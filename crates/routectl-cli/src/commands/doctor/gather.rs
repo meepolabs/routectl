@@ -323,7 +323,7 @@ async fn gather_auth() -> (
 /// raw Display. The enum is `#[non_exhaustive]`, so the catch-all is itself a
 /// path-free class message rather than a passthrough -- fail-safe against a
 /// future path-bearing variant.
-pub(super) fn sanitize_store_open_error(err: &OAuthError) -> String {
+pub fn sanitize_store_open_error(err: &OAuthError) -> String {
     const STORE_BASENAME: &str = "credentials.json";
     match err {
         OAuthError::SchemaMismatch {

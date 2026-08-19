@@ -1201,7 +1201,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   override so it renders as a string-keyed object rather than a u16 map)
 - `src/config/validate.rs` -- Config version preflight + non-schema
   validation: `version: u32` schema-stamps the file (`CURRENT_CONFIG_VERSION
-  == 3`); `preflight_config_version(raw_toml)` reads `version` off the RAW
+  == 4`); `preflight_config_version(raw_toml)` reads `version` off the RAW
   TOML before the `deny_unknown_fields` typed deserialize, failing closed with
   `ConfigVersionError` (too-new -> upgrade the binary; too-old -> `config
   migrate`, never mutated on load) rather than a confusing unknown-field
@@ -1326,8 +1326,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   closed, for ANY key). `apply_config_transforms(&mut DocumentMut,
   raw_version) -> Result<Vec<StepOutcome>, Refusal>` is the pure document-only
   ladder (v1->v2 via `apply_v1_to_v2_doc` stamping the LITERAL `2` and
-  dropping `[cache_pricing]`, then v2->v3, then the v3->v3 same-version
-  normalization) -- both `plan_migration` (on a clone, to build the candidate)
+  dropping `[cache_pricing]`, then v2->v3, then v3->v4, then the
+  same-version normalization at the latest version) -- both `plan_migration` (on a clone, to build the candidate)
   and the caller's commit closure (on the re-read document under the write
   lock) call it, so the committed bytes reproduce exactly what planning gated.
   `migrate_v2_to_v3(&mut DocumentMut) -> Result<StepOutcome, Refusal>` retires
@@ -1337,6 +1337,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[retry.classes.*]` fold, carrying rendered per-code guidance) /
   `Refusal::Malformed` (a non-`u16` entry, refused rather than silently
   dropped) with the document byte-untouched.
+  `migrate_v3_to_v4(&mut DocumentMut) -> Result<StepOutcome, Refusal>` stamps
+  the LITERAL `4` and relocates every provider-level `seat_selection` onto a
+  `[pools.<name>]` block whose sole member is that entry, taking the pool name
+  from `seat_naming::pool_name` (never a rule restated here). Refuses with
+  `Refusal::SeatSelectionRelocation` -- document byte-untouched -- when a
+  present knob has no derivable pool (no `oauth://` ref to name a family, an
+  unusable family token, or a derived pool name held by a provider entry, a
+  model nickname, or a hand-authored pool block). A file carrying no such knob
+  is a version stamp only. NO store access: the rung runs twice (plan + locked
+  re-read), so the store-aware half lives in the command instead.
+  `bare_oauth_pool_candidates(&DocumentMut) -> Vec<BareOauthRef{entry, family}>`
+  is the PURE input that half reads -- every provider entry carrying a BARE
+  `oauth://` ref, in document order. `apply_seat_pool_move(&mut DocumentMut,
+  &SeatPoolMove{entry, pool, accounts: Vec<SeatPoolAccount{entry_name,
+  secret_ref, already_present}>})` is its write primitive: clones the entry
+  once per labelled seat with that seat's ref, unions the member list onto
+  `[pools.<pool>]`, and relocates the knob -- idempotent over its own output.
   `normalize_capability_overrides(&mut DocumentMut) -> Result<bool, Refusal>`
   folds legacy `unsupported_features` into `[capability.overrides]`
   (same-version, no version bump, idempotent), refusing on a behavior-bearing
@@ -2664,7 +2681,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   here
 - `src/oauth/mod.rs` -- crate-internal entry for the OAuth 2.0 PKCE subsystem;
   defines `OAuthError` and re-exports `OAuthStore`, `LoginOptions`,
-  `run_login`, `known_provider_ids`, token types
+  `run_login`, `known_provider_ids`, token types, plus
+  `credentials_default_path()` for a caller that opens the store at an
+  explicit path (hermetic in tests) and still needs the production one
 - `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord`
   (incl. optional `session_id` and optional `cloud_project_id`),
   `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug),
@@ -4174,8 +4193,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (check-before-write end to end): snapshot + raw `version` read; PLAN the
   migration purely (`plan_migration` -> `MigrationPlan`, no disk mutation -- a
   `Refusal` / future-version file surfaces here with a truthful "nothing was
-  written"); a `NoChange` plan (`config_candidate()` -> `None`) short-circuits
-  to `AlreadyCurrent`; gate the plan's config candidate through the shared
+  written"); then plan PHASE 2, the store-aware half the pure ladder cannot
+  own (it runs twice, and the committed bytes must reproduce what planning
+  gated) -- `enumerate_seats` opens the credential store READ-ONLY through
+  `OAuthStore::open` and keys its seats by provider family, and
+  `plan_seat_materialization` turns each `bare_oauth_pool_candidates` entry
+  whose family holds MORE THAN ONE seat into a `SeatPoolMove` via
+  `seat_naming::plan_pool_materialization` (byte-for-byte the names the login
+  writer generates; a fully-satisfied move is dropped so a rerun reports no
+  pending write). A single-seat family is a structural no-op by construction
+  (at v4 a bare ref means the default seat). An unreadable store refuses the
+  WHOLE migration (`seat_enumeration_refusal`, path-free via
+  `sanitize_store_open_error`) rather than stamp the version alone and silently
+  narrow the ref; a `SeatNamingError` surfaces unsoftened. `combined_candidate`
+  composes phase 1 + phase 2 into ONE candidate text (phase 2 composes onto the
+  ORIGINAL document for a `NoChange` plan, so a hand-authored already-current
+  file carrying a bare multi-seat ref is still handled); only when BOTH phases
+  are empty does the run short-circuit to `AlreadyCurrent`; gate the combined
+  candidate through the shared
   `parse_config` + `validation_report` suite (a parse failure is stripped of
   its verbatim source-line preview via
   `redact_parse_error`/`is_source_snippet_row` first -- the offending config
@@ -4185,15 +4220,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   touched the real files); otherwise ACKNOWLEDGE every real write
   (`confirm_migration` -- interactive `y` / `--yes`, with `--force` kept one
   release as a deprecated hidden alias for `--yes`;
-  non-interactive-without-acknowledgement refuses), including a same-version
-  v3 normalization, AFTER the gate and BEFORE any write; then `commit_plan`
+  non-interactive-without-acknowledgement refuses) -- ONE acknowledgement for
+  the whole combined change, including a same-version normalization, AFTER the
+  gate and BEFORE any write; then `commit_plan`
   (takes the plan BY VALUE, moving the overlay cells) writes the overlay FIRST
   via `commit_overlay` -> `with_overlay_write_lock` (the revision check runs
   INSIDE the advisory lock, so a concurrent `catalog` writer can neither slip
   between the check and the rename nor be silently overwritten) and
   `config.toml` LAST as the visible completion marker (via `edit_config_toml`,
-  whose closure re-applies the SAME `apply_config_transforms` the plan gated,
-  under the write lock against the original snapshot). Two-file commit is
+  whose closure re-applies the SAME `apply_config_transforms` the plan gated
+  plus the SAME phase-2 moves, under the write lock against the original
+  snapshot). The seats are RE-ENUMERATED immediately before that locked write
+  and phase 2 re-planned against them: a mismatch is
+  `CommitError::InventoryChanged`, so a login or logout between the shown diff
+  and the commit refuses instead of landing a diff that no longer describes the
+  store. Two-file commit is
   recoverable, not atomic: a config-side failure AFTER the overlay landed is
   reported as resumable (`resumable_commit_error`/`CommitFailure`, outcome
   `incomplete`) and NEVER claims "nothing was written"; a rerun re-plans
@@ -4209,7 +4250,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   base-bytes conflict, the neutral `write_failed` otherwise) and
   `acknowledged` is true ONLY after a real interactive `y` (never synthesized
   -- a `--yes` write records `acknowledged=false`). `run_at` takes the overlay
-  path explicitly so tests point both files at a temp dir
+  AND credentials paths explicitly so tests point the config, the overlay and
+  the credential store at a temp dir
 - `src/commands/config_effective.rs` -- `routectl config show --effective`
   render layer over `routectl_router::derive_effective_view`: the plain
   redacted dump (unchanged), then provenance-annotated sections for the two

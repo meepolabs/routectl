@@ -121,11 +121,14 @@ pub fn commit_models_aliases(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::CURRENT_CONFIG_VERSION;
     use routectl_router::parse_config;
 
-    const PROVIDERS_ONLY: &str = "\
-version = 3
+    fn providers_only() -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n") + PROVIDERS_ONLY_BODY
+    }
 
+    const PROVIDERS_ONLY_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -136,10 +139,11 @@ base_url = \"http://127.0.0.1:1\"
 api_key_ref = \"literal:test-key\"
 ";
 
-    const WITH_MODEL: &str = "\
-# operator note
-version = 3
+    fn with_model() -> String {
+        format!("# operator note\nversion = {CURRENT_CONFIG_VERSION}\n") + WITH_MODEL_BODY
+    }
 
+    const WITH_MODEL_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -185,7 +189,7 @@ default = \"gpt\"
 
     #[test]
     fn insert_writes_models_and_default_alias_omitting_defaults() {
-        let out = apply(PROVIDERS_ONLY, &[wiring("gpt", "fast", "gpt-4o")], "gpt");
+        let out = apply(&providers_only(), &[wiring("gpt", "fast", "gpt-4o")], "gpt");
 
         assert!(out.contains("[models.gpt]"), "{out}");
         assert!(out.contains("provider = \"fast\""), "{out}");
@@ -207,7 +211,7 @@ default = \"gpt\"
     #[test]
     fn preserves_comments_section_order_and_existing_models() {
         let out = apply(
-            WITH_MODEL,
+            &with_model(),
             &[wiring("claude", "fast", "claude-x")],
             "claude",
         );
@@ -232,7 +236,7 @@ default = \"gpt\"
     #[test]
     fn commit_lands_models_and_default_alias() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), PROVIDERS_ONLY);
+        let path = write_config(dir.path(), &providers_only());
         let snapshot = std::fs::read(&path).unwrap();
         let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
 
@@ -260,7 +264,7 @@ default = \"gpt\"
     #[test]
     fn identical_replan_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), PROVIDERS_ONLY);
+        let path = write_config(dir.path(), &providers_only());
         let snapshot = std::fs::read(&path).unwrap();
         let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
 
@@ -294,7 +298,7 @@ default = \"gpt\"
     #[test]
     fn partial_match_writes_only_the_missing_model() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), PROVIDERS_ONLY);
+        let path = write_config(dir.path(), &providers_only());
         let snapshot = std::fs::read(&path).unwrap();
         let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
 
@@ -344,7 +348,7 @@ default = \"gpt\"
     #[test]
     fn gate_rejection_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), PROVIDERS_ONLY);
+        let path = write_config(dir.path(), &providers_only());
         let snapshot = std::fs::read(&path).unwrap();
         let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
         let before = snapshot.clone();
@@ -373,12 +377,12 @@ default = \"gpt\"
     #[test]
     fn stale_snapshot_conflict_leaves_file_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), PROVIDERS_ONLY);
+        let path = write_config(dir.path(), &providers_only());
         let stale = std::fs::read(&path).unwrap();
         let stale_text = String::from_utf8(stale.clone()).unwrap();
 
         // Something else rewrote the file after the caller snapshotted it.
-        let rewritten = format!("{PROVIDERS_ONLY}# added out of band\n");
+        let rewritten = format!("{}# added out of band\n", providers_only());
         std::fs::write(&path, &rewritten).unwrap();
 
         let err = commit_models_aliases(

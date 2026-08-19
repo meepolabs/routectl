@@ -67,8 +67,10 @@ mod config_version_tests {
     #[test]
     fn explicit_current_version_round_trips() {
         // Arrange / Act
-        let config: Config =
-            toml::from_str("version = 3\n[server]\nhost = \"127.0.0.1\"\n").expect("parse");
+        let config: Config = toml::from_str(&format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\n"
+        ))
+        .expect("parse");
 
         // Assert
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
@@ -132,21 +134,24 @@ mod config_version_tests {
     #[test]
     fn preflight_accepts_current_version() {
         assert_eq!(
-            preflight_config_version("version = 3\n[server]\nhost = \"x\"\n"),
-            Ok(3)
+            preflight_config_version(&format!(
+                "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"x\"\n"
+            )),
+            Ok(CURRENT_CONFIG_VERSION)
         );
     }
 
     #[test]
     fn preflight_rejects_version_newer_than_current() {
         // Act
-        let err = preflight_config_version("version = 4\n[server]\nhost = \"x\"\n")
-            .expect_err("version 4 must be rejected");
+        let found = CURRENT_CONFIG_VERSION + 1;
+        let err = preflight_config_version(&format!("version = {found}\n[server]\nhost = \"x\"\n"))
+            .expect_err("a version above the current one must be rejected");
 
         // Assert
         match err {
             ConfigVersionError::TooNew(inner) => {
-                assert_eq!(inner.found, 4);
+                assert_eq!(inner.found, found);
                 assert_eq!(inner.supported, CURRENT_CONFIG_VERSION);
             }
             other => panic!("expected TooNew, got {other:?}"),

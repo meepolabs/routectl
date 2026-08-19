@@ -1,3 +1,5 @@
+use routectl_router::CURRENT_CONFIG_VERSION;
+
 use super::*;
 use crate::server::serve::build_usage_writer;
 use crate::server::test_support::isolate_usage_db;
@@ -354,7 +356,7 @@ async fn credentials_reload_rebuild_failure_keeps_previous_router() {
 #[cfg(test)]
 fn usage_config_text(enabled: bool, db_path: &std::path::Path) -> String {
     format!(
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+        "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
              [usage]\nenabled = {enabled}\ndb_path = \"{}\"\nretention_days = 0\n",
         db_path.display()
     )
@@ -439,7 +441,7 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
     )
     .unwrap();
 
@@ -526,7 +528,7 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
     )
     .unwrap();
 
@@ -608,7 +610,7 @@ async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
     let cfg_path = config_dir.join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
     )
     .unwrap();
 
@@ -788,7 +790,7 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
     )
     .unwrap();
 
@@ -1014,7 +1016,7 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
     )
     .unwrap();
 
@@ -1073,7 +1075,7 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
 #[cfg(test)]
 fn reduction_config_text(enabled: bool) -> String {
     format!(
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+        "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
          [reduction]\nenabled = {enabled}\n"
     )
 }
@@ -1167,7 +1169,7 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
 #[cfg(test)]
 fn k_gated_emission_config_text(enabled: bool) -> String {
     format!(
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+        "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
          [cache]\nk_gated_emission = {enabled}\n"
     )
 }
@@ -1288,8 +1290,10 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\nprt = 8080\n\n\
-         [cache]\nk_gated_emission = true\n",
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\nprt = 8080\n\n\
+            [cache]\nk_gated_emission = true\n"
+        ),
     )
     .unwrap();
 
@@ -1356,8 +1360,10 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
-         [reduction]\nenabled = false\n\n[cache]\nk_gated_emission = true\n",
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+            [reduction]\nenabled = false\n\n[cache]\nk_gated_emission = true\n"
+        ),
     )
     .unwrap();
 
@@ -1403,7 +1409,7 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
 #[cfg(test)]
 fn reduction_config_text_unparseable(enabled: bool) -> String {
     format!(
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\nprt = 8080\n\n\
+        "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\nprt = 8080\n\n\
          [reduction]\nenabled = {enabled}\n"
     )
 }

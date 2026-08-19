@@ -2,33 +2,47 @@
 //! current schema version through the shared migration ladder, committing the
 //! result through the same single write primitive as `config set`.
 //!
-//! The pipeline is check-before-write end to end: the ladder runs as a PURE
+//! The pipeline is check-before-write end to end. The ladder runs as a PURE
 //! planning phase ([`plan_migration`]) that produces a `MigrationPlan` whose
 //! `write_kind` (`NoChange` / `ConfigOnly(text)` / `ConfigAndOverlay(text,
 //! overlay)`) folds the config candidate and the pending overlay write INTO
 //! the variant that needs them, so no cross-field invariant is left for the
-//! caller to `.expect()`. Planning touches NO disk, so every refusal and
-//! validation check clears before any mutation:
+//! caller to `.expect()`. A SECOND, store-aware phase composes on top of it:
+//! the pure ladder cannot read the credential store (it runs twice -- plan
+//! and locked re-read -- and the committed bytes must reproduce what
+//! planning gated), so materializing one explicit account entry per stored
+//! seat lives here instead. Both phases plan without touching disk, so every
+//! refusal clears before any mutation:
 //!
 //!   1. Snapshot the raw bytes and read the file's raw `version`.
-//!   2. Plan the migration purely. A [`Refusal`] (behavior-bearing / malformed
-//!      retry lists, or an egress allowlist) or a future-version file surfaces
-//!      here with an explicit "nothing was written" -- nothing has been.
-//!   3. Gate the candidate config text through the shared `parse_config` +
-//!      `validation_report` suite; a gate failure renders the report and
-//!      writes nothing.
-//!   4. `--dry-run` renders the exact candidate plus a change summary and stops
-//!      -- it needs no acknowledgement (nothing is written) and no temp copy
-//!      (planning never touched the real files).
-//!   5. Acknowledge EVERY real write (a version bump OR a same-version v3
-//!      normalization): interactive `y`, or `--yes` non-interactively; a
-//!      non-interactive run without `--yes` refuses. The acknowledgement runs
-//!      AFTER the gate (only a valid migration is worth prompting for) and
-//!      BEFORE any write.
-//!   6. Commit in two phases: the overlay FIRST (revision-checked, idempotent),
+//!   2. Plan the pure ladder. A [`Refusal`] (behavior-bearing / malformed
+//!      retry lists, an egress allowlist, an unrelocatable `seat_selection`)
+//!      or a future-version file surfaces here with an explicit "nothing was
+//!      written" -- nothing has been.
+//!   3. Enumerate stored OAuth seats READ-ONLY and plan phase 2 against the
+//!      pure candidate: for each provider entry whose BARE `oauth://` ref
+//!      covered more than one stored seat, the naming module derives the
+//!      account entries and the pool that replace it. An unreadable store, a
+//!      name collision, or two labels generating one name refuses the whole
+//!      migration -- a v4 file whose bare ref silently stopped covering its
+//!      sibling seats is structurally excluded.
+//!   4. Gate the COMBINED candidate (phase 1 + phase 2) through the shared
+//!      `parse_config` + `validation_report` suite; a gate failure renders
+//!      the report and writes nothing.
+//!   5. `--dry-run` renders the exact combined candidate plus a change
+//!      summary and stops -- it needs no acknowledgement (nothing is written)
+//!      and no temp copy (planning never touched the real files).
+//!   6. ONE acknowledgement for the combined change: interactive `y`, or
+//!      `--yes` non-interactively; a non-interactive run without `--yes`
+//!      refuses. It runs AFTER the gate (only a valid migration is worth
+//!      prompting for) and BEFORE any write. Declining writes NOTHING.
+//!   7. Commit as a unit: the overlay FIRST (revision-checked, idempotent),
 //!      then `config.toml` LAST via [`edit_config_toml`] as the visible
 //!      completion marker (base-bytes revision check -> conflict = no write).
-//!      A crash between the phases is recoverable: a rerun re-plans (the
+//!      The seats are RE-ENUMERATED immediately before the locked write and
+//!      phase 2 re-planned against them, so a login or logout between the
+//!      shown diff and the commit refuses instead of landing a stale diff. A
+//!      crash between the phases is recoverable: a rerun re-plans (the
 //!      overlay fold is now a no-op) and stamps config.toml.
 //!
 //! Two-file (config + overlay) is not literally atomic without a journal; the
@@ -46,16 +60,19 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use routectl_auth::oauth::OAuthStore;
 use routectl_core::{Error, Result};
 use routectl_router::{
-    CURRENT_CONFIG_VERSION, CachePricingOverride, CatalogOverlay, Config, ConfigWriteError,
-    EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite, Refusal, WriteKind,
-    apply_config_transforms, edit_config_toml, parse_config, plan_migration,
-    with_overlay_write_lock,
+    BareOauthRef, CURRENT_CONFIG_VERSION, CachePricingOverride, CatalogOverlay, Config,
+    ConfigWriteError, EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite,
+    Refusal, SeatPoolAccount, SeatPoolMove, WriteKind, apply_config_transforms,
+    apply_seat_pool_move, bare_oauth_pool_candidates, edit_config_toml, parse_config,
+    plan_migration, with_overlay_write_lock,
 };
 use toml_edit::DocumentMut;
 
 use super::config::validation_report;
+use super::doctor::sanitize_store_open_error;
 use super::parse_error_redaction::redact_parse_error;
 
 /// A config with no `version` key predates the schema and is treated as v1,
@@ -78,32 +95,203 @@ pub enum MigrateResult {
 }
 
 /// The `edit_fn` closure's error for the final commit. The ladder already ran
-/// the v2->v3 transform and the shared gate once against the same content, so
-/// both variants are belt-and-suspenders guards a deterministic re-run never
-/// reaches.
+/// the pure transforms and the shared gate once against the same content, so
+/// the first two variants are belt-and-suspenders guards a deterministic
+/// re-run never reaches. `InventoryChanged` is different in kind: it closes a
+/// real window, between phase 2's plan-time store read and the locked write.
 #[derive(Debug, thiserror::Error)]
 enum CommitError {
     #[error("migration refused under the write lock:\n{0}")]
     Refused(Refusal),
     #[error("migrated config failed re-validation under the write lock")]
     Revalidation,
+    #[error(
+        "the stored OAuth seats changed between planning this migration and committing it, so \
+         the shown diff no longer describes the seats on disk; nothing was written -- rerun \
+         `config migrate` to plan against the current seats"
+    )]
+    InventoryChanged,
 }
 
-/// Run the migrate pipeline against the default config + overlay paths.
-pub fn run(config_path: &Path, dry_run: bool, yes: bool) -> Result<MigrateResult> {
+/// Run the migrate pipeline against the default config + overlay +
+/// credentials paths.
+pub async fn run(config_path: &Path, dry_run: bool, yes: bool) -> Result<MigrateResult> {
+    // A config dir that cannot be resolved is the store-unreadable refusal:
+    // phase 2 cannot enumerate seats, and a version-stamp-only migration
+    // would silently narrow every bare ref to the default seat.
+    let credentials_path = routectl_auth::oauth::credentials_default_path()
+        .map_err(|e| Error::Config(seat_enumeration_refusal(&sanitize_store_open_error(&e))))?;
     run_at(
         config_path,
         &routectl_router::overlay_default_path(),
+        &credentials_path,
         dry_run,
         yes,
     )
+    .await
 }
 
-/// Core of [`run`], taking the overlay path explicitly so tests point both the
-/// config and the overlay at a temp directory instead of the real files.
-pub fn run_at(
+/// The stored-seat inventory phase 2 plans against: one label list per
+/// provider family, `None` standing for the family's default seat.
+///
+/// A `SeatInventory` is only ever built from a SUCCESSFUL read-only store
+/// open, so its presence is itself the proof that phase 2 is allowed to
+/// proceed -- an unreadable store refuses before one exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SeatInventory {
+    /// Seat labels per family, sorted, `None` first when the default seat
+    /// is stored. Sorted rather than store order so the same store yields
+    /// the same generated names on every run.
+    seats: BTreeMap<String, Vec<Option<String>>>,
+}
+
+impl SeatInventory {
+    /// The labels stored for `family`, or an empty slice.
+    fn labels_of(&self, family: &str) -> &[Option<String>] {
+        self.seats.get(family).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Enumerate the credential store's seats READ-ONLY, keyed by provider
+/// family.
+///
+/// Opened through [`OAuthStore`] directly, the way every read-only seat
+/// reader does: the composite store's `list_seats` echoes a pinned ref back
+/// as a one-element list when its oauth arm is absent, which would report a
+/// confident single seat for exactly the unreadable-store case phase 2 must
+/// refuse on. A merely-absent credentials file opens as an EMPTY store, so
+/// "nothing logged in" stays distinguishable from "cannot tell".
+///
+/// # Errors
+///
+/// A store OPEN failure, rendered through the shared path-free sanitizer --
+/// never a raw store error, whose Display embeds the credentials-file path.
+async fn enumerate_seats(credentials_path: &Path) -> Result<SeatInventory> {
+    let store = OAuthStore::open(credentials_path)
+        .await
+        .map_err(|e| Error::Config(seat_enumeration_refusal(&sanitize_store_open_error(&e))))?;
+    let mut seats: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
+    for (key, _) in store.list().await {
+        let (family, label) = match key.split_once('#') {
+            None => (key.clone(), None),
+            Some((family, label)) => (family.to_string(), Some(label.to_string())),
+        };
+        seats.entry(family).or_default().push(label);
+    }
+    for labels in seats.values_mut() {
+        labels.sort();
+        labels.dedup();
+    }
+    Ok(SeatInventory { seats })
+}
+
+/// The refusal message for a phase-2 store read that could not happen.
+/// Phase 2 cannot tell a single-seat family from a multi-seat one without
+/// the store, and a v4 file whose bare ref silently stops covering the
+/// sibling seats it used to reach is exactly the silent seat loss the
+/// combined migration exists to prevent -- so an unreadable store refuses
+/// the WHOLE migration rather than migrating the version stamp alone.
+fn seat_enumeration_refusal(reason: &str) -> String {
+    format!(
+        "cannot enumerate stored OAuth seats, so this migration cannot tell which \
+         `oauth://` refs stand for more than one seat: {reason}. A version-stamp-only \
+         migration would silently narrow those refs to the default seat. Nothing was \
+         written -- fix the credential store (or run `routectl login`) and rerun"
+    )
+}
+
+/// Plan phase 2: one [`SeatPoolMove`] per provider entry whose BARE
+/// `oauth://` ref covered more than one stored seat under v3 semantics.
+///
+/// A single-seat family is a structural NO-OP by construction, not by a
+/// special case: at v4 a bare ref means the default seat, which for a
+/// one-seat family is the same credential the v3 ref resolved to, so there
+/// is nothing to materialize and no pool to create.
+///
+/// Generated names come from `seat_naming::plan_pool_materialization`
+/// against the candidate config, byte-for-byte the names the login writer
+/// will later generate. `already_present` / `pool_exists` make a rerun over
+/// the migration's own output a no-op.
+///
+/// # Errors
+///
+/// A `SeatNamingError` from the naming module, surfaced verbatim:
+/// a generated name held by an unrelated entry, two labels generating one
+/// name, an unusable label token, the reserved `default` label, or a pool
+/// name held by a provider entry or a model nickname. Never softened -- a
+/// lossy rewrite would point a config entry at the wrong credential.
+fn plan_seat_materialization(
+    candidate: &Config,
+    doc: &DocumentMut,
+    inventory: &SeatInventory,
+) -> Result<Vec<SeatPoolMove>> {
+    let mut moves = Vec::new();
+    for BareOauthRef { entry, family } in bare_oauth_pool_candidates(doc) {
+        let labels = inventory.labels_of(&family);
+        if labels.len() <= 1 {
+            continue;
+        }
+        let plan = routectl_router::seat_naming::plan_pool_materialization(
+            candidate,
+            &family,
+            labels.iter().map(Option::as_deref),
+        )
+        .map_err(|e| {
+            Error::Config(format!(
+                "cannot materialize the stored seats of `oauth://{family}` (referenced by \
+                 [providers.{entry}]) as explicit accounts: {e}. Nothing was written"
+            ))
+        })?;
+        // The entry itself IS the default-seat member and keeps its name, so
+        // only the labelled seats materialize as new entries.
+        let accounts: Vec<SeatPoolAccount> = plan
+            .accounts
+            .into_iter()
+            .filter(|account| account.label.is_some())
+            .map(|account| SeatPoolAccount {
+                entry_name: account.entry_name,
+                secret_ref: account.secret_ref,
+                already_present: account.already_present,
+            })
+            .collect();
+        // A move the config already satisfies is dropped, not planned: with
+        // every account present and the pool listing them, applying it would
+        // change nothing, and carrying it would make a rerun report a pending
+        // write that does not exist.
+        let satisfied = plan.pool_exists
+            && accounts.iter().all(|a| a.already_present)
+            && candidate.pools.get(&plan.pool_name).is_some_and(|pool| {
+                pool.members.contains(&entry)
+                    && accounts
+                        .iter()
+                        .all(|a| pool.members.contains(&a.entry_name))
+            });
+        if satisfied {
+            continue;
+        }
+        moves.push(SeatPoolMove {
+            entry,
+            pool: plan.pool_name,
+            accounts,
+        });
+    }
+    Ok(moves)
+}
+
+/// Apply every phase-2 move to `doc`, in plan order.
+fn apply_seat_materialization(doc: &mut DocumentMut, moves: &[SeatPoolMove]) {
+    for mv in moves {
+        apply_seat_pool_move(doc, mv);
+    }
+}
+
+/// Core of [`run`], taking the overlay and credentials paths explicitly so
+/// tests point the config, the overlay AND the credential store at a temp
+/// directory instead of the real files.
+pub async fn run_at(
     config_path: &Path,
     overlay_path: &Path,
+    credentials_path: &Path,
     dry_run: bool,
     yes: bool,
 ) -> Result<MigrateResult> {
@@ -138,29 +326,32 @@ pub fn run_at(
         .map_err(|e| render_ladder_error(e, config_path, from_version, dry_run))?;
     let to_version = plan.to;
 
-    // A `NoChange` plan short-circuits; every other plan carries its config
-    // candidate in `write_kind`, so the text is read straight off the enum
-    // -- no separate `Option` field to `.expect()` against.
-    let candidate_text = match plan.config_candidate() {
-        None => {
-            println!("config is already at version {CURRENT_CONFIG_VERSION}; nothing to migrate.");
-            audit_event(
-                config_path,
-                from_version,
-                from_version,
-                dry_run,
-                false,
-                false,
-                "no_change",
-                None,
-            );
-            return Ok(MigrateResult::AlreadyCurrent);
-        }
-        Some(text) => text,
+    // Phase 2, store-aware, composed ON TOP of the pure plan: the seat
+    // inventory decides which bare refs stood for more than one seat. It runs
+    // for every plan shape, including a `NoChange` one -- a file already at
+    // the current version can still carry a bare multi-seat ref if it was
+    // hand-authored -- and, like phase 1, writes nothing.
+    let inventory = enumerate_seats(credentials_path).await?;
+    let phase_two = plan_phase_two(&plan, &doc, from_version, &inventory)?;
+
+    // Nothing to do only when BOTH phases are empty.
+    let Some(candidate_text) = combined_candidate(&plan, &doc, &phase_two)? else {
+        println!("config is already at version {CURRENT_CONFIG_VERSION}; nothing to migrate.");
+        audit_event(
+            config_path,
+            from_version,
+            from_version,
+            dry_run,
+            false,
+            false,
+            "no_change",
+            None,
+        );
+        return Ok(MigrateResult::AlreadyCurrent);
     };
 
-    // Validation gate -- still before any write.
-    gate(candidate_text).map_err(|errors| {
+    // Validation gate on the COMBINED candidate -- still before any write.
+    gate(&candidate_text).map_err(|errors| {
         render_gate_errors(&errors);
         audit_event(
             config_path,
@@ -175,9 +366,15 @@ pub fn run_at(
         Error::Config(format!("{} config error(s)", errors.len()))
     })?;
 
-    // `--dry-run` renders the candidate and stops -- no write, no ack.
+    // `--dry-run` renders the combined candidate and stops -- no write, no ack.
     if dry_run {
-        render_dry_run(candidate_text, from_version, to_version, &plan.removed_keys);
+        render_dry_run(
+            &candidate_text,
+            from_version,
+            to_version,
+            &plan.removed_keys,
+            &phase_two,
+        );
         audit_event(
             config_path,
             from_version,
@@ -191,10 +388,10 @@ pub fn run_at(
         return Ok(MigrateResult::DryRun);
     }
 
-    // Acknowledge EVERY real write (a version bump OR a same-version v3
-    // normalization), now that the candidate is known valid and a write is
-    // known to be pending. A declined prompt leaves both files byte-identical.
-    if !confirm_migration(from_version, to_version, yes) {
+    // ONE acknowledgement for the combined change, now that the candidate is
+    // known valid and a write is known to be pending. A declined prompt
+    // leaves both files byte-identical.
+    if !confirm_migration(from_version, to_version, &phase_two, yes) {
         println!("aborted; nothing further written.");
         audit_event(
             config_path,
@@ -209,7 +406,17 @@ pub fn run_at(
         return Ok(MigrateResult::Aborted);
     }
 
-    commit_plan(plan, config_path, overlay_path, &snapshot, from_version).map_err(|failure| {
+    commit_plan(
+        plan,
+        &phase_two,
+        config_path,
+        overlay_path,
+        credentials_path,
+        &snapshot,
+        from_version,
+    )
+    .await
+    .map_err(|failure| {
         // A commit failure AFTER the overlay was written is resumable and must
         // NEVER claim "nothing was written" (the overlay mutation is durable);
         // `failure.outcome` is labelled at the failure site by the underlying
@@ -238,19 +445,60 @@ pub fn run_at(
         "written",
         None,
     );
-    if from_version == to_version {
-        println!(
-            "normalized config at version {to_version} (folded legacy `unsupported_features` \
-             into [capability.overrides]). Restart any running routectl daemon onto the matching \
-             binary to pick up the change."
-        );
-    } else {
-        println!(
-            "migrated config to version {to_version}. Restart any running routectl daemon onto \
-             the matching binary to pick up the change."
-        );
-    }
+    render_success(from_version, to_version, &phase_two);
     Ok(MigrateResult::Migrated { from_version })
+}
+
+/// Plan phase 2 against the config the PURE plan produced (or against the
+/// file as it stands, for a `NoChange` plan): the naming module checks
+/// generated names against a real `Config`, so the candidate it sees must be
+/// the one phase 1 would leave behind.
+fn plan_phase_two(
+    plan: &MigrationPlan,
+    original: &DocumentMut,
+    from_version: u32,
+    inventory: &SeatInventory,
+) -> Result<Vec<SeatPoolMove>> {
+    let mut doc = original.clone();
+    if plan.config_candidate().is_none() {
+        // A NoChange plan leaves the document as-is; phase 2 plans against
+        // exactly those bytes.
+    } else {
+        // Reproduce the pure ladder rather than re-parsing the plan's text:
+        // the candidate a `WriteKind` carries is the same transform, and
+        // running it here keeps phase 2's input a `DocumentMut` throughout.
+        apply_config_transforms(&mut doc, from_version)
+            .map_err(|refusal| Error::Config(refusal.to_string()))?;
+    }
+    let candidate = parse_config(&doc.to_string()).map_err(|e| {
+        Error::Config(format!(
+            "migrated config does not parse: {}",
+            redact_parse_error(&e)
+        ))
+    })?;
+    plan_seat_materialization(&candidate, &doc, inventory)
+}
+
+/// The COMBINED candidate text (phase 1 then phase 2), or `None` when
+/// neither phase changes anything.
+///
+/// A `NoChange` plan carries no candidate text, so phase 2 composes onto the
+/// ORIGINAL document -- an already-current file can still carry a bare
+/// multi-seat ref if it was hand-authored.
+fn combined_candidate(
+    plan: &MigrationPlan,
+    original: &DocumentMut,
+    phase_two: &[SeatPoolMove],
+) -> Result<Option<String>> {
+    if phase_two.is_empty() {
+        return Ok(plan.config_candidate().map(str::to_string));
+    }
+    let mut doc = match plan.config_candidate() {
+        Some(text) => parse_document(text)?,
+        None => original.clone(),
+    };
+    apply_seat_materialization(&mut doc, phase_two);
+    Ok(Some(doc.to_string()))
 }
 
 /// A commit failure, carrying the truthful audit outcome the caller should
@@ -265,21 +513,30 @@ struct CommitFailure {
     outcome: &'static str,
 }
 
-/// Commit a validated [`MigrationPlan`] in two phases: the overlay FIRST
-/// (revision-checked, under the overlay write lock, idempotent), then
-/// `config.toml` LAST as the visible completion marker. The config write
-/// reproduces the SAME pure transform the plan gated, under the write lock
-/// against the original snapshot bytes. Takes the plan BY VALUE so the
-/// pending overlay cells move into the commit rather than being cloned.
+/// Commit a validated [`MigrationPlan`] plus its phase-2 moves in two
+/// phases: the overlay FIRST (revision-checked, under the overlay write
+/// lock, idempotent), then `config.toml` LAST as the visible completion
+/// marker. The config write reproduces the SAME transforms the combined
+/// candidate was gated on, under the write lock against the original
+/// snapshot bytes. Takes the plan BY VALUE so the pending overlay cells move
+/// into the commit rather than being cloned.
+///
+/// The stored seats are RE-ENUMERATED immediately before the locked write and
+/// phase 2 is re-planned against them: a login or logout between the shown
+/// diff and the commit would otherwise land a file describing seats that no
+/// longer exist. A mismatch refuses; the file side is covered by
+/// `edit_config_toml`'s own byte-snapshot check.
 ///
 /// Two-file commit is not literally atomic without a journal. It is
 /// recoverable instead: a crash (or a config-side conflict) after the overlay
 /// write leaves `config.toml` at its old version, so a rerun re-plans (the
 /// overlay fold is now an idempotent no-op) and completes the config stamp.
-fn commit_plan(
+async fn commit_plan(
     plan: MigrationPlan,
+    phase_two: &[SeatPoolMove],
     config_path: &Path,
     overlay_path: &Path,
+    credentials_path: &Path,
     snapshot: &[u8],
     from_version: u32,
 ) -> std::result::Result<(), CommitFailure> {
@@ -304,9 +561,30 @@ fn commit_plan(
         _ => false,
     };
 
+    // Re-read the seat inventory as late as possible: everything after this
+    // point is synchronous, so nothing can await between the check and the
+    // write.
+    let fresh = enumerate_seats(credentials_path)
+        .await
+        .map_err(|e| CommitFailure {
+            error: Box::new(e),
+            outcome: if overlay_written {
+                "incomplete"
+            } else {
+                "write_failed"
+            },
+        })?;
+
     // Phase 2: config.toml LAST, the visible version marker.
     edit_config_toml::<CommitError, _>(config_path, snapshot, |d| {
         apply_config_transforms(d, from_version).map_err(CommitError::Refused)?;
+        let candidate = parse_config(&d.to_string()).map_err(|_| CommitError::Revalidation)?;
+        let replanned = plan_seat_materialization(&candidate, d, &fresh)
+            .map_err(|_| CommitError::InventoryChanged)?;
+        if replanned != phase_two {
+            return Err(CommitError::InventoryChanged);
+        }
+        apply_seat_materialization(d, phase_two);
         match gate(&d.to_string()) {
             Ok(_) => Ok(EditOutcome::Modified),
             Err(_) => Err(CommitError::Revalidation),
@@ -513,6 +791,7 @@ const fn refusal_kind(refusal: &Refusal) -> &'static str {
         Refusal::BehaviorBearing { .. } => "behavior_bearing",
         Refusal::Malformed { .. } => "malformed",
         Refusal::EgressAllowlist { .. } => "egress_allowlist",
+        Refusal::SeatSelectionRelocation { .. } => "seat_selection_relocation",
     }
 }
 
@@ -527,7 +806,13 @@ fn render_write_error(err: ConfigWriteError<CommitError>) -> Error {
 /// goes to STDERR, where it cannot contaminate the bytes it warns about. Note
 /// stdout also carries the framing and summary lines around the block, so it is
 /// the delimited block that is byte-exact, not the whole stream.
-fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, removed: &[String]) {
+fn render_dry_run(
+    candidate_text: &str,
+    from_version: u32,
+    to_version: u32,
+    removed: &[String],
+    phase_two: &[SeatPoolMove],
+) {
     eprintln!(
         "warning: the candidate below is printed byte-exact and may carry credentials \
          anywhere the file does -- e.g. userinfo, query, or fragment in a `base_url`, \
@@ -546,22 +831,94 @@ fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, remo
     } else {
         println!("summary: migrates config from version {from_version} to {to_version}");
     }
-    if removed.is_empty() {
+    if removed.is_empty() && phase_two.is_empty() {
         println!("  (no keys removed; version stamp only)");
     } else {
         for key in removed {
             println!("  - removes `{key}`");
         }
+        for line in seat_materialization_summary(phase_two) {
+            println!("  - {line}");
+        }
     }
     println!("dry-run: nothing was written.");
+}
+
+/// One summary line per phase-2 move, naming the pool and the account
+/// entries it materializes. Names only -- a seat LABEL is operator-authored
+/// but a generated entry name carries no token, account id, or storage path,
+/// and the surrounding candidate block already renders the file verbatim.
+fn seat_materialization_summary(phase_two: &[SeatPoolMove]) -> Vec<String> {
+    phase_two
+        .iter()
+        .map(|mv| {
+            let added: Vec<&str> = mv
+                .accounts
+                .iter()
+                .filter(|a| !a.already_present)
+                .map(|a| a.entry_name.as_str())
+                .collect();
+            if added.is_empty() {
+                format!(
+                    "adds `[pools.{}]` grouping the stored seats of `[providers.{}]` \
+                     (every account entry already present)",
+                    mv.pool, mv.entry
+                )
+            } else {
+                format!(
+                    "adds `[pools.{}]` plus account entr{} {} so each stored seat of \
+                     `[providers.{}]` is addressable (a bare `oauth://` ref means the \
+                     default seat at version {CURRENT_CONFIG_VERSION})",
+                    mv.pool,
+                    if added.len() == 1 { "y" } else { "ies" },
+                    added
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    mv.entry,
+                )
+            }
+        })
+        .collect()
+}
+
+/// The completion line, naming the seat materialization when phase 2 did
+/// any: an operator who just gained provider entries needs to know before
+/// pointing a model at the pool.
+fn render_success(from_version: u32, to_version: u32, phase_two: &[SeatPoolMove]) {
+    if from_version == to_version {
+        println!(
+            "normalized config at version {to_version} (folded legacy `unsupported_features` \
+             into [capability.overrides])."
+        );
+    } else {
+        println!("migrated config to version {to_version}.");
+    }
+    for line in seat_materialization_summary(phase_two) {
+        println!("  - {line}");
+    }
+    if !phase_two.is_empty() {
+        println!(
+            "point a `[models.X] provider` at the pool to route across its accounts; a \
+             provider entry still names one account."
+        );
+    }
+    println!("Restart any running routectl daemon onto the matching binary to pick up the change.");
 }
 
 /// Acknowledge the schema change before the write lock. `--yes` bypasses the
 /// prompt; a non-interactive run (no TTY on stdin) without `--yes` declines
 /// immediately without reading, so a silent pipe cannot hang it.
-/// Never called while the write lock is held. Called for EVERY real write,
-/// including a same-version v3 normalization (`from_version == to_version`).
-fn confirm_migration(from_version: u32, to_version: u32, yes: bool) -> bool {
+/// Never called while the write lock is held. Called ONCE for the combined
+/// change (version stamp, key relocation, and any seat materialization),
+/// including a same-version normalization (`from_version == to_version`).
+fn confirm_migration(
+    from_version: u32,
+    to_version: u32,
+    phase_two: &[SeatPoolMove],
+    yes: bool,
+) -> bool {
     if yes {
         return true;
     }
@@ -583,9 +940,14 @@ fn confirm_migration(from_version: u32, to_version: u32, yes: bool) -> bool {
     } else {
         println!(
             "this migrates config.toml from version {from_version} to {to_version}. The break \
-             retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table). A \
-             running routectl daemon must be restarted onto the matching binary after migration."
+             retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table), \
+             and moves `seat_selection` onto the `[pools.<name>]` block that groups the \
+             accounts. A running routectl daemon must be restarted onto the matching binary \
+             after migration."
         );
+    }
+    for line in seat_materialization_summary(phase_two) {
+        println!("  - {line}");
     }
     print!("proceed? [y/N] ");
     let _ = std::io::stdout().flush();
@@ -710,6 +1072,17 @@ default = \"gpt\"
         _dir: tempfile::TempDir,
         config: std::path::PathBuf,
         overlay: std::path::PathBuf,
+        credentials: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        /// Drive the pipeline against this fixture's own config, overlay and
+        /// credential-store paths. A fixture with no credentials file opens
+        /// as an EMPTY store, which is the accurate "nothing logged in"
+        /// answer and leaves phase 2 a structural no-op.
+        async fn migrate(&self, dry_run: bool, yes: bool) -> Result<MigrateResult> {
+            run_at(&self.config, &self.overlay, &self.credentials, dry_run, yes).await
+        }
     }
 
     fn fixture(body: &str) -> Fixture {
@@ -717,10 +1090,12 @@ default = \"gpt\"
         let config = dir.path().join("config.toml");
         std::fs::write(&config, body).unwrap();
         let overlay = dir.path().join("catalog_overlay.json");
+        let credentials = dir.path().join("credentials.json");
         Fixture {
             _dir: dir,
             config,
             overlay,
+            credentials,
         }
     }
 
@@ -728,19 +1103,479 @@ default = \"gpt\"
         std::fs::read_to_string(path).unwrap()
     }
 
+    /// A v3 config whose provider entry carries a BARE `oauth://` ref plus
+    /// the retired provider-level `seat_selection`, and a model routed at it.
+    /// This is the shape phase 2 materializes when the store holds more than
+    /// one seat for the family.
+    const V3_BARE_OAUTH: &str = "\
+# operator note: keep me
+version = 3
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[providers.anthropic-managed]
+kind = \"anthropic-api\"
+api_key_ref = \"oauth://anthropic\"
+seat_selection = \"round-robin\"
+
+[models.opus]
+provider = \"anthropic-managed\"
+upstream = \"claude-opus-4-8\"
+
+[aliases]
+default = \"opus\"
+";
+
+    /// A plausible token record. Values are inert: nothing in the migration
+    /// path resolves or presents a token, and the seat KEYS are all phase 2
+    /// reads.
+    fn token_record() -> routectl_auth::oauth::types::TokenRecord {
+        serde_json::from_value(serde_json::json!({
+            "access_token": "not-a-real-token",
+            "refresh_token": "not-a-real-token",
+            "expires_at_unix": 4_000_000_000_u64,
+            "obtained_at_unix": 1_000_u64,
+        }))
+        .expect("token record fixture parses")
+    }
+
+    /// Seed the fixture's credential store with one record per seat key, at
+    /// the `0o600` the store requires. Written directly rather than through a
+    /// login flow: phase 2 only ever reads seat KEYS.
+    fn seed_seats(f: &Fixture, seat_keys: &[&str]) {
+        let providers: serde_json::Map<String, serde_json::Value> = seat_keys
+            .iter()
+            .map(|key| {
+                (
+                    (*key).to_string(),
+                    serde_json::to_value(token_record()).expect("record serializes"),
+                )
+            })
+            .collect();
+        let body = serde_json::json!({
+            "schema_version": routectl_auth::oauth::SCHEMA_VERSION,
+            "providers": providers,
+        });
+        std::fs::write(&f.credentials, body.to_string()).unwrap();
+        set_owner_only(&f.credentials);
+    }
+
+    /// Tighten a file to `0o600`; the credential store refuses to open
+    /// anything wider.
+    fn set_owner_only(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2: a bare multi-seat `oauth://` ref materializes into explicit
+    // accounts plus a pool, as ONE combined change with ONE confirmation.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_bare_multi_seat_ref_materializes_accounts_and_a_pool() {
+        // Arrange: three stored seats for the family the bare ref names.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work", "anthropic#personal"]);
+
+        // Act
+        let result = f.migrate(false, true).await.expect("combined migrate");
+
+        // Assert
+        assert_eq!(result, MigrateResult::Migrated { from_version: 3 });
+        let text = read(&f.config);
+        assert!(
+            text.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
+            "{text}"
+        );
+        // One account entry per labelled seat, under the naming convention.
+        assert!(text.contains("[providers.anthropic-work]"), "{text}");
+        assert!(text.contains("[providers.anthropic-personal]"), "{text}");
+        assert!(
+            text.contains("api_key_ref = \"oauth://anthropic#work\""),
+            "{text}"
+        );
+        // The pool groups them with the original (default-seat) entry.
+        assert!(text.contains("[pools.anthropic]"), "{text}");
+        for member in ["anthropic-managed", "anthropic-work", "anthropic-personal"] {
+            assert!(text.contains(member), "pool must list `{member}`: {text}");
+        }
+        // The relocated knob landed on the pool, not the provider entry.
+        assert!(text.contains("seat_selection = \"round-robin\""), "{text}");
+        // Comments survive, and the result passes the shared gate.
+        assert!(text.contains("# operator note: keep me"), "{text}");
+        gate(&text).expect("the migrated config must pass the gate");
+    }
+
+    /// Generated names are the naming module's, asserted AGAINST it rather
+    /// than re-derived here -- the migration and the login writer must agree
+    /// byte-for-byte or reconciliation-by-ref points an entry at the wrong
+    /// credential.
+    #[tokio::test]
+    async fn generated_names_match_the_naming_module_byte_for_byte() {
+        // Arrange
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        f.migrate(false, true).await.expect("migrate");
+
+        // Act
+        let text = read(&f.config);
+        let config = parse_config(&text).expect("migrated config parses");
+        let expected = routectl_router::seat_naming::plan_pool_materialization(
+            &config,
+            "anthropic",
+            [None, Some("work")],
+        )
+        .expect("the convention re-derives over its own output");
+
+        // Assert: every name the convention derives is already present, and
+        // re-deriving reports the whole shape as a no-op.
+        assert!(config.pools.contains_key(&expected.pool_name));
+        assert!(expected.pool_exists, "the pool the convention names exists");
+        for account in &expected.accounts {
+            assert!(
+                config.providers.contains_key(&account.entry_name)
+                    || account.entry_name == "anthropic-default",
+                "entry `{}` must exist: {text}",
+                account.entry_name
+            );
+        }
+        assert!(
+            expected
+                .accounts
+                .iter()
+                .filter(|a| a.label.is_some())
+                .all(|a| a.already_present),
+            "re-deriving over the migration's output must be a no-op: {expected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_seat_bare_ref_migrates_without_a_structural_rewrite() {
+        // Arrange: exactly one stored seat -- at v4 a bare ref means the
+        // default seat, which IS that one seat, so there is nothing to pool.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic"]);
+
+        // Act
+        f.migrate(false, true).await.expect("migrate");
+
+        // Assert: the version stamp plus the knob relocation the pure rung
+        // owns, and NO materialized account entries.
+        let text = read(&f.config);
+        assert!(!text.contains("[providers.anthropic-work]"), "{text}");
+        assert!(
+            !text.contains("[providers.anthropic-default]"),
+            "a single-seat ref must not materialize accounts: {text}"
+        );
+        assert!(
+            text.contains("members = [\"anthropic-managed\"]"),
+            "the pool the knob relocation creates lists only the entry: {text}"
+        );
+        gate(&text).expect("the migrated config must pass the gate");
+    }
+
+    #[tokio::test]
+    async fn a_combined_migration_is_idempotent_on_a_rerun() {
+        // Arrange
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        f.migrate(false, true).await.expect("first migrate");
+        let once = read(&f.config);
+
+        // Act
+        let result = f.migrate(false, true).await.expect("rerun");
+
+        // Assert: nothing left to do, file byte-identical.
+        assert_eq!(result, MigrateResult::AlreadyCurrent);
+        assert_eq!(read(&f.config), once);
+    }
+
+    #[tokio::test]
+    async fn declining_the_combined_migration_writes_nothing() {
+        // stdin is not a TTY under the test harness, so the single
+        // acknowledgement is declined without reading.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let result = f
+            .migrate(false, false)
+            .await
+            .expect("decline is not an error");
+
+        assert_eq!(result, MigrateResult::Aborted);
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a declined combined migration must write nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_combined_dry_run_renders_the_candidate_and_writes_nothing() {
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let result = f.migrate(true, false).await.expect("dry-run");
+
+        assert_eq!(result, MigrateResult::DryRun);
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a combined dry-run must write nothing"
+        );
+    }
+
+    /// The dry-run summary names the pool and account entries but never a
+    /// token, an account id, or the store path -- phase 2's inputs are seat
+    /// KEYS, and its output is config entry names.
+    #[test]
+    fn the_seat_materialization_summary_carries_no_secret_material() {
+        let moves = vec![SeatPoolMove {
+            entry: "anthropic-managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        }];
+
+        let lines = seat_materialization_summary(&moves);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("[pools.anthropic]"), "{lines:?}");
+        assert!(lines[0].contains("anthropic-work"), "{lines:?}");
+        for forbidden in ["not-a-real-token", "credentials.json", "/home/"] {
+            assert!(!lines[0].contains(forbidden), "{lines:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Fail-closed refusals: each leaves config.toml byte-identical.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn an_unreadable_store_refuses_the_whole_migration_byte_identical() {
+        // Arrange: a credentials file the store cannot open (wider than the
+        // `0o600` it requires). Distinct from a MISSING file, which opens as
+        // an empty store and is an accurate "nothing logged in".
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&f.credentials, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("an unreadable store must refuse");
+
+        // Assert: the refusal explains the seat-loss risk, names no path, and
+        // wrote nothing.
+        let rendered = err.to_string();
+        assert!(rendered.contains("stored OAuth seats"), "err: {rendered}");
+        assert!(rendered.contains("Nothing was written"), "err: {rendered}");
+        assert!(
+            !rendered.contains(f.credentials.to_string_lossy().as_ref()),
+            "the refusal must not disclose the store path: {rendered}"
+        );
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_generated_name_held_by_an_unrelated_entry_refuses_byte_identical() {
+        // Arrange: `anthropic-work` already exists carrying a DIFFERENT
+        // credential, so writing the generated entry would repoint it.
+        let body = V3_BARE_OAUTH.replace(
+            "[models.opus]",
+            "[providers.anthropic-work]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#other\"\n\n\
+             [models.opus]",
+        );
+        let f = fixture(&body);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("a taken entry name must refuse");
+
+        // Assert: the naming module's own wording surfaces unsoftened.
+        let rendered = err.to_string();
+        assert!(rendered.contains("anthropic-work"), "err: {rendered}");
+        assert!(rendered.contains("different credential"), "err: {rendered}");
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_seat_label_that_cannot_be_a_config_key_refuses_byte_identical() {
+        // Arrange: a label carrying characters no generated entry name can
+        // hold verbatim. Refused rather than normalized -- a rewritten name
+        // no longer identifies the seat it came from.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work seat"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("an unusable label must refuse");
+
+        // Assert
+        assert!(
+            err.to_string().contains("cannot be used verbatim"),
+            "err: {err}"
+        );
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn the_reserved_default_label_refuses_byte_identical() {
+        // Arrange: a seat literally labelled `default` would generate the
+        // default seat's own entry name, aliasing two credentials onto one
+        // entry.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#default"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("the reserved label must refuse");
+
+        // Assert
+        assert!(err.to_string().contains("reserved"), "err: {err}");
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn an_unrelocatable_seat_selection_refuses_byte_identical() {
+        // Arrange: the pure rung's own refusal, surfaced through the command
+        // -- an API-key provider carrying the retired knob has no provider
+        // family to name a pool after.
+        let body = V3_BARE_OAUTH
+            .replace(
+                "api_key_ref = \"oauth://anthropic\"",
+                "api_key_ref = \"env://K\"",
+            )
+            .replace(
+                "kind = \"anthropic-api\"",
+                "kind = \"openai-compat\"\nbase_url = \"https://x\"",
+            );
+        let f = fixture(&body);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("an unrelocatable knob must refuse");
+
+        // Assert
+        assert!(err.to_string().contains("seat_selection"), "err: {err}");
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_combined_migration_audits_the_refusal_kind() {
+        let body = V3_BARE_OAUTH
+            .replace(
+                "api_key_ref = \"oauth://anthropic\"",
+                "api_key_ref = \"env://K\"",
+            )
+            .replace(
+                "kind = \"anthropic-api\"",
+                "kind = \"openai-compat\"\nbase_url = \"https://x\"",
+            );
+        let f = fixture(&body);
+
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
+
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("refused"));
+        assert_eq!(
+            audit.field("refusal_kind"),
+            Some("seat_selection_relocation")
+        );
+    }
+
+    /// The seat inventory is re-read under the write lock: a login or logout
+    /// between the shown diff and the commit must refuse rather than land a
+    /// file describing seats that no longer exist.
+    #[tokio::test]
+    async fn an_inventory_change_between_plan_and_commit_refuses_without_writing() {
+        // Arrange: plan against two seats.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let snapshot = std::fs::read(&f.config).unwrap();
+        let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
+        let doc = parse_document(&snapshot_text).expect("parse");
+        let plan = plan_migration(&doc, 3, &BTreeMap::new(), &f.overlay).expect("plan");
+        let inventory = enumerate_seats(&f.credentials).await.expect("enumerate");
+        let phase_two = plan_phase_two(&plan, &doc, 3, &inventory).expect("phase 2 plans");
+        assert!(!phase_two.is_empty(), "the fixture must plan a pool");
+
+        // A third seat appears after planning -- the shown diff no longer
+        // describes the store.
+        seed_seats(&f, &["anthropic", "anthropic#work", "anthropic#personal"]);
+
+        // Act
+        let failure = commit_plan(
+            plan,
+            &phase_two,
+            &f.config,
+            &f.overlay,
+            &f.credentials,
+            &snapshot,
+            3,
+        )
+        .await
+        .expect_err("a changed inventory must refuse at the commit");
+
+        // Assert: nothing written, and the message says to rerun.
+        assert_eq!(failure.outcome, "write_failed");
+        assert!(
+            failure.error.to_string().contains("changed between"),
+            "err: {}",
+            failure.error
+        );
+        assert_eq!(std::fs::read(&f.config).unwrap(), snapshot);
+    }
+
     // -----------------------------------------------------------------
     // Ack matrix: --yes writes; non-interactive without --yes refuses;
     // dry-run needs neither.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn yes_migrates_v2_to_v3_and_the_result_revalidates() {
+    #[tokio::test]
+    async fn yes_migrates_v2_to_the_current_version_and_the_result_revalidates() {
         let f = fixture(V2_CLEAN);
-        let result = run_at(&f.config, &f.overlay, false, true).expect("yes migrate");
+        let result = f.migrate(false, true).await.expect("yes migrate");
         assert_eq!(result, MigrateResult::Migrated { from_version: 2 });
 
         let text = read(&f.config);
-        assert!(text.contains("version = 3"), "{text}");
+        assert!(
+            text.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
+            "{text}"
+        );
         assert!(!text.contains("retry_allowlist"), "{text}");
         assert!(!text.contains("retry_denylist"), "{text}");
         // Comments and unrelated content survive.
@@ -749,14 +1584,17 @@ default = \"gpt\"
         gate(&text).expect("migrated config must pass the gate");
     }
 
-    #[test]
-    fn non_interactive_without_yes_refuses_with_nothing_written() {
+    #[tokio::test]
+    async fn non_interactive_without_yes_refuses_with_nothing_written() {
         let f = fixture(V2_CLEAN);
         let before = std::fs::read(&f.config).unwrap();
 
         // stdin is not a TTY under the test harness, so the prompt is
         // declined immediately without reading.
-        let result = run_at(&f.config, &f.overlay, false, false).expect("decline is not an error");
+        let result = f
+            .migrate(false, false)
+            .await
+            .expect("decline is not an error");
         assert_eq!(result, MigrateResult::Aborted);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -765,8 +1603,8 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v1_non_interactive_without_yes_refuses_before_any_mutation() {
+    #[tokio::test]
+    async fn v1_non_interactive_without_yes_refuses_before_any_mutation() {
         // A v1 file's migration mutates disk INSIDE the ladder (the v1 rung
         // rewrites config.toml to v2 and folds the overlay). Authorization
         // runs before the ladder, so a declined non-interactive run (no TTY)
@@ -775,7 +1613,10 @@ default = \"gpt\"
         let f = fixture(V1_WITH_CACHE_PRICING);
         let before = std::fs::read(&f.config).unwrap();
 
-        let result = run_at(&f.config, &f.overlay, false, false).expect("decline is not an error");
+        let result = f
+            .migrate(false, false)
+            .await
+            .expect("decline is not an error");
         assert_eq!(result, MigrateResult::Aborted);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -788,8 +1629,8 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn confirm_migration_declines_immediately_on_non_tty_without_yes() {
+    #[tokio::test]
+    async fn confirm_migration_declines_immediately_on_non_tty_without_yes() {
         // Under the test harness stdin is not a TTY, so the terminal gate
         // must fire and decline WITHOUT reaching read_line -- a silent
         // pipe can no longer hang the prompt.
@@ -799,21 +1640,21 @@ default = \"gpt\"
             "test harness stdin must be non-interactive for this assertion",
         );
         assert!(
-            !confirm_migration(2, 3, false),
+            !confirm_migration(3, 4, &[], false),
             "non-TTY without --yes must decline",
         );
         assert!(
-            confirm_migration(2, 3, true),
+            confirm_migration(3, 4, &[], true),
             "--yes must still proceed byte-identically",
         );
     }
 
-    #[test]
-    fn dry_run_renders_v3_candidate_and_writes_nothing() {
+    #[tokio::test]
+    async fn dry_run_renders_the_candidate_and_writes_nothing() {
         let f = fixture(V2_CLEAN);
         let before = std::fs::read(&f.config).unwrap();
 
-        let result = run_at(&f.config, &f.overlay, true, false).expect("dry-run");
+        let result = f.migrate(true, false).await.expect("dry-run");
         assert_eq!(result, MigrateResult::DryRun);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -826,12 +1667,12 @@ default = \"gpt\"
     // Refusal: a behavior-bearing v2 list is refused, byte-identical.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn behavior_bearing_list_is_refused_byte_identical() {
+    #[tokio::test]
+    async fn behavior_bearing_list_is_refused_byte_identical() {
         let f = fixture(V2_BEHAVIOR_BEARING);
         let before = std::fs::read(&f.config).unwrap();
 
-        let err = run_at(&f.config, &f.overlay, false, true).expect_err("must refuse");
+        let err = f.migrate(false, true).await.expect_err("must refuse");
         assert!(err.to_string().contains("503"), "err: {err}");
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -840,12 +1681,14 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn behavior_bearing_dry_run_is_also_refused_and_writes_nothing() {
+    #[tokio::test]
+    async fn behavior_bearing_dry_run_is_also_refused_and_writes_nothing() {
         let f = fixture(V2_BEHAVIOR_BEARING);
         let before = std::fs::read(&f.config).unwrap();
 
-        run_at(&f.config, &f.overlay, true, false).expect_err("dry-run must also refuse");
+        f.migrate(true, false)
+            .await
+            .expect_err("dry-run must also refuse");
         assert_eq!(std::fs::read(&f.config).unwrap(), before);
     }
 
@@ -854,14 +1697,17 @@ default = \"gpt\"
     // retry lists gone; comments preserved.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn v1_file_chains_to_v3_folding_cache_pricing_into_the_overlay() {
+    #[tokio::test]
+    async fn v1_file_chains_to_the_current_version_folding_cache_pricing_into_the_overlay() {
         let f = fixture(V1_WITH_CACHE_PRICING);
-        let result = run_at(&f.config, &f.overlay, false, true).expect("v1 migrate");
+        let result = f.migrate(false, true).await.expect("v1 migrate");
         assert_eq!(result, MigrateResult::Migrated { from_version: 1 });
 
         let text = read(&f.config);
-        assert!(text.contains("version = 3"), "{text}");
+        assert!(
+            text.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
+            "{text}"
+        );
         assert!(!text.contains("cache_pricing"), "{text}");
         gate(&text).expect("migrated v1 config must pass the gate");
 
@@ -874,12 +1720,12 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v1_dry_run_touches_neither_config_nor_overlay() {
+    #[tokio::test]
+    async fn v1_dry_run_touches_neither_config_nor_overlay() {
         let f = fixture(V1_WITH_CACHE_PRICING);
         let before = std::fs::read(&f.config).unwrap();
 
-        let result = run_at(&f.config, &f.overlay, true, false).expect("v1 dry-run");
+        let result = f.migrate(true, false).await.expect("v1 dry-run");
         assert_eq!(result, MigrateResult::DryRun);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -896,13 +1742,17 @@ default = \"gpt\"
     // Already-current is a no-op.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn already_v3_is_a_no_op() {
-        let v3 = V2_CLEAN.replacen("version = 2", "version = 3", 1);
-        let f = fixture(&v3);
+    #[tokio::test]
+    async fn already_at_the_current_version_is_a_no_op() {
+        let current = V2_CLEAN.replacen(
+            "version = 2",
+            &format!("version = {CURRENT_CONFIG_VERSION}"),
+            1,
+        );
+        let f = fixture(&current);
         let before = std::fs::read(&f.config).unwrap();
 
-        let result = run_at(&f.config, &f.overlay, false, true).expect("no-op");
+        let result = f.migrate(false, true).await.expect("no-op");
         assert_eq!(result, MigrateResult::AlreadyCurrent);
         assert_eq!(std::fs::read(&f.config).unwrap(), before);
     }
@@ -911,15 +1761,15 @@ default = \"gpt\"
     // Gate failure: an invalid candidate writes nothing.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn invalid_candidate_writes_nothing() {
+    #[tokio::test]
+    async fn invalid_candidate_writes_nothing() {
         // A v2 config whose alias points at an undefined model migrates
         // cleanly (empty retry lists) but fails the shared cross-field gate.
         let body = V2_CLEAN.replace("default = \"gpt\"", "default = \"no-such-model\"");
         let f = fixture(&body);
         let before = std::fs::read(&f.config).unwrap();
 
-        let err = run_at(&f.config, &f.overlay, false, true).expect_err("gate must reject");
+        let err = f.migrate(false, true).await.expect_err("gate must reject");
         assert!(err.to_string().contains("config error"), "err: {err}");
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -933,14 +1783,15 @@ default = \"gpt\"
     // source line (which may carry a `literal:` credential).
     // -----------------------------------------------------------------
 
-    #[test]
-    fn gate_parse_failure_does_not_echo_a_secret_bearing_source_line() {
+    #[tokio::test]
+    async fn gate_parse_failure_does_not_echo_a_secret_bearing_source_line() {
         const SECRET: &str = "sk-THIS-IS-A-FAKE-CREDENTIAL-value";
         // An unknown field under a known table: parse_config rejects it, and
         // toml's diagnostic would frame the offending line -- carrying the
         // secret -- unless the preview is redacted.
         let candidate = format!(
-            "version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = 8787\nbogus_secret_key = \"{SECRET}\"\n"
+            "version = {CURRENT_CONFIG_VERSION}\n\n[server]\nhost = \"127.0.0.1\"\nport = \
+             8787\nbogus_secret_key = \"{SECRET}\"\n"
         );
 
         let errors = gate(&candidate).expect_err("an unknown field must fail the gate");
@@ -963,13 +1814,15 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn gate_type_mismatch_in_non_string_field_does_not_survive() {
+    #[tokio::test]
+    async fn gate_type_mismatch_in_non_string_field_does_not_survive() {
         // A fake secret mistyped into the numeric `port` field: serde renders
         // `invalid type: string "...", expected u16`, embedding it verbatim.
         const SECRET: &str = "sk-THIS-IS-A-FAKE-CREDENTIAL-value";
-        let candidate =
-            format!("version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = \"{SECRET}\"\n");
+        let candidate = format!(
+            "version = {CURRENT_CONFIG_VERSION}\n\n[server]\nhost = \"127.0.0.1\"\nport = \
+                 \"{SECRET}\"\n"
+        );
 
         let errors = gate(&candidate).expect_err("a type mismatch must fail the gate");
         for e in &errors {
@@ -984,8 +1837,8 @@ default = \"gpt\"
     // Conflict: stale base bytes (concurrent edit) refuse with no write.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn stale_base_bytes_conflict_writes_nothing() {
+    #[tokio::test]
+    async fn stale_base_bytes_conflict_writes_nothing() {
         // Snapshot v2 bytes, then commit an already-v3 candidate against them
         // through the primitive directly: the on-disk file was concurrently
         // replaced, so the base-bytes revision check must refuse.
@@ -1021,12 +1874,12 @@ default = \"gpt\"
     // path -- and never a value or candidate bytes.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn emits_audit_event_with_versions_and_no_bytes() {
+    #[tokio::test]
+    async fn emits_audit_event_with_versions_and_no_bytes() {
         let f = fixture(V2_CLEAN);
-        let events = routectl_testkit::capture_events(|| {
-            run_at(&f.config, &f.overlay, false, true).expect("migrate");
-        });
+        let (result, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
+        result.expect("migrate");
 
         let audit: Vec<_> = events
             .iter()
@@ -1036,7 +1889,10 @@ default = \"gpt\"
 
         let event = audit[0];
         assert_eq!(event.field("from_version"), Some("2"));
-        assert_eq!(event.field("to_version"), Some("3"));
+        assert_eq!(
+            event.field("to_version"),
+            Some(CURRENT_CONFIG_VERSION.to_string().as_str())
+        );
         assert_eq!(event.field("dry_run"), Some("false"));
         assert_eq!(event.field("forced"), Some("true"));
         assert_eq!(event.field("outcome"), Some("written"));
@@ -1045,12 +1901,11 @@ default = \"gpt\"
         assert!(event.field("value").is_none());
     }
 
-    #[test]
-    fn refusal_audit_event_names_the_kind() {
+    #[tokio::test]
+    async fn refusal_audit_event_names_the_kind() {
         let f = fixture(V2_BEHAVIOR_BEARING);
-        let events = routectl_testkit::capture_events(|| {
-            let _ = run_at(&f.config, &f.overlay, false, true);
-        });
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
         let audit = events
             .iter()
             .find(|e| e.field("verb") == Some("migrate"))
@@ -1060,16 +1915,18 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
-    // Same-version v3 normalization: legacy unsupported_features fold into
+    // Same-version normalization: legacy unsupported_features fold into
     // [capability.overrides]; egress allowlists and conflicts refuse.
     // -----------------------------------------------------------------
 
-    /// A v3 config carrying legacy provider AND model `unsupported_features`
-    /// plus a valid provider/model/alias so the folded result passes the gate.
-    const V3_WITH_LEGACY: &str = "\
-# operator note: keep me
-version = 3
+    /// A current-version config carrying legacy provider AND model
+    /// `unsupported_features` plus a valid provider/model/alias so the folded
+    /// result passes the gate.
+    fn latest_with_legacy() -> String {
+        format!("# operator note: keep me\nversion = {CURRENT_CONFIG_VERSION}\n") + LEGACY_BODY
+    }
 
+    const LEGACY_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -1089,10 +1946,12 @@ unsupported_features = [\"computer_use\"]
 default = \"gpt\"
 ";
 
-    /// A plain v3 config with no legacy fields at all.
-    const V3_CLEAN: &str = "\
-version = 3
+    /// A plain current-version config with no legacy fields at all.
+    fn latest_clean() -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n") + CLEAN_BODY
+    }
 
+    const CLEAN_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -1110,15 +1969,23 @@ upstream = \"gpt-4o\"
 default = \"gpt\"
 ";
 
-    #[test]
-    fn v3_legacy_lists_normalize_into_capability_overrides_and_keys_removed() {
-        let f = fixture(V3_WITH_LEGACY);
-        let result = run_at(&f.config, &f.overlay, false, true).expect("normalize");
-        assert_eq!(result, MigrateResult::Migrated { from_version: 3 });
+    #[tokio::test]
+    async fn legacy_lists_normalize_into_capability_overrides_and_keys_removed() {
+        let f = fixture(&latest_with_legacy());
+        let result = f.migrate(false, true).await.expect("normalize");
+        assert_eq!(
+            result,
+            MigrateResult::Migrated {
+                from_version: CURRENT_CONFIG_VERSION
+            }
+        );
 
         let text = read(&f.config);
         assert!(!text.contains("unsupported_features"), "{text}");
-        assert!(text.contains("version = 3"), "{text}");
+        assert!(
+            text.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
+            "{text}"
+        );
         assert!(text.contains("[capability.overrides.fast]"), "{text}");
         assert!(
             text.contains("[capability.overrides.\"fast:gpt\"]"),
@@ -1129,12 +1996,12 @@ default = \"gpt\"
         gate(&text).expect("normalized config must pass the gate");
     }
 
-    #[test]
-    fn v3_no_legacy_fields_is_already_current_and_writes_nothing() {
-        let f = fixture(V3_CLEAN);
+    #[tokio::test]
+    async fn no_legacy_fields_is_already_current_and_writes_nothing() {
+        let f = fixture(&latest_clean());
         let before = std::fs::read(&f.config).unwrap();
 
-        let result = run_at(&f.config, &f.overlay, false, true).expect("already current");
+        let result = f.migrate(false, true).await.expect("already current");
         assert_eq!(result, MigrateResult::AlreadyCurrent);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -1143,16 +2010,19 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v3_egress_allowlist_refuses_byte_identical() {
-        let body = V3_WITH_LEGACY.replace(
+    #[tokio::test]
+    async fn egress_allowlist_refuses_byte_identical() {
+        let body = latest_with_legacy().replace(
             "[server]\n",
             "[bedrock]\nallowed_betas = [\"beta-1\"]\n\n[server]\n",
         );
         let f = fixture(&body);
         let before = std::fs::read(&f.config).unwrap();
 
-        let err = run_at(&f.config, &f.overlay, false, true).expect_err("egress allowlist refuses");
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("egress allowlist refuses");
         assert!(err.to_string().contains("allowed_betas"), "err: {err}");
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -1161,16 +2031,15 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v3_egress_allowlist_refusal_audit_names_the_kind() {
-        let body = V3_WITH_LEGACY.replace(
+    #[tokio::test]
+    async fn egress_allowlist_refusal_audit_names_the_kind() {
+        let body = latest_with_legacy().replace(
             "[server]\n",
             "[bedrock]\nallowed_betas = [\"beta-1\"]\n\n[server]\n",
         );
         let f = fixture(&body);
-        let events = routectl_testkit::capture_events(|| {
-            let _ = run_at(&f.config, &f.overlay, false, true);
-        });
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
         let audit = events
             .iter()
             .find(|e| e.field("verb") == Some("migrate"))
@@ -1179,20 +2048,23 @@ default = \"gpt\"
         assert_eq!(audit.field("refusal_kind"), Some("egress_allowlist"));
     }
 
-    #[test]
-    fn v3_conflicting_cell_refuses_via_the_gate_byte_identical() {
+    #[tokio::test]
+    async fn conflicting_cell_refuses_via_the_gate_byte_identical() {
         // Legacy provider list routes `web_search` away while a new
         // force_supported entry marks the SAME cell supported: after folding
         // the legacy list into `unsupported`, the shared gate's conflict
         // check rejects, and the file stays byte-identical.
-        let body = V3_WITH_LEGACY.replace(
+        let body = latest_with_legacy().replace(
             "[aliases]\n",
             "[capability.overrides.fast]\nforce_supported = [\"web_search\"]\n\n[aliases]\n",
         );
         let f = fixture(&body);
         let before = std::fs::read(&f.config).unwrap();
 
-        let err = run_at(&f.config, &f.overlay, false, true).expect_err("conflict must refuse");
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("conflict must refuse");
         assert!(err.to_string().contains("config error"), "err: {err}");
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -1201,12 +2073,12 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v3_normalize_dry_run_renders_candidate_and_writes_nothing() {
-        let f = fixture(V3_WITH_LEGACY);
+    #[tokio::test]
+    async fn normalize_dry_run_renders_candidate_and_writes_nothing() {
+        let f = fixture(&latest_with_legacy());
         let before = std::fs::read(&f.config).unwrap();
 
-        let result = run_at(&f.config, &f.overlay, true, false).expect("dry-run");
+        let result = f.migrate(true, false).await.expect("dry-run");
         assert_eq!(result, MigrateResult::DryRun);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -1248,12 +2120,14 @@ upstream = \"gpt-4o\"
 default = \"gpt\"
 ";
 
-    #[test]
-    fn v1_refusal_leaves_config_and_overlay_byte_untouched() {
+    #[tokio::test]
+    async fn v1_refusal_leaves_config_and_overlay_byte_untouched() {
         let f = fixture(V1_CACHE_PRICING_AND_BEHAVIOR_BEARING);
         let before = std::fs::read(&f.config).unwrap();
 
-        let err = run_at(&f.config, &f.overlay, false, true)
+        let err = f
+            .migrate(false, true)
+            .await
             .expect_err("a v1 file with a behavior-bearing list must refuse");
         assert!(err.to_string().contains("503"), "err: {err}");
         // Both files untouched -- the overlay was never even created, and the
@@ -1269,12 +2143,11 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v1_refusal_audit_never_reports_written_and_names_the_kind() {
+    #[tokio::test]
+    async fn v1_refusal_audit_never_reports_written_and_names_the_kind() {
         let f = fixture(V1_CACHE_PRICING_AND_BEHAVIOR_BEARING);
-        let events = routectl_testkit::capture_events(|| {
-            let _ = run_at(&f.config, &f.overlay, false, true);
-        });
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
         let audit = events
             .iter()
             .find(|e| e.field("verb") == Some("migrate"))
@@ -1289,15 +2162,17 @@ default = \"gpt\"
     // acknowledgement (never a synthesized acknowledged=true).
     // -----------------------------------------------------------------
 
-    #[test]
-    fn v3_normalize_non_interactive_without_yes_aborts_byte_identical() {
+    #[tokio::test]
+    async fn normalize_non_interactive_without_yes_aborts_byte_identical() {
         // stdin is not a TTY under the test harness: read_line hits EOF, so
         // the normalize prompt is declined and nothing is written.
-        let f = fixture(V3_WITH_LEGACY);
+        let f = fixture(&latest_with_legacy());
         let before = std::fs::read(&f.config).unwrap();
 
-        let result =
-            run_at(&f.config, &f.overlay, false, false).expect("declining is not an error");
+        let result = f
+            .migrate(false, false)
+            .await
+            .expect("declining is not an error");
         assert_eq!(result, MigrateResult::Aborted);
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
@@ -1306,15 +2181,14 @@ default = \"gpt\"
         );
     }
 
-    #[test]
-    fn v3_normalize_forced_audit_records_acknowledged_false_not_synthesized() {
+    #[tokio::test]
+    async fn normalize_forced_audit_records_acknowledged_false_not_synthesized() {
         // A forced normalize was authorized by --yes, NOT by an interactive
         // acknowledgement, so `acknowledged` must be false -- the defect
         // was a synthesized acknowledged=true on this exact path.
-        let f = fixture(V3_WITH_LEGACY);
-        let events = routectl_testkit::capture_events(|| {
-            run_at(&f.config, &f.overlay, false, true).expect("normalize");
-        });
+        let f = fixture(&latest_with_legacy());
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
         let audit = events
             .iter()
             .find(|e| e.field("verb") == Some("migrate"))
@@ -1332,13 +2206,12 @@ default = \"gpt\"
     // The audit distinguishes aborted / refused / dry_run / written.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn aborted_audit_event_names_aborted() {
+    #[tokio::test]
+    async fn aborted_audit_event_names_aborted() {
         let f = fixture(V2_CLEAN);
-        let events = routectl_testkit::capture_events(|| {
-            // Non-interactive without --yes declines at the prompt.
-            let _ = run_at(&f.config, &f.overlay, false, false);
-        });
+        // Non-interactive without --yes declines at the prompt.
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, false).await }).await;
         let audit = events
             .iter()
             .find(|e| e.field("verb") == Some("migrate"))
@@ -1346,12 +2219,11 @@ default = \"gpt\"
         assert_eq!(audit.field("outcome"), Some("aborted"));
     }
 
-    #[test]
-    fn dry_run_audit_event_names_dry_run() {
+    #[tokio::test]
+    async fn dry_run_audit_event_names_dry_run() {
         let f = fixture(V2_CLEAN);
-        let events = routectl_testkit::capture_events(|| {
-            run_at(&f.config, &f.overlay, true, false).expect("dry-run");
-        });
+        let (_, events) =
+            routectl_testkit::with_capture(async { f.migrate(true, false).await }).await;
         let audit = events
             .iter()
             .find(|e| e.field("verb") == Some("migrate"))
@@ -1365,13 +2237,13 @@ default = \"gpt\"
     // safely to a consistent result without a double overlay write.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn partial_commit_state_reruns_safely_to_completion() {
+    #[tokio::test]
+    async fn partial_commit_state_reruns_safely_to_completion() {
         let f = fixture(V1_WITH_CACHE_PRICING);
         let v1_body = std::fs::read(&f.config).unwrap();
 
         // First run completes both phases (overlay folded, config -> v3).
-        run_at(&f.config, &f.overlay, false, true).expect("first migrate");
+        f.migrate(false, true).await.expect("first migrate");
         assert!(f.overlay.exists(), "first run folds the overlay");
         let overlay_after_first = std::fs::read(&f.overlay).unwrap();
 
@@ -1382,10 +2254,13 @@ default = \"gpt\"
 
         // Rerun completes safely: the overlay fold is now an idempotent no-op
         // (no double write) and config.toml is stamped forward to v3.
-        let result = run_at(&f.config, &f.overlay, false, true).expect("rerun");
+        let result = f.migrate(false, true).await.expect("rerun");
         assert_eq!(result, MigrateResult::Migrated { from_version: 1 });
         let text = read(&f.config);
-        assert!(text.contains("version = 3"), "{text}");
+        assert!(
+            text.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
+            "{text}"
+        );
         assert!(!text.contains("cache_pricing"), "{text}");
         gate(&text).expect("the completed config must pass the gate");
         assert_eq!(
@@ -1402,8 +2277,8 @@ default = \"gpt\"
     // overwritten -- the commit conflicts and leaves the file byte-intact.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn overlay_commit_refuses_a_stale_base_revision_without_clobbering() {
+    #[tokio::test]
+    async fn overlay_commit_refuses_a_stale_base_revision_without_clobbering() {
         let f = fixture(V1_WITH_CACHE_PRICING);
         // Seed the overlay so its on-disk revision is 1 -- ahead of a plan
         // computed against revision 0 (a concurrent `catalog` write landed in
@@ -1442,8 +2317,8 @@ default = \"gpt\"
     // the error is the resumable message, and the overlay stays committed.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn live_mid_commit_config_conflict_lands_overlay_and_reports_incomplete() {
+    #[tokio::test]
+    async fn live_mid_commit_config_conflict_lands_overlay_and_reports_incomplete() {
         let f = fixture(V1_WITH_CACHE_PRICING);
         let snapshot = std::fs::read(&f.config).unwrap();
         let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
@@ -1464,8 +2339,17 @@ default = \"gpt\"
 
         // `run_at` feeds `failure.outcome` verbatim to the audit event, so the
         // asserted outcome IS the audited outcome.
-        let failure = commit_plan(plan, &f.config, &f.overlay, &snapshot, 1)
-            .expect_err("a config-phase conflict after the overlay lands must fail");
+        let failure = commit_plan(
+            plan,
+            &[],
+            &f.config,
+            &f.overlay,
+            &f.credentials,
+            &snapshot,
+            1,
+        )
+        .await
+        .expect_err("a config-phase conflict after the overlay lands must fail");
         assert_eq!(failure.outcome, "incomplete");
         assert!(
             failure.error.to_string().contains("rerun `config migrate`"),
@@ -1504,8 +2388,8 @@ default = \"gpt\"
     //     lock) observes the raced bytes and conflicts.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn run_at_config_conflict_after_overlay_audits_incomplete_and_resumes() {
+    #[tokio::test]
+    async fn run_at_config_conflict_after_overlay_audits_incomplete_and_resumes() {
         use std::sync::mpsc;
 
         let f = fixture(V1_WITH_CACHE_PRICING);
@@ -1562,17 +2446,13 @@ default = \"gpt\"
 
         locked_rx.recv().expect("racer acquired the config lock");
 
-        let mut outcome = None;
-        let events = routectl_testkit::capture_events(|| {
-            outcome = Some(run_at(&f.config, &f.overlay, false, true));
-        });
+        let (outcome, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
         racer.join().expect("racer thread");
 
         // (b) the user-facing error is the resumable message, never a false
         // "nothing was written".
-        let err = outcome
-            .expect("run_at ran")
-            .expect_err("a config conflict after the overlay lands must fail");
+        let err = outcome.expect_err("a config conflict after the overlay lands must fail");
         assert!(
             err.to_string().contains("rerun `config migrate`"),
             "the resumable message must never claim nothing was written, got: {err}"
@@ -1600,10 +2480,13 @@ default = \"gpt\"
 
         // (d) a rerun completes: the overlay fold is now an idempotent no-op
         // and config.toml is stamped forward to v3.
-        let result = run_at(&f.config, &f.overlay, false, true).expect("rerun completes");
+        let result = f.migrate(false, true).await.expect("rerun completes");
         assert_eq!(result, MigrateResult::Migrated { from_version: 1 });
         let text = read(&f.config);
-        assert!(text.contains("version = 3"), "{text}");
+        assert!(
+            text.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
+            "{text}"
+        );
         assert!(!text.contains("cache_pricing"), "{text}");
         gate(&text).expect("the completed config must pass the gate");
     }
@@ -1614,8 +2497,8 @@ default = \"gpt\"
     // the old hardcoded value.
     // -----------------------------------------------------------------
 
-    #[test]
-    fn config_phase_conflict_without_overlay_reports_conflict() {
+    #[tokio::test]
+    async fn config_phase_conflict_without_overlay_reports_conflict() {
         let f = fixture(V2_CLEAN);
         let snapshot = std::fs::read(&f.config).unwrap();
         let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
@@ -1629,8 +2512,17 @@ default = \"gpt\"
         )
         .unwrap();
 
-        let failure = commit_plan(plan, &f.config, &f.overlay, &snapshot, 2)
-            .expect_err("a stale snapshot must conflict at the config phase");
+        let failure = commit_plan(
+            plan,
+            &[],
+            &f.config,
+            &f.overlay,
+            &f.credentials,
+            &snapshot,
+            2,
+        )
+        .await
+        .expect_err("a stale snapshot must conflict at the config phase");
         assert_eq!(failure.outcome, "conflict");
         assert!(
             !f.overlay.exists(),

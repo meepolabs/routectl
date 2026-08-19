@@ -229,7 +229,11 @@ mod tests {
     async fn panel_constant_tracks_the_no_network_report_schema_version() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, b"version = 3\n").unwrap();
+        std::fs::write(
+            &config_path,
+            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+        )
+        .unwrap();
 
         let ctx = gather_context_no_network(&config_path).await;
         let report = build_report_no_network(&ctx);
@@ -245,7 +249,10 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         std::fs::write(
             &config_path,
-            b"version = 3\nbogus_field = \"literal:sk-live-LEAKED\"\n",
+            format!(
+                "version = {}\nbogus_field = \"literal:sk-live-LEAKED\"\n",
+                routectl_router::CURRENT_CONFIG_VERSION
+            ),
         )
         .unwrap();
 
@@ -306,7 +313,11 @@ mod tests {
     async fn doctor_panel_embeds_catalog_freshness_rows() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, b"version = 3\n").unwrap();
+        std::fs::write(
+            &config_path,
+            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+        )
+        .unwrap();
 
         let state = state_with_config(Some(config_path));
         let app = super::super::status_router().with_state(state);

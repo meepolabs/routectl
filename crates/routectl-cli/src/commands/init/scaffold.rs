@@ -122,6 +122,7 @@ fn scaffold_from_text(config_path: &Path, text: &str) -> std::result::Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::CURRENT_CONFIG_VERSION;
 
     use routectl_router::parse_config;
 
@@ -167,8 +168,9 @@ mod tests {
         // Arrange: a config already sits at the target path.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let existing = "version = 3\n[server]\nhost = \"10.0.0.1\"\n";
-        std::fs::write(&path, existing).unwrap();
+        let existing =
+            format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"10.0.0.1\"\n");
+        std::fs::write(&path, &existing).unwrap();
 
         // Act
         let err = scaffold_fresh(&path).expect_err("existing config must refuse");
@@ -203,9 +205,12 @@ mod tests {
         // must leave nothing on disk.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let invalid = "version = 3\n[models.x]\nprovider = \"missing\"\nupstream = \"m\"\n";
+        let invalid = format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[models.x]\nprovider = \"missing\"\n\
+             upstream = \"m\"\n"
+        );
 
-        let err = scaffold_from_text(&path, invalid).expect_err("gate must reject");
+        let err = scaffold_from_text(&path, &invalid).expect_err("gate must reject");
 
         assert!(matches!(err, ScaffoldError::Gate(_)), "err: {err}");
         assert!(!path.exists(), "no file written on a gate failure");

@@ -755,7 +755,11 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, b"version = 3\n").unwrap();
+        std::fs::write(
+            &config_path,
+            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+        )
+        .unwrap();
 
         let router = Router::new(Arc::new(Config::default()));
         let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));

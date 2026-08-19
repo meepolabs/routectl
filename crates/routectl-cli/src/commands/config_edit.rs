@@ -273,11 +273,17 @@ fn infer_scalar(raw: &str) -> Item {
 
 #[cfg(test)]
 mod tests {
+    use routectl_router::CURRENT_CONFIG_VERSION;
+
     use super::*;
 
-    const V3_BASE: &str = "\
-version = 3
+    /// A minimal valid config at the version this build writes, rendered
+    /// from the const so the next schema bump needs no fixture edit here.
+    fn current_base() -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n\n{BASE_BODY}")
+    }
 
+    const BASE_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -331,9 +337,10 @@ default = \"gpt\"
     #[test]
     fn edits_leaf_preserving_comments_and_order() {
         let dir = tempfile::tempdir().unwrap();
-        let body = "\
+        let body = format!(
+            "\
 # operator note
-version = 3
+version = {CURRENT_CONFIG_VERSION}
 
 [retry]
 max_attempts = 2
@@ -353,8 +360,9 @@ upstream = \"gpt-4o\"
 
 [aliases]
 default = \"gpt\"
-";
-        let path = write_config(dir.path(), body);
+"
+        );
+        let path = write_config(dir.path(), &body);
 
         let result = set(&path, "retry.classes.server-error.retry", "4").expect("set");
         assert!(matches!(result, SetResult::Written { .. }));
@@ -388,30 +396,31 @@ default = \"gpt\"
 
     #[test]
     fn bad_type_leaves_file_unchanged() {
-        assert_no_write(V3_BASE, "server.port", "not-a-number");
+        assert_no_write(&current_base(), "server.port", "not-a-number");
     }
 
     #[test]
     fn unknown_path_leaves_file_unchanged() {
-        assert_no_write(V3_BASE, "server.nope", "1");
+        assert_no_write(&current_base(), "server.nope", "1");
     }
 
     #[test]
     fn array_target_leaves_file_unchanged() {
-        assert_no_write(V3_BASE, "bedrock.allowed_betas", "429");
+        assert_no_write(&current_base(), "bedrock.allowed_betas", "429");
     }
 
     #[test]
     fn invalid_cross_field_leaves_file_unchanged() {
         // An alias pointing at an undefined model target passes the parse
         // but fails the shared cross-field validator suite.
-        assert_no_write(V3_BASE, "aliases.broken", "no-such-model");
+        assert_no_write(&current_base(), "aliases.broken", "no-such-model");
     }
 
     #[test]
     fn legacy_key_trip_leaves_file_unchanged() {
-        let body = "\
-version = 3
+        let body = format!(
+            "\
+version = {CURRENT_CONFIG_VERSION}
 
 [server]
 host = \"127.0.0.1\"
@@ -431,8 +440,9 @@ upstream = \"gpt-4o\"
 
 [aliases]
 default = \"gpt\"
-";
-        assert_no_write(body, "server.port", "9999");
+"
+        );
+        assert_no_write(&body, "server.port", "9999");
     }
 
     // -----------------------------------------------------------------
@@ -467,7 +477,7 @@ default = \"gpt\"
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, body, "v1 file must be byte-identical after refusal");
         assert!(
-            !after.contains("version = 3"),
+            !after.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
             "no version stamp may be written"
         );
     }
@@ -479,7 +489,7 @@ default = \"gpt\"
     #[test]
     fn restart_required_field_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
 
         let result = set(&path, "usage.retention_days", "30").expect("set");
         match result {
@@ -498,7 +508,7 @@ default = \"gpt\"
     #[test]
     fn no_op_set_reports_no_change_and_no_restart_notice() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
         let before = std::fs::read(&path).unwrap();
 
         let result = set(&path, "server.port", "8787").expect("set");
@@ -517,7 +527,7 @@ default = \"gpt\"
     #[test]
     fn high_consequence_edit_bypassed_by_yes() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
 
         let result =
             set(&path, "providers.fast.base_url", "http://127.0.0.1:2").expect("set with --yes");
@@ -538,7 +548,7 @@ default = \"gpt\"
         // yes=false and a non-interactive stdin (EOF) -> confirm returns
         // false -> abort with the file untouched.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
         let before = std::fs::read(&path).unwrap();
 
         let result = run(
@@ -563,7 +573,7 @@ default = \"gpt\"
     #[test]
     fn emits_one_audit_event_without_the_value() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
 
         let events = routectl_testkit::capture_events(|| {
             set(&path, "usage.retention_days", "30").expect("set");
@@ -600,9 +610,11 @@ default = \"gpt\"
 
     /// Config whose only retry override is a single sparse class leaf, so
     /// removing it empties the whole `[retry.classes.*]` chain.
-    const RETRY_OVERRIDE: &str = "\
-version = 3
+    fn retry_override() -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n\n{RETRY_OVERRIDE_BODY}")
+    }
 
+    const RETRY_OVERRIDE_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -626,7 +638,7 @@ default = \"gpt\"
     #[test]
     fn unset_removes_override_falling_back_to_baked_default() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), RETRY_OVERRIDE);
+        let path = write_config(dir.path(), &retry_override());
 
         // The override is in force before removal.
         let before = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -652,7 +664,7 @@ default = \"gpt\"
     #[test]
     fn unset_prunes_all_now_empty_parent_tables() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), RETRY_OVERRIDE);
+        let path = write_config(dir.path(), &retry_override());
 
         unset(&path, "retry.classes.server-error.retry").expect("unset");
 
@@ -672,10 +684,13 @@ default = \"gpt\"
         // as the map it is, not silently no-op. (Bare keys precede section
         // headers in TOML, hence the fixture layout.)
         let dir = tempfile::tempdir().unwrap();
-        let body = V3_BASE
+        let body = current_base()
             .replace(
-                "version = 3\n",
-                "version = 3\naliases = { default = \"gpt\", second = \"gpt\" }\n",
+                &format!("version = {CURRENT_CONFIG_VERSION}\n"),
+                &format!(
+                    "version = {CURRENT_CONFIG_VERSION}\naliases = {{ default = \"gpt\", \
+                     second = \"gpt\" }}\n"
+                ),
             )
             .replace("[aliases]\ndefault = \"gpt\"\n", "");
         let path = write_config(dir.path(), &body);
@@ -691,10 +706,10 @@ default = \"gpt\"
     #[test]
     fn set_reaches_into_an_inline_table() {
         let dir = tempfile::tempdir().unwrap();
-        let body = V3_BASE
+        let body = current_base()
             .replace(
-                "version = 3\n",
-                "version = 3\naliases = { default = \"gpt\" }\n",
+                &format!("version = {CURRENT_CONFIG_VERSION}\n"),
+                &format!("version = {CURRENT_CONFIG_VERSION}\naliases = {{ default = \"gpt\" }}\n"),
             )
             .replace("[aliases]\ndefault = \"gpt\"\n", "");
         let path = write_config(dir.path(), &body);
@@ -710,8 +725,9 @@ default = \"gpt\"
     #[test]
     fn unset_keeps_parent_with_a_surviving_sibling_key() {
         let dir = tempfile::tempdir().unwrap();
-        let body = "\
-version = 3
+        let body = format!(
+            "\
+version = {CURRENT_CONFIG_VERSION}
 
 [server]
 host = \"127.0.0.1\"
@@ -734,8 +750,9 @@ upstream = \"gpt-4o\"
 
 [aliases]
 default = \"gpt\"
-";
-        let path = write_config(dir.path(), body);
+"
+        );
+        let path = write_config(dir.path(), &body);
 
         unset(&path, "retry.classes.server-error.retry").expect("unset");
 
@@ -749,8 +766,9 @@ default = \"gpt\"
     #[test]
     fn unset_keeps_parent_with_a_surviving_sibling_table() {
         let dir = tempfile::tempdir().unwrap();
-        let body = "\
-version = 3
+        let body = format!(
+            "\
+version = {CURRENT_CONFIG_VERSION}
 
 [server]
 host = \"127.0.0.1\"
@@ -773,8 +791,9 @@ upstream = \"gpt-4o\"
 
 [aliases]
 default = \"gpt\"
-";
-        let path = write_config(dir.path(), body);
+"
+        );
+        let path = write_config(dir.path(), &body);
 
         unset(&path, "retry.classes.server-error.retry").expect("unset");
 
@@ -791,7 +810,7 @@ default = \"gpt\"
         // PathShape::Table is accepted for unset (rejected only for set):
         // naming the table node drops the whole override block at once.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), RETRY_OVERRIDE);
+        let path = write_config(dir.path(), &retry_override());
 
         let result = unset(&path, "retry.classes.server-error").expect("unset table node");
         assert!(matches!(result, SetResult::Written { .. }));
@@ -803,9 +822,10 @@ default = \"gpt\"
     #[test]
     fn unset_preserves_comments_and_order_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        let body = "\
+        let body = format!(
+            "\
 # operator note
-version = 3
+version = {CURRENT_CONFIG_VERSION}
 
 [server]
 host = \"127.0.0.1\"
@@ -826,8 +846,9 @@ upstream = \"gpt-4o\"
 
 [aliases]
 default = \"gpt\"
-";
-        let path = write_config(dir.path(), body);
+"
+        );
+        let path = write_config(dir.path(), &body);
 
         unset(&path, "retry.classes.server-error.retry").expect("unset");
 
@@ -845,7 +866,7 @@ default = \"gpt\"
     #[test]
     fn unset_missing_key_reports_no_change_without_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
         let before = std::fs::read(&path).unwrap();
 
         let result = unset(&path, "retry.max_attempts").expect("unset missing key");
@@ -885,7 +906,7 @@ default = \"gpt\"
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, body, "v1 file must be byte-identical after refusal");
         assert!(
-            !after.contains("version = 3"),
+            !after.contains(&format!("version = {CURRENT_CONFIG_VERSION}")),
             "no version stamp may be written"
         );
     }
@@ -896,7 +917,7 @@ default = \"gpt\"
         // serde default) makes the candidate fail the parse gate, so
         // nothing is written.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V3_BASE);
+        let path = write_config(dir.path(), &current_base());
         let before = std::fs::read(&path).unwrap();
 
         let err = unset(&path, "models.gpt.upstream");
@@ -911,7 +932,7 @@ default = \"gpt\"
     #[test]
     fn unset_emits_one_audit_event_with_verb_unset_and_no_value() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), RETRY_OVERRIDE);
+        let path = write_config(dir.path(), &retry_override());
 
         let events = routectl_testkit::capture_events(|| {
             unset(&path, "retry.classes.server-error.retry").expect("unset");
@@ -947,7 +968,8 @@ default = \"gpt\"
         // it, and toml's diagnostic would frame the offending source line --
         // carrying the secret -- unless the preview is redacted.
         let candidate = format!(
-            "version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = 8787\nbogus_secret_key = \"{FAKE_SECRET}\"\n"
+            "version = {CURRENT_CONFIG_VERSION}\n\n[server]\nhost = \"127.0.0.1\"\nport = \
+             8787\nbogus_secret_key = \"{FAKE_SECRET}\"\n"
         );
 
         let errors = gate(&candidate).expect_err("an unknown field must fail the gate");
@@ -974,8 +996,10 @@ default = \"gpt\"
         // A fake secret mistyped into the numeric `port` field: serde renders
         // `invalid type: string "...", expected u16`, embedding it verbatim on
         // a clause the snippet-row filter never sees -- it must still be gone.
-        let candidate =
-            format!("version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = \"{FAKE_SECRET}\"\n");
+        let candidate = format!(
+            "version = {CURRENT_CONFIG_VERSION}\n\n[server]\nhost = \"127.0.0.1\"\nport = \
+                 \"{FAKE_SECRET}\"\n"
+        );
 
         let errors = gate(&candidate).expect_err("a type mismatch must fail the gate");
         for e in &errors {
@@ -992,7 +1016,8 @@ default = \"gpt\"
         // backtick token of an `unknown field` clause; it must be dropped while
         // the schema candidate names survive.
         let candidate = format!(
-            "version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = 8787\n\"literal:{FAKE_SECRET}\" = 1\n"
+            "version = {CURRENT_CONFIG_VERSION}\n\n[server]\nhost = \"127.0.0.1\"\nport = \
+             8787\n\"literal:{FAKE_SECRET}\" = 1\n"
         );
 
         let errors = gate(&candidate).expect_err("a quoted secret key must fail the gate");

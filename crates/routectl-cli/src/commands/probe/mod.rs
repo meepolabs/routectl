@@ -373,6 +373,7 @@ fn report_json(results: &[(String, ProbeOutcome)]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::CURRENT_CONFIG_VERSION;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -868,9 +869,11 @@ mod tests {
 
     use routectl_testkit::ScopedEnv;
 
-    const V3_ONE_PROVIDER: &str = "\
-version = 3
+    fn one_provider_config() -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n") + ONE_PROVIDER_BODY
+    }
 
+    const ONE_PROVIDER_BODY: &str = "\
 [providers.alpha]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:1\"
@@ -885,7 +888,7 @@ api_key_ref = \"literal:k\"
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
-        std::fs::write(&config_path, V3_ONE_PROVIDER).unwrap();
+        std::fs::write(&config_path, one_provider_config()).unwrap();
 
         let before = snapshot_dir(tmp.path());
         let code = run(&config_path, Some("missing".to_string()), false).await;
@@ -906,7 +909,7 @@ api_key_ref = \"literal:k\"
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
-        std::fs::write(&config_path, V3_ONE_PROVIDER).unwrap();
+        std::fs::write(&config_path, one_provider_config()).unwrap();
 
         let before = snapshot_dir(tmp.path());
         // alpha points at a closed loopback port -> Unreachable -> nonzero,

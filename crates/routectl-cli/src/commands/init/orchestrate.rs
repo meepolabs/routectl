@@ -543,6 +543,7 @@ mod tests {
     use super::*;
     use crate::commands::init::ModelWiring;
     use async_trait::async_trait;
+    use routectl_router::CURRENT_CONFIG_VERSION;
 
     /// Configurable [`InitIo`] fake: no real TTY, stdin, prompt, or browser.
     /// Drives every wizard seam AND the inherited [`AddIo`] credential seams
@@ -820,9 +821,8 @@ mod tests {
         // A config already routing model `m` -> provider `p`, both on disk and
         // in the existing_config the wizard reasons about, so the in-loop hook
         // can resolve the lane the moment `p` is overwritten.
-        let existing_text = "\
-version = 3
-
+        let existing_text = format!("version = {CURRENT_CONFIG_VERSION}\n")
+            + "\
 [providers.p]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:2\"
@@ -835,8 +835,8 @@ upstream = \"gpt-4o\"
 [aliases]
 default = \"m\"
 ";
-        std::fs::write(&path, existing_text).unwrap();
-        let existing = parse_config(existing_text).unwrap();
+        std::fs::write(&path, &existing_text).unwrap();
+        let existing = parse_config(&existing_text).unwrap();
 
         // Overwrite `p` with a DIFFERENT block so the add is a real `Written`,
         // arming the in-loop offer (the lane already exists on disk).
@@ -1156,8 +1156,9 @@ default = \"m\"
     async fn scaffold_refuses_an_existing_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let existing = "version = 3\n[server]\nhost = \"10.0.0.1\"\n";
-        std::fs::write(&path, existing).unwrap();
+        let existing =
+            format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"10.0.0.1\"\n");
+        std::fs::write(&path, &existing).unwrap();
 
         let err = orchestrate(
             &path,

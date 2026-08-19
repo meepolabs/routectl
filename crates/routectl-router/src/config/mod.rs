@@ -40,10 +40,10 @@ pub use validate::{
 pub struct Config {
     /// Schema-version stamp for this `config.toml`. Absent in the file
     /// (every pre-v0.9 config) deserializes to `1`. [`CURRENT_CONFIG_VERSION`]
-    /// is `3`. A `version` that does not equal [`CURRENT_CONFIG_VERSION`]
+    /// is `4`. A `version` that does not equal [`CURRENT_CONFIG_VERSION`]
     /// is rejected before this struct is deserialized -- a too-old file is
-    /// pointed at `config migrate` (which chains the v1->v2 and v2->v3
-    /// transforms), a too-new file at a binary upgrade. See
+    /// pointed at `config migrate` (which chains the v1->v2, v2->v3 and
+    /// v3->v4 transforms), a too-new file at a binary upgrade. See
     /// [`preflight_config_version`]. The loader never migrates on load.
     ///
     /// NOTE: `Config::default()` (plain Rust construction, e.g. in tests)
@@ -270,7 +270,7 @@ impl Config {
 /// lets the shipped-example parse assertions run unchanged on a lean build.
 #[cfg(test)]
 pub(crate) const LEAN_EXAMPLE_CONFIG: &str = r#"
-version = 3
+version = 4
 
 [server]
 host = "127.0.0.1"

@@ -3,16 +3,20 @@
 use super::*;
 
 use routectl_auth::SecretRef;
-use routectl_router::ProviderEntry;
+use routectl_router::{CURRENT_CONFIG_VERSION, ProviderEntry};
 
 use super::build::resolve_secret;
 use super::capture::{capture_value, execute_pending};
 use super::toml_edit::{commit, provider_table};
 use crate::commands::provider_env::env_var_for_kind;
 
-const V3_BASE: &str = "\
-version = 3
+/// A minimal valid config at the version this build writes, rendered from
+/// the const so the next schema bump needs no fixture edit here.
+fn current_base() -> String {
+    format!("version = {CURRENT_CONFIG_VERSION}\n{BASE_BODY}")
+}
 
+const BASE_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -116,7 +120,7 @@ fn resolve_secret_rejects_literal_ref() {
 #[tokio::test]
 async fn adds_openai_compat_via_secret_ref() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
@@ -146,7 +150,7 @@ async fn adds_via_api_key_env_without_leaking_the_value() {
     set_env(key, secret_value);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("anthropic-api", "claude");
     a.api_key_env = Some(key.to_string());
@@ -174,7 +178,7 @@ async fn key_env_that_is_unset_errors_without_writing() {
     unset_env(key);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("anthropic-api", "claude");
@@ -192,10 +196,8 @@ async fn key_env_that_is_unset_errors_without_writing() {
 #[tokio::test]
 async fn preserves_comments_and_existing_blocks() {
     let dir = tempfile::tempdir().unwrap();
-    let body = "\
-# operator note
-version = 3
-
+    let body = format!("# operator note\nversion = {CURRENT_CONFIG_VERSION}\n")
+        + "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -213,7 +215,7 @@ upstream = \"gpt-4o\"
 [aliases]
 default = \"gpt\"
 ";
-    let path = write_config(dir.path(), body);
+    let path = write_config(dir.path(), &body);
 
     let mut a = args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
@@ -240,7 +242,7 @@ default = \"gpt\"
 #[tokio::test]
 async fn identical_re_add_is_a_no_op() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut first = args("openai-compat", "grok");
     first.base_url = Some("https://api.x.example/v1".to_string());
@@ -275,7 +277,7 @@ async fn identical_re_add_is_a_no_op() {
 #[tokio::test]
 async fn different_block_on_existing_name_is_refused_without_overwrite() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     // "fast" already exists with a different base_url + api_key_ref.
@@ -293,7 +295,7 @@ async fn different_block_on_existing_name_is_refused_without_overwrite() {
 #[tokio::test]
 async fn overwrite_replaces_an_existing_block() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("openai-compat", "fast");
     a.base_url = Some("https://elsewhere.example/v1".to_string());
@@ -314,7 +316,7 @@ async fn overwrite_still_passes_through_the_confirm_gate() {
     // high-consequence confirmation: with yes=false and an EOF stdin the
     // overwrite is declined and the original block is left byte-identical.
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "fast");
@@ -344,9 +346,8 @@ async fn candidate_failing_the_gate_writes_nothing() {
     // but the shared gate re-validates the whole candidate and rejects
     // it -- so `provider add` refuses to write and leaves the file
     // byte-identical, before it ever reaches the confirmation prompt.
-    let body = "\
-version = 3
-
+    let body = format!("version = {CURRENT_CONFIG_VERSION}\n")
+        + "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -364,7 +365,7 @@ upstream = \"gpt-4o\"
 default = \"no-such-model\"
 ";
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), body);
+    let path = write_config(dir.path(), &body);
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "grok");
@@ -388,7 +389,7 @@ default = \"no-such-model\"
 #[tokio::test]
 async fn missing_secret_source_errors_actionably() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "grok");
@@ -407,7 +408,7 @@ async fn missing_secret_source_errors_actionably() {
 #[tokio::test]
 async fn adds_gemini_with_default_base_url() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("gemini", "gem");
     a.secret_ref = Some("env://GEMINI_API_KEY".to_string());
@@ -424,7 +425,7 @@ async fn adds_gemini_with_default_base_url() {
 #[tokio::test]
 async fn gemini_rejects_base_url_flag() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("gemini", "gem");
@@ -441,7 +442,7 @@ async fn gemini_rejects_base_url_flag() {
 #[tokio::test]
 async fn unsupported_kind_errors_actionably() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("bedrock", "aws");
     a.secret_ref = Some("file:///abs/key".to_string());
@@ -470,7 +471,7 @@ async fn declining_the_confirmation_writes_nothing() {
     // yes=false with a non-interactive stdin (EOF) -> confirm returns
     // false -> abort with the file untouched.
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "grok");
@@ -500,7 +501,7 @@ async fn emits_one_audit_event_without_value_or_full_ref() {
     set_env(key, secret_value);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let (_res, events) = routectl_testkit::with_capture(async {
         let mut a = args("anthropic-api", "claude");
@@ -542,12 +543,12 @@ async fn emits_one_audit_event_without_value_or_full_ref() {
 #[test]
 fn stale_snapshot_conflict_leaves_file_unchanged() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let stale = std::fs::read(&path).unwrap();
     let stale_text = String::from_utf8(stale.clone()).unwrap();
 
     // Something else rewrote the file after the caller snapshotted it.
-    let rewritten = format!("{V3_BASE}# added out of band\n");
+    let rewritten = format!("{}# added out of band\n", current_base());
     std::fs::write(&path, &rewritten).unwrap();
 
     let entry = ProviderEntry::openai_compat("https://api.x.example/v1", "file:///abs/key");
@@ -645,7 +646,7 @@ fn scoped_secret_dir(tmp: &std::path::Path) -> std::path::PathBuf {
 #[serial_test::serial]
 async fn api_key_stdin_captures_to_managed_store_and_writes_only_the_ref() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let secret_value = "piped-secret-value-not-real";
@@ -692,7 +693,7 @@ async fn api_key_stdin_captures_to_managed_store_and_writes_only_the_ref() {
 #[serial_test::serial]
 async fn api_key_stdin_on_a_tty_errors_immediately_without_reading() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "grok");
@@ -719,7 +720,7 @@ async fn api_key_stdin_on_a_tty_errors_immediately_without_reading() {
 #[serial_test::serial]
 async fn missing_key_without_tty_errors_actionably_and_never_prompts() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "grok");
@@ -744,7 +745,7 @@ async fn missing_key_without_tty_errors_actionably_and_never_prompts() {
 #[serial_test::serial]
 async fn interactive_hidden_prompt_captures_when_tty_and_missing() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     // No conventional var set, so the env-offer is skipped and the prompt
@@ -783,7 +784,7 @@ async fn interactive_hidden_prompt_captures_when_tty_and_missing() {
 #[serial_test::serial]
 async fn interactive_offers_a_resolvable_env_var_and_writes_the_env_ref() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let var = env_var_for_kind("anthropic-api").unwrap();
     let prev_var = std::env::var(var).ok();
     set_env(var, "resolvable-value-not-real");
@@ -816,7 +817,7 @@ async fn interactive_offers_a_resolvable_env_var_and_writes_the_env_ref() {
 #[serial_test::serial]
 async fn interactive_does_not_offer_an_unresolved_env_var() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let var = env_var_for_kind("anthropic-api").unwrap();
@@ -853,7 +854,7 @@ async fn interactive_does_not_offer_an_unresolved_env_var() {
 #[serial_test::serial]
 async fn interactive_does_not_offer_an_empty_env_var() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let var = env_var_for_kind("anthropic-api").unwrap();
@@ -888,7 +889,7 @@ async fn interactive_does_not_offer_an_empty_env_var() {
 #[tokio::test]
 async fn forwarded_anthropic_api_adds_without_a_secret_prompt() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("anthropic-api", "fwd");
     a.credential_source = Some("forwarded".to_string());
@@ -921,7 +922,7 @@ async fn forwarded_anthropic_api_adds_without_a_secret_prompt() {
 #[tokio::test]
 async fn forwarded_on_a_non_anthropic_kind_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("openai-compat", "x");
@@ -939,7 +940,7 @@ async fn forwarded_on_a_non_anthropic_kind_is_rejected() {
 #[tokio::test]
 async fn forwarded_with_a_secret_flag_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("anthropic-api", "fwd");
@@ -960,7 +961,7 @@ async fn forwarded_with_a_secret_flag_is_rejected() {
 #[tokio::test]
 async fn oauth_backed_kind_rejects_base_url_flag() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let mut a = args("anthropic", "claude-sub");
@@ -977,7 +978,7 @@ async fn oauth_backed_kind_rejects_base_url_flag() {
 #[tokio::test]
 async fn oauth_backed_kind_delegates_to_login_and_writes_the_oauth_ref() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let a = args("anthropic", "claude-sub");
     let io = FakeIo::default(); // login_ok = true (already-logged-in seam)
@@ -999,7 +1000,7 @@ async fn oauth_backed_kind_delegates_to_login_and_writes_the_oauth_ref() {
 #[tokio::test]
 async fn oauth_login_failure_aborts_before_the_config_write() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
     let a = args("anthropic", "claude-sub");
@@ -1019,7 +1020,7 @@ async fn oauth_login_failure_aborts_before_the_config_write() {
 #[serial_test::serial]
 async fn declined_confirm_captures_no_secret_file() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
@@ -1053,7 +1054,7 @@ async fn declined_confirm_captures_no_secret_file() {
 #[serial_test::serial]
 async fn post_capture_config_conflict_persists_secret_and_reports_recovery() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
 
@@ -1068,7 +1069,7 @@ async fn post_capture_config_conflict_persists_secret_and_reports_recovery() {
     let io = FakeIo {
         stdin_value: "captured-then-conflict".to_string(),
         stdin_hook: Some(Box::new(move || {
-            std::fs::write(&conflict_path, format!("{V3_BASE}# out of band\n")).unwrap();
+            std::fs::write(&conflict_path, format!("{}# out of band\n", current_base())).unwrap();
         })),
         ..Default::default()
     };
@@ -1093,7 +1094,7 @@ async fn post_capture_config_conflict_persists_secret_and_reports_recovery() {
 #[serial_test::serial]
 async fn captured_value_never_appears_in_tracing_events() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let _secrets = scoped_secret_dir(xdg.path());
     let secret_value = "tracing-secret-value-not-real";
@@ -1230,7 +1231,7 @@ async fn fresh_piped_key_rewrites_secret_and_reports_rotated() {
     // Arrange: an existing file-backed provider whose managed secret holds
     // the original key.
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
@@ -1285,7 +1286,7 @@ async fn fresh_piped_key_rewrites_secret_and_reports_rotated() {
 async fn fresh_piped_key_on_existing_provider_requires_overwrite() {
     // Arrange: an existing file-backed provider.
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
@@ -1326,7 +1327,7 @@ async fn env_ref_identical_re_add_stays_no_change() {
     let key = "ROUTECTL_PROVIDER_ADD_IDEMPOTENT_ENV";
     set_env(key, "present-value-not-real");
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut first = args("anthropic-api", "claude");
     first.api_key_env = Some(key.to_string());
@@ -1360,7 +1361,7 @@ async fn rotation_secret_write_failure_leaves_old_secret_intact() {
     // Arrange: an existing file-backed provider whose secret holds a known
     // value.
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let config_before = seed_file_backed_grok(&path, "durable-old-key-not-real").await;
@@ -1414,7 +1415,7 @@ async fn rotation_secret_write_failure_leaves_old_secret_intact() {
 #[serial_test::serial]
 async fn rotation_emits_one_audit_event_config_unchanged_without_value_or_ref() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
     let secrets = scoped_secret_dir(xdg.path());
     let secret_value = "rotation-audit-secret-not-real";
@@ -1520,7 +1521,7 @@ async fn failing_post_add_probe_leaves_the_provider_block_intact() {
     // at one unreachable base; the add rewrites it to a different unreachable
     // base, so the write is a real `Written` outcome.
     let body = format!(
-        "version = 3\n\n\
+        "version = {CURRENT_CONFIG_VERSION}\n\n\
          [server]\nhost = \"127.0.0.1\"\nport = 8787\n\n\
          [usage]\ndb_path = \"{}\"\n\n\
          [providers.grok]\nkind = \"openai-compat\"\n\
@@ -1581,7 +1582,7 @@ async fn post_add_probe_offer_skips_when_no_model_routes_to_the_provider() {
     let dir = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     let _secrets = scoped_secret_dir(xdg.path());
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());

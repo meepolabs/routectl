@@ -3,7 +3,8 @@
 //!
 //! [`plan_migration`] computes a [`MigrationPlan`] WITHOUT touching disk:
 //! it runs every ladder transform in memory (the v1 `[cache_pricing]` ->
-//! catalog-overlay fold, the v2 -> v3 retry-list retirement, the v3 -> v3
+//! catalog-overlay fold, the v2 -> v3 retry-list retirement, the v3 -> v4
+//! `seat_selection`-onto-pool relocation, the v4 -> v4
 //! `unsupported_features` normalization) and returns the config-text
 //! candidate, the overlay candidate, and the removed keys. Every refusal
 //! and conflict check is part of planning, so no on-disk mutation can
@@ -34,6 +35,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use routectl_auth::SecretRef;
 use routectl_core::failure_class::{FailureClass, class_guidance_for_status};
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value};
 
@@ -358,7 +360,7 @@ fn civil_from_epoch_day(z: i64) -> (i64, u32, u32) {
 /// bare bump of the const (task ordering) can never make the ladder claim a
 /// version it has no step for -- and an already-latest doc stays a no-op
 /// regardless of what the const currently reads.
-const LATEST_MIGRATION_VERSION: u32 = 3;
+const LATEST_MIGRATION_VERSION: u32 = 4;
 
 /// The ladder must always be able to reach the current version: every step
 /// up to `CURRENT_CONFIG_VERSION` has to exist. Enforced at compile time so
@@ -439,6 +441,13 @@ pub enum Refusal {
         /// `providers.<name>.allowed_betas`).
         fields: Vec<String>,
     },
+    /// A provider-level `seat_selection` the v3 -> v4 rung cannot relocate
+    /// onto a pool block without guessing.
+    SeatSelectionRelocation {
+        /// One line per provider entry, naming the entry and why its knob
+        /// has no derivable pool.
+        entries: Vec<String>,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -505,6 +514,23 @@ impl fmt::Display for Refusal {
                 }
                 Ok(())
             }
+            Self::SeatSelectionRelocation { entries } => {
+                writeln!(
+                    f,
+                    "the `seat_selection` knob moves off `[providers.X]` onto the \
+                     `[pools.<name>]` block that groups the accounts, but the entries below \
+                     carry one that cannot be relocated automatically: the pool name is \
+                     derived from the provider family named by the entry's `oauth://` ref, so \
+                     an entry with no oauth ref, with refs to more than one family, or whose \
+                     derived pool name is already taken has no single answer. Nothing was \
+                     written. Add the `[pools.<name>]` block by hand (moving the knob onto it) \
+                     and remove the provider-level key, then rerun:"
+                )?;
+                for entry in entries {
+                    writeln!(f, "  - {entry}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -518,9 +544,9 @@ pub enum MigrateError {
     #[error(transparent)]
     V1ToV2(#[from] MigrationError),
 
-    /// The v2 -> v3 rung or the v3 -> v3 normalization refused a
+    /// A ladder rung or the same-version normalization refused a
     /// behavior-bearing config; nothing written.
-    #[error("config migration to version 3 refused:\n{0}")]
+    #[error("config migration refused:\n{0}")]
     Refused(Refusal),
 
     /// The file's version is newer than any step the ladder can produce.
@@ -937,6 +963,353 @@ fn ensure_overrides_table(doc: &mut DocumentMut) -> Option<&mut dyn TableLike> {
     capability.get_mut("overrides")?.as_table_like_mut()
 }
 
+/// The config key a provider entry's OAuth credential reference lives on.
+/// The Bedrock lanes authenticate through a `bedrock_mantle.creds` /
+/// `creds` descriptor instead, and no such descriptor names an
+/// `oauth://` seat -- so an entry whose seats need pooling always carries
+/// its ref here.
+const PROVIDER_SECRET_REF_KEY: &str = "api_key_ref";
+
+/// The provider family named by a provider entry's `oauth://` credential
+/// ref, or `None` when the entry has no such ref (an API-key or Bedrock
+/// entry, or a malformed value the shared gate rejects).
+fn oauth_family_of_entry(entry: &dyn TableLike) -> Option<String> {
+    let uri = entry.get(PROVIDER_SECRET_REF_KEY)?.as_str()?;
+    match SecretRef::parse(uri) {
+        Ok(SecretRef::OAuth { provider, .. }) => Some(provider),
+        _ => None,
+    }
+}
+
+/// Whether a provider entry's `oauth://` ref is BARE -- no `#label`, so at
+/// v3 it expanded to every stored seat of its family.
+fn has_bare_oauth_ref(entry: &dyn TableLike) -> bool {
+    let Some(uri) = entry.get(PROVIDER_SECRET_REF_KEY).and_then(Item::as_str) else {
+        return false;
+    };
+    matches!(
+        SecretRef::parse(uri),
+        Ok(SecretRef::OAuth { label: None, .. })
+    )
+}
+
+/// One provider entry whose bare `oauth://` ref expanded to every stored
+/// seat of its family under v3 semantics, and so may need materializing into
+/// explicit accounts under v4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BareOauthRef {
+    /// The `[providers.<name>]` key the ref sits on.
+    pub entry: String,
+    /// The provider family the ref names.
+    pub family: String,
+}
+
+/// Every provider entry carrying a BARE `oauth://` ref, in document order.
+///
+/// Pure: it reports what the document says, never what the credential store
+/// holds. The store-aware half of the migration reads this to decide which
+/// families have more than one stored seat and so need explicit accounts --
+/// a v4 file must not leave a bare ref standing in for several seats,
+/// because at v4 a bare ref means the DEFAULT SEAT alone.
+#[must_use]
+pub fn bare_oauth_pool_candidates(doc: &DocumentMut) -> Vec<BareOauthRef> {
+    let Some(providers) = doc.get("providers").and_then(Item::as_table_like) else {
+        return Vec::new();
+    };
+    providers
+        .iter()
+        .filter_map(|(name, item)| {
+            let entry = item.as_table_like()?;
+            if !has_bare_oauth_ref(entry) {
+                return None;
+            }
+            Some(BareOauthRef {
+                entry: name.to_string(),
+                family: oauth_family_of_entry(entry)?,
+            })
+        })
+        .collect()
+}
+
+/// One provider entry's move onto the explicit-pool shape: which pool the
+/// entry's accounts group under, the member entry names in write order, and
+/// the `seat_selection` value (if any) the pool block inherits.
+///
+/// Produced by the pure v3 -> v4 rung or by the store-aware caller that
+/// knows the family's stored seats, and applied by
+/// [`apply_seat_pool_move`]. Splitting the plan from the application is what
+/// lets the command compose one combined diff and reproduce it byte-for-byte
+/// under the write lock.
+///
+/// The ORIGINAL entry is always the pool's first member and keeps its
+/// operator-chosen name: at v4 its bare `oauth://<family>` ref means the
+/// default seat, and every `[models.X] provider` value naming it keeps
+/// resolving. Only the family's LABELLED seats materialize as new entries,
+/// under the names the naming convention derives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatPoolMove {
+    /// The provider entry the move starts from: the pool's default-seat
+    /// member.
+    pub entry: String,
+    /// The `[pools.<name>]` key the accounts group under.
+    pub pool: String,
+    /// One account entry per LABELLED seat, in write order. Each is a copy
+    /// of `entry` carrying that seat's `#label` ref.
+    pub accounts: Vec<SeatPoolAccount>,
+}
+
+/// One account entry a [`SeatPoolMove`] writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatPoolAccount {
+    /// The `[providers.<name>]` key this account takes.
+    pub entry_name: String,
+    /// The `oauth://` ref this account authenticates with.
+    pub secret_ref: String,
+    /// Whether the entry already exists carrying this ref, making its write
+    /// a no-op (an idempotent rerun over a config the move already produced).
+    pub already_present: bool,
+}
+
+/// Plan the PURE part of one provider entry's v3 -> v4 move: relocating a
+/// present provider-level `seat_selection` onto a `[pools.<name>]` block
+/// whose sole member is that entry.
+///
+/// The pool takes the plain provider-family name from
+/// [`crate::seat_naming::pool_name`] -- never a rule restated here, because
+/// the migration and the login writer must generate identical names.
+///
+/// # Errors
+///
+/// Returns a description of why the move has no single answer: no
+/// `oauth://` ref to derive a family from, an unusable family token, or a
+/// derived pool name already held by a provider entry, a model nickname, or
+/// a hand-authored pool block. The caller turns these into one
+/// [`Refusal::SeatSelectionRelocation`], leaving the document untouched.
+fn plan_seat_pool_move(doc: &DocumentMut, entry_name: &str) -> Result<SeatPoolMove, String> {
+    let entry = doc
+        .get("providers")
+        .and_then(Item::as_table_like)
+        .and_then(|providers| providers.get(entry_name))
+        .and_then(Item::as_table_like)
+        .ok_or_else(|| format!("[providers.{entry_name}] is not a table"))?;
+
+    let family = oauth_family_of_entry(entry).ok_or_else(|| {
+        format!(
+            "[providers.{entry_name}] carries `seat_selection` but no `oauth://` \
+             `{PROVIDER_SECRET_REF_KEY}`, so no provider family names its pool"
+        )
+    })?;
+    let pool = derive_pool_name(doc, entry_name, &family)?;
+    Ok(SeatPoolMove {
+        entry: entry_name.to_string(),
+        pool,
+        accounts: Vec::new(),
+    })
+}
+
+/// The `[pools.<name>]` key one provider entry's accounts group under, or a
+/// description of the namespace collision that leaves the move with no
+/// single answer.
+///
+/// Providers, pools and model nicknames share ONE namespace on a
+/// `[models.X] provider` value, so a derived pool name held by any of them
+/// is a refusal rather than a guess -- including the case where the entry
+/// itself already holds its family's plain name, because taking it for the
+/// pool would repoint every model naming that entry.
+fn derive_pool_name(doc: &DocumentMut, entry_name: &str, family: &str) -> Result<String, String> {
+    let pool = crate::seat_naming::pool_name(family).map_err(|e| {
+        format!("[providers.{entry_name}]: pool name for provider family `{family}`: {e}")
+    })?;
+    let held_by_provider = doc
+        .get("providers")
+        .and_then(Item::as_table_like)
+        .is_some_and(|providers| providers.contains_key(&pool));
+    let held_by_model = doc
+        .get("models")
+        .and_then(Item::as_table_like)
+        .is_some_and(|models| models.contains_key(&pool));
+    let held_by_pool = doc
+        .get("pools")
+        .and_then(Item::as_table_like)
+        .is_some_and(|pools| pools.contains_key(&pool));
+    if held_by_pool {
+        return Err(format!(
+            "[providers.{entry_name}]: a `[pools.{pool}]` block already exists; move the \
+             entry's `seat_selection` onto it by hand"
+        ));
+    }
+    if held_by_provider || held_by_model {
+        return Err(format!(
+            "[providers.{entry_name}]: the pool name `{pool}` is already used by a provider \
+             entry or a model nickname; providers, pools and model nicknames share one \
+             namespace -- rename the colliding entry, then rerun"
+        ));
+    }
+    Ok(pool)
+}
+
+/// Apply one [`SeatPoolMove`] to `doc`, format-preserving: move the entry's
+/// `seat_selection` (when present) onto the pool block, clone the entry once
+/// per labelled seat, and write `[pools.<name>]` listing the entry plus
+/// every account.
+///
+/// Every map walk goes through [`TableLike`] so an inline `providers = { ...
+/// }` / `models = { ... }` shape is handled as well as the standard-table
+/// one. Idempotent: an account already present with the right ref is left
+/// alone, and a member already listed is not duplicated.
+pub fn apply_seat_pool_move(doc: &mut DocumentMut, mv: &SeatPoolMove) {
+    let selection = take_provider_seat_selection(doc, &mv.entry);
+
+    for account in &mv.accounts {
+        clone_provider_entry(doc, &mv.entry, account);
+    }
+    let mut members = vec![mv.entry.as_str()];
+    members.extend(mv.accounts.iter().map(|a| a.entry_name.as_str()));
+    write_pool_block(doc, &mv.pool, &members, selection);
+}
+
+/// Remove and return a provider entry's `seat_selection` value, preserving
+/// its formatting so the relocated key renders as the operator wrote it.
+fn take_provider_seat_selection(doc: &mut DocumentMut, entry_name: &str) -> Option<Value> {
+    doc.get_mut("providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(entry_name))
+        .and_then(Item::as_table_like_mut)
+        .and_then(|entry| entry.remove(SEAT_SELECTION_KEY))
+        .and_then(|item| item.as_value().cloned())
+}
+
+/// Add one seat's account entry as a copy of `source` carrying that seat's
+/// `oauth://` ref. An entry already present with the right ref is left
+/// byte-untouched (the idempotent-rerun path).
+fn clone_provider_entry(doc: &mut DocumentMut, source: &str, account: &SeatPoolAccount) {
+    let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    if providers.contains_key(&account.entry_name) {
+        return;
+    }
+    let Some(item) = providers.get(source).cloned() else {
+        return;
+    };
+    providers.insert(&account.entry_name, item);
+    if let Some(entry) = providers
+        .get_mut(&account.entry_name)
+        .and_then(Item::as_table_like_mut)
+    {
+        entry.insert(
+            PROVIDER_SECRET_REF_KEY,
+            toml_edit::value(account.secret_ref.as_str()),
+        );
+    }
+}
+
+/// Write `[pools.<pool>]`: union the member list with whatever the block
+/// already carries (so a rerun adds nothing) and set `seat_selection` only
+/// when a value was relocated onto it.
+fn write_pool_block(doc: &mut DocumentMut, pool: &str, members: &[&str], selection: Option<Value>) {
+    let root = doc.as_table_mut();
+    if !root.contains_key("pools") {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        root.insert("pools", Item::Table(table));
+    }
+    let Some(pools) = root.get_mut("pools").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    if !pools.contains_key(pool) {
+        pools.insert(pool, Item::Table(Table::new()));
+    }
+    let Some(block) = pools.get_mut(pool).and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    if !block.contains_key("members") {
+        block.insert("members", toml_edit::value(Array::new()));
+    }
+    if let Some(arr) = block.get_mut("members").and_then(Item::as_array_mut) {
+        let existing: std::collections::BTreeSet<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        for member in members {
+            if !existing.contains(*member) {
+                arr.push(*member);
+            }
+        }
+    }
+    if let Some(selection) = selection {
+        block.insert(SEAT_SELECTION_KEY, Item::Value(selection));
+    }
+}
+
+/// The retired provider-level knob the v3 -> v4 rung relocates.
+const SEAT_SELECTION_KEY: &str = "seat_selection";
+
+/// Pure v3 -> v4 transform on the RAW toml_edit document. NO IO and no
+/// store access -- the ladder runs twice (plan and locked re-read) and the
+/// committed bytes must reproduce what planning gated, so a credential-store
+/// read here would break both that property and the ladder's offline
+/// testability. The store-aware half (materializing one account entry per
+/// stored seat) is composed by the `config migrate` command on top of this
+/// rung's output.
+///
+/// The v3 -> v4 break makes explicit `[pools.<name>]` blocks the only
+/// multi-seat shape: `seat_selection` is a property of a SET of accounts,
+/// so it moves off `[providers.X]` onto the block that names the set, and a
+/// bare `oauth://<provider>` ref means the DEFAULT SEAT alone. This rung
+/// stamps LITERAL `version = 4` and relocates every present provider-level
+/// `seat_selection` onto a pool block whose sole member is that entry.
+///
+/// A file carrying no provider-level `seat_selection` needs no structural
+/// change: the rung stamps the version and nothing else.
+///
+/// # Errors
+///
+/// Returns [`Refusal::SeatSelectionRelocation`] -- with NO mutation -- when
+/// a present `seat_selection` has no derivable pool (no `oauth://` ref to
+/// name a family, an unusable family token, or a derived pool name held by
+/// an unrelated entry, a model nickname, or a hand-authored pool block).
+pub fn migrate_v3_to_v4(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
+    let mut moves = Vec::new();
+    let mut problems = Vec::new();
+    for entry_name in provider_entries_with_seat_selection(doc) {
+        match plan_seat_pool_move(doc, &entry_name) {
+            Ok(mv) => moves.push(mv),
+            Err(problem) => problems.push(problem),
+        }
+    }
+    if !problems.is_empty() {
+        return Err(Refusal::SeatSelectionRelocation { entries: problems });
+    }
+
+    for mv in &moves {
+        apply_seat_pool_move(doc, mv);
+    }
+    doc["version"] = toml_edit::value(4i64);
+
+    Ok(StepOutcome {
+        from_version: 3,
+        to_version: 4,
+    })
+}
+
+/// Provider entry names carrying a provider-level `seat_selection`, in
+/// document order. Walked through [`TableLike`] so an inline `providers =
+/// { ... }` map is seen too.
+fn provider_entries_with_seat_selection(doc: &DocumentMut) -> Vec<String> {
+    let Some(providers) = doc.get("providers").and_then(Item::as_table_like) else {
+        return Vec::new();
+    };
+    providers
+        .iter()
+        .filter(|(_, item)| {
+            item.as_table_like()
+                .is_some_and(|entry| entry.contains_key(SEAT_SELECTION_KEY))
+        })
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
 /// Apply the PURE `config.toml` document transforms for the ladder, from
 /// `raw_version` up to the latest, mutating `doc` in place. Performs NO IO
 /// and touches NO overlay -- the v1 `[cache_pricing]` fold is
@@ -953,14 +1326,17 @@ fn ensure_overrides_table(doc: &mut DocumentMut) -> Option<&mut dyn TableLike> {
 ///   drops `[cache_pricing]`, then the v2 -> v3 rung runs on the result.
 /// - `raw_version == 2`: [`migrate_v2_to_v3`] retires the per-status retry
 ///   lists and stamps `version = 3`.
+/// - `raw_version == 3`: [`migrate_v3_to_v4`] relocates a provider-level
+///   `seat_selection` onto a `[pools.<name>]` block and stamps
+///   `version = 4`.
 /// - `raw_version == LATEST` (`LATEST_MIGRATION_VERSION`): the same-version
 ///   [`normalize_capability_overrides`] folds legacy `unsupported_features`
-///   into `[capability.overrides]`, recording a 3 -> 3 step only when the
-///   doc actually changed. A plain v3 file is a no-op (no step).
+///   into `[capability.overrides]`, recording a 4 -> 4 step only when the
+///   doc actually changed. A plain v4 file is a no-op (no step).
 ///
 /// # Errors
 ///
-/// A [`Refusal`] from the v2 -> v3 rung or the same-version normalization,
+/// A [`Refusal`] from any rung or from the same-version normalization,
 /// leaving `doc` byte-untouched.
 pub fn apply_config_transforms(
     doc: &mut DocumentMut,
@@ -980,11 +1356,16 @@ pub fn apply_config_transforms(
 
     if version == 2 {
         steps.push(migrate_v2_to_v3(doc)?);
+        version = 3;
     }
 
-    // Same-version (v3 -> v3) normalization runs ONLY for a file already at
-    // the latest version: a lower-version file reaches v3 through the rungs
-    // above and re-runs `config migrate` at v3 to normalize (idempotent).
+    if version == 3 {
+        steps.push(migrate_v3_to_v4(doc)?);
+    }
+
+    // Same-version normalization runs ONLY for a file already at the latest
+    // version: a lower-version file reaches it through the rungs above and
+    // re-runs `config migrate` there to normalize (idempotent).
     if raw_version == LATEST_MIGRATION_VERSION && normalize_capability_overrides(doc)? {
         steps.push(StepOutcome {
             from_version: LATEST_MIGRATION_VERSION,
@@ -1073,6 +1454,14 @@ fn collect_removed_keys(doc: &DocumentMut, raw_version: u32) -> Vec<String> {
     }
     if raw_version <= 1 && doc.contains_key("cache_pricing") {
         removed.push("[cache_pricing] (folded into the catalog overlay)".to_string());
+    }
+    if raw_version <= 3 {
+        for entry in provider_entries_with_seat_selection(doc) {
+            removed.push(format!(
+                "[providers.{entry}].seat_selection (relocated onto the pool block that groups \
+                 the accounts)"
+            ));
+        }
     }
     if raw_version >= LATEST_MIGRATION_VERSION {
         collect_unsupported_features_removals(doc, &mut removed);
@@ -1171,7 +1560,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn plan_v1_folds_cache_pricing_into_overlay_candidate_and_bumps_config_to_v3() {
+    fn plan_v1_folds_cache_pricing_into_overlay_candidate_and_bumps_config_to_latest() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
@@ -1204,7 +1593,7 @@ mod tests {
             "planning must not write the overlay"
         );
         assert_eq!(plan.from, 1);
-        assert_eq!(plan.to, 3);
+        assert_eq!(plan.to, LATEST_MIGRATION_VERSION);
         assert!(matches!(plan.write_kind, WriteKind::ConfigAndOverlay(..)));
 
         // Assert: the overlay candidate carries the migrated cell.
@@ -1219,10 +1608,14 @@ mod tests {
         assert_eq!(cell.verified_at, "2026-06-01");
         assert_eq!(cell.wm, Some(1.5));
 
-        // Assert: the config candidate is v3, [cache_pricing] gone, comments
-        // and unrelated content preserved, and it re-parses as a v3 Config.
+        // Assert: the config candidate is at the latest version,
+        // [cache_pricing] gone, comments and unrelated content preserved, and
+        // it re-parses as a current Config.
         let candidate = plan.config_candidate().expect("config candidate");
-        assert!(candidate.contains("version = 3"), "candidate: {candidate}");
+        assert!(
+            candidate.contains(&format!("version = {LATEST_MIGRATION_VERSION}")),
+            "candidate: {candidate}"
+        );
         assert!(
             !candidate.contains("cache_pricing"),
             "candidate: {candidate}"
@@ -1236,7 +1629,7 @@ mod tests {
             "candidate: {candidate}"
         );
         let reparsed: crate::config::Config = toml::from_str(candidate).expect("reparse");
-        assert_eq!(reparsed.version, 3);
+        assert_eq!(reparsed.version, CURRENT_CONFIG_VERSION);
         assert!(reparsed.cache_pricing.is_empty());
     }
 
@@ -1257,7 +1650,7 @@ mod tests {
         assert!(!overlay_path.exists());
         let reparsed: crate::config::Config =
             toml::from_str(plan.config_candidate().unwrap()).unwrap();
-        assert_eq!(reparsed.version, 3);
+        assert_eq!(reparsed.version, CURRENT_CONFIG_VERSION);
     }
 
     /// `[cache_pricing]` written in the TABLE form (`[cache_pricing."key"]`
@@ -1318,7 +1711,7 @@ mod tests {
             "candidate: {candidate}"
         );
         let reparsed: crate::config::Config = toml::from_str(candidate).expect("reparse");
-        assert_eq!(reparsed.version, 3);
+        assert_eq!(reparsed.version, CURRENT_CONFIG_VERSION);
         assert!(reparsed.cache_pricing.is_empty());
         assert!(reparsed.providers.contains_key("foo"));
     }
@@ -1869,7 +2262,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn plan_v1_doc_chains_to_3_folding_cache_pricing_and_dropping_lists() {
+    fn plan_v1_doc_chains_to_latest_folding_cache_pricing_and_dropping_lists() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
         let doc = doc_of(
@@ -1884,30 +2277,30 @@ mod tests {
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert("openai-compat:grok-*".to_string(), override_with_wm(1.5));
 
-        let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("v1 chains to 3");
+        let plan =
+            plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("v1 chains to latest");
         assert_eq!(plan.from, 1);
-        assert_eq!(plan.to, 3);
+        assert_eq!(plan.to, LATEST_MIGRATION_VERSION);
         assert!(matches!(plan.write_kind, WriteKind::ConfigAndOverlay(..)));
-        assert_eq!(plan.steps.len(), 2);
+        // One step per rung between v1 and the latest, each stamping its own
+        // literal target -- so this holds as the ladder grows.
         assert_eq!(
-            plan.steps[0],
-            StepOutcome {
-                from_version: 1,
-                to_version: 2
-            }
-        );
-        assert_eq!(
-            plan.steps[1],
-            StepOutcome {
-                from_version: 2,
-                to_version: 3
-            }
+            plan.steps,
+            (1..LATEST_MIGRATION_VERSION)
+                .map(|from_version| StepOutcome {
+                    from_version,
+                    to_version: from_version + 1,
+                })
+                .collect::<Vec<_>>()
         );
 
-        // Config candidate is fully migrated to v3, cache_pricing folded away,
+        // Config candidate is fully migrated, cache_pricing folded away,
         // retry list dropped -- and the overlay candidate carries the cell.
         let out = plan.config_candidate().expect("candidate");
-        assert!(out.contains("version = 3"), "{out}");
+        assert!(
+            out.contains(&format!("version = {LATEST_MIGRATION_VERSION}")),
+            "{out}"
+        );
         assert!(!out.contains("cache_pricing"), "{out}");
         assert!(!out.contains("retry_allowlist"), "{out}");
         assert!(
@@ -1925,30 +2318,35 @@ mod tests {
     }
 
     #[test]
-    fn plan_v2_doc_migrates_to_3_config_only() {
+    fn plan_v2_doc_migrates_to_latest_config_only() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
         let doc = doc_of("version = 2\n[retry]\nretry_allowlist = []\n");
 
-        let plan = plan_migration(&doc, 2, &BTreeMap::new(), &overlay_path).expect("v2 -> 3");
+        let plan = plan_migration(&doc, 2, &BTreeMap::new(), &overlay_path).expect("v2 -> latest");
         assert_eq!(
             plan.steps,
-            vec![StepOutcome {
-                from_version: 2,
-                to_version: 3
-            }]
+            (2..LATEST_MIGRATION_VERSION)
+                .map(|from_version| StepOutcome {
+                    from_version,
+                    to_version: from_version + 1,
+                })
+                .collect::<Vec<_>>()
         );
         assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
         assert!(plan.overlay_candidate().is_none());
         let out = plan.config_candidate().expect("candidate");
-        assert!(out.contains("version = 3"), "{out}");
+        assert!(
+            out.contains(&format!("version = {LATEST_MIGRATION_VERSION}")),
+            "{out}"
+        );
     }
 
     #[test]
     fn plan_already_latest_doc_is_a_no_change() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let doc = doc_of("version = 3\n");
+        let doc = doc_of(&format!("version = {LATEST_MIGRATION_VERSION}\n"));
 
         let plan = plan_migration(
             &doc,
@@ -1994,7 +2392,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_config_transforms_chains_v1_to_v3_on_the_document() {
+    fn apply_config_transforms_chains_v1_to_latest_on_the_document() {
         let mut doc = doc_of(
             "version = 1\n\n[cache_pricing]\n\"openai-compat:grok-*\" = { wm = 1.5 }\n\n\
              [retry]\nretry_allowlist = []\n",
@@ -2002,9 +2400,15 @@ mod tests {
 
         let steps = apply_config_transforms(&mut doc, 1).expect("chains");
 
-        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps.len(),
+            usize::try_from(LATEST_MIGRATION_VERSION - 1).unwrap()
+        );
         let out = doc.to_string();
-        assert!(out.contains("version = 3"), "{out}");
+        assert!(
+            out.contains(&format!("version = {LATEST_MIGRATION_VERSION}")),
+            "{out}"
+        );
         assert!(!out.contains("cache_pricing"), "{out}");
         assert!(!out.contains("retry_allowlist"), "{out}");
     }
@@ -2014,8 +2418,8 @@ mod tests {
     // provider/model unsupported_features into [capability.overrides].
     // -----------------------------------------------------------------------
 
-    const V3_PROVIDER_MODEL: &str = "\
-version = 3\n\
+    const LATEST_PROVIDER_MODEL: &str = "\
+version = 4\n\
 \n\
 [providers.fast]\n\
 kind = \"openai-compat\"\n\
@@ -2030,7 +2434,7 @@ unsupported_features = [\"computer_use\"]\n";
 
     #[test]
     fn normalize_folds_provider_and_model_lists_and_removes_legacy_keys() {
-        let mut doc = V3_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
+        let mut doc = LATEST_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
 
         let changed = normalize_capability_overrides(&mut doc).expect("no egress -> folds");
         assert!(changed, "a legacy-carrying v3 file changes");
@@ -2039,8 +2443,14 @@ unsupported_features = [\"computer_use\"]\n";
         // Legacy keys gone.
         assert!(!out.contains("unsupported_features"), "{out}");
         // No version bump.
-        assert!(out.contains("version = 3"), "{out}");
-        assert!(!out.contains("version = 4"), "{out}");
+        assert!(
+            out.contains(&format!("version = {LATEST_MIGRATION_VERSION}")),
+            "{out}"
+        );
+        assert!(
+            !out.contains(&format!("version = {}", LATEST_MIGRATION_VERSION + 1)),
+            "{out}"
+        );
         // Canonical override tables, provider-scoped and model-scoped.
         assert!(
             out.contains("[capability.overrides.fast]"),
@@ -2065,10 +2475,10 @@ unsupported_features = [\"computer_use\"]\n";
         use crate::override_registry::{OverrideRegistry, OverrideVerdict};
 
         let before: crate::config::Config =
-            toml::from_str(V3_PROVIDER_MODEL).expect("legacy config parses");
+            toml::from_str(LATEST_PROVIDER_MODEL).expect("legacy config parses");
         let before_registry = OverrideRegistry::build(&before);
 
-        let mut doc = V3_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
+        let mut doc = LATEST_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
         normalize_capability_overrides(&mut doc).expect("folds");
         let after: crate::config::Config =
             toml::from_str(&doc.to_string()).expect("migrated config parses");
@@ -2212,15 +2622,16 @@ unsupported_features = [\"computer_use\"]\n";
     }
 
     // -----------------------------------------------------------------------
-    // Ladder: raw v3 with legacy fields records a same-version 3 -> 3 step;
-    // a plain v3 stays a no-op; an egress allowlist refuses without IO.
+    // Ladder: a raw LATEST-version file with legacy fields records a
+    // same-version step; a plain one stays a no-op; an egress allowlist
+    // refuses without IO.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn plan_v3_with_legacy_fields_records_a_same_version_step_config_only() {
+    fn plan_latest_with_legacy_fields_records_a_same_version_step_config_only() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let doc = doc_of(V3_PROVIDER_MODEL);
+        let doc = doc_of(LATEST_PROVIDER_MODEL);
 
         let plan = plan_migration(
             &doc,
@@ -2228,16 +2639,16 @@ unsupported_features = [\"computer_use\"]\n";
             &BTreeMap::new(),
             &overlay_path,
         )
-        .expect("v3 normalizes");
+        .expect("a latest-version file normalizes");
         assert_eq!(
             plan.steps,
             vec![StepOutcome {
-                from_version: 3,
-                to_version: 3
+                from_version: LATEST_MIGRATION_VERSION,
+                to_version: LATEST_MIGRATION_VERSION
             }]
         );
-        assert_eq!(plan.from, 3);
-        assert_eq!(plan.to, 3);
+        assert_eq!(plan.from, LATEST_MIGRATION_VERSION);
+        assert_eq!(plan.to, LATEST_MIGRATION_VERSION);
         assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
         assert!(plan.overlay_candidate().is_none());
         // The candidate folds the legacy keys away.
@@ -2246,10 +2657,13 @@ unsupported_features = [\"computer_use\"]\n";
     }
 
     #[test]
-    fn plan_v3_egress_allowlist_refuses() {
+    fn plan_latest_egress_allowlist_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let doc = doc_of("version = 3\n[bedrock]\nallowed_body_fields = [\"messages\"]\n");
+        let doc = doc_of(&format!(
+            "version = {LATEST_MIGRATION_VERSION}\n[bedrock]\nallowed_body_fields = \
+             [\"messages\"]\n"
+        ));
 
         let err = plan_migration(
             &doc,
@@ -2259,5 +2673,334 @@ unsupported_features = [\"computer_use\"]\n";
         )
         .expect_err("egress allowlist refuses");
         assert!(matches!(err, MigrateError::Refused(_)), "err: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // v3 -> v4: the provider-level `seat_selection` knob relocates onto a
+    // `[pools.<name>]` block. Offline (no store read), format-preserving, and
+    // fail-closed on any namespace collision.
+    // -----------------------------------------------------------------------
+
+    /// A v3 provider entry with a bare `oauth://` ref and the retired
+    /// provider-level knob, plus the model/alias that make it a valid config.
+    const V3_WITH_PROVIDER_SEAT_SELECTION: &str = "\
+# operator note: keep me
+version = 3
+
+[providers.anthropic-managed]
+kind = \"anthropic-api\"
+api_key_ref = \"oauth://anthropic\"
+seat_selection = \"round-robin\" # spread the load
+
+[models.opus]
+provider = \"anthropic-managed\"
+upstream = \"claude-opus-4-8\"
+
+[aliases]
+default = \"opus\"
+";
+
+    #[test]
+    fn v3_to_v4_relocates_provider_seat_selection_onto_a_pool_block() {
+        // Arrange
+        let mut doc = doc_of(V3_WITH_PROVIDER_SEAT_SELECTION);
+
+        // Act
+        let step = migrate_v3_to_v4(&mut doc).expect("relocation plans and applies");
+
+        // Assert: the literal rung target, the knob moved, the pool names the
+        // provider family, and the entry is its sole member.
+        assert_eq!(
+            step,
+            StepOutcome {
+                from_version: 3,
+                to_version: 4
+            }
+        );
+        let out = doc.to_string();
+        assert!(out.contains("version = 4"), "{out}");
+        assert!(
+            !out.contains("[providers.anthropic-managed]\nkind")
+                || !providers_carry_seat_selection(&doc),
+            "the provider-level knob must be gone: {out}"
+        );
+        assert!(out.contains("[pools.anthropic]"), "{out}");
+        assert!(
+            out.contains("members = [\"anthropic-managed\"]"),
+            "the entry must be the pool's sole member: {out}"
+        );
+        assert!(
+            out.contains("seat_selection = \"round-robin\""),
+            "the knob's value must survive on the pool: {out}"
+        );
+        // Format-preserving: the operator's comments survive.
+        assert!(out.contains("# operator note: keep me"), "{out}");
+        assert!(out.contains("# spread the load"), "{out}");
+    }
+
+    /// Whether any provider entry still carries the retired knob.
+    fn providers_carry_seat_selection(doc: &DocumentMut) -> bool {
+        !provider_entries_with_seat_selection(doc).is_empty()
+    }
+
+    #[test]
+    fn v3_to_v4_with_no_provider_seat_selection_is_a_version_stamp_only() {
+        // Arrange: a v3 file whose provider carries no retired knob.
+        let src = "version = 3\n\
+             [providers.fast]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"env://K\"\n";
+        let mut doc = doc_of(src);
+
+        // Act
+        migrate_v3_to_v4(&mut doc).expect("stamps");
+
+        // Assert: nothing but the version changed.
+        let out = doc.to_string();
+        assert_eq!(out, src.replacen("version = 3", "version = 4", 1));
+        assert!(!out.contains("pools"), "{out}");
+    }
+
+    /// The knob relocation walks provider entries through `TableLike`, so an
+    /// INLINE `providers = { ... }` map is seen too -- a plain `as_table_mut`
+    /// walk silently no-ops on that shape.
+    #[test]
+    fn v3_to_v4_relocates_through_an_inline_providers_table() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 3\n\
+             providers = { managed = { kind = \"anthropic-api\", api_key_ref = \
+             \"oauth://anthropic\", seat_selection = \"round-robin\" } }\n",
+        );
+
+        // Act
+        migrate_v3_to_v4(&mut doc).expect("relocation reaches into the inline table");
+
+        // Assert
+        let out = doc.to_string();
+        assert!(!providers_carry_seat_selection(&doc), "{out}");
+        assert!(out.contains("[pools.anthropic]"), "{out}");
+        assert!(out.contains("members = [\"managed\"]"), "{out}");
+        assert!(out.contains("seat_selection = \"round-robin\""), "{out}");
+    }
+
+    #[test]
+    fn v3_to_v4_is_idempotent_over_its_own_output() {
+        // Arrange
+        let mut doc = doc_of(V3_WITH_PROVIDER_SEAT_SELECTION);
+        migrate_v3_to_v4(&mut doc).expect("first pass");
+        let once = doc.to_string();
+
+        // Act: re-running the rung over the migrated document finds no
+        // provider-level knob left to move.
+        let mut again = doc_of(&once.replacen("version = 4", "version = 3", 1));
+        migrate_v3_to_v4(&mut again).expect("second pass");
+
+        // Assert
+        assert_eq!(again.to_string(), once);
+    }
+
+    #[test]
+    fn v3_to_v4_refuses_a_seat_selection_with_no_oauth_ref() {
+        // Arrange: an API-key provider carrying the retired knob -- no
+        // provider family to name a pool after.
+        let src = "version = 3\n\
+             [providers.keyed]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"env://K\"\n\
+             seat_selection = \"round-robin\"\n";
+        let mut doc = doc_of(src);
+
+        // Act
+        let err = migrate_v3_to_v4(&mut doc).expect_err("no family -> refuse");
+
+        // Assert: named refusal, document byte-untouched.
+        assert!(
+            matches!(err, Refusal::SeatSelectionRelocation { ref entries }
+                if entries.len() == 1 && entries[0].contains("keyed")),
+            "err: {err:?}"
+        );
+        assert_eq!(
+            doc.to_string(),
+            src,
+            "a refusal must not mutate the document"
+        );
+    }
+
+    #[test]
+    fn v3_to_v4_refuses_when_the_derived_pool_name_is_taken() {
+        // Arrange: a second provider entry already holds the family name the
+        // pool would take -- providers, pools and model nicknames share one
+        // namespace, so there is no defensible answer.
+        let src = "version = 3\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#other\"\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             seat_selection = \"round-robin\"\n";
+        let mut doc = doc_of(src);
+
+        // Act
+        let err = migrate_v3_to_v4(&mut doc).expect_err("collision -> refuse");
+
+        // Assert
+        assert!(
+            matches!(err, Refusal::SeatSelectionRelocation { ref entries }
+                if entries.len() == 1 && entries[0].contains("one namespace")),
+            "err: {err:?}"
+        );
+        assert_eq!(doc.to_string(), src);
+    }
+
+    #[test]
+    fn v3_to_v4_refuses_when_a_pool_block_already_exists() {
+        // Arrange: a hand-authored pool under the derived name. Relocating
+        // onto it would silently change that pool's strategy.
+        let src = "version = 3\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             seat_selection = \"round-robin\"\n\
+             [pools.anthropic]\n\
+             members = [\"managed\"]\n";
+        let mut doc = doc_of(src);
+
+        // Act
+        let err = migrate_v3_to_v4(&mut doc).expect_err("existing pool -> refuse");
+
+        // Assert
+        assert!(
+            matches!(err, Refusal::SeatSelectionRelocation { ref entries }
+                if entries[0].contains("[pools.anthropic]")),
+            "err: {err:?}"
+        );
+        assert_eq!(doc.to_string(), src);
+    }
+
+    /// The relocated key shows up in the dry-run change summary, so the
+    /// operator sees WHY the file grew a pool block.
+    #[test]
+    fn removed_keys_names_the_relocated_seat_selection() {
+        let doc = doc_of(V3_WITH_PROVIDER_SEAT_SELECTION);
+
+        let removed = collect_removed_keys(&doc, 3);
+
+        assert!(
+            removed
+                .iter()
+                .any(|k| k.contains("anthropic-managed") && k.contains("seat_selection")),
+            "removed: {removed:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bare_oauth_pool_candidates: the PURE input phase 2 reads. Reports what
+    // the document says, never what the credential store holds.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bare_oauth_candidates_report_bare_refs_only() {
+        let doc = doc_of(
+            "version = 4\n\
+             [providers.bare]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [providers.pinned]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#work\"\n\
+             [providers.keyed]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"env://K\"\n",
+        );
+
+        let candidates = bare_oauth_pool_candidates(&doc);
+
+        assert_eq!(
+            candidates,
+            vec![BareOauthRef {
+                entry: "bare".to_string(),
+                family: "anthropic".to_string(),
+            }],
+            "only the bare oauth ref is a pool candidate"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_seat_pool_move: the store-aware caller's write primitive. Clones
+    // the entry per labelled seat and lists every member on the pool.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_seat_pool_move_clones_the_entry_per_labelled_seat() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             auth_kind = \"oauth-bearer\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert: the clone carries the source's other knobs and the seat's
+        // own ref, and the pool lists the original entry first.
+        let out = doc.to_string();
+        assert!(out.contains("[providers.anthropic-work]"), "{out}");
+        assert!(
+            out.contains("api_key_ref = \"oauth://anthropic#work\""),
+            "{out}"
+        );
+        assert!(
+            out.matches("auth_kind = \"oauth-bearer\"").count() == 2,
+            "the clone must carry the source's knobs: {out}"
+        );
+        assert!(
+            out.contains("members = [\"managed\", \"anthropic-work\"]"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn apply_seat_pool_move_is_a_no_op_over_its_own_output() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+        apply_seat_pool_move(&mut doc, &mv);
+        let once = doc.to_string();
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert: no duplicated entry, no duplicated member.
+        assert_eq!(doc.to_string(), once);
     }
 }

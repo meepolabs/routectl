@@ -40,7 +40,7 @@ use self::sections::{
     section_version,
 };
 
-pub(crate) use self::gather::gather_context_no_network;
+pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_error};
 
 /// UNSTABLE report schema version. Bumped on ANY structural or semantic
 /// change a consumer would care about -- including an ADDITIVE one, since the

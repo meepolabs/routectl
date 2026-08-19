@@ -127,9 +127,10 @@ pub use config_effective::{
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;
 pub use config_migrate::{
-    MigrateError, MigrationError, MigrationPlan, OverlayWrite, Refusal, RefusalSource, StepOutcome,
-    WriteKind, apply_config_transforms, migrate_v2_to_v3, normalize_capability_overrides,
-    plan_migration,
+    BareOauthRef, MigrateError, MigrationError, MigrationPlan, OverlayWrite, Refusal,
+    RefusalSource, SeatPoolAccount, SeatPoolMove, StepOutcome, WriteKind, apply_config_transforms,
+    apply_seat_pool_move, bare_oauth_pool_candidates, migrate_v2_to_v3, migrate_v3_to_v4,
+    normalize_capability_overrides, plan_migration,
 };
 pub use config_path::{PathError, PathShape, validate_config_path};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};
