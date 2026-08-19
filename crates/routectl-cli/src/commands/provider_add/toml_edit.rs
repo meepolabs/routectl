@@ -2,11 +2,13 @@
 
 use std::path::Path;
 
-use ::toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
+use ::toml_edit::{Array, InlineTable, Item, Table};
 use routectl_core::{Error, Result};
 use routectl_router::{EditOutcome, ProviderEntry, edit_config_toml};
 
-use crate::commands::edit_pipeline::{RelockValidationError, gate, render_write_error};
+use crate::commands::edit_pipeline::{
+    RelockValidationError, gate, insert_provider_block, parse_document, render_write_error,
+};
 
 /// Serialize a [`ProviderEntry`] into a standard (non-inline) `toml_edit`
 /// table, dropping the empty collection defaults serde emits (an empty
@@ -46,31 +48,6 @@ fn is_empty_item(item: &Item) -> bool {
             .or_else(|| v.as_inline_table().map(InlineTable::is_empty))
             .unwrap_or(false),
     }
-}
-
-pub(super) fn parse_document(text: &str) -> Result<DocumentMut> {
-    text.parse::<DocumentMut>()
-        .map_err(|e| Error::Config(format!("config does not parse: {e}")))
-}
-
-/// Insert `block` at `[providers.<name>]`, descending into (or creating) the
-/// `providers` table via `as_table_like_mut` so existing providers' comments
-/// and ordering survive. A same-name insert replaces the whole block
-/// (`--overwrite`). Deterministic given the same input document (the
-/// write closure relies on this).
-pub(super) fn insert_provider_block(doc: &mut DocumentMut, name: &str, block: Table) -> Result<()> {
-    let root = doc.as_table_mut();
-    if !root.contains_key("providers") {
-        let mut providers = Table::new();
-        providers.set_implicit(true);
-        root.insert("providers", Item::Table(providers));
-    }
-    let providers = root
-        .get_mut("providers")
-        .and_then(Item::as_table_like_mut)
-        .ok_or_else(|| Error::Config("`providers` exists but is not a table".into()))?;
-    providers.insert(name, Item::Table(block));
-    Ok(())
 }
 
 /// Re-read `config_path` under the advisory lock + revision check and commit

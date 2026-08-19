@@ -1263,10 +1263,20 @@ fn clone_provider_entry(doc: &mut DocumentMut, source: &str, account: &SeatPoolA
     }
 }
 
-/// Write `[pools.<pool>]`: union the member list with whatever the block
-/// already carries (so a rerun adds nothing) and set `seat_selection` only
-/// when a value was relocated onto it.
-fn write_pool_block(doc: &mut DocumentMut, pool: &str, members: &[&str], selection: Option<Value>) {
+/// Write `[pools.<pool>]`: union `members` into whatever member list the
+/// block already carries, creating the `pools` table and the block itself
+/// when absent.
+///
+/// Format-preserving and IDEMPOTENT: a member already listed is not
+/// duplicated, so re-running over this function's own output changes no
+/// bytes. That property is what lets two writers -- the migration ladder
+/// and the login auto-surface -- grow one pool without either having to
+/// know what the other wrote.
+///
+/// Nothing else on the block is touched: an existing `seat_selection` or
+/// `accepts_new_logins` marker is an operator statement and survives
+/// verbatim.
+pub fn upsert_pool_members(doc: &mut DocumentMut, pool: &str, members: &[&str]) {
     let root = doc.as_table_mut();
     if !root.contains_key("pools") {
         let mut table = Table::new();
@@ -1286,16 +1296,34 @@ fn write_pool_block(doc: &mut DocumentMut, pool: &str, members: &[&str], selecti
         block.insert("members", toml_edit::value(Array::new()));
     }
     if let Some(arr) = block.get_mut("members").and_then(Item::as_array_mut) {
-        let existing: std::collections::BTreeSet<String> = arr
+        let mut seen: std::collections::BTreeSet<String> = arr
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
         for member in members {
-            if !existing.contains(*member) {
+            // Insert BEFORE the push, so a duplicate within `members`
+            // itself is dropped too -- a caller assembling a list from two
+            // sources must not be able to write `["a", "a"]`.
+            if seen.insert((*member).to_string()) {
                 arr.push(*member);
             }
         }
     }
+}
+
+/// [`upsert_pool_members`] plus the migration's own extra: set
+/// `seat_selection` when a value was relocated off a provider entry onto
+/// this block.
+fn write_pool_block(doc: &mut DocumentMut, pool: &str, members: &[&str], selection: Option<Value>) {
+    upsert_pool_members(doc, pool, members);
+    let Some(block) = doc
+        .get_mut("pools")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|pools| pools.get_mut(pool))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
     if let Some(selection) = selection {
         block.insert(SEAT_SELECTION_KEY, Item::Value(selection));
     }
@@ -3315,5 +3343,89 @@ default = \"opus\"
 
         assert_eq!(models_routed_at(&doc, "managed"), vec!["opus".to_string()]);
         assert!(models_routed_at(&doc, "nobody").is_empty());
+    }
+
+    /// The union is what lets two writers (the ladder and the login
+    /// auto-surface) grow one pool without either knowing what the other
+    /// wrote: a rerun must add no member and change no byte.
+    #[test]
+    fn upsert_pool_members_unions_without_duplicating_and_is_byte_idempotent() {
+        // Arrange
+        let mut doc = doc_of("version = 4\n");
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["a", "b"]);
+        let after_first = doc.to_string();
+        upsert_pool_members(&mut doc, "anthropic", &["b", "c"]);
+        let after_second = doc.to_string();
+        upsert_pool_members(&mut doc, "anthropic", &["a", "b", "c"]);
+
+        // Assert
+        assert!(
+            after_first.contains(r#"members = ["a", "b"]"#),
+            "{after_first}"
+        );
+        assert!(
+            after_second.contains(r#"members = ["a", "b", "c"]"#),
+            "{after_second}"
+        );
+        assert_eq!(doc.to_string(), after_second, "a rerun must change no byte");
+    }
+
+    /// The union covers duplicates WITHIN one call's member list too, not
+    /// just against what the block already carries: a caller assembling
+    /// the list from two sources (an entry name plus a pool's members)
+    /// must not be able to write a duplicate.
+    #[test]
+    fn upsert_pool_members_drops_duplicates_within_one_calls_member_list() {
+        // Arrange
+        let mut doc = doc_of("version = 4\n");
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["a", "a", "b", "a"]);
+
+        // Assert
+        assert!(doc.to_string().contains(r#"members = ["a", "b"]"#), "{doc}");
+    }
+
+    /// Everything else on the block is the operator's statement and
+    /// survives a member union verbatim -- including the growth marker,
+    /// which login never flips.
+    #[test]
+    fn upsert_pool_members_leaves_seat_selection_and_the_growth_marker_untouched() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [pools.anthropic]\n\
+             members = [\"a\"]\n\
+             seat_selection = \"round-robin\" # spread the load\n\
+             accepts_new_logins = false\n",
+        );
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["b"]);
+
+        // Assert
+        let out = doc.to_string();
+        assert!(out.contains(r#"members = ["a", "b"]"#), "{out}");
+        assert!(
+            out.contains("seat_selection = \"round-robin\" # spread the load"),
+            "{out}"
+        );
+        assert!(out.contains("accepts_new_logins = false"), "{out}");
+    }
+
+    /// An inline `pools = { ... }` shape must be walked as well as the
+    /// standard-table one, or a member union silently no-ops.
+    #[test]
+    fn upsert_pool_members_descends_into_an_inline_pools_table() {
+        // Arrange
+        let mut doc = doc_of("version = 4\npools = { anthropic = { members = [\"a\"] } }\n");
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["b"]);
+
+        // Assert
+        assert!(doc.to_string().contains(r#""a", "b""#), "{doc}");
     }
 }

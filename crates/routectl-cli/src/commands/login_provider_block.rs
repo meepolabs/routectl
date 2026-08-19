@@ -14,6 +14,8 @@
 
 use routectl_auth::SecretRef;
 use routectl_router::provider_kind_for_oauth_id;
+use routectl_router::seat_naming::account_entry_name;
+use toml_edit::Table;
 
 /// The auth-selector field and endpoint an `oauth://<id>` credential must
 /// be consumed with, keyed by login-provider id.
@@ -77,6 +79,10 @@ struct AuthShape {
 }
 
 /// A rendered `[providers.<name>]` entry for one logged-in seat.
+///
+/// `Debug` is safe here: every field is a static token, a name, or a
+/// secret REFERENCE -- the block never holds credential material.
+#[derive(Debug)]
 pub struct ProviderBlock {
     name: String,
     kind: &'static str,
@@ -113,17 +119,81 @@ pub fn provider_block(oauth_id: &str, label: Option<&str>) -> Option<ProviderBlo
     })
 }
 
-/// Suggested provider name for the entry. A labelled seat gets a
-/// label-suffixed name so pasting the blocks for two seats of the same
-/// upstream does not collide on one `[providers.<name>]` key.
+/// Suggested provider name for the entry, taken from the shared naming
+/// convention so the name PRINTED here and the name a config write picks
+/// are one string. Two names for one seat would make reconciliation by
+/// ref disagree with reconciliation by name.
+///
+/// The convention refuses tokens it cannot render verbatim (an unusable
+/// family or label, the reserved label `default`). Those cases still get a
+/// printable suggestion -- the block is a hint an operator edits, and
+/// printing nothing would leave a successful login with no output at all
+/// -- so they fall back to the plain label-suffixed derivation, whose
+/// TOML-key quoting [`toml_key`] already handles.
 fn block_name(oauth_id: &str, label: Option<&str>) -> String {
-    match label {
+    account_entry_name(oauth_id, label).unwrap_or_else(|_| match label {
         Some(l) => format!("{oauth_id}-{l}"),
         None => oauth_id.to_string(),
-    }
+    })
+}
+
+/// The auth-shape fields a provider entry consuming `oauth://<oauth_id>`
+/// MUST carry: the `kind` tag and the auth-selector key/value (absent for
+/// a variant that has none).
+///
+/// Read by the login auto-surface to check an existing entry it matched by
+/// ref for auth drift. Deliberately narrower than the full auth shape: an
+/// operator's `base_url` override is legitimate configuration, while a
+/// wrong `kind` or auth selector means the entry authenticates on the
+/// wrong surface.
+pub struct RequiredAuthFields {
+    /// The `kind` discriminant the entry must carry.
+    pub kind: &'static str,
+    /// The auth-selector key and value, or `None` for a variant with no
+    /// such field.
+    pub auth_selector: Option<(&'static str, &'static str)>,
+}
+
+/// The required auth-shape fields for `oauth_id`, or `None` for an id with
+/// no known provider shape.
+#[must_use]
+pub fn required_auth_fields(oauth_id: &str) -> Option<RequiredAuthFields> {
+    let kind = provider_kind_for_oauth_id(oauth_id)?;
+    let shape = auth_shape_for_oauth_id(oauth_id)?;
+    Some(RequiredAuthFields {
+        kind,
+        auth_selector: shape.auth_field,
+    })
 }
 
 impl ProviderBlock {
+    /// Rename the entry this block writes and prints, keeping every auth
+    /// field. Used when the naming authority for the write is the config
+    /// being edited (a pool's existing member name) rather than the
+    /// convention's fresh derivation.
+    #[must_use]
+    pub fn with_entry_name(mut self, name: String) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// The entry as a `toml_edit` table, ready for
+    /// `edit_pipeline::insert_provider_block`.
+    ///
+    /// Built from the SAME `rows` the printed block renders, so the
+    /// written entry and the printed one can never carry different fields.
+    /// No render-then-parse round trip: nothing here needs quoting or
+    /// escaping decisions made twice.
+    #[must_use]
+    pub fn entry_table(&self) -> Table {
+        let mut table = Table::new();
+        table.set_implicit(false);
+        for (key, value) in self.rows() {
+            table.insert(key, toml_edit::value(value));
+        }
+        table
+    }
+
     /// Render the entry as pasteable TOML: a table header plus one
     /// `key = "value"` line per field, `=` aligned.
     #[must_use]
@@ -157,7 +227,7 @@ impl ProviderBlock {
 /// characters a bare key permits, quoted otherwise. An operator label is
 /// only checked for non-emptiness upstream, so it can carry a space or a
 /// dot that would split the key path if written bare.
-fn toml_key(name: &str) -> String {
+pub(crate) fn toml_key(name: &str) -> String {
     let is_bare = !name.is_empty()
         && name
             .chars()
@@ -171,14 +241,14 @@ fn toml_key(name: &str) -> String {
 
 /// Render `value` as a TOML basic string, escaping the two characters
 /// that would otherwise terminate or reinterpret it.
-fn toml_string(value: &str) -> String {
+pub(crate) fn toml_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_block, toml_key};
+    use super::{block_name, provider_block, toml_key};
 
     fn rendered(oauth_id: &str, label: Option<&str>) -> String {
         provider_block(oauth_id, label)
@@ -374,7 +444,7 @@ mod tests {
             toml::from_str(&rendered("antigravity", None)).expect("parse antigravity block");
 
         // Assert
-        let entry = cfg.providers.get("antigravity").expect("entry");
+        let entry = cfg.providers.get("antigravity-default").expect("entry");
         assert_eq!(entry.kind_str(), "gemini");
         assert_eq!(entry.api_key_ref(), Some("oauth://antigravity"));
         assert!(
@@ -396,6 +466,96 @@ mod tests {
         assert!(
             block.starts_with(r#"[providers."anthropic-seat b"]"#),
             "{block}"
+        );
+    }
+
+    /// The printed name and the name a config write picks must be ONE
+    /// string: two names for one seat make reconciliation by ref disagree
+    /// with reconciliation by name, which is what mints duplicate entries.
+    #[test]
+    fn the_block_name_is_the_naming_convention_for_every_login_id() {
+        for id in routectl_auth::oauth::known_provider_ids() {
+            for label in [None, Some("work")] {
+                let expected = routectl_router::seat_naming::account_entry_name(id, label)
+                    .expect("a login id and a usable label derive a name");
+                assert_eq!(block_name(id, label), expected, "id `{id}` label {label:?}");
+            }
+        }
+    }
+
+    /// An unlabelled login prints the convention's `<family>-default`, not
+    /// the bare family name -- the bare name is the POOL's, and a provider
+    /// entry holding it makes the pool unnameable.
+    #[test]
+    fn an_unlabelled_login_takes_the_default_suffix_not_the_bare_family_name() {
+        let block = rendered("anthropic", None);
+
+        assert!(
+            block.starts_with("[providers.anthropic-default]\n"),
+            "{block}"
+        );
+    }
+
+    /// The convention refuses tokens it cannot render verbatim; the block
+    /// is still printable, because a successful login with no output at
+    /// all is worse than a name the operator edits.
+    #[test]
+    fn a_name_the_convention_refuses_falls_back_to_a_printable_derivation() {
+        // Arrange: `default` is reserved, and a space is unusable.
+        assert!(
+            routectl_router::seat_naming::account_entry_name("anthropic", Some("default")).is_err()
+        );
+
+        // Act / Assert
+        assert_eq!(
+            block_name("anthropic", Some("default")),
+            "anthropic-default"
+        );
+        assert_eq!(block_name("anthropic", Some("seat b")), "anthropic-seat b");
+    }
+
+    /// The WRITTEN entry and the PRINTED entry come from one row set, so a
+    /// field added to the auth table cannot reach one and miss the other.
+    #[test]
+    fn the_entry_table_carries_exactly_the_fields_the_rendered_block_prints() {
+        for id in routectl_auth::oauth::known_provider_ids() {
+            let block = provider_block(id, Some("work")).expect("block");
+
+            let table = block.entry_table();
+            let printed: routectl_router::Config =
+                toml::from_str(&block.render()).expect("rendered block parses");
+            let written: routectl_router::Config =
+                toml::from_str(&format!("[providers.x]\n{table}")).expect("entry table parses");
+
+            let printed_entry = printed.providers.get(&block.name).expect("printed entry");
+            let written_entry = written.providers.get("x").expect("written entry");
+            assert_eq!(
+                format!("{printed_entry:?}"),
+                format!("{written_entry:?}"),
+                "id `{id}`"
+            );
+        }
+    }
+
+    /// A rename keeps every auth field: only the key the entry is written
+    /// under changes.
+    #[test]
+    fn with_entry_name_renames_the_key_and_keeps_the_auth_fields() {
+        // Arrange
+        let original = provider_block("anthropic", None).expect("block");
+        let original_rows = original.rows();
+
+        // Act
+        let renamed = provider_block("anthropic", None)
+            .expect("block")
+            .with_entry_name("claude-sub".into());
+
+        // Assert
+        assert_eq!(renamed.rows(), original_rows);
+        assert!(
+            renamed.render().starts_with("[providers.claude-sub]\n"),
+            "{}",
+            renamed.render()
         );
     }
 }

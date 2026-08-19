@@ -52,7 +52,10 @@ use async_trait::async_trait;
 use routectl_core::{Error, Result};
 use routectl_router::{EditOutcome, parse_config};
 
-use super::edit_pipeline::{confirm_high_consequence, gate, preflight, render_gate_errors};
+use super::edit_pipeline::{
+    confirm_high_consequence, gate, insert_provider_block, parse_document, preflight,
+    render_gate_errors,
+};
 use crate::config_classify::collect_high_consequence_changes;
 
 mod build;
@@ -65,7 +68,7 @@ mod tests;
 
 use self::build::build_entry;
 use self::capture::execute_pending;
-use self::toml_edit::{commit, insert_provider_block, parse_document, provider_table};
+use self::toml_edit::{commit, provider_table};
 
 /// Flag-driven inputs for `provider add`, assembled from the clap surface.
 pub struct ProviderAddArgs {

@@ -130,7 +130,7 @@ pub use config_migrate::{
     BareOauthRef, MigrateError, MigrationError, MigrationPlan, OverlayWrite, Refusal,
     RefusalSource, SeatPoolAccount, SeatPoolMove, StepOutcome, WriteKind, apply_config_transforms,
     apply_seat_pool_move, bare_oauth_pool_candidates, migrate_v2_to_v3, migrate_v3_to_v4,
-    models_routed_at, normalize_capability_overrides, plan_migration,
+    models_routed_at, normalize_capability_overrides, plan_migration, upsert_pool_members,
 };
 pub use config_path::{PathError, PathShape, validate_config_path};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};

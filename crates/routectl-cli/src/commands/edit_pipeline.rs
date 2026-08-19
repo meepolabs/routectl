@@ -1,8 +1,10 @@
 //! Building blocks shared by the `config.toml`-mutating commands
-//! (`config set`/`unset` in [`super::config_edit`] and `provider add` in
-//! [`super::provider_add`]): the raw version/legacy preflights, the
-//! in-memory validation gate plus its error rendering, and the pre-lock
-//! high-consequence confirmation prompt.
+//! (`config set`/`unset` in [`super::config_edit`], `provider add` in
+//! [`super::provider_add`], and the login auto-surface in
+//! [`super::login_surface`]): the raw version/legacy preflights, the
+//! in-memory validation gate plus its error rendering, the pre-lock
+//! high-consequence confirmation prompt, and the document parse +
+//! provider-block insert every one of them writes through.
 //!
 //! These live in one place so every mutating command refuses stale/legacy
 //! files, re-validates candidates, and prompts on egress-defining edits
@@ -15,6 +17,7 @@ use routectl_router::{
     Config, ConfigWriteError, parse_config, preflight_config_version,
     preflight_legacy_mitm_credential_source,
 };
+use toml_edit::{DocumentMut, Item, Table};
 
 use super::config::validation_report;
 use super::parse_error_redaction::redact_parse_error;
@@ -89,4 +92,35 @@ pub(crate) fn confirm_high_consequence(fields: &[&str], yes: bool) -> bool {
         return false;
     }
     matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Parse candidate config text into a format-preserving document.
+///
+/// The error deliberately carries no source-line preview: the offending
+/// line can hold credential material, and every caller here is about to
+/// print it.
+pub(crate) fn parse_document(text: &str) -> Result<DocumentMut> {
+    text.parse::<DocumentMut>()
+        .map_err(|e| Error::Config(format!("config does not parse: {e}")))
+}
+
+/// Insert `block` at `[providers.<name>]`, descending into (or creating) the
+/// `providers` table via `as_table_like_mut` so existing providers' comments
+/// and ordering survive. A same-name insert replaces the whole block
+/// (`provider add --overwrite`). Deterministic given the same input
+/// document -- the write closures rely on this to reproduce under the lock
+/// exactly what planning gated.
+pub(crate) fn insert_provider_block(doc: &mut DocumentMut, name: &str, block: Table) -> Result<()> {
+    let root = doc.as_table_mut();
+    if !root.contains_key("providers") {
+        let mut providers = Table::new();
+        providers.set_implicit(true);
+        root.insert("providers", Item::Table(providers));
+    }
+    let providers = root
+        .get_mut("providers")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| Error::Config("`providers` exists but is not a table".into()))?;
+    providers.insert(name, Item::Table(block));
+    Ok(())
 }
