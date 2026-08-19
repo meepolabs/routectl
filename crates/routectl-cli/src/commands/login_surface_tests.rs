@@ -35,6 +35,17 @@ fn expect_write(plan: SurfacePlan) -> super::SurfaceWrite {
     }
 }
 
+/// The pool action of a write that must have one. A write with a SKIPPED
+/// pool half (the family's pool exists but is pinned) is a distinct plan
+/// shape, so a test expecting an action says so rather than unwrapping
+/// silently.
+fn expect_pool(write: &super::SurfaceWrite) -> &PoolAction {
+    write
+        .pool
+        .as_ref()
+        .unwrap_or_else(|| panic!("expected a pool action, got none (note: {:?})", write.note))
+}
+
 fn expect_refusal(plan: SurfacePlan) -> RefuseReason {
     match plan {
         SurfacePlan::Refuse(reason) => reason,
@@ -78,7 +89,7 @@ fn a_clean_config_plans_a_new_entry_and_creates_the_family_pool() {
     // Assert: the convention's name, not the login id.
     assert_eq!(write.entry_name, "anthropic-default");
     assert!(write.new_entry.is_some());
-    match &write.pool {
+    match expect_pool(&write) {
         PoolAction::Create { pool, members } => {
             assert_eq!(pool, "anthropic");
             assert_eq!(members, &["anthropic-default"]);
@@ -97,7 +108,7 @@ fn a_second_labelled_login_joins_the_growth_pool_without_recreating_it() {
 
     // Assert: the post-join member list, and NO growth marker to write.
     assert_eq!(write.entry_name, "anthropic-work");
-    match &write.pool {
+    match expect_pool(&write) {
         PoolAction::Join { pool, members } => {
             assert_eq!(pool, "anthropic");
             assert_eq!(members, &["anthropic-default", "anthropic-work"]);
@@ -148,7 +159,7 @@ fn plans_membership_not_a_second_entry_for_a_hand_named_entry() {
         write.new_entry.is_none(),
         "a second entry for one credential was planned: {write:?}"
     );
-    match &write.pool {
+    match expect_pool(&write) {
         PoolAction::Create { pool, members } => {
             assert_eq!(pool, "anthropic");
             assert_eq!(members, &["claude-sub"]);
@@ -196,7 +207,7 @@ fn a_squatted_generated_name_does_not_turn_a_required_join_into_a_pool_creation(
     // Assert: joins the operator's growth pool, creates nothing.
     assert_eq!(write.entry_name, "claude-work");
     assert!(write.new_entry.is_none());
-    match &write.pool {
+    match expect_pool(&write) {
         PoolAction::Join { pool, members } => {
             assert_eq!(pool, "team-anthropic");
             assert_eq!(members, &["claude-main", "claude-work"]);
@@ -678,4 +689,101 @@ fn a_login_id_with_no_provider_shape_is_an_error_not_a_plan() {
     // unreachable through the command surface -- pinned so it stays a
     // typed refusal rather than a silent empty plan.
     assert!(plan(&Config::default(), "not-a-provider", None).is_err());
+}
+
+/// The other half of the convergence property: a NEW label over migrate's
+/// own output. The migrator writes no growth marker, so the pool is pinned
+/// and only the account entry is planned -- the pool half is skipped with
+/// the note, never joined and never marked.
+#[test]
+fn a_new_label_over_the_migrated_shape_plans_the_entry_only_and_notes_the_pinned_pool() {
+    // Arrange: migrate's output for one seat, pool included, marker absent.
+    let mut doc: toml_edit::DocumentMut = "version = 4\n\
+         [providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         auth_kind = \"oauth-bearer\"\n\
+         api_key_ref = \"oauth://anthropic\"\n"
+        .parse()
+        .expect("fixture parses");
+    routectl_router::upsert_pool_members(&mut doc, "anthropic", &["anthropic-managed"]);
+    let config: Config = toml::from_str(&doc.to_string()).expect("migrated config parses");
+
+    // Act: a label the migrated config carries no entry for.
+    let write = expect_write(plan(&config, "anthropic", Some("work")).expect("plans"));
+
+    // Assert: the entry surfaces ...
+    assert_eq!(write.entry_name, "anthropic-work");
+    assert!(write.new_entry.is_some(), "the account must still surface");
+
+    // ... and the pool half is skipped with the reason, not joined.
+    assert!(
+        write.pool.is_none(),
+        "a pinned pool must not be joined, got {:?}",
+        write.pool
+    );
+    assert_eq!(
+        write.note,
+        Some(NothingNote::PinnedPool {
+            pool: "anthropic".to_string()
+        })
+    );
+
+    // And the rendered delta shows the entry WITHOUT a pool block: showing
+    // one would describe an edit that is deliberately not happening.
+    let rendered = render_delta(&plan(&config, "anthropic", Some("work")).expect("plans"));
+    assert!(
+        rendered.contains("[providers.anthropic-work]"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("[pools."), "{rendered}");
+    assert!(!rendered.contains("accepts_new_logins"), "{rendered}");
+}
+
+/// The zero-match arm's THREE pool states, side by side -- the distinction
+/// the defect collapsed. `plan_new_seat` reports `None` for both "no pool"
+/// and "pinned pool", so only consulting `pool_exists` tells them apart.
+#[test]
+fn the_fresh_entry_arm_creates_joins_or_skips_the_pool_per_its_state() {
+    let entry = "[providers.anthropic-default]\n\
+                 kind = \"anthropic-api\"\n\
+                 auth_kind = \"oauth-bearer\"\n\
+                 api_key_ref = \"oauth://anthropic\"\n";
+
+    // No pool at all -> create it, with the marker.
+    let write = expect_write(plan(&Config::default(), "anthropic", None).expect("plans"));
+    match expect_pool(&write) {
+        PoolAction::Create { pool, members } => {
+            assert_eq!(pool, "anthropic");
+            assert_eq!(members, &["anthropic-default"]);
+        }
+        other => panic!("a config with no pool must create one, got {other:?}"),
+    }
+
+    // A growth-marked pool -> join it.
+    let grown = parse(&format!(
+        "{entry}[pools.anthropic]\n\
+         members = [\"anthropic-default\"]\n\
+         accepts_new_logins = true\n"
+    ));
+    let write = expect_write(plan(&grown, "anthropic", Some("work")).expect("plans"));
+    match expect_pool(&write) {
+        PoolAction::Join { pool, members } => {
+            assert_eq!(pool, "anthropic");
+            assert_eq!(members, &["anthropic-default", "anthropic-work"]);
+        }
+        other => panic!("a growth-marked pool must be joined, got {other:?}"),
+    }
+
+    // A PINNED pool -> no pool action at all.
+    let pinned = parse(&format!(
+        "{entry}[pools.anthropic]\n\
+         members = [\"anthropic-default\"]\n"
+    ));
+    let write = expect_write(plan(&pinned, "anthropic", Some("work")).expect("plans"));
+    assert!(
+        write.pool.is_none(),
+        "a pinned pool must yield no action, got {:?}",
+        write.pool
+    );
+    assert!(write.new_entry.is_some(), "the entry still surfaces");
 }

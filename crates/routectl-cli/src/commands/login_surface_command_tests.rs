@@ -594,3 +594,201 @@ fn the_only_operator_reachable_failure_is_the_post_commit_one() {
         "the post-commit failure must state the credential stands"
     );
 }
+
+// -----------------------------------------------------------------
+// The pinned-pool invariant on the ZERO-match arm. A pinned pool (no
+// `accepts_new_logins`) is an operator statement that only an explicit
+// edit grows it -- and login must never flip that marker. The one-match
+// arm carried this check from the start; the fresh-entry arm did not.
+// -----------------------------------------------------------------
+
+/// THE regression: a FRESH login (no entry carries the ref yet) into a
+/// family whose pool is PINNED must write the account entry and leave the
+/// pool byte-untouched. Before the fix this joined the pool AND flipped its
+/// marker to `true`, converting a pinned pool into a growing one with no
+/// operator action.
+#[test]
+fn a_fresh_login_never_joins_or_marks_a_pinned_family_pool() {
+    // Arrange: the migrate-shaped config -- a pool with members and NO
+    // growth marker -- and no entry yet carrying the labelled seat's ref.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pinned = base_with_default_seat().replace("accepts_new_logins = true\n", "");
+    let path = write_config(dir.path(), &pinned);
+
+    // Act: a fresh labelled login (zero ref matches for `#work`).
+    let outcome = surface(&path, "anthropic", Some("work"), true).expect("the entry still writes");
+
+    // Assert: the account surfaced ...
+    assert_eq!(
+        outcome,
+        SurfaceOutcome::Written {
+            entry_name: "anthropic-work".to_string()
+        }
+    );
+    let text = String::from_utf8(read(&path)).expect("utf8");
+    let config = parse_config(&text).expect("parses");
+    assert_eq!(
+        config
+            .providers
+            .get("anthropic-work")
+            .expect("the new entry landed")
+            .api_key_ref(),
+        Some("oauth://anthropic#work")
+    );
+
+    // ... and the pinned pool is untouched, both in members and in marker.
+    let pool = config.pools.get("anthropic").expect("pool");
+    assert_eq!(
+        pool.members,
+        ["anthropic-default"],
+        "a pinned pool must gain no member"
+    );
+    assert!(
+        !pool.accepts_new_logins,
+        "login must never flip an operator's pinned marker"
+    );
+    assert!(
+        !text.contains("accepts_new_logins"),
+        "the marker must not appear at all: {text}"
+    );
+}
+
+/// The same invariant as RAW BYTES: the `[pools.anthropic]` block the
+/// operator wrote must survive verbatim, decorations included. A parsed
+/// comparison can pass while the block was rewritten.
+#[test]
+fn the_pinned_pool_block_survives_a_fresh_login_byte_for_byte() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pinned = base_with_default_seat().replace("accepts_new_logins = true\n", "");
+    let path = write_config(dir.path(), &pinned);
+
+    let pool_block = |text: &str| {
+        text.split("[pools.anthropic]")
+            .nth(1)
+            .expect("the pool block is present")
+            .to_string()
+    };
+    let before = pool_block(&pinned);
+
+    // Act
+    surface(&path, "anthropic", Some("work"), true).expect("the entry writes");
+
+    // Assert: the entry is appended elsewhere; the pool block itself is
+    // byte-identical from its header to end of file.
+    let after_text = String::from_utf8(read(&path)).expect("utf8");
+    assert_eq!(
+        pool_block(&after_text),
+        before,
+        "the pinned pool block must not be rewritten"
+    );
+}
+
+/// The most reachable path, end to end and with no hand-editing: `config
+/// migrate` writes pool blocks WITHOUT the growth marker, so a login
+/// straight after a migration is exactly the pinned-pool case. A NEW label
+/// plans the entry only; an EXISTING seat still plans nothing.
+#[test]
+fn a_login_over_migrate_output_writes_the_entry_and_leaves_the_unmarked_pool_alone() {
+    // Arrange: the shape the migration ladder produces -- suffixed account
+    // entries plus the plain-named pool listing them, no marker.
+    let mut doc: toml_edit::DocumentMut = format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         auth_kind = \"oauth-bearer\"\n\
+         api_key_ref = \"oauth://anthropic\"\n"
+    )
+    .parse()
+    .expect("fixture parses");
+    routectl_router::upsert_pool_members(&mut doc, "anthropic", &["anthropic-managed"]);
+    let migrated = doc.to_string();
+    assert!(
+        !migrated.contains("accepts_new_logins"),
+        "the migrator writes no growth marker -- that is what makes this the pinned case"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), &migrated);
+
+    // Act: a login for a label the migrated config does not carry.
+    let outcome = surface(&path, "anthropic", Some("work"), true).expect("the entry writes");
+
+    // Assert: entry only.
+    assert_eq!(
+        outcome,
+        SurfaceOutcome::Written {
+            entry_name: "anthropic-work".to_string()
+        }
+    );
+    let text = String::from_utf8(read(&path)).expect("utf8");
+    let config = parse_config(&text).expect("parses");
+    assert!(config.providers.contains_key("anthropic-work"));
+    assert_eq!(
+        config.pools.get("anthropic").expect("pool").members,
+        ["anthropic-managed"],
+        "the migrated pool must gain no member"
+    );
+    assert!(!text.contains("accepts_new_logins"), "{text}");
+
+    // And the seat the migration already wired stays a no-op.
+    let before = read(&path);
+    assert_eq!(
+        surface(&path, "anthropic", None, true).expect("re-login"),
+        SurfaceOutcome::Nothing
+    );
+    assert_eq!(read(&path), before);
+}
+
+/// The delta-vs-written equality in the POOL-EXISTS arm. The pool-absent
+/// case is covered above; this is the one that broke -- the delta rendered a
+/// one-member `Create` while the write unioned into the existing block.
+///
+/// A `Join`'s delta deliberately omits `accepts_new_logins` (the pool
+/// already carries whatever the operator wrote), so the property is: the
+/// MEMBERS the delta showed are the members that landed, and the marker is
+/// untouched relative to the pre-write file. Comparing the marker against
+/// the delta parsed standalone would be wrong -- an absent key reads
+/// `false` there while the file legitimately holds `true`.
+#[test]
+fn every_field_of_the_shown_delta_lands_when_the_family_pool_already_exists() {
+    // Arrange: a growth-marked pool, so the plan is a Join over an existing
+    // block rather than a Create.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let body = base_with_default_seat();
+    let path = write_config(dir.path(), &body);
+    let before = parse_config(&body).expect("parses");
+    let shown = render_delta(&super::plan(&before, "anthropic", Some("work")).expect("plans"));
+
+    // Act
+    surface(&path, "anthropic", Some("work"), true).expect("writes");
+
+    // Assert
+    let declared: routectl_router::Config =
+        toml::from_str(&format!("version = {CURRENT_CONFIG_VERSION}\n{shown}"))
+            .expect("the shown delta parses");
+    let written = parse_config(&String::from_utf8(read(&path)).expect("utf8")).expect("parses");
+    assert!(
+        declared.pools.contains_key("anthropic"),
+        "the delta must describe the pool it joins: {shown}"
+    );
+    for (name, pool) in &declared.pools {
+        let landed = written
+            .pools
+            .get(name)
+            .unwrap_or_else(|| panic!("the shown pool `{name}` did not land"));
+        assert_eq!(
+            pool.members, landed.members,
+            "the members the delta showed are not the members that landed for `{name}`"
+        );
+        assert_eq!(
+            before.pools.get(name).map(|p| p.accepts_new_logins),
+            Some(landed.accepts_new_logins),
+            "a join must leave the growth marker of `{name}` exactly as the operator wrote it"
+        );
+    }
+    assert!(
+        !shown.contains("accepts_new_logins"),
+        "a join must not show a marker it does not write: {shown}"
+    );
+}
