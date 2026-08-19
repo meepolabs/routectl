@@ -82,7 +82,8 @@ enum Cmd {
     /// persists tokens to `~/.config/routectl/credentials.json`. Then
     /// offers the `config.toml` change that makes the new seat
     /// reachable; declining it, or having no editable config, still
-    /// exits 0 -- the credential is stored either way.
+    /// exits 0 -- the credential is stored either way. A non-interactive
+    /// run declines the offer unless `--yes` is given.
     Login {
         /// Which provider to log into.
         #[arg(value_parser = provider_value_parser())]
@@ -230,7 +231,7 @@ enum Cmd {
     /// is supplied by reference (`--secret-ref`) or environment variable
     /// (`--api-key-env`) -- never a bare value on argv. A new or overwritten
     /// provider block is egress-defining and prompts for confirmation unless
-    /// `--yes` is given.
+    /// `--yes` is given; a non-interactive run without `--yes` declines.
     Provider {
         #[command(subcommand)]
         action: ProviderCmd,
@@ -348,7 +349,8 @@ enum ConfigCmd {
     /// atomic write. The value's scalar type is inferred (bool / int /
     /// float / string). An egress-defining change (a provider `base_url`
     /// or `credential_source`, a `[mitm]` origin) prompts for confirmation
-    /// unless `--yes` is given.
+    /// unless `--yes` is given; a non-interactive run without `--yes`
+    /// declines.
     Set {
         /// Dotted config path to the scalar leaf to set.
         path: String,
@@ -363,7 +365,8 @@ enum ConfigCmd {
     /// tables the removal empties are pruned. The whole file is re-validated
     /// through the shared gate before an atomic write. Removing an
     /// egress-defining override prompts for confirmation unless `--yes` is
-    /// given; removing a key that is not set writes nothing.
+    /// given (a non-interactive run without `--yes` declines); removing a key
+    /// that is not set writes nothing.
     Unset {
         /// Dotted config path to the key (or override table) to remove.
         path: String,

@@ -22,7 +22,8 @@
 //!      nothing.
 //!   6. Classify the diff: a high-consequence (egress-defining) change
 //!      prompts for confirmation BEFORE the lock is acquired (`--yes`
-//!      bypasses); restart-required field names are remembered for output.
+//!      bypasses; a non-interactive run without it declines); restart-required
+//!      field names are remembered for output.
 //!   7. [`edit_config_toml`] re-reads under the lock, re-applies the same
 //!      deterministic mutation, and commits atomically (or writes nothing
 //!      on a no-op).
@@ -545,8 +546,8 @@ default = \"gpt\"
 
     #[test]
     fn high_consequence_edit_declined_when_not_confirmed() {
-        // yes=false and a non-interactive stdin (EOF) -> confirm returns
-        // false -> abort with the file untouched.
+        // yes=false with a non-terminal stdin -> confirm declines without
+        // reading -> abort with the file untouched.
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &current_base());
         let before = std::fs::read(&path).unwrap();

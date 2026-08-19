@@ -8,9 +8,11 @@
 //!
 //! These live in one place so every mutating command refuses stale/legacy
 //! files, re-validates candidates, and prompts on egress-defining edits
-//! identically -- their behavior can never drift apart.
+//! identically -- their behavior can never drift apart. That includes the
+//! non-interactive contract: with no TTY on stdin the confirmation declines
+//! rather than reading, so a silent pipe cannot hang any of them.
 
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 
 use routectl_core::{Error, Result};
 use routectl_router::{
@@ -75,7 +77,10 @@ pub(crate) fn render_gate_errors(errors: &[String]) {
 }
 
 /// Prompt before a high-consequence (egress-defining) edit. `--yes`
-/// bypasses it. Called BEFORE the write lock is acquired, never while
+/// bypasses it. A non-interactive run (no TTY on stdin) without `--yes`
+/// declines immediately without reading, so a silent pipe cannot hang it;
+/// the field list is printed either way, so a scripted caller sees what was
+/// declined. Called BEFORE the write lock is acquired, never while
 /// holding it.
 pub(crate) fn confirm_high_consequence(fields: &[&str], yes: bool) -> bool {
     if yes {
@@ -85,6 +90,15 @@ pub(crate) fn confirm_high_consequence(fields: &[&str], yes: bool) -> bool {
         "this edit changes egress-defining settings: {}",
         fields.join(", ")
     );
+    // A non-interactive caller with an open-but-silent stdin (a pipe that
+    // never sends a line or EOF) would otherwise block `read_line`
+    // forever. With no TTY there is no one to answer the prompt, so
+    // decline immediately -- the documented non-interactive contract is
+    // `--yes`.
+    if !std::io::stdin().is_terminal() {
+        println!("stdin is not a terminal; declining without prompting. Pass `--yes` to apply.");
+        return false;
+    }
     print!("apply anyway? [y/N] ");
     let _ = std::io::stdout().flush();
     let mut input = String::new();
@@ -123,4 +137,28 @@ pub(crate) fn insert_provider_block(doc: &mut DocumentMut, name: &str, block: Ta
         .ok_or_else(|| Error::Config("`providers` exists but is not a table".into()))?;
     providers.insert(name, Item::Table(block));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirm_high_consequence_declines_immediately_on_non_tty_without_yes() {
+        // Under the test harness stdin is not a TTY, so the terminal gate
+        // must fire and decline WITHOUT reaching read_line -- a silent
+        // pipe can no longer hang the prompt.
+        assert!(
+            !std::io::stdin().is_terminal(),
+            "test harness stdin must be non-interactive for this assertion",
+        );
+        assert!(
+            !confirm_high_consequence(&["providers.base_url"], false),
+            "non-TTY without --yes must decline",
+        );
+        assert!(
+            confirm_high_consequence(&["providers.base_url"], true),
+            "--yes must still proceed byte-identically",
+        );
+    }
 }

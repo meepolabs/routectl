@@ -34,7 +34,8 @@
 //!      nothing.
 //!   5. A new/overwritten provider block is always egress-defining, so it
 //!      prompts for confirmation before the lock is acquired (`--yes`
-//!      bypasses). A declined confirm captures NO secret and logs in NOT.
+//!      bypasses; a non-interactive run without it declines). A declined
+//!      confirm captures NO secret and logs in NOT.
 //!   6. NOW execute the pending secret side effect (file `put` / oauth
 //!      login), then [`routectl_router::edit_config_toml`] re-reads under the advisory lock,
 //!      re-applies the same deterministic insert, re-gates, and commits

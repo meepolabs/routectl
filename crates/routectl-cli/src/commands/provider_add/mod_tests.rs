@@ -313,7 +313,7 @@ async fn overwrite_replaces_an_existing_block() {
 #[tokio::test]
 async fn overwrite_still_passes_through_the_confirm_gate() {
     // `--overwrite` clears the existing-block refusal but NOT the
-    // high-consequence confirmation: with yes=false and an EOF stdin the
+    // high-consequence confirmation: with yes=false and a non-terminal stdin the
     // overwrite is declined and the original block is left byte-identical.
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
@@ -468,8 +468,8 @@ async fn unsupported_kind_errors_actionably() {
 
 #[tokio::test]
 async fn declining_the_confirmation_writes_nothing() {
-    // yes=false with a non-interactive stdin (EOF) -> confirm returns
-    // false -> abort with the file untouched.
+    // yes=false with a non-terminal stdin -> confirm declines without
+    // reading -> abort with the file untouched.
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
@@ -1035,7 +1035,7 @@ async fn declined_confirm_captures_no_secret_file() {
     let mut a = args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
-    a.yes = false; // EOF stdin -> confirm declines
+    a.yes = false; // non-terminal stdin -> confirm declines
     let io = FakeIo {
         stdin_value: "declined-key-not-real".to_string(),
         ..Default::default()

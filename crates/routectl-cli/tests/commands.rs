@@ -1422,3 +1422,146 @@ fn clap_accepts_yes_on_login() {
         "`--yes` must be a documented login flag: {stdout}"
     );
 }
+
+// -- the high-consequence confirmation under an open-but-silent stdin. Only
+// a real subprocess can hold a pipe open WITHOUT ever sending a line or EOF,
+// which is the automation shape (a wrapper that pipes stdin from a process
+// producing nothing) an EOF-stdin in-process test cannot reproduce.
+
+/// A config at the current version carrying two providers: `fast`, whose
+/// `base_url` a `config set` can repoint, and an unreferenced `spare` whose
+/// whole block a `config unset` can remove. Both edits drop an egress-defining
+/// `base_url` value, so both reach the confirmation, and both leave a config
+/// the shared validation gate still accepts -- otherwise the gate would
+/// reject the candidate before the prompt.
+fn high_consequence_config(dir: &std::path::Path) -> std::path::PathBuf {
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [server]\n\
+             host = \"127.0.0.1\"\n\
+             port = 8787\n\
+             [providers.fast]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"http://127.0.0.1:1\"\n\
+             api_key_ref = \"literal:test-key\"\n\
+             [providers.spare]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"http://127.0.0.1:3\"\n\
+             api_key_ref = \"literal:test-key\"\n\
+             [models.gpt]\n\
+             provider = \"fast\"\n\
+             upstream = \"gpt-4o\"\n\
+             [aliases]\n\
+             default = \"gpt\"\n"
+        ),
+    )
+    .expect("write config");
+    config_path
+}
+
+/// Run the real binary with stdin held open as a pipe that never carries a
+/// byte and never closes, returning `(exit_code, stdout)`. The child is
+/// polled against a bounded deadline and killed on overrun, so a regression
+/// that blocks on `read_line` fails the test instead of stalling the suite.
+fn run_routectl_with_silent_stdin(xdg: &std::path::Path, args: &[&str]) -> (i32, String) {
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", xdg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl binary");
+    // Held, never written to and never dropped before the wait: dropping it
+    // would close the pipe and hand the child an EOF, which is the case that
+    // already declined before the terminal gate existed.
+    let stdin = child.stdin.take().expect("piped stdin");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("poll the child") {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("routectl {args:?} hung on an open-but-silent stdin");
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(25)),
+        }
+    }
+    drop(stdin);
+
+    let out = child.wait_with_output().expect("collect child output");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn config_set_declines_a_high_consequence_edit_on_a_silent_stdin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = high_consequence_config(tmp.path());
+    let before = std::fs::read(&config_path).expect("read config");
+
+    let (code, stdout) = run_routectl_with_silent_stdin(
+        tmp.path(),
+        &[
+            "--config",
+            config_path.to_str().unwrap(),
+            "config",
+            "set",
+            "providers.fast.base_url",
+            "http://127.0.0.1:2",
+        ],
+    );
+
+    assert_eq!(code, 0, "a decline is not an error: {stdout}");
+    assert!(
+        stdout.contains("providers.base_url"),
+        "the decline must still name what was declined: {stdout}"
+    );
+    assert!(
+        stdout.contains("--yes"),
+        "the decline must name the non-interactive contract: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read config"),
+        before,
+        "a declined edit must not write"
+    );
+}
+
+#[test]
+fn config_unset_declines_a_high_consequence_removal_on_a_silent_stdin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = high_consequence_config(tmp.path());
+    let before = std::fs::read(&config_path).expect("read config");
+
+    let (code, stdout) = run_routectl_with_silent_stdin(
+        tmp.path(),
+        &[
+            "--config",
+            config_path.to_str().unwrap(),
+            "config",
+            "unset",
+            "providers.spare",
+        ],
+    );
+
+    assert_eq!(code, 0, "a decline is not an error: {stdout}");
+    assert!(
+        stdout.contains("providers.base_url") && stdout.contains("--yes"),
+        "the decline must name the field and the non-interactive contract: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read config"),
+        before,
+        "a declined removal must not write"
+    );
+}
