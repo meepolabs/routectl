@@ -1,18 +1,19 @@
-//! Seat-pool expansion for OAuth credential pools.
+//! Seat-pool dispatch across the members of a `[pools.<name>]` block.
 //!
-//! A model whose primary `api_key_ref` is a bare-pool `oauth://<provider>`
-//! (no `#label`) backed by MORE THAN ONE stored seat dispatches across all
-//! of its seats. The seat set is fixed at build time: the factory builds one
-//! [`SeatTarget`] (a seat-pinned provider + its own `state_key`) per seat.
+//! A model whose `[models.X] provider` value names a pool dispatches across
+//! that pool's member provider entries. The seat set is fixed at build time:
+//! the factory compiles one [`SeatTarget`] (a member's own provider instance)
+//! per usable member, computed ONCE per pool and shared by every model naming
+//! it.
 //!
 //! At request time the router asks [`seat_order_for_request`] for the order
 //! in which to walk those seats. The seats then slot into the existing
 //! fallback chain as ordinary dispatch hops -- the per-target circuit
 //! breaker, retry caps, probe fast-fail, and the `Retry-After` park all key
-//! off the per-seat `state_key`, so seat rotation and cooling are delivered
-//! by machinery that already exists. This module owns only the expansion
-//! glue and the round-robin counter, keeping it out of the oversized
-//! `router.rs`.
+//! off the per-seat, per-model state key, so seat rotation and cooling are
+//! delivered by machinery that already exists. This module owns only the
+//! dispatch-order glue and the round-robin counter, keeping it out of the
+//! oversized `router.rs`.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -28,53 +29,82 @@ use crate::config::SeatSelection;
 use crate::quota::placement::{QuotaDecision, SeatQuota};
 use crate::runtime_state::{CapacitySnapshot, CircuitPhase};
 
-/// One credential seat of a pooled model: a seat-pinned provider instance
-/// plus the runtime-state key that gives this seat its OWN circuit breaker
-/// and RPM bucket entry in `Router.state`. Built once at startup (the seat
-/// set is fixed) and cloned by reference (the `Arc`s) on every dispatch.
+/// One credential seat of a pooled model: the member provider entry's name
+/// plus the provider instance built from that member's OWN credential
+/// reference. Built once per pool at startup (the seat set is fixed) and
+/// cloned by reference (the `Arc`s) on every dispatch.
+///
+/// Deliberately carries NO model-scoped key. One seat set is shared by every
+/// model that names the pool, so a `state_key` field would have to pick one
+/// model's key and hand it to the others; the per-model key is derived where
+/// the model is known, through [`SeatTarget::state_key_for`].
 #[derive(Clone)]
 pub struct SeatTarget {
-    /// Seat label (`None` for the default/pool seat, `Some(label)` for a
-    /// labeled seat). Retained for tracing and `state_key` derivation.
-    pub label: Option<String>,
-    /// Key into `Router.state` for this seat's breaker + RPM bucket.
-    /// Stable across a Router rebuild so `carry_over_runtime_state_from`
-    /// matches a surviving seat and preserves its counters / park.
-    pub state_key: String,
-    /// Seat-pinned provider instance (built from a labeled `SecretRef`).
+    /// The seat's `[providers]` table key -- the pool member this seat
+    /// dispatches. Every per-provider config lookup on the dispatch path
+    /// (runtime policy, class overrides, header extras, beta floor) resolves
+    /// against THIS name rather than the model's `provider` value, which for
+    /// a pool-backed model names the pool and not a provider entry.
+    pub provider_name: String,
+    /// Provider instance built from this member's own credential reference.
     pub provider: Arc<dyn Provider>,
-    /// Source `SecretRef` for this specific seat. Retained for diagnostics
-    /// (Debug / tracing of seat identity); the 401 self-heal does NOT read
-    /// this field -- it works through the seat-pinned `provider`'s own
-    /// `ManagedToken`, which already refreshes the correct seat.
+    /// Source `SecretRef` for this specific seat. Retained for the
+    /// account-scoped quota key and seat identity; the 401 self-heal does NOT
+    /// read this field -- it works through the seat's own `ManagedToken`,
+    /// which already refreshes the correct credential.
     pub auth_secret_ref: Option<SecretRef>,
+}
+
+impl SeatTarget {
+    /// This seat's key into `Router.state` under `nickname`: its own circuit
+    /// breaker and RPM bucket entry.
+    ///
+    /// Model-scoped by design: per-model breaker quarantine is a shipped
+    /// contract, so a flaky model-on-account combination must not open the
+    /// breaker for healthy sibling models on the same account. Stable across
+    /// a Router rebuild, so `carry_over_runtime_state_from` matches a
+    /// surviving seat and preserves its counters / park.
+    #[must_use]
+    pub fn state_key_for(&self, nickname: &str) -> String {
+        seat_state_key(nickname, Some(&self.provider_name))
+    }
 }
 
 impl std::fmt::Debug for SeatTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeatTarget")
-            .field("label", &self.label)
-            .field("state_key", &self.state_key)
+            .field("provider_name", &self.provider_name)
             .field("provider_id", &self.provider.id())
             .field(
-                "auth_secret_ref",
-                &self
-                    .auth_secret_ref
-                    .as_ref()
-                    .map(std::string::ToString::to_string),
+                "auth_secret_scheme",
+                &self.auth_secret_ref.as_ref().map(secret_ref_scheme),
             )
             .finish()
+    }
+}
+
+/// The leak-safe scheme token of a seat's credential reference. An
+/// ALLOWLIST, not a prefix split: rendering the reference itself would put a
+/// `file://` key path (and, for a reference constructed in code rather than
+/// parsed, inline secret material) into every log line that debug-formats a
+/// seat.
+const fn secret_ref_scheme(secret_ref: &SecretRef) -> &'static str {
+    match secret_ref {
+        SecretRef::OAuth { .. } => "oauth://",
+        SecretRef::Env(_) => "env://",
+        SecretRef::File(_) => "file://",
+        SecretRef::Literal(_) => "literal:",
+        _ => "unknown",
     }
 }
 
 /// Derive the runtime-state key for one seat of a pooled model.
 ///
 /// The DEFAULT seat (label `None`) keys as the bare `nickname` -- so a
-/// single-seat pool is byte-for-byte identical to a non-pooled model
-/// (`state_key == nickname`). A LABELED seat keys as `"{nickname}#{label}"`,
-/// mirroring the established `provider#label` convention used by
-/// `oauth::seat_key` and `SecretRef`'s `Display`, which keeps the key
-/// operator-readable in logs.
+/// single-target model keys by nickname exactly as it always has. A NAMED
+/// seat keys as `"{nickname}#{label}"`, mirroring the established
+/// `provider#label` convention used by `oauth::seat_key` and `SecretRef`'s
+/// `Display`, which keeps the key operator-readable in logs.
 ///
 /// Collision boundary: a labeled-seat key collides with a real model
 /// nickname only if an operator declares a SEPARATE `[models.X]` whose
@@ -164,7 +194,7 @@ const STICKY_PIN_CAPACITY: usize = 4096;
 
 /// Bounded LRU map of inbound conversation session key -> pinned [`SeatPin`]
 /// (the seat's STABLE `state_key` plus the one-time overflow-repin marker;
-/// see [`SeatTarget::state_key`] / [`seat_state_key`]). A positional seat
+/// see [`SeatTarget::state_key_for`] / [`seat_state_key`]). A positional seat
 /// index is deliberately NOT stored: indices can shift on a Router rebuild,
 /// whereas `state_key` is stable across reloads.
 ///
@@ -541,6 +571,93 @@ pub fn sticky_least_loaded_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `SeatTarget` whose credential ref renders a filesystem path -- the
+    /// arm that makes the leak concrete rather than hypothetical.
+    fn seat_with_file_ref() -> SeatTarget {
+        struct NullProvider;
+
+        #[async_trait::async_trait]
+        impl routectl_core::Provider for NullProvider {
+            fn id(&self) -> &'static str {
+                "anthropic-api:member"
+            }
+            fn normalize_request(
+                &self,
+                _: &routectl_core::ChatRequest,
+            ) -> routectl_core::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            fn normalize_response(
+                &self,
+                _: serde_json::Value,
+            ) -> routectl_core::Result<routectl_core::ChatResponse> {
+                Err(routectl_core::Error::normalize_response("member", "unused"))
+            }
+            async fn complete(
+                &self,
+                _: routectl_core::ChatRequest,
+            ) -> routectl_core::Result<routectl_core::ChatResponse> {
+                unreachable!("this seat is never dispatched")
+            }
+            async fn stream(
+                &self,
+                _: routectl_core::ChatRequest,
+            ) -> routectl_core::Result<
+                futures::stream::BoxStream<
+                    'static,
+                    routectl_core::Result<routectl_core::ChatChunk>,
+                >,
+            > {
+                unreachable!("this seat is never dispatched")
+            }
+        }
+
+        SeatTarget {
+            provider_name: "anthropic-work".to_string(),
+            provider: Arc::new(NullProvider),
+            auth_secret_ref: Some(SecretRef::File(std::path::PathBuf::from(
+                "/var/secrets/anthropic-work.key",
+            ))),
+        }
+    }
+
+    #[test]
+    fn seat_target_debug_redacts_the_credential_reference() {
+        // A seat is debug-formatted wherever a dispatch target or resolved
+        // model is, so rendering the ref publishes the operator's key PATH
+        // into ordinary diagnostics. Only the leak-safe scheme token survives.
+        let rendered = format!("{:?}", seat_with_file_ref());
+
+        assert!(
+            !rendered.contains("/var/secrets"),
+            "the credential path must not appear: {rendered}"
+        );
+        assert!(
+            !rendered.contains("anthropic-work.key"),
+            "the key filename must not appear: {rendered}"
+        );
+        assert!(
+            rendered.contains("file://"),
+            "the leak-safe scheme token identifies the source: {rendered}"
+        );
+        assert!(
+            rendered.contains("anthropic-work"),
+            "the member name is config, not credential, and stays: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_seats_credential_reference_never_reaches_a_state_key() {
+        // The other surface a seat's identity ships on: the runtime-state key
+        // is persisted (it becomes the usage ledger's lane key) and logged, so
+        // it must be derived from the MEMBER name, never the credential ref.
+        let key = seat_with_file_ref().state_key_for("opus");
+
+        assert_eq!(key, "opus#anthropic-work");
+        assert!(!key.contains("/var/secrets"), "{key}");
+        assert!(!key.contains("file://"), "{key}");
+    }
 
     #[test]
     fn seat_state_key_default_seat_is_bare_nickname() {

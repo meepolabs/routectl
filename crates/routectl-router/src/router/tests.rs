@@ -1752,6 +1752,18 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
         "rc_quota_placement_all_capped_total",
         "rc_quota_placement_mixed_unknown_total",
         "rc_quota_placement_all_unknown_total",
+        // The pool counters, including the one whose only driver today is the
+        // seam `note_pool_removed_pin_repick`: a counter absent from the
+        // snapshot is unobservable, and a zero-valued one is the honest report
+        // of a fleet with no pools.
+        "rc_pool_dispatch_total",
+        "rc_pool_degraded_dispatch_total",
+        "rc_pool_unavailable_total",
+        "rc_pool_member_omitted_credential_missing_total",
+        "rc_pool_member_omitted_credential_unreadable_total",
+        "rc_pool_member_omitted_credential_invalid_total",
+        "rc_pool_member_omitted_provider_init_failed_total",
+        "rc_pool_removed_pin_repick_total",
     ] {
         assert_eq!(
             snapshot.field(field),

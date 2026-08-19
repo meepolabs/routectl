@@ -187,23 +187,28 @@ fn expand_chain_to_targets_sets_flag_false_for_own_anthropic_provider() {
 fn expand_chain_to_targets_sets_flag_for_every_seat_of_a_forwarded_pool() {
     let spy = Arc::new(ModelSpyProvider::new("fwd-prov"));
     let mut config = Config::default();
-    config.providers.insert(
-        "fwd-prov".to_string(),
-        ProviderEntry::anthropic_api("literal:k")
-            .with_credential_source(CredentialSource::Forwarded),
+    for member in ["fwd-a", "fwd-b"] {
+        config.providers.insert(
+            member.to_string(),
+            ProviderEntry::anthropic_api("literal:k")
+                .with_credential_source(CredentialSource::Forwarded),
+        );
+    }
+    config.pools.insert(
+        "fwd-pool".to_string(),
+        crate::config::PoolEntry::new(vec!["fwd-a".into(), "fwd-b".into()]),
     );
     let router = Router::new(Arc::new(config));
-    let seats: Vec<crate::seat_pool::SeatTarget> = ["seat-a", "seat-b"]
+    let seats: Vec<crate::seat_pool::SeatTarget> = ["fwd-a", "fwd-b"]
         .iter()
-        .map(|label| crate::seat_pool::SeatTarget {
-            label: Some((*label).to_string()),
-            state_key: crate::seat_pool::seat_state_key("nick", Some(label)),
+        .map(|member| crate::seat_pool::SeatTarget {
+            provider_name: (*member).to_string(),
             provider: spy.clone() as Arc<dyn Provider>,
             auth_secret_ref: None,
         })
         .collect();
     let model = Arc::new(
-        ResolvedModel::new("nick", "fwd-prov", spy as Arc<dyn Provider>, "claude-x")
+        ResolvedModel::new("nick", "fwd-pool", spy as Arc<dyn Provider>, "claude-x")
             .with_seats(seats.into()),
     );
     let targets = router.expand_chain_to_targets(vec![model], None);

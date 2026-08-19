@@ -310,6 +310,10 @@ pub struct Router {
     /// reload -- a per-Router latch would re-warn on every config reload and
     /// turn a one-shot diagnostic into a reload-frequency signal.
     prefix_rewrite_warned: Arc<AtomicBool>,
+    /// The sanitized per-pool build reports this Router was built from. Empty
+    /// for a config with no pools, and for any caller that built the resolved
+    /// table through the report-discarding entry point.
+    pool_reports: Vec<crate::pool_build::PoolReport>,
 }
 
 /// Lock-free router-side observability counters.
@@ -451,6 +455,42 @@ struct RouterMetrics {
     /// trap the skip counter carries for false skips. Bumped once per
     /// dispatch error arm by the class-observability path.
     context_window_overflow_total: AtomicU64,
+    /// Requests whose chain expansion walked a pool-backed model, counted once
+    /// per pooled model per chain expansion (a chain naming two pools bumps
+    /// twice). The denominator every other pool counter reads against.
+    pool_dispatch_total: AtomicU64,
+    /// The subset of [`pool_dispatch_total`](Self::pool_dispatch_total) served
+    /// by a pool whose compiled seat count sits BELOW its configured member
+    /// count -- a degraded pool serving through its survivors. A rising share
+    /// means traffic is concentrating on fewer accounts than the operator
+    /// configured, which the per-member omission WARN explains once at build
+    /// time and this counts continuously.
+    pool_degraded_dispatch_total: AtomicU64,
+    /// Chain expansions that reached a pool-backed model with an EMPTY seat
+    /// set. Defensive: the build refuses a zero-usable pool, so a nonzero
+    /// count means a pooled model reached dispatch through some path that
+    /// bypassed that refusal.
+    pool_unavailable_total: AtomicU64,
+    /// Pool members omitted at build time because the member declared no
+    /// credential reference. Per-reason splits of the omission WARN, so the
+    /// shape of a degraded fleet is answerable without re-reading logs.
+    pool_member_omitted_credential_missing_total: AtomicU64,
+    /// Pool members omitted because the store could not produce a credential
+    /// for the member's reference (not logged in, refresh refused, backing
+    /// file unreadable).
+    pool_member_omitted_credential_unreadable_total: AtomicU64,
+    /// Pool members omitted because the member's credential reference did not
+    /// parse.
+    pool_member_omitted_credential_invalid_total: AtomicU64,
+    /// Pool members omitted because the provider instance failed to construct
+    /// despite a usable credential.
+    pool_member_omitted_provider_init_failed_total: AtomicU64,
+    /// Sticky pins re-picked onto a surviving member because their pinned
+    /// member left the pool. Declared with its emission seam
+    /// ([`RouterMetrics::incr_pool_removed_pin_repick`]) ahead of the reload
+    /// carry-over that drives it, so the counter and its snapshot field land
+    /// in one place rather than being retrofitted around the carry-over.
+    pool_removed_pin_repick_total: AtomicU64,
 }
 
 /// Running quota-placement totals, partitioned by the partition's arms.
@@ -462,7 +502,78 @@ struct QuotaPlacementTotals {
     all_unknown: u64,
 }
 
+/// Running pool totals, read once per snapshot line so the emitted fields
+/// cannot disagree about which load each came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PoolTotals {
+    dispatch: u64,
+    degraded_dispatch: u64,
+    unavailable: u64,
+    omitted_credential_missing: u64,
+    omitted_credential_unreadable: u64,
+    omitted_credential_invalid: u64,
+    omitted_provider_init_failed: u64,
+    removed_pin_repick: u64,
+}
+
 impl RouterMetrics {
+    fn incr_pool_dispatch(&self) {
+        self.pool_dispatch_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_pool_degraded_dispatch(&self) {
+        self.pool_degraded_dispatch_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_pool_unavailable(&self) {
+        self.pool_unavailable_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one build-time member omission under its allowlisted reason.
+    /// Driven by [`Router::install_pool_reports`] once per omission per build.
+    fn incr_pool_member_omitted(&self, reason: crate::pool_build::PoolOmissionReason) {
+        use crate::pool_build::PoolOmissionReason as Reason;
+        let counter = match reason {
+            Reason::CredentialMissing => &self.pool_member_omitted_credential_missing_total,
+            Reason::CredentialUnreadable => &self.pool_member_omitted_credential_unreadable_total,
+            Reason::CredentialInvalid => &self.pool_member_omitted_credential_invalid_total,
+            Reason::ProviderInitFailed => &self.pool_member_omitted_provider_init_failed_total,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The emission seam for the removed-member pin re-pick, ahead of the
+    /// reload carry-over that drives it. Every other pool counter has a live
+    /// driver; this one is reachable only through
+    /// [`Router::note_pool_removed_pin_repick`] until the carry-over lands.
+    fn incr_pool_removed_pin_repick(&self) {
+        self.pool_removed_pin_repick_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Every pool counter's running total, for the snapshot line.
+    fn pool_totals(&self) -> PoolTotals {
+        PoolTotals {
+            dispatch: self.pool_dispatch_total.load(Ordering::Relaxed),
+            degraded_dispatch: self.pool_degraded_dispatch_total.load(Ordering::Relaxed),
+            unavailable: self.pool_unavailable_total.load(Ordering::Relaxed),
+            omitted_credential_missing: self
+                .pool_member_omitted_credential_missing_total
+                .load(Ordering::Relaxed),
+            omitted_credential_unreadable: self
+                .pool_member_omitted_credential_unreadable_total
+                .load(Ordering::Relaxed),
+            omitted_credential_invalid: self
+                .pool_member_omitted_credential_invalid_total
+                .load(Ordering::Relaxed),
+            omitted_provider_init_failed: self
+                .pool_member_omitted_provider_init_failed_total
+                .load(Ordering::Relaxed),
+            removed_pin_repick: self.pool_removed_pin_repick_total.load(Ordering::Relaxed),
+        }
+    }
+
     fn incr_unknown_failure_classification(&self) {
         self.unknown_failure_classifications_total
             .fetch_add(1, Ordering::Relaxed);
@@ -735,6 +846,7 @@ impl RouterMetrics {
     /// holds both `self.metrics` and `self.quota_store`.
     fn log_snapshot(&self, quota_refused_by_admission_total: u64) {
         let quota = self.quota_placement_totals();
+        let pool = self.pool_totals();
         #[cfg(feature = "bedrock")]
         tracing::debug!(
             target: "routectl_router::router::metrics",
@@ -762,6 +874,14 @@ impl RouterMetrics {
             rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
             rc_quota_placement_all_unknown_total = quota.all_unknown,
             rc_quota_refused_by_admission_total = quota_refused_by_admission_total,
+            rc_pool_dispatch_total = pool.dispatch,
+            rc_pool_degraded_dispatch_total = pool.degraded_dispatch,
+            rc_pool_unavailable_total = pool.unavailable,
+            rc_pool_member_omitted_credential_missing_total = pool.omitted_credential_missing,
+            rc_pool_member_omitted_credential_unreadable_total = pool.omitted_credential_unreadable,
+            rc_pool_member_omitted_credential_invalid_total = pool.omitted_credential_invalid,
+            rc_pool_member_omitted_provider_init_failed_total = pool.omitted_provider_init_failed,
+            rc_pool_removed_pin_repick_total = pool.removed_pin_repick,
             rc_bedrock_validation_unmatched_total = self.bedrock_validation_unmatched_total(),
             "router metrics snapshot"
         );
@@ -792,6 +912,14 @@ impl RouterMetrics {
             rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
             rc_quota_placement_all_unknown_total = quota.all_unknown,
             rc_quota_refused_by_admission_total = quota_refused_by_admission_total,
+            rc_pool_dispatch_total = pool.dispatch,
+            rc_pool_degraded_dispatch_total = pool.degraded_dispatch,
+            rc_pool_unavailable_total = pool.unavailable,
+            rc_pool_member_omitted_credential_missing_total = pool.omitted_credential_missing,
+            rc_pool_member_omitted_credential_unreadable_total = pool.omitted_credential_unreadable,
+            rc_pool_member_omitted_credential_invalid_total = pool.omitted_credential_invalid,
+            rc_pool_member_omitted_provider_init_failed_total = pool.omitted_provider_init_failed,
+            rc_pool_removed_pin_repick_total = pool.removed_pin_repick,
             "router metrics snapshot"
         );
     }
@@ -1469,6 +1597,7 @@ impl Router {
             learned_capabilities,
             learned_replay,
             override_registry,
+            pool_reports: Vec::new(),
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
             overlay_revision: 0,
             catalog_overlay: Arc::default(),
@@ -1529,17 +1658,25 @@ impl Router {
                 .map(|e| e.runtime().clone())
                 .unwrap_or_default();
             // A pooled model (Some seats) gets one state slot per seat,
-            // each keyed by the seat's `state_key`, so the breaker + RPM
-            // bucket are per-seat (probe fast-fail, retry caps, and the
-            // reset park all apply per seat).
-            // The default seat keys as the bare nickname, so the slot
-            // below covers it; this loop adds the labeled-seat slots.
+            // each keyed by that seat's per-model `state_key`, so the breaker
+            // + RPM bucket are per (model, seat) -- probe fast-fail, retry
+            // caps, and the reset park all apply per seat. Each seat's policy
+            // comes from its OWN member entry: a pool-backed model's
+            // `provider_name` is the POOL name, which has no runtime block, so
+            // reading the policy from it would silently hand every seat the
+            // defaults instead of the operator's per-account knobs.
             // A non-pooled model (None seats) only gets the nickname slot.
             if let Some(seats) = m.seats.as_ref() {
                 for seat in seats.iter() {
+                    let seat_policy = self
+                        .config
+                        .providers
+                        .get(&seat.provider_name)
+                        .map(|e| e.runtime().clone())
+                        .unwrap_or_default();
                     self.state
-                        .entry(seat.state_key.clone())
-                        .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
+                        .entry(seat.state_key_for(nickname))
+                        .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&seat_policy))));
                 }
                 // Round-robin pools rotate the starting seat per request;
                 // register a cursor only for that selection mode.
@@ -2037,6 +2174,42 @@ impl Router {
     pub fn log_metrics_snapshot(&self) {
         self.metrics
             .log_snapshot(self.quota_store.refused_by_admission_total());
+    }
+
+    /// Retain the build's sanitized per-pool reports and count their
+    /// omissions.
+    ///
+    /// Retention rather than re-derivation: a pool's degraded state is only
+    /// observable AT BUILD TIME (config alone cannot see a credential
+    /// failure), so a read surface that re-derived it from config would report
+    /// every pool as fully healthy. Counted here rather than in the factory so
+    /// the totals land on the router instance the metrics carry-over shares --
+    /// a rejected reload's build never reaches this call, which is why a
+    /// rejected candidate cannot inflate the live router's counters.
+    pub fn install_pool_reports(&mut self, reports: Vec<crate::pool_build::PoolReport>) {
+        for report in &reports {
+            for omission in &report.omissions {
+                self.metrics.incr_pool_member_omitted(omission.reason);
+            }
+        }
+        self.pool_reports = reports;
+    }
+
+    /// The sanitized per-pool build reports this Router was built from: what
+    /// each pool was configured with, what it serves, and every member it
+    /// lost. Read surface for the operator-facing pools report.
+    #[must_use]
+    pub fn pool_reports(&self) -> &[crate::pool_build::PoolReport] {
+        &self.pool_reports
+    }
+
+    /// Record that a sticky pin was re-picked onto a surviving member because
+    /// its pinned member left the pool.
+    ///
+    /// The public driver of the removed-member re-pick counter, standing ahead
+    /// of the reload carry-over that will call it once per re-picked pin.
+    pub fn note_pool_removed_pin_repick(&self) {
+        self.metrics.incr_pool_removed_pin_repick();
     }
 }
 

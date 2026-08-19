@@ -111,15 +111,12 @@ pub struct ResolvedModel {
     /// `None` for provider kinds that don't carry a primary api-key
     /// reference (e.g. Bedrock under DefaultChain / Profile creds).
     pub auth_secret_ref: Option<routectl_auth::SecretRef>,
-    /// OAuth credential-pool seats. `None` for the common single-seat /
-    /// non-pooled case -- dispatch then builds exactly ONE target keyed
-    /// by `nickname` (byte-for-byte the pre-pool behavior). `Some` only
-    /// when this model's primary `api_key_ref` was a bare-pool
-    /// `oauth://<provider>` backed by MORE THAN ONE stored seat; the
-    /// slice then holds one seat-pinned provider per seat (default seat
-    /// first, then sorted labels), each with its own `state_key`.
-    /// `provider` / `auth_secret_ref` above mirror the first (default)
-    /// seat. `Arc<[..]>` so cloning at dispatch is a refcount bump.
+    /// Pool seats. `None` for the common single-target case -- dispatch then
+    /// builds exactly ONE target keyed by `nickname`. `Some` only when this
+    /// model's `provider` value named a `[pools.<name>]` block; the slice then
+    /// holds one provider per usable pool member, in the operator's declared
+    /// member order, and is SHARED by `Arc` with every other model naming the
+    /// same pool. `provider` / `auth_secret_ref` above mirror the first seat.
     pub(crate) seats: Option<Arc<[crate::seat_pool::SeatTarget]>>,
     /// The two-layer catalog merge (baked table + overlay cell) resolved
     /// for this model's `(provider_kind, upstream)` selector at chain-build
@@ -251,10 +248,10 @@ impl ResolvedModel {
         self
     }
 
-    /// Attach the OAuth credential-pool seats for a pooled model. Only
-    /// called by the factory when the model's primary ref expanded to
-    /// more than one seat; a single-seat / non-pooled model leaves
-    /// `seats` as `None` and dispatches a single nickname-keyed target.
+    /// Attach the pool seat set for a pool-backed model. Only called by the
+    /// factory, with the seat set the pool compiled to; a model whose
+    /// `provider` names a `[providers]` entry leaves `seats` as `None` and
+    /// dispatches a single nickname-keyed target.
     pub(crate) fn with_seats(mut self, seats: Arc<[crate::seat_pool::SeatTarget]>) -> Self {
         self.seats = Some(seats);
         self
@@ -306,11 +303,12 @@ impl std::fmt::Debug for ResolvedModel {
                     .map(std::string::ToString::to_string),
             )
             .field(
-                "seat_state_keys",
-                &self
-                    .seats
-                    .as_ref()
-                    .map(|s| s.iter().map(|t| t.state_key.as_str()).collect::<Vec<_>>()),
+                "seat_members",
+                &self.seats.as_ref().map(|s| {
+                    s.iter()
+                        .map(|t| t.provider_name.as_str())
+                        .collect::<Vec<_>>()
+                }),
             )
             .field("effective_row", &self.effective_row)
             .finish()

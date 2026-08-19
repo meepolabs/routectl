@@ -9,8 +9,8 @@ mod warnings;
 #[cfg(test)]
 pub use build::resolve_max_thinking_entry_bytes_for_test;
 pub use build::{
-    BuildOptions, apply_catalog_overlay, build_provider, build_provider_with_options,
-    build_resolved_models,
+    BuildOptions, ResolvedModelBuild, apply_catalog_overlay, build_provider,
+    build_provider_with_options, build_resolved_models, build_resolved_models_reported,
 };
 #[cfg(feature = "bedrock")]
 pub use validate::validate_bedrock_creds_refs;

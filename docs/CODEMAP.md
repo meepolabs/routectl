@@ -1358,6 +1358,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `build`/`validate`/`warnings` submodules (plus the cfg(`openai-responses`)
   `installation_id` submodule) and re-exports the crate-facing surface
   (`build_provider`, `build_provider_with_options`, `build_resolved_models`,
+  `build_resolved_models_reported`, `ResolvedModelBuild`,
   `apply_catalog_overlay`, `BuildOptions`, the `validate_*` family,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
   `validate_bedrock_global_config`, `validate_bedrock_invoke_model_family`,
@@ -1369,9 +1370,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   kind (incl. the `gemini`-feature-gated arm: the `ApiKey` mode resolves the
   `x-goog-api-key` source, the `CloudCode` mode requires an `oauth://` ref,
   resolves the bearer, and wires an `OAuthStoreProjectCache` into
-  `GeminiConfig::new_cloud_code`); OAuth credential-pool expansion (a
-  bare-pool `oauth://<provider>` ref with >1 stored seat builds one
-  seat-pinned provider per seat via `list_seats`); `apply_catalog_overlay`
+  `GeminiConfig::new_cloud_code`); provider-or-pool resolution -- a
+  `[models.X] provider` naming a `[pools]` block compiles through
+  `compile_pool` into one seat per usable member (built from that member's own
+  `api_key_ref`, credential probed first so a logged-out member is OMITTED
+  rather than lazily failing at first traffic), computed ONCE per pool and
+  shared by Arc, with `build_resolved_models_reported` returning the sanitized
+  `PoolReport` set and refusing the build when a pool a selectable model names
+  has zero usable members. A bare `oauth://<provider>` on a plain provider
+  entry resolves to that account's DEFAULT seat only -- no `list_seats`
+  enumeration on either path; `apply_catalog_overlay`
   runs the two-layer catalog merge once at chain-build/load time and stamps
   the result onto each `ResolvedModel::effective_row`, so the dispatch path
   never re-runs the merge per request; calls the row-reading `validate_*`
@@ -1877,9 +1885,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and stored but deliberately UNWIRED here
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
-  (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
-  non-pooled case); `reported_model: Option<String>` (per-model response-echo
-  override)
+  (one `SeatTarget` per usable pool member, shared by Arc across every model
+  naming that pool, `None` when `provider` names a plain `[providers]` entry);
+  `reported_model: Option<String>` (per-model response-echo override)
 - `src/router/mod.rs` -- the `Router` type family + construction/lifecycle
   plus submodule wiring; the dispatch retry state machine itself lives in
   `dispatch.rs`. Holds the `Router` struct (providers map, per-`[models.X]`
@@ -2273,9 +2281,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   DuplicateGeneratedName, EntryNameTaken, PoolNameTaken, AmbiguousPool}, never
   a lossy normalization, because the migration pass and the login writer must
   agree byte-for-byte on generated names
-- `src/seat_pool.rs` -- OAuth credential-pool glue: `SeatTarget` (seat-pinned
-  provider + per-seat `state_key`), `seat_state_key` (bare nickname for the
-  default seat, `nickname#label` for labeled seats), `seat_identity` (the
+- `src/pool_build.rs` -- the typed outcome of compiling a `[pools.<name>]`
+  block: `PoolOutcome` {Ready(shared seat set + omissions) / Unavailable},
+  `PoolReport` (pool, models routed at it, configured vs usable member counts,
+  omissions) with `is_degraded` / `is_unavailable`, `PoolMemberOmission` +
+  the allowlisted `PoolOmissionReason` {CredentialMissing,
+  CredentialUnreadable, CredentialInvalid, ProviderInitFailed} whose `token()`
+  is the vocabulary the omission WARN and the operator report share, and
+  `unavailable_pool_error` (the boot / reload refusal naming both the dead
+  pool and every model routed at it). Nothing here carries a store error
+  string, credential path, or account id
+- `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget` (one pool member's
+  `provider_name` + its own provider instance + credential ref, with
+  `state_key_for(nickname)` deriving the per-model key so ONE seat set can be
+  shared by every model naming the pool), `seat_state_key` (bare nickname for
+  a single target, `nickname#member` for a pool seat), `seat_identity` (the
   persistable `provider#label` credential identity of a `SecretRef`, `None`
   for every non-OAuth scheme so no path or env-var name reaches the usage
   ledger), `seat_order_for_request`

@@ -145,25 +145,23 @@ async fn coordinator_rig(
     (oauth, secrets, swap)
 }
 
-/// Adding a seat to credentials.json and firing a credentials reload
-/// must re-expand the live Router's pool: the model goes from a single
-/// target (one seat, non-pooled) to two seat targets, with no daemon
-/// restart and no config change.
+/// A stored seat appearing in credentials.json must NOT turn a standalone
+/// `[providers.X]` entry into a multi-seat target set. A bare
+/// `oauth://<provider>` names that account's DEFAULT seat and nothing else, so
+/// membership is an explicit `[pools]` decision rather than a side effect of
+/// logging in -- otherwise a second login would silently repoint live traffic
+/// onto an account the operator never added to any route.
 #[tokio::test]
-async fn credentials_reload_reexpands_seat_set() {
-    // Arrange: one seat on disk -> non-pooled (seat_count_for == None).
+async fn a_new_stored_seat_does_not_expand_a_standalone_provider_entry() {
+    // Arrange: one seat on disk, one standalone provider entry.
     let dir = tempfile::tempdir().unwrap();
     let creds = dir.path().join("routectl").join("credentials.json");
     write_pool_credentials(&creds, &[("anthropic", "tok-default")]);
     let config = pooled_oauth_config();
     let (oauth, secrets, swap) = coordinator_rig(&creds, &config).await;
-    assert_eq!(
-        swap.load().seat_count_for("claude"),
-        None,
-        "single seat must stay single-target before reload"
-    );
+    assert_eq!(swap.load().seat_count_for("claude"), None);
 
-    // Act: add a second seat on disk, then reload credentials.
+    // Act: add a second stored seat on disk, then reload credentials.
     write_pool_credentials(
         &creds,
         &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
@@ -179,11 +177,12 @@ async fn credentials_reload_reexpands_seat_set() {
     )
     .await;
 
-    // Assert: the live Router now resolves two seat targets.
+    // Assert: still a single target -- the new seat is reachable only once an
+    // operator adds an entry for it and names it in a pool.
     assert_eq!(
         swap.load().seat_count_for("claude"),
-        Some(2),
-        "reload must re-expand the pool to two seats"
+        None,
+        "a stored seat must not join a route without a config decision"
     );
 }
 
@@ -694,6 +693,86 @@ async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
     assert!(
         Arc::ptr_eq(&swap.load_full(), &router_after_write),
         "a corrupt overlay write must keep the previously-installed router live",
+    );
+}
+
+/// Hot-reload posture: a candidate whose pool has NO usable member is rejected
+/// and the previous router stays live. A degraded pool serves its survivors, so
+/// the only refusal is a pool that serves nothing -- and refusing it at reload
+/// is what keeps a credential outage from replacing a working router with one
+/// whose route cannot dispatch at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn config_reload_rejects_a_candidate_whose_pool_has_no_usable_member() {
+    // Arrange: a good current-version config, an initial router built from it.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    let good = format!(
+        "version = {}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        routectl_router::CURRENT_CONFIG_VERSION
+    );
+    std::fs::write(&cfg_path, &good).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut initial_config = Config {
+        version: routectl_router::CURRENT_CONFIG_VERSION,
+        ..Default::default()
+    };
+    let _usage_dir = isolate_usage_db(&mut initial_config);
+    let initial_config = Arc::new(initial_config);
+    let (usage, _writer) = build_usage_writer(&initial_config);
+    let router = build_router_from_config_with_overlay(
+        initial_config.clone(),
+        &Arc::default(),
+        secrets.clone(),
+    )
+    .await
+    .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let router_before = swap.load_full();
+
+    // Act: rewrite the config so a selectable model routes at a pool whose one
+    // member cannot resolve a credential (a MemoryStore refuses oauth:// refs,
+    // which is the same shape as a logged-out account).
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "version = {}\n\
+             [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+             [providers.anthropic-a]\n\
+             kind = \"anthropic-api\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             api_key_ref = \"oauth://anthropic-a\"\n\
+             auth_kind = \"oauth-bearer\"\n\n\
+             [pools.anthropic-pool]\n\
+             members = [\"anthropic-a\"]\n\n\
+             [models.claude]\n\
+             provider = \"anthropic-pool\"\n\
+             upstream = \"claude-sonnet-4-6\"\n",
+            routectl_router::CURRENT_CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+    let result = handle_config_reload(
+        Some(&cfg_path),
+        &initial_config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+    )
+    .await;
+
+    // Assert: the reload rejects and the prior router stays installed.
+    assert!(
+        result.is_none(),
+        "a zero-usable pool behind a selectable model must reject the reload"
+    );
+    let router_after = swap.load_full();
+    assert!(
+        Arc::ptr_eq(&router_before, &router_after),
+        "the previous router must stay live when a candidate is rejected"
     );
 }
 

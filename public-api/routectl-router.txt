@@ -3032,6 +3032,246 @@ pub const routectl_router::config::CURRENT_CONFIG_VERSION: u32
 pub fn routectl_router::config::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
 pub fn routectl_router::config::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
 pub fn routectl_router::config::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
+pub mod routectl_router::pool_build
+pub enum routectl_router::pool_build::PoolOmissionReason
+pub routectl_router::pool_build::PoolOmissionReason::CredentialInvalid
+pub routectl_router::pool_build::PoolOmissionReason::CredentialMissing
+pub routectl_router::pool_build::PoolOmissionReason::CredentialUnreadable
+pub routectl_router::pool_build::PoolOmissionReason::ProviderInitFailed
+impl routectl_router::pool_build::PoolOmissionReason
+pub const fn routectl_router::pool_build::PoolOmissionReason::token(self) -> &'static str
+impl core::clone::Clone for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::clone(&self) -> routectl_router::pool_build::PoolOmissionReason
+impl core::cmp::Eq for routectl_router::pool_build::PoolOmissionReason
+impl core::cmp::PartialEq for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::eq(&self, &routectl_router::pool_build::PoolOmissionReason) -> bool
+impl core::fmt::Debug for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::StructuralPartialEq for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Freeze for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Send for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Sync for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Unpin for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolOmissionReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolOmissionReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolOmissionReason
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pool_build::PoolOmissionReason where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolOmissionReason where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolOmissionReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolOmissionReason where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolOmissionReason::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolOmissionReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolOmissionReason where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolOmissionReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolOmissionReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolOmissionReason::Owned = T
+pub fn routectl_router::pool_build::PoolOmissionReason::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolOmissionReason::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOmissionReason::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolOmissionReason where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolOmissionReason where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolOmissionReason where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolOmissionReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOmissionReason::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolOmissionReason
+impl<T> outref::AsOut<T> for routectl_router::pool_build::PoolOmissionReason where T: core::marker::Copy
+pub fn routectl_router::pool_build::PoolOmissionReason::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolOmissionReason where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolOmissionReason::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolOmissionReason
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolOmissionReason
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolOmissionReason
+pub type routectl_router::pool_build::PoolOmissionReason::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolOmissionReason where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolOmissionReason::into_shared(self) -> Shared
+pub enum routectl_router::pool_build::PoolOutcome
+pub routectl_router::pool_build::PoolOutcome::Ready
+pub routectl_router::pool_build::PoolOutcome::Ready::omissions: alloc::vec::Vec<routectl_router::pool_build::PoolMemberOmission>
+pub routectl_router::pool_build::PoolOutcome::Ready::seats: alloc::sync::Arc<[routectl_router::seat_pool::SeatTarget]>
+pub routectl_router::pool_build::PoolOutcome::Unavailable
+pub routectl_router::pool_build::PoolOutcome::Unavailable::omissions: alloc::vec::Vec<routectl_router::pool_build::PoolMemberOmission>
+impl routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::omissions(&self) -> &[routectl_router::pool_build::PoolMemberOmission]
+pub const fn routectl_router::pool_build::PoolOutcome::seats(&self) -> core::option::Option<&alloc::sync::Arc<[routectl_router::seat_pool::SeatTarget]>>
+impl core::clone::Clone for routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::clone(&self) -> routectl_router::pool_build::PoolOutcome
+impl core::fmt::Debug for routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::pool_build::PoolOutcome
+impl core::marker::Send for routectl_router::pool_build::PoolOutcome
+impl core::marker::Sync for routectl_router::pool_build::PoolOutcome
+impl core::marker::Unpin for routectl_router::pool_build::PoolOutcome
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolOutcome
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolOutcome
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolOutcome
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolOutcome where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolOutcome where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolOutcome::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolOutcome where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolOutcome::Owned = T
+pub fn routectl_router::pool_build::PoolOutcome::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolOutcome::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOutcome::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolOutcome where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolOutcome where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOutcome::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolOutcome
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolOutcome where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolOutcome::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolOutcome
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolOutcome
+pub type routectl_router::pool_build::PoolOutcome::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolOutcome::into_shared(self) -> Shared
+pub struct routectl_router::pool_build::PoolMemberOmission
+pub routectl_router::pool_build::PoolMemberOmission::member: alloc::string::String
+pub routectl_router::pool_build::PoolMemberOmission::provider_kind: &'static str
+pub routectl_router::pool_build::PoolMemberOmission::reason: routectl_router::pool_build::PoolOmissionReason
+impl core::clone::Clone for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::clone(&self) -> routectl_router::pool_build::PoolMemberOmission
+impl core::cmp::Eq for routectl_router::pool_build::PoolMemberOmission
+impl core::cmp::PartialEq for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::eq(&self, &routectl_router::pool_build::PoolMemberOmission) -> bool
+impl core::fmt::Debug for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Freeze for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Send for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Sync for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Unpin for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolMemberOmission
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolMemberOmission
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolMemberOmission
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pool_build::PoolMemberOmission where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolMemberOmission where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolMemberOmission::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolMemberOmission where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolMemberOmission::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolMemberOmission::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolMemberOmission where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolMemberOmission::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolMemberOmission::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolMemberOmission::Owned = T
+pub fn routectl_router::pool_build::PoolMemberOmission::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolMemberOmission::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolMemberOmission::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolMemberOmission where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolMemberOmission where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolMemberOmission where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolMemberOmission::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolMemberOmission::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolMemberOmission
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolMemberOmission where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolMemberOmission::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolMemberOmission
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolMemberOmission
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolMemberOmission
+pub type routectl_router::pool_build::PoolMemberOmission::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolMemberOmission where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolMemberOmission::into_shared(self) -> Shared
+pub struct routectl_router::pool_build::PoolReport
+pub routectl_router::pool_build::PoolReport::configured_members: usize
+pub routectl_router::pool_build::PoolReport::models: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::pool_build::PoolReport::omissions: alloc::vec::Vec<routectl_router::pool_build::PoolMemberOmission>
+pub routectl_router::pool_build::PoolReport::pool: alloc::string::String
+pub routectl_router::pool_build::PoolReport::usable_members: usize
+impl routectl_router::pool_build::PoolReport
+pub const fn routectl_router::pool_build::PoolReport::is_degraded(&self) -> bool
+pub const fn routectl_router::pool_build::PoolReport::is_unavailable(&self) -> bool
+impl core::clone::Clone for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::clone(&self) -> routectl_router::pool_build::PoolReport
+impl core::cmp::Eq for routectl_router::pool_build::PoolReport
+impl core::cmp::PartialEq for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::eq(&self, &routectl_router::pool_build::PoolReport) -> bool
+impl core::fmt::Debug for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::pool_build::PoolReport
+impl core::marker::Freeze for routectl_router::pool_build::PoolReport
+impl core::marker::Send for routectl_router::pool_build::PoolReport
+impl core::marker::Sync for routectl_router::pool_build::PoolReport
+impl core::marker::Unpin for routectl_router::pool_build::PoolReport
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolReport
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pool_build::PoolReport where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolReport where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolReport where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolReport::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolReport where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolReport::Owned = T
+pub fn routectl_router::pool_build::PoolReport::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolReport::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolReport::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolReport where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolReport where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolReport where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolReport::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolReport
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolReport where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolReport::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolReport
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolReport
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolReport
+pub type routectl_router::pool_build::PoolReport::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolReport where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolReport::into_shared(self) -> Shared
+pub fn routectl_router::pool_build::unavailable_pool_error(&[routectl_router::pool_build::PoolReport]) -> core::option::Option<alloc::string::String>
 pub mod routectl_router::router
 pub struct routectl_router::router::CapabilityClearedEvent
 pub routectl_router::router::CapabilityClearedEvent::capability_key: alloc::string::String
@@ -3486,11 +3726,14 @@ pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_rout
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub const fn routectl_router::router::Router::has_forwarded_provider(&self) -> bool
 pub fn routectl_router::router::Router::install_catalog_overlay(&mut self, alloc::sync::Arc<routectl_router::CatalogOverlay>)
+pub fn routectl_router::router::Router::install_pool_reports(&mut self, alloc::vec::Vec<routectl_router::pool_build::PoolReport>)
 pub fn routectl_router::router::Router::install_resolved_models(&mut self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>)
 pub fn routectl_router::router::Router::log_metrics_snapshot(&self)
 pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::config::Config>) -> Self
+pub fn routectl_router::router::Router::note_pool_removed_pin_repick(&self)
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
+pub fn routectl_router::router::Router::pool_reports(&self) -> &[routectl_router::pool_build::PoolReport]
 pub fn routectl_router::router::Router::rebuild_calibration_from_ledger(&self, &dyn routectl_router::CalibrationLedgerReader, std::time::SystemTime, usize) -> routectl_router::CalibrationRebuildSummary
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::router::Router::record_calibration_sample(&self, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, u64, u64, std::time::SystemTime)
@@ -5967,6 +6210,125 @@ impl<T> typenum::type_operators::Same for routectl_router::PathShape
 pub type routectl_router::PathShape::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PathShape where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::PathShape::into_shared(self) -> Shared
+pub enum routectl_router::PoolOmissionReason
+pub routectl_router::PoolOmissionReason::CredentialInvalid
+pub routectl_router::PoolOmissionReason::CredentialMissing
+pub routectl_router::PoolOmissionReason::CredentialUnreadable
+pub routectl_router::PoolOmissionReason::ProviderInitFailed
+impl routectl_router::pool_build::PoolOmissionReason
+pub const fn routectl_router::pool_build::PoolOmissionReason::token(self) -> &'static str
+impl core::clone::Clone for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::clone(&self) -> routectl_router::pool_build::PoolOmissionReason
+impl core::cmp::Eq for routectl_router::pool_build::PoolOmissionReason
+impl core::cmp::PartialEq for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::eq(&self, &routectl_router::pool_build::PoolOmissionReason) -> bool
+impl core::fmt::Debug for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::StructuralPartialEq for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Freeze for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Send for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Sync for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::Unpin for routectl_router::pool_build::PoolOmissionReason
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolOmissionReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolOmissionReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolOmissionReason
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pool_build::PoolOmissionReason where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolOmissionReason where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolOmissionReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolOmissionReason where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolOmissionReason::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolOmissionReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolOmissionReason where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolOmissionReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolOmissionReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolOmissionReason::Owned = T
+pub fn routectl_router::pool_build::PoolOmissionReason::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolOmissionReason::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOmissionReason::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolOmissionReason where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolOmissionReason where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolOmissionReason where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolOmissionReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolOmissionReason
+pub fn routectl_router::pool_build::PoolOmissionReason::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolOmissionReason where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOmissionReason::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolOmissionReason
+impl<T> outref::AsOut<T> for routectl_router::pool_build::PoolOmissionReason where T: core::marker::Copy
+pub fn routectl_router::pool_build::PoolOmissionReason::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolOmissionReason where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOmissionReason::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolOmissionReason::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolOmissionReason
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolOmissionReason
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolOmissionReason
+pub type routectl_router::pool_build::PoolOmissionReason::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolOmissionReason where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolOmissionReason::into_shared(self) -> Shared
+pub enum routectl_router::PoolOutcome
+pub routectl_router::PoolOutcome::Ready
+pub routectl_router::PoolOutcome::Ready::omissions: alloc::vec::Vec<routectl_router::pool_build::PoolMemberOmission>
+pub routectl_router::PoolOutcome::Ready::seats: alloc::sync::Arc<[routectl_router::seat_pool::SeatTarget]>
+pub routectl_router::PoolOutcome::Unavailable
+pub routectl_router::PoolOutcome::Unavailable::omissions: alloc::vec::Vec<routectl_router::pool_build::PoolMemberOmission>
+impl routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::omissions(&self) -> &[routectl_router::pool_build::PoolMemberOmission]
+pub const fn routectl_router::pool_build::PoolOutcome::seats(&self) -> core::option::Option<&alloc::sync::Arc<[routectl_router::seat_pool::SeatTarget]>>
+impl core::clone::Clone for routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::clone(&self) -> routectl_router::pool_build::PoolOutcome
+impl core::fmt::Debug for routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::pool_build::PoolOutcome
+impl core::marker::Send for routectl_router::pool_build::PoolOutcome
+impl core::marker::Sync for routectl_router::pool_build::PoolOutcome
+impl core::marker::Unpin for routectl_router::pool_build::PoolOutcome
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolOutcome
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolOutcome
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolOutcome
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolOutcome where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolOutcome where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolOutcome::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolOutcome where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolOutcome::Owned = T
+pub fn routectl_router::pool_build::PoolOutcome::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolOutcome::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOutcome::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolOutcome where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolOutcome where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolOutcome
+pub fn routectl_router::pool_build::PoolOutcome::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolOutcome where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolOutcome::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolOutcome
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolOutcome where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolOutcome::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolOutcome::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolOutcome
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolOutcome
+pub type routectl_router::pool_build::PoolOutcome::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolOutcome::into_shared(self) -> Shared
 #[non_exhaustive] pub enum routectl_router::ProviderEntry
 #[non_exhaustive] pub routectl_router::ProviderEntry::AnthropicApi
 pub routectl_router::ProviderEntry::AnthropicApi::allowed_betas: alloc::vec::Vec<alloc::string::String>
@@ -10673,6 +11035,125 @@ impl<T> typenum::type_operators::Same for routectl_router::PoolEntry
 pub type routectl_router::PoolEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PoolEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::PoolEntry::into_shared(self) -> Shared
+pub struct routectl_router::PoolMemberOmission
+pub routectl_router::PoolMemberOmission::member: alloc::string::String
+pub routectl_router::PoolMemberOmission::provider_kind: &'static str
+pub routectl_router::PoolMemberOmission::reason: routectl_router::pool_build::PoolOmissionReason
+impl core::clone::Clone for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::clone(&self) -> routectl_router::pool_build::PoolMemberOmission
+impl core::cmp::Eq for routectl_router::pool_build::PoolMemberOmission
+impl core::cmp::PartialEq for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::eq(&self, &routectl_router::pool_build::PoolMemberOmission) -> bool
+impl core::fmt::Debug for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Freeze for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Send for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Sync for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::Unpin for routectl_router::pool_build::PoolMemberOmission
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolMemberOmission
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolMemberOmission
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolMemberOmission
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pool_build::PoolMemberOmission where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolMemberOmission where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolMemberOmission::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolMemberOmission where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolMemberOmission::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolMemberOmission::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolMemberOmission where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolMemberOmission::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolMemberOmission::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolMemberOmission::Owned = T
+pub fn routectl_router::pool_build::PoolMemberOmission::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolMemberOmission::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolMemberOmission::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolMemberOmission where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolMemberOmission where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolMemberOmission where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolMemberOmission::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolMemberOmission
+pub fn routectl_router::pool_build::PoolMemberOmission::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolMemberOmission where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolMemberOmission::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolMemberOmission
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolMemberOmission where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolMemberOmission::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolMemberOmission::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolMemberOmission
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolMemberOmission
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolMemberOmission
+pub type routectl_router::pool_build::PoolMemberOmission::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolMemberOmission where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolMemberOmission::into_shared(self) -> Shared
+pub struct routectl_router::PoolReport
+pub routectl_router::PoolReport::configured_members: usize
+pub routectl_router::PoolReport::models: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::PoolReport::omissions: alloc::vec::Vec<routectl_router::pool_build::PoolMemberOmission>
+pub routectl_router::PoolReport::pool: alloc::string::String
+pub routectl_router::PoolReport::usable_members: usize
+impl routectl_router::pool_build::PoolReport
+pub const fn routectl_router::pool_build::PoolReport::is_degraded(&self) -> bool
+pub const fn routectl_router::pool_build::PoolReport::is_unavailable(&self) -> bool
+impl core::clone::Clone for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::clone(&self) -> routectl_router::pool_build::PoolReport
+impl core::cmp::Eq for routectl_router::pool_build::PoolReport
+impl core::cmp::PartialEq for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::eq(&self, &routectl_router::pool_build::PoolReport) -> bool
+impl core::fmt::Debug for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::pool_build::PoolReport
+impl core::marker::Freeze for routectl_router::pool_build::PoolReport
+impl core::marker::Send for routectl_router::pool_build::PoolReport
+impl core::marker::Sync for routectl_router::pool_build::PoolReport
+impl core::marker::Unpin for routectl_router::pool_build::PoolReport
+impl core::marker::UnsafeUnpin for routectl_router::pool_build::PoolReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pool_build::PoolReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pool_build::PoolReport
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pool_build::PoolReport where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pool_build::PoolReport where U: core::convert::From<T>
+pub fn routectl_router::pool_build::PoolReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pool_build::PoolReport where U: core::convert::Into<T>
+pub type routectl_router::pool_build::PoolReport::Error = core::convert::Infallible
+pub fn routectl_router::pool_build::PoolReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pool_build::PoolReport where U: core::convert::TryFrom<T>
+pub type routectl_router::pool_build::PoolReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pool_build::PoolReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub type routectl_router::pool_build::PoolReport::Owned = T
+pub fn routectl_router::pool_build::PoolReport::clone_into(&self, &mut T)
+pub fn routectl_router::pool_build::PoolReport::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolReport::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pool_build::PoolReport where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pool_build::PoolReport where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pool_build::PoolReport where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub unsafe fn routectl_router::pool_build::PoolReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pool_build::PoolReport
+pub fn routectl_router::pool_build::PoolReport::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pool_build::PoolReport where T: core::clone::Clone
+pub fn routectl_router::pool_build::PoolReport::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pool_build::PoolReport
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pool_build::PoolReport where T: ?core::marker::Sized
+pub fn routectl_router::pool_build::PoolReport::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pool_build::PoolReport::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pool_build::PoolReport
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pool_build::PoolReport
+impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolReport
+pub type routectl_router::pool_build::PoolReport::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolReport where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pool_build::PoolReport::into_shared(self) -> Shared
 pub struct routectl_router::PrefixIndex<V: core::clone::Clone>
 impl<V: core::clone::Clone> routectl_router::PrefixIndex<V>
 pub fn routectl_router::PrefixIndex<V>::insert(&mut self, routectl_router::AliasPattern, V)
@@ -11260,6 +11741,45 @@ impl<T> typenum::type_operators::Same for routectl_router::ResolvedModel
 pub type routectl_router::ResolvedModel::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResolvedModel where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ResolvedModel::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::ResolvedModelBuild
+pub routectl_router::ResolvedModelBuild::failed: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub routectl_router::ResolvedModelBuild::models: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>
+pub routectl_router::ResolvedModelBuild::pool_reports: alloc::vec::Vec<routectl_router::pool_build::PoolReport>
+impl core::fmt::Debug for routectl_router::ResolvedModelBuild
+pub fn routectl_router::ResolvedModelBuild::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::ResolvedModelBuild
+impl core::marker::Send for routectl_router::ResolvedModelBuild
+impl core::marker::Sync for routectl_router::ResolvedModelBuild
+impl core::marker::Unpin for routectl_router::ResolvedModelBuild
+impl core::marker::UnsafeUnpin for routectl_router::ResolvedModelBuild
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::ResolvedModelBuild
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::ResolvedModelBuild
+impl<T, U> core::convert::Into<U> for routectl_router::ResolvedModelBuild where U: core::convert::From<T>
+pub fn routectl_router::ResolvedModelBuild::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ResolvedModelBuild where U: core::convert::Into<T>
+pub type routectl_router::ResolvedModelBuild::Error = core::convert::Infallible
+pub fn routectl_router::ResolvedModelBuild::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ResolvedModelBuild where U: core::convert::TryFrom<T>
+pub type routectl_router::ResolvedModelBuild::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ResolvedModelBuild::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_router::ResolvedModelBuild where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ResolvedModelBuild::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ResolvedModelBuild where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedModelBuild::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ResolvedModelBuild where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedModelBuild::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_router::ResolvedModelBuild
+pub fn routectl_router::ResolvedModelBuild::from(T) -> T
+impl<T> either::into_either::IntoEither for routectl_router::ResolvedModelBuild
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ResolvedModelBuild where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedModelBuild::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ResolvedModelBuild::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ResolvedModelBuild
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ResolvedModelBuild
+impl<T> typenum::type_operators::Same for routectl_router::ResolvedModelBuild
+pub type routectl_router::ResolvedModelBuild::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResolvedModelBuild where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ResolvedModelBuild::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::RetryPolicy
 pub routectl_router::RetryPolicy::backoff_multiplier: f64
 pub routectl_router::RetryPolicy::classes: alloc::collections::btree::map::BTreeMap<routectl_router::class_policy::ConfigFailureClass, routectl_router::class_policy::ClassPolicy>
@@ -11354,11 +11874,14 @@ pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_rout
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub const fn routectl_router::router::Router::has_forwarded_provider(&self) -> bool
 pub fn routectl_router::router::Router::install_catalog_overlay(&mut self, alloc::sync::Arc<routectl_router::CatalogOverlay>)
+pub fn routectl_router::router::Router::install_pool_reports(&mut self, alloc::vec::Vec<routectl_router::pool_build::PoolReport>)
 pub fn routectl_router::router::Router::install_resolved_models(&mut self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>)
 pub fn routectl_router::router::Router::log_metrics_snapshot(&self)
 pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::config::Config>) -> Self
+pub fn routectl_router::router::Router::note_pool_removed_pin_repick(&self)
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
+pub fn routectl_router::router::Router::pool_reports(&self) -> &[routectl_router::pool_build::PoolReport]
 pub fn routectl_router::router::Router::rebuild_calibration_from_ledger(&self, &dyn routectl_router::CalibrationLedgerReader, std::time::SystemTime, usize) -> routectl_router::CalibrationRebuildSummary
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::router::Router::record_calibration_sample(&self, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, u64, u64, std::time::SystemTime)
@@ -12591,6 +13114,7 @@ pub fn routectl_router::build_import_candidate(routectl_router::CandidateOrigin,
 pub async fn routectl_router::build_provider(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
 pub async fn routectl_router::build_provider_with_options(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
 pub async fn routectl_router::build_resolved_models(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>)>
+pub async fn routectl_router::build_resolved_models_reported(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<routectl_router::ResolvedModelBuild>
 pub fn routectl_router::candidate_shrink_counts(&routectl_router::ImportCandidate) -> routectl_router::ShrinkCounts
 pub fn routectl_router::catalog_import_state_default_path() -> std::path::PathBuf
 pub fn routectl_router::catalog_state_default_path() -> std::path::PathBuf

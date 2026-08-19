@@ -21,8 +21,9 @@ pub struct RouteTargetStatus {
     pub provider_name: String,
     /// Wire value of the `model` field this target dispatches to.
     pub upstream: String,
-    /// Seat label: `None` for a non-pooled model or the default seat,
-    /// `Some(label)` for a labeled seat of a pooled model.
+    /// Seat identity: `None` for a non-pooled model, `Some(member)` for one
+    /// member seat of a pool-backed model (the member's `[providers]` table
+    /// key).
     pub seat_label: Option<String>,
     /// Non-mutating gate health for this target.
     pub gate: ProviderGateStatus,
@@ -78,12 +79,12 @@ impl Router {
                 Some(seats) => {
                     for seat in seats.iter() {
                         out.push(RouteTargetStatus {
-                            state_key: seat.state_key.clone(),
+                            state_key: seat.state_key_for(&model.nickname),
                             nickname: model.nickname.clone(),
-                            provider_name: model.provider_name.clone(),
+                            provider_name: seat.provider_name.clone(),
                             upstream: model.upstream.clone(),
-                            seat_label: seat.label.clone(),
-                            gate: self.gate_status_for(&seat.state_key, now),
+                            seat_label: Some(seat.provider_name.clone()),
+                            gate: self.gate_status_for(&seat.state_key_for(&model.nickname), now),
                         });
                     }
                 }

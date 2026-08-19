@@ -149,19 +149,45 @@ impl Router {
         session_key: Option<&str>,
     ) -> Result<Vec<DispatchTarget>> {
         if let Some(chain) = self.resolve_v6_alias(model)? {
-            return Ok(self.expand_chain_to_targets(chain, session_key));
+            return self.expand_resolved_chain(model, chain, session_key);
         }
         // Wire model could ALSO be a direct nickname.
         if let Some(m) = self.resolve_nickname(model) {
-            return Ok(self.expand_chain_to_targets(vec![m], session_key));
+            return self.expand_resolved_chain(model, vec![m], session_key);
         }
         // Catch-all: only consulted after exact alias / glob / direct
         // nickname all miss. This ordering means a wire model that's
         // a known nickname always wins over a configured default.
         if let Some(chain) = self.resolve_default_alias()? {
-            return Ok(self.expand_chain_to_targets(chain, session_key));
+            return self.expand_resolved_chain(model, chain, session_key);
         }
         Err(Error::UnknownAlias(model.to_string()))
+    }
+
+    /// Expand a resolved chain, refusing a chain that expanded to NOTHING.
+    ///
+    /// A resolved chain whose every entry is a pool-backed model with an empty
+    /// seat set yields zero dispatch targets. Letting that fall through would
+    /// surface as `UnknownAlias` at the end of the dispatch loop -- a 404
+    /// naming a route that IS configured, which sends the operator hunting a
+    /// routing typo for a credential outage, and which no client retries. This
+    /// returns a retryable, fallbackable upstream-shaped error instead, so the
+    /// caller backs off and a client-side chain can move on.
+    ///
+    /// Defensive: the build refuses a pool with zero usable members, so this
+    /// is reachable only if a pooled model with no seats reached dispatch
+    /// through some path that bypassed that refusal.
+    fn expand_resolved_chain(
+        &self,
+        model: &str,
+        chain: Vec<Arc<ResolvedModel>>,
+        session_key: Option<&str>,
+    ) -> Result<Vec<DispatchTarget>> {
+        let targets = self.expand_chain_to_targets(chain, session_key);
+        if targets.is_empty() {
+            return Err(empty_pool_error(model));
+        }
+        Ok(targets)
     }
 
     /// Expand a resolved-model chain into the per-request dispatch-target
@@ -219,9 +245,10 @@ impl Router {
 
     /// Append one dispatch target per seat of a pooled model, in the
     /// request's resolved seat order. Each target carries the seat's own
-    /// provider, `state_key`, and `auth_secret_ref` so the breaker, RPM
-    /// gate, retry caps, probe fast-fail, and the `Retry-After` park all
-    /// apply per seat; every other dispatch knob is shared from the model.
+    /// provider, member provider name, per-(model, seat) `state_key`, and
+    /// `auth_secret_ref` so the breaker, RPM gate, retry caps, probe
+    /// fast-fail, and the `Retry-After` park all apply per seat; every other
+    /// dispatch knob is shared from the model.
     fn push_seat_targets(
         &self,
         m: &Arc<ResolvedModel>,
@@ -229,13 +256,20 @@ impl Router {
         session_key: Option<&str>,
         out: &mut Vec<DispatchTarget>,
     ) {
+        if seats.is_empty() {
+            // Defensive only: the build refuses a pool with no usable member,
+            // so a live pooled model always has at least one seat. The
+            // dispatch loop turns an empty target set into a retryable
+            // upstream-shaped error rather than `UnknownAlias`; see
+            // `Router::empty_pool_error`.
+            self.metrics.incr_pool_unavailable();
+            return;
+        }
+        self.metrics.incr_pool_dispatch();
+        if seats.len() < self.configured_member_count(&m.provider_name) {
+            self.metrics.incr_pool_degraded_dispatch();
+        }
         let selection = self.config.seat_selection_for(&m.provider_name);
-
-        let provider_kind = self
-            .config
-            .providers
-            .get(&m.provider_name)
-            .map(crate::config::ProviderEntry::kind_str);
 
         // Sticky least-loaded only engages with a real session key on a
         // multi-seat pool. Every OTHER case (FillFirst, RoundRobin, or
@@ -252,8 +286,7 @@ impl Router {
         let (order, token): (Vec<usize>, Option<&'static str>) = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
                 let pin_key = sticky_pin_key(key, &m.nickname);
-                let (order, tok) =
-                    self.sticky_seat_order(seats, &pin_key, &m.nickname, provider_kind);
+                let (order, tok) = self.sticky_seat_order(seats, &pin_key, &m.nickname);
                 (order, Some(tok))
             }
             // Keyless StickyLeastLoaded has no session identity, so it mints
@@ -265,7 +298,7 @@ impl Router {
             // operator can still spot a silent fill-first regime on a pool
             // configured sticky.
             (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
-                self.keyless_seat_order(seats, &m.nickname, provider_kind)
+                self.keyless_seat_order(seats, &m.nickname)
             }
             _ => (
                 crate::seat_pool::seat_order_for_request(
@@ -280,6 +313,15 @@ impl Router {
         let first = out.len();
         for idx in order {
             let seat = &seats[idx];
+            // Resolved per SEAT, not once per model: pool members are
+            // same-kind by validation today, but reading the kind off the
+            // seat's own entry keeps the target's classification anchored to
+            // the entry that actually egresses.
+            let provider_kind = self
+                .config
+                .providers
+                .get(&seat.provider_name)
+                .map(crate::config::ProviderEntry::kind_str);
             out.push(dispatch_target_for_seat(m, seat, provider_kind));
         }
         // Stamp the decision on the home (first) target pushed for THIS
@@ -291,6 +333,17 @@ impl Router {
         {
             t.selection_decision = Some(tok);
         }
+    }
+
+    /// How many members the `[pools]` block behind a dispatch target declared,
+    /// or `0` when the name is not a pool. The compiled seat count sitting
+    /// BELOW this is exactly what "degraded" means: the build dropped a
+    /// member the operator configured.
+    fn configured_member_count(&self, name: &str) -> usize {
+        self.config
+            .pools
+            .get(name)
+            .map_or(0, |pool| pool.members.len())
     }
 
     /// Resolve the dispatch chain for a request and pre-filter against
@@ -347,6 +400,23 @@ impl Router {
     }
 }
 
+/// The error a chain that expanded to zero dispatch targets returns.
+///
+/// Shaped as an `Upstream` 503 rather than `UnknownAlias`: the route exists,
+/// so a 404 would be wrong, and the condition is a credential-side outage that
+/// may clear. 503 lands on `FailureClass::ServerError`, which the baked retry
+/// matrix marks retryable AND fallbackable, so both the router's own chain walk
+/// and a client-side retry treat it as transient. The detail names only the
+/// wire model the caller already sent.
+pub(super) fn empty_pool_error(model: &str) -> Error {
+    Error::upstream(
+        model,
+        503,
+        "no usable credential seat is available for this route; \
+         every member of its pool is currently unusable",
+    )
+}
+
 /// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`
 /// shape the dispatch loop walks. Hoisted out of `dispatch_chain`
 /// so the three resolution branches share one builder.
@@ -392,15 +462,15 @@ pub(super) fn sticky_pin_key(session: &str, nickname: &str) -> String {
     format!("{}:{}:{}", nickname.len(), nickname, session)
 }
 
-/// Build a dispatch target for one seat of a pooled model. Identical to
-/// `into_one_dispatch_target` except the seat overrides the provider
-/// instance and `state_key` (its own breaker + RPM bucket); every other
-/// knob is shared from the model. The nickname stays the model's nickname
-/// for tracing, while `state_key` carries the seat suffix. `provider_kind`
-/// is the seat provider's stable kind token (a seat shares its model's
-/// provider entry, so the caller resolves it from `provider_name` exactly
-/// as the non-seat path does) so error classification keys off the real
-/// egress kind rather than the union table.
+/// Build one dispatch target for one seat of a pooled model.
+///
+/// `provider_name` is the SEAT's member `[providers]` table key, not the
+/// model's `provider` value: a pool-backed model's `provider` names the pool,
+/// which is not a `[providers]` entry, so keying the target by it would make
+/// every per-provider config lookup on the dispatch path (runtime policy,
+/// class overrides, header extras, beta floor, context reduction) silently
+/// miss. `nickname` still carries the model for tracing, while `state_key`
+/// joins the two so the breaker and RPM bucket are per (model, seat).
 pub(super) fn dispatch_target_for_seat(
     m: &Arc<ResolvedModel>,
     seat: &crate::seat_pool::SeatTarget,
@@ -408,10 +478,10 @@ pub(super) fn dispatch_target_for_seat(
 ) -> DispatchTarget {
     let capabilities = catalog_capabilities(&m.effective_row);
     DispatchTarget {
-        provider_name: m.provider_name.clone(),
+        provider_name: seat.provider_name.clone(),
         provider_kind,
         use_forwarded_credential: false,
-        state_key: seat.state_key.clone(),
+        state_key: seat.state_key_for(&m.nickname),
         seat: crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref()),
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),

@@ -147,8 +147,12 @@ pub async fn build_router_from_config_with_overlay(
     // non-Bedrock provider entry (cached) and one provider per Bedrock
     // model. Failures are collected and only fatal when an `[aliases]`
     // chain references a model whose provider failed to build.
-    let (resolved_models, failed) =
-        routectl_router::build_resolved_models(&config, secrets, opts).await?;
+    let built = routectl_router::build_resolved_models_reported(&config, secrets, opts).await?;
+    let (resolved_models, failed) = (built.models, built.failed);
+    // Retain what the build observed about each pool BEFORE the resolved table
+    // is installed: a degraded pool is invisible to config alone, so the read
+    // side has to be handed the build's own observation.
+    router.install_pool_reports(built.pool_reports);
     // Stamp each resolved model's precomputed two-layer catalog merge
     // (baked table + this boot/reload's overlay) onto the table BEFORE
     // installing it, so `Router::record_would_trim` reads a resolved
