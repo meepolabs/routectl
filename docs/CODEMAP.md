@@ -5011,8 +5011,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils`
   (single source of truth for the canonical scenario builders) plus the
-  cli-only `replay` harness submodule; the builders are enabled via the
-  `test-utils` dev-dependency feature on core
+  cli-only `replay` harness and `readiness` submodules; the builders are
+  enabled via the `test-utils` dev-dependency feature on core
+- `tests/common/readiness.rs` -- shared `/health` readiness poll
+  (`await_health`, deadline + cadence consts) used by every integration
+  binary that boots `serve_on_listener`; readiness is a served response,
+  never a sleep
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
 - `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +

@@ -1,5 +1,5 @@
-//! Thin re-export of the shared contract-test fixture builders, plus
-//! the cli-only `replay` harness submodule.
+//! Thin re-export of the shared contract-test fixture builders, plus the
+//! cli-only `replay` harness and `readiness` polling submodules.
 //!
 //! The single source of truth for the canonical-request /
 //! canonical-response builders lives in `routectl_core::test_utils`
@@ -9,6 +9,7 @@
 //! (`common::user_msg`, etc.) unchanged, while `replay` stays local to
 //! this crate (it depends on cli-side fixtures and harness code).
 
+pub mod readiness;
 pub mod replay;
 
 /// A `file://` secret ref that resolves to `value`. Drop-in replacement for

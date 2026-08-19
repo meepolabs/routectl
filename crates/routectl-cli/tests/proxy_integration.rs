@@ -50,7 +50,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use routectl_router::{Config, MitmConfig, ServerAuth};
 use rustls_pki_types::pem::PemObject;
@@ -60,18 +59,10 @@ use tokio::time::Instant;
 
 mod common;
 
+use common::readiness::{READY_DEADLINE, await_health, sleep_until_cadence_or_deadline};
+
 const MITM_HOST: &str = "api.anthropic.com";
 const CONNECT_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
-
-/// How long a readiness poll keeps trying before declaring the surface
-/// broken rather than slow. Generous enough to absorb a cold, loaded,
-/// fully parallel suite; short enough that a genuinely dead front fails
-/// the test instead of stalling the shard.
-const READY_DEADLINE: Duration = Duration::from_secs(10);
-
-/// Pause between readiness attempts. A poll cadence, not a readiness
-/// wait -- readiness is always the successful response itself.
-const POLL_CADENCE: Duration = Duration::from_millis(20);
 
 /// Binds an ephemeral loopback port, reads it back, then drops the
 /// listener -- reserving a free port NUMBER for `[mitm] listen_port`,
@@ -156,30 +147,6 @@ async fn spawn_test_server(config: Arc<Config>) -> String {
     base_url
 }
 
-/// Poll `GET {base_url}/health` until it returns success or the readiness
-/// deadline elapses. The inter-attempt pause is a poll cadence, not a
-/// readiness wait -- readiness is the successful response.
-///
-/// Every attempt (and the cadence pause after it) is bounded by the
-/// REMAINING deadline, not just checked between attempts: a server that
-/// completes the TCP accept but never sends response headers would
-/// otherwise park `send()` on reqwest's own (default: none) timeout and
-/// stall the shard far past `READY_DEADLINE`.
-async fn await_health(base_url: &str) {
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + READY_DEADLINE;
-    while Instant::now() < deadline {
-        let attempt = client.get(format!("{base_url}/health")).send();
-        if let Ok(Ok(response)) = tokio::time::timeout_at(deadline, attempt).await
-            && response.status().is_success()
-        {
-            return;
-        }
-        sleep_until_cadence_or_deadline(deadline).await;
-    }
-    panic!("the test server did not become healthy at {base_url}");
-}
-
 /// Poll the MITM front's CONNECT protocol until it answers `200
 /// Connection Established` for `mitm_host` (which the MITM branch
 /// answers without dialing anything) or the readiness deadline elapses.
@@ -211,13 +178,6 @@ async fn await_proxy_front(port: u16, mitm_host: &str) {
          start (a sibling claimed the reserved port number before the proxy bound it) or another \
          process holds that port"
     );
-}
-
-/// Wait one poll cadence, but never past the readiness deadline -- so the
-/// pause between attempts cannot itself push a poll loop over its bound.
-async fn sleep_until_cadence_or_deadline(deadline: Instant) {
-    let wake = (Instant::now() + POLL_CADENCE).min(deadline);
-    tokio::time::sleep_until(wake).await;
 }
 
 /// One CONNECT attempt against the MITM front. Every failure shape (no
@@ -433,12 +393,20 @@ async fn mitm_enabled_on_a_non_loopback_bind_is_hard_refused() {
 /// must not trip the MITM-specific refusal. A listener token is
 /// configured so the pre-existing (unrelated) "public bind without
 /// auth" cross-check also passes, isolating this assertion to the MITM
-/// hard-refuse specifically. `serve_on_listener` never returns on
-/// success (it serves until shutdown), so a short "still running"
-/// window is the proof both checks were cleared.
+/// hard-refuse specifically.
+///
+/// `serve_on_listener` never returns on success (it serves until
+/// shutdown), so liveness is the assertion -- but it is gated on the
+/// server ANSWERING `/health` over the non-loopback bind, not on a fixed
+/// wait. Both refusals happen before the serve loop starts, so a served
+/// `/health` can only mean the bind decision was cleared; a fixed sleep
+/// proves only that time passed and goes false-green under load. The
+/// refusal is raced against readiness so a returning regression fails
+/// immediately, naming its own error, instead of at the poll deadline.
 #[tokio::test]
 async fn mitm_absent_does_not_trip_the_hard_refuse_on_a_non_loopback_bind() {
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
 
     let config = Config {
         server: routectl_router::ServerConfig {
@@ -451,14 +419,19 @@ async fn mitm_absent_does_not_trip_the_hard_refuse_on_a_non_loopback_bind() {
     };
     let config = common::isolate_usage_db(Arc::new(config));
 
-    let handle = tokio::spawn(routectl_cli::server::serve_on_listener(
+    let mut handle = tokio::spawn(routectl_cli::server::serve_on_listener(
         config, listener, None,
     ));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        !handle.is_finished(),
-        "a non-loopback bind with [mitm] absent and listener auth configured must not error out"
-    );
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    tokio::select! {
+        served = &mut handle => panic!(
+            "a non-loopback bind with [mitm] absent and listener auth configured must not error \
+             out, but serve_on_listener returned: {served:?}"
+        ),
+        () = await_health(&base_url) => {}
+    }
+
     handle.abort();
 }
 
