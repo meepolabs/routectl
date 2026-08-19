@@ -199,3 +199,41 @@ fn a_ready_outcome_exposes_its_seats_and_an_unavailable_one_does_not() {
     assert!(unavailable.seats().is_none());
     assert_eq!(unavailable.omissions().len(), 1);
 }
+
+/// The refusal string is printed to the operator AND re-logged verbatim by the
+/// reload path, so the operator-written keys it names must arrive
+/// control-char-filtered: a pool or member key bearing a newline plus an ANSI
+/// sequence would otherwise forge a whole second log record.
+#[test]
+fn the_boot_refusal_neutralizes_control_bytes_in_pool_member_and_model_keys() {
+    // Arrange: each of the three operator-written keys carries a newline and an
+    // ANSI escape, the shape a forged log line needs.
+    let reports = vec![report(
+        "p\n\u{1b}[31mINFO forged pool line",
+        &["m\nINFO forged model line"],
+        0,
+        vec![omission(
+            "a-1\nINFO forged member line",
+            PoolOmissionReason::CredentialMissing,
+        )],
+    )];
+
+    // Act
+    let detail = unavailable_pool_error(&reports).expect("a zero-usable pool must refuse");
+
+    // Assert
+    assert_eq!(
+        detail.lines().count(),
+        1,
+        "one line per dead pool: {detail}"
+    );
+    assert!(!detail.contains('\u{1b}'), "{detail}");
+    assert!(
+        detail.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("credential_missing"),
+        "the real reason must survive: {detail}"
+    );
+}

@@ -1,6 +1,7 @@
 //! Doctor section producers.
 
 use routectl_auth::oauth::types::TokenRecord;
+use routectl_core::sanitize_for_log;
 use routectl_router::{
     ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding, Status,
     UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
@@ -11,7 +12,7 @@ use crate::commands::capability_legacy::{
 };
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
-    PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, stored_seat_pool_rows,
+    PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
 };
 
 use super::gather::{SecretCheck, SecretPresence};
@@ -184,7 +185,12 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
                 section: "config",
                 name: "validation".to_string(),
                 status: Status::Fail,
-                detail: err,
+                // Every validator formats operator-written table keys into its
+                // message, so this one render point control-char-filters the
+                // whole suite's output: a key bearing a newline plus an ANSI
+                // sequence would otherwise forge a fabricated finding line in
+                // the human render.
+                detail: sanitize_for_log(&err),
                 remediation: Some(
                     "fix the config error above, then re-run `routectl doctor`".to_string(),
                 ),
@@ -366,19 +372,30 @@ fn pool_finding(row: &PoolRow) -> Finding {
 /// stored credential is never auto-deleted or refreshed. The finding names
 /// the SEAT KEY only (provider id plus the operator's own label); no token
 /// material, account data, or storage path is disclosed.
+///
+/// The label half of the key is operator-written (`login --label`), so the key
+/// and the `logout` remediation it composes are both rendered through the
+/// shared log-safe helper: a label bearing a newline and an ANSI sequence would
+/// otherwise forge a whole finding line in the human render, and a
+/// copy-pasteable remediation is the worst place to hand one back.
 pub(super) fn section_seat_orphans(ctx: &DoctorContext) -> Vec<Finding> {
     ctx.orphan_seats
         .iter()
-        .map(|seat| Finding {
-            section: "seats",
-            name: seat.clone(),
-            status: Status::Warn,
-            detail: format!("seat `{seat}` has stored credentials but no provider entry uses it"),
-            remediation: Some(format!(
-                "reference this seat from a provider `api_key_ref` or run \
-                 `routectl logout {}` to remove it",
-                logout_target(seat)
-            )),
+        .map(|seat| {
+            let shown = safe(seat);
+            Finding {
+                section: "seats",
+                name: shown.clone(),
+                status: Status::Warn,
+                detail: format!(
+                    "seat `{shown}` has stored credentials but no provider entry uses it"
+                ),
+                remediation: Some(format!(
+                    "reference this seat from a provider `api_key_ref` or run \
+                     `routectl logout {}` to remove it",
+                    safe(&logout_target(seat))
+                )),
+            }
         })
         .collect()
 }
@@ -421,20 +438,23 @@ pub(super) fn section_auth(ctx: &DoctorContext) -> Vec<Finding> {
         .collect()
 }
 
+/// One seat's auth finding. The seat key's label half is operator-written, so
+/// both the finding name and the `login` remediation route through the shared
+/// log-safe helper -- same reason as the orphan section.
 fn auth_finding(seat_key: &str, rec: &TokenRecord, now: u64) -> Finding {
     if rec.is_locally_usable(now) {
         Finding {
             section: "auth",
-            name: seat_key.to_string(),
+            name: safe(seat_key),
             status: Status::Pass,
             detail: "logged in".to_string(),
             remediation: None,
         }
     } else {
-        let provider = seat_provider(seat_key);
+        let provider = safe(seat_provider(seat_key));
         Finding {
             section: "auth",
-            name: seat_key.to_string(),
+            name: safe(seat_key),
             status: Status::Warn,
             detail: "access token expired".to_string(),
             remediation: Some(format!(

@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+use routectl_core::sanitize_for_log;
+
 use crate::seat_pool::SeatTarget;
 
 /// Why one pool member was left out of the compiled seat set.
@@ -161,19 +163,26 @@ impl PoolOutcome {
 /// seat set. Refusing at build time gives the operator the pool and the
 /// model, instead of a server that starts healthy and fails at first
 /// traffic.
+///
+/// Every operator-written key the sentence names -- the pool, each omitted
+/// member, each routed model nickname -- is rendered through the shared log
+/// sanitizer. The string is returned as a config error that is both printed to
+/// the operator and re-logged verbatim by the reload path, so a table key
+/// bearing a newline would otherwise forge a whole log record there.
 #[must_use]
 pub fn unavailable_pool_error(reports: &[PoolReport]) -> Option<String> {
     let lines: Vec<String> = reports
         .iter()
         .filter(|report| report.is_unavailable() && !report.models.is_empty())
         .map(|report| {
+            let models: Vec<String> = report.models.iter().map(|m| sanitize_for_log(m)).collect();
             format!(
                 "pool `{}` has no usable member of {} configured (omitted: {}); \
                  models routed at it: {}",
-                report.pool,
+                sanitize_for_log(&report.pool),
                 report.configured_members,
                 omission_summary(&report.omissions),
-                report.models.join(", "),
+                models.join(", "),
             )
         })
         .collect();
@@ -185,11 +194,12 @@ pub fn unavailable_pool_error(reports: &[PoolReport]) -> Option<String> {
 }
 
 /// `member=reason` pairs for an operator-facing message. Only the member key
-/// and the allowlisted reason token, never an error string.
+/// and the allowlisted reason token, never an error string -- and the member
+/// key is sanitized, since it is the one half of the pair the operator writes.
 fn omission_summary(omissions: &[PoolMemberOmission]) -> String {
     omissions
         .iter()
-        .map(|o| format!("{}={}", o.member, o.reason.token()))
+        .map(|o| format!("{}={}", sanitize_for_log(&o.member), o.reason.token()))
         .collect::<Vec<_>>()
         .join(", ")
 }

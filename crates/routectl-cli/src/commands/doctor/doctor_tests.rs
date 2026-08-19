@@ -1114,6 +1114,39 @@ fn semantic_validation_error_reports_fail() {
     );
 }
 
+/// A validator message embeds the operator-written table keys it names, so the
+/// config battery's one render point control-char-filters the whole suite's
+/// output: a key bearing a newline plus an ANSI sequence would otherwise forge
+/// a fabricated PASS line in the human render.
+#[test]
+fn a_control_byte_bearing_config_key_cannot_forge_a_finding_line() {
+    // Arrange: the hostile bytes arrive as a `[models]` provider value, which
+    // the unknown-provider validator formats into its message verbatim.
+    let mut cfg = Config::default();
+    cfg.models.insert(
+        "sonnet".to_string(),
+        ModelEntry::new(
+            "ghost\n  \u{1b}[32mPASS forged: all good",
+            "claude-sonnet-4-5",
+        ),
+    );
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
+    // Act
+    let findings = section_config(&context);
+
+    // Assert
+    let f = find(&findings, "config", "validation");
+    assert_eq!(f.status, Status::Fail);
+    assert!(!f.detail.contains('\n'), "{:?}", f.detail);
+    assert!(!f.detail.contains('\u{1b}'), "{:?}", f.detail);
+    assert!(
+        f.detail.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+        "{:?}",
+        f.detail
+    );
+}
+
 /// When the typed config load failed, the section must NOT run the
 /// validator suite against the fallback `Config::default()` -- doing so
 /// emits a spurious Pass that contradicts the Fail the version section
@@ -1536,6 +1569,76 @@ fn labelled_orphan_remediation_carries_the_label() {
         !default.contains("--label"),
         "the default seat takes no label: {default}"
     );
+}
+
+/// A seat label is operator-written (`login --label`), so neither the orphan
+/// finding nor its copy-pasteable `logout` remediation may carry control bytes:
+/// a label embedding a newline plus an ANSI sequence would otherwise forge a
+/// fabricated finding line in the doctor human render.
+#[test]
+fn a_control_byte_bearing_orphan_seat_label_cannot_forge_a_finding_line() {
+    // Arrange
+    let hostile = "anthropic#a\n  \u{1b}[32mPASS forged: all good";
+    let mut context = ctx(
+        Config::default(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
+    context.orphan_seats = vec![hostile.to_string()];
+
+    // Act
+    let findings = section_seat_orphans(&context);
+
+    // Assert
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    let remediation = f.remediation.as_deref().expect("orphan carries a fix");
+    for text in [f.name.as_str(), f.detail.as_str(), remediation] {
+        assert!(!text.contains('\n'), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert!(
+            text.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+            "{text}"
+        );
+    }
+}
+
+/// Same treatment on the auth section, which names every stored seat key: a
+/// hostile label reaches `Finding::name` there and, for an expired seat, the
+/// `login` remediation too.
+#[test]
+fn a_control_byte_bearing_seat_label_cannot_forge_an_auth_finding_line() {
+    // Arrange: one usable seat and one expired seat, both hostile-labelled, so
+    // both arms of the auth finding are covered.
+    let hostile_live = "anthropic#live\n  \u{1b}[32mPASS forged: all good";
+    let hostile_expired = "anthropic#dead\n  \u{1b}[31mPASS forged: all good";
+    let context = ctx(
+        Config::default(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        vec![
+            (hostile_live.to_string(), token_record(9_000)),
+            (hostile_expired.to_string(), token_record_no_refresh(1)),
+        ],
+    );
+
+    // Act
+    let findings = section_auth(&context);
+
+    // Assert
+    assert_eq!(findings.len(), 2, "{findings:?}");
+    for f in &findings {
+        let texts = [f.name.as_str(), f.detail.as_str()];
+        for text in texts.iter().copied().chain(f.remediation.as_deref()) {
+            assert!(!text.contains('\n'), "{text}");
+            assert!(!text.contains('\u{1b}'), "{text}");
+            assert!(
+                text.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+                "{text}"
+            );
+        }
+    }
 }
 
 /// No token material, refresh token, or account identity from a stored seat

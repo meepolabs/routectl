@@ -492,6 +492,43 @@ fn a_delimiter_bearing_member_name_cannot_forge_a_second_selection_clause() {
     );
 }
 
+/// The two remaining characters the pool sentence's grammar uses -- the `=` of
+/// an `entry=seat` pair and the backtick that quotes the pool name -- are
+/// neutralized too, so a member key cannot forge an extra pair in the listing
+/// and a pool key cannot close its own quoting.
+#[test]
+fn an_equals_or_backtick_bearing_key_cannot_forge_a_pair_or_close_the_quoting() {
+    // Arrange
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.\"ghost=default\"]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [pools.\"p`x\"]\n\
+         members = [\"ghost=default\"]\n",
+    )
+    .expect("hostile pool fixture parses");
+
+    // Act
+    let sentence = describe_pool(&pool_rows(&config, Some(&keys(&["anthropic"]))).remove(0));
+
+    // Assert
+    assert_eq!(
+        sentence.matches('=').count(),
+        1,
+        "exactly one entry=seat pair may render for one member: {sentence}"
+    );
+    assert_eq!(
+        sentence.matches('`').count(),
+        2,
+        "the pool name's quoting must stay balanced: {sentence}"
+    );
+    assert!(
+        sentence.starts_with("pool `p?x` has 1 member (ghost?default=default)"),
+        "{sentence}"
+    );
+}
+
 /// A hostile config ENTRY key cannot forge a second `config check` row: the
 /// block gives each row one line separated from its sentence by `: `, and the
 /// key cannot reproduce that separator.
