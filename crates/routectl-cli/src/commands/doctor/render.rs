@@ -71,6 +71,7 @@ fn section_title(key: &str) -> &'static str {
         "version" => "Config schema version",
         "config" => "Config validation",
         "auth" => "OAuth credentials",
+        "pools" => "OAuth seat pools",
         "seats" => "OAuth seats",
         "secrets" => "Managed secrets",
         "probe" => "Provider reachability",

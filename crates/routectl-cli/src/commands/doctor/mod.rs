@@ -36,7 +36,8 @@ use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
     section_auth, section_capability, section_config, section_freshness, section_inventory,
-    section_probe, section_seat_orphans, section_secret_orphans, section_version,
+    section_probe, section_seat_orphans, section_seat_pools, section_secret_orphans,
+    section_version,
 };
 
 pub(crate) use self::gather::gather_context_no_network;
@@ -62,7 +63,11 @@ pub(crate) use self::gather::gather_context_no_network;
 ///
 /// v4 -> v5: the `seats` section joins the report, one finding per stored
 /// OAuth seat no provider entry references.
-const SCHEMA_VERSION: u32 = 5;
+///
+/// v5 -> v6: the additive `pools` section joins the report, one purely
+/// informational Pass finding per `oauth://` reference describing how many
+/// stored seats it resolves to and which seat-selection strategy applies.
+const SCHEMA_VERSION: u32 = 6;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -78,6 +83,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("version", section_version),
     ("config", section_config),
     ("auth", section_auth),
+    ("pools", section_seat_pools),
     ("seats", section_seat_orphans),
     ("secrets", section_secret_orphans),
     ("probe", section_probe),
@@ -99,6 +105,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("version", section_version),
     ("config", section_config),
     ("auth", section_auth),
+    ("pools", section_seat_pools),
     ("seats", section_seat_orphans),
     ("secrets", section_secret_orphans),
     ("capability", section_capability),
