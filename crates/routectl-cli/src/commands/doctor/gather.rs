@@ -499,23 +499,40 @@ pub(super) fn gather_orphan_secrets(config: &Config) -> Vec<String> {
     orphans
 }
 
-/// The `oauth://` coverage the config's provider entries express, split by
-/// how each ref resolves at dispatch:
+/// The `oauth://` coverage the config expresses, split by which seat each ref
+/// resolves to at dispatch:
 ///
-///   - `pooled_providers` -- providers named by a BARE `oauth://<provider>`
-///     ref (label `None`). Such a ref is a POOL ref: the factory expands it
-///     through `list_seats` into every stored seat of that provider, so a
-///     bare ref covers the default seat AND every labelled sibling.
+///   - `default_seat_providers` -- providers named by a BARE
+///     `oauth://<provider>` ref (label `None`). Schema version 4 made a bare
+///     ref the DEFAULT SEAT alone: it covers no labelled sibling, and
+///     `[pools]` is the multi-seat shape that replaced the old expansion.
 ///   - `pinned_seats` -- full seat keys named by a LABELLED
 ///     `oauth://<provider>#<label>` ref. A labelled ref pins exactly that one
 ///     seat and covers no sibling, not even the default.
+///
+/// A pool covers exactly the seats its MEMBERS' own refs name, so walking
+/// every provider entry already covers pool membership: a member is a
+/// `[providers.X]` entry like any other. Nothing extra is contributed by the
+/// `[pools]` blocks themselves -- a pool holds no credential ref.
 struct SeatCoverage {
-    pooled_providers: BTreeSet<String>,
+    default_seat_providers: BTreeSet<String>,
     pinned_seats: BTreeSet<String>,
 }
 
+impl SeatCoverage {
+    /// Whether any config ref reaches `seat_key`. A labelled seat needs a ref
+    /// naming it (a pool member's pinned ref, or a standalone pinned entry);
+    /// the default seat needs a bare ref for its provider.
+    fn covers(&self, seat_key: &str) -> bool {
+        match seat_key.split_once('#') {
+            Some(_) => self.pinned_seats.contains(seat_key),
+            None => self.default_seat_providers.contains(seat_key),
+        }
+    }
+}
+
 fn referenced_seat_coverage(config: &Config) -> SeatCoverage {
-    let mut pooled_providers = BTreeSet::new();
+    let mut default_seat_providers = BTreeSet::new();
     let mut pinned_seats = BTreeSet::new();
     for entry in config.providers.values() {
         for uri in entry.secret_uris() {
@@ -527,13 +544,13 @@ fn referenced_seat_coverage(config: &Config) -> SeatCoverage {
                     pinned_seats.insert(seat_key(&provider, Some(&label)));
                 }
                 None => {
-                    pooled_providers.insert(provider);
+                    default_seat_providers.insert(provider);
                 }
             }
         }
     }
     SeatCoverage {
-        pooled_providers,
+        default_seat_providers,
         pinned_seats,
     }
 }
@@ -544,21 +561,19 @@ fn referenced_seat_coverage(config: &Config) -> SeatCoverage {
 /// default seat, `<provider>#<label>` for a labelled one) no provider entry
 /// reaches; nothing is ever refreshed, rewritten, or removed.
 ///
-/// Seat matching is by FULL seat identity, with pool expansion honored: a
-/// labelled ref pins one seat, so the default seat of that provider is an
-/// orphan unless something else reaches it; a bare pool ref reaches every
-/// stored seat of its provider, so no sibling of a pooled provider is an
-/// orphan. The returned strings carry only the provider id and the operator's
-/// own seat label -- never token material, account data, or a storage path.
+/// Seat matching is by FULL seat identity: every ref names exactly one seat.
+/// A labelled ref pins that seat, so the default seat of that provider is an
+/// orphan unless something else reaches it; a bare ref pins the DEFAULT seat,
+/// so a labelled seat is an orphan unless some ref names it by label -- which
+/// in a pooled configuration is a pool MEMBER's own pinned ref. The returned
+/// strings carry only the provider id and the operator's own seat label --
+/// never token material, account data, or a storage path.
 pub(super) fn gather_orphan_seats(config: &Config, seats: &[(String, TokenRecord)]) -> Vec<String> {
     let coverage = referenced_seat_coverage(config);
     let mut orphans: Vec<String> = seats
         .iter()
         .map(|(key, _)| key.as_str())
-        .filter(|key| {
-            let provider = key.split_once('#').map_or(*key, |(p, _)| p);
-            !coverage.pooled_providers.contains(provider) && !coverage.pinned_seats.contains(*key)
-        })
+        .filter(|key| !coverage.covers(key))
         .map(str::to_string)
         .collect();
     orphans.sort();

@@ -4180,9 +4180,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ``alias/model/provider `X` `` clauses, and unresolvable messages fall back
   unchanged (a display aid only, never a taxonomy change). `check` also prints
   the informational OAuth seat-pool block from
-  `seat_report::seat_pool_lines`, counting seats through a direct
+  `seat_report::seat_pool_lines` (one line per `[pools.<name>]` block, then one
+  per provider entry no pool claims), reading seat presence through a direct
   `OAuthStore::open_default` (never the composite, whose absent oauth arm
-  would fabricate a "1 seat" reading); the block never enters `CheckReport`
+  would fabricate a present-seat reading); the block never enters `CheckReport`
   and never moves the exit code. `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
   example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
@@ -4507,14 +4508,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   OAuth commands (rejects empty/whitespace labels, mirroring the `oauth://`
   ref parser)
 - `src/commands/seat_report.rs` -- shared OAuth seat-pool report: pure
-  `stored_seat_pool_rows(config, Option<&[seat_key]>)` joins every provider
-  entry's `oauth://` refs (walked via `secret_uris`, the same basis as the
-  orphan scan) against a stored-seat-key snapshot (`None` = store unreadable
-  -> `SeatCount::Unknown`), plus `describe_row` (THE one sentence both doctor
-  and `config check` render), `seat_pool_lines` (the check block) and
-  `selection_label`. Signatures take seat KEYS only, never a `TokenRecord`, so
-  token material cannot reach the render; labels and entry names go through
-  `routectl_core::sanitize_for_log`
+  `pool_rows(config, Option<&[seat_key]>)` joins every `[pools.<name>]` block
+  against its members' refs (`PoolRow`/`PoolMember`/`PoolHealth`
+  Ready/Degraded/Unusable/Unknown), and `stored_seat_pool_rows` joins every
+  provider entry's `oauth://` refs (walked via `secret_uris`, the same basis as
+  the orphan scan) against a stored-seat-key snapshot (`None` = store
+  unreadable -> `SeatCount::Unknown`), each `SeatPoolRow` carrying
+  `pool: Option<String>` for the block claiming its entry. `describe_pool` and
+  `describe_row` are THE two sentences both doctor and `config check` render (a
+  ref pins exactly ONE seat -- the default for a bare ref -- so the strategy is
+  stated on the POOL, never on a standalone entry); `seat_pool_lines` renders
+  the check block (pools first, then only the entries no pool claims) and
+  `selection_label` names each strategy. Signatures take seat KEYS only, never
+  a `TokenRecord`, so token material cannot reach the render; labels, pool
+  names and entry names go through `routectl_core::sanitize_for_log`
 - `src/commands/staleness_hint.rs` -- catalog-overlay staleness nudge for the
   human CLI verbs. Pure `staleness_hint_line(verified_at, threshold_days,
   today_epoch_days)` (delegates the strict-greater-than age check to
@@ -4806,13 +4813,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `gather_orphan_secrets`/`referenced_secret_files` is a read-only
   managed-secret-dir vs `file://`-refs diff (never deletes).
   `gather_orphan_seats`/`referenced_seat_coverage` is the STORED-OAuth-seat
-  sibling of that diff: it splits the config's `oauth://` refs into
-  pool-covered providers (a bare `oauth://<provider>` reaches every stored seat
-  of that provider, matching the factory's `list_seats` expansion) and
+  sibling of that diff: every `oauth://` ref names exactly ONE seat, so it
+  splits them into default-seat providers (a bare `oauth://<provider>` reaches
+  the DEFAULT seat alone -- config schema version 4 retired the old
+  `list_seats` expansion, and `[pools]` is the multi-seat shape) and
   label-pinned seat keys (`oauth://<provider>#<label>` covers that seat ONLY,
-  never the default or a sibling label), then reports the stored seat keys no
-  ref reaches -- seat key only, never token material or a storage path, and
-  nothing is refreshed or removed.
+  never the default or a sibling label). `SeatCoverage::covers` is the single
+  predicate both classes route through, so a labelled seat is covered only by a
+  ref naming it -- in a pooled config, that pool member's own pinned ref. It
+  then reports the stored seat keys no ref reaches -- seat key only, never
+  token material or a storage path, and nothing is refreshed or removed.
   `build_capability_inputs` resolves the config-derived capability inputs
   (legacy keys + `derive_prior_cells` -- one prior per model whose
   `EffectiveRow::Present` carries capability data, retaining its `verified_at`
@@ -4843,10 +4853,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   skipped" + the secret checks when the typed load failed, so a broken file
   never emits a spurious validation `Pass`) + the leak-safe secret-presence
   scan, auth (no seats/expired -> WARN, store-open error -> FAIL), pools
-  (`section_seat_pools`: one purely informational `Pass` finding per
-  `oauth://` ref per entry, pinned refs included, detail from
-  `seat_report::describe_row`, remediation always `None`, Unknown wording when
-  `auth_store_error` is set), seats
+  (`section_seat_pools` + `pool_finding`: one finding per `[pools.<name>]`
+  block from `seat_report::describe_pool` -- Warn naming a member with no
+  stored credential, Fail when no member has one, so this section CAN move the
+  exit code -- then one purely informational `Pass` per `oauth://` ref on an
+  entry NO pool claims, detail from `seat_report::describe_row`. Presence is
+  config-plus-store only, since a doctor pass builds no router; an
+  `auth_store_error` yields unknown presence and neither Warn nor Fail), seats
   (`section_seat_orphans`: a stored OAuth seat no provider entry references ->
   WARN naming the seat key, remediation via `logout_target` so a labelled
   seat's `routectl logout` hint carries `--label` rather than wiping the

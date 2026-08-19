@@ -67,7 +67,14 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// v5 -> v6: the additive `pools` section joins the report, one purely
 /// informational Pass finding per `oauth://` reference describing how many
 /// stored seats it resolves to and which seat-selection strategy applies.
-const SCHEMA_VERSION: u32 = 6;
+///
+/// v6 -> v7: the `pools` section's finding SET and statuses change. Config
+/// schema version 4 made `[pools.<name>]` the multi-seat shape, so a finding
+/// is now keyed on the POOL (its members and their seats, the strategy, the
+/// growth marker) with the per-ref rows reduced to the entries no pool claims.
+/// The section can also now Warn (a member with no stored credential) and Fail
+/// (a pool with none), so it is no longer exit-code-neutral.
+const SCHEMA_VERSION: u32 = 7;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

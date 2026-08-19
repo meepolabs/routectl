@@ -1017,8 +1017,10 @@ fn write_oauth_config(dir: &std::path::Path, ref_uri: &str) -> std::path::PathBu
     config_path
 }
 
+/// A bare ref on a standalone entry pins the DEFAULT seat: the stored
+/// labelled sibling is NOT claimed by it, and no strategy applies.
 #[test]
-fn config_check_reports_stored_seats_for_a_pool_ref() {
+fn config_check_reports_the_default_seat_for_a_bare_ref() {
     let tmp = tempfile::tempdir().unwrap();
     seed_credentials(
         tmp.path(),
@@ -1039,13 +1041,68 @@ fn config_check_reports_stored_seats_for_a_pool_ref() {
         "expected the seat-pool block header, got: {stdout}"
     );
     assert!(
-        stdout
-            .contains("managed: pool ref oauth://anthropic resolves to 2 seats (default, seat-b)"),
-        "expected both seats named under the entry key, got: {stdout}"
+        stdout.contains(
+            "managed: ref oauth://anthropic pins the default seat; \
+             seat_selection not applicable to a single-seat ref"
+        ),
+        "expected the default-seat wording, got: {stdout}"
     );
     assert!(
-        stdout.contains("seat_selection fill-first (default)"),
-        "expected the strategy clause, got: {stdout}"
+        !stdout.contains("seat-b"),
+        "a bare ref must not claim a labelled sibling, got: {stdout}"
+    );
+}
+
+/// A `[pools.<name>]` block renders as ONE line naming its members, their
+/// seats, the strategy and the growth marker -- and its members do not also
+/// render as standalone rows.
+#[test]
+fn config_check_reports_a_named_pool_with_its_members_and_strategy() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_credentials(
+        tmp.path(),
+        &[
+            ("anthropic", "default@example.com"),
+            ("anthropic#seat-b", "seat-b@example.com"),
+        ],
+    );
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [providers.anthropic-default]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             [providers.anthropic-seat-b]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#seat-b\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             [pools.anthropic]\n\
+             members = [\"anthropic-default\", \"anthropic-seat-b\"]\n\
+             seat_selection = \"round-robin\"\n\
+             accepts_new_logins = true\n"
+        ),
+    )
+    .expect("write pooled config");
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert_eq!(code, 0, "seat block is informational: {stdout} / {stderr}");
+    assert!(
+        stdout.contains(
+            "pool `anthropic` has 2 members \
+             (anthropic-default=default, anthropic-seat-b=seat-b); \
+             seat_selection round-robin; accepts new logins: yes"
+        ),
+        "expected the pool line, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("anthropic-default: ref"),
+        "a pool member must not also render a standalone row, got: {stdout}"
     );
 }
 
@@ -1094,16 +1151,17 @@ fn config_check_reports_no_stored_seats_for_an_empty_store() {
         "an empty store is not a failure: {stdout} / {stderr}"
     );
     assert!(
-        stdout.contains("pool ref oauth://anthropic has no stored seats"),
+        stdout
+            .contains("ref oauth://anthropic pins the default seat (no stored credential for it)"),
         "expected the empty-store wording, got: {stdout}"
     );
 }
 
 /// With neither `HOME` nor `XDG_CONFIG_HOME` set the store cannot be opened
-/// at all: the count renders unknown, the strategy still renders, no path is
-/// disclosed, and check still exits 0.
+/// at all: presence renders unknown, no path is disclosed, and check still
+/// exits 0.
 #[test]
-fn config_check_reports_unknown_seat_count_when_the_store_cannot_open() {
+fn config_check_reports_unknown_seat_presence_when_the_store_cannot_open() {
     let tmp = tempfile::tempdir().unwrap();
     let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
     let path = config_path.to_str().unwrap();
@@ -1121,13 +1179,20 @@ fn config_check_reports_unknown_seat_count_when_the_store_cannot_open() {
         Some(0),
         "an unreadable store must not fail check: {stdout}"
     );
+    // Scoped to the block's own line: the secret-ref resolution WARNING that
+    // follows legitimately names the store file, and that message is the auth
+    // layer's, not this block's.
+    let block_line = stdout
+        .lines()
+        .find(|line| line.contains("ref oauth://anthropic"))
+        .expect("the seat-pool block renders one line for the ref");
     assert!(
-        stdout.contains("seat count unknown (credential store unavailable)"),
-        "expected the unknown-count wording, got: {stdout}"
+        block_line.contains("store presence unknown - credential store unavailable"),
+        "expected the unknown-presence wording, got: {block_line}"
     );
     assert!(
-        stdout.contains("seat_selection fill-first (default)"),
-        "the strategy is config-derived and stays known, got: {stdout}"
+        !block_line.contains("credentials.json"),
+        "the block must disclose no storage path, got: {block_line}"
     );
 }
 

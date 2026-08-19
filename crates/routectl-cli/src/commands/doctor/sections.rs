@@ -10,7 +10,9 @@ use crate::commands::capability_legacy::{
     LEGACY_ALLOWED_BETAS, LEGACY_ALLOWED_BODY_FIELDS, LEGACY_UNSUPPORTED_FEATURES,
 };
 use crate::commands::probe::{login_id_for, probe_finding};
-use crate::commands::seat_report::{describe_row, stored_seat_pool_rows};
+use crate::commands::seat_report::{
+    PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, stored_seat_pool_rows,
+};
 
 use super::gather::{SecretCheck, SecretPresence};
 use super::{DoctorContext, FreshnessInputs};
@@ -274,18 +276,33 @@ pub(super) fn section_secret_orphans(ctx: &DoctorContext) -> Vec<Finding> {
         .collect()
 }
 
-/// OAuth seat-pool section: one purely informational finding per `oauth://`
-/// reference per provider entry, INCLUDING label-pinned refs. Every finding
-/// is `Pass` with no remediation -- the section describes what a ref resolves
-/// to and which selection strategy applies, so it can never advise and can
-/// never move the exit code. The seat count and wording come from the shared
-/// [`crate::commands::seat_report`] join, so this section and `config check`
-/// tell one story from one state.
+/// OAuth seat-pool section: one finding per `[pools.<name>]` block, then one
+/// per `oauth://` reference on a provider entry NO pool claims.
 ///
-/// The join is derived here from `ctx.seats` keys plus `ctx.config`; no extra
-/// gathering plumbing exists for it. When the credential store failed to
-/// open, the snapshot is `None` (Unknown wording, strategy still rendered) --
-/// the auth section keeps sole ownership of the store `Fail`.
+/// A pool is the unit an operator reasons about, so the pool line names its
+/// members and their seats, its `seat_selection`, whether it accepts new
+/// logins, and any member the credential store holds no seat for. A pool
+/// missing a member's credential is a `Warn` naming the member; a pool no
+/// member of which has a stored credential is a `Fail` -- every model naming
+/// it is unroutable. Standalone ref rows stay purely informational `Pass`
+/// findings with no remediation.
+///
+/// LIMIT, deliberate: this section runs on a doctor pass that builds NO
+/// router, so the presence answers come from the config plus the read-only
+/// store snapshot. A member whose credential IS stored but which the factory
+/// could not compile into a dispatch seat (a refused refresh, a provider block
+/// the factory rejects) is only observable at BUILD time -- the router retains
+/// that report for a surface that has a built router. This section therefore
+/// under-reports degradation rather than guessing at it, and never claims a
+/// pool is healthy in build terms.
+///
+/// The join and wording come from the shared
+/// [`crate::commands::seat_report`] module, so this section and `config check`
+/// tell one story from one state. It is derived here from `ctx.seats` keys plus
+/// `ctx.config`; no extra gathering plumbing exists for it. When the credential
+/// store failed to open, the snapshot is `None` (unknown presence, strategy
+/// still rendered, no Warn or Fail claimed) -- the auth section keeps sole
+/// ownership of the store `Fail`.
 pub(super) fn section_seat_pools(ctx: &DoctorContext) -> Vec<Finding> {
     let stored: Vec<String> = ctx.seats.iter().map(|(key, _)| key.clone()).collect();
     let snapshot = if ctx.auth_store_error.is_some() {
@@ -293,16 +310,55 @@ pub(super) fn section_seat_pools(ctx: &DoctorContext) -> Vec<Finding> {
     } else {
         Some(stored.as_slice())
     };
-    stored_seat_pool_rows(&ctx.config, snapshot)
+    let mut findings: Vec<Finding> = pool_rows(&ctx.config, snapshot)
         .iter()
-        .map(|row| Finding {
-            section: "pools",
-            name: row.entry.clone(),
-            status: Status::Pass,
-            detail: describe_row(row),
-            remediation: None,
-        })
-        .collect()
+        .map(pool_finding)
+        .collect();
+    findings.extend(
+        stored_seat_pool_rows(&ctx.config, snapshot)
+            .iter()
+            .filter(|row| row.pool.is_none())
+            .map(|row| Finding {
+                section: "pools",
+                name: row.entry.clone(),
+                status: Status::Pass,
+                detail: describe_row(row),
+                remediation: None,
+            }),
+    );
+    findings
+}
+
+/// One pool's finding: the shared pool sentence, with the status and the
+/// remediation drawn from what the config plus the store snapshot can see.
+fn pool_finding(row: &PoolRow) -> Finding {
+    let (status, remediation) = match row.health {
+        PoolHealth::Ready | PoolHealth::Unknown => (Status::Pass, None),
+        PoolHealth::Degraded => (
+            Status::Warn,
+            Some(
+                "log in the account each omitted member names \
+                 (`routectl login <provider> --label <label>`) or remove it from the pool"
+                    .to_string(),
+            ),
+        ),
+        PoolHealth::Unusable => (
+            Status::Fail,
+            Some(
+                "log in at least one of this pool's accounts \
+                 (`routectl login <provider> --label <label>`); every model naming \
+                 the pool is unroutable until one member resolves"
+                    .to_string(),
+            ),
+        ),
+    };
+    Finding {
+        section: "pools",
+        name: row.pool.clone(),
+        status,
+        detail: describe_pool(row),
+        remediation,
+    }
 }
 
 /// Orphan-seat section: each stored OAuth seat no provider entry's

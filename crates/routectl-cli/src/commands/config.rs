@@ -4,7 +4,7 @@ use routectl_auth::{OAuthStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_dotted_path};
 
-use crate::commands::seat_report::{seat_pool_lines, stored_seat_pool_rows};
+use crate::commands::seat_report::{pool_rows, seat_pool_lines, stored_seat_pool_rows};
 use crate::server::CompositeStore;
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
@@ -63,10 +63,11 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
         config.server.host, config.server.port
     );
 
-    let seat_lines = seat_pool_lines(&stored_seat_pool_rows(
-        config,
-        stored_seat_keys().await.as_deref(),
-    ));
+    let stored = stored_seat_keys().await;
+    let seat_lines = seat_pool_lines(
+        &pool_rows(config, stored.as_deref()),
+        &stored_seat_pool_rows(config, stored.as_deref()),
+    );
     if !seat_lines.is_empty() {
         println!();
         for line in &seat_lines {

@@ -1,28 +1,35 @@
-//! Shared OAuth seat-pool reporting: the join of the config's `oauth://`
-//! refs against the STORED seat keys, plus the one sentence every operator
-//! surface renders for it.
+//! Shared OAuth seat-pool reporting: the join of the config's `[pools]`
+//! blocks and `oauth://` refs against the STORED seat keys, plus the sentences
+//! every operator surface renders for them.
 //!
 //! Both `routectl doctor` and `routectl config check` describe seat pools, so
 //! the join and its wording live here once and cannot drift between them.
 //! Everything in this module is pure and synchronous: the caller opens the
 //! credential store (or fails to) and passes a seat-key snapshot in.
 //!
+//! A `[pools.<name>]` block is THE multi-seat shape: the pool is the rendered
+//! unit (its members, its strategy, whether it accepts new logins), while a
+//! `oauth://<provider>` ref on a standalone provider entry pins exactly one
+//! seat -- the default one -- and carries no strategy of its own.
+//!
 //! Secret-material guard by construction: the entry points take seat KEYS
 //! (`<provider>` / `<provider>#<label>`), never a `TokenRecord`, so no token,
-//! account identity, or storage path can reach the rendered text. Seat labels
-//! and config entry names are operator-controlled input, so both are rendered
-//! through the shared log-safe sanitizer -- a label bearing newlines or ANSI
-//! escapes cannot forge a finding line.
+//! account identity, or storage path can reach the rendered text. Seat labels,
+//! pool names, and config entry names are operator-controlled input, so all
+//! three are rendered through the shared log-safe sanitizer -- a label bearing
+//! newlines or ANSI escapes cannot forge a finding line.
 
 use routectl_auth::SecretRef;
 use routectl_core::sanitize_for_log;
 use routectl_router::Config;
 use routectl_router::config::SeatSelection;
 
-/// How many seats a pool ref resolves to, as far as the caller could tell.
+/// Whether the seat a ref names is present in the credential store, as far as
+/// the caller could tell.
 ///
-/// `Known` carries DISPLAY-ONLY seat labels: the default seat renders as
-/// `default` and comes first, followed by the labelled seats in sorted order.
+/// `Known` carries the DISPLAY-ONLY labels the ref resolves to: `default` for
+/// a bare ref that the store holds a default seat for, the pinned label for a
+/// `#label` ref, and nothing at all when the store holds no such seat.
 /// `Unknown` means the credential store could not be read at all -- reserved
 /// for an OPEN failure, never for an empty store (nothing logged in is
 /// `Known(0)`, which is an accurate answer).
@@ -34,19 +41,143 @@ pub(crate) enum SeatCount {
 /// One `oauth://` reference expressed by one provider entry, joined against
 /// the stored seats.
 ///
-/// For a bare pool ref `seats` is what the store holds for that provider. A
-/// pinned ref names exactly one seat by config, so its count comes from the
-/// ref rather than the store; whether that seat is logged in is the
-/// secret-presence check's story, not the pool's.
+/// Every ref names exactly ONE seat: a bare `oauth://<provider>` ref the
+/// provider's default seat, a `#label` ref that labelled seat. `seats` is
+/// therefore a presence answer, not a count -- it lists the one label when the
+/// store holds the seat and nothing when it does not.
 pub(crate) struct SeatPoolRow {
     /// The config entry key this ref belongs to (`[providers.<entry>]`).
     pub(crate) entry: String,
     /// The oauth provider id named by the ref.
     pub(crate) oauth_provider: String,
-    /// `Some(label)` for a `#label`-pinned ref, `None` for a bare pool ref.
+    /// `Some(label)` for a `#label`-pinned ref, `None` for a bare
+    /// default-seat ref.
     pub(crate) pinned_label: Option<String>,
     pub(crate) seats: SeatCount,
     pub(crate) selection: SeatSelection,
+    /// The `[pools.<name>]` block claiming this entry, when one does. A member
+    /// row's own sentence names its pool; the pool itself renders as a
+    /// [`PoolRow`], which is the unit an operator reasons about.
+    pub(crate) pool: Option<String>,
+}
+
+/// One `[pools.<name>]` block: its members joined against the stored seats,
+/// plus the two policy facts an operator sets on it.
+pub(crate) struct PoolRow {
+    /// The `[pools]` table key.
+    pub(crate) pool: String,
+    /// Every declared member, in declaration order.
+    pub(crate) members: Vec<PoolMember>,
+    /// The strategy dispatch picks members with.
+    pub(crate) selection: SeatSelection,
+    /// Whether a future `routectl login` may propose joining a new account.
+    pub(crate) accepts_new_logins: bool,
+    /// What the config plus the store snapshot say this pool can serve.
+    pub(crate) health: PoolHealth,
+}
+
+/// One declared pool member: the provider entry, the seat its ref names, and
+/// whether the store holds that seat.
+pub(crate) struct PoolMember {
+    /// The `[providers]` table key.
+    pub(crate) entry: String,
+    /// The seat the member's ref names: `default` for a bare ref, the label
+    /// for a pinned one. `None` when the member declares no `oauth://` ref at
+    /// all (validation rejects that; the render stays defensive).
+    pub(crate) seat: Option<String>,
+    /// Whether the store holds that seat. `None` when the store could not be
+    /// opened, or when the member names no oauth seat to look for.
+    pub(crate) stored: Option<bool>,
+}
+
+/// What a pool can serve, derived from the config plus the store snapshot.
+///
+/// This is a CONFIG-AND-STORE verdict, not the build's: a member whose
+/// credential is stored can still fail to compile into a dispatch seat (a
+/// refused refresh, a provider block the factory rejects). Only the build
+/// observes that, and no doctor or `config check` run builds a router.
+pub(crate) enum PoolHealth {
+    /// The store holds the seat every member names.
+    Ready,
+    /// The store holds at least one member's seat and is missing at least one.
+    Degraded,
+    /// The store holds no member's seat: every model naming this pool is
+    /// unroutable.
+    Unusable,
+    /// The credential store could not be opened, so presence is unknowable.
+    Unknown,
+}
+
+/// Join every `[pools.<name>]` block against its members' refs and
+/// `stored_seat_keys`.
+///
+/// `stored_seat_keys` is a snapshot of the credential store's seat keys;
+/// `None` means the store could not be opened, and every pool then reports
+/// `Unknown` health with no per-member presence claim.
+pub(crate) fn pool_rows(config: &Config, stored_seat_keys: Option<&[String]>) -> Vec<PoolRow> {
+    config
+        .pools
+        .iter()
+        .map(|(name, pool)| {
+            let members: Vec<PoolMember> = pool
+                .members
+                .iter()
+                .map(|member| pool_member(config, member, stored_seat_keys))
+                .collect();
+            PoolRow {
+                pool: safe(name),
+                health: pool_health(&members, stored_seat_keys.is_none()),
+                members,
+                selection: pool.seat_selection,
+                accepts_new_logins: pool.accepts_new_logins,
+            }
+        })
+        .collect()
+}
+
+/// One member's join: the seat its first `oauth://` ref names, and whether
+/// the snapshot holds it.
+fn pool_member(config: &Config, member: &str, stored_seat_keys: Option<&[String]>) -> PoolMember {
+    let seat_ref = config
+        .providers
+        .get(member)
+        .into_iter()
+        .flat_map(routectl_router::ProviderEntry::secret_uris)
+        .find_map(|uri| match SecretRef::parse(uri) {
+            Ok(SecretRef::OAuth { provider, label }) => Some((provider, label)),
+            _ => None,
+        });
+    let (seat, stored) = match (seat_ref, stored_seat_keys) {
+        (None, _) => (None, None),
+        (Some((_, label)), None) => (Some(seat_display(label.as_deref())), None),
+        (Some((provider, label)), Some(keys)) => {
+            let wanted = seat_key(&provider, label.as_deref());
+            (
+                Some(seat_display(label.as_deref())),
+                Some(keys.contains(&wanted)),
+            )
+        }
+    };
+    PoolMember {
+        entry: safe(member),
+        seat,
+        stored,
+    }
+}
+
+/// The pool's verdict over its members' presence answers.
+fn pool_health(members: &[PoolMember], store_unreadable: bool) -> PoolHealth {
+    if store_unreadable {
+        return PoolHealth::Unknown;
+    }
+    let stored = members.iter().filter(|m| m.stored == Some(true)).count();
+    if stored == 0 {
+        PoolHealth::Unusable
+    } else if stored < members.len() {
+        PoolHealth::Degraded
+    } else {
+        PoolHealth::Ready
+    }
 }
 
 /// Join every provider entry's `oauth://` refs against `stored_seat_keys`.
@@ -63,19 +194,18 @@ pub(crate) fn stored_seat_pool_rows(
     let mut rows = Vec::new();
     for (entry, provider_entry) in &config.providers {
         // The strategy is a pool property: an entry claimed by a pool
-        // renders that pool's strategy, a standalone entry the fill-first
-        // default. Naming the pool in the sentence is the render task's
-        // work, not this join's.
+        // renders that pool's strategy, a standalone entry has no strategy
+        // to apply because its ref names one seat.
         let selection = config.seat_selection_for(entry);
+        let pool = claiming_pool(config, entry).map(safe);
         for uri in provider_entry.secret_uris() {
             let Ok(SecretRef::OAuth { provider, label }) = SecretRef::parse(uri) else {
                 continue;
             };
-            let seats = match (stored_seat_keys, label.as_deref()) {
-                (None, _) => SeatCount::Unknown,
-                (Some(keys), None) => SeatCount::Known(pool_labels(&provider, keys)),
-                (Some(keys), Some(label)) => {
-                    SeatCount::Known(pinned_labels(&provider, label, keys))
+            let seats = match stored_seat_keys {
+                None => SeatCount::Unknown,
+                Some(keys) => {
+                    SeatCount::Known(present_seat_labels(&provider, label.as_deref(), keys))
                 }
             };
             rows.push(SeatPoolRow {
@@ -84,61 +214,143 @@ pub(crate) fn stored_seat_pool_rows(
                 pinned_label: label.as_deref().map(safe),
                 seats,
                 selection,
+                pool: pool.clone(),
             });
         }
     }
     rows
 }
 
-/// THE shared seat-pool sentence. Purely informational: it states what the
-/// ref resolves to and which selection strategy applies, and never advises.
+/// The `[pools]` key of the pool claiming `entry`, when one does. Validation
+/// rejects a provider claimed by two pools, so there is at most one answer for
+/// any config that passed the gate.
+fn claiming_pool<'a>(config: &'a Config, entry: &str) -> Option<&'a str> {
+    config
+        .pools
+        .iter()
+        .find(|(_, pool)| pool.members.iter().any(|member| member == entry))
+        .map(|(name, _)| name.as_str())
+}
+
+/// THE shared per-ref sentence. Purely informational: it states which seat the
+/// ref pins and, for a pool member, which pool owns the strategy. It never
+/// advises.
 pub(crate) fn describe_row(row: &SeatPoolRow) -> String {
     let provider = &row.oauth_provider;
     if let Some(label) = &row.pinned_label {
         return format!(
-            "ref oauth://{provider}#{label} pins 1 seat; \
-             seat_selection not applicable to a pinned ref"
+            "ref oauth://{provider}#{label} pins 1 seat{}{}",
+            presence_clause(&row.seats),
+            pool_clause(row),
         );
     }
-    match &row.seats {
-        // The strategy is config-derived, so it is known even when the seat
-        // count is not; the single-seat "inactive" nuance cannot be claimed
-        // here, so the plain label renders.
-        SeatCount::Unknown => format!(
-            "pool ref oauth://{provider}: seat count unknown \
-             (credential store unavailable); seat_selection {}",
-            selection_label(row.selection)
-        ),
-        SeatCount::Known(labels) if labels.is_empty() => {
-            format!("pool ref oauth://{provider} has no stored seats")
-        }
-        SeatCount::Known(labels) => {
-            let strategy = if labels.len() == 1 {
-                single_seat_selection_label(row.selection)
-            } else {
-                selection_label(row.selection)
-            };
-            format!(
-                "pool ref oauth://{provider} resolves to {} ({}); seat_selection {strategy}",
-                seat_plural(labels.len()),
-                render_labels(labels)
-            )
-        }
+    // A bare ref pins the provider's DEFAULT seat and nothing else -- it is
+    // not a set, so there is no count to state and no strategy to apply.
+    format!(
+        "ref oauth://{provider} pins the default seat{}{}",
+        presence_clause(&row.seats),
+        pool_clause(row),
+    )
+}
+
+/// The store-presence clause of a per-ref sentence. A ref names its seat by
+/// CONFIG whether or not that seat is logged in, so presence is reported
+/// alongside the pin rather than folded into it.
+const fn presence_clause(seats: &SeatCount) -> &'static str {
+    match seats {
+        SeatCount::Unknown => " (store presence unknown - credential store unavailable)",
+        SeatCount::Known(labels) if labels.is_empty() => " (no stored credential for it)",
+        SeatCount::Known(_) => "",
     }
 }
 
-/// The `config check` seat-pool block: a header plus one line per row. Empty
-/// when no provider carries an oauth ref, so an api-key-only config renders
-/// no header noise.
+/// The strategy clause. A pool owns the strategy, so a member row names its
+/// pool and the strategy in force; a standalone entry states plainly that
+/// `seat_selection` has nothing to select between.
+fn pool_clause(row: &SeatPoolRow) -> String {
+    match &row.pool {
+        Some(pool) => format!(
+            "; member of pool `{pool}` with seat_selection {}",
+            selection_label(row.selection)
+        ),
+        None => "; seat_selection not applicable to a single-seat ref".to_string(),
+    }
+}
+
+/// THE shared pool sentence: what the pool is made of, how dispatch picks
+/// among it, whether it grows, and which members have no stored credential.
+pub(crate) fn describe_pool(row: &PoolRow) -> String {
+    let mut sentence = format!(
+        "pool `{}` has {} ({}); seat_selection {}; accepts new logins: {}",
+        row.pool,
+        plural(row.members.len(), "member"),
+        render_labels(&member_labels(&row.members)),
+        selection_label(row.selection),
+        if row.accepts_new_logins { "yes" } else { "no" },
+    );
+    match row.health {
+        PoolHealth::Ready => {}
+        PoolHealth::Degraded => {
+            let missing = render_labels(&missing_member_entries(&row.members));
+            sentence.push_str(&format!("; no stored credential for {missing}"));
+        }
+        PoolHealth::Unusable => {
+            sentence.push_str("; no member has a stored credential");
+        }
+        PoolHealth::Unknown => {
+            sentence
+                .push_str("; member credential presence unknown (credential store unavailable)");
+        }
+    }
+    sentence
+}
+
+/// `entry=seat` display pairs, one per member. A member declaring no
+/// `oauth://` ref renders `entry=none` rather than being dropped, so the
+/// member count and the listing always agree.
+fn member_labels(members: &[PoolMember]) -> Vec<String> {
+    members
+        .iter()
+        .map(|member| {
+            let seat = member.seat.as_deref().unwrap_or("none");
+            format!("{}={seat}", member.entry)
+        })
+        .collect()
+}
+
+/// The `[providers]` keys of the members whose seat the store does not hold.
+fn missing_member_entries(members: &[PoolMember]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|member| member.stored != Some(true))
+        .map(|member| member.entry.clone())
+        .collect()
+}
+
+/// The `config check` seat-pool block: a header, one line per pool, then one
+/// line per provider entry NOT claimed by a pool. Empty when the config
+/// declares no pool and no provider carries an oauth ref, so an api-key-only
+/// config renders no header noise.
+///
+/// Pool members are deliberately not repeated as standalone rows: the pool
+/// line already names every member and its seat, and a duplicated per-member
+/// line would read as a second, independent dispatch target.
 // Rendered as a returned line vector rather than printed, so the block is
 // testable without stdout capture.
-pub(crate) fn seat_pool_lines(rows: &[SeatPoolRow]) -> Vec<String> {
-    if rows.is_empty() {
+pub(crate) fn seat_pool_lines(pools: &[PoolRow], rows: &[SeatPoolRow]) -> Vec<String> {
+    let standalone: Vec<&SeatPoolRow> = rows.iter().filter(|row| row.pool.is_none()).collect();
+    if pools.is_empty() && standalone.is_empty() {
         return Vec::new();
     }
     let mut lines = vec!["oauth seat pools:".to_string()];
     lines.extend(
-        rows.iter()
+        pools
+            .iter()
+            .map(|pool| format!("  {}", describe_pool(pool))),
+    );
+    lines.extend(
+        standalone
+            .iter()
             .map(|row| format!("  {}: {}", row.entry, describe_row(row))),
     );
     lines
@@ -156,61 +368,49 @@ pub(crate) const fn selection_label(selection: SeatSelection) -> &'static str {
     }
 }
 
-/// [`selection_label`] for a pool that resolves to exactly one seat: the
-/// strategy is configured but has nothing to choose between. Factual, not
-/// advisory -- a single-seat pool is a normal configuration.
-const fn single_seat_selection_label(selection: SeatSelection) -> &'static str {
-    match selection {
-        SeatSelection::FillFirst => "fill-first (default; inactive at 1 seat)",
-        SeatSelection::RoundRobin => "round-robin (inactive at 1 seat)",
-        SeatSelection::StickyLeastLoaded => "sticky-least-loaded (inactive at 1 seat)",
+/// The display label of the seat a ref names: `default` for a bare ref, the
+/// operator's own label for a pinned one.
+fn seat_display(label: Option<&str>) -> String {
+    label.map_or_else(|| "default".to_string(), safe)
+}
+
+/// The credential-store seat key a ref resolves to: the bare provider id for
+/// the default seat, `<provider>#<label>` for a labelled one. Mirrors the
+/// store's own key shape, so a ref and a stored seat compare as strings.
+fn seat_key(provider: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("{provider}#{label}"),
+        None => provider.to_string(),
     }
 }
 
-/// Display labels of every stored seat a BARE pool ref expands to: the
-/// default seat first (as `default`), then the labelled siblings sorted.
-fn pool_labels(provider: &str, stored_seat_keys: &[String]) -> Vec<String> {
-    let mut labels: Vec<String> = Vec::new();
-    let mut has_default = false;
-    for key in stored_seat_keys {
-        match key.split_once('#') {
-            None if key == provider => has_default = true,
-            Some((key_provider, label)) if key_provider == provider => labels.push(safe(label)),
-            _ => {}
-        }
-    }
-    labels.sort();
-    if has_default {
-        labels.insert(0, "default".to_string());
-    }
-    labels
-}
-
-/// Display labels for a `#label`-pinned ref: the pinned seat when the store
-/// holds it, nothing when it does not.
+/// The display label of the ONE seat this ref names, when the store holds it;
+/// nothing when it does not.
 ///
-/// [`describe_row`] deliberately does NOT read this -- a pinned ref pins one
-/// seat by CONFIG whether or not that seat is logged in, and whether it is
-/// belongs to the secret-presence check. The value is retained so a future
-/// presence-aware renderer states store presence explicitly rather than
-/// silently contradicting the "pins 1 seat" count.
-fn pinned_labels(provider: &str, label: &str, stored_seat_keys: &[String]) -> Vec<String> {
-    let pinned = format!("{provider}#{label}");
-    if stored_seat_keys.contains(&pinned) {
-        vec![safe(label)]
+/// A bare ref names the default seat alone -- schema version 4 retired the
+/// bare-ref-expands-to-every-stored-seat reading, and `[pools]` is the
+/// multi-seat shape that replaced it.
+fn present_seat_labels(
+    provider: &str,
+    label: Option<&str>,
+    stored_seat_keys: &[String],
+) -> Vec<String> {
+    let wanted = seat_key(provider, label);
+    if stored_seat_keys.contains(&wanted) {
+        vec![seat_display(label)]
     } else {
         Vec::new()
     }
 }
 
-/// How many seat labels the sentence lists before collapsing the tail. A
-/// credential store can legitimately hold hundreds of seats, and the sentence
-/// is printed ahead of the `config check` warnings and errors -- an uncapped
-/// list would bury them. The COUNT stays exact; only the listing is bounded.
+/// How many labels a sentence lists before collapsing the tail. A pool may
+/// hold up to 32 members, and the sentence is printed ahead of the `config
+/// check` warnings and errors -- an uncapped list would bury them. The COUNT
+/// stays exact; only the listing is bounded.
 const MAX_LISTED_LABELS: usize = 10;
 
-/// The parenthesized seat listing: the first [`MAX_LISTED_LABELS`] labels,
-/// with the remainder collapsed to `and K more`.
+/// A comma-separated listing: the first [`MAX_LISTED_LABELS`] entries, with
+/// the remainder collapsed to `and K more`.
 fn render_labels(labels: &[String]) -> String {
     if labels.len() <= MAX_LISTED_LABELS {
         return labels.join(", ");
@@ -220,11 +420,11 @@ fn render_labels(labels: &[String]) -> String {
     format!("{shown}, and {hidden} more")
 }
 
-fn seat_plural(count: usize) -> String {
+fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
-        "1 seat".to_string()
+        format!("1 {noun}")
     } else {
-        format!("{count} seats")
+        format!("{count} {noun}s")
     }
 }
 
@@ -233,7 +433,7 @@ fn seat_plural(count: usize) -> String {
 /// Beyond the control-byte/ANSI filtering the shared sanitizer performs, every
 /// character this module's own grammar carries meaning with (`( ) , ; :`) is
 /// neutralized: a label such as `a); seat_selection round-robin (b` would
-/// otherwise close the seat list and forge a syntactically perfect second
+/// otherwise close the member list and forge a syntactically perfect second
 /// strategy clause, and a `:`-bearing config entry key would forge a second
 /// `config check` row on the one line the block gives it.
 fn safe(s: &str) -> String {
