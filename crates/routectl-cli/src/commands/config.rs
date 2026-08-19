@@ -349,6 +349,46 @@ mod emitted_example_tests {
             "the emitted example must declare providers"
         );
     }
+
+    /// The shipped example must pass `routectl config check` with ZERO
+    /// errors on a clean machine -- an operator's first command after
+    /// copying it in is that check, and a bundled example the repo's own
+    /// validator rejects teaches the wrong shape before it teaches
+    /// anything else.
+    ///
+    /// Both error-producing halves of the check are asserted, because they
+    /// fail independently: [`secret_ref_parse_errors`] rejects a ref whose
+    /// SCHEME does not parse (a `file://<local-path>` placeholder, a
+    /// `literal:` inline key), and [`validation_report`] owns the semantic
+    /// suite (unknown model targets, pool coherence, namespace collisions).
+    ///
+    /// Hermetic by construction: both are sync and store-free, so this
+    /// reads no env var, opens no credential store, and touches no HOME.
+    /// That is also the boundary of what it proves -- an `env://VAR` that
+    /// is unset and an `oauth://` seat with nothing logged in are
+    /// WARNINGS, and the example is deliberately shipped in exactly that
+    /// state: it passes the check without being boot-ready.
+    #[test]
+    fn the_shipped_example_config_passes_check_as_shipped() {
+        // Arrange
+        let text = EXAMPLE_CONFIG;
+        let config: Config = toml::from_str(text).expect("the shipped example must parse");
+
+        // Act
+        let parse_errors = secret_ref_parse_errors(&config, Some(text));
+        let report = validation_report(&config, Some(text));
+
+        // Assert
+        assert!(
+            parse_errors.is_empty(),
+            "every credential ref in examples/config.toml must parse: {parse_errors:?}"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "examples/config.toml must pass the shared validator suite: {:?}",
+            report.errors
+        );
+    }
 }
 
 #[cfg(test)]

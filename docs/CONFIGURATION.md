@@ -5,7 +5,8 @@ overlays merge, what's reserved.
 
 > **In a hurry:** run `routectl init` (guided setup wizard), or copy
 > [`examples/config.toml`](../examples/config.toml)
-> for a working end-to-end config (print one anytime with
+> for a full reference config -- it passes `routectl config check` as
+> shipped, and needs only credentials to serve (print one anytime with
 > `routectl config example`). Then jump to
 > [Getting started](#getting-started-provider--model--alias),
 > [claude-code as a gateway
@@ -89,18 +90,24 @@ client sends to that model (or to a fallback chain of them):
 version = 4           # config schema version; routectl refuses older
                       # files until `routectl config migrate` runs
 
-[providers.anthropic]
+[providers.anthropic-api-key]
 kind        = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 
 [models.heavy]
-provider = "anthropic"
+provider = "anthropic-api-key"
 upstream = "claude-opus-4-20250514"
 
 [aliases]
 heavy   = "heavy"
 default = "heavy"     # catch-all for unmatched model strings
 ```
+
+The entry is named `anthropic-api-key`, not the bare family name
+`anthropic`: providers, pools and model nicknames share ONE namespace, so
+an entry holding the plain family name makes `[pools.anthropic]`
+unnameable, and a later `routectl login anthropic` then has nowhere to
+put a second subscription seat.
 
 Save as `~/.config/routectl/config.toml`, then `routectl config check`
 and `routectl serve`. Credentials always arrive as references --
@@ -124,6 +131,10 @@ version = 4           # config schema version; see "Config schema version"
 
 [providers.X]         # transport + auth: how to reach an upstream
 [providers.Y]         # one block per upstream (multiple Y allowed)
+
+[pools.X]             # a group of same-kind provider entries (OAuth
+                      # accounts) dispatch spreads across: members,
+                      # seat_selection, accepts_new_logins. Optional.
 
 [models.X]            # per-model behavior: provider ref, upstream id,
                       # reasoning defaults, header/payload extras
@@ -185,11 +196,15 @@ version = 4           # config schema version; see "Config schema version"
                       # (absence = zero proxy startup).
 ```
 
-[`examples/config.toml`](../examples/config.toml) is a working
-end-to-end reference; [`examples/bedrock.toml`](../examples/bedrock.toml)
+[`examples/config.toml`](../examples/config.toml) passes `routectl config
+check` exactly as shipped, but it is NOT boot-ready: every credential in
+it is a REFERENCE, and none resolves until the named env var is set or
+the matching `routectl login` has run (an unresolved ref is a warning,
+never an error). [`examples/bedrock.toml`](../examples/bedrock.toml)
 ships an empirical Bedrock allowlist baseline (16 betas + 16 body
-fields). Copy and edit; do not re-derive. Carrying a v1
-`[cache_pricing]` table: see
+fields) as a `[bedrock]`-section FRAGMENT, not a whole config -- paste it
+into your own file rather than checking it standalone. Copy and edit; do
+not re-derive. Carrying a v1 `[cache_pricing]` table: see
 [Retired: `[cache_pricing]`](#retired-cache_pricing).
 
 ## Config schema version (`version`)
@@ -420,13 +435,15 @@ nickname; nothing else in the config does.
 
 ```toml
 [models.heavy]
-provider   = "anthropic"                  # required; a [providers] key
+provider   = "anthropic-api-key"          # required; a [providers] or
+                                          # [pools] key
 upstream   = "claude-opus-4-20250514"     # required; the upstream wire id
 selectable = true                         # default true
 ```
 
-- **`provider`** (string, required) -- the `[providers.X]` key this model
-  dispatches through. Validated at startup against the provider table.
+- **`provider`** (string, required) -- the `[providers.X]` entry or
+  `[pools.X]` block this model dispatches through. Validated at startup
+  against both tables, which share one namespace.
 - **`upstream`** (string, required) -- the model id forwarded to the
   upstream verbatim. For Bedrock this is the inference-profile id (e.g.
   `us.anthropic.claude-haiku-4-5-20251001-v1:0`); for OpenAI-shaped
@@ -1046,7 +1063,10 @@ Fields:
     credential record. See the cloud-code stanza below and
     [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code).
 
-Cloud Code (OAuth) stanza:
+Cloud Code (OAuth) stanza. `routectl login antigravity` offers this entry
+under the convention's name (`antigravity-default`) plus its pool, so the
+hand-written form below is for an entry you want to name or tune
+yourself:
 
 ```toml
 [providers.gemini-cloud-code]
@@ -2791,7 +2811,7 @@ auto_emit_per_block_breakpoints = true
 
 # Opt the real Anthropic surface back out without touching the terminal
 # marker.
-[providers.anthropic]
+[providers.anthropic-api-key]
 kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 auto_emit_per_block_breakpoints = false
@@ -3557,11 +3577,55 @@ provider permits -- see the README "Responsible use" section.
    **routectl-managed OAuth (recommended).** Run
    `routectl login anthropic` once -- it opens the browser to the
    claude.ai consent flow, captures the `sk-ant-oat01-...` token, and
-   persists it to `~/.config/routectl/credentials.json`. Then in the
-   TOML:
+   persists it to `~/.config/routectl/credentials.json`. It then OFFERS
+   the config change that makes the new seat reachable, prints that exact
+   delta, and writes it on confirmation:
+
+   ```text
+   Credential stored. This config change would route to it:
+
+   [providers.anthropic-default]
+   kind        = "anthropic-api"
+   auth_kind   = "oauth-bearer"
+   api_key_ref = "oauth://anthropic"
+
+   [pools.anthropic]
+   members = ["anthropic-default"]
+   accepts_new_logins = true
+   ```
+
+   Answer the confirmation (or pass `--yes`, which skips the PROMPT but
+   never the printed delta) and the entry plus its pool land in the file.
+   Declining writes nothing and exits 0 -- the credential is stored
+   either way, so the block above is also what to paste by hand. Points
+   worth knowing:
+
+   - The entry is `anthropic-default`, not the bare `anthropic`: the
+     plain family name belongs to the POOL, and providers, pools and
+     model nicknames share one namespace.
+   - `accepts_new_logins = true` is written only for a pool this login
+     CREATES. It is what lets a later
+     `routectl login anthropic --label <name>` offer to join its new seat
+     to the same pool; login never flips an existing marker.
+   - A re-login for a seat the config already reaches proposes nothing.
+   - Login never CREATES `config.toml` (that is `routectl config init`),
+     and never edits one this build must not write -- it prints the block
+     and exits 0 instead.
+   - After the write it names whatever routing is still missing: a
+     `[models.X]` naming the pool, or an `[aliases]` entry reaching that
+     model. The upstream model id is never guessed.
+
+   The `oauth://anthropic` ref resolves at request time against the
+   credentials store; the `auth_kind = "oauth-bearer"` flag emits
+   `Authorization: Bearer <token>` instead of `x-api-key`.
+
+   For the claude-code client identity (`user_agent`, forwarded session
+   headers, the full stainless header pack) the offered entry is a
+   starting point rather than the finished article -- add those fields to
+   `[providers.anthropic-default]`:
 
    ```toml
-   [providers.anthropic-managed]
+   [providers.anthropic-default]
    kind          = "anthropic-api"
    api_key_ref   = "oauth://anthropic"
    auth_kind     = "oauth-bearer"
@@ -3571,19 +3635,19 @@ provider permits -- see the README "Responsible use" section.
        "x-claude-code-agent-id",
        "x-claude-code-parent-agent-id",
    ]
-   # plus a [providers.anthropic-managed.header_extras] sub-table --
+   # plus a [providers.anthropic-default.header_extras] sub-table --
    # see "Header pack" below
    ```
 
-   The `oauth://anthropic` ref resolves at request time against the
-   credentials store; the `auth_kind = "oauth-bearer"` flag emits
-   `Authorization: Bearer <token>` instead of `x-api-key`.
+   Keep it as ONE entry: a second entry naming the same
+   `oauth://anthropic` seat makes a later login ambiguous, and it refuses
+   to guess which of the two a pool should grow around.
 
    **Anthropic API key (no OAuth).** Standard pattern, no `routectl
    login` needed:
 
    ```toml
-   [providers.anthropic-api]
+   [providers.anthropic-api-key]
    kind        = "anthropic-api"
    api_key_ref = "env://ANTHROPIC_API_KEY"
    auth_kind   = "api-key"
@@ -3592,19 +3656,21 @@ provider permits -- see the README "Responsible use" section.
 3. Add models and aliases that match what claude-code expects on the
    wire. claude-code 2.1.x sends `claude-haiku-4-5-...`,
    `claude-sonnet-4-...`, `claude-opus-4-...` model strings; the
-   suffix-glob aliases collapse the per-version churn:
+   suffix-glob aliases collapse the per-version churn. Point them at the
+   POOL rather than the member entry, so a second subscription seat added
+   by a later login serves the same models with no further edit:
 
    ```toml
    [models.anthropic-haiku]
-   provider = "anthropic-managed"
+   provider = "anthropic"
    upstream = "claude-haiku-4-5-20251001"
 
    [models.anthropic-sonnet]
-   provider = "anthropic-managed"
+   provider = "anthropic"
    upstream = "claude-sonnet-4-6"
 
    [models.anthropic-opus]
-   provider = "anthropic-managed"
+   provider = "anthropic"
    upstream = "claude-opus-4-7"
 
    [aliases]
@@ -3745,7 +3811,12 @@ with its own expiry.
 Seats are NOT declared in this file. They live in the credential store
 (`credentials.json`), and the only way to add one is to log in:
 `routectl login <provider> --label <name>`. The config's `api_key_ref`
-selects among the seats already stored; it never creates one. `routectl
+selects among the seats already stored; it never creates one. What the
+login DOES do to this file is offer the provider entry (and, on a first
+login for the family, the pool) that consumes the new seat -- printed
+before anything is written, applied on confirmation or with `--yes`,
+skipped entirely when there is no config file to edit. A pool without
+`accepts_new_logins = true` is never grown that way. `routectl
 config check` and `routectl doctor` both report each pool -- its members
 and the seat each names, its strategy, whether it accepts new logins, and
 any member the credential store holds no seat for -- plus one line per
@@ -3867,13 +3938,14 @@ the family, its members suffixed) with the models routed through it.
 
 ### Header pack ("look like claude-code")
 
-Drop this into `header_extras` on the anthropic-managed provider so
-the upstream sees the same SDK fingerprint claude-code 2.1.143 sends
-from the bundled `@anthropic-ai/sdk`. Written as a sub-table -- a
-multi-line inline table (`{ ... }` spanning lines) is not legal TOML:
+Drop this into `header_extras` on the OAuth-bearer Anthropic entry (the
+one `routectl login anthropic` wrote) so the upstream sees the same SDK
+fingerprint claude-code 2.1.143 sends from the bundled
+`@anthropic-ai/sdk`. Written as a sub-table -- a multi-line inline table
+(`{ ... }` spanning lines) is not legal TOML:
 
 ```toml
-[providers.anthropic-managed.header_extras]
+[providers.anthropic-default.header_extras]
 "anthropic-beta"                            = "claude-code-20250219,oauth-2025-04-20"
 "x-app"                                     = "cli"
 "anthropic-dangerous-direct-browser-access" = "true"
@@ -3945,16 +4017,28 @@ is rejected, because the OpenAI auth flow has no headless paste-back
 landing page. SSH / headless operators should port-forward 1455 to the
 local box and use the default browser flow.
 
-Then in `~/.config/routectl/config.toml`:
+The login then OFFERS the config change that consumes the new seat and
+writes it on confirmation (`--yes` skips the prompt, never the printed
+delta), so the block below usually lands without hand-editing:
 
 ```toml
-[providers.codex]
+[providers.codex-default]
 kind        = "openai-responses"
 auth_kind   = "chatgpt-oauth"
 api_key_ref = "oauth://codex"
 # account_id_ref omitted: routectl reads `chatgpt_account_id` off the
 # OAuth-session JWT and injects it as the `ChatGPT-Account-Id` header.
+
+[pools.codex]
+members = ["codex-default"]
+accepts_new_logins = true
 ```
+
+The entry takes the `-default` suffix because the plain family name
+`codex` is the POOL's; `accepts_new_logins = true` on a pool this login
+created is what lets `routectl login codex --label <name>` offer to join
+a second ChatGPT account later. Declining writes nothing and exits 0 --
+paste the block by hand instead.
 
 The `oauth://codex` ref resolves at request time against the credentials
 store; rotation is picked up live without restarting routectl. When the
@@ -3990,7 +4074,7 @@ rebuilding, so an operator can track a newer upstream codex release the
 moment it lands rather than waiting for a routectl release.
 
 ```toml
-[providers.codex]
+[providers.codex-default]
 kind          = "openai-responses"
 auth_kind     = "chatgpt-oauth"
 api_key_ref   = "oauth://codex"
@@ -4045,21 +4129,27 @@ no secondary fallback port. If 56121 is busy on your machine, the login will fai
 with a clear bind-error rather than silently binding an unregistered port and
 confusing xAI's redirect validation.
 
-Then in `~/.config/routectl/config.toml`:
+The login then OFFERS this config change and writes it on confirmation
+(`--yes` skips the prompt, never the printed delta):
 
 ```toml
-[providers.xai]
+[providers.xai-default]
 kind        = "openai-compat"
 base_url    = "https://api.x.ai/v1"   # REQUIRED non-empty on this kind
 api_key_ref = "oauth://xai"
+
+[pools.xai]
+members = ["xai-default"]
+accepts_new_logins = true
 ```
 
 The `openai-compat` variant carries NO auth-selector field -- entries are
 `deny_unknown_fields`, so writing an `auth_kind` here fails config load with
 `unknown field`. The `oauth://` scheme on `api_key_ref` is what selects the
 bearer surface; `base_url` must be spelled out because validation rejects an
-empty one on this kind. `routectl login xai` prints exactly this block on
-success.
+empty one on this kind. Declining the offer writes nothing and exits 0 --
+`routectl login xai` prints exactly this block either way, so it can be
+pasted by hand.
 
 The `oauth://xai` ref resolves at request time against the credentials store;
 rotation is picked up live without restarting routectl. When the upstream marks
