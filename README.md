@@ -147,6 +147,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the crate map.
 Minimal example:
 
 ```toml
+version = 4                      # config schema version
+
 [server]
 host = "127.0.0.1"
 port = 8787
@@ -155,26 +157,32 @@ port = 8787
 kind = "openai-compat"
 base_url = "https://api.deepseek.com/v1"
 api_key_ref = "env://DEEPSEEK_API_KEY"
-reasoning_dialect = "deepseek"
 
-[providers.anthropic]
+# Named `anthropic-api-key`, not the bare family name: providers, pools
+# and model nicknames share ONE namespace, so an entry holding `anthropic`
+# would make `[pools.anthropic]` unnameable and leave a later
+# `routectl login anthropic` nowhere to put a subscription seat.
+[providers.anthropic-api-key]
 kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 
 [models.fast]
 provider = "deepseek"
 upstream = "deepseek-chat"
+reasoning_dialect = "deepseek"   # a MODEL knob, not a provider one
 
 [models.heavy]
-provider = "anthropic"
+provider = "anthropic-api-key"
 upstream = "claude-opus-4-20250514"
 supports_adaptive_thinking = true
 
 [aliases]
-fast  = "fast"
-heavy = ["heavy", "fast"]        # fallback chain
-"claude-opus-*" = "heavy"        # suffix-glob routing
-default = "fast"
+# An alias key must not equal the nickname it points at -- alias
+# resolution would read that as a one-hop cycle and refuse the config.
+"deepseek-chat"  = "fast"
+"claude-opus-*"  = "heavy"       # suffix-glob routing
+big              = ["heavy", "fast"]   # fallback chain
+default          = "fast"
 ```
 
 Credentials resolve through URI schemes; inline literals are rejected

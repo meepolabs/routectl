@@ -99,9 +99,13 @@ provider = "anthropic-api-key"
 upstream = "claude-opus-4-20250514"
 
 [aliases]
-heavy   = "heavy"
+"claude-opus-*" = "heavy"
 default = "heavy"     # catch-all for unmatched model strings
 ```
+
+An alias key must differ from the model nickname it points at: alias
+resolution walks keys through the alias table before reaching a model, so
+`heavy = "heavy"` reads as a one-hop cycle and is refused.
 
 The entry is named `anthropic-api-key`, not the bare family name
 `anthropic`: providers, pools and model nicknames share ONE namespace, so
@@ -569,14 +573,14 @@ Anthropic ingress lifts the header into `req.anthropic_beta = ["foo"]`
 (unchanged in v0.6.0). Then:
 
 ```toml
-[providers.anthropic-oauth]
+[providers.anthropic-default]
 kind = "anthropic-api"
 api_key_ref = "env://ROUTECTL_ANTHROPIC"
 auth_kind = "oauth-bearer"
 header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
 [models.anthropic-opus]
-provider = "anthropic-oauth"
+provider = "anthropic-default"
 upstream = "claude-opus-4-7"
 header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
 ```
@@ -1799,7 +1803,7 @@ validation. Rare in practice; typical claude-code clients send
 
 ```toml
 [models.opus-legacy]
-provider          = "anthropic-oauth"
+provider          = "anthropic-default"
 upstream          = "claude-opus-4"
 # Older Opus 4 caps max_tokens at 32000; lower the baseline so callers
 # omitting max_tokens do not 400.
