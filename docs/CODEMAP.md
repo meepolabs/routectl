@@ -1939,6 +1939,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_prefix_epochs_from` /
   `carry_over_calibration_from` / `carry_over_quota_from` /
+  `carry_over_pool_state_from` (per-POOL rotation cursors + the sticky-pin
+  membership reconcile: adopts surviving pools' cursor `Arc`s into a FRESH map
+  and re-picks a retired member's pins once onto a survivor) /
   `carry_over_learned_from` reload carries +
   `install_catalog_overlay` (the
   single writer of the RETAINED accepted overlay and its revision stamp), the
@@ -2326,10 +2329,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   persistable `provider#label` credential identity of a `SecretRef`, `None`
   for every non-OAuth scheme so no path or env-var name reaches the usage
   ledger), `seat_order_for_request`
-  + `RoundRobinCursors` (per-pool `AtomicUsize` rotating the start seat per
-  request under `RoundRobin`; `FillFirst` walks a fixed default-first order);
-  `StickyLeastLoaded` selection adds `StickyPins` (a bounded-LRU `session_key
-  -> SeatPin{state_key, repinned}` map, held behind an `Arc` on `Router` and
+  + `RoundRobinCursors` (one `Arc<AtomicUsize>` per POOL rotating the start
+  seat per request under `RoundRobin`, so two models naming one pool share ONE
+  cursor and interleave across its accounts; carried across a hot-reload into
+  a FRESH map by `carry_over_pool_state_from`, so a renamed or dropped pool
+  starts over rather than accumulating; `FillFirst` walks a fixed
+  default-first order);
+  `StickyLeastLoaded` selection adds `StickyPins` (a bounded-LRU
+  `sticky_pin_key(session, pool) -> SeatPin{member, repinned}` map -- keyed per
+  session per POOL, so a session stays on ONE ACCOUNT across every model of
+  that pool, and storing the MEMBER rather than a model-scoped `state_key`
+  because a model-scoped key would read as a miss for every sibling model
+  sharing the pin; held behind an `Arc` on `Router` and
   SHARED -- not copied -- across a hot-reload via `carry_over_sticky_from`,
   which also shares the anti-herd `tiebreak` counter), the pure comparator
   `pick_least_loaded`

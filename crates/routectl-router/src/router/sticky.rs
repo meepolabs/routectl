@@ -154,8 +154,9 @@ impl Router {
     pub(super) fn keyless_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
-        nickname: &str,
+        model: &crate::resolved::ResolvedModel,
     ) -> (Vec<usize>, Option<&'static str>) {
+        let nickname = model.nickname.as_str();
         let quota = self.quota_tiers_for_birth(seats);
         let mut decision = QuotaDecision::Dormant;
         let ordered = if quota.is_empty() {
@@ -176,7 +177,7 @@ impl Router {
             Some(order) => (order, Some("keyless_quota")),
             None => (
                 crate::seat_pool::seat_order_for_request(
-                    nickname,
+                    model.rotation_key(),
                     seats.len(),
                     crate::config::SeatSelection::StickyLeastLoaded,
                     &self.round_robin,
@@ -214,13 +215,13 @@ impl Router {
         key: &str,
         nickname: &str,
     ) -> (Vec<usize>, &'static str) {
-        // A pinned state_key no longer present in this pool resolves to None
+        // A pinned member no longer present in this pool resolves to None
         // -> treated as a miss (re-pick), and `repinned` resets to false on
         // the fresh birth -- correct.
         let pin: Option<(usize, bool)> = self.sticky_pins.get(key).and_then(|p| {
             seats
                 .iter()
-                .position(|s| s.state_key_for(nickname) == p.state_key)
+                .position(|s| s.provider_name == p.member)
                 .map(|i| (i, p.repinned))
         });
 
@@ -305,32 +306,32 @@ impl Router {
     ) -> &'static str {
         match outcome {
             crate::seat_pool::SelectionOutcome::Birth { home } => {
-                let state_key = seats[home].state_key_for(nickname);
+                let member = seats[home].provider_name.clone();
                 tracing::debug!(
-                    state_key = %state_key,
-                    member = %seats[home].provider_name,
+                    state_key = %seats[home].state_key_for(nickname),
+                    member = %member,
                     "sticky least-loaded birth pick: pinned session to seat"
                 );
                 self.sticky_pins.put(
                     key,
                     crate::seat_pool::SeatPin {
-                        state_key,
+                        member,
                         repinned: false,
                     },
                 );
                 "birth_pick"
             }
             crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
-                let state_key = seats[home].state_key_for(nickname);
+                let member = seats[home].provider_name.clone();
                 tracing::debug!(
-                    state_key = %state_key,
-                    member = %seats[home].provider_name,
+                    state_key = %seats[home].state_key_for(nickname),
+                    member = %member,
                     "sticky least-loaded overflow-repin: migrated session to healthy sibling"
                 );
                 self.sticky_pins.put(
                     key,
                     crate::seat_pool::SeatPin {
-                        state_key,
+                        member,
                         repinned: true,
                     },
                 );

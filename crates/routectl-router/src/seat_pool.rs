@@ -139,46 +139,91 @@ pub fn seat_identity(secret_ref: Option<&SecretRef>) -> Option<String> {
     }
 }
 
-/// Per-pool round-robin cursor set. Holds one [`AtomicUsize`] per pooled
-/// model nickname; `RoundRobin` selection advances the cursor by one per
-/// request via `fetch_add`. Lives on the `Router` alongside `state`.
+/// Per-pool round-robin cursor set. Holds one `AtomicUsize` per rotation
+/// namespace -- the POOL name for a pool-backed model, so two models on one
+/// pool advance ONE cursor and their traffic interleaves across the pool's
+/// accounts instead of each model rotating the accounts independently.
+/// `RoundRobin` selection advances the cursor by one per request via
+/// `fetch_add`. Lives on the `Router` alongside `state`.
 ///
-/// The cursor is deliberately NOT carried over on a Router rebuild -- a
-/// reset to seat 0 on hot-reload is benign at single-operator scale (the
-/// only cost is one request landing on the default seat instead of the
-/// next-in-rotation seat). `FillFirst` pools need no cursor and are never
-/// inserted here.
+/// Each cursor sits behind its own `Arc` so a hot-reload can carry the
+/// SURVIVING pools' cursors onto the replacement Router (see
+/// `Router::carry_over_pool_state_from`) while a request still holding the
+/// outgoing Router advances the same atomic. A pool the new config no longer
+/// declares -- including a RENAMED one, which is a new pool -- simply has no
+/// key in the fresh map and its cursor is dropped with the old Router.
+/// `FillFirst` pools need no cursor and are never inserted here.
 #[derive(Debug, Default)]
 pub struct RoundRobinCursors {
-    cursors: BTreeMap<String, AtomicUsize>,
+    cursors: BTreeMap<String, Arc<AtomicUsize>>,
 }
 
 impl RoundRobinCursors {
-    /// Register a round-robin cursor for a pooled nickname. Idempotent:
-    /// re-registering keeps the existing cursor. Call at install time for
-    /// each pooled model whose `seat_selection` is `RoundRobin`.
-    pub fn register(&mut self, nickname: &str) {
+    /// Register a round-robin cursor for one rotation namespace (a pool
+    /// name). Idempotent: re-registering keeps the existing cursor, which is
+    /// what lets every model naming one pool register the same key. Call at
+    /// install time for each pooled model whose `seat_selection` is
+    /// `RoundRobin`.
+    pub fn register(&mut self, rotation_key: &str) {
         self.cursors
-            .entry(nickname.to_string())
-            .or_insert_with(|| AtomicUsize::new(0));
+            .entry(rotation_key.to_string())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
     }
 
     /// Return the starting offset for this request and advance the cursor.
-    /// `None` when no cursor is registered for `nickname` (the pool is
-    /// `FillFirst`, or the nickname is not pooled) -- callers treat that as
+    /// `None` when no cursor is registered for `rotation_key` (the pool is
+    /// `FillFirst`, or the target is not pooled) -- callers treat that as
     /// "start at seat 0, fixed order".
-    fn next_start(&self, nickname: &str) -> Option<usize> {
+    fn next_start(&self, rotation_key: &str) -> Option<usize> {
         self.cursors
-            .get(nickname)
+            .get(rotation_key)
             .map(|c| c.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Adopt `previous`'s cursor for every rotation namespace THIS set
+    /// already registered, sharing each `Arc` rather than copying its value.
+    ///
+    /// Writes into the fresh map rather than mutating the previous one: the
+    /// keys are exactly the pools the new config declares, so a run of
+    /// reloads over renamed pools cannot accumulate historical pool names,
+    /// and a pool absent from the new config is dropped rather than carried.
+    /// Sharing the atomic (not its value) is what keeps a request still
+    /// holding the outgoing Router rotating the same cursor the incoming one
+    /// reads, so the seat it starts from is never handed out twice across the
+    /// swap.
+    pub(crate) fn carry_over_from(&mut self, previous: &Self) {
+        for (key, cursor) in &previous.cursors {
+            if let Some(slot) = self.cursors.get_mut(key) {
+                *slot = Arc::clone(cursor);
+            }
+        }
+    }
+
+    /// The rotation namespaces holding a cursor. Test read surface only:
+    /// production asks for a start offset, never for the key set.
+    #[cfg(test)]
+    pub(crate) fn keys(&self) -> Vec<&str> {
+        self.cursors.keys().map(String::as_str).collect()
     }
 }
 
-/// Pinned-seat record for one inbound conversation. Carries the seat's
-/// stable `state_key` plus a one-time overflow-repin marker.
+/// Pinned-seat record for one inbound conversation: which pool MEMBER
+/// (account) the session is pinned to, plus a one-time overflow-repin marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatPin {
-    pub(crate) state_key: String,
+    /// The pinned seat's member `[providers]` table key -- the ACCOUNT, not a
+    /// model-scoped key.
+    ///
+    /// The account is what carries the warm prompt cache, and one pin is held
+    /// per session per POOL (see `sticky_pin_key`), so several models of one
+    /// pool resolve this same pin. A model-scoped `state_key` here would
+    /// resolve for exactly one of those models and read as a miss for every
+    /// other, so each model would re-pick and overwrite the shared pin --
+    /// leaving the session flapping between accounts, the opposite of what
+    /// pinning it once per pool delivers. Member names are unique within a
+    /// pool and stable across a Router rebuild, so the identity survives a
+    /// reload the same way a `state_key` did.
+    pub(crate) member: String,
     /// True once this session has been migrated off its birth seat by a
     /// one-time overflow-repin. Caps migration at one and prevents an
     /// A->B->A flap when the original seat recovers.
@@ -192,16 +237,18 @@ pub struct SeatPin {
 /// next turn, so the bound is safe.
 const STICKY_PIN_CAPACITY: usize = 4096;
 
-/// Bounded LRU map of inbound conversation session key -> pinned [`SeatPin`]
-/// (the seat's STABLE `state_key` plus the one-time overflow-repin marker;
-/// see [`SeatTarget::state_key_for`] / [`seat_state_key`]). A positional seat
-/// index is deliberately NOT stored: indices can shift on a Router rebuild,
-/// whereas `state_key` is stable across reloads.
+/// Bounded LRU map of pin lookup key -> pinned [`SeatPin`] (the pinned pool
+/// MEMBER plus the one-time overflow-repin marker). The lookup key namespaces
+/// the session by pool rather than by model, so a session holds ONE pin per
+/// pool -- see `sticky_pin_key`. Neither a positional seat index nor a
+/// model-scoped `state_key` is stored: indices shift on a Router rebuild, and
+/// a model-scoped key would resolve for only one of the models sharing the
+/// pool (see the field doc on [`SeatPin::member`]).
 ///
 /// Wraps a `parking_lot::Mutex<LruCache<..>>` for interior mutability so the
 /// map is read/written on the `&self` dispatch path.
 ///
-/// UNLIKE [`RoundRobinCursors`], this whole struct is held behind an `Arc` on
+/// This whole struct is held behind an `Arc` on
 /// `Router` and SHARED (not copied) across a hot-reload rebuild (see
 /// `Router::carry_over_sticky_from`). Dropping pins mid-incident would
 /// scatter every live conversation off its warm-cache seat -- a mass
@@ -260,6 +307,40 @@ impl StickyPins {
     /// overflow-repin passes `repinned: true`.
     pub(crate) fn put(&self, session_key: &str, pin: SeatPin) {
         self.pins.lock().put(session_key.to_string(), pin);
+    }
+
+    /// Re-pick, in place, every pin whose member `survivor_for` answers for,
+    /// and return how many pins moved.
+    ///
+    /// `survivor_for` is the caller's membership question: given a pinned
+    /// member, it answers `Some(survivor)` only when that member is no longer
+    /// usable AND the pool it belonged to still serves someone. Every other
+    /// pin -- a member still serving, or one whose whole pool is gone -- is
+    /// left byte-for-byte alone, so a membership change never globally resets
+    /// the pin map.
+    ///
+    /// Re-picked pins land with `repinned: false`. The marker exists to cap
+    /// HEALTH-driven migration at one hop; a member the operator withdrew is
+    /// not a health event, so spending the session's one-time migration budget
+    /// on it would leave the session unable to escape a seat that later trips.
+    /// The move is a fresh birth on the survivor.
+    ///
+    /// One lock acquisition for the whole walk, and `iter_mut` does not
+    /// re-order the LRU, so a pin's eviction position is unchanged by being
+    /// re-picked.
+    pub(crate) fn repick_members(
+        &self,
+        survivor_for: &mut dyn FnMut(&str) -> Option<String>,
+    ) -> usize {
+        let mut moved = 0;
+        for (_, pin) in self.pins.lock().iter_mut() {
+            if let Some(survivor) = survivor_for(&pin.member) {
+                pin.member = survivor;
+                pin.repinned = false;
+                moved += 1;
+            }
+        }
+        moved
     }
 
     /// Number of pins currently held. Test read surface only: production
@@ -333,8 +414,13 @@ pub fn keyless_quota_order(
 /// Returns indices into the model's seat slice; the caller maps them back
 /// to [`SeatTarget`]s. An empty or single-element seat set yields the
 /// trivial order with no cursor traffic.
+///
+/// `rotation_key` is the POOL name for a pool-backed model (so two models on
+/// one pool advance one cursor and interleave across its accounts) and the
+/// model nickname for a standalone provider-backed one -- see
+/// `Router::rotation_key_for`.
 pub fn seat_order_for_request(
-    nickname: &str,
+    rotation_key: &str,
     seat_count: usize,
     selection: SeatSelection,
     cursors: &RoundRobinCursors,
@@ -343,7 +429,7 @@ pub fn seat_order_for_request(
         return (0..seat_count).collect();
     }
     let start = match selection {
-        SeatSelection::RoundRobin => cursors.next_start(nickname).unwrap_or(0) % seat_count,
+        SeatSelection::RoundRobin => cursors.next_start(rotation_key).unwrap_or(0) % seat_count,
         SeatSelection::FillFirst => 0,
         // Keyless / single-seat StickyLeastLoaded resolves here and walks the
         // fixed fill-first order (start seat 0). The keyed sticky-least-loaded
@@ -787,9 +873,9 @@ mod tests {
         assert_eq!(order, vec![0, 1, 2]);
     }
 
-    fn pin(state_key: &str) -> SeatPin {
+    fn pin(member: &str) -> SeatPin {
         SeatPin {
-            state_key: state_key.to_string(),
+            member: member.to_string(),
             repinned: false,
         }
     }

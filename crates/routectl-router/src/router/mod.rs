@@ -126,16 +126,23 @@ pub struct Router {
     /// wins.
     alias_glob_index: PrefixIndex<AliasValue>,
     /// Per-pool round-robin cursors for OAuth credential pools whose
-    /// `seat_selection` is `RoundRobin`. One `AtomicUsize` per pooled
-    /// nickname; advanced once per request to rotate the starting seat.
-    /// Deliberately NOT carried over on a Router rebuild (a reset to
-    /// seat 0 is benign at single-operator scale). `FillFirst` pools
-    /// and non-pooled models have no entry here.
+    /// `seat_selection` is `RoundRobin`. One `AtomicUsize` per POOL, so two
+    /// models naming one pool advance the SAME cursor and their traffic
+    /// interleaves across the pool's accounts. Advanced once per request to
+    /// rotate the starting seat. `FillFirst` pools and non-pooled models have
+    /// no entry here.
+    ///
+    /// Carried across a hot-reload for the pools the new config still declares
+    /// (see `carry_over_pool_state_from`): each cursor sits behind its own
+    /// `Arc`, so a request still holding the outgoing Router advances the same
+    /// atomic the incoming one reads and no seat is handed out twice across
+    /// the swap. A pool the new config dropped -- including a RENAMED one,
+    /// which is a new pool -- has no key in the fresh map and starts at seat 0.
     round_robin: crate::seat_pool::RoundRobinCursors,
-    /// Bounded LRU map of conversation session key -> pinned seat
-    /// `state_key`, for `StickyLeastLoaded` selection. In sharp contrast to
-    /// `round_robin` (which is dropped on a Router rebuild because resetting
-    /// to seat 0 is benign), these pins MUST survive a hot-reload: dropping
+    /// Bounded LRU map of pin lookup key -> pinned pool MEMBER, for
+    /// `StickyLeastLoaded` selection. Keyed per session per POOL, so a session
+    /// stays on one account across every model of that pool. These pins MUST
+    /// survive a hot-reload: dropping
     /// them would scatter every live conversation off its warm-cache seat,
     /// causing a mass cold-miss.
     ///
@@ -486,10 +493,10 @@ struct RouterMetrics {
     /// despite a usable credential.
     pool_member_omitted_provider_init_failed_total: AtomicU64,
     /// Sticky pins re-picked onto a surviving member because their pinned
-    /// member left the pool. Declared with its emission seam
-    /// ([`RouterMetrics::incr_pool_removed_pin_repick`]) ahead of the reload
-    /// carry-over that drives it, so the counter and its snapshot field land
-    /// in one place rather than being retrofitted around the carry-over.
+    /// member left the pool. Bumped once per moved pin by
+    /// `Router::carry_over_pool_state_from`; a burst of them is the operator's
+    /// only signal that a credential change scattered live conversations off
+    /// their warm-cache accounts.
     pool_removed_pin_repick_total: AtomicU64,
 }
 
@@ -543,10 +550,8 @@ impl RouterMetrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The emission seam for the removed-member pin re-pick, ahead of the
-    /// reload carry-over that drives it. Every other pool counter has a live
-    /// driver; this one is reachable only through
-    /// [`Router::note_pool_removed_pin_repick`] until the carry-over lands.
+    /// Count one re-pick of a pin whose member left the pool. Driven by
+    /// [`Router::note_pool_removed_pin_repick`], once per moved pin.
     fn incr_pool_removed_pin_repick(&self) {
         self.pool_removed_pin_repick_total
             .fetch_add(1, Ordering::Relaxed);
@@ -1679,12 +1684,13 @@ impl Router {
                         .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&seat_policy))));
                 }
                 // Round-robin pools rotate the starting seat per request;
-                // register a cursor only for that selection mode.
+                // register a cursor only for that selection mode, keyed by the
+                // POOL so every model naming it advances one cursor.
                 if matches!(
                     self.config.seat_selection_for(&m.provider_name),
                     crate::config::SeatSelection::RoundRobin
                 ) {
-                    self.round_robin.register(nickname);
+                    self.round_robin.register(m.rotation_key());
                 }
             }
             self.state
@@ -1741,12 +1747,14 @@ impl Router {
     /// into this freshly-built Router during a hot-reload.
     ///
     /// This carry-over is MANDATORY. Each pin keeps a live conversation on
-    /// the one seat holding its warm prompt cache; dropping the pins on a
+    /// the one account holding its warm prompt cache; dropping the pins on a
     /// reload would re-pin every conversation from scratch and scatter them
-    /// across seats -- a mass cold-miss across all in-flight conversations.
-    /// (By contrast, the round-robin cursors are deliberately dropped on a
-    /// reload because a reset to seat 0 costs at most one mis-rotated
-    /// request -- benign. Pins are not benign, so they survive here.)
+    /// across accounts -- a mass cold-miss across all in-flight conversations.
+    ///
+    /// Membership is NOT reconciled here. That is
+    /// `carry_over_pool_state_from`'s job, and it must run after this call:
+    /// a pin whose member left the pool re-picks once onto a survivor there,
+    /// while every surviving pin is left byte-for-byte alone.
     ///
     /// Carried by SHARING the `Arc` rather than copying entries, the same
     /// fix `carry_over_k_store_from` applies to the K-estimator store: a
@@ -1764,6 +1772,113 @@ impl Router {
     /// alongside `carry_over_runtime_state_from`.
     pub fn carry_over_sticky_from(&mut self, previous: &Self) {
         self.sticky_pins = Arc::clone(&previous.sticky_pins);
+    }
+
+    /// The usable members of every pool this Router serves, in the operator's
+    /// declared order, keyed by pool name.
+    ///
+    /// Read off the compiled seat sets rather than the `[pools]` config table:
+    /// a member the build dropped for a credential failure is not a seat this
+    /// Router can pin a session to, so treating it as present would leave a
+    /// pin sitting on an account nothing dispatches.
+    fn pool_membership(&self) -> BTreeMap<&str, Vec<&str>> {
+        let mut by_pool: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for m in self.resolved_models.values() {
+            if let Some(seats) = m.seats.as_ref() {
+                by_pool
+                    .entry(m.rotation_key())
+                    .or_insert_with(|| seats.iter().map(|s| s.provider_name.as_str()).collect());
+            }
+        }
+        by_pool
+    }
+
+    /// Which surviving member each RETIRED member's pins must move to, for the
+    /// pools both Routers serve.
+    ///
+    /// A member appears here only when its pool still serves at least one
+    /// account AND that member is no longer among them. So:
+    ///
+    /// - a member still serving is absent -- its pins are never touched, which
+    ///   is what keeps a membership change from globally resetting affinity;
+    /// - a member whose whole pool is gone is absent too. Its pins resolve to
+    ///   a miss at read time (there is no pool to walk) and re-pick naturally
+    ///   if the pool ever returns; picking a survivor from an unrelated pool
+    ///   would be worse than a cold miss.
+    /// - a RENAMED pool is a new pool on both sides of this join, so neither
+    ///   its cursor nor its pins transfer. Deliberate: no heuristic can tell a
+    ///   rename from a decommission-plus-introduction, and guessing wrong
+    ///   silently pins sessions onto accounts the operator moved away from.
+    ///
+    /// The survivor is the pool's FIRST usable member -- the operator's
+    /// declared order, the same order fill-first walks -- so the choice is
+    /// deterministic across the reload rather than dependent on map iteration.
+    fn retired_member_survivors(&self, previous: &Self) -> BTreeMap<String, String> {
+        let current = self.pool_membership();
+        let mut survivors = BTreeMap::new();
+        for (pool, before) in previous.pool_membership() {
+            let Some(after) = current.get(pool) else {
+                continue;
+            };
+            let Some(survivor) = after.first() else {
+                continue;
+            };
+            for member in before {
+                if !after.contains(&member) {
+                    survivors.insert(member.to_string(), (*survivor).to_string());
+                }
+            }
+        }
+        survivors
+    }
+
+    /// Carry the previous Router's per-pool rotation and affinity state into
+    /// this freshly-built Router during a hot-reload, and reconcile the pins
+    /// against the new pool membership.
+    ///
+    /// Call AFTER `carry_over_sticky_from` (the pins this reconciles are the
+    /// shared ones) and after `carry_over_metrics_from` (the re-pick count
+    /// must land on the shared counter storage, not on a value this Router is
+    /// about to discard).
+    ///
+    /// Two pieces of state, both per pool:
+    ///
+    /// - the round-robin cursors, adopted into this Router's FRESH map for the
+    ///   pools it declares. Building forward rather than mutating the previous
+    ///   map is what bounds the keyspace to the current config: mutating in
+    ///   place would let a run of reloads over renamed pools accumulate every
+    ///   pool name the process ever saw.
+    /// - the sticky pins, re-picked once for any member that left a pool still
+    ///   serving. A surviving member's pin is never touched, so a membership
+    ///   change costs a cold miss only to the sessions whose own account went
+    ///   away. Each move is counted, because a burst of them is the operator's
+    ///   only signal that a credential change scattered live conversations.
+    ///
+    /// Quota admission needs nothing here: its keyspace is the account
+    /// identity set, re-declared by `carry_over_quota_from` through
+    /// `admit_seats`. Lock discipline is unchanged with it -- this call takes
+    /// only the pin map's own lock and never holds it across a quota lock.
+    pub fn carry_over_pool_state_from(&mut self, previous: &Self) {
+        self.round_robin.carry_over_from(&previous.round_robin);
+
+        let survivors = self.retired_member_survivors(previous);
+        if survivors.is_empty() {
+            return;
+        }
+        let moved = self
+            .sticky_pins
+            .repick_members(&mut |member| survivors.get(member).cloned());
+        for _ in 0..moved {
+            self.note_pool_removed_pin_repick();
+        }
+        if moved > 0 {
+            tracing::info!(
+                event = "pool_removed_pin_repick",
+                repicked_pins = moved,
+                retired_members = survivors.len(),
+                "pool members left the fleet; their pinned sessions re-picked onto survivors",
+            );
+        }
     }
 
     /// Carry the previous Router's per-session K-estimator windows into
@@ -2206,8 +2321,8 @@ impl Router {
     /// Record that a sticky pin was re-picked onto a surviving member because
     /// its pinned member left the pool.
     ///
-    /// The public driver of the removed-member re-pick counter, standing ahead
-    /// of the reload carry-over that will call it once per re-picked pin.
+    /// The public driver of the removed-member re-pick counter, called once per
+    /// re-picked pin by [`Router::carry_over_pool_state_from`].
     pub fn note_pool_removed_pin_repick(&self) {
         self.metrics.incr_pool_removed_pin_repick();
     }

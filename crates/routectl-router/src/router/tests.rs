@@ -474,7 +474,7 @@ fn carry_over_sticky_from_preserves_pins() {
     before.sticky_pins.put(
         "sess-1",
         crate::seat_pool::SeatPin {
-            state_key: "opus#seat-b".into(),
+            member: "seat-b".into(),
             repinned: true,
         },
     );
@@ -490,7 +490,7 @@ fn carry_over_sticky_from_preserves_pins() {
     assert_eq!(
         after.sticky_pins.get("sess-1"),
         Some(crate::seat_pool::SeatPin {
-            state_key: "opus#seat-b".to_string(),
+            member: "seat-b".to_string(),
             repinned: true,
         }),
         "carry_over_sticky_from must preserve session->seat pins (with the \
@@ -538,7 +538,7 @@ fn carry_over_sticky_from_makes_a_swap_window_pin_visible() {
     before.sticky_pins.put(
         "late-sess",
         crate::seat_pool::SeatPin {
-            state_key: "opus#seat-b".into(),
+            member: "seat-b".into(),
             repinned: false,
         },
     );
@@ -547,7 +547,7 @@ fn carry_over_sticky_from_makes_a_swap_window_pin_visible() {
     assert_eq!(
         after.sticky_pins.get("late-sess"),
         Some(crate::seat_pool::SeatPin {
-            state_key: "opus#seat-b".to_string(),
+            member: "seat-b".to_string(),
             repinned: false,
         }),
         "a pin written on the outgoing router after carry-over must land in \
