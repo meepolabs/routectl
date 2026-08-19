@@ -431,13 +431,15 @@ fn plural(count: usize, noun: &str) -> String {
 /// One-line, ASCII-safe rendering of an operator-controlled string.
 ///
 /// Beyond the control-byte/ANSI filtering the shared sanitizer performs, every
-/// character this module's own grammar carries meaning with (`( ) , ; :`) is
-/// neutralized: a label such as `a); seat_selection round-robin (b` would
-/// otherwise close the member list and forge a syntactically perfect second
-/// strategy clause, and a `:`-bearing config entry key would forge a second
-/// `config check` row on the one line the block gives it.
-fn safe(s: &str) -> String {
-    sanitize_for_log(s).replace(['(', ')', ',', ';', ':'], "?")
+/// character this module's own grammar carries meaning with (`( ) , ; : =` and
+/// the backtick) is neutralized: a label such as `a); seat_selection
+/// round-robin (b` would otherwise close the member list and forge a
+/// syntactically perfect second strategy clause, a `ghost=default`-shaped one
+/// would forge a member of the listing, a backtick would close the quoting a
+/// caller wraps the value in, and a `:`-bearing config entry key would forge a
+/// second `config check` row on the one line the block gives it.
+pub(crate) fn safe(s: &str) -> String {
+    sanitize_for_log(s).replace(['(', ')', ',', ';', ':', '=', '`'], "?")
 }
 
 #[cfg(test)]

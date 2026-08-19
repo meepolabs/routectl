@@ -1500,13 +1500,18 @@ pub async fn build_resolved_models_reported(
 /// error, credential path, token, or account id reaches this line -- the
 /// omission type carries none of those, so the constraint is structural
 /// rather than a rule to remember here.
+///
+/// The two operator-written keys (the pool name, the member key) are rendered
+/// through the shared log sanitizer: a `%` field passes its bytes into the log
+/// line verbatim, so a table key bearing a newline would forge a whole second
+/// record with fields of its choosing.
 fn warn_pool_omissions(reports: &[PoolReport]) {
     for report in reports {
         for omission in &report.omissions {
             tracing::warn!(
                 event = "pool_member_omitted",
-                pool = %report.pool,
-                member = %omission.member,
+                pool = %routectl_core::sanitize_for_log(&report.pool),
+                member = %routectl_core::sanitize_for_log(&omission.member),
                 provider_kind = omission.provider_kind,
                 reason = omission.reason.token(),
                 configured_members = report.configured_members,

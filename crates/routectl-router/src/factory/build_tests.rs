@@ -710,6 +710,70 @@ mod build_resolved_models_tests {
         assert!(msg.contains("opus"), "must name the model: {msg}");
     }
 
+    /// The build refusal for a pool whose keys carry control bytes stays one
+    /// neutral line: the reload path re-logs this string verbatim, so a newline
+    /// plus an ANSI sequence in a `[pools]` key would forge a log record there.
+    #[tokio::test]
+    async fn the_build_refusal_for_hostile_pool_keys_renders_one_neutral_line() {
+        // Arrange
+        let dead = "anthropic-a\nINFO forged member line";
+        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
+            dead_provider: dead.into(),
+        });
+        let cfg = pooled_config("pool\n\u{1b}[31mINFO forged pool line", &[dead], &["opus"]);
+
+        // Act
+        let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect_err("a zero-usable pool must refuse the build");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(!msg.contains('\n'), "{msg}");
+        assert!(!msg.contains('\u{1b}'), "{msg}");
+        assert!(
+            msg.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+            "{msg}"
+        );
+    }
+
+    /// Both operator-written keys on the omission WARN are `%` fields, which
+    /// pass their bytes into the log line verbatim. A member key bearing a
+    /// newline and a second `reason=` must not forge a second record or
+    /// override the real reason.
+    #[test]
+    fn the_omission_warn_neutralizes_control_bytes_in_the_pool_and_member_keys() {
+        // Arrange
+        let reports = vec![PoolReport {
+            pool: "pool\n\u{1b}[31mWARN forged".to_string(),
+            models: vec!["opus".to_string()],
+            configured_members: 2,
+            usable_members: 1,
+            omissions: vec![PoolMemberOmission {
+                member: "a-1\nWARN forged reason=all_good".to_string(),
+                provider_kind: "anthropic-api",
+                reason: PoolOmissionReason::CredentialMissing,
+            }],
+        }];
+
+        // Act
+        let events = routectl_testkit::capture_events(|| warn_pool_omissions(&reports));
+
+        // Assert
+        assert_eq!(events.len(), 1, "one WARN per omission: {events:?}");
+        let event = &events[0];
+        assert_eq!(event.field("reason"), Some("credential_missing"));
+        for field in ["pool", "member"] {
+            let value = event.field(field).expect("field present");
+            assert!(!value.contains('\n'), "{field}: {value}");
+            assert!(!value.contains('\u{1b}'), "{field}: {value}");
+            assert!(
+                value.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+                "{field}: {value}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_model_naming_neither_a_provider_nor_a_pool_is_reported_failed() {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
