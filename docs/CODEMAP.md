@@ -2747,8 +2747,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reload-generation guard), `reload_from_disk`, transient-failure cooldown
   bookkeeping, and the transient-vs-terminal error classifier
 - `src/oauth/store/seat.rs` -- `SecretStore` impl for `OAuthStore`: resolves
-  labeled seats by `seat_key`, `list_seats` expands a bare pool ref to one ref
-  per stored seat, `get` near-expiry refresh + `on_auth_failure` 401 recovery;
+  labeled seats by `seat_key`, `list_seats` enumerates one ref per stored seat
+  for a bare `oauth://<provider>` ref (a store INVENTORY primitive -- no
+  routing path calls it, since a bare ref resolves to the default seat alone
+  at v4), `get` near-expiry refresh + `on_auth_failure` 401 recovery;
   preserves an existing `session_id` across token rotation (the codex provider
   flow mints the fresh `session_id` on first OAuth exchange);
   `seat_ref_from_key` inverse of `seat_key`
