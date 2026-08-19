@@ -117,7 +117,7 @@ pub(crate) fn describe_row(row: &SeatPoolRow) -> String {
             format!(
                 "pool ref oauth://{provider} resolves to {} ({}); seat_selection {strategy}",
                 seat_plural(labels.len()),
-                labels.join(", ")
+                render_labels(labels)
             )
         }
     }
@@ -184,6 +184,12 @@ fn pool_labels(provider: &str, stored_seat_keys: &[String]) -> Vec<String> {
 
 /// Display labels for a `#label`-pinned ref: the pinned seat when the store
 /// holds it, nothing when it does not.
+///
+/// [`describe_row`] deliberately does NOT read this -- a pinned ref pins one
+/// seat by CONFIG whether or not that seat is logged in, and whether it is
+/// belongs to the secret-presence check. The value is retained so a future
+/// presence-aware renderer states store presence explicitly rather than
+/// silently contradicting the "pins 1 seat" count.
 fn pinned_labels(provider: &str, label: &str, stored_seat_keys: &[String]) -> Vec<String> {
     let pinned = format!("{provider}#{label}");
     if stored_seat_keys.contains(&pinned) {
@@ -191,6 +197,23 @@ fn pinned_labels(provider: &str, label: &str, stored_seat_keys: &[String]) -> Ve
     } else {
         Vec::new()
     }
+}
+
+/// How many seat labels the sentence lists before collapsing the tail. A
+/// credential store can legitimately hold hundreds of seats, and the sentence
+/// is printed ahead of the `config check` warnings and errors -- an uncapped
+/// list would bury them. The COUNT stays exact; only the listing is bounded.
+const MAX_LISTED_LABELS: usize = 10;
+
+/// The parenthesized seat listing: the first [`MAX_LISTED_LABELS`] labels,
+/// with the remainder collapsed to `and K more`.
+fn render_labels(labels: &[String]) -> String {
+    if labels.len() <= MAX_LISTED_LABELS {
+        return labels.join(", ");
+    }
+    let shown = labels[..MAX_LISTED_LABELS].join(", ");
+    let hidden = labels.len() - MAX_LISTED_LABELS;
+    format!("{shown}, and {hidden} more")
 }
 
 fn seat_plural(count: usize) -> String {
@@ -202,8 +225,15 @@ fn seat_plural(count: usize) -> String {
 }
 
 /// One-line, ASCII-safe rendering of an operator-controlled string.
+///
+/// Beyond the control-byte/ANSI filtering the shared sanitizer performs, every
+/// character this module's own grammar carries meaning with (`( ) , ; :`) is
+/// neutralized: a label such as `a); seat_selection round-robin (b` would
+/// otherwise close the seat list and forge a syntactically perfect second
+/// strategy clause, and a `:`-bearing config entry key would forge a second
+/// `config check` row on the one line the block gives it.
 fn safe(s: &str) -> String {
-    sanitize_for_log(s)
+    sanitize_for_log(s).replace(['(', ')', ',', ';', ':'], "?")
 }
 
 #[cfg(test)]

@@ -4637,8 +4637,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   assembly. Read-only posture: a doctor run mutates nothing
   (config/credentials/overlay/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
-  Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `seats`,
-  `secrets`, `probe`, `capability`, `freshness`) -- one extension point per
+  Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
+  `seats`, `secrets`, `probe`, `capability`, `freshness`) -- one extension
+  point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
   per-layer `CapabilityInputs`/`CapabilityConfig`/`PriorCell` types and the
@@ -4651,10 +4652,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version =
-  5 (UNSTABLE pre-1.0; any structural/semantic change, incl. additive, bumps
+  6 (UNSTABLE pre-1.0; any structural/semantic change, incl. additive, bumps
   it -- v4 supersedes the capability override/prior/learned findings with the
   `capability_matrix` panel and adds the freshness section, v5 adds the
-  `seats` orphan-seat section), findings, panels
+  `seats` orphan-seat section, v6 adds the additive `pools` seat-pool
+  section), findings, panels
   }`; `run` renders human or `--json` and returns `overall_exit`. Data
   collection lives in `gather.rs`, the section producers in `sections.rs`, the
   capability matrix panel builder in `matrix.rs`, human rendering in
