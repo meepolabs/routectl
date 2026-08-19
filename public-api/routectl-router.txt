@@ -13326,6 +13326,7 @@ pub fn routectl_router::lookup_with_overrides(&str, &str, core::option::Option<&
 pub fn routectl_router::merge(core::option::Option<&routectl_router::catalog::CatalogRow>, core::option::Option<&core::option::Option<routectl_router::OverlayCell>>) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::migrate_v2_to_v3(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
 pub fn routectl_router::migrate_v3_to_v4(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
+pub fn routectl_router::models_routed_at(&toml_edit::document::DocumentMut, &str) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::near_lossless_candidate(&routectl_core::schema::ChatRequest, &[routectl_router::ElisionMark]) -> core::option::Option<routectl_router::PrefixReductionCandidate>
 pub fn routectl_router::normalize_capability_overrides(&mut toml_edit::document::DocumentMut) -> core::result::Result<bool, routectl_router::Refusal>
 pub fn routectl_router::overall_exit(&[routectl_router::Finding]) -> i32
