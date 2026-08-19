@@ -40,17 +40,21 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 - `crates/routectl-router/` -- alias resolution, fallback chain
   walker, retry policy, capability filter (`unsupported_features`),
-  provider factory. `seat_pool.rs` expands a pooled
-  `oauth://<provider>` ref into per-seat `ResolvedModel` hops that
-  slot into the fallback chain.
+  provider factory. A `[pools.<name>]` block groups same-kind member
+  provider entries; the factory compiles one seat per usable member
+  (from that member's OWN credential ref) once per pool, and
+  `seat_pool.rs` owns the request-time dispatch order plus the
+  pool-keyed rotation and sticky-pin state, slotting those seats into
+  the fallback chain as ordinary hops.
 
 - `crates/routectl-auth/` -- `SecretStore` trait + resolvers for
   `env://`, `file://`, and `oauth://<provider>` (PKCE login + atomic
   credentials.json + lazy refresh). `literal:` refs are rejected at
-  parse and resolve -- reference a 0600 file instead.
-  `oauth://<provider>#<label>` pins a named seat; a bare pool ref
-  expands via `list_seats` to all stored seats. No OS-keychain
-  integration.
+  parse and resolve -- reference a 0600 file instead. Every ref names
+  exactly ONE seat: `oauth://<provider>#<label>` pins the labelled
+  seat, and a bare `oauth://<provider>` pins the DEFAULT seat
+  (reaching several accounts is what a `[pools.<name>]` block is for).
+  No OS-keychain integration.
 
 - `crates/routectl-usage/` -- SQLite-backed per-request usage
   accounting: `UsageWriter` (async-producer -> blocking-writer
