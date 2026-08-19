@@ -396,6 +396,78 @@ fn missing_required_input_without_tty_errors_within_bounded_time() {
     assert!(msg.contains("--api-key-stdin"), "actionable message: {msg}");
 }
 
+/// The high-consequence confirmation under an OPEN-but-silent stdin: a pipe
+/// carrying neither a line nor an EOF. Only a real subprocess can hold that
+/// shape, which is why this lives beside the flag-parity checks rather than
+/// in the command's own EOF-stdin unit tests. The declined run must print
+/// what it declined and leave the file byte-identical.
+#[test]
+fn silent_stdin_declines_the_confirmation_within_bounded_time() {
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let before = std::fs::read(&path).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args([
+            "--config",
+            path.to_str().unwrap(),
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "grok",
+            "--base-url",
+            "https://api.x.example/v1",
+            "--secret-ref",
+            "file:///abs/key",
+            "--no-probe",
+        ])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl binary");
+    // Held open deliberately: dropping it would deliver an EOF, which is the
+    // case that already declined before the terminal gate existed.
+    let stdin = child.stdin.take().expect("piped stdin");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("poll the child") {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("provider add hung on an open-but-silent stdin");
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    drop(stdin);
+
+    let out = child.wait_with_output().expect("collect child output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a decline is not an error: {stdout}"
+    );
+    assert!(
+        stdout.contains("providers.base_url") && stdout.contains("--yes"),
+        "the decline must name the field and the non-interactive contract: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a declined add must not write"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Format preservation: a round-trip add keeps pre-existing comments and
 // section ordering intact.

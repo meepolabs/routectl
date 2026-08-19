@@ -2604,7 +2604,11 @@ a rejected edit leaves the file byte-identical:
 - **High-consequence confirmation.** An egress-defining change -- a
   provider `base_url` or `credential_source`, a `[mitm]` origin or host
   -- prompts for confirmation first. `--yes` bypasses the prompt for
-  scripting.
+  scripting. With no terminal on stdin the prompt is DECLINED rather
+  than read, so an automated caller neither hangs nor applies the edit
+  by accident: the field list still prints, naming what was declined,
+  and `--yes` is the non-interactive way to apply it. The same contract
+  covers `provider add` and the `login` config offer.
 - **Atomic, format-preserving write.** The write goes through a
   sibling advisory lock and a base-bytes revision check (an out-of-band
   edit between read and commit is reported as a conflict, with nothing

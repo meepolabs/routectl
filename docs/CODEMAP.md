@@ -4311,7 +4311,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
   auto-surface): the raw version/legacy preflights, the in-memory
   `parse_config` + `collect_config_validation` gate plus its error rendering,
-  the pre-lock high-consequence confirmation prompt, and `parse_document` +
+  the pre-lock high-consequence confirmation prompt (`--yes` bypasses; a
+  non-TTY stdin declines without reading, so a silent pipe cannot hang any
+  mutating command), and `parse_document` +
   `insert_provider_block` (format-preserving `[providers.<name>]`
   insert/replace, deterministic so a write closure reproduces under the lock
   exactly what planning gated). One home so every mutating command refuses

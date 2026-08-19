@@ -9,8 +9,9 @@
 //! the decline path prints.
 //!
 //! Every test runs with `yes = true` unless it is about the confirmation:
-//! `confirm_high_consequence` reads stdin, which under the test harness is
-//! at EOF, so `yes = false` deterministically DECLINES.
+//! `confirm_high_consequence` declines without reading whenever stdin is not
+//! a terminal, which under the test harness it never is, so `yes = false`
+//! deterministically DECLINES.
 
 use routectl_router::{CURRENT_CONFIG_VERSION, parse_config};
 
@@ -180,12 +181,22 @@ fn an_idempotent_relogin_writes_nothing_and_leaves_the_inode_alone() {
 // Decline: byte-identical, exit 0, the delta printed for hand-pasting.
 // -----------------------------------------------------------------
 
+/// The decline is a TERMINAL-gate decision, not an EOF one: the guard fires
+/// before `read_line`, so a caller whose stdin is an open-but-silent pipe
+/// declines instead of hanging. The precondition is asserted explicitly
+/// because it is what makes every `yes = false` test here deterministic.
 #[test]
 fn declining_leaves_the_file_byte_identical_and_is_not_an_error() {
-    // Arrange: yes=false with the harness's EOF stdin declines.
+    // Arrange
+    use std::io::IsTerminal as _;
+
     let dir = tempfile::tempdir().expect("tempdir");
     let path = write_config(dir.path(), &base());
     let before = read(&path);
+    assert!(
+        !std::io::stdin().is_terminal(),
+        "test harness stdin must be non-interactive for this assertion",
+    );
 
     // Act
     let outcome = surface(&path, "anthropic", None, false).expect("declining is not an error");
