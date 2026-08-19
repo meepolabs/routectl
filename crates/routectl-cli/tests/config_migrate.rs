@@ -226,6 +226,105 @@ async fn serve_boots_on_a_migrated_multi_seat_pool_config() {
     assert_eq!(resp.status(), 200);
 }
 
+/// CAPACITY PRESERVATION -- the load-bearing property of the whole migration.
+///
+/// Under v3 a bare `oauth://anthropic` ref on a provider entry expanded to
+/// EVERY stored seat, so `[models.opus] provider = "anthropic-managed"`
+/// dispatched across both seats. Under v4 that same ref means the DEFAULT SEAT
+/// alone. So if the migration materializes the pool but leaves the model
+/// naming the entry, the operator comes out of `config migrate` dispatching
+/// across ONE seat instead of two -- silent capacity loss through the
+/// migration whose entire purpose is behavior preservation.
+///
+/// Asserted against the real build path (the same
+/// `build_resolved_models_reported` `serve` runs), not against config text: the
+/// question is how many seats the model actually DISPATCHES over.
+#[tokio::test]
+async fn a_migrated_multi_seat_config_still_dispatches_across_every_seat() {
+    use std::collections::BTreeMap;
+
+    use routectl_auth::{SecretRef, SecretStore};
+    use routectl_router::{BuildOptions, build_resolved_models_reported};
+
+    /// Resolves any ref, so both seats build and the pool is fully usable.
+    struct AnySecret;
+
+    #[async_trait::async_trait]
+    impl SecretStore for AnySecret {
+        async fn get(&self, _: &SecretRef) -> routectl_core::Result<String> {
+            Ok("token".into())
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Arrange: a v3 config whose ONE provider entry has a bare ref, with two
+    // stored seats -- exactly the shape that dispatched across 2 seats at v3.
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let overlay_path = dir.path().join("catalog_overlay.json");
+    let credentials_path = dir.path().join("credentials.json");
+    std::fs::write(&config_path, previous_version_bare_oauth_config()).unwrap();
+    seed_seats(&credentials_path, &["anthropic", "anthropic#work"]);
+
+    // Act
+    config_migrate_cmd::run_at(&config_path, &overlay_path, &credentials_path, false, true)
+        .await
+        .expect("the combined migration must succeed");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    let config = routectl_router::parse_config(&text).expect("migrated config parses");
+    let secrets: Arc<dyn SecretStore> = Arc::new(AnySecret);
+    let built = build_resolved_models_reported(&config, secrets, BuildOptions::default())
+        .await
+        .expect("the migrated config must build");
+
+    // Assert: THE capacity assertion -- the model builds onto a pool serving
+    // BOTH seats, so post-migration dispatch breadth equals the v3 breadth.
+    assert!(
+        built.failed.is_empty(),
+        "no model may fail to build: {:?}",
+        built.failed
+    );
+    assert_eq!(
+        built.pool_reports.len(),
+        1,
+        "the migration must produce exactly one pool: {:?}",
+        built.pool_reports
+    );
+    let report = &built.pool_reports[0];
+    assert_eq!(report.pool, "anthropic");
+    assert_eq!(
+        report.usable_members, 2,
+        "both stored seats must be dispatchable after migration: {report:?}"
+    );
+    assert!(
+        !report.is_degraded(),
+        "the migrated pool must not be degraded: {report:?}"
+    );
+    assert_eq!(
+        report.models,
+        vec!["opus".to_string()],
+        "the model must be routed THROUGH the pool -- an empty list here means \
+         it stayed on the single-seat entry and lost a seat: {report:?}"
+    );
+
+    // Belt-and-suspenders on the same property from the config side: the
+    // model's provider value names the pool, and the pool lists both accounts.
+    let model_target: &BTreeMap<String, _> = &config.models;
+    assert_eq!(model_target["opus"].provider, "anthropic");
+    assert_eq!(
+        config.pools["anthropic"].members,
+        vec![
+            "anthropic-managed".to_string(),
+            "anthropic-work".to_string()
+        ]
+    );
+}
+
 /// The deprecated `--force` alias still skips the confirmation and migrates,
 /// exercising the real CLI's `yes || force` normalization plus its deprecation
 /// notice -- the one-release compatibility promise the canonical `--yes` swap

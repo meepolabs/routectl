@@ -1150,13 +1150,29 @@ fn derive_pool_name(doc: &DocumentMut, entry_name: &str, family: &str) -> Result
 
 /// Apply one [`SeatPoolMove`] to `doc`, format-preserving: move the entry's
 /// `seat_selection` (when present) onto the pool block, clone the entry once
-/// per labelled seat, and write `[pools.<name>]` listing the entry plus
-/// every account.
+/// per labelled seat, write `[pools.<name>]` listing the entry plus every
+/// account, and repoint the models that routed at the entry onto the pool.
+///
+/// The repoint is what PRESERVES DISPATCH BREADTH, and it runs exactly when
+/// the move materializes labelled-seat accounts. Under v3 a bare
+/// `oauth://<family>` ref on the entry expanded to every stored seat, so a
+/// model naming that entry dispatched across all of them; under v4 the same
+/// ref means the default seat alone. Leaving the model on the entry would
+/// silently cut an N-seat model down to one seat -- through the very
+/// migration whose purpose is behavior preservation. The pool carries the
+/// full seat set, so the model has to name the pool.
+///
+/// A move with NO accounts (the pure rung's `seat_selection` relocation on a
+/// single-seat family) leaves model references alone: the pool has one
+/// member, so breadth is identical either way, and a member inherits its
+/// pool's strategy through `Config::seat_selection_for` regardless of which
+/// name the model uses. Fewer bytes changed, same behavior.
 ///
 /// Every map walk goes through [`TableLike`] so an inline `providers = { ...
 /// }` / `models = { ... }` shape is handled as well as the standard-table
 /// one. Idempotent: an account already present with the right ref is left
-/// alone, and a member already listed is not duplicated.
+/// alone, a member already listed is not duplicated, and a model already
+/// naming the pool is not rewritten.
 pub fn apply_seat_pool_move(doc: &mut DocumentMut, mv: &SeatPoolMove) {
     let selection = take_provider_seat_selection(doc, &mv.entry);
 
@@ -1166,6 +1182,48 @@ pub fn apply_seat_pool_move(doc: &mut DocumentMut, mv: &SeatPoolMove) {
     let mut members = vec![mv.entry.as_str()];
     members.extend(mv.accounts.iter().map(|a| a.entry_name.as_str()));
     write_pool_block(doc, &mv.pool, &members, selection);
+    if !mv.accounts.is_empty() {
+        repoint_models_at_pool(doc, &mv.entry, &mv.pool);
+    }
+}
+
+/// Repoint every `[models.X] provider` value naming `entry` at `pool`.
+///
+/// `[models.X] provider` resolves against providers and pools in ONE
+/// namespace, so this is a rename of the target, not a new field.
+fn repoint_models_at_pool(doc: &mut DocumentMut, entry: &str, pool: &str) {
+    let Some(models) = doc.get_mut("models").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    for (_, item) in models.iter_mut() {
+        let Some(model) = item.as_table_like_mut() else {
+            continue;
+        };
+        if model.get("provider").and_then(Item::as_str) == Some(entry) {
+            model.insert("provider", toml_edit::value(pool));
+        }
+    }
+}
+
+/// The `[models.X]` nicknames whose `provider` value names `entry`, in
+/// document order. Read-only counterpart to the repoint
+/// [`apply_seat_pool_move`] performs, for the change summary the operator
+/// confirms.
+#[must_use]
+pub fn models_routed_at(doc: &DocumentMut, entry: &str) -> Vec<String> {
+    let Some(models) = doc.get("models").and_then(Item::as_table_like) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter(|(_, item)| {
+            item.as_table_like()
+                .and_then(|model| model.get("provider"))
+                .and_then(Item::as_str)
+                == Some(entry)
+        })
+        .map(|(nickname, _)| nickname.to_string())
+        .collect()
 }
 
 /// Remove and return a provider entry's `seat_selection` value, preserving
@@ -3002,5 +3060,186 @@ default = \"opus\"
 
         // Assert: no duplicated entry, no duplicated member.
         assert_eq!(doc.to_string(), once);
+    }
+
+    // -----------------------------------------------------------------------
+    // The model repoint: a materialized pool takes over the models that
+    // routed at the entry, or v3's dispatch breadth is silently lost (at v4
+    // the entry's bare ref is the default seat alone).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_materialized_pool_takes_over_the_models_that_routed_at_the_entry() {
+        // Arrange: two models on the entry, one on an unrelated provider.
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [providers.other]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"env://K\"\n\
+             [models.opus]\n\
+             provider = \"managed\"\n\
+             upstream = \"claude-opus-4-8\"\n\
+             [models.sonnet]\n\
+             provider = \"managed\"\n\
+             upstream = \"claude-sonnet-4-8\"\n\
+             [models.gpt]\n\
+             provider = \"other\"\n\
+             upstream = \"gpt-4o\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert: both models on the entry now name the POOL (which carries
+        // every seat); the unrelated model is untouched.
+        let models = doc.get("models").and_then(Item::as_table_like).unwrap();
+        for nickname in ["opus", "sonnet"] {
+            let provider = models
+                .get(nickname)
+                .and_then(Item::as_table_like)
+                .and_then(|m| m.get("provider"))
+                .and_then(Item::as_str);
+            assert_eq!(
+                provider,
+                Some("anthropic"),
+                "model `{nickname}` must route at the pool, not the single-seat entry"
+            );
+        }
+        assert_eq!(
+            models
+                .get("gpt")
+                .and_then(Item::as_table_like)
+                .and_then(|m| m.get("provider"))
+                .and_then(Item::as_str),
+            Some("other"),
+            "a model on an unrelated provider must not be repointed"
+        );
+        // The entry itself stays a member, so its default seat is still served.
+        assert!(
+            doc.to_string()
+                .contains("members = [\"managed\", \"anthropic-work\"]"),
+            "{doc}"
+        );
+    }
+
+    /// A move with NO materialized accounts is the pure rung's `seat_selection`
+    /// relocation on a single-seat family. The pool has one member, so breadth
+    /// is identical either way and a member inherits its pool's strategy
+    /// regardless -- so model references stay put rather than churn bytes.
+    #[test]
+    fn a_single_member_pool_leaves_model_references_alone() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [models.opus]\n\
+             provider = \"managed\"\n\
+             upstream = \"claude-opus-4-8\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: Vec::new(),
+        };
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert
+        assert!(doc.to_string().contains("provider = \"managed\""), "{doc}");
+    }
+
+    #[test]
+    fn the_model_repoint_is_a_no_op_over_its_own_output() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [models.opus]\n\
+             provider = \"managed\"\n\
+             upstream = \"claude-opus-4-8\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+        apply_seat_pool_move(&mut doc, &mv);
+        let once = doc.to_string();
+
+        // Act: a model already naming the pool is not rewritten again.
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert
+        assert_eq!(doc.to_string(), once);
+    }
+
+    /// The repoint walks models through `TableLike`, so an INLINE `models = {
+    /// ... }` map is seen too -- a plain table walk would silently leave those
+    /// models on the single-seat entry.
+    #[test]
+    fn the_model_repoint_reaches_into_an_inline_models_table() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             models = { opus = { provider = \"managed\", upstream = \"claude-opus-4-8\" } }\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "managed".to_string(),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert
+        let out = doc.to_string();
+        assert!(out.contains("provider = \"anthropic\""), "{out}");
+        assert!(!out.contains("provider = \"managed\""), "{out}");
+    }
+
+    #[test]
+    fn models_routed_at_names_only_the_entrys_own_models() {
+        let doc = doc_of(
+            "version = 4\n\
+             [models.opus]\n\
+             provider = \"managed\"\n\
+             upstream = \"claude-opus-4-8\"\n\
+             [models.gpt]\n\
+             provider = \"other\"\n\
+             upstream = \"gpt-4o\"\n",
+        );
+
+        assert_eq!(models_routed_at(&doc, "managed"), vec!["opus".to_string()]);
+        assert!(models_routed_at(&doc, "nobody").is_empty());
     }
 }

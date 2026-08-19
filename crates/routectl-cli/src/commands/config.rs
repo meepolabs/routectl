@@ -127,11 +127,17 @@ pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport
     let mut errors: Vec<String> = Vec::new();
 
     for (nickname, model) in &config.models {
-        if !config.providers.contains_key(&model.provider) {
+        // A `[models.X] provider` value resolves against providers AND pools
+        // in ONE namespace (the factory's build walk reads it that way), so a
+        // pool name here is a valid target, not an unknown provider.
+        if !config.providers.contains_key(&model.provider)
+            && !config.pools.contains_key(&model.provider)
+        {
             errors.push(locate(
                 raw_text,
                 format!(
-                    "model `{nickname}` references unknown provider `{}` (not in [providers])",
+                    "model `{nickname}` references unknown provider or pool `{}` (not in \
+                     [providers] or [pools])",
                     model.provider,
                 ),
             ));

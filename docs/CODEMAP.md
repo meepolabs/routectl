@@ -1353,7 +1353,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   &SeatPoolMove{entry, pool, accounts: Vec<SeatPoolAccount{entry_name,
   secret_ref, already_present}>})` is its write primitive: clones the entry
   once per labelled seat with that seat's ref, unions the member list onto
-  `[pools.<pool>]`, and relocates the knob -- idempotent over its own output.
+  `[pools.<pool>]`, relocates the knob, and -- when the move materializes
+  accounts -- REPOINTS every `[models.X] provider` naming the entry at the pool
+  (`repoint_models_at_pool`). The repoint is what preserves DISPATCH BREADTH: a
+  v3 bare ref expanded to every stored seat, a v4 one means the default seat
+  alone, so a model left on the entry would silently drop from N seats to 1.
+  An accounts-free move (the single-seat `seat_selection` relocation) leaves
+  model references alone -- one member, identical breadth, and a member inherits
+  its pool's strategy through `Config::seat_selection_for` either way.
+  Idempotent over its own output. `models_routed_at(&DocumentMut, entry) ->
+  Vec<String>` is the read-only counterpart, for the change summary the
+  operator confirms.
   `normalize_capability_overrides(&mut DocumentMut) -> Result<bool, Refusal>`
   folds legacy `unsupported_features` into `[capability.overrides]`
   (same-version, no version bump, idempotent), refusing on a behavior-bearing
@@ -4149,7 +4159,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret
   resolution, alias chain validation, the shared `collect_config_validation`
-  suite). On `check`, each semantic error is passed through `locate` ->
+  suite). Its own `[models.X] provider` walk resolves against providers AND
+  pools in ONE namespace, matching the factory's build walk -- a pool name
+  there is a valid target, so a pool-backed model is not reported as an unknown
+  provider. On `check`, each semantic error is passed through `locate` ->
   `locate_dotted_path` (fed the raw config text) to gain a `(line N): ` prefix
   pointing at the `config.toml` line that produced it; `derive_dotted_path`
   conservatively recognizes leading `[a.b.c]` headers and

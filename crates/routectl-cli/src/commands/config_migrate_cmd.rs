@@ -66,8 +66,8 @@ use routectl_router::{
     BareOauthRef, CURRENT_CONFIG_VERSION, CachePricingOverride, CatalogOverlay, Config,
     ConfigWriteError, EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite,
     Refusal, SeatPoolAccount, SeatPoolMove, WriteKind, apply_config_transforms,
-    apply_seat_pool_move, bare_oauth_pool_candidates, edit_config_toml, parse_config,
-    plan_migration, with_overlay_write_lock,
+    apply_seat_pool_move, bare_oauth_pool_candidates, edit_config_toml, models_routed_at,
+    parse_config, plan_migration, with_overlay_write_lock,
 };
 use toml_edit::DocumentMut;
 
@@ -373,6 +373,7 @@ pub async fn run_at(
             from_version,
             to_version,
             &plan.removed_keys,
+            &doc,
             &phase_two,
         );
         audit_event(
@@ -391,7 +392,7 @@ pub async fn run_at(
     // ONE acknowledgement for the combined change, now that the candidate is
     // known valid and a write is known to be pending. A declined prompt
     // leaves both files byte-identical.
-    if !confirm_migration(from_version, to_version, &phase_two, yes) {
+    if !confirm_migration(from_version, to_version, &doc, &phase_two, yes) {
         println!("aborted; nothing further written.");
         audit_event(
             config_path,
@@ -445,7 +446,7 @@ pub async fn run_at(
         "written",
         None,
     );
-    render_success(from_version, to_version, &phase_two);
+    render_success(from_version, to_version, &doc, &phase_two);
     Ok(MigrateResult::Migrated { from_version })
 }
 
@@ -811,6 +812,7 @@ fn render_dry_run(
     from_version: u32,
     to_version: u32,
     removed: &[String],
+    original: &DocumentMut,
     phase_two: &[SeatPoolMove],
 ) {
     eprintln!(
@@ -837,7 +839,7 @@ fn render_dry_run(
         for key in removed {
             println!("  - removes `{key}`");
         }
-        for line in seat_materialization_summary(phase_two) {
+        for line in seat_materialization_summary(original, phase_two) {
             println!("  - {line}");
         }
     }
@@ -848,7 +850,18 @@ fn render_dry_run(
 /// entries it materializes. Names only -- a seat LABEL is operator-authored
 /// but a generated entry name carries no token, account id, or storage path,
 /// and the surrounding candidate block already renders the file verbatim.
-fn seat_materialization_summary(phase_two: &[SeatPoolMove]) -> Vec<String> {
+/// One summary line per phase-2 move, naming the pool, the account entries
+/// it materializes, and the models it repoints onto the pool.
+///
+/// `original` is the PRE-migration document, so the repointed nicknames are
+/// the ones that named the entry before the rewrite -- which is what the
+/// operator is being asked to confirm.
+///
+/// Names only -- a seat LABEL is operator-authored but a generated entry
+/// name, a pool name and a model nickname carry no token, account id, or
+/// storage path, and the surrounding candidate block already renders the
+/// file verbatim.
+fn seat_materialization_summary(original: &DocumentMut, phase_two: &[SeatPoolMove]) -> Vec<String> {
     phase_two
         .iter()
         .map(|mv| {
@@ -858,7 +871,7 @@ fn seat_materialization_summary(phase_two: &[SeatPoolMove]) -> Vec<String> {
                 .filter(|a| !a.already_present)
                 .map(|a| a.entry_name.as_str())
                 .collect();
-            if added.is_empty() {
+            let mut line = if added.is_empty() {
                 format!(
                     "adds `[pools.{}]` grouping the stored seats of `[providers.{}]` \
                      (every account entry already present)",
@@ -878,7 +891,24 @@ fn seat_materialization_summary(phase_two: &[SeatPoolMove]) -> Vec<String> {
                         .join(", "),
                     mv.entry,
                 )
+            };
+            if !mv.accounts.is_empty() {
+                let repointed = models_routed_at(original, &mv.entry);
+                if !repointed.is_empty() {
+                    line.push_str(&format!(
+                        "; repoints model{} {} onto `{}` so they keep dispatching across \
+                         every seat",
+                        if repointed.len() == 1 { "" } else { "s" },
+                        repointed
+                            .iter()
+                            .map(|nickname| format!("`{nickname}`"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        mv.pool,
+                    ));
+                }
             }
+            line
         })
         .collect()
 }
@@ -886,7 +916,12 @@ fn seat_materialization_summary(phase_two: &[SeatPoolMove]) -> Vec<String> {
 /// The completion line, naming the seat materialization when phase 2 did
 /// any: an operator who just gained provider entries needs to know before
 /// pointing a model at the pool.
-fn render_success(from_version: u32, to_version: u32, phase_two: &[SeatPoolMove]) {
+fn render_success(
+    from_version: u32,
+    to_version: u32,
+    original: &DocumentMut,
+    phase_two: &[SeatPoolMove],
+) {
     if from_version == to_version {
         println!(
             "normalized config at version {to_version} (folded legacy `unsupported_features` \
@@ -895,7 +930,7 @@ fn render_success(from_version: u32, to_version: u32, phase_two: &[SeatPoolMove]
     } else {
         println!("migrated config to version {to_version}.");
     }
-    for line in seat_materialization_summary(phase_two) {
+    for line in seat_materialization_summary(original, phase_two) {
         println!("  - {line}");
     }
     if !phase_two.is_empty() {
@@ -916,6 +951,7 @@ fn render_success(from_version: u32, to_version: u32, phase_two: &[SeatPoolMove]
 fn confirm_migration(
     from_version: u32,
     to_version: u32,
+    original: &DocumentMut,
     phase_two: &[SeatPoolMove],
     yes: bool,
 ) -> bool {
@@ -946,7 +982,7 @@ fn confirm_migration(
              after migration."
         );
     }
-    for line in seat_materialization_summary(phase_two) {
+    for line in seat_materialization_summary(original, phase_two) {
         println!("  - {line}");
     }
     print!("proceed? [y/N] ");
@@ -1083,6 +1119,26 @@ default = \"gpt\"
         async fn migrate(&self, dry_run: bool, yes: bool) -> Result<MigrateResult> {
             run_at(&self.config, &self.overlay, &self.credentials, dry_run, yes).await
         }
+
+        /// The COMBINED candidate text the pipeline would show and write,
+        /// built through the same planning path `run_at` uses. Lets a test
+        /// assert on the exact bytes the operator confirms without scraping
+        /// stdout.
+        async fn plan_combined(&self) -> String {
+            let snapshot_text = std::fs::read_to_string(&self.config).unwrap();
+            let doc = parse_document(&snapshot_text).expect("parse");
+            let from_version = raw_version_of(&doc).expect("raw version");
+            let plan = plan_migration(&doc, from_version, &BTreeMap::new(), &self.overlay)
+                .expect("pure plan");
+            let inventory = enumerate_seats(&self.credentials)
+                .await
+                .expect("enumerate seats");
+            let phase_two =
+                plan_phase_two(&plan, &doc, from_version, &inventory).expect("phase 2 plans");
+            combined_candidate(&plan, &doc, &phase_two)
+                .expect("candidate composes")
+                .expect("a migration is pending")
+        }
     }
 
     fn fixture(body: &str) -> Fixture {
@@ -1204,6 +1260,14 @@ default = \"opus\"
         }
         // The relocated knob landed on the pool, not the provider entry.
         assert!(text.contains("seat_selection = \"round-robin\""), "{text}");
+        // The model routed at the entry now names the POOL. Without this the
+        // model would keep naming an entry whose bare ref is the DEFAULT SEAT
+        // at v4, cutting a 3-seat model down to 1 through the migration.
+        let migrated = parse_config(&text).expect("migrated config parses");
+        assert_eq!(
+            migrated.models["opus"].provider, "anthropic",
+            "the model must route at the pool so it keeps every seat: {text}"
+        );
         // Comments survive, and the result passes the shared gate.
         assert!(text.contains("# operator note: keep me"), "{text}");
         gate(&text).expect("the migrated config must pass the gate");
@@ -1274,6 +1338,13 @@ default = \"opus\"
             text.contains("members = [\"anthropic-managed\"]"),
             "the pool the knob relocation creates lists only the entry: {text}"
         );
+        // No accounts materialized means no repoint: the pool has one member,
+        // so breadth is identical and the member inherits the pool's strategy.
+        let migrated = parse_config(&text).expect("migrated config parses");
+        assert_eq!(
+            migrated.models["opus"].provider, "anthropic-managed",
+            "a single-seat migration must not churn the model reference: {text}"
+        );
         gate(&text).expect("the migrated config must pass the gate");
     }
 
@@ -1330,11 +1401,35 @@ default = \"opus\"
         );
     }
 
-    /// The dry-run summary names the pool and account entries but never a
-    /// token, an account id, or the store path -- phase 2's inputs are seat
-    /// KEYS, and its output is config entry names.
+    /// The dry-run candidate is what the operator is asked to approve, so the
+    /// model repoint has to be IN it -- a diff that silently omitted the
+    /// repoint would show a migration that preserved capacity while writing
+    /// one that did not.
+    #[tokio::test]
+    async fn a_combined_dry_run_candidate_carries_the_model_repoint() {
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+
+        let plan = f.plan_combined().await;
+
+        assert!(
+            plan.contains("provider = \"anthropic\""),
+            "the candidate must repoint the model at the pool: {plan}"
+        );
+        assert!(
+            !plan.contains("provider = \"anthropic-managed\""),
+            "no model may still name the single-seat entry: {plan}"
+        );
+    }
+
+    /// The dry-run summary names the pool, the account entries and the models
+    /// it repoints, but never a token, an account id, or the store path --
+    /// phase 2's inputs are seat KEYS, and its output is config names.
     #[test]
     fn the_seat_materialization_summary_carries_no_secret_material() {
+        let original = V3_BARE_OAUTH
+            .parse::<DocumentMut>()
+            .expect("fixture parses");
         let moves = vec![SeatPoolMove {
             entry: "anthropic-managed".to_string(),
             pool: "anthropic".to_string(),
@@ -1345,11 +1440,14 @@ default = \"opus\"
             }],
         }];
 
-        let lines = seat_materialization_summary(&moves);
+        let lines = seat_materialization_summary(&original, &moves);
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("[pools.anthropic]"), "{lines:?}");
         assert!(lines[0].contains("anthropic-work"), "{lines:?}");
+        // The repoint is part of what the operator confirms.
+        assert!(lines[0].contains("opus"), "{lines:?}");
+        assert!(lines[0].contains("repoints model"), "{lines:?}");
         for forbidden in ["not-a-real-token", "credentials.json", "/home/"] {
             assert!(!lines[0].contains(forbidden), "{lines:?}");
         }
@@ -1640,11 +1738,11 @@ default = \"opus\"
             "test harness stdin must be non-interactive for this assertion",
         );
         assert!(
-            !confirm_migration(3, 4, &[], false),
+            !confirm_migration(3, 4, &DocumentMut::new(), &[], false),
             "non-TTY without --yes must decline",
         );
         assert!(
-            confirm_migration(3, 4, &[], true),
+            confirm_migration(3, 4, &DocumentMut::new(), &[], true),
             "--yes must still proceed byte-identically",
         );
     }
