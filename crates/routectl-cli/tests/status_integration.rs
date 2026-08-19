@@ -48,22 +48,8 @@ async fn spawn(config: Arc<Config>) -> String {
             .await
             .expect("server failed");
     });
-    await_health(&base).await;
+    common::readiness::await_health(&base).await;
     base
-}
-
-async fn await_health(base: &str) {
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if let Ok(resp) = client.get(format!("{base}/health")).send().await
-            && resp.status().is_success()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("test server did not become healthy at {base}");
 }
 
 /// One openai-compat provider with a 1-failure circuit breaker and a short

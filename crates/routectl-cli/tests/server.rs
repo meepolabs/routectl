@@ -18,7 +18,6 @@ mod common;
 
 mod helpers {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     use routectl_router::Config;
     use tokio::net::TcpListener;
@@ -33,11 +32,8 @@ mod helpers {
     /// (the `UsageConfig` default). See `common::isolate_usage_db` for why
     /// that path is persistent / leaked rather than guarded.
     ///
-    /// Readiness is decided by a successful `/health` response, not by a
-    /// fixed sleep: the listener is bound before the serve task starts, so
-    /// a bare TCP connect succeeds from the OS backlog before the router
-    /// can answer. Polling the live endpoint against a deadline instead
-    /// keeps a slow boot on a loaded CI box from flaking the suite.
+    /// Readiness comes from `common::readiness::await_health` -- a
+    /// successful `/health` response, never a fixed sleep.
     pub async fn spawn_test_server(config: Arc<Config>) -> String {
         let config = crate::common::isolate_usage_db(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -50,25 +46,8 @@ mod helpers {
                 .expect("server failed");
         });
 
-        await_health(&base_url).await;
+        crate::common::readiness::await_health(&base_url).await;
         base_url
-    }
-
-    /// Poll `GET {base_url}/health` until it returns success or a 5s
-    /// deadline elapses. The 20ms inter-attempt pause is a poll cadence,
-    /// not a readiness wait -- readiness is the 200 response.
-    async fn await_health(base_url: &str) {
-        let client = reqwest::Client::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if let Ok(resp) = client.get(format!("{base_url}/health")).send().await
-                && resp.status().is_success()
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("test server did not become healthy at {base_url}");
     }
 }
 
