@@ -3843,10 +3843,17 @@ point, leaves `config.toml` byte-identical. The migration refuses rather
 than guess when a generated entry name is already held by an unrelated
 entry, when two seat labels would generate one name, when a seat label
 cannot appear verbatim in a config key, when the pool name is already a
-provider entry or a model nickname, or when the credential store cannot
-be read at all (without it there is no way to tell a single-seat family
-from a multi-seat one, and stamping the version alone would silently
-narrow the ref). Each refusal names what to fix by hand; rerun after.
+provider entry or a model nickname, when a `[pools.<name>]` block of that
+name already exists (its membership is your statement about which
+accounts share an egress, so the migration never grows it), when two or
+more provider entries carry a bare `oauth://` ref for the SAME provider
+family (grouping them would merge entries that may point at different
+egresses into one pool and dispatch every account's credential to all of
+them -- pin all but one with `oauth://<family>#<label>`, or write the
+pool blocks by hand), or when the credential store cannot be read at all
+(without it there is no way to tell a single-seat family from a
+multi-seat one, and stamping the version alone would silently narrow the
+ref). Each refusal names what to fix by hand; rerun after.
 
 When the migration materializes a pool, it also repoints every
 `[models.X] provider` that named the migrated entry at the POOL, so a

@@ -23,9 +23,12 @@
 //!      pure candidate: for each provider entry whose BARE `oauth://` ref
 //!      covered more than one stored seat, the naming module derives the
 //!      account entries and the pool that replace it. An unreadable store, a
-//!      name collision, or two labels generating one name refuses the whole
-//!      migration -- a v4 file whose bare ref silently stopped covering its
-//!      sibling seats is structurally excluded.
+//!      name collision, two labels generating one name, two entries sharing
+//!      one OAuth family, or a derived pool name held by a pool the migration
+//!      did not create refuses the whole migration -- a v4 file whose bare ref
+//!      silently stopped covering its sibling seats is structurally excluded,
+//!      and so is one that merges accounts the operator kept on separate
+//!      egresses.
 //!   4. Gate the COMBINED candidate (phase 1 + phase 2) through the shared
 //!      `parse_config` + `validation_report` suite; a gate failure renders
 //!      the report and writes nothing.
@@ -57,7 +60,7 @@
 //! `write_failed`. The `acknowledged` field reflects a REAL prompt: it is true
 //! only after an interactive `y`, never synthesized.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use routectl_auth::oauth::OAuthStore;
@@ -213,23 +216,41 @@ fn seat_enumeration_refusal(reason: &str) -> String {
 /// will later generate. `already_present` / `pool_exists` make a rerun over
 /// the migration's own output a no-op.
 ///
+/// `preexisting_pools` names the `[pools.*]` blocks the file carried BEFORE
+/// the migration planned anything, so a pool this migration is about to
+/// create is distinguishable from one it would grow.
+///
 /// # Errors
 ///
-/// A `SeatNamingError` from the naming module, surfaced verbatim:
-/// a generated name held by an unrelated entry, two labels generating one
-/// name, an unusable label token, the reserved `default` label, or a pool
-/// name held by a provider entry or a model nickname. Never softened -- a
-/// lossy rewrite would point a config entry at the wrong credential.
+/// A [`SeatMaterializationRefusal`] -- two bare refs on one provider family,
+/// or a derived pool name held by a pool the migration did not create -- or a
+/// `SeatNamingError` from the naming module, surfaced verbatim: a generated
+/// name held by an unrelated entry, two labels generating one name, an
+/// unusable label token, the reserved `default` label, or a pool name held by
+/// a provider entry or a model nickname. Never softened -- a lossy rewrite
+/// would point a config entry at the wrong credential.
 fn plan_seat_materialization(
     candidate: &Config,
     doc: &DocumentMut,
     inventory: &SeatInventory,
+    preexisting_pools: &BTreeSet<String>,
 ) -> Result<Vec<SeatPoolMove>> {
+    let candidates = bare_oauth_pool_candidates(doc);
     let mut moves = Vec::new();
-    for BareOauthRef { entry, family } in bare_oauth_pool_candidates(doc) {
+    for BareOauthRef { entry, family } in candidates.clone() {
         let labels = inventory.labels_of(&family);
         if labels.len() <= 1 {
             continue;
+        }
+        let siblings = entries_of_family(&candidates, &family);
+        if siblings.len() > 1 {
+            return Err(Error::Config(
+                SeatMaterializationRefusal::FamilyFanOut {
+                    family,
+                    entries: siblings,
+                }
+                .to_string(),
+            ));
         }
         let plan = routectl_router::seat_naming::plan_pool_materialization(
             candidate,
@@ -269,6 +290,20 @@ fn plan_seat_materialization(
         if satisfied {
             continue;
         }
+        // A pool the FILE already carried is not this migration's to grow: its
+        // membership is an operator statement about which accounts share an
+        // egress, and phase 2 cannot tell an intentionally pinned set from an
+        // incomplete one.
+        if preexisting_pools.contains(&plan.pool_name) {
+            return Err(Error::Config(
+                SeatMaterializationRefusal::ExistingPool {
+                    pool: plan.pool_name,
+                    entry,
+                    family,
+                }
+                .to_string(),
+            ));
+        }
         moves.push(SeatPoolMove {
             entry,
             pool: plan.pool_name,
@@ -276,6 +311,92 @@ fn plan_seat_materialization(
         });
     }
     Ok(moves)
+}
+
+/// The `[pools.*]` block names a document carries, for the
+/// [`SeatMaterializationRefusal::ExistingPool`] check.
+fn pool_block_names(doc: &DocumentMut) -> BTreeSet<String> {
+    doc.get("pools")
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|pools| pools.iter().map(|(name, _)| name.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// The bare-`oauth://` provider entries naming one provider family, sorted.
+fn entries_of_family(candidates: &[BareOauthRef], family: &str) -> Vec<String> {
+    let mut entries: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.family == family)
+        .map(|c| c.entry.clone())
+        .collect();
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
+/// A phase-2 refusal class: the migration would have to guess which accounts
+/// share one pool, and a wrong guess dispatches an account's OAuth bearer to
+/// an egress the operator never paired it with.
+///
+/// Fail-closed like every sibling class: the caller writes nothing and the
+/// file stays byte-identical.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SeatMaterializationRefusal {
+    /// Two or more provider entries carry a BARE `oauth://<family>` ref for
+    /// the same family. Materializing them would fold entries that may name
+    /// deliberately distinct egresses into ONE pool and repoint every model
+    /// naming either entry at it.
+    FamilyFanOut {
+        /// The provider family both refs name.
+        family: String,
+        /// The provider entry names carrying the bare ref, sorted.
+        entries: Vec<String>,
+    },
+    /// The derived pool name is held by a `[pools.*]` block the file already
+    /// carried, so materializing would grow an operator-authored pool.
+    ExistingPool {
+        /// The pool block already present.
+        pool: String,
+        /// The provider entry whose seats would have been materialized.
+        entry: String,
+        /// The provider family the entry's bare ref names.
+        family: String,
+    },
+}
+
+impl std::fmt::Display for SeatMaterializationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FamilyFanOut { family, entries } => write!(
+                f,
+                "{} provider entries ({}) each carry a bare `oauth://{family}` ref, and \
+                 `oauth://{family}` stands for more than one stored seat. Materializing them \
+                 would group entries that may point at different egresses into one \
+                 `[pools.{family}]` and dispatch every account's credential to all of them, \
+                 so this migration has no single answer. Nothing was written -- pin all but \
+                 one of those entries to a specific seat with `oauth://{family}#<label>`, or \
+                 write the `[pools.<name>]` blocks for this provider by hand, then rerun",
+                entries.len(),
+                entries
+                    .iter()
+                    .map(|e| format!("[providers.{e}]"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Self::ExistingPool {
+                pool,
+                entry,
+                family,
+            } => write!(
+                f,
+                "a `[pools.{pool}]` block already exists, so materializing the stored seats of \
+                 `oauth://{family}` (referenced by [providers.{entry}]) would add members to a \
+                 pool this migration did not create -- its membership is your statement about \
+                 which accounts share an egress. Nothing was written -- add the account entries \
+                 to that pool by hand (or rename it), then rerun"
+            ),
+        }
+    }
 }
 
 /// Apply every phase-2 move to `doc`, in plan order.
@@ -454,12 +575,18 @@ pub async fn run_at(
 /// file as it stands, for a `NoChange` plan): the naming module checks
 /// generated names against a real `Config`, so the candidate it sees must be
 /// the one phase 1 would leave behind.
+///
+/// The pre-existing pool set is read off `original`, NOT off the transformed
+/// document: phase 1's own `seat_selection` relocation creates a pool block
+/// that phase 2 is expected to grow, while a pool the FILE carried is one the
+/// migration must refuse to touch.
 fn plan_phase_two(
     plan: &MigrationPlan,
     original: &DocumentMut,
     from_version: u32,
     inventory: &SeatInventory,
 ) -> Result<Vec<SeatPoolMove>> {
+    let preexisting_pools = pool_block_names(original);
     let mut doc = original.clone();
     if plan.config_candidate().is_none() {
         // A NoChange plan leaves the document as-is; phase 2 plans against
@@ -477,7 +604,7 @@ fn plan_phase_two(
             redact_parse_error(&e)
         ))
     })?;
-    plan_seat_materialization(&candidate, &doc, inventory)
+    plan_seat_materialization(&candidate, &doc, inventory, &preexisting_pools)
 }
 
 /// The COMBINED candidate text (phase 1 then phase 2), or `None` when
@@ -578,9 +705,10 @@ async fn commit_plan(
 
     // Phase 2: config.toml LAST, the visible version marker.
     edit_config_toml::<CommitError, _>(config_path, snapshot, |d| {
+        let preexisting_pools = pool_block_names(d);
         apply_config_transforms(d, from_version).map_err(CommitError::Refused)?;
         let candidate = parse_config(&d.to_string()).map_err(|_| CommitError::Revalidation)?;
-        let replanned = plan_seat_materialization(&candidate, d, &fresh)
+        let replanned = plan_seat_materialization(&candidate, d, &fresh, &preexisting_pools)
             .map_err(|_| CommitError::InventoryChanged)?;
         if replanned != phase_two {
             return Err(CommitError::InventoryChanged);
@@ -1456,6 +1584,240 @@ default = \"opus\"
     // -----------------------------------------------------------------
     // Fail-closed refusals: each leaves config.toml byte-identical.
     // -----------------------------------------------------------------
+
+    /// A v3 config with TWO provider entries on one OAuth family, each
+    /// carrying a bare ref and each naming a DIFFERENT egress host, plus a
+    /// model routed at each. Phase 2 must refuse: both entries derive the
+    /// pool name `anthropic`, and grouping them would dispatch each account's
+    /// bearer to both hosts.
+    const V3_TWO_BARE_ENTRIES_ONE_FAMILY: &str = "\
+version = 3
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[providers.anthropic-primary]
+kind = \"anthropic-api\"
+base_url = \"https://one.example\"
+api_key_ref = \"oauth://anthropic\"
+
+[providers.anthropic-secondary]
+kind = \"anthropic-api\"
+base_url = \"https://two.example\"
+api_key_ref = \"oauth://anthropic\"
+
+[models.opus]
+provider = \"anthropic-primary\"
+upstream = \"claude-opus-4-8\"
+
+[models.sonnet]
+provider = \"anthropic-secondary\"
+upstream = \"claude-sonnet-4-8\"
+
+[aliases]
+default = \"opus\"
+";
+
+    /// Two bare refs on one family means the migration would have to guess
+    /// which accounts share an egress. It refuses instead, naming both
+    /// entries -- the merge would send every account's OAuth bearer to every
+    /// egress in the merged set.
+    #[tokio::test]
+    async fn two_bare_entries_on_one_family_refuse_byte_identical() {
+        // Arrange
+        let f = fixture(V3_TWO_BARE_ENTRIES_ONE_FAMILY);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("two bare refs on one family must refuse");
+
+        // Assert: both entries named, the remedy stated, nothing written.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("[providers.anthropic-primary]"),
+            "err: {rendered}"
+        );
+        assert!(
+            rendered.contains("[providers.anthropic-secondary]"),
+            "err: {rendered}"
+        );
+        assert!(rendered.contains("oauth://anthropic#"), "err: {rendered}");
+        assert!(rendered.contains("Nothing was written"), "err: {rendered}");
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// The same shape with a hand-authored PINNED pool already present: the
+    /// refusal still fires and the operator's pool keeps its exact members
+    /// and its `accepts_new_logins = false` marker.
+    #[tokio::test]
+    async fn two_bare_entries_with_a_hand_authored_pinned_pool_refuse_untouched() {
+        // Arrange
+        let body = V3_TWO_BARE_ENTRIES_ONE_FAMILY.replace(
+            "[models.opus]",
+            "[pools.anthropic]\n\
+             members = [\"anthropic-primary\"]\n\
+             accepts_new_logins = false\n\n\
+             [models.opus]",
+        );
+        let f = fixture(&body);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("a pinned pool must not be grown by the migration");
+
+        // Assert
+        let rendered = err.to_string();
+        assert!(rendered.contains("Nothing was written"), "err: {rendered}");
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "the hand-authored pool must be byte-untouched"
+        );
+    }
+
+    /// A SINGLE bare entry whose derived pool name is held by a
+    /// hand-authored pool block: the migration would grow a pool it did not
+    /// create, whose membership is the operator's statement about which
+    /// accounts share an egress. Refused, pool byte-untouched.
+    #[tokio::test]
+    async fn a_hand_authored_pool_is_never_grown_by_the_migration() {
+        // Arrange: one bare entry, plus a pinned `[pools.anthropic]` the
+        // operator wrote. No provider-level `seat_selection`, so the pure rung
+        // has nothing to relocate and phase 2 is the only claimant.
+        let body = V3_BARE_OAUTH
+            .replace("seat_selection = \"round-robin\"\n", "")
+            .replace(
+                "[models.opus]",
+                "[pools.anthropic]\n\
+                 members = [\"anthropic-managed\"]\n\
+                 accepts_new_logins = false\n\n\
+                 [models.opus]",
+            );
+        let f = fixture(&body);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("an existing pool must refuse");
+
+        // Assert
+        let rendered = err.to_string();
+        assert!(rendered.contains("[pools.anthropic]"), "err: {rendered}");
+        assert!(rendered.contains("Nothing was written"), "err: {rendered}");
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// The seat_selection-overwrite path is unreachable: when both same-family
+    /// entries also carry the retired knob, the PURE rung refuses before phase
+    /// 2 ever plans, so no relocated `seat_selection` can overwrite another's.
+    #[tokio::test]
+    async fn two_same_family_entries_with_seat_selection_refuse_before_any_relocation() {
+        // Arrange: distinct strategies, so a silent overwrite would be a
+        // behavior change and not merely a redundant write.
+        let body = V3_TWO_BARE_ENTRIES_ONE_FAMILY
+            .replace(
+                "api_key_ref = \"oauth://anthropic\"\n\n[providers.anthropic-secondary]",
+                "api_key_ref = \"oauth://anthropic\"\nseat_selection = \"round-robin\"\n\n\
+                 [providers.anthropic-secondary]",
+            )
+            .replace(
+                "api_key_ref = \"oauth://anthropic\"\n\n[models.opus]",
+                "api_key_ref = \"oauth://anthropic\"\nseat_selection = \"sticky\"\n\n\
+                 [models.opus]",
+            );
+        let f = fixture(&body);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f.migrate(false, true).await.expect_err("must refuse");
+
+        // Assert: the pure rung's class fires, naming both entries; neither
+        // strategy was relocated anywhere.
+        let rendered = err.to_string();
+        assert!(rendered.contains("seat_selection"), "err: {rendered}");
+        assert!(
+            rendered.contains("[providers.anthropic-primary]")
+                && rendered.contains("[providers.anthropic-secondary]"),
+            "err: {rendered}"
+        );
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// A dry-run on the two-entry shape prints the refusal and writes
+    /// nothing: the operator learns the migration cannot proceed BEFORE being
+    /// asked to approve anything.
+    #[tokio::test]
+    async fn a_two_entry_dry_run_refuses_and_writes_nothing() {
+        let f = fixture(V3_TWO_BARE_ENTRIES_ONE_FAMILY);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let err = f
+            .migrate(true, false)
+            .await
+            .expect_err("dry-run must also refuse");
+
+        assert!(
+            err.to_string().contains("[providers.anthropic-primary]"),
+            "err: {err}"
+        );
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// The refusal is rendered from config NAMES only: no seat label, no
+    /// token, no store path, no filesystem path.
+    #[test]
+    fn the_family_fan_out_refusal_carries_no_credential_material() {
+        let rendered = SeatMaterializationRefusal::FamilyFanOut {
+            family: "anthropic".to_string(),
+            entries: vec![
+                "anthropic-primary".to_string(),
+                "anthropic-secondary".to_string(),
+            ],
+        }
+        .to_string();
+
+        assert!(rendered.contains("anthropic-primary"), "{rendered}");
+        assert!(rendered.contains("anthropic-secondary"), "{rendered}");
+        for forbidden in [
+            "not-a-real-token",
+            "credentials.json",
+            "/home/",
+            "oauth://anthropic#work",
+        ] {
+            assert!(!rendered.contains(forbidden), "{rendered}");
+        }
+    }
+
+    /// Same hygiene contract for the existing-pool class.
+    #[test]
+    fn the_existing_pool_refusal_carries_no_credential_material() {
+        let rendered = SeatMaterializationRefusal::ExistingPool {
+            pool: "anthropic".to_string(),
+            entry: "anthropic-managed".to_string(),
+            family: "anthropic".to_string(),
+        }
+        .to_string();
+
+        assert!(rendered.contains("[pools.anthropic]"), "{rendered}");
+        assert!(rendered.contains("anthropic-managed"), "{rendered}");
+        for forbidden in ["not-a-real-token", "credentials.json", "/home/"] {
+            assert!(!rendered.contains(forbidden), "{rendered}");
+        }
+    }
 
     #[tokio::test]
     async fn an_unreadable_store_refuses_the_whole_migration_byte_identical() {

@@ -1344,7 +1344,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Refusal::SeatSelectionRelocation` -- document byte-untouched -- when a
   present knob has no derivable pool (no `oauth://` ref to name a family, an
   unusable family token, or a derived pool name held by a provider entry, a
-  model nickname, or a hand-authored pool block). A file carrying no such knob
+  model nickname, or a hand-authored pool block), or when two entries derive
+  the SAME pool name (`colliding_pool_derivations`: grouping them would merge
+  accounts the operator kept separate and drop all but one `seat_selection`).
+  A file carrying no such knob
   is a version stamp only. NO store access: the rung runs twice (plan + locked
   re-read), so the store-aware half lives in the command instead.
   `bare_oauth_pool_candidates(&DocumentMut) -> Vec<BareOauthRef{entry, family}>`
@@ -4232,7 +4235,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (at v4 a bare ref means the default seat). An unreadable store refuses the
   WHOLE migration (`seat_enumeration_refusal`, path-free via
   `sanitize_store_open_error`) rather than stamp the version alone and silently
-  narrow the ref; a `SeatNamingError` surfaces unsoftened. `combined_candidate`
+  narrow the ref; a `SeatNamingError` surfaces unsoftened. Two further
+  fail-closed classes live in `SeatMaterializationRefusal`:
+  `FamilyFanOut` (2+ provider entries carry a bare `oauth://<family>` ref for
+  ONE family -- merging them would group entries that may name deliberately
+  distinct egresses into one pool and dispatch every account's bearer to all of
+  them; the message names every claimant entry) and `ExistingPool` (the derived
+  pool name is held by a `[pools.*]` block the FILE carried, read off the
+  ORIGINAL document by `pool_block_names` so phase 1's own relocated pool is
+  still growable -- an operator-authored pool's membership is never grown by
+  the migration). `combined_candidate`
   composes phase 1 + phase 2 into ONE candidate text (phase 2 composes onto the
   ORIGINAL document for a `NoChange` plan, so a hand-authored already-current
   file carrying a bare multi-seat ref is still handled); only when BOTH phases
