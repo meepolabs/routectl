@@ -79,7 +79,10 @@ enum Cmd {
     /// Log into a managed OAuth provider (`anthropic` for claude.ai,
     /// `codex` for OpenAI ChatGPT/Codex). Spawns a local callback
     /// server, opens the browser to the provider's auth URL, and
-    /// persists tokens to `~/.config/routectl/credentials.json`.
+    /// persists tokens to `~/.config/routectl/credentials.json`. Then
+    /// offers the `config.toml` change that makes the new seat
+    /// reachable; declining it, or having no editable config, still
+    /// exits 0 -- the credential is stored either way.
     Login {
         /// Which provider to log into.
         #[arg(value_parser = provider_value_parser())]
@@ -97,6 +100,10 @@ enum Cmd {
         /// default.
         #[arg(long)]
         label: Option<String>,
+        /// Apply the offered config change without the confirmation
+        /// prompt. The change is still printed before it is written.
+        #[arg(long)]
+        yes: bool,
     },
     /// Remove a provider's tokens from the routectl credentials store.
     /// First-time logout (no record present) is reported but is not an
@@ -647,9 +654,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             print_url,
             callback_port,
             label,
+            yes,
         } => {
-            if let Err(e) =
-                commands::login::run(&provider, print_url, callback_port, label.as_deref()).await
+            let config_path = resolve_config_path(cli.config.as_deref());
+            if let Err(e) = commands::login::run(
+                &provider,
+                print_url,
+                callback_port,
+                label.as_deref(),
+                commands::login::ConfigSurface::Auto {
+                    config_path: &config_path,
+                    yes,
+                },
+            )
+            .await
             {
                 eprintln!("error: {e}");
                 std::process::exit(1);

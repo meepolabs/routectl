@@ -1,11 +1,12 @@
-//! The pure planner behind `routectl login`'s config auto-surface: what
-//! config delta a freshly minted seat implies, and how that delta renders
-//! as pasteable TOML.
+//! `routectl login`'s config auto-surface: what config delta a freshly
+//! minted seat implies, how that delta renders as pasteable TOML, and the
+//! confirmed write that applies it.
 //!
-//! Both halves are PURE over a parsed [`Config`] -- no IO, no credential
-//! store, no clock. The command layer owns the snapshot, the confirmation
-//! and the write; everything judgment-bearing happens here so it is
-//! testable as a table.
+//! [`plan`] and [`render_delta`] are PURE over a parsed [`Config`] -- no
+//! IO, no credential store, no clock -- so everything judgment-bearing is
+//! testable as a table. [`surface`] is the one impure half: it owns the
+//! byte snapshot, the preflights, the confirmation and the write, and it
+//! decides nothing the planner could have decided.
 //!
 //! Reconciliation is by CREDENTIAL REF, never by generated name.
 //! [`ref_matches`] finds the entries that already consume the seat's
@@ -39,17 +40,29 @@
 //! one `Err` is an oauth id with no known provider shape, which the CLI's
 //! accepted set (the login registry) cannot produce.
 
+use std::path::Path;
+
 use routectl_auth::SecretRef;
 use routectl_core::{Error, Result};
 use routectl_router::seat_naming::{
     SeatNamingError, growth_pools_for_family, plan_new_seat, plan_pool_materialization,
     seat_secret_ref,
 };
-use routectl_router::{Config, ProviderEntry};
+use routectl_router::{
+    Config, EditOutcome, ProviderEntry, parse_config, upsert_pool_members as upsert_pool,
+};
+use toml_edit::{DocumentMut, Item};
 
+use super::edit_pipeline::{
+    RelockValidationError, confirm_high_consequence, gate, insert_provider_block, parse_document,
+    preflight, render_gate_errors,
+};
 use super::login_provider_block::{
     ProviderBlock, provider_block, required_auth_fields, toml_key, toml_string,
 };
+use super::login_surface_availability::availability_gap;
+use super::parse_error_redaction::redact_parse_error;
+use crate::config_classify::collect_high_consequence_changes;
 
 /// The config delta a freshly minted seat implies.
 #[derive(Debug)]
@@ -470,3 +483,395 @@ fn render_pool_block(action: &PoolAction) -> String {
 #[cfg(test)]
 #[path = "login_surface_tests.rs"]
 mod tests;
+
+// ---------------------------------------------------------------------
+// The impure half: snapshot, preflight, plan, render, confirm, commit.
+// ---------------------------------------------------------------------
+
+/// What [`surface`] settled on, for the caller and for tests.
+///
+/// Every variant except [`SurfaceOutcome::Written`] leaves `config.toml`
+/// byte-identical, and NONE of them is an error: login already succeeded
+/// and the credential is stored, so a refusal, a decline, an absent config
+/// or a config this build cannot edit all exit clean. Only a failure AFTER
+/// the confirmation was accepted is an `Err`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SurfaceOutcome {
+    /// The delta was confirmed and committed.
+    Written {
+        /// The `[providers.<name>]` key that now serves the seat.
+        entry_name: String,
+    },
+    /// Config already reaches the seat; nothing was proposed.
+    Nothing,
+    /// A plan refusal (ambiguity, naming, auth drift): reported, not written.
+    Refused,
+    /// The candidate config the delta would produce failed the shared
+    /// validation gate, so it was never offered. Distinct from
+    /// [`SurfaceOutcome::Refused`]: the planner was willing, the config as a
+    /// whole was not.
+    Rejected,
+    /// The confirmation was declined.
+    Declined,
+    /// The auto-surface did not run against this config at all: no file, a
+    /// file this build must not edit (version out of bounds, a legacy key),
+    /// or one that does not parse.
+    Skipped(SkipReason),
+}
+
+/// Why [`surface`] never got as far as planning.
+///
+/// Each case prints and exits 0: the operator asked for a credential and
+/// got one, and a config routectl must not touch is not a login failure.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// No config file exists. Login never creates one -- `config init`
+    /// owns that decision, including where the file goes and what else it
+    /// contains.
+    NoConfigFile,
+    /// The file exists but could not be read (permissions, a broken symlink,
+    /// a device error). Never an error: a login is not the moment to fail on
+    /// a config file routectl was not asked to write.
+    Unreadable {
+        /// The IO failure, with the path.
+        detail: String,
+    },
+    /// The file exists but this build must not edit it: its version is out
+    /// of bounds, or it carries a removed key the migrator relocates. The
+    /// preflight's own wording -- which already names `config migrate` for
+    /// a too-old file -- is carried VERBATIM rather than re-stated, so the
+    /// pointer cannot drift from the loader's.
+    Unwritable {
+        /// The preflight's message, printed as-is.
+        detail: String,
+    },
+    /// The file exists but does not parse, so no delta can be planned
+    /// against it. The parse error is redacted before it is carried: toml
+    /// echoes the offending line, which may hold credential material.
+    Unparseable {
+        /// The redacted parse error.
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoConfigFile => write!(
+                f,
+                "no config file yet, so nothing was written -- run `routectl config init` \
+                 to create one, then add the entry below"
+            ),
+            Self::Unwritable { detail } => write!(f, "{detail} Nothing was written"),
+            Self::Unreadable { detail } => write!(
+                f,
+                "{detail}; no config change was proposed. Nothing was written"
+            ),
+            Self::Unparseable { detail } => write!(
+                f,
+                "the current config does not parse, so no config change was proposed \
+                 ({detail}); fix it (or run `routectl config migrate` if it predates this \
+                 build), then add the entry below. Nothing was written"
+            ),
+        }
+    }
+}
+
+/// Offer, and on confirmation apply, the config delta a freshly minted seat
+/// of `family` labelled `label` implies.
+///
+/// Sequence: read the file's bytes as the write snapshot -> raw preflights
+/// -> parse -> [`plan`] -> print [`render_delta`] -> confirm (`yes`
+/// bypasses the PROMPT, never the print) -> commit through
+/// `edit_config_toml` against that exact snapshot.
+///
+/// # Errors
+///
+/// EXACTLY ONE condition: the commit failed after the confirmation was
+/// accepted (a snapshot conflict, a candidate that fails re-validation under
+/// the lock, an IO failure). Every pre-acceptance condition -- no config
+/// file, an unreadable or unwritable or unparseable one, a plan refusal, a
+/// candidate the gate rejects, a decline -- is an `Ok` VALUE, because login
+/// already succeeded and the credential is stored. A nonzero exit there
+/// would fail every credential-only login run against a config routectl was
+/// never asked to write.
+///
+/// The error message says the credential remains stored, because it does:
+/// login ran to completion before this was called and nothing here rolls it
+/// back. A conflict is NOT retried against fresh bytes -- the operator
+/// confirmed one specific delta against one specific file state.
+pub fn surface(
+    config_path: &Path,
+    family: &str,
+    label: Option<&str>,
+    yes: bool,
+) -> Result<SurfaceOutcome> {
+    let snapshot = match read_snapshot(config_path) {
+        Ok(bytes) => bytes,
+        Err(reason) => return Ok(skip(reason, family, label)),
+    };
+    surface_against(config_path, snapshot, family, label, yes)
+}
+
+/// [`surface`] against an already-captured `snapshot`.
+///
+/// Split out so the conflict path is reachable without a thread race: the
+/// snapshot is what the commit's byte comparison is made against, so
+/// passing bytes the file no longer holds IS the out-of-band-write case,
+/// through the same code.
+fn surface_against(
+    config_path: &Path,
+    snapshot: Vec<u8>,
+    family: &str,
+    label: Option<&str>,
+    yes: bool,
+) -> Result<SurfaceOutcome> {
+    let snapshot_text = match String::from_utf8(snapshot.clone()) {
+        Ok(text) => text,
+        Err(e) => {
+            return Ok(skip(
+                SkipReason::Unparseable {
+                    detail: format!("config is not UTF-8: {e}"),
+                },
+                family,
+                label,
+            ));
+        }
+    };
+    if let Err(e) = preflight(&snapshot_text) {
+        return Ok(skip(
+            SkipReason::Unwritable {
+                detail: e.to_string(),
+            },
+            family,
+            label,
+        ));
+    }
+    let prev = match parse_config(&snapshot_text) {
+        Ok(config) => config,
+        Err(e) => {
+            return Ok(skip(
+                SkipReason::Unparseable {
+                    detail: redact_parse_error(&e),
+                },
+                family,
+                label,
+            ));
+        }
+    };
+
+    // `plan`'s only `Err` is an oauth id with no known provider shape, which
+    // the CLI's accepted set (the login registry) cannot produce. It is still
+    // reported as a value rather than propagated: this is post-login, and no
+    // unreachable planner branch may turn a successful login into a nonzero
+    // exit.
+    let planned = match plan(&prev, family, label) {
+        Ok(planned) => planned,
+        Err(e) => {
+            println!("\n{e}. Nothing was written.");
+            return Ok(SurfaceOutcome::Rejected);
+        }
+    };
+    let write = match &planned {
+        SurfacePlan::Nothing { entry_name, note } => {
+            if let Some(note) = note {
+                println!("\n{note}.");
+            } else {
+                println!("\nConfig already routes this account; nothing to change.");
+            }
+            print_availability(&prev, entry_name);
+            return Ok(SurfaceOutcome::Nothing);
+        }
+        SurfacePlan::Refuse(reason) => {
+            println!("\n{reason}. Add or fix the entry by hand:");
+            println!("\n{}", render_delta_or_block(&planned, family, label));
+            return Ok(SurfaceOutcome::Refused);
+        }
+        SurfacePlan::Write(write) => write,
+    };
+
+    let delta = render_delta(&planned);
+    println!("\nCredential stored. This config change would route to it:\n\n{delta}");
+
+    // Everything from here to the confirmation is PRE-acceptance, so a
+    // failure is a reported value, never a nonzero exit: nothing was
+    // written and the operator never agreed to anything. Only the commit
+    // below can fail nonzero.
+    let candidate = apply_delta_text(&snapshot_text, write)
+        .map_err(|e| vec![e.to_string()])
+        .and_then(|text| gate(&text).map(|next| (text, next)));
+    let (_, next) = match candidate {
+        Ok(pair) => pair,
+        Err(errors) => {
+            render_gate_errors(&errors);
+            println!("\nAdd the entry by hand once the config is valid:\n\n{delta}");
+            return Ok(SurfaceOutcome::Rejected);
+        }
+    };
+
+    // A new provider entry sets the credential source, and a pool membership
+    // change redirects which account serves a model, so this edit is always
+    // egress-defining. The collector names the specific fields; the fallback
+    // mirrors `provider add`'s, for the case where it comes back empty.
+    let mut high = collect_high_consequence_changes(&prev, &next);
+    if high.is_empty() {
+        high.push("pools.members");
+    }
+    if !confirm_high_consequence(&high, yes) {
+        println!("nothing written. Add it by hand when you are ready:\n\n{delta}");
+        return Ok(SurfaceOutcome::Declined);
+    }
+
+    let outcome = commit(config_path, &snapshot, &snapshot_text, write).map_err(|e| {
+        Error::Config(format!(
+            "the credential is stored and remains valid, but the config was NOT changed \
+             ({e}). Nothing was rolled back -- the login stands; only `config.toml` is \
+             unchanged. Add the entry by hand, or re-run `routectl login` to be offered \
+             it again:\n\n{delta}"
+        ))
+    })?;
+
+    let entry_name = write.entry_name.clone();
+    tracing::info!(
+        surface = "cli",
+        verb = "login-config-surface",
+        entry = %routectl_core::sanitize_for_log(&entry_name),
+        pool = %routectl_core::sanitize_for_log(write.pool.pool()),
+        config_changed = outcome == EditOutcome::Modified,
+        "login config surface committed",
+    );
+    println!(
+        "config updated: [providers.{}] now serves this account.",
+        toml_key(&entry_name)
+    );
+
+    // The availability scan reads the config that was just committed, not
+    // the pre-write one -- the entry it asks about only exists in the
+    // candidate.
+    print_availability(&next, &entry_name);
+    Ok(SurfaceOutcome::Written { entry_name })
+}
+
+/// Print the skip reason plus the block the operator would add by hand.
+/// The block comes from the same renderer every other surface prints, so a
+/// skipped login and an accepted one can never describe different entries.
+fn skip(reason: SkipReason, family: &str, label: Option<&str>) -> SurfaceOutcome {
+    println!("\n{reason}.");
+    if let Some(block) = provider_block(family, label) {
+        println!("\n{}", block.render());
+    }
+    SurfaceOutcome::Skipped(reason)
+}
+
+/// The seat's config bytes, or the reason there are none.
+///
+/// Every read failure -- absent, unreadable, permission-denied -- is a skip,
+/// not an error: this runs AFTER a successful login, and no pre-acceptance
+/// condition may turn a stored credential into a nonzero exit.
+fn read_snapshot(config_path: &Path) -> std::result::Result<Vec<u8>, SkipReason> {
+    match std::fs::read(config_path) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(SkipReason::NoConfigFile),
+        Err(e) => Err(SkipReason::Unreadable {
+            detail: format!("cannot read config `{}`: {e}", config_path.display()),
+        }),
+    }
+}
+
+/// The delta for a plan that has one, else the bare provider block the
+/// login's own success print would show. A refusal has no plan-derived
+/// delta (nothing is determined), but the operator still needs the entry
+/// shape in front of them.
+fn render_delta_or_block(plan: &SurfacePlan, family: &str, label: Option<&str>) -> String {
+    let delta = render_delta(plan);
+    if !delta.is_empty() {
+        return delta;
+    }
+    provider_block(family, label).map_or_else(String::new, |block| block.render())
+}
+
+/// Print the routing gap between the seat and a servable request, if any.
+fn print_availability(config: &Config, entry_name: &str) {
+    let pool = config
+        .pools
+        .iter()
+        .find(|(_, pool)| pool.members.iter().any(|m| m == entry_name))
+        .map(|(name, _)| name.clone());
+    if let Some(gap) = availability_gap(config, entry_name, pool.as_deref()) {
+        println!("\n{gap}\n");
+    }
+}
+
+/// Apply `write` to a config document, in the deterministic order the
+/// commit closure repeats under the lock.
+///
+/// `accepts_new_logins = true` is set ONLY for a pool this edit creates --
+/// `upsert_pool_members` deliberately leaves the marker alone, and flipping
+/// an operator's `false` would grow a pool they pinned. This mirrors
+/// [`render_delta`] exactly; the two must agree or the shown delta is a
+/// lie.
+fn apply_delta(doc: &mut DocumentMut, write: &SurfaceWrite) -> Result<()> {
+    if let Some(entry) = &write.new_entry {
+        insert_provider_block(doc, &write.entry_name, entry.entry_table())?;
+    }
+    let members: Vec<&str> = match &write.pool {
+        PoolAction::Join { members, .. } | PoolAction::Create { members, .. } => {
+            members.iter().map(String::as_str).collect()
+        }
+    };
+    upsert_pool(doc, write.pool.pool(), &members);
+    if matches!(write.pool, PoolAction::Create { .. }) {
+        set_accepts_new_logins(doc, write.pool.pool());
+    }
+    Ok(())
+}
+
+/// Mark a pool this edit created as one future logins may grow.
+fn set_accepts_new_logins(doc: &mut DocumentMut, pool: &str) {
+    if let Some(block) = doc
+        .get_mut("pools")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|pools| pools.get_mut(pool))
+        .and_then(Item::as_table_like_mut)
+    {
+        block.insert("accepts_new_logins", toml_edit::value(true));
+    }
+}
+
+/// The candidate config text, for the pre-lock gate.
+fn apply_delta_text(snapshot_text: &str, write: &SurfaceWrite) -> Result<String> {
+    let mut doc = parse_document(snapshot_text)?;
+    apply_delta(&mut doc, write)?;
+    Ok(doc.to_string())
+}
+
+/// Re-read under the advisory lock against `snapshot`, re-apply the SAME
+/// deterministic edit, re-gate, and commit atomically.
+fn commit(
+    config_path: &Path,
+    snapshot: &[u8],
+    snapshot_text: &str,
+    write: &SurfaceWrite,
+) -> Result<EditOutcome> {
+    let result = routectl_router::edit_config_toml::<RelockValidationError, _>(
+        config_path,
+        snapshot,
+        |doc| {
+            apply_delta(doc, write).map_err(|_| RelockValidationError)?;
+            let text = doc.to_string();
+            if text == snapshot_text {
+                return Ok(EditOutcome::Unchanged);
+            }
+            match gate(&text) {
+                Ok(_) => Ok(EditOutcome::Modified),
+                Err(_) => Err(RelockValidationError),
+            }
+        },
+    )
+    .map_err(super::edit_pipeline::render_write_error)?;
+    Ok(result.outcome)
+}
+
+#[cfg(test)]
+#[path = "login_surface_command_tests.rs"]
+mod command_tests;

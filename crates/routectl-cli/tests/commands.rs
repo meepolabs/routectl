@@ -53,7 +53,15 @@ async fn login_unknown_provider_errors_clearly() {
     // binding any sockets or opening browsers. (clap normally rejects
     // unknown values first; this guards the command body's own
     // registry-lookup path, which must list every known provider.)
-    match commands::login::run("made-up-provider", false, None, None).await {
+    match commands::login::run(
+        "made-up-provider",
+        false,
+        None,
+        None,
+        commands::login::ConfigSurface::Skip,
+    )
+    .await
+    {
         Err(routectl_core::Error::Auth(msg)) => {
             assert!(
                 msg.contains("unknown oauth provider"),
@@ -531,9 +539,15 @@ async fn login_codex_print_url_is_refused_with_browser_only_message() {
     // must fail fast (before opening the store or binding a socket) with
     // the browser-only guidance. Exit-non-zero is enforced by main.rs;
     // here we assert the command body returns the Auth error.
-    let err = commands::login::run("codex", /* print_url */ true, None, None)
-        .await
-        .expect_err("codex --print-url must be refused");
+    let err = commands::login::run(
+        "codex",
+        /* print_url */ true,
+        None,
+        None,
+        commands::login::ConfigSurface::Skip,
+    )
+    .await
+    .expect_err("codex --print-url must be refused");
     match err {
         routectl_core::Error::Auth(msg) => {
             assert!(
@@ -1350,5 +1364,61 @@ fn validation_report_falls_back_to_plain_when_path_not_locatable() {
     assert!(
         retry_err.starts_with("config: [retry.classes.feature-unsupported]"),
         "expected the bare validator message, got: {retry_err}"
+    );
+}
+
+/// `refresh` is WRITE-FREE by construction: it takes no config path, so it
+/// cannot reach `config.toml` at all. Pinned behaviorally (a refresh run
+/// beside a config file leaves it byte-identical) because the auto-surface
+/// landing on `login` makes "which credential commands write config" a
+/// question a reader now has to ask.
+#[tokio::test]
+#[serial_test::serial]
+async fn refresh_leaves_a_neighbouring_config_byte_identical() {
+    // Arrange: a config file where a writer would find it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path().join("routectl");
+    std::fs::create_dir_all(&config_dir).expect("mkdir");
+    let config_path = config_dir.join("config.toml");
+    let body = format!(
+        "version = {}\n\
+         [providers.anthropic-default]\n\
+         kind = \"anthropic-api\"\n\
+         auth_kind = \"oauth-bearer\"\n\
+         api_key_ref = \"oauth://anthropic\"\n",
+        routectl_router::CURRENT_CONFIG_VERSION
+    );
+    std::fs::write(&config_path, &body).expect("write config");
+    let before = std::fs::read(&config_path).expect("read config");
+
+    // SAFETY: env-touching tests are serialized via serial_test.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
+
+    // Act: no credential record, so the refresh fails -- the point is what
+    // it did NOT touch on the way.
+    let outcome = commands::refresh::run("anthropic", None).await;
+
+    // Assert
+    assert!(outcome.is_err(), "refresh without a record must error");
+    assert_eq!(
+        std::fs::read(&config_path).expect("read config"),
+        before,
+        "refresh must never write config.toml"
+    );
+    unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+}
+
+#[test]
+fn clap_accepts_yes_on_login() {
+    // `--yes` skips the auto-surface's confirmation PROMPT (never the
+    // printed delta). Pinned at the clap layer because nothing else can
+    // reach it: exercising the flag itself needs a completed OAuth flow.
+    // `--help` parses the whole subcommand definition, so a missing flag
+    // shows up in its output without running any part of the login.
+    let (code, stdout, stderr) = run_routectl_full(&["login", "--help"]);
+    assert_eq!(code, 0, "login --help must parse; stderr: {stderr}");
+    assert!(
+        stdout.contains("--yes"),
+        "`--yes` must be a documented login flag: {stdout}"
     );
 }

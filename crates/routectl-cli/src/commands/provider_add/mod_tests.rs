@@ -579,6 +579,9 @@ struct FakeIo {
     offer_env: bool,
     prompt_value: String,
     login_ok: bool,
+    /// Side effect the stub login performs before returning, standing in
+    /// for whatever the real login flow does to the filesystem.
+    login_hook: Option<Box<dyn Fn() + Send + Sync>>,
     confirm_probe: bool,
     login_calls: std::sync::Mutex<Vec<String>>,
     stdin_reads: std::sync::Mutex<u32>,
@@ -594,6 +597,7 @@ impl Default for FakeIo {
             offer_env: false,
             prompt_value: String::new(),
             login_ok: true,
+            login_hook: None,
             confirm_probe: false,
             login_calls: std::sync::Mutex::new(Vec::new()),
             stdin_reads: std::sync::Mutex::new(0),
@@ -626,6 +630,9 @@ impl AddIo for FakeIo {
     }
     async fn login(&self, provider: &str) -> Result<()> {
         self.login_calls.lock().unwrap().push(provider.to_string());
+        if let Some(hook) = &self.login_hook {
+            hook();
+        }
         if self.login_ok {
             Ok(())
         } else {
@@ -1599,4 +1606,77 @@ async fn post_add_probe_offer_skips_when_no_model_routes_to_the_provider() {
     let config = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(config.providers.contains_key("grok"));
     unset_env("XDG_CONFIG_HOME");
+}
+
+// -----------------------------------------------------------------
+// The oauth arm writes exactly ONE block, because the delegated login
+// touches no config file. Nothing about this has a compile signal: the
+// defect it guards surfaces only as a confusing snapshot conflict.
+// -----------------------------------------------------------------
+
+/// The MECHANISM: this command's snapshot is captured before the login and
+/// its commit compares against those exact bytes, so a login that writes
+/// config in between makes the add conflict. Driven here by a stub login
+/// that writes -- which is precisely what the auto-surface would do if the
+/// production seam passed anything but `ConfigSurface::Skip`.
+#[tokio::test]
+async fn a_config_writing_login_would_make_the_oauth_arm_conflict_on_its_own_snapshot() {
+    // Arrange: the stub login appends a byte to config.toml, standing in
+    // for the login auto-surface committing its own delta.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let racing_path = path.clone();
+    let io = FakeIo {
+        login_hook: Some(Box::new(move || {
+            let mut text = std::fs::read_to_string(&racing_path).unwrap();
+            text.push_str("\n# a config-writing login landed here\n");
+            std::fs::write(&racing_path, text).unwrap();
+        })),
+        ..Default::default()
+    };
+
+    // Act
+    let err = run_with_io(&path, args("anthropic", "claude-sub"), &io)
+        .await
+        .expect_err("a login that writes config invalidates this command's snapshot");
+
+    // Assert: the conflict, reported through the post-side-effect recovery
+    // wording rather than a bare failure.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("changed on disk"),
+        "expected a snapshot conflict, got: {msg}"
+    );
+    // And the entry the add existed to write is absent: one command, one
+    // write, and this one wrote nothing.
+    let config = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        !config.providers.contains_key("claude-sub"),
+        "the conflicting add must write no block"
+    );
+}
+
+/// The WIRING: the production seam must pass `Skip`. There is no compile
+/// signal for this (both variants type-check), and no test can drive the
+/// real oauth flow, so the guard is lexical over this module's own
+/// production source -- the one place `login::run` is called from here.
+///
+/// The whole file is scanned deliberately, with no `#[cfg(test)]` cut: this
+/// module's tests are a SIDECAR (`#[path = "mod_tests.rs"] mod tests;`), so
+/// none of their text is in `mod.rs` at all, while cutting on the first
+/// `#[cfg(test)]` would truncate at that declaration -- which sits ABOVE
+/// `RealAddIo` and would leave the guard scanning nothing that matters.
+#[test]
+fn the_production_login_seam_never_arms_the_config_auto_surface() {
+    let production = include_str!("mod.rs");
+
+    assert!(
+        production.contains("ConfigSurface::Skip"),
+        "RealAddIo::login must pass ConfigSurface::Skip"
+    );
+    assert!(
+        !production.contains("ConfigSurface::Auto"),
+        "arming the auto-surface here makes every oauth `provider add` conflict on its \
+         own byte snapshot"
+    );
 }

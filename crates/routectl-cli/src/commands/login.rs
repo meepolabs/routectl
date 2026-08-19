@@ -1,22 +1,56 @@
-//! `routectl login <provider>` -- run the OAuth 2.0 PKCE flow and
-//! persist tokens to `~/.config/routectl/credentials.json`.
+//! `routectl login <provider>` -- run the OAuth 2.0 PKCE flow, persist
+//! tokens to `~/.config/routectl/credentials.json`, and (for a direct
+//! `routectl login`) offer the config change that makes the new seat
+//! reachable.
 //!
 //! Providers: `anthropic` (claude.ai) and `codex` (OpenAI
 //! ChatGPT/Codex). The accepted set is validated at the clap layer
 //! against the auth registry; this body is provider-id-generic except
 //! for the `--print-url` guard below.
+//!
+//! The config auto-surface is a CALLER's choice ([`ConfigSurface`]), not a
+//! property of logging in: `provider add` drives this same flow between its
+//! own byte snapshot and its own commit, so a config-writing login there
+//! would make every oauth `provider add` fail its snapshot check.
+
+use std::path::Path;
 
 use routectl_auth::{LoginOptions, OAuthStore};
 use routectl_core::{Error, Result};
 
 use crate::commands::login_provider_block::provider_block;
+use crate::commands::login_surface;
 use crate::commands::seat::validate_label;
+
+/// Whether a login offers to write the config change its new seat implies.
+///
+/// The auto-surface is login-specific. A caller that is ITSELF mid-edit of
+/// `config.toml` passes [`ConfigSurface::Skip`]: two writers between one
+/// snapshot and one commit is a guaranteed conflict, and that caller is
+/// already writing the entry the surface would propose.
+///
+/// `Auto` carries the file it may edit and the skip-confirm flag, so a
+/// `Skip` caller has no path to hand over and cannot supply a placeholder
+/// one by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSurface<'a> {
+    /// Plan the config delta, show it, and write it on confirmation.
+    Auto {
+        /// The `config.toml` to offer the delta against.
+        config_path: &'a Path,
+        /// Skip the confirmation PROMPT. Never the printed delta.
+        yes: bool,
+    },
+    /// Print the pasteable entry only; touch no config file.
+    Skip,
+}
 
 pub async fn run(
     provider: &str,
     print_url: bool,
     callback_port: Option<u16>,
     label: Option<&str>,
+    surface: ConfigSurface<'_>,
 ) -> Result<()> {
     if print_url && !provider_supports_print_url(provider) {
         return Err(Error::Auth(format!(
@@ -35,13 +69,22 @@ pub async fn run(
     routectl_auth::oauth::run_login(provider, &store, opts)
         .await
         .map_err(|e| Error::Auth(e.to_string()))?;
-    print_next_step(provider, label);
+    match surface {
+        ConfigSurface::Auto { config_path, yes } => {
+            login_surface::surface(config_path, provider, label, yes)?;
+        }
+        ConfigSurface::Skip => print_next_step(provider, label),
+    }
     Ok(())
 }
 
-/// Print the provider entry that consumes the seat just minted. The
-/// credential alone routes no traffic: nothing in `config.toml` reaches it
-/// until an operator adds this block, and login writes no config itself.
+/// Print the provider entry that consumes the seat just minted -- the
+/// [`ConfigSurface::Skip`] path's whole output.
+///
+/// The credential alone routes no traffic: nothing in `config.toml` reaches
+/// it until an operator adds this block. On the `Skip` path that is the
+/// caller's own job (it is mid-edit of the same file), so a printed block
+/// is all this can offer.
 ///
 /// An id with no rendered block (not reachable via the CLI, whose accepted
 /// set IS the login registry) prints nothing rather than a partial hint.
