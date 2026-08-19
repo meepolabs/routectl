@@ -162,7 +162,19 @@ impl AddIo for RealAddIo {
     }
 
     async fn login(&self, provider: &str) -> Result<()> {
-        super::login::run(provider, false, None, None).await
+        // `ConfigSurface::Skip` is load-bearing, not a default: this call
+        // sits BETWEEN this command's byte snapshot and its commit, so a
+        // config-writing login would invalidate the snapshot and make every
+        // oauth `provider add` fail its conflict check. The entry the
+        // surface would propose is the one this command is already writing.
+        super::login::run(
+            provider,
+            false,
+            None,
+            None,
+            super::login::ConfigSurface::Skip,
+        )
+        .await
     }
 }
 

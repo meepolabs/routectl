@@ -4506,12 +4506,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `EconomicsProjection`/`Report` are `PartialEq` (not `Eq`: the projection
   carries `f64`). Still offline-only -- no router.rs / context_reduction.rs
   touch
-- `src/commands/login.rs` -- `routectl login <provider> [--label <name>]` runs
-  the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via
+- `src/commands/login.rs` -- `routectl login <provider> [--label <name>]
+  [--yes]` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via
   `OAuthStore`; `--label` registers an additional seat without overwriting the
   default; `--print-url` headless flow guarded against providers without a
-  paste-back landing page; on success prints the provider entry that consumes
-  the new seat
+  paste-back landing page. `ConfigSurface<'a>` is the caller's choice of what
+  happens after the token lands: `Auto { config_path, yes }` (main.rs) drives
+  the `login_surface` auto-surface, `Skip` (provider add's `RealAddIo::login`)
+  only prints the pasteable entry -- a config-writing login there would
+  invalidate provider add's own byte snapshot. `Auto` carries the path, so a
+  `Skip` caller cannot supply a placeholder one
 - `src/commands/login_provider_block.rs` -- renders the ready-to-paste
   `[providers.<name>]` entry for a logged-in seat (`kind` from
   `provider_kind_for_oauth_id`, auth selector + endpoint from the one local
@@ -4526,8 +4530,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   authority. `required_auth_fields(oauth_id)` exposes just the `kind` + auth
   selector an entry MUST carry, for the auto-surface's drift check. Mutates no
   config and emits no credential material
-- `src/commands/login_surface.rs` -- the PURE planner behind login's config
-  auto-surface. `ref_matches(&Config, &SecretRef)` finds the entries already
+- `src/commands/login_surface.rs` -- login's config auto-surface, pure planner
+  plus the confirmed write. `ref_matches(&Config, &SecretRef)` finds the
+  entries already
   consuming a seat's credential through `secret_uris()` -- reconciliation is by
   REF, never by generated name, so an operator's hand-named entry is grown
   rather than duplicated. `plan(&Config, family, label) -> SurfacePlan`
@@ -4543,15 +4548,34 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   whose required auth fields drifted refuses naming the FIELD NAMES only. `render_delta` is THE
   renderer for the shown diff, the decline print and the recovery block --
   typed plan data only, never a byte diff -- and writes
-  `accepts_new_logins = true` ONLY on a pool the plan creates. No IO, no store,
-  no clock
+  `accepts_new_logins = true` ONLY on a pool the plan creates. `surface(path,
+  family, label, yes) -> SurfaceOutcome` is the one impure half: byte snapshot
+  -> `edit_pipeline::preflight` -> parse -> plan -> print the delta (`--yes`
+  bypasses the PROMPT, never the print) -> `confirm_high_consequence` ->
+  `edit_config_toml` against that exact snapshot (`apply_delta` mirrors
+  `render_delta`, so the shown TOML and the written bytes cannot disagree).
+  Exit contract: decline / any refuse / pinned pool / `Nothing` / no config
+  file / an unwritable-or-unparseable config are all `Ok` VALUES (login
+  succeeded, the credential is stored); only a failure AFTER acceptance is
+  `Err`, whose message states the credential remains stored and was never
+  rolled back and carries the same `render_delta` as a recovery block. A
+  snapshot conflict NEVER retries against fresh bytes
+- `src/commands/login_surface_availability.rs` -- what is still missing between
+  a seat config reaches and traffic arriving: two boolean scans over the typed
+  config behind `availability_gap(config, entry, Option<pool>)`, reported after
+  a committed write and on the `Nothing` path. No model names the entry or its
+  pool -> the `[models.X]` shape (pointing at the POOL when pooled, with the
+  upstream id left a placeholder -- never guessed); models exist but no alias
+  chain reaches them -> the `[aliases]` gap. Availability only, never routing
+  advice
 - `src/commands/logout.rs` -- `routectl logout <provider> [--label <name>]` --
   removes one seat (`--label` removes only the named seat; no label removes
   the default) from the credentials store; first-time logout reported but not
   an error
 - `src/commands/refresh.rs` -- `routectl refresh <provider> [--label <name>]`
   -- forces a refresh of one seat through the per-seat single-flight gate,
-  regardless of expiry
+  regardless of expiry. Takes no config path, so it is write-free by
+  construction (unlike `login`, which offers a config change)
 - `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth seat state
   grouped by provider (default seat as `<provider> (default)`, labeled seats
   as `<provider>#<label>`), each with its own expiry; exits 0 when at least
