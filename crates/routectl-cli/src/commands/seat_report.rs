@@ -62,7 +62,11 @@ pub(crate) fn stored_seat_pool_rows(
 ) -> Vec<SeatPoolRow> {
     let mut rows = Vec::new();
     for (entry, provider_entry) in &config.providers {
-        let selection = provider_entry.runtime().seat_selection;
+        // The strategy is a pool property: an entry claimed by a pool
+        // renders that pool's strategy, a standalone entry the fill-first
+        // default. Naming the pool in the sentence is the render task's
+        // work, not this join's.
+        let selection = config.seat_selection_for(entry);
         for uri in provider_entry.secret_uris() {
             let Ok(SecretRef::OAuth { provider, label }) = SecretRef::parse(uri) else {
                 continue;

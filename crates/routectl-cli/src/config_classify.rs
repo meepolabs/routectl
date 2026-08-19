@@ -20,11 +20,14 @@ pub const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "log", "usage", "mitm
 
 /// Top-level sections carrying egress-defining knobs (where requests go,
 /// which credential authenticates them) that warrant an operator prompt on
-/// `config set`. The `[mitm]` section is egress-relevant too, but its whole
-/// block is restart-required, so it is bucketed there; the runtime
-/// [`collect_high_consequence_changes`] still flags its egress fields.
+/// `config set`. A `pools` edit changes which credential authenticates a
+/// request just as directly as a provider edit does: adding or removing a
+/// member repoints traffic onto a different account. The `[mitm]` section is
+/// egress-relevant too, but its whole block is restart-required, so it is
+/// bucketed there; the runtime [`collect_high_consequence_changes`] still
+/// flags its egress fields.
 #[cfg(test)]
-pub const HIGH_CONSEQUENCE_SECTIONS: &[&str] = &["providers"];
+pub const HIGH_CONSEQUENCE_SECTIONS: &[&str] = &["providers", "pools"];
 
 /// Top-level sections that hot-reload cleanly on the next config swap with
 /// no restart and no confirmation prompt.
@@ -136,9 +139,11 @@ pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'s
 /// pattern; `--yes` bypasses). Covers every provider entry's `base_url`,
 /// `credential_source`, and `bedrock_mantle` (the Bedrock mantle lane
 /// selector: its region derives the endpoint host and its creds carry the
-/// credential), plus the `[mitm]` block's upstream origin + SNI/Host.
-/// Local knobs (`[mitm] listen_port`, `cert_dir`) are not egress and stay
-/// out.
+/// credential), every pool's membership (which repoints traffic onto a
+/// different account's credential), plus the `[mitm]` block's upstream
+/// origin + SNI/Host. Local knobs (`[mitm] listen_port`, `cert_dir`) are not
+/// egress and stay out; so does a pool's `seat_selection`, which reorders
+/// members without changing the set of credentials in play.
 pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
 
@@ -164,6 +169,23 @@ pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'s
     }
     if bedrock_mantle_changed {
         out.push("providers.bedrock_mantle");
+    }
+
+    let mut pool_keys: BTreeSet<&str> = BTreeSet::new();
+    pool_keys.extend(prev.pools.keys().map(String::as_str));
+    pool_keys.extend(next.pools.keys().map(String::as_str));
+    let members_of = |config: &Config, key: &str| {
+        config
+            .pools
+            .get(key)
+            .map(|pool| pool.members.clone())
+            .unwrap_or_default()
+    };
+    if pool_keys
+        .into_iter()
+        .any(|key| members_of(prev, key) != members_of(next, key))
+    {
+        out.push("pools.members");
     }
 
     let prev_origin = prev.mitm.as_ref().map(|m| m.upstream_origin.as_str());
@@ -378,6 +400,50 @@ mod tests {
         );
         let changes = collect_high_consequence_changes(&prev, &next);
         assert!(changes.contains(&"providers.base_url"), "got {changes:?}");
+    }
+
+    /// A pool membership edit repoints traffic onto a different account's
+    /// credential, so it is high-consequence. A `seat_selection` edit
+    /// reorders the same credentials and is not.
+    #[test]
+    fn high_consequence_flags_pool_membership_but_not_its_strategy() {
+        use routectl_router::PoolEntry;
+        use routectl_router::config::SeatSelection;
+
+        // Arrange
+        let mut prev = Config::default();
+        prev.pools.insert(
+            "anthropic".into(),
+            PoolEntry::new(vec!["anthropic-default".into()]),
+        );
+        let mut next = prev.clone();
+
+        // No-op: identical configs -> empty.
+        assert!(collect_high_consequence_changes(&prev, &next).is_empty());
+
+        // Strategy-only edit -> not egress.
+        next.pools.insert(
+            "anthropic".into(),
+            PoolEntry::new(vec!["anthropic-default".into()])
+                .with_seat_selection(SeatSelection::RoundRobin),
+        );
+        assert!(
+            collect_high_consequence_changes(&prev, &next).is_empty(),
+            "a strategy edit changes no credential"
+        );
+
+        // Membership edit -> pools.members.
+        let mut grown = prev.clone();
+        grown.pools.insert(
+            "anthropic".into(),
+            PoolEntry::new(vec!["anthropic-default".into(), "anthropic-work".into()]),
+        );
+        let changes = collect_high_consequence_changes(&prev, &grown);
+        assert!(changes.contains(&"pools.members"), "got {changes:?}");
+
+        // A pool appearing or disappearing counts too.
+        let changes = collect_high_consequence_changes(&Config::default(), &prev);
+        assert!(changes.contains(&"pools.members"), "got {changes:?}");
     }
 
     #[test]

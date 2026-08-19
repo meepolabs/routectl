@@ -2986,3 +2986,312 @@ mod bedrock_invoke_model_family_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pool_validation_tests {
+    //! Every `[pools.<name>]` rejection class, table-driven, plus proof that
+    //! each fires through the collected suite every config surface routes
+    //! through -- `config check`, the serve gate, the hot-reload gate, and
+    //! doctor's config section all read that one collection.
+
+    use super::{MAX_POOL_MEMBERS, collect_config_validation, validate_pools};
+    use crate::config::Config;
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).expect("fixture config parses")
+    }
+
+    /// Two same-kind OAuth accounts, the shape a valid pool groups.
+    const OAUTH_ACCOUNTS: &str = "[providers.anthropic-default]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [providers.anthropic-work]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic#work\"\n";
+
+    /// One rejection class: a config that trips it and the substrings its
+    /// error must carry.
+    struct Case {
+        name: &'static str,
+        config: String,
+        expect: &'static [&'static str],
+    }
+
+    fn cases() -> Vec<Case> {
+        vec![
+            Case {
+                name: "mixed-kind",
+                config: format!(
+                    "{OAUTH_ACCOUNTS}\
+                     [providers.codex-default]\n\
+                     kind = \"openai-responses\"\n\
+                     api_key_ref = \"oauth://codex\"\n\
+                     [pools.mixed]\n\
+                     members = [\"anthropic-default\", \"codex-default\"]\n"
+                ),
+                expect: &[
+                    "codex-default",
+                    "openai-responses",
+                    "anthropic-api",
+                    "ONE provider kind",
+                ],
+            },
+            Case {
+                name: "unknown-member",
+                config: format!(
+                    "{OAUTH_ACCOUNTS}\
+                     [pools.anthropic]\n\
+                     members = [\"anthropic-default\", \"ghost\"]\n"
+                ),
+                expect: &["ghost", "not a known provider entry"],
+            },
+            Case {
+                name: "member-in-two-pools",
+                config: format!(
+                    "{OAUTH_ACCOUNTS}\
+                     [pools.first]\n\
+                     members = [\"anthropic-default\"]\n\
+                     [pools.second]\n\
+                     members = [\"anthropic-default\"]\n"
+                ),
+                expect: &["anthropic-default", "at most one pool"],
+            },
+            Case {
+                name: "api-key-member",
+                config: "[providers.keyed]\n\
+                     kind = \"openai-compat\"\n\
+                     base_url = \"https://api.example.invalid\"\n\
+                     api_key_ref = \"env://SOME_KEY\"\n\
+                     [pools.keyed-pool]\n\
+                     members = [\"keyed\"]\n"
+                    .to_string(),
+                expect: &["keyed", "oauth://", "this release"],
+            },
+            Case {
+                name: "pool-provider-name-collision",
+                config: format!(
+                    "{OAUTH_ACCOUNTS}\
+                     [providers.anthropic]\n\
+                     kind = \"anthropic-api\"\n\
+                     api_key_ref = \"oauth://anthropic\"\n\
+                     [pools.anthropic]\n\
+                     members = [\"anthropic-default\"]\n"
+                ),
+                expect: &["anthropic", "ONE namespace"],
+            },
+            Case {
+                name: "empty-members",
+                config: "[pools.empty]\nmembers = []\n".to_string(),
+                expect: &["empty", "serves no traffic"],
+            },
+            Case {
+                name: "pool-nickname-collision",
+                config: format!(
+                    "{OAUTH_ACCOUNTS}\
+                     [models.anthropic]\n\
+                     provider = \"anthropic-default\"\n\
+                     upstream = \"claude-opus-4-7\"\n\
+                     [pools.anthropic]\n\
+                     members = [\"anthropic-default\"]\n"
+                ),
+                expect: &["anthropic", "model nickname"],
+            },
+            Case {
+                name: "pool-name-collides-with-a-generated-account-name",
+                config: format!(
+                    "{OAUTH_ACCOUNTS}\
+                     [pools.anthropic-work]\n\
+                     members = [\"anthropic-default\"]\n"
+                ),
+                expect: &["anthropic-work", "ONE namespace"],
+            },
+            Case {
+                name: "member-cap",
+                config: {
+                    let mut text = String::new();
+                    let mut members: Vec<String> = Vec::new();
+                    for i in 0..=MAX_POOL_MEMBERS {
+                        let name = format!("anthropic-s{i:03}");
+                        text.push_str(&format!(
+                            "[providers.{name}]\n\
+                             kind = \"anthropic-api\"\n\
+                             api_key_ref = \"oauth://anthropic#s{i:03}\"\n"
+                        ));
+                        members.push(format!("\"{name}\""));
+                    }
+                    text.push_str(&format!(
+                        "[pools.anthropic]\nmembers = [{}]\n",
+                        members.join(", ")
+                    ));
+                    text
+                },
+                expect: &["exceeds", "32-member cap"],
+            },
+        ]
+    }
+
+    #[test]
+    fn every_rejection_class_fires_with_its_own_named_error() {
+        // Arrange / Act / Assert
+        for case in cases() {
+            let config = parse(&case.config);
+            let err = match validate_pools(&config) {
+                Ok(()) => panic!("`{}` must be rejected", case.name),
+                Err(e) => e.to_string(),
+            };
+            for needle in case.expect {
+                assert!(
+                    err.contains(needle),
+                    "`{}` error must mention `{needle}`: {err}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    /// The nine classes must not collapse into one generic message: a
+    /// distinct error per class is what makes an operator able to act.
+    #[test]
+    fn each_rejection_class_renders_a_distinct_message() {
+        // Arrange / Act
+        let mut messages: Vec<String> = Vec::new();
+        for case in cases() {
+            let config = parse(&case.config);
+            let err = validate_pools(&config)
+                .expect_err("every case rejects")
+                .to_string();
+            messages.push(err);
+        }
+
+        // Assert
+        let mut deduped = messages.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            messages.len(),
+            "each class needs its own wording: {messages:?}"
+        );
+    }
+
+    /// Wiring proof: every class reaches the ONE collected suite, so the
+    /// serve gate, `config check`, the hot-reload gate and doctor's config
+    /// section all reject it without per-surface plumbing.
+    #[test]
+    fn every_rejection_class_surfaces_through_the_collected_suite() {
+        // Arrange / Act / Assert
+        for case in cases() {
+            let config = parse(&case.config);
+            let errors = collect_config_validation(&config).errors;
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| case.expect.iter().all(|n| e.contains(n))),
+                "`{}` must surface through the collected suite: {errors:?}",
+                case.name
+            );
+        }
+    }
+
+    /// A well-formed pool passes: same-kind OAuth members, membership
+    /// claimed once, a name held by neither a provider nor a nickname.
+    #[test]
+    fn a_same_kind_oauth_pool_passes() {
+        // Arrange
+        let config = parse(&format!(
+            "{OAUTH_ACCOUNTS}\
+             [pools.anthropic]\n\
+             members = [\"anthropic-default\", \"anthropic-work\"]\n\
+             seat_selection = \"round-robin\"\n\
+             accepts_new_logins = true\n"
+        ));
+
+        // Act / Assert
+        assert!(
+            validate_pools(&config).is_ok(),
+            "a same-kind oauth pool must pass: {:?}",
+            validate_pools(&config).err().map(|e| e.to_string())
+        );
+        assert!(collect_config_validation(&config).errors.is_empty());
+    }
+
+    /// Exactly at the cap is accepted -- the rejection is strictly above it.
+    #[test]
+    fn a_pool_at_the_member_cap_passes() {
+        // Arrange
+        let mut text = String::new();
+        let mut members: Vec<String> = Vec::new();
+        for i in 0..MAX_POOL_MEMBERS {
+            let name = format!("anthropic-s{i:03}");
+            text.push_str(&format!(
+                "[providers.{name}]\n\
+                 kind = \"anthropic-api\"\n\
+                 api_key_ref = \"oauth://anthropic#s{i:03}\"\n"
+            ));
+            members.push(format!("\"{name}\""));
+        }
+        text.push_str(&format!(
+            "[pools.anthropic]\nmembers = [{}]\n",
+            members.join(", ")
+        ));
+
+        // Act / Assert
+        assert!(validate_pools(&parse(&text)).is_ok());
+    }
+
+    /// A config with no pool table at all is unaffected -- the validator
+    /// adds no error to configs written before pools existed.
+    #[test]
+    fn a_config_without_pools_is_unaffected() {
+        assert!(validate_pools(&Config::default()).is_ok());
+        assert!(validate_pools(&parse(OAUTH_ACCOUNTS)).is_ok());
+    }
+
+    /// One pass names EVERY problem: an operator fixing a pool table should
+    /// not have to re-run the check once per mistake.
+    #[test]
+    fn one_pass_collects_every_problem_in_the_table() {
+        // Arrange: an empty pool AND an unknown member in a second pool.
+        let config = parse(&format!(
+            "{OAUTH_ACCOUNTS}\
+             [pools.empty]\n\
+             members = []\n\
+             [pools.anthropic]\n\
+             members = [\"ghost\"]\n"
+        ));
+
+        // Act
+        let err = validate_pools(&config)
+            .expect_err("both problems reject")
+            .to_string();
+
+        // Assert
+        assert!(err.contains("serves no traffic"), "{err}");
+        assert!(err.contains("ghost"), "{err}");
+    }
+
+    /// A member entry whose credential is not an `oauth://` seat at all (a
+    /// Bedrock lane authenticates through `creds`) is rejected by the same
+    /// milestone-scoped rule rather than slipping through.
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn a_non_oauth_credential_member_is_rejected() {
+        // Arrange
+        let config = parse(
+            "[providers.br]\n\
+             kind = \"bedrock\"\n\
+             region = \"us-east-1\"\n\
+             creds = { kind = \"default-chain\" }\n\
+             [pools.br-pool]\n\
+             members = [\"br\"]\n",
+        );
+
+        // Act
+        let err = validate_pools(&config)
+            .expect_err("a non-oauth member rejects")
+            .to_string();
+
+        // Assert
+        assert!(err.contains("oauth://"), "{err}");
+    }
+}

@@ -1544,7 +1544,7 @@ impl Router {
                 // Round-robin pools rotate the starting seat per request;
                 // register a cursor only for that selection mode.
                 if matches!(
-                    policy.seat_selection,
+                    self.config.seat_selection_for(&m.provider_name),
                     crate::config::SeatSelection::RoundRobin
                 ) {
                     self.round_robin.register(nickname);

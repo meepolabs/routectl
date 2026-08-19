@@ -18,7 +18,7 @@ use super::*;
 
 use async_trait::async_trait;
 
-use crate::config::{ProviderEntry, ProviderRuntimePolicy, SeatSelection};
+use crate::config::{PoolEntry, ProviderEntry, SeatSelection};
 use crate::quota::freshness::{ObservationStamp, accept_reset};
 use crate::quota::key::{SeatKey, seat_key_for_secret_ref};
 use crate::quota::reduce::QuotaSnapshot;
@@ -95,15 +95,16 @@ fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -
     let mut providers = BTreeMap::new();
     providers.insert(
         SEAT_PROVIDER.to_string(),
-        ProviderEntry::anthropic_api(format!("oauth://{SEAT_PROVIDER}")).with_runtime(
-            ProviderRuntimePolicy {
-                seat_selection: selection,
-                ..Default::default()
-            },
-        ),
+        ProviderEntry::anthropic_api(format!("oauth://{SEAT_PROVIDER}")),
+    );
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        format!("{SEAT_PROVIDER}-pool"),
+        PoolEntry::new(vec![SEAT_PROVIDER.to_string()]).with_seat_selection(selection),
     );
     let mut cfg = Config {
         providers,
+        pools,
         ..Config::default()
     };
     cfg.seat_quota.enabled = quota_enabled;

@@ -1592,7 +1592,7 @@ always has -- neither reads a seat's budget, and the switch below changes
 nothing for them. `fill-first` in particular is unchanged *deliberately*:
 draining one seat is what that setting asks for. Adopting quota-aware
 placement is therefore an explicit
-`seat_selection = "sticky-least-loaded"` on the provider.
+`seat_selection = "sticky-least-loaded"` on the pool.
 
 Nothing here can move an established conversation. Placement is
 consulted for a birth pick only, so a soft cap never evicts or migrates a
@@ -3687,16 +3687,20 @@ config check` and `routectl doctor` both report, per provider entry, how
 many stored seats its ref resolves to and which labels they carry.
 
 **Seat selection.** A `seat_selection` knob picks how dispatch chooses
-among the pool's seats. It takes effect only when a pool resolves to more
-than one stored seat -- with a single seat (or a `#label`-pinned ref)
-there is nothing to choose between, and every strategy behaves
-identically:
+among a pool's seats. It is set on the `[pools.<name>]` block that groups
+the accounts, because the strategy is a property of the SET, not of one
+transport. It takes effect only when a pool resolves to more than one
+stored seat -- with a single seat (or a `#label`-pinned ref) there is
+nothing to choose between, and every strategy behaves identically:
 
 ```toml
 [providers.anthropic-managed]
 kind          = "anthropic-api"
 api_key_ref   = "oauth://anthropic"
 auth_kind     = "oauth-bearer"
+
+[pools.anthropic]
+members        = ["anthropic-managed"]
 seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sticky-least-loaded"
 ```
 

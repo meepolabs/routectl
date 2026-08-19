@@ -433,3 +433,200 @@ fn serve_load_is_silent_without_legacy_capability_lists() {
         "a config with no legacy lists must emit no deprecation WARN"
     );
 }
+
+/// Two same-kind OAuth accounts every pool fixture below groups.
+const POOL_ACCOUNTS: &str = "[providers.anthropic-default]\n\
+     kind = \"anthropic-api\"\n\
+     api_key_ref = \"oauth://anthropic\"\n\
+     [providers.anthropic-work]\n\
+     kind = \"anthropic-api\"\n\
+     api_key_ref = \"oauth://anthropic#work\"\n";
+
+/// One config text per pool rejection class, each the smallest fixture
+/// that trips it.
+fn rejected_pool_configs() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "mixed-kind",
+            format!(
+                "version = 3\n{POOL_ACCOUNTS}\
+                 [providers.codex-default]\n\
+                 kind = \"openai-responses\"\n\
+                 api_key_ref = \"oauth://codex\"\n\
+                 [pools.mixed]\n\
+                 members = [\"anthropic-default\", \"codex-default\"]\n"
+            ),
+        ),
+        (
+            "unknown-member",
+            format!(
+                "version = 3\n{POOL_ACCOUNTS}\
+                 [pools.anthropic]\n\
+                 members = [\"ghost\"]\n"
+            ),
+        ),
+        (
+            "member-in-two-pools",
+            format!(
+                "version = 3\n{POOL_ACCOUNTS}\
+                 [pools.first]\n\
+                 members = [\"anthropic-default\"]\n\
+                 [pools.second]\n\
+                 members = [\"anthropic-default\"]\n"
+            ),
+        ),
+        (
+            "api-key-member",
+            "version = 3\n\
+             [providers.keyed]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://api.example.invalid\"\n\
+             api_key_ref = \"env://SOME_KEY\"\n\
+             [pools.keyed-pool]\n\
+             members = [\"keyed\"]\n"
+                .to_string(),
+        ),
+        (
+            "pool-provider-collision",
+            format!(
+                "version = 3\n{POOL_ACCOUNTS}\
+                 [providers.anthropic]\n\
+                 kind = \"anthropic-api\"\n\
+                 api_key_ref = \"oauth://anthropic\"\n\
+                 [pools.anthropic]\n\
+                 members = [\"anthropic-default\"]\n"
+            ),
+        ),
+        (
+            "empty-members",
+            "version = 3\n[pools.empty]\nmembers = []\n".to_string(),
+        ),
+        (
+            "pool-nickname-collision",
+            format!(
+                "version = 3\n{POOL_ACCOUNTS}\
+                 [models.anthropic]\n\
+                 provider = \"anthropic-default\"\n\
+                 upstream = \"claude-opus-4-7\"\n\
+                 [pools.anthropic]\n\
+                 members = [\"anthropic-default\"]\n"
+            ),
+        ),
+        ("member-cap", {
+            let mut text = String::from("version = 3\n");
+            let mut members: Vec<String> = Vec::new();
+            for i in 0..=routectl_router::MAX_POOL_MEMBERS {
+                let name = format!("anthropic-s{i:03}");
+                text.push_str(&format!(
+                    "[providers.{name}]\n\
+                         kind = \"anthropic-api\"\n\
+                         api_key_ref = \"oauth://anthropic#s{i:03}\"\n"
+                ));
+                members.push(format!("\"{name}\""));
+            }
+            text.push_str(&format!(
+                "[pools.anthropic]\nmembers = [{}]\n",
+                members.join(", ")
+            ));
+            text
+        }),
+    ]
+}
+
+/// A valid pool config the surfaces below must ACCEPT, so the rejections
+/// above are proven to come from the offending class rather than from
+/// pools being rejected wholesale.
+fn accepted_pool_config() -> String {
+    format!(
+        "version = 3\n{POOL_ACCOUNTS}\
+         [pools.anthropic]\n\
+         members = [\"anthropic-default\", \"anthropic-work\"]\n\
+         seat_selection = \"round-robin\"\n\
+         accepts_new_logins = true\n"
+    )
+}
+
+/// Every pool rejection class fails the SERVE gate (the pre-parse
+/// validation `load_effective_config` runs), and a well-formed pool passes
+/// it.
+#[test]
+#[serial_test::serial]
+fn the_serve_gate_rejects_every_bad_pool_and_accepts_a_good_one() {
+    // Arrange / Act / Assert
+    for (name, body) in rejected_pool_configs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        assert!(
+            load_effective_config(&cfg_path).is_err(),
+            "the serve gate must reject `{name}`"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, accepted_pool_config()).expect("write config.toml");
+    assert!(
+        load_effective_config(&cfg_path).is_ok(),
+        "a well-formed pool must pass the serve gate"
+    );
+}
+
+/// A hot reload carrying any pool rejection class is DECLINED: the loader
+/// the reload path runs returns None, which is what keeps the previous
+/// router live. Asserted per class, not assumed from the shared wiring.
+#[test]
+#[serial_test::serial]
+fn a_hot_reload_carrying_any_bad_pool_is_declined() {
+    // Arrange / Act / Assert
+    for (name, body) in rejected_pool_configs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        let mut loaded = None;
+        let events = routectl_testkit::capture_events(|| {
+            loaded = Some(read_parse_validate_config(&cfg_path));
+        });
+
+        assert!(
+            loaded.expect("the loader ran").is_none(),
+            "a reload carrying `{name}` must be declined so the previous \
+             router stays live"
+        );
+        assert!(
+            events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a declined reload must say so: `{name}`"
+        );
+    }
+}
+
+/// `config check`'s report carries the same pool errors, so the operator
+/// sees them before starting the daemon. Doctor's config section renders
+/// this same report.
+#[test]
+#[serial_test::serial]
+fn config_check_reports_every_bad_pool() {
+    // Arrange / Act / Assert
+    for (name, body) in rejected_pool_configs() {
+        let config: Config = toml::from_str(&body).expect("fixture parses");
+        let report = crate::commands::config::validation_report(&config, Some(&body));
+        assert!(
+            !report.errors.is_empty(),
+            "config check must report `{name}`"
+        );
+    }
+
+    let body = accepted_pool_config();
+    let config: Config = toml::from_str(&body).expect("fixture parses");
+    let report = crate::commands::config::validation_report(&config, Some(&body));
+    assert!(
+        report.errors.is_empty(),
+        "a well-formed pool must pass config check: {:?}",
+        report.errors
+    );
+}

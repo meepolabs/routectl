@@ -2735,23 +2735,12 @@ pub struct ProviderRuntimePolicy {
         with = "std::collections::BTreeMap<String, crate::class_policy::ConfigFailureClass>"
     )]
     pub class_overrides: BTreeMap<u16, ConfigFailureClass>,
-
-    /// How dispatch picks among multiple OAuth seats configured for this
-    /// provider's credential pool. `fill-first` (the default) drains one
-    /// seat before moving to the next; `round-robin` spreads load across
-    /// seats, advancing the start seat per request;
-    /// `sticky-least-loaded` pins each conversation to one seat for
-    /// prompt-cache affinity while balancing new conversations across seats
-    /// by load, and is the only strategy quota-aware placement applies to.
-    /// Applied per request at dispatch time whenever the provider's
-    /// credential pool resolves to more than one seat.
-    #[serde(default)]
-    pub seat_selection: SeatSelection,
 }
 
-/// Per-provider seat-selection strategy for the OAuth credential pool.
-/// Default is `fill-first` so a single-seat provider (the common case)
-/// keeps its current behavior with no config.
+/// Seat-selection strategy for a set of interchangeable accounts, set on
+/// the `pools.<name>` block that groups them. Default is `fill-first` so a
+/// single-member pool (the common case) keeps its current behavior with no
+/// config.
 ///
 /// Subscription-quota-aware placement and the session-affinity layer reach
 /// `sticky-least-loaded` ONLY. The other two variants keep their own contracts

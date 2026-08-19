@@ -777,6 +777,33 @@
       },
       "type": "object"
     },
+    "PoolEntry": {
+      "additionalProperties": false,
+      "description": "One `[pools.<name>]` entry: the member provider entries plus the policy\nthat picks among them.\n\nMembers are `[providers.X]` table keys, all of the same provider kind.\nValidation rejects a mixed-kind pool, an unknown member, a member\nclaimed by two pools, an empty member list, and a pool name that\ncollides with a provider entry or a model nickname.",
+      "properties": {
+        "accepts_new_logins": {
+          "default": false,
+          "description": "Whether a future `routectl login` for this pool's provider family\nmay propose joining the new account to this pool. False (the\ndefault) pins the membership list: only an explicit config edit\ngrows it. This is the only thing that grows a pool -- there is no\nwildcard member token.",
+          "type": "boolean"
+        },
+        "members": {
+          "description": "Provider entry names that make up this pool. Required and\nnon-empty: an empty pool serves nothing, which is a silent\nno-serve rather than a configuration an operator meant to write.\nEvery member must name an existing `[providers.X]` entry of the\nsame kind, and a provider entry belongs to at most one pool.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "seat_selection": {
+          "$ref": "#/$defs/SeatSelection",
+          "default": "fill-first",
+          "description": "How dispatch picks among this pool's members for one request.\n`fill-first` (the default) drains one member before moving to the\nnext; `round-robin` spreads load across members, advancing the\nstart member per request; `sticky-least-loaded` pins each\nconversation to one member for prompt-cache affinity while\nbalancing new conversations across members by load, and is the only\nstrategy quota-aware placement applies to. Applied per request\nwhenever the pool resolves to more than one usable member."
+        }
+      },
+      "required": [
+        "members"
+      ],
+      "type": "object"
+    },
     "PricingConfig": {
       "additionalProperties": false,
       "description": "Per-million-token pricing for one `[registry.*]` entry. All fields\nare USD per million tokens and all are optional -- routectl ships no\nprice defaults, so any field left unset means \"this dimension is\nunpriced\" and contributes nothing to a derived cost. Cost is computed\nat query time, never persisted, so a corrected price retroactively\nfixes historical rows.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
@@ -941,11 +968,6 @@
                 "integer",
                 "null"
               ]
-            },
-            "seat_selection": {
-              "$ref": "#/$defs/SeatSelection",
-              "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1150,11 +1172,6 @@
                 "null"
               ]
             },
-            "seat_selection": {
-              "$ref": "#/$defs/SeatSelection",
-              "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
-            },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
               "format": "uint64",
@@ -1324,11 +1341,6 @@
                 "null"
               ]
             },
-            "seat_selection": {
-              "$ref": "#/$defs/SeatSelection",
-              "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
-            },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
               "format": "uint64",
@@ -1477,11 +1489,6 @@
                 "null"
               ]
             },
-            "seat_selection": {
-              "$ref": "#/$defs/SeatSelection",
-              "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
-            },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
               "format": "uint64",
@@ -1623,11 +1630,6 @@
                 "integer",
                 "null"
               ]
-            },
-            "seat_selection": {
-              "$ref": "#/$defs/SeatSelection",
-              "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1850,7 +1852,7 @@
       "type": "object"
     },
     "SeatSelection": {
-      "description": "Per-provider seat-selection strategy for the OAuth credential pool.\nDefault is `fill-first` so a single-seat provider (the common case)\nkeeps its current behavior with no config.\n\nSubscription-quota-aware placement and the session-affinity layer reach\n`sticky-least-loaded` ONLY. The other two variants keep their own contracts\nunchanged: neither pins a session nor reads a seat's remaining budget.",
+      "description": "Seat-selection strategy for a set of interchangeable accounts, set on\nthe `pools.<name>` block that groups them. Default is `fill-first` so a\nsingle-member pool (the common case) keeps its current behavior with no\nconfig.\n\nSubscription-quota-aware placement and the session-affinity layer reach\n`sticky-least-loaded` ONLY. The other two variants keep their own contracts\nunchanged: neither pins a session nor reads a seat's remaining budget.",
       "oneOf": [
         {
           "const": "fill-first",
@@ -2100,6 +2102,14 @@
       },
       "default": {},
       "description": "v0.6.0 model directory. Each entry binds a logical nickname\n(the table key) to a transport (`provider`), an upstream model\nid (`upstream`), and per-model knobs. The `[aliases]` table\nreferences entries by nickname. See the v0.6.0-rc.1 changelog.",
+      "type": "object"
+    },
+    "pools": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PoolEntry"
+      },
+      "default": {},
+      "description": "Pool definitions keyed by operator-facing name: each groups\nsame-kind `[providers.X]` entries (accounts) under one\nseat-selection strategy. A `[models.X] provider` value may name a\nprovider entry OR a pool -- one namespace, so a name matching both\nis a validation error. A provider entry belongs to at most one\npool.",
       "type": "object"
     },
     "providers": {
