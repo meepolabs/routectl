@@ -10,6 +10,7 @@ use crate::commands::capability_legacy::{
     LEGACY_ALLOWED_BETAS, LEGACY_ALLOWED_BODY_FIELDS, LEGACY_UNSUPPORTED_FEATURES,
 };
 use crate::commands::probe::{login_id_for, probe_finding};
+use crate::commands::seat_report::{describe_row, stored_seat_pool_rows};
 
 use super::gather::{SecretCheck, SecretPresence};
 use super::{DoctorContext, FreshnessInputs};
@@ -269,6 +270,37 @@ pub(super) fn section_secret_orphans(ctx: &DoctorContext) -> Vec<Finding> {
             remediation: Some(
                 "reference this secret from a provider or remove it manually".to_string(),
             ),
+        })
+        .collect()
+}
+
+/// OAuth seat-pool section: one purely informational finding per `oauth://`
+/// reference per provider entry, INCLUDING label-pinned refs. Every finding
+/// is `Pass` with no remediation -- the section describes what a ref resolves
+/// to and which selection strategy applies, so it can never advise and can
+/// never move the exit code. The seat count and wording come from the shared
+/// [`crate::commands::seat_report`] join, so this section and `config check`
+/// tell one story from one state.
+///
+/// The join is derived here from `ctx.seats` keys plus `ctx.config`; no extra
+/// gathering plumbing exists for it. When the credential store failed to
+/// open, the snapshot is `None` (Unknown wording, strategy still rendered) --
+/// the auth section keeps sole ownership of the store `Fail`.
+pub(super) fn section_seat_pools(ctx: &DoctorContext) -> Vec<Finding> {
+    let stored: Vec<String> = ctx.seats.iter().map(|(key, _)| key.clone()).collect();
+    let snapshot = if ctx.auth_store_error.is_some() {
+        None
+    } else {
+        Some(stored.as_slice())
+    };
+    stored_seat_pool_rows(&ctx.config, snapshot)
+        .iter()
+        .map(|row| Finding {
+            section: "pools",
+            name: row.entry.clone(),
+            status: Status::Pass,
+            detail: describe_row(row),
+            remediation: None,
         })
         .collect()
 }

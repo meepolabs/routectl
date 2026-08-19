@@ -4385,6 +4385,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/seat.rs` -- shared `--label` validation for the seat-aware
   OAuth commands (rejects empty/whitespace labels, mirroring the `oauth://`
   ref parser)
+- `src/commands/seat_report.rs` -- shared OAuth seat-pool report: pure
+  `stored_seat_pool_rows(config, Option<&[seat_key]>)` joins every provider
+  entry's `oauth://` refs (walked via `secret_uris`, the same basis as the
+  orphan scan) against a stored-seat-key snapshot (`None` = store unreadable
+  -> `SeatCount::Unknown`), plus `describe_row` (THE one sentence both doctor
+  and `config check` render), `seat_pool_lines` (the check block) and
+  `selection_label`. Signatures take seat KEYS only, never a `TokenRecord`, so
+  token material cannot reach the render; labels and entry names go through
+  `routectl_core::sanitize_for_log`
 - `src/commands/staleness_hint.rs` -- catalog-overlay staleness nudge for the
   human CLI verbs. Pure `staleness_hint_line(verified_at, threshold_days,
   today_epoch_days)` (delegates the strict-greater-than age check to
@@ -4710,7 +4719,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   shared `validation_report` (short-circuited to one `Warn` "validation
   skipped" + the secret checks when the typed load failed, so a broken file
   never emits a spurious validation `Pass`) + the leak-safe secret-presence
-  scan, auth (no seats/expired -> WARN, store-open error -> FAIL), seats
+  scan, auth (no seats/expired -> WARN, store-open error -> FAIL), pools
+  (`section_seat_pools`: one purely informational `Pass` finding per
+  `oauth://` ref per entry, pinned refs included, detail from
+  `seat_report::describe_row`, remediation always `None`, Unknown wording when
+  `auth_store_error` is set), seats
   (`section_seat_orphans`: a stored OAuth seat no provider entry references ->
   WARN naming the seat key, remediation via `logout_target` so a labelled
   seat's `routectl logout` hint carries `--label` rather than wiping the

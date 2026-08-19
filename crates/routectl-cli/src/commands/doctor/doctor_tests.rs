@@ -20,7 +20,8 @@ use super::gather::{
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
     freshness_findings, legacy_nudge, secret_finding, section_auth, section_capability,
-    section_config, section_probe, section_seat_orphans, section_secret_orphans, section_version,
+    section_config, section_probe, section_seat_orphans, section_seat_pools,
+    section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -670,8 +671,9 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_five() {
-    assert_eq!(SCHEMA_VERSION, 5);
+fn schema_version_is_six() {
+    assert_eq!(SCHEMA_VERSION, 6);
+
     let context = ctx(
         config_with_overrides(),
         Some("version = 3\n"),
@@ -679,7 +681,8 @@ fn schema_version_is_five() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 5);
+    assert_eq!(report.schema_version, 6);
+
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
     let value = serde_json::to_value(&report).expect("serialize");
@@ -1536,6 +1539,138 @@ fn seats_section_is_in_both_section_lists() {
     );
 }
 
+/// A config with two provider entries reaching the same oauth provider: one
+/// bare pool ref and one label-pinned ref.
+fn config_with_pool_and_pinned_refs() -> Config {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    cfg.providers.insert(
+        "anthropic-work".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic#work"),
+    );
+    cfg
+}
+
+/// The pool section is purely informational: every finding is Pass with no
+/// remediation, for BOTH a bare pool ref and a label-pinned ref, and the
+/// section cannot move the overall exit code.
+#[test]
+fn seat_pool_findings_are_pass_without_remediation_and_never_move_the_exit() {
+    // Arrange
+    let context = ctx(
+        config_with_pool_and_pinned_refs(),
+        Some("version = 3\n"),
+        Vec::new(),
+        vec![
+            ("anthropic".to_string(), token_record(9_000)),
+            ("anthropic#work".to_string(), token_record(9_000)),
+        ],
+    );
+
+    // Act
+    let pools = section_seat_pools(&context);
+    let report = build_report(&context);
+    let without_pools: Vec<Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.section != "pools")
+        .cloned()
+        .collect();
+
+    // Assert
+    assert_eq!(pools.len(), 2, "one finding per oauth ref: {pools:?}");
+    for f in &pools {
+        assert_eq!(f.status, Status::Pass, "{f:?}");
+        assert!(f.remediation.is_none(), "{f:?}");
+    }
+    assert!(
+        find(&report.findings, "pools", "anthropic")
+            .detail
+            .contains("resolves to 2 seats (default, work)"),
+        "{:?}",
+        find(&report.findings, "pools", "anthropic")
+    );
+    assert!(
+        find(&report.findings, "pools", "anthropic-work")
+            .detail
+            .contains("pins 1 seat"),
+        "{:?}",
+        find(&report.findings, "pools", "anthropic-work")
+    );
+    assert_eq!(
+        overall_exit(&report.findings),
+        overall_exit(&without_pools),
+        "pool findings must not change the exit code"
+    );
+}
+
+/// An unreadable credential store still renders the pool rows, with the
+/// unknown-count wording and the strategy retained. The store Fail stays the
+/// auth section's alone.
+#[test]
+fn seat_pool_findings_stay_pass_with_unknown_count_when_the_store_is_unreadable() {
+    // Arrange
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         seat_selection = \"round-robin\"\n\
+         [providers.anthropic-work]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic#work\"\n",
+    )
+    .expect("fixture config parses");
+    let mut context = ctx(config, Some("version = 3\n"), Vec::new(), Vec::new());
+    context.auth_store_error = Some("oauth credentials store could not be opened".to_string());
+
+    // Act
+    let pools = section_seat_pools(&context);
+
+    // Assert
+    for f in &pools {
+        assert_eq!(f.status, Status::Pass, "{f:?}");
+        assert!(f.remediation.is_none(), "{f:?}");
+    }
+    let bare = find(&pools, "pools", "anthropic");
+    assert!(
+        bare.detail
+            .contains("seat count unknown (credential store unavailable)"),
+        "{bare:?}"
+    );
+    assert!(
+        bare.detail.ends_with("; seat_selection round-robin"),
+        "an unknown count must still render the configured strategy: {bare:?}"
+    );
+}
+
+/// The pool section is wired into BOTH the CLI battery and the offline status
+/// doctor, and the human render carries its title.
+#[test]
+fn pools_section_is_in_both_section_lists_and_renders_its_title() {
+    // Arrange / Act / Assert
+    assert!(
+        SECTIONS.iter().any(|(k, _)| *k == "pools"),
+        "pools must be in SECTIONS (CLI doctor)"
+    );
+    assert!(
+        NO_NETWORK_SECTIONS.iter().any(|(k, _)| *k == "pools"),
+        "pools must be in NO_NETWORK_SECTIONS (offline status doctor)"
+    );
+
+    let context = ctx(
+        config_with_pool_and_pinned_refs(),
+        Some("version = 3\n"),
+        Vec::new(),
+        Vec::new(),
+    );
+    let text = render_human(&build_report(&context)).join("\n");
+    assert!(text.contains("[OAuth seat pools]"), "{text}");
+}
+
 /// End-to-end through the real gather: a stored seat with no matching
 /// provider entry surfaces on the report, and the run leaves the credentials
 /// file byte-identical.
@@ -1870,7 +2005,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 5);
+    assert_eq!(no_net.schema_version, 6);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
