@@ -285,7 +285,7 @@ impl Router {
         // sticky decision to record.
         let (order, token): (Vec<usize>, Option<&'static str>) = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
-                let pin_key = sticky_pin_key(key, &m.nickname);
+                let pin_key = sticky_pin_key(key, m.rotation_key());
                 let (order, tok) = self.sticky_seat_order(seats, &pin_key, &m.nickname);
                 (order, Some(tok))
             }
@@ -298,11 +298,11 @@ impl Router {
             // operator can still spot a silent fill-first regime on a pool
             // configured sticky.
             (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
-                self.keyless_seat_order(seats, &m.nickname)
+                self.keyless_seat_order(seats, m)
             }
             _ => (
                 crate::seat_pool::seat_order_for_request(
-                    &m.nickname,
+                    m.rotation_key(),
                     seats.len(),
                     selection,
                     &self.round_robin,
@@ -450,16 +450,23 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
     }
 }
 
-/// Namespace a sticky pin lookup key by the pool's model nickname so two
-/// StickyLeastLoaded pools in one chain keep independent pins for the same
-/// inbound session. Without the namespace both pools key by the bare session
-/// and clobber each other's pin every turn, defeating the prompt-cache
-/// locality StickyLeastLoaded exists to provide.
+/// Namespace a sticky pin lookup key by the POOL a target dispatches, so a
+/// session holds one pin per pool: it stays on one account across every model
+/// of that pool (its warm prompt cache lives on the account, not on the
+/// model), while two DIFFERENT pools in one chain keep independent pins for
+/// the same inbound session. Without the namespace both pools key by the bare
+/// session and clobber each other's pin every turn, defeating the
+/// prompt-cache locality StickyLeastLoaded exists to provide.
 ///
-/// The nickname is length-prefixed so no (session, nickname) pair can collide
+/// `pool` is the pool name for a pool-backed model and the model nickname for
+/// a standalone provider-backed one (see `Router::rotation_key_for`);
+/// validation rejects a pool name that collides with a nickname, so the two
+/// bases cannot name one lane.
+///
+/// The pool key is length-prefixed so no (session, pool) pair can collide
 /// with another regardless of which bytes appear in the session key.
-pub(super) fn sticky_pin_key(session: &str, nickname: &str) -> String {
-    format!("{}:{}:{}", nickname.len(), nickname, session)
+pub(super) fn sticky_pin_key(session: &str, pool: &str) -> String {
+    format!("{}:{}:{}", pool.len(), pool, session)
 }
 
 /// Build one dispatch target for one seat of a pooled model.

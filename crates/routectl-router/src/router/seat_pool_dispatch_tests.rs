@@ -344,10 +344,7 @@ async fn sticky_defer_no_healthy_stamps_defer_token() {
         vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
     assert!(
-        router
-            .sticky_pins
-            .get(&super::chain::sticky_pin_key("S", "opus"))
-            .is_none(),
+        pinned_member(&router, "S").is_none(),
         "DeferNoHealthy must not write a pin"
     );
 }
@@ -542,15 +539,38 @@ async fn sticky_keyless_matches_fill_first() {
     );
 }
 
+/// The pool every `pooled_router` fixture builds its model on. The sticky pin
+/// namespace is the POOL, not the model, so a test reading a pin keys on this.
+const POOL: &str = "anthropic-pool";
+
+/// The member (account) `pooled_router`'s session is pinned to, or `None` when
+/// the session holds no pin. Reads the pin through the pool-keyed namespace
+/// dispatch writes, so a test cannot accidentally assert against a lane
+/// nothing writes.
+fn pinned_member(router: &Router, session: &str) -> Option<String> {
+    router
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key(session, POOL))
+        .map(|pin| pin.member)
+}
+
+/// The seat `state_key` a member maps to for model `opus` -- the shape
+/// `chain_state_keys_for` returns. Lets a member-shaped pin be compared
+/// against a chain-shaped seat key without either side re-deriving the other's
+/// format inline.
+fn opus_state_key(member: &str) -> String {
+    format!("opus#{member}")
+}
+
 #[tokio::test]
 async fn sticky_stale_pin_not_in_pool_is_re_picked() {
-    // A pin whose state_key no longer exists in the pool resolves to a
+    // A pin whose member no longer exists in the pool resolves to a
     // miss: the request re-picks a valid in-pool seat (and re-pins it).
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
     router.sticky_pins.put(
-        &super::chain::sticky_pin_key("S", "opus"),
+        &super::chain::sticky_pin_key("S", POOL),
         crate::seat_pool::SeatPin {
-            state_key: "opus#anthropic-gone".to_string(),
+            member: "anthropic-gone".to_string(),
             repinned: false,
         },
     );
@@ -561,16 +581,11 @@ async fn sticky_stale_pin_not_in_pool_is_re_picked() {
         "stale pin must re-pick a valid in-pool seat, got {}",
         order[0]
     );
-    // The re-pick repaired the pin to an in-pool seat.
+    // The re-pick repaired the pin to an in-pool member.
+    let repaired = pinned_member(&router, "S").expect("re-pinned");
     assert!(
-        valid.contains(
-            &router
-                .sticky_pins
-                .get(&super::chain::sticky_pin_key("S", "opus"))
-                .expect("re-pinned")
-                .state_key
-                .as_str()
-        )
+        ["anthropic-a", "anthropic-b", "anthropic-c"].contains(&repaired.as_str()),
+        "stale pin must re-pick a member the pool still serves, got {repaired}"
     );
 }
 
@@ -590,7 +605,7 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
     assert!(
         !router
             .sticky_pins
-            .get(&super::chain::sticky_pin_key("S", "opus"))
+            .get(&super::chain::sticky_pin_key("S", POOL))
             .expect("pinned")
             .repinned,
         "birth pin must start un-repinned"
@@ -611,10 +626,11 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
     let sibling = migrated[0].clone();
     let pin_after = router
         .sticky_pins
-        .get(&super::chain::sticky_pin_key("S", "opus"))
+        .get(&super::chain::sticky_pin_key("S", POOL))
         .expect("re-pinned");
     assert_eq!(
-        pin_after.state_key, sibling,
+        opus_state_key(&pin_after.member),
+        sibling,
         "pin must point at the sibling"
     );
     assert!(
@@ -642,26 +658,29 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
         capped[0], sibling,
         "an already-repinned session must not chase a third seat"
     );
+    let still_pinned = pinned_member(&router, "S").expect("still pinned");
     assert_eq!(
-        router
-            .sticky_pins
-            .get(&super::chain::sticky_pin_key("S", "opus"))
-            .expect("still pinned")
-            .state_key,
+        opus_state_key(&still_pinned),
         sibling,
         "the pin must remain on the sibling -- no second migration"
     );
 }
 
-/// Build a two-pool StickyLeastLoaded chain `hot = [opusPool, sonnetPool]`,
-/// each a two-member pool. Both models share the same inbound session AND the
-/// same pool membership; the per-model pin namespace must give each its own
-/// stable pin instead of clobbering a single session-keyed slot.
+/// Build a chain `hot = [opusPool, sonnetPool]` over TWO distinct pools --
+/// `opus-pool` and `sonnet-pool` -- one model each, both StickyLeastLoaded and
+/// both two-member.
+///
+/// Two POOLS is what makes the independence property meaningful: affinity is
+/// namespaced per pool, so two models on DIFFERENT pools must hold distinct
+/// pins for one inbound session. (Two models on ONE pool deliberately SHARE a
+/// pin -- that is the sibling test below, not this one.) Each pool gets its own
+/// member accounts, since a provider entry belongs to at most one pool.
 fn two_pool_sticky_chain_router() -> Router {
-    const MEMBERS: [&str; 2] = ["anthropic-a", "anthropic-b"];
+    const OPUS_MEMBERS: [&str; 2] = ["anthropic-a", "anthropic-b"];
+    const SONNET_MEMBERS: [&str; 2] = ["anthropic-c", "anthropic-d"];
 
-    fn seats_for() -> Vec<SeatTarget> {
-        MEMBERS
+    fn seats_for(members: &[&str]) -> Vec<SeatTarget> {
+        members
             .iter()
             .map(|member| {
                 let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
@@ -678,18 +697,20 @@ fn two_pool_sticky_chain_router() -> Router {
     }
 
     let mut providers = BTreeMap::new();
-    for member in MEMBERS {
+    for member in OPUS_MEMBERS.iter().chain(SONNET_MEMBERS.iter()) {
         providers.insert(
-            member.to_string(),
+            (*member).to_string(),
             ProviderEntry::anthropic_api(format!("oauth://{member}")),
         );
     }
     let mut pools = BTreeMap::new();
-    pools.insert(
-        "anthropic-pool".to_string(),
-        PoolEntry::new(MEMBERS.iter().map(|m| (*m).to_string()).collect())
-            .with_seat_selection(SeatSelection::StickyLeastLoaded),
-    );
+    for (pool, members) in [("opus-pool", OPUS_MEMBERS), ("sonnet-pool", SONNET_MEMBERS)] {
+        pools.insert(
+            pool.to_string(),
+            PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect())
+                .with_seat_selection(SeatSelection::StickyLeastLoaded),
+        );
+    }
     let mut config = Config {
         providers,
         pools,
@@ -702,11 +723,14 @@ fn two_pool_sticky_chain_router() -> Router {
 
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    for (nickname, wire) in [("opusPool", "claude-opus"), ("sonnetPool", "claude-sonnet")] {
-        let seats = seats_for();
+    for (nickname, pool, wire, members) in [
+        ("opusPool", "opus-pool", "claude-opus", OPUS_MEMBERS),
+        ("sonnetPool", "sonnet-pool", "claude-sonnet", SONNET_MEMBERS),
+    ] {
+        let seats = seats_for(&members);
         let default_provider = seats[0].provider.clone();
-        let model = ResolvedModel::new(nickname, "anthropic-pool", default_provider, wire)
-            .with_seats(Arc::from(seats));
+        let model =
+            ResolvedModel::new(nickname, pool, default_provider, wire).with_seats(Arc::from(seats));
         models.insert(nickname.to_string(), Arc::new(model));
     }
     router.install_resolved_models(models);
@@ -715,10 +739,11 @@ fn two_pool_sticky_chain_router() -> Router {
 
 #[tokio::test]
 async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
-    // Chain `hot = [opusPool, sonnetPool]`, both StickyLeastLoaded, same
-    // session "S". Each pool must birth-then-stay on its OWN home seat. With
-    // a single session-keyed pin the two pools clobber each other every turn,
-    // so the 2nd request would report birth_pick again for both.
+    // Chain `hot = [opusPool, sonnetPool]` over TWO pools, both
+    // StickyLeastLoaded, same session "S". Each pool must birth-then-stay on
+    // its OWN home seat. With a single session-keyed pin the two pools clobber
+    // each other every turn, so the 2nd request would report birth_pick again
+    // for both.
     let router = two_pool_sticky_chain_router();
 
     // Request 1: both pools birth. Chain layout is
@@ -773,20 +798,148 @@ async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
         "sonnet pool keeps the same home seat across turns"
     );
 
-    // The two pools hold DISTINCT, independent pins.
+    // The two pools hold DISTINCT, independent pins, keyed by POOL name --
+    // and each names a member of its OWN pool, which is what proves the two
+    // namespaces never resolved to one slot.
+    let opus_pin = router
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key("S", "opus-pool"))
+        .expect("opus pool owns its own namespaced pin");
+    let sonnet_pin = router
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key("S", "sonnet-pool"))
+        .expect("sonnet pool owns its own namespaced pin");
     assert!(
-        router
-            .sticky_pins
-            .get(&super::chain::sticky_pin_key("S", "opusPool"))
-            .is_some(),
-        "opus pool owns its own namespaced pin"
+        ["anthropic-a", "anthropic-b"].contains(&opus_pin.member.as_str()),
+        "opus pool must pin one of its OWN members, got {}",
+        opus_pin.member
     );
     assert!(
+        ["anthropic-c", "anthropic-d"].contains(&sonnet_pin.member.as_str()),
+        "sonnet pool must pin one of its OWN members, got {}",
+        sonnet_pin.member
+    );
+}
+
+/// The D4 counterpart of the independence test above: two models on ONE pool
+/// deliberately SHARE a pin, so a session stays on one account across every
+/// model of that pool.
+///
+/// The account -- not the model -- is what holds the warm prompt cache, so a
+/// session that moves from `opusShared` to `sonnetShared` must land on the SAME
+/// member rather than birthing a second pin and a second cold cache. Keyed
+/// per-model this test fails: the second model reads no pin and births.
+fn one_pool_two_models_router() -> Router {
+    const MEMBERS: [&str; 2] = ["anthropic-a", "anthropic-b"];
+
+    let mut providers = BTreeMap::new();
+    for member in MEMBERS {
+        providers.insert(
+            member.to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+    }
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "shared-pool".to_string(),
+        PoolEntry::new(MEMBERS.iter().map(|m| (*m).to_string()).collect())
+            .with_seat_selection(SeatSelection::StickyLeastLoaded),
+    );
+    let config = Config {
+        providers,
+        pools,
+        ..Config::default()
+    };
+
+    // ONE shared seat set, exactly as the factory compiles a pool once and
+    // hands the same `Arc` to every model naming it.
+    let seats: Arc<[SeatTarget]> = Arc::from(
+        MEMBERS
+            .iter()
+            .map(|member| {
+                let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
+                    id: (*member).to_string(),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                });
+                SeatTarget {
+                    provider_name: (*member).to_string(),
+                    provider,
+                    auth_secret_ref: None,
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let mut router = Router::new(Arc::new(config));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for (nickname, wire) in [
+        ("opusShared", "claude-opus"),
+        ("sonnetShared", "claude-sonnet"),
+    ] {
+        let model = ResolvedModel::new(nickname, "shared-pool", seats[0].provider.clone(), wire)
+            .with_seats(Arc::clone(&seats));
+        models.insert(nickname.to_string(), Arc::new(model));
+    }
+    router.install_resolved_models(models);
+    router
+}
+
+#[tokio::test]
+async fn two_models_on_one_pool_share_one_session_pin() {
+    // Arrange: two models, one pool, one shared seat set.
+    let router = one_pool_two_models_router();
+
+    // Act: the session births on the first model, then arrives at the SECOND
+    // model of the same pool.
+    let first = router
+        .dispatch_chain("opusShared", Some("S"))
+        .expect("chain resolves");
+    let second = router
+        .dispatch_chain("sonnetShared", Some("S"))
+        .expect("chain resolves");
+
+    // Assert: the first model births; the second READS that pin rather than
+    // minting its own.
+    assert_eq!(
+        first[0].selection_decision,
+        Some("birth_pick"),
+        "the first model of the pool births the session's pin"
+    );
+    assert_eq!(
+        second[0].selection_decision,
+        Some("sticky_stay"),
+        "the second model of the SAME pool must read the shared pin, not birth"
+    );
+
+    // And it is the same ACCOUNT, which is the point: the state_keys differ by
+    // model while the member behind them is one.
+    let home_member = first[0]
+        .state_key
+        .strip_prefix("opusShared#")
+        .expect("pooled seat key is model-scoped");
+    let second_member = second[0]
+        .state_key
+        .strip_prefix("sonnetShared#")
+        .expect("pooled seat key is model-scoped");
+    assert_eq!(
+        home_member, second_member,
+        "the session must stay on ONE account across models of the pool"
+    );
+
+    // Exactly one pin exists, under the POOL namespace.
+    assert_eq!(
+        router.sticky_pins.len(),
+        1,
+        "one pool holds one pin per session, not one per model"
+    );
+    assert_eq!(
         router
             .sticky_pins
-            .get(&super::chain::sticky_pin_key("S", "sonnetPool"))
-            .is_some(),
-        "sonnet pool owns its own namespaced pin"
+            .get(&super::chain::sticky_pin_key("S", "shared-pool"))
+            .expect("the pin is keyed by pool")
+            .member,
+        home_member,
+        "the shared pin names the account both models served"
     );
 }
 
@@ -887,5 +1040,442 @@ fn dispatch_on_an_empty_pool_returns_a_retryable_error_never_unknown_alias() {
         router.metrics.pool_totals().unavailable,
         1,
         "the defensive empty-pool path must be observable"
+    );
+}
+
+// ---- per-pool shared rotation + reload carry-over ----
+
+/// Two RoundRobin models on ONE pool, sharing one compiled seat set -- the
+/// rotation counterpart of `one_pool_two_models_router`.
+fn one_pool_two_round_robin_models_router() -> Router {
+    const MEMBERS: [&str; 2] = ["anthropic-a", "anthropic-b"];
+
+    let mut providers = BTreeMap::new();
+    for member in MEMBERS {
+        providers.insert(
+            member.to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+    }
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "shared-pool".to_string(),
+        PoolEntry::new(MEMBERS.iter().map(|m| (*m).to_string()).collect())
+            .with_seat_selection(SeatSelection::RoundRobin),
+    );
+    let config = Config {
+        providers,
+        pools,
+        ..Config::default()
+    };
+
+    let seats: Arc<[SeatTarget]> = Arc::from(
+        MEMBERS
+            .iter()
+            .map(|member| {
+                let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
+                    id: (*member).to_string(),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                });
+                SeatTarget {
+                    provider_name: (*member).to_string(),
+                    provider,
+                    auth_secret_ref: None,
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let mut router = Router::new(Arc::new(config));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for (nickname, wire) in [("opusRr", "claude-opus"), ("sonnetRr", "claude-sonnet")] {
+        let model = ResolvedModel::new(nickname, "shared-pool", seats[0].provider.clone(), wire)
+            .with_seats(Arc::clone(&seats));
+        models.insert(nickname.to_string(), Arc::new(model));
+    }
+    router.install_resolved_models(models);
+    router
+}
+
+/// The member each model's first dispatch target names, for a chain resolved
+/// without a session key.
+fn lead_member(router: &Router, alias: &str) -> String {
+    router
+        .dispatch_chain(alias, None)
+        .expect("chain resolves")
+        .swap_remove(0)
+        .provider_name
+}
+
+#[tokio::test]
+async fn two_models_on_one_pool_share_one_rotation_cursor() {
+    // THE rotation-sharing contract: one cursor per POOL, so two models naming
+    // it interleave across the pool's accounts instead of each rotating
+    // independently. Keyed per-model both models would read their own cursor
+    // and each start at seat 0 -- so both first requests would name
+    // anthropic-a, and the shared advance below would not be observable.
+    let router = one_pool_two_round_robin_models_router();
+
+    // Act: alternate models, one request each, over a two-member pool.
+    let first = lead_member(&router, "opusRr");
+    let second = lead_member(&router, "sonnetRr");
+    let third = lead_member(&router, "opusRr");
+    let fourth = lead_member(&router, "sonnetRr");
+
+    // Assert: the SECOND model's request sees the cursor the FIRST advanced,
+    // so consecutive requests never repeat an account while one is free.
+    assert_eq!(
+        first, "anthropic-a",
+        "the first request of a fresh pool leads with the first member"
+    );
+    assert_eq!(
+        second, "anthropic-b",
+        "a sibling model on the same pool must observe the shared advance, \
+         not restart the rotation at seat 0"
+    );
+    assert_eq!(third, "anthropic-a", "the shared cursor wraps");
+    assert_eq!(fourth, "anthropic-b");
+}
+
+#[tokio::test]
+async fn a_same_name_pool_keeps_its_rotation_cursor_across_a_reload() {
+    // The cursor is carried, not reset: a reload mid-rotation must not send the
+    // next request back to seat 0, which would double-serve one account.
+    let before = one_pool_two_round_robin_models_router();
+    assert_eq!(lead_member(&before, "opusRr"), "anthropic-a");
+
+    // Rebuild the same config and carry over, exactly as the coordinator does.
+    let mut after = one_pool_two_round_robin_models_router();
+    after.carry_over_pool_state_from(&before);
+
+    // The next request continues the rotation rather than repeating seat 0.
+    assert_eq!(
+        lead_member(&after, "opusRr"),
+        "anthropic-b",
+        "a surviving pool's cursor must continue across a reload, not reset"
+    );
+}
+
+#[tokio::test]
+async fn a_renamed_pool_starts_a_fresh_rotation_cursor() {
+    // A rename is a NEW pool: no heuristic state transfer. The fresh map simply
+    // has no key for the old name, so the cursor starts at seat 0.
+    let before = one_pool_two_round_robin_models_router();
+    assert_eq!(lead_member(&before, "opusRr"), "anthropic-a");
+
+    // Rebuild with the pool renamed; the models now name `renamed-pool`.
+    let mut after = one_pool_two_round_robin_models_router();
+    {
+        let mut config = (*after.config).clone();
+        let pool = config.pools.remove("shared-pool").expect("pool exists");
+        config.pools.insert("renamed-pool".to_string(), pool);
+        let mut models = BTreeMap::new();
+        for (nickname, model) in &after.resolved_models {
+            let seats = model.seats.clone().expect("pooled");
+            let rebuilt = ResolvedModel::new(
+                nickname,
+                "renamed-pool",
+                model.provider.clone(),
+                model.upstream.clone(),
+            )
+            .with_seats(seats);
+            models.insert(nickname.clone(), Arc::new(rebuilt));
+        }
+        after = Router::new(Arc::new(config));
+        after.install_resolved_models(models);
+    }
+    after.carry_over_pool_state_from(&before);
+
+    assert_eq!(
+        lead_member(&after, "opusRr"),
+        "anthropic-a",
+        "a renamed pool is a new pool: its rotation starts fresh"
+    );
+}
+
+#[test]
+fn cursor_carry_over_builds_a_fresh_map_without_historical_pool_names() {
+    // The keyspace bound: carry-over writes into THIS router's fresh map, so a
+    // run of reloads over renamed pools cannot accumulate every name the
+    // process ever saw.
+    let before = one_pool_two_round_robin_models_router();
+    assert_eq!(before.round_robin.keys(), vec!["shared-pool"]);
+
+    // A router that declares NO pool carries nothing forward.
+    let mut after = Router::new(Arc::new(Config::default()));
+    after.carry_over_pool_state_from(&before);
+
+    assert!(
+        after.round_robin.keys().is_empty(),
+        "a pool absent from the new config must not survive the carry-over"
+    );
+}
+
+/// A three-member StickyLeastLoaded pool with a session pinned to `pinned`,
+/// built over `members`. Returns the router.
+fn sticky_pool_router(members: &[&str]) -> Router {
+    let mut providers = BTreeMap::new();
+    let mut seats: Vec<SeatTarget> = Vec::new();
+    for member in members {
+        providers.insert(
+            (*member).to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+        let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
+            id: (*member).to_string(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        seats.push(SeatTarget {
+            provider_name: (*member).to_string(),
+            provider,
+            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
+                provider: (*member).to_string(),
+                label: None,
+            }),
+        });
+    }
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "shared-pool".to_string(),
+        PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect())
+            .with_seat_selection(SeatSelection::StickyLeastLoaded),
+    );
+    let config = Config {
+        providers,
+        pools,
+        ..Config::default()
+    };
+    let default_provider = seats[0].provider.clone();
+    let mut router = Router::new(Arc::new(config));
+    let model = ResolvedModel::new("opus", "shared-pool", default_provider, "claude-opus")
+        .with_seats(Arc::from(seats));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert("opus".to_string(), Arc::new(model));
+    router.install_resolved_models(models);
+    router
+}
+
+/// Pin `session` to `member` in `router`'s pool-keyed namespace.
+fn pin_session_to(router: &Router, session: &str, member: &str) {
+    router.sticky_pins.put(
+        &super::chain::sticky_pin_key(session, "shared-pool"),
+        crate::seat_pool::SeatPin {
+            member: member.to_string(),
+            repinned: false,
+        },
+    );
+}
+
+/// The member `session` is pinned to in `router`'s pool-keyed namespace.
+fn pinned_in_shared_pool(router: &Router, session: &str) -> Option<String> {
+    router
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key(session, "shared-pool"))
+        .map(|pin| pin.member)
+}
+
+#[test]
+fn a_removed_members_pin_repicks_once_onto_a_survivor_and_counts_it() {
+    // A member leaving the pool must move ITS pins exactly once, onto a
+    // survivor, and the move must be observable -- a burst of these is the
+    // operator's only signal that a credential change scattered conversations.
+    let before = sticky_pool_router(&["anthropic-a", "anthropic-b", "anthropic-c"]);
+    pin_session_to(&before, "doomed", "anthropic-c");
+
+    // Reload drops anthropic-c.
+    let mut after = sticky_pool_router(&["anthropic-a", "anthropic-b"]);
+    after.carry_over_metrics_from(&before);
+    after.carry_over_sticky_from(&before);
+    after.carry_over_pool_state_from(&before);
+
+    // Re-picked onto a surviving member, exactly once, and counted once.
+    let repicked = pinned_in_shared_pool(&after, "doomed").expect("pin survives, re-pointed");
+    assert!(
+        ["anthropic-a", "anthropic-b"].contains(&repicked.as_str()),
+        "a retired member's pin must move to a survivor, got {repicked}"
+    );
+    assert_eq!(
+        after.metrics.pool_totals().removed_pin_repick,
+        1,
+        "each moved pin must be counted exactly once"
+    );
+
+    // Idempotent: carrying over again moves nothing, because the pin now names
+    // a member the pool still serves.
+    let mut third = sticky_pool_router(&["anthropic-a", "anthropic-b"]);
+    third.carry_over_metrics_from(&after);
+    third.carry_over_sticky_from(&after);
+    third.carry_over_pool_state_from(&after);
+    assert_eq!(
+        third.metrics.pool_totals().removed_pin_repick,
+        1,
+        "a pin already on a survivor must not be re-picked a second time"
+    );
+}
+
+#[test]
+fn a_surviving_members_pin_is_never_touched_by_a_membership_change() {
+    // The blast radius: a member leaving costs a cold miss ONLY to the sessions
+    // pinned to it. Every other pin -- and its one-time overflow marker -- is
+    // left byte-for-byte alone.
+    let before = sticky_pool_router(&["anthropic-a", "anthropic-b", "anthropic-c"]);
+    pin_session_to(&before, "doomed", "anthropic-c");
+    before.sticky_pins.put(
+        &super::chain::sticky_pin_key("survivor", "shared-pool"),
+        crate::seat_pool::SeatPin {
+            member: "anthropic-a".to_string(),
+            // Already migrated once: the marker must survive, or the reload
+            // would silently re-open this session's flap window.
+            repinned: true,
+        },
+    );
+
+    let mut after = sticky_pool_router(&["anthropic-a", "anthropic-b"]);
+    after.carry_over_metrics_from(&before);
+    after.carry_over_sticky_from(&before);
+    after.carry_over_pool_state_from(&before);
+
+    let kept = after
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key("survivor", "shared-pool"))
+        .expect("a surviving member's pin is never dropped");
+    assert_eq!(
+        kept.member, "anthropic-a",
+        "a surviving member's pin must not move"
+    );
+    assert!(
+        kept.repinned,
+        "the one-time overflow marker must survive the reload"
+    );
+    assert_eq!(
+        after.metrics.pool_totals().removed_pin_repick,
+        1,
+        "only the retired member's pin counts as a re-pick"
+    );
+}
+
+#[test]
+fn a_renamed_pool_leaves_its_pins_to_resolve_as_a_miss_rather_than_repicking() {
+    // A rename is a new pool on both sides, so there is no survivor to move a
+    // pin to. The old pin is left alone under its old namespace: nothing reads
+    // it, so it resolves as a miss and re-picks naturally. Picking a survivor
+    // from an unrelated pool would be worse than a cold miss.
+    let before = sticky_pool_router(&["anthropic-a", "anthropic-b", "anthropic-c"]);
+    pin_session_to(&before, "S", "anthropic-c");
+
+    // The new config's pool has a different NAME, so no join matches.
+    let mut after = sticky_pool_router(&["anthropic-a", "anthropic-b"]);
+    {
+        let mut config = (*after.config).clone();
+        let pool = config.pools.remove("shared-pool").expect("pool exists");
+        config.pools.insert("renamed-pool".to_string(), pool);
+        let model = after.resolved_models.get("opus").expect("model").clone();
+        let rebuilt = ResolvedModel::new(
+            "opus",
+            "renamed-pool",
+            model.provider.clone(),
+            model.upstream.clone(),
+        )
+        .with_seats(model.seats.clone().expect("pooled"));
+        let mut models = BTreeMap::new();
+        models.insert("opus".to_string(), Arc::new(rebuilt));
+        after = Router::new(Arc::new(config));
+        after.install_resolved_models(models);
+    }
+    after.carry_over_metrics_from(&before);
+    after.carry_over_sticky_from(&before);
+    after.carry_over_pool_state_from(&before);
+
+    assert_eq!(
+        after.metrics.pool_totals().removed_pin_repick,
+        0,
+        "a renamed pool transfers no pin state, so nothing is re-picked"
+    );
+    assert!(
+        after
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", "renamed-pool"))
+            .is_none(),
+        "the renamed pool starts with no pin for the session"
+    );
+}
+
+#[test]
+fn pool_state_carry_over_re_declares_quota_admission_for_the_new_seat_set() {
+    // Quota admission is account-keyed and re-declared by the quota carry-over,
+    // not by this one -- but the two run at the same reload site, so the
+    // combination must leave the store admitting exactly the NEW seat set. A
+    // retired member's write is refused; a surviving member's lands.
+    use crate::quota::key::seat_key_for_secret_ref;
+
+    let retired_ref = routectl_auth::SecretRef::OAuth {
+        provider: "anthropic-c".to_string(),
+        label: None,
+    };
+    let kept_ref = routectl_auth::SecretRef::OAuth {
+        provider: "anthropic-a".to_string(),
+        label: None,
+    };
+    let retired = seat_key_for_secret_ref(Some(&retired_ref)).expect("oauth ref yields a key");
+    let kept = seat_key_for_secret_ref(Some(&kept_ref)).expect("oauth ref yields a key");
+
+    let before = sticky_pool_router(&["anthropic-a", "anthropic-b", "anthropic-c"]);
+    let mut after = sticky_pool_router(&["anthropic-a", "anthropic-b"]);
+    after.carry_over_metrics_from(&before);
+    after.carry_over_sticky_from(&before);
+    after.carry_over_quota_from(&before);
+    after.carry_over_pool_state_from(&before);
+
+    assert!(
+        after.quota_store.admits(&kept),
+        "a surviving account must still be admitted after the reload"
+    );
+    assert!(
+        !after.quota_store.admits(&retired),
+        "an account the new config dropped must no longer be admitted"
+    );
+}
+
+#[tokio::test]
+async fn an_in_flight_request_finishes_on_the_old_router_after_a_pool_reload() {
+    // In-flight requests finish on the Arc they started with: the swap replaces
+    // the router a NEW request resolves against and never reaches back into one
+    // already resolved. Proven by resolving a chain, reloading with the pinned
+    // member removed, and asserting the already-resolved chain is unchanged.
+    let before = sticky_pool_router(&["anthropic-a", "anthropic-b", "anthropic-c"]);
+    let in_flight: Vec<String> = before
+        .dispatch_chain("opus", Some("S"))
+        .expect("chain resolves")
+        .into_iter()
+        .map(|t| t.state_key)
+        .collect();
+
+    let mut after = sticky_pool_router(&["anthropic-a", "anthropic-b"]);
+    after.carry_over_metrics_from(&before);
+    after.carry_over_sticky_from(&before);
+    after.carry_over_pool_state_from(&before);
+
+    // The chain resolved before the swap still names all three seats.
+    assert_eq!(
+        in_flight.len(),
+        3,
+        "the in-flight chain keeps the seat set it resolved against"
+    );
+    assert!(
+        in_flight.iter().any(|k| k.ends_with("anthropic-c")),
+        "the retired seat is still dispatchable for the request already holding \
+         the old router: {in_flight:?}"
+    );
+    // While a request resolving against the NEW router sees only survivors.
+    let fresh: Vec<String> = after
+        .dispatch_chain("opus", Some("S"))
+        .expect("chain resolves")
+        .into_iter()
+        .map(|t| t.state_key)
+        .collect();
+    assert_eq!(fresh.len(), 2, "the new router serves only survivors");
+    assert!(
+        !fresh.iter().any(|k| k.ends_with("anthropic-c")),
+        "the retired seat must not appear on the new router: {fresh:?}"
     );
 }

@@ -257,6 +257,32 @@ impl ResolvedModel {
         self
     }
 
+    /// This model's shared-state namespace: the POOL name for a pool-backed
+    /// model, its own nickname for a standalone provider-backed one.
+    ///
+    /// THE one derivation for both per-pool namespaces -- the round-robin
+    /// rotation cursor and the sticky pin key -- so the two cannot disagree
+    /// about which models share a lane. Pool-backed is read off `seats`
+    /// rather than off the config's `[pools]` table: `seats` is `Some` for
+    /// exactly the models the factory compiled from a pool, and for those
+    /// `provider_name` IS the pool name the operator wrote.
+    ///
+    /// Two models naming one pool therefore share one cursor and one pin per
+    /// session, while two pools in one chain stay independent. Validation
+    /// rejects a pool name colliding with a model nickname, so the two bases
+    /// cannot resolve to the same key.
+    ///
+    /// The breaker / RPM / capability lane key is deliberately NOT derived
+    /// from this: it stays per-model (see
+    /// [`SeatTarget::state_key_for`](crate::seat_pool::SeatTarget::state_key_for)).
+    pub(crate) fn rotation_key(&self) -> &str {
+        if self.seats.is_some() {
+            &self.provider_name
+        } else {
+            &self.nickname
+        }
+    }
+
     /// Stamp the precomputed two-layer catalog merge for this model.
     /// Called by `factory::apply_catalog_overlay` as a post-pass over the
     /// resolved table so `build_resolved_models` itself never needs to
