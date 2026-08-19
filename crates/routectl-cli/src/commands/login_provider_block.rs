@@ -239,11 +239,37 @@ pub(crate) fn toml_key(name: &str) -> String {
     }
 }
 
-/// Render `value` as a TOML basic string, escaping the two characters
-/// that would otherwise terminate or reinterpret it.
+/// Render `value` as a TOML basic string.
+///
+/// TOML forbids raw control characters inside a basic string outright, not
+/// just the quote and backslash that would terminate or reinterpret it. A
+/// member or label name carrying a newline is reachable -- pool member names
+/// come from operator-written config, and only non-emptiness is checked
+/// upstream -- and a raw one would make the PRINTED delta unparseable while
+/// the committed file (written through `toml_edit`, which escapes properly)
+/// stayed valid. An operator pasting the shown block would then hit a syntax
+/// error routectl appeared to have authored.
+///
+/// The three whitespace controls get their short escapes; every other C0
+/// control plus DEL takes the `\uXXXX` form.
 pub(crate) fn toml_string(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
