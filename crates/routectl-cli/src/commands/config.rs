@@ -1,9 +1,10 @@
 //! `routectl config <subcommand>` -- check, show, example.
 
-use routectl_auth::{SecretRef, SecretStore};
+use routectl_auth::{OAuthStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_dotted_path};
 
+use crate::commands::seat_report::{seat_pool_lines, stored_seat_pool_rows};
 use crate::server::CompositeStore;
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
@@ -15,6 +16,10 @@ use crate::server::CompositeStore;
 /// the source line it came from. It is `None` when the text was unreadable;
 /// every error then falls back to its plain message. Locating a line is a
 /// presentation nicety and never turns into a load error.
+///
+/// The OAuth seat-pool block is purely informational: it never enters
+/// [`CheckReport`] and never moves the exit code, so an unreadable credential
+/// store still reports `ok` (with the pool counts rendered as unknown).
 pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     let secrets = CompositeStore::open_default().await?;
     let mut errors: Vec<String> = secret_ref_parse_errors(config, raw_text);
@@ -58,6 +63,17 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
         config.server.host, config.server.port
     );
 
+    let seat_lines = seat_pool_lines(&stored_seat_pool_rows(
+        config,
+        stored_seat_keys().await.as_deref(),
+    ));
+    if !seat_lines.is_empty() {
+        println!();
+        for line in &seat_lines {
+            println!("{line}");
+        }
+    }
+
     if !warnings.is_empty() {
         println!("\nwarnings ({}):", warnings.len());
         for w in &warnings {
@@ -75,6 +91,20 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
 
     println!("\nok.");
     Ok(())
+}
+
+/// Snapshot of the credential store's seat keys for the informational
+/// seat-pool block, or `None` when the store could not be OPENED.
+///
+/// Opened directly through [`OAuthStore`] rather than through the composite
+/// store on purpose: the composite's `list_seats` echoes a pinned ref back as
+/// a one-element list when its oauth arm is absent, which would report a
+/// confident "1 seat" for exactly the unreadable-store case this block exists
+/// to make visible. A merely-missing credentials file opens as an empty store,
+/// so "nothing logged in" stays distinguishable from "cannot tell".
+async fn stored_seat_keys() -> Option<Vec<String>> {
+    let store = OAuthStore::open_default().await.ok()?;
+    Some(store.list().await.into_iter().map(|(key, _)| key).collect())
 }
 
 /// The rendered semantic findings of `config check`: error and warning lines
