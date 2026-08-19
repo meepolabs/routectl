@@ -7,17 +7,22 @@ use super::{
 };
 
 /// A config with one anthropic-api provider entry whose credential ref is
-/// `ref_uri`, optionally carrying an explicit `seat_selection` token.
+/// `ref_uri`. `selection`, when given, arrives the way an operator now sets
+/// it: a pool claiming that entry and carrying the strategy.
 fn config_with_ref(ref_uri: &str, selection: Option<&str>) -> Config {
-    let selection_line = selection.map_or_else(String::new, |token| {
-        format!("seat_selection = \"{token}\"\n")
+    let pool_block = selection.map_or_else(String::new, |token| {
+        format!(
+            "[pools.anthropic-pool]\n\
+             members = [\"anthropic\"]\n\
+             seat_selection = \"{token}\"\n"
+        )
     });
     let text = format!(
         "version = 3\n\
          [providers.anthropic]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"{ref_uri}\"\n\
-         {selection_line}"
+         {pool_block}"
     );
     toml::from_str(&text).expect("fixture config parses")
 }

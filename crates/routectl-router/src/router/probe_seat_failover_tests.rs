@@ -6,7 +6,7 @@
 //! futile). Complete and stream paths are pinned symmetrically.
 
 use super::*;
-use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy, SeatSelection};
+use crate::config::{AliasValue, Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::seat_pool::SeatTarget;
 use async_trait::async_trait;
@@ -134,13 +134,9 @@ fn pooled_two_seat_router(
     ];
 
     let mut providers = BTreeMap::new();
-    let runtime = ProviderRuntimePolicy {
-        seat_selection: SeatSelection::FillFirst,
-        ..Default::default()
-    };
     providers.insert(
         "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic").with_runtime(runtime),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
     );
     let cfg = Arc::new(Config {
         providers,

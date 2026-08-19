@@ -1722,6 +1722,7 @@ pub routectl_router::config::Config::capability: routectl_router::CapabilityConf
 pub routectl_router::config::Config::log: routectl_router::LogConfig
 pub routectl_router::config::Config::mitm: core::option::Option<routectl_router::MitmConfig>
 pub routectl_router::config::Config::models: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ModelEntry>
+pub routectl_router::config::Config::pools: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::PoolEntry>
 pub routectl_router::config::Config::providers: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>
 pub routectl_router::config::Config::reduction: routectl_router::ReductionConfig
 pub routectl_router::config::Config::registry: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::RegistryEntry>
@@ -1734,6 +1735,8 @@ pub routectl_router::config::Config::version: u32
 pub routectl_router::config::Config::window_gate: routectl_router::WindowGateConfig
 impl routectl_router::config::Config
 pub fn routectl_router::config::Config::pricing_for(&self, &str, &str) -> core::option::Option<&routectl_router::PricingConfig>
+impl routectl_router::config::Config
+pub fn routectl_router::config::Config::seat_selection_for(&self, &str) -> routectl_router::config::SeatSelection
 impl core::clone::Clone for routectl_router::config::Config
 pub fn routectl_router::config::Config::clone(&self) -> routectl_router::config::Config
 impl core::default::Default for routectl_router::config::Config
@@ -2146,6 +2149,73 @@ impl<T> typenum::type_operators::Same for routectl_router::OverrideEntry
 pub type routectl_router::OverrideEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::OverrideEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::OverrideEntry::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::config::PoolEntry
+pub routectl_router::config::PoolEntry::accepts_new_logins: bool
+pub routectl_router::config::PoolEntry::members: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::config::PoolEntry::seat_selection: routectl_router::config::SeatSelection
+impl routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::new(alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn routectl_router::PoolEntry::with_accepts_new_logins(self, bool) -> Self
+pub fn routectl_router::PoolEntry::with_seat_selection(self, routectl_router::config::SeatSelection) -> Self
+impl core::clone::Clone for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::clone(&self) -> routectl_router::PoolEntry
+impl core::default::Default for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::default() -> routectl_router::PoolEntry
+impl core::fmt::Debug for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl schemars::JsonSchema for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::inline_schema() -> bool
+pub fn routectl_router::PoolEntry::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::PoolEntry::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::PoolEntry::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::PoolEntry
+impl core::marker::Send for routectl_router::PoolEntry
+impl core::marker::Sync for routectl_router::PoolEntry
+impl core::marker::Unpin for routectl_router::PoolEntry
+impl core::marker::UnsafeUnpin for routectl_router::PoolEntry
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::PoolEntry
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::PoolEntry
+impl<T, U> core::convert::Into<U> for routectl_router::PoolEntry where U: core::convert::From<T>
+pub fn routectl_router::PoolEntry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::PoolEntry where U: core::convert::Into<T>
+pub type routectl_router::PoolEntry::Error = core::convert::Infallible
+pub fn routectl_router::PoolEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::PoolEntry where U: core::convert::TryFrom<T>
+pub type routectl_router::PoolEntry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::PoolEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::PoolEntry where T: core::clone::Clone
+pub type routectl_router::PoolEntry::Owned = T
+pub fn routectl_router::PoolEntry::clone_into(&self, &mut T)
+pub fn routectl_router::PoolEntry::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::PoolEntry where T: core::clone::Clone
+pub fn routectl_router::PoolEntry::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::PoolEntry where T: 'static + ?core::marker::Sized
+pub fn routectl_router::PoolEntry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::PoolEntry where T: ?core::marker::Sized
+pub fn routectl_router::PoolEntry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::PoolEntry where T: ?core::marker::Sized
+pub fn routectl_router::PoolEntry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::PoolEntry where T: core::clone::Clone
+pub unsafe fn routectl_router::PoolEntry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::PoolEntry where T: core::clone::Clone
+pub fn routectl_router::PoolEntry::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::PoolEntry
+impl<T> serde_core::de::DeserializeOwned for routectl_router::PoolEntry where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::PoolEntry where T: ?core::marker::Sized
+pub fn routectl_router::PoolEntry::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::PoolEntry::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::PoolEntry
+impl<T> tracing::instrument::WithSubscriber for routectl_router::PoolEntry
+impl<T> typenum::type_operators::Same for routectl_router::PoolEntry
+pub type routectl_router::PoolEntry::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PoolEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::PoolEntry::into_shared(self) -> Shared
 pub struct routectl_router::config::PricingConfig
 pub routectl_router::config::PricingConfig::cache_read_per_mtok: core::option::Option<f64>
 pub routectl_router::config::PricingConfig::cache_write_1h_per_mtok: core::option::Option<f64>
@@ -2220,7 +2290,6 @@ pub routectl_router::config::ProviderRuntimePolicy::circuit_failures: core::opti
 pub routectl_router::config::ProviderRuntimePolicy::class_overrides: alloc::collections::btree::map::BTreeMap<u16, routectl_router::class_policy::ConfigFailureClass>
 pub routectl_router::config::ProviderRuntimePolicy::request_timeout_ms: core::option::Option<u64>
 pub routectl_router::config::ProviderRuntimePolicy::rpm_limit: core::option::Option<u32>
-pub routectl_router::config::ProviderRuntimePolicy::seat_selection: routectl_router::config::SeatSelection
 pub routectl_router::config::ProviderRuntimePolicy::stream_first_byte_timeout_ms: core::option::Option<u64>
 pub routectl_router::config::ProviderRuntimePolicy::unsupported_features: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::ProviderRuntimePolicy
@@ -3813,6 +3882,257 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::runtime_state::ProviderState::into_shared(self) -> Shared
 pub mod routectl_router::schema_gen
 pub fn routectl_router::schema_gen::render_schema_json() -> alloc::string::String
+pub mod routectl_router::seat_naming
+#[non_exhaustive] pub enum routectl_router::seat_naming::SeatNamingError
+pub routectl_router::seat_naming::SeatNamingError::AmbiguousPool
+pub routectl_router::seat_naming::SeatNamingError::AmbiguousPool::pools: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::seat_naming::SeatNamingError::DuplicateGeneratedName
+pub routectl_router::seat_naming::SeatNamingError::DuplicateGeneratedName::name: alloc::string::String
+pub routectl_router::seat_naming::SeatNamingError::EntryNameTaken
+pub routectl_router::seat_naming::SeatNamingError::EntryNameTaken::name: alloc::string::String
+pub routectl_router::seat_naming::SeatNamingError::PoolNameTaken
+pub routectl_router::seat_naming::SeatNamingError::PoolNameTaken::name: alloc::string::String
+pub routectl_router::seat_naming::SeatNamingError::ReservedLabel
+pub routectl_router::seat_naming::SeatNamingError::ReservedLabel::label: alloc::string::String
+pub routectl_router::seat_naming::SeatNamingError::UnusableToken
+pub routectl_router::seat_naming::SeatNamingError::UnusableToken::kind: &'static str
+pub routectl_router::seat_naming::SeatNamingError::UnusableToken::token: alloc::string::String
+impl core::clone::Clone for routectl_router::seat_naming::SeatNamingError
+pub fn routectl_router::seat_naming::SeatNamingError::clone(&self) -> routectl_router::seat_naming::SeatNamingError
+impl core::cmp::Eq for routectl_router::seat_naming::SeatNamingError
+impl core::cmp::PartialEq for routectl_router::seat_naming::SeatNamingError
+pub fn routectl_router::seat_naming::SeatNamingError::eq(&self, &routectl_router::seat_naming::SeatNamingError) -> bool
+impl core::error::Error for routectl_router::seat_naming::SeatNamingError
+impl core::fmt::Debug for routectl_router::seat_naming::SeatNamingError
+pub fn routectl_router::seat_naming::SeatNamingError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_router::seat_naming::SeatNamingError
+pub fn routectl_router::seat_naming::SeatNamingError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::seat_naming::SeatNamingError
+impl core::marker::Freeze for routectl_router::seat_naming::SeatNamingError
+impl core::marker::Send for routectl_router::seat_naming::SeatNamingError
+impl core::marker::Sync for routectl_router::seat_naming::SeatNamingError
+impl core::marker::Unpin for routectl_router::seat_naming::SeatNamingError
+impl core::marker::UnsafeUnpin for routectl_router::seat_naming::SeatNamingError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::seat_naming::SeatNamingError
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::seat_naming::SeatNamingError
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::seat_naming::SeatNamingError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::seat_naming::SeatNamingError::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::seat_naming::SeatNamingError where U: core::convert::From<T>
+pub fn routectl_router::seat_naming::SeatNamingError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::seat_naming::SeatNamingError where U: core::convert::Into<T>
+pub type routectl_router::seat_naming::SeatNamingError::Error = core::convert::Infallible
+pub fn routectl_router::seat_naming::SeatNamingError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::seat_naming::SeatNamingError where U: core::convert::TryFrom<T>
+pub type routectl_router::seat_naming::SeatNamingError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::seat_naming::SeatNamingError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::seat_naming::SeatNamingError where T: core::clone::Clone
+pub type routectl_router::seat_naming::SeatNamingError::Owned = T
+pub fn routectl_router::seat_naming::SeatNamingError::clone_into(&self, &mut T)
+pub fn routectl_router::seat_naming::SeatNamingError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_router::seat_naming::SeatNamingError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_router::seat_naming::SeatNamingError::to_string(&self) -> alloc::string::String
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::seat_naming::SeatNamingError where T: core::clone::Clone
+pub fn routectl_router::seat_naming::SeatNamingError::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::seat_naming::SeatNamingError where T: 'static + ?core::marker::Sized
+pub fn routectl_router::seat_naming::SeatNamingError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::seat_naming::SeatNamingError where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::SeatNamingError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::seat_naming::SeatNamingError where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::SeatNamingError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::seat_naming::SeatNamingError where T: core::clone::Clone
+pub unsafe fn routectl_router::seat_naming::SeatNamingError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::seat_naming::SeatNamingError
+pub fn routectl_router::seat_naming::SeatNamingError::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::seat_naming::SeatNamingError where T: core::clone::Clone
+pub fn routectl_router::seat_naming::SeatNamingError::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::seat_naming::SeatNamingError
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::seat_naming::SeatNamingError where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::SeatNamingError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::seat_naming::SeatNamingError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::seat_naming::SeatNamingError
+impl<T> tracing::instrument::WithSubscriber for routectl_router::seat_naming::SeatNamingError
+impl<T> typenum::type_operators::Same for routectl_router::seat_naming::SeatNamingError
+pub type routectl_router::seat_naming::SeatNamingError::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::seat_naming::SeatNamingError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::seat_naming::SeatNamingError::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::seat_naming::GeneratedAccount
+pub routectl_router::seat_naming::GeneratedAccount::already_present: bool
+pub routectl_router::seat_naming::GeneratedAccount::entry_name: alloc::string::String
+pub routectl_router::seat_naming::GeneratedAccount::label: core::option::Option<alloc::string::String>
+pub routectl_router::seat_naming::GeneratedAccount::secret_ref: alloc::string::String
+impl core::clone::Clone for routectl_router::seat_naming::GeneratedAccount
+pub fn routectl_router::seat_naming::GeneratedAccount::clone(&self) -> routectl_router::seat_naming::GeneratedAccount
+impl core::cmp::Eq for routectl_router::seat_naming::GeneratedAccount
+impl core::cmp::PartialEq for routectl_router::seat_naming::GeneratedAccount
+pub fn routectl_router::seat_naming::GeneratedAccount::eq(&self, &routectl_router::seat_naming::GeneratedAccount) -> bool
+impl core::fmt::Debug for routectl_router::seat_naming::GeneratedAccount
+pub fn routectl_router::seat_naming::GeneratedAccount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::seat_naming::GeneratedAccount
+impl core::marker::Freeze for routectl_router::seat_naming::GeneratedAccount
+impl core::marker::Send for routectl_router::seat_naming::GeneratedAccount
+impl core::marker::Sync for routectl_router::seat_naming::GeneratedAccount
+impl core::marker::Unpin for routectl_router::seat_naming::GeneratedAccount
+impl core::marker::UnsafeUnpin for routectl_router::seat_naming::GeneratedAccount
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::seat_naming::GeneratedAccount
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::seat_naming::GeneratedAccount
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::seat_naming::GeneratedAccount where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::seat_naming::GeneratedAccount::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::seat_naming::GeneratedAccount where U: core::convert::From<T>
+pub fn routectl_router::seat_naming::GeneratedAccount::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::seat_naming::GeneratedAccount where U: core::convert::Into<T>
+pub type routectl_router::seat_naming::GeneratedAccount::Error = core::convert::Infallible
+pub fn routectl_router::seat_naming::GeneratedAccount::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::seat_naming::GeneratedAccount where U: core::convert::TryFrom<T>
+pub type routectl_router::seat_naming::GeneratedAccount::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::seat_naming::GeneratedAccount::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::seat_naming::GeneratedAccount where T: core::clone::Clone
+pub type routectl_router::seat_naming::GeneratedAccount::Owned = T
+pub fn routectl_router::seat_naming::GeneratedAccount::clone_into(&self, &mut T)
+pub fn routectl_router::seat_naming::GeneratedAccount::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::seat_naming::GeneratedAccount where T: core::clone::Clone
+pub fn routectl_router::seat_naming::GeneratedAccount::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::seat_naming::GeneratedAccount where T: 'static + ?core::marker::Sized
+pub fn routectl_router::seat_naming::GeneratedAccount::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::seat_naming::GeneratedAccount where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::GeneratedAccount::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::seat_naming::GeneratedAccount where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::GeneratedAccount::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::seat_naming::GeneratedAccount where T: core::clone::Clone
+pub unsafe fn routectl_router::seat_naming::GeneratedAccount::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::seat_naming::GeneratedAccount
+pub fn routectl_router::seat_naming::GeneratedAccount::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::seat_naming::GeneratedAccount where T: core::clone::Clone
+pub fn routectl_router::seat_naming::GeneratedAccount::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::seat_naming::GeneratedAccount
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::seat_naming::GeneratedAccount where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::GeneratedAccount::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::seat_naming::GeneratedAccount::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::seat_naming::GeneratedAccount
+impl<T> tracing::instrument::WithSubscriber for routectl_router::seat_naming::GeneratedAccount
+impl<T> typenum::type_operators::Same for routectl_router::seat_naming::GeneratedAccount
+pub type routectl_router::seat_naming::GeneratedAccount::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::seat_naming::GeneratedAccount where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::seat_naming::GeneratedAccount::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::seat_naming::NewSeatPlacement
+pub routectl_router::seat_naming::NewSeatPlacement::account: routectl_router::seat_naming::GeneratedAccount
+pub routectl_router::seat_naming::NewSeatPlacement::already_member: bool
+pub routectl_router::seat_naming::NewSeatPlacement::pool_name: core::option::Option<alloc::string::String>
+impl core::clone::Clone for routectl_router::seat_naming::NewSeatPlacement
+pub fn routectl_router::seat_naming::NewSeatPlacement::clone(&self) -> routectl_router::seat_naming::NewSeatPlacement
+impl core::cmp::Eq for routectl_router::seat_naming::NewSeatPlacement
+impl core::cmp::PartialEq for routectl_router::seat_naming::NewSeatPlacement
+pub fn routectl_router::seat_naming::NewSeatPlacement::eq(&self, &routectl_router::seat_naming::NewSeatPlacement) -> bool
+impl core::fmt::Debug for routectl_router::seat_naming::NewSeatPlacement
+pub fn routectl_router::seat_naming::NewSeatPlacement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::seat_naming::NewSeatPlacement
+impl core::marker::Freeze for routectl_router::seat_naming::NewSeatPlacement
+impl core::marker::Send for routectl_router::seat_naming::NewSeatPlacement
+impl core::marker::Sync for routectl_router::seat_naming::NewSeatPlacement
+impl core::marker::Unpin for routectl_router::seat_naming::NewSeatPlacement
+impl core::marker::UnsafeUnpin for routectl_router::seat_naming::NewSeatPlacement
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::seat_naming::NewSeatPlacement
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::seat_naming::NewSeatPlacement
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::seat_naming::NewSeatPlacement where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::seat_naming::NewSeatPlacement::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::seat_naming::NewSeatPlacement where U: core::convert::From<T>
+pub fn routectl_router::seat_naming::NewSeatPlacement::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::seat_naming::NewSeatPlacement where U: core::convert::Into<T>
+pub type routectl_router::seat_naming::NewSeatPlacement::Error = core::convert::Infallible
+pub fn routectl_router::seat_naming::NewSeatPlacement::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::seat_naming::NewSeatPlacement where U: core::convert::TryFrom<T>
+pub type routectl_router::seat_naming::NewSeatPlacement::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::seat_naming::NewSeatPlacement::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::seat_naming::NewSeatPlacement where T: core::clone::Clone
+pub type routectl_router::seat_naming::NewSeatPlacement::Owned = T
+pub fn routectl_router::seat_naming::NewSeatPlacement::clone_into(&self, &mut T)
+pub fn routectl_router::seat_naming::NewSeatPlacement::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::seat_naming::NewSeatPlacement where T: core::clone::Clone
+pub fn routectl_router::seat_naming::NewSeatPlacement::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::seat_naming::NewSeatPlacement where T: 'static + ?core::marker::Sized
+pub fn routectl_router::seat_naming::NewSeatPlacement::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::seat_naming::NewSeatPlacement where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::NewSeatPlacement::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::seat_naming::NewSeatPlacement where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::NewSeatPlacement::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::seat_naming::NewSeatPlacement where T: core::clone::Clone
+pub unsafe fn routectl_router::seat_naming::NewSeatPlacement::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::seat_naming::NewSeatPlacement
+pub fn routectl_router::seat_naming::NewSeatPlacement::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::seat_naming::NewSeatPlacement where T: core::clone::Clone
+pub fn routectl_router::seat_naming::NewSeatPlacement::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::seat_naming::NewSeatPlacement
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::seat_naming::NewSeatPlacement where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::NewSeatPlacement::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::seat_naming::NewSeatPlacement::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::seat_naming::NewSeatPlacement
+impl<T> tracing::instrument::WithSubscriber for routectl_router::seat_naming::NewSeatPlacement
+impl<T> typenum::type_operators::Same for routectl_router::seat_naming::NewSeatPlacement
+pub type routectl_router::seat_naming::NewSeatPlacement::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::seat_naming::NewSeatPlacement where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::seat_naming::NewSeatPlacement::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::seat_naming::PoolMaterialization
+pub routectl_router::seat_naming::PoolMaterialization::accounts: alloc::vec::Vec<routectl_router::seat_naming::GeneratedAccount>
+pub routectl_router::seat_naming::PoolMaterialization::pool_exists: bool
+pub routectl_router::seat_naming::PoolMaterialization::pool_name: alloc::string::String
+impl core::clone::Clone for routectl_router::seat_naming::PoolMaterialization
+pub fn routectl_router::seat_naming::PoolMaterialization::clone(&self) -> routectl_router::seat_naming::PoolMaterialization
+impl core::cmp::Eq for routectl_router::seat_naming::PoolMaterialization
+impl core::cmp::PartialEq for routectl_router::seat_naming::PoolMaterialization
+pub fn routectl_router::seat_naming::PoolMaterialization::eq(&self, &routectl_router::seat_naming::PoolMaterialization) -> bool
+impl core::fmt::Debug for routectl_router::seat_naming::PoolMaterialization
+pub fn routectl_router::seat_naming::PoolMaterialization::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::seat_naming::PoolMaterialization
+impl core::marker::Freeze for routectl_router::seat_naming::PoolMaterialization
+impl core::marker::Send for routectl_router::seat_naming::PoolMaterialization
+impl core::marker::Sync for routectl_router::seat_naming::PoolMaterialization
+impl core::marker::Unpin for routectl_router::seat_naming::PoolMaterialization
+impl core::marker::UnsafeUnpin for routectl_router::seat_naming::PoolMaterialization
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::seat_naming::PoolMaterialization
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::seat_naming::PoolMaterialization
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::seat_naming::PoolMaterialization where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::seat_naming::PoolMaterialization::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::seat_naming::PoolMaterialization where U: core::convert::From<T>
+pub fn routectl_router::seat_naming::PoolMaterialization::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::seat_naming::PoolMaterialization where U: core::convert::Into<T>
+pub type routectl_router::seat_naming::PoolMaterialization::Error = core::convert::Infallible
+pub fn routectl_router::seat_naming::PoolMaterialization::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::seat_naming::PoolMaterialization where U: core::convert::TryFrom<T>
+pub type routectl_router::seat_naming::PoolMaterialization::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::seat_naming::PoolMaterialization::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::seat_naming::PoolMaterialization where T: core::clone::Clone
+pub type routectl_router::seat_naming::PoolMaterialization::Owned = T
+pub fn routectl_router::seat_naming::PoolMaterialization::clone_into(&self, &mut T)
+pub fn routectl_router::seat_naming::PoolMaterialization::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::seat_naming::PoolMaterialization where T: core::clone::Clone
+pub fn routectl_router::seat_naming::PoolMaterialization::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::seat_naming::PoolMaterialization where T: 'static + ?core::marker::Sized
+pub fn routectl_router::seat_naming::PoolMaterialization::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::seat_naming::PoolMaterialization where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::PoolMaterialization::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::seat_naming::PoolMaterialization where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::PoolMaterialization::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::seat_naming::PoolMaterialization where T: core::clone::Clone
+pub unsafe fn routectl_router::seat_naming::PoolMaterialization::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::seat_naming::PoolMaterialization
+pub fn routectl_router::seat_naming::PoolMaterialization::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::seat_naming::PoolMaterialization where T: core::clone::Clone
+pub fn routectl_router::seat_naming::PoolMaterialization::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::seat_naming::PoolMaterialization
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::seat_naming::PoolMaterialization where T: ?core::marker::Sized
+pub fn routectl_router::seat_naming::PoolMaterialization::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::seat_naming::PoolMaterialization::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::seat_naming::PoolMaterialization
+impl<T> tracing::instrument::WithSubscriber for routectl_router::seat_naming::PoolMaterialization
+impl<T> typenum::type_operators::Same for routectl_router::seat_naming::PoolMaterialization
+pub type routectl_router::seat_naming::PoolMaterialization::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::seat_naming::PoolMaterialization where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::seat_naming::PoolMaterialization::into_shared(self) -> Shared
+pub fn routectl_router::seat_naming::account_entry_name(&str, core::option::Option<&str>) -> core::result::Result<alloc::string::String, routectl_router::seat_naming::SeatNamingError>
+pub fn routectl_router::seat_naming::growth_pools_for_family(&routectl_router::config::Config, &str) -> alloc::vec::Vec<alloc::string::String>
+pub fn routectl_router::seat_naming::plan_new_seat(&routectl_router::config::Config, &str, core::option::Option<&str>) -> core::result::Result<routectl_router::seat_naming::NewSeatPlacement, routectl_router::seat_naming::SeatNamingError>
+pub fn routectl_router::seat_naming::plan_pool_materialization<'a>(&routectl_router::config::Config, &str, impl core::iter::traits::collect::IntoIterator<Item = core::option::Option<&'a str>>) -> core::result::Result<routectl_router::seat_naming::PoolMaterialization, routectl_router::seat_naming::SeatNamingError>
+pub fn routectl_router::seat_naming::pool_name(&str) -> core::result::Result<alloc::string::String, routectl_router::seat_naming::SeatNamingError>
+pub fn routectl_router::seat_naming::seat_secret_ref(&str, core::option::Option<&str>) -> alloc::string::String
 #[non_exhaustive] pub enum routectl_router::ActivationStatus
 pub routectl_router::ActivationStatus::Activated
 pub routectl_router::ActivationStatus::Unresolved
@@ -7956,6 +8276,7 @@ pub routectl_router::Config::capability: routectl_router::CapabilityConfig
 pub routectl_router::Config::log: routectl_router::LogConfig
 pub routectl_router::Config::mitm: core::option::Option<routectl_router::MitmConfig>
 pub routectl_router::Config::models: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ModelEntry>
+pub routectl_router::Config::pools: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::PoolEntry>
 pub routectl_router::Config::providers: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>
 pub routectl_router::Config::reduction: routectl_router::ReductionConfig
 pub routectl_router::Config::registry: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::RegistryEntry>
@@ -7968,6 +8289,8 @@ pub routectl_router::Config::version: u32
 pub routectl_router::Config::window_gate: routectl_router::WindowGateConfig
 impl routectl_router::config::Config
 pub fn routectl_router::config::Config::pricing_for(&self, &str, &str) -> core::option::Option<&routectl_router::PricingConfig>
+impl routectl_router::config::Config
+pub fn routectl_router::config::Config::seat_selection_for(&self, &str) -> routectl_router::config::SeatSelection
 impl core::clone::Clone for routectl_router::config::Config
 pub fn routectl_router::config::Config::clone(&self) -> routectl_router::config::Config
 impl core::default::Default for routectl_router::config::Config
@@ -10283,6 +10606,73 @@ impl<T> typenum::type_operators::Same for routectl_router::OverrideRow
 pub type routectl_router::OverrideRow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::OverrideRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::OverrideRow::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::PoolEntry
+pub routectl_router::PoolEntry::accepts_new_logins: bool
+pub routectl_router::PoolEntry::members: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::PoolEntry::seat_selection: routectl_router::config::SeatSelection
+impl routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::new(alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn routectl_router::PoolEntry::with_accepts_new_logins(self, bool) -> Self
+pub fn routectl_router::PoolEntry::with_seat_selection(self, routectl_router::config::SeatSelection) -> Self
+impl core::clone::Clone for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::clone(&self) -> routectl_router::PoolEntry
+impl core::default::Default for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::default() -> routectl_router::PoolEntry
+impl core::fmt::Debug for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl schemars::JsonSchema for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::inline_schema() -> bool
+pub fn routectl_router::PoolEntry::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::PoolEntry::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::PoolEntry::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::PoolEntry
+impl core::marker::Send for routectl_router::PoolEntry
+impl core::marker::Sync for routectl_router::PoolEntry
+impl core::marker::Unpin for routectl_router::PoolEntry
+impl core::marker::UnsafeUnpin for routectl_router::PoolEntry
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::PoolEntry
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::PoolEntry
+impl<T, U> core::convert::Into<U> for routectl_router::PoolEntry where U: core::convert::From<T>
+pub fn routectl_router::PoolEntry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::PoolEntry where U: core::convert::Into<T>
+pub type routectl_router::PoolEntry::Error = core::convert::Infallible
+pub fn routectl_router::PoolEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::PoolEntry where U: core::convert::TryFrom<T>
+pub type routectl_router::PoolEntry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::PoolEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::PoolEntry where T: core::clone::Clone
+pub type routectl_router::PoolEntry::Owned = T
+pub fn routectl_router::PoolEntry::clone_into(&self, &mut T)
+pub fn routectl_router::PoolEntry::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::PoolEntry where T: core::clone::Clone
+pub fn routectl_router::PoolEntry::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::PoolEntry where T: 'static + ?core::marker::Sized
+pub fn routectl_router::PoolEntry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::PoolEntry where T: ?core::marker::Sized
+pub fn routectl_router::PoolEntry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::PoolEntry where T: ?core::marker::Sized
+pub fn routectl_router::PoolEntry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::PoolEntry where T: core::clone::Clone
+pub unsafe fn routectl_router::PoolEntry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::PoolEntry
+pub fn routectl_router::PoolEntry::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::PoolEntry where T: core::clone::Clone
+pub fn routectl_router::PoolEntry::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::PoolEntry
+impl<T> serde_core::de::DeserializeOwned for routectl_router::PoolEntry where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::PoolEntry where T: ?core::marker::Sized
+pub fn routectl_router::PoolEntry::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::PoolEntry::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::PoolEntry
+impl<T> tracing::instrument::WithSubscriber for routectl_router::PoolEntry
+impl<T> typenum::type_operators::Same for routectl_router::PoolEntry
+pub type routectl_router::PoolEntry::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PoolEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::PoolEntry::into_shared(self) -> Shared
 pub struct routectl_router::PrefixIndex<V: core::clone::Clone>
 impl<V: core::clone::Clone> routectl_router::PrefixIndex<V>
 pub fn routectl_router::PrefixIndex<V>::insert(&mut self, routectl_router::AliasPattern, V)
@@ -10535,7 +10925,6 @@ pub routectl_router::ProviderRuntimePolicy::circuit_failures: core::option::Opti
 pub routectl_router::ProviderRuntimePolicy::class_overrides: alloc::collections::btree::map::BTreeMap<u16, routectl_router::class_policy::ConfigFailureClass>
 pub routectl_router::ProviderRuntimePolicy::request_timeout_ms: core::option::Option<u64>
 pub routectl_router::ProviderRuntimePolicy::rpm_limit: core::option::Option<u32>
-pub routectl_router::ProviderRuntimePolicy::seat_selection: routectl_router::config::SeatSelection
 pub routectl_router::ProviderRuntimePolicy::stream_first_byte_timeout_ms: core::option::Option<u64>
 pub routectl_router::ProviderRuntimePolicy::unsupported_features: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::ProviderRuntimePolicy
@@ -12179,6 +12568,7 @@ pub const routectl_router::CATALOG_SNAPSHOT_DATE: &str
 pub const routectl_router::CATALOG_VERSION: u32
 pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::K_SESSION_CAPACITY: usize
+pub const routectl_router::MAX_POOL_MEMBERS: usize
 pub trait routectl_router::CalibrationLedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::CalibrationLedgerReader::read_calibration_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::CalibrationLedgerRow>
 pub trait routectl_router::CapabilityLedgerReader: core::marker::Send + core::marker::Sync
@@ -12272,6 +12662,7 @@ pub fn routectl_router::validate_codex_version(&routectl_router::config::Config)
 pub fn routectl_router::validate_config_path(&str) -> core::result::Result<routectl_router::PathShape, routectl_router::PathError>
 pub fn routectl_router::validate_mitm_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_overrides(&alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::result::Result<(), alloc::string::String>
+pub fn routectl_router::validate_pools(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_provider_bedrock_mantle(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_provider_credential_sources(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_provider_openai_mantle(&routectl_router::config::Config) -> routectl_core::error::Result<()>

@@ -1360,6 +1360,135 @@ pub(super) fn validate_codex_version_syntax(provider_name: &str, version: &str) 
     Ok(())
 }
 
+/// The maximum number of members one pool may declare. Bounds pool
+/// construction cost, the per-request dispatch chain a pool expands into,
+/// and the per-member WARN volume a degraded pool emits. Well above any
+/// plausible account count for one provider family; a config that exceeds
+/// it is far more likely a generated mistake than an intent.
+pub const MAX_POOL_MEMBERS: usize = 32;
+
+/// Reject every incoherent `[pools.<name>]` block. One function so `config
+/// check`, the serve gate, the hot-reload gate and doctor's config section
+/// all apply the identical rule set -- every rejection class below fires on
+/// each of those surfaces with no per-surface plumbing.
+///
+/// Rejection classes, each with its own message:
+///
+///   - a pool naming a provider entry that does not exist,
+///   - a pool mixing provider kinds (members must be interchangeable
+///     accounts of one upstream shape, which is what keeps pools and alias
+///     chains from becoming two overlapping fallback mechanisms),
+///   - a member claimed by two pools (a provider entry belongs to at most
+///     one pool),
+///   - a member authenticating with an API key rather than an OAuth seat,
+///   - a pool name colliding with a provider entry name or with a model
+///     nickname (a `[models.X] provider` value resolves against providers
+///     and pools in one namespace, and the rotation / affinity namespaces
+///     are pool-or-nickname keyed),
+///   - an empty member list (a pool that serves nothing is a silent
+///     no-serve rather than a configuration),
+///   - more than [`MAX_POOL_MEMBERS`] members.
+///
+/// Every class is collected rather than short-circuited, so one pass names
+/// every problem in the pool table.
+pub fn validate_pools(config: &Config) -> Result<()> {
+    use routectl_core::Error;
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut claimed_by: BTreeMap<&str, &str> = BTreeMap::new();
+
+    for (pool_name, pool) in &config.pools {
+        if config.providers.contains_key(pool_name) {
+            errors.push(format!(
+                "pool `{pool_name}`: a provider entry of the same name exists; a model's \
+                 `provider` value resolves against providers and pools in ONE namespace, so \
+                 a name matching both is ambiguous -- rename the pool or the provider entry"
+            ));
+        }
+        if config.models.contains_key(pool_name) {
+            errors.push(format!(
+                "pool `{pool_name}`: a model nickname of the same name exists; seat rotation \
+                 and session affinity are keyed by pool name or model nickname, so a name \
+                 matching both would share one rotation between unrelated targets -- rename \
+                 the pool or the model"
+            ));
+        }
+        if pool.members.is_empty() {
+            errors.push(format!(
+                "pool `{pool_name}`: `members` is empty; an empty pool serves no traffic, \
+                 which fails every request routed to it -- list at least one provider entry \
+                 or remove the pool"
+            ));
+        }
+        if pool.members.len() > MAX_POOL_MEMBERS {
+            errors.push(format!(
+                "pool `{pool_name}`: {} members exceeds the {MAX_POOL_MEMBERS}-member cap; \
+                 split the accounts across more than one pool",
+                pool.members.len()
+            ));
+        }
+
+        let mut pool_kind: Option<(&str, &str)> = None;
+        for member in &pool.members {
+            if let Some(previous) = claimed_by.insert(member.as_str(), pool_name.as_str())
+                && previous != pool_name.as_str()
+            {
+                errors.push(format!(
+                    "provider `{member}` is a member of both pool `{previous}` and pool \
+                     `{pool_name}`; a provider entry belongs to at most one pool"
+                ));
+            }
+            let Some(entry) = config.providers.get(member) else {
+                errors.push(format!(
+                    "pool `{pool_name}`: member `{member}` is not a known provider entry in \
+                     [providers]"
+                ));
+                continue;
+            };
+            let kind = entry.kind_str();
+            match pool_kind {
+                None => pool_kind = Some((member.as_str(), kind)),
+                Some((first_member, first_kind)) if first_kind != kind => {
+                    errors.push(format!(
+                        "pool `{pool_name}`: member `{member}` is kind `{kind}` but member \
+                         `{first_member}` is kind `{first_kind}`; a pool groups interchangeable \
+                         accounts of ONE provider kind -- use an alias chain for ordered \
+                         fallback across kinds"
+                    ));
+                }
+                Some(_) => {}
+            }
+            if !member_authenticates_with_oauth(entry) {
+                errors.push(format!(
+                    "pool `{pool_name}`: member `{member}` does not authenticate with an \
+                     `oauth://` credential; pool members are OAuth accounts this release \
+                     (API-key members are a planned widening, not a permanent restriction)"
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Config(errors.join("\n")))
+    }
+}
+
+/// Whether a provider entry authenticates against a routectl-managed OAuth
+/// seat. An entry carrying no credential ref at all (the Bedrock lanes)
+/// does not, and neither does an `env://` / `file://` API key.
+fn member_authenticates_with_oauth(entry: &ProviderEntry) -> bool {
+    let uris = entry.secret_uris();
+    !uris.is_empty()
+        && uris.iter().all(|uri| {
+            matches!(
+                routectl_auth::SecretRef::parse(uri),
+                Ok(routectl_auth::SecretRef::OAuth { .. })
+            )
+        })
+}
+
 /// The single `codex_version` value configured across the provider table,
 /// or `None` when no provider sets one (the caller falls back to the
 /// pinned default). Assumes [`validate_codex_version`] has already
@@ -1470,6 +1599,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_codex_version(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_pools(config) {
         errors.push(bare_validation_message(e));
     }
 

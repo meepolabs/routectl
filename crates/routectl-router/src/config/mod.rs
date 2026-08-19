@@ -7,9 +7,11 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+mod pool;
 mod schema;
 mod validate;
 
+pub use pool::PoolEntry;
 #[cfg(feature = "bedrock")]
 pub(crate) use schema::default_anthropic_base;
 #[cfg(feature = "gemini")]
@@ -66,6 +68,15 @@ pub struct Config {
     /// `[models.X]` in v0.6.0.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
+
+    /// Pool definitions keyed by operator-facing name: each groups
+    /// same-kind `[providers.X]` entries (accounts) under one
+    /// seat-selection strategy. A `[models.X] provider` value may name a
+    /// provider entry OR a pool -- one namespace, so a name matching both
+    /// is a validation error. A provider entry belongs to at most one
+    /// pool.
+    #[serde(default)]
+    pub pools: BTreeMap<String, PoolEntry>,
 
     /// v0.6.0 alias table. Each key is a wire `model` value (or a
     /// suffix-glob pattern like `claude-opus-*`, or the literal

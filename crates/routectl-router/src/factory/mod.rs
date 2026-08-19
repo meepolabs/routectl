@@ -23,9 +23,9 @@ pub use validate::validate_provider_bedrock_mantle;
 #[cfg(feature = "bedrock")]
 pub use validate::validate_provider_openai_mantle;
 pub use validate::{
-    ConfigValidation, collect_config_validation, resolved_codex_version,
+    ConfigValidation, MAX_POOL_MEMBERS, collect_config_validation, resolved_codex_version,
     validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
-    validate_codex_version, validate_mitm_config, validate_provider_credential_sources,
-    validate_reasoning_defaults, validate_registry_patterns,
+    validate_codex_version, validate_mitm_config, validate_pools,
+    validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use warnings::{class_policy_warnings, codex_identity_warnings, per_block_breakpoint_warnings};

@@ -1128,11 +1128,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/config/mod.rs` -- Config schema root: the top-level `Config` struct
   (all
   `[server]`/`[providers]`/`[models]`/`[aliases]`/`[retry]`/`[cache]`/`[capability]`/`[registry]`/`[mitm]`/...
-  tables) with `version: u32` schema stamp, and `impl Config` (`pricing_for`
+  tables) with `version: u32` schema stamp, `pools: BTreeMap<String,
+  PoolEntry>` (the `[pools.<name>]` account-grouping table), and `impl Config`
+  (`pricing_for`
   resolves an upstream-id glob -- provider-scoped beats agnostic, then
-  longest-prefix -- to a `&PricingConfig`). Re-exports the `schema` +
+  longest-prefix -- to a `&PricingConfig`). Re-exports the `pool` + `schema` +
   `validate` submodules so every internal `crate::config::X` path AND every
   crate-root `routectl_router::` re-export resolves unchanged
+- `src/config/pool.rs` -- the `[pools.<name>]` block: `PoolEntry` (`members:
+  Vec<String>` of provider entry names, `seat_selection: SeatSelection`,
+  `accepts_new_logins: bool` growth marker; `deny_unknown_fields` +
+  `non_exhaustive`, constructor `PoolEntry::new` + `with_seat_selection` /
+  `with_accepts_new_logins`), plus `Config::seat_selection_for(name)` -- the
+  ONE resolution of a dispatch target's in-force strategy (a pool's own, else
+  its claiming pool's, else the `fill-first` default for a standalone provider)
 - `src/config/schema.rs` -- Config value types: `ProviderEntry` (one variant
   per provider kind incl. the `gemini`-feature-gated `Gemini { api_key_ref,
   base_url, header_extras, payload_extras, user_agent, auth_mode, ... }`;
@@ -1431,8 +1440,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   message names the model id plus both lane options. Rejects rather than
   auto-selecting Converse, since the shape also selects the response
   translation and would otherwise split `api_shape` into a configured vs
-  effective value; the `[mitm]` validator is deliberately excluded
-  (router-build-specific)
+  effective value; `validate_pools` rejects every incoherent `[pools.<name>]`
+  block in ONE collecting pass (each class its own named message): unknown
+  member, mixed-kind members (compared by `kind_str`), a member claimed by two
+  pools, a non-`oauth://` member (milestone-scoped wording), a pool name held
+  by a provider entry or a model nickname, an empty `members`, and more than
+  `MAX_POOL_MEMBERS` (32) members; the `[mitm]` validator is deliberately
+  excluded (router-build-specific)
 - `src/factory/warnings.rs` -- non-fatal config warnings;
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
   the same surface (never fails): a `class_overrides` remap whose SOURCE
@@ -2247,6 +2261,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   arithmetic with `refill_tokens` (via `projected_tokens`) so the two cannot
   drift, and never claims the half-open probe slot the way a
   `try_dispatch`-based read would
+- `src/seat_naming.rs` -- THE naming convention for OAuth account entries and
+  their pool, pure over a `Config` (never the credential store): `pool_name`
+  (plain provider-family name), `account_entry_name` (`<family>-default` /
+  `<family>-<label>`), `seat_secret_ref`, `plan_pool_materialization` (every
+  name one family's seats take, with `already_present` / `pool_exists` so
+  re-deriving over its own output is a no-op), `plan_new_seat` (the typed
+  resolver: which `accepts_new_logins` pool serves `oauth://<provider>` and
+  what entry a new seat takes), `growth_pools_for_family`. Exact mapping or
+  refuse -- `SeatNamingError` {UnusableToken, ReservedLabel,
+  DuplicateGeneratedName, EntryNameTaken, PoolNameTaken, AmbiguousPool}, never
+  a lossy normalization, because the migration pass and the login writer must
+  agree byte-for-byte on generated names
 - `src/seat_pool.rs` -- OAuth credential-pool glue: `SeatTarget` (seat-pinned
   provider + per-seat `state_key`), `seat_state_key` (bare nickname for the
   default seat, `nickname#label` for labeled seats), `seat_identity` (the
@@ -4326,11 +4352,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `usage.retention_days`, `[mitm]`, and per-provider `codex_version` -- all
   startup-only state; `codex_version` is stamped into the process-global codex
   identity once at boot) and `collect_high_consequence_changes(prev, next)`
-  (provider `base_url`, `credential_source`, `[mitm]` egress fields -- the
-  confirm-before-write set). A coverage-tripwire test walks the schema's
+  (provider `base_url`, `credential_source`, pool `members` -- a membership
+  edit repoints traffic onto a different account's credential -- and `[mitm]`
+  egress fields; the confirm-before-write set. A pool's `seat_selection`
+  reorders members without changing which credentials are in play, so it is
+  not in the set). A coverage-tripwire test walks the schema's
   top-level properties and fails on any unclassified new `Config` section; the
   `[capability]` section classifies as plain hot-reloadable (neither
-  restart-required nor high-consequence)
+  restart-required nor high-consequence) and `[pools]` as high-consequence
+  beside `[providers]`
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion
   against an alias or model nickname
 - `src/commands/prompt_size.rs` -- `routectl prompt-size --alias <X> --request

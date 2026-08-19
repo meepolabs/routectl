@@ -168,9 +168,10 @@ impl Router {
     /// chain. A non-pooled model (`seats == None`) maps to exactly one
     /// target keyed by nickname -- byte-for-byte the pre-pool path. A
     /// pooled model maps to one target per seat, in the order
-    /// `seat_pool::seat_order_for_request` returns for the provider's
-    /// `seat_selection` (FillFirst: fixed default-first order; RoundRobin:
-    /// per-request rotated start). The expanded seat targets slot inline
+    /// `seat_pool::seat_order_for_request` returns for the target's
+    /// in-force `seat_selection` (FillFirst: fixed default-first order;
+    /// RoundRobin: per-request rotated start). The expanded seat targets
+    /// slot inline
     /// where the model sat, preserving the operator's fallback order so a
     /// chain `[opus, sonnet]` becomes `[opus-seatA, opus-seatB, sonnet]`.
     ///
@@ -228,12 +229,7 @@ impl Router {
         session_key: Option<&str>,
         out: &mut Vec<DispatchTarget>,
     ) {
-        let selection = self
-            .config
-            .providers
-            .get(&m.provider_name)
-            .map(|e| e.runtime().seat_selection)
-            .unwrap_or_default();
+        let selection = self.config.seat_selection_for(&m.provider_name);
 
         let provider_kind = self
             .config

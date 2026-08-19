@@ -1618,10 +1618,12 @@ fn seat_pool_findings_stay_pass_with_unknown_count_when_the_store_is_unreadable(
          [providers.anthropic]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"oauth://anthropic\"\n\
-         seat_selection = \"round-robin\"\n\
          [providers.anthropic-work]\n\
          kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n",
+         api_key_ref = \"oauth://anthropic#work\"\n\
+         [pools.anthropic-pool]\n\
+         members = [\"anthropic\"]\n\
+         seat_selection = \"round-robin\"\n",
     )
     .expect("fixture config parses");
     let mut context = ctx(config, Some("version = 3\n"), Vec::new(), Vec::new());

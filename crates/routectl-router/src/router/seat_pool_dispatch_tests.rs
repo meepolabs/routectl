@@ -3,7 +3,7 @@
 //! breaker entry, ordered by the provider's `seat_selection`.
 
 use super::*;
-use crate::config::{AliasValue, ProviderEntry, ProviderRuntimePolicy, SeatSelection};
+use crate::config::{AliasValue, PoolEntry, ProviderEntry, SeatSelection};
 use crate::seat_pool::SeatTarget;
 use async_trait::async_trait;
 use routectl_core::{Choice, Message};
@@ -102,16 +102,18 @@ fn pooled_router_with_labels(
     let default_provider = seats[0].provider.clone();
 
     let mut providers = BTreeMap::new();
-    let runtime = ProviderRuntimePolicy {
-        seat_selection: selection,
-        ..Default::default()
-    };
     providers.insert(
         "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic").with_runtime(runtime),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "anthropic-pool".to_string(),
+        PoolEntry::new(vec!["anthropic".to_string()]).with_seat_selection(selection),
     );
     let cfg = Arc::new(Config {
         providers,
+        pools,
         ..Config::default()
     });
 
@@ -659,16 +661,19 @@ fn two_pool_sticky_chain_router() -> Router {
     }
 
     let mut providers = BTreeMap::new();
-    let runtime = ProviderRuntimePolicy {
-        seat_selection: SeatSelection::StickyLeastLoaded,
-        ..Default::default()
-    };
     providers.insert(
         "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic").with_runtime(runtime),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "anthropic-pool".to_string(),
+        PoolEntry::new(vec!["anthropic".to_string()])
+            .with_seat_selection(SeatSelection::StickyLeastLoaded),
     );
     let mut config = Config {
         providers,
+        pools,
         ..Config::default()
     };
     config.aliases.insert(

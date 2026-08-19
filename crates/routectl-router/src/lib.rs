@@ -60,6 +60,7 @@ pub(crate) mod resolved;
 pub mod router;
 pub mod runtime_state;
 pub mod schema_gen;
+pub mod seat_naming;
 pub(crate) mod seat_pool;
 #[cfg(test)]
 pub(crate) mod test_secret;
@@ -108,7 +109,7 @@ pub use catalog_state::{
 pub use config::{
     AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CalibrationConfig,
     CapabilityConfig, Config, ConfigVersionError, HistoryReasoning,
-    LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, OverrideEntry,
+    LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
     RegistryEntry, RetryPolicy, SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
     VersionTooNewError, WindowGateConfig, preflight_config_version,
@@ -152,11 +153,11 @@ pub use factory::validate_provider_bedrock_mantle;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_provider_openai_mantle;
 pub use factory::{
-    BuildOptions, ConfigValidation, apply_catalog_overlay, build_provider,
+    BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, apply_catalog_overlay, build_provider,
     build_provider_with_options, build_resolved_models, class_policy_warnings,
     codex_identity_warnings, collect_config_validation, per_block_breakpoint_warnings,
     resolved_codex_version, validate_alias_chain_targets, validate_alias_patterns,
-    validate_class_policy, validate_codex_version, validate_mitm_config,
+    validate_class_policy, validate_codex_version, validate_mitm_config, validate_pools,
     validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use glob::{AliasPattern, PrefixIndex};
