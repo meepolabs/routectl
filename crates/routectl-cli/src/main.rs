@@ -777,7 +777,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 if let Err(e) =
-                    commands::config_migrate_cmd::run(&config_path, dry_run, yes || force)
+                    commands::config_migrate_cmd::run(&config_path, dry_run, yes || force).await
                 {
                     eprintln!("error: {e}");
                     std::process::exit(1);

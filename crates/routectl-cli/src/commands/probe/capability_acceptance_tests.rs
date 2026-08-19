@@ -577,7 +577,7 @@ async fn wizard_offer_scopes_the_probe_to_the_just_added_provider() {
     drop(open(&db).expect("create migrated ledger"));
     let config_path = tmp.path().join("config.toml");
     let body = format!(
-        "version = 3\n\n\
+        "version = {}\n\n\
          [usage]\ndb_path = \"{}\"\n\n\
          [providers.incumbent]\nkind = \"openai-compat\"\n\
          base_url = \"http://127.0.0.1:1\"\napi_key_ref = \"literal:k\"\n\n\
@@ -586,6 +586,7 @@ async fn wizard_offer_scopes_the_probe_to_the_just_added_provider() {
          [models.incumbent-lane]\nprovider = \"incumbent\"\nupstream = \"incumbent-model\"\n\n\
          [models.added-lane]\nprovider = \"added\"\nupstream = \"added-model\"\n\n\
          [aliases]\ndefault = \"incumbent-lane\"\n",
+        routectl_router::CURRENT_CONFIG_VERSION,
         db.display()
     );
     std::fs::write(&config_path, &body).unwrap();

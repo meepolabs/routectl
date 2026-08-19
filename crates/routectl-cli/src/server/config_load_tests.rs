@@ -1,5 +1,7 @@
-use super::*;
+use routectl_router::CURRENT_CONFIG_VERSION;
 use routectl_testkit::ScopedEnv;
+
+use super::*;
 
 /// A config older than this build writes is REJECTED at load, never
 /// migrated in place. Both the serve/reload loader
@@ -54,8 +56,10 @@ fn load_leaves_a_current_version_config_unchanged() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    let body = "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
-    std::fs::write(&cfg_path, body).expect("write config.toml");
+    let body = format!(
+        "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n"
+    );
+    std::fs::write(&cfg_path, &body).expect("write config.toml");
 
     let sidecar_dir = dir.path().join("routectl");
     std::fs::create_dir_all(&sidecar_dir).expect("create sidecar dir");
@@ -126,11 +130,13 @@ fn load_effective_config_rejects_forwarded_provider_on_non_anthropic_host() {
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n\
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n\
              [providers.sneaky]\n\
              kind = \"anthropic-api\"\n\
              base_url = \"https://evil.example.com\"\n\
-             credential_source = \"forwarded\"\n",
+             credential_source = \"forwarded\"\n"
+        ),
     )
     .expect("write config.toml");
 
@@ -159,11 +165,14 @@ fn load_effective_config_rejects_each_centralized_bad_config() {
     let cases = [
         (
             "unknown-alias-target",
-            "version = 3\n[aliases]\nfast = \"ghost\"\n",
+            format!("version = {CURRENT_CONFIG_VERSION}\n[aliases]\nfast = \"ghost\"\n"),
         ),
         (
             "reserved-class-override",
-            "version = 3\n[retry.classes.feature-unsupported]\nfallback = false\n",
+            format!(
+                "version = {CURRENT_CONFIG_VERSION}\n[retry.classes.feature-unsupported]\n\
+                 fallback = false\n"
+            ),
         ),
     ];
 
@@ -187,7 +196,9 @@ fn load_effective_config_rejects_each_centralized_bad_config() {
 /// Bedrock allowlist validator short-circuits and the config loads
 /// cleanly -- letting the same file exercise both the serve WARN and
 /// the silent `config check` path.
-const LEGACY_LIST_CONFIG: &str = "version = 3\n\
+fn legacy_list_config() -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
          [providers.p]\n\
          kind = \"openai-compat\"\n\
          base_url = \"https://api.example.com\"\n\
@@ -195,7 +206,9 @@ const LEGACY_LIST_CONFIG: &str = "version = 3\n\
          unsupported_features = [\"web_search\"]\n\
          [bedrock]\n\
          allowed_betas = [\"some-beta\"]\n\
-         allowed_body_fields = [\"messages\", \"anthropic_version\", \"max_tokens\"]\n";
+         allowed_body_fields = [\"messages\", \"anthropic_version\", \"max_tokens\"]\n"
+    )
+}
 
 fn deprecation_warns(
     events: &[routectl_testkit::CapturedEvent],
@@ -218,7 +231,7 @@ fn serve_load_warns_once_on_legacy_capability_lists() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
+    std::fs::write(&cfg_path, legacy_list_config()).expect("write config.toml");
 
     // Act
     let events = routectl_testkit::capture_events(|| {
@@ -262,7 +275,7 @@ fn hot_reload_load_warns_once_on_legacy_capability_lists() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
+    std::fs::write(&cfg_path, legacy_list_config()).expect("write config.toml");
 
     // Act
     let events = routectl_testkit::capture_events(|| {
@@ -288,7 +301,7 @@ fn config_check_stays_silent_and_passing_on_legacy_capability_lists() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
+    std::fs::write(&cfg_path, legacy_list_config()).expect("write config.toml");
 
     // Act: the loader `config check` uses, under capture.
     let mut loaded = None;
@@ -322,10 +335,14 @@ fn config_check_stays_silent_and_passing_on_legacy_capability_lists() {
 /// cold-start seam `main` runs every load error through) nor the
 /// hot-reload WARN (`read_parse_validate_config`), proving both serve
 /// paths are secret-free.
-const LITERAL_SECRET_PARSE_ERROR_CONFIG: &str = "version = 3\n\
+fn literal_secret_parse_error_config() -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
          api_key_ref = \"literal:sk-live-LEAKEDSECRET42\"\n\
          [server]\n\
-         host = \"127.0.0.1\"\n";
+         host = \"127.0.0.1\"\n"
+    )
+}
 
 const LITERAL_SECRET_SUBSTRING: &str = "LEAKEDSECRET42";
 
@@ -340,7 +357,7 @@ fn cold_start_parse_error_redacts_literal_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, LITERAL_SECRET_PARSE_ERROR_CONFIG).expect("write config.toml");
+    std::fs::write(&cfg_path, literal_secret_parse_error_config()).expect("write config.toml");
 
     // Act: the raw loader error, then the redaction the cold-start seam applies.
     let raw = match load_effective_config(&cfg_path) {
@@ -375,7 +392,7 @@ fn hot_reload_parse_error_warn_redacts_literal_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, LITERAL_SECRET_PARSE_ERROR_CONFIG).expect("write config.toml");
+    std::fs::write(&cfg_path, literal_secret_parse_error_config()).expect("write config.toml");
 
     // Act
     let mut out = None;
@@ -418,7 +435,7 @@ fn serve_load_is_silent_without_legacy_capability_lists() {
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
         &cfg_path,
-        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
     )
     .expect("write config.toml");
 
@@ -449,7 +466,7 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
         (
             "mixed-kind",
             format!(
-                "version = 3\n{POOL_ACCOUNTS}\
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.codex-default]\n\
                  kind = \"openai-responses\"\n\
                  api_key_ref = \"oauth://codex\"\n\
@@ -460,7 +477,7 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
         (
             "unknown-member",
             format!(
-                "version = 3\n{POOL_ACCOUNTS}\
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [pools.anthropic]\n\
                  members = [\"ghost\"]\n"
             ),
@@ -468,7 +485,7 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
         (
             "member-in-two-pools",
             format!(
-                "version = 3\n{POOL_ACCOUNTS}\
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [pools.first]\n\
                  members = [\"anthropic-default\"]\n\
                  [pools.second]\n\
@@ -477,19 +494,20 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
         ),
         (
             "api-key-member",
-            "version = 3\n\
-             [providers.keyed]\n\
-             kind = \"openai-compat\"\n\
-             base_url = \"https://api.example.invalid\"\n\
-             api_key_ref = \"env://SOME_KEY\"\n\
-             [pools.keyed-pool]\n\
-             members = [\"keyed\"]\n"
-                .to_string(),
+            format!(
+                "version = {CURRENT_CONFIG_VERSION}\n\
+                 [providers.keyed]\n\
+                 kind = \"openai-compat\"\n\
+                 base_url = \"https://api.example.invalid\"\n\
+                 api_key_ref = \"env://SOME_KEY\"\n\
+                 [pools.keyed-pool]\n\
+                 members = [\"keyed\"]\n"
+            ),
         ),
         (
             "pool-provider-collision",
             format!(
-                "version = 3\n{POOL_ACCOUNTS}\
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.anthropic]\n\
                  kind = \"anthropic-api\"\n\
                  api_key_ref = \"oauth://anthropic\"\n\
@@ -499,12 +517,12 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
         ),
         (
             "empty-members",
-            "version = 3\n[pools.empty]\nmembers = []\n".to_string(),
+            format!("version = {CURRENT_CONFIG_VERSION}\n[pools.empty]\nmembers = []\n"),
         ),
         (
             "pool-nickname-collision",
             format!(
-                "version = 3\n{POOL_ACCOUNTS}\
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [models.anthropic]\n\
                  provider = \"anthropic-default\"\n\
                  upstream = \"claude-opus-4-7\"\n\
@@ -513,7 +531,7 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             ),
         ),
         ("member-cap", {
-            let mut text = String::from("version = 3\n");
+            let mut text = format!("version = {CURRENT_CONFIG_VERSION}\n");
             let mut members: Vec<String> = Vec::new();
             for i in 0..=routectl_router::MAX_POOL_MEMBERS {
                 let name = format!("anthropic-s{i:03}");
@@ -538,7 +556,7 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
 /// pools being rejected wholesale.
 fn accepted_pool_config() -> String {
     format!(
-        "version = 3\n{POOL_ACCOUNTS}\
+        "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
          [pools.anthropic]\n\
          members = [\"anthropic-default\", \"anthropic-work\"]\n\
          seat_selection = \"round-robin\"\n\
@@ -629,4 +647,139 @@ fn config_check_reports_every_bad_pool() {
         "a well-formed pool must pass config check: {:?}",
         report.errors
     );
+}
+
+// -----------------------------------------------------------------------
+// A PREVIOUS-version config on this binary: every load surface refuses at
+// the version preflight and points at `config migrate`. Critically it must
+// NEVER surface as an unknown-field parse error -- the retired
+// provider-level `seat_selection` is exactly such a field now, and burying
+// the version break behind "unknown field" leaves the operator with no
+// actionable next step.
+// -----------------------------------------------------------------------
+
+/// The previous schema version, carrying the provider-level `seat_selection`
+/// this build retired. Named `PREVIOUS` rather than a literal so the fixture
+/// tracks the const.
+fn previous_version_config_with_retired_key() -> String {
+    format!(
+        "version = {}\n\
+         [providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         seat_selection = \"round-robin\"\n",
+        CURRENT_CONFIG_VERSION - 1
+    )
+}
+
+/// The previous schema version with no retired key at all -- the version
+/// break alone must still be what the operator is told about.
+fn previous_version_config_plain() -> String {
+    format!(
+        "version = {}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        CURRENT_CONFIG_VERSION - 1
+    )
+}
+
+/// Whether a load error is the version-preflight refusal that names the fix,
+/// and not a parse diagnostic about an unknown field.
+fn is_migrate_pointer(err: &str) -> bool {
+    err.contains("config migrate") && !err.contains("unknown field")
+}
+
+#[test]
+#[serial_test::serial]
+fn cold_start_on_a_previous_version_config_points_at_config_migrate() {
+    for (name, body) in [
+        (
+            "with the retired key",
+            previous_version_config_with_retired_key(),
+        ),
+        ("plain", previous_version_config_plain()),
+    ] {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act: the loader `serve` runs at cold start.
+        let err = match load_effective_config(&cfg_path) {
+            Ok(_) => panic!("a previous-version config must not load ({name})"),
+            Err(e) => e,
+        };
+
+        // Assert
+        assert!(
+            is_migrate_pointer(&err),
+            "a previous-version config ({name}) must yield the migrate pointer, \
+             not a parse error: {err}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn config_check_on_a_previous_version_config_points_at_config_migrate() {
+    for (name, body) in [
+        (
+            "with the retired key",
+            previous_version_config_with_retired_key(),
+        ),
+        ("plain", previous_version_config_plain()),
+    ] {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act: `config check` parses through the same shared preflight.
+        let err = parse_config_only(&cfg_path)
+            .err()
+            .unwrap_or_else(|| panic!("config check must refuse ({name})"));
+
+        // Assert
+        assert!(
+            is_migrate_pointer(&err),
+            "config check on a previous-version config ({name}) must yield the \
+             migrate pointer, not a parse error: {err}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn a_hot_reload_of_a_previous_version_config_is_declined() {
+    for (name, body) in [
+        (
+            "with the retired key",
+            previous_version_config_with_retired_key(),
+        ),
+        ("plain", previous_version_config_plain()),
+    ] {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act
+        let mut loaded = None;
+        let events = routectl_testkit::capture_events(|| {
+            loaded = Some(read_parse_validate_config(&cfg_path));
+        });
+
+        // Assert: a None keeps the running router live, and the rejection is
+        // announced rather than silent.
+        assert!(
+            loaded.expect("the loader ran").is_none(),
+            "a reload of a previous-version config ({name}) must be declined so \
+             the running router stays live"
+        );
+        assert!(
+            events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a declined reload must say so ({name})"
+        );
+    }
 }

@@ -503,11 +503,14 @@ fn select_capabilities_rejects_unknown_token() {
 fn capabilities_load_error_redacts_literal_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cfg_path = dir.path().join("config.toml");
-    let malformed = "version = 3\n\
+    let malformed = format!(
+        "version = {}\n\
          api_key_ref = \"literal:sk-live-LEAKEDSECRET42\"\n\
          [server]\n\
-         host = \"127.0.0.1\"\n";
-    std::fs::write(&cfg_path, malformed).expect("write config.toml");
+         host = \"127.0.0.1\"\n",
+        routectl_router::CURRENT_CONFIG_VERSION
+    );
+    std::fs::write(&cfg_path, &malformed).expect("write config.toml");
 
     let raw = match crate::server::load_effective_config_unvalidated(&cfg_path) {
         Ok(_) => panic!("an unknown-field config must fail the parse"),

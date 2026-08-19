@@ -86,7 +86,7 @@ model on that provider, and an **alias** maps the model string your
 client sends to that model (or to a fallback chain of them):
 
 ```toml
-version = 3           # config schema version; routectl refuses older
+version = 4           # config schema version; routectl refuses older
                       # files until `routectl config migrate` runs
 
 [providers.anthropic]
@@ -117,7 +117,7 @@ A routectl config is a single TOML file with the following top-level
 sections:
 
 ```toml
-version = 3           # config schema version; see "Config schema version"
+version = 4           # config schema version; see "Config schema version"
 
 [server]              # listener: host, port, strict_translation
 [server.auth]         # listener auth tokens (when binding non-loopback)
@@ -195,11 +195,11 @@ fields). Copy and edit; do not re-derive. Carrying a v1
 ## Config schema version (`version`)
 
 ```toml
-version = 3
+version = 4
 ```
 
 - **`version`** (u32, required in practice) -- the config schema version
-  this file is written against. The current version is `3`
+  this file is written against. The current version is `4`
   (`CURRENT_CONFIG_VERSION` in
   `crates/routectl-router/src/config/validate.rs`); a file omitting the
   key reads as the legacy `1`.
@@ -223,11 +223,14 @@ parse at all, or a `version` that is present but is not a plain
 non-negative integer, falls through to the normal typed deserialize so the
 precise syntax or type error is the one reported.
 
-Two keys are retired by the ladder rather than removed silently: v1's
+Three knobs are retired by the ladder rather than removed silently: v1's
 `[cache_pricing]` table folds into the catalog overlay (see
-[Retired: `[cache_pricing]`](#retired-cache_pricing)), and v2's raw-status
+[Retired: `[cache_pricing]`](#retired-cache_pricing)), v2's raw-status
 retry allow/deny escape hatch becomes per-class policy (see
-[Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)).
+[Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)),
+and v3's provider-level `seat_selection` moves onto the `[pools.<name>]`
+block that groups the accounts (see
+[Migrating a v3 config to explicit pools](#migrating-a-v3-config-to-explicit-pools)).
 `version` is hot-reloadable: a live swap to a config carrying an
 out-of-range version is REJECTED and the prior router keeps serving.
 
@@ -3760,6 +3763,45 @@ a best-effort ordering hint: the per-seat rate-limit gate and the
 fallback chain remain authoritative. An empty or whitespace-only
 `--label` is rejected with a clear error, matching the
 `oauth://<provider>#<label>` ref parser's rule.
+
+### Migrating a v3 config to explicit pools
+
+Config schema version 4 makes `[pools.<name>]` blocks the ONLY multi-seat
+shape. Under version 3 a bare `oauth://<provider>` ref quietly stood for
+EVERY stored seat of that provider; under version 4 it means the DEFAULT
+SEAT alone, and `#<label>` remains the single-seat pin. That is a
+behavior change on an existing file, so the binary refuses a version-3
+config outright rather than reinterpreting it: `serve` and `config check`
+exit nonzero at the version preflight naming `config migrate`, and a hot
+reload of a version-3 file is rejected while the running router keeps
+serving.
+
+`routectl config migrate` carries the file forward in one change, with
+one confirmation, applied as a unit:
+
+- Any provider-level `seat_selection` moves onto a `[pools.<name>]` block
+  named after the provider family the entry's `oauth://` ref points at.
+- Reading the credential store read-only, any provider entry whose bare
+  ref covered more than one stored seat gains one account entry per
+  labelled seat (`<family>-<label>`, carrying that seat's
+  `oauth://<family>#<label>` ref) and a pool listing them alongside the
+  original entry, so every seat that used to be reachable still is.
+- A single stored seat needs no rewrite: the default seat IS that seat.
+
+Comments and key order survive. Re-running is a no-op. Nothing is written
+unless the whole change is valid and confirmed -- `--dry-run` prints the
+exact candidate and writes nothing, and declining, or any failure at any
+point, leaves `config.toml` byte-identical. The migration refuses rather
+than guess when a generated entry name is already held by an unrelated
+entry, when two seat labels would generate one name, when a seat label
+cannot appear verbatim in a config key, when the pool name is already a
+provider entry or a model nickname, or when the credential store cannot
+be read at all (without it there is no way to tell a single-seat family
+from a multi-seat one, and stamping the version alone would silently
+narrow the ref). Each refusal names what to fix by hand; rerun after.
+
+After migrating, point a `[models.X] provider` value at the POOL to route
+across its accounts -- a provider entry still names exactly one account.
 
 ### Header pack ("look like claude-code")
 

@@ -147,7 +147,7 @@ fn activated_provider_maps_to_pass_without_remediation() {
     let cfg = config_referencing_anthropic();
     let context = ctx(
         cfg,
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         vec![("anthropic", LocalProbe::Present)],
         Vec::new(),
     );
@@ -162,7 +162,7 @@ fn referenced_unresolved_provider_warns_with_login_remediation() {
     let cfg = config_referencing_anthropic();
     let context = ctx(
         cfg,
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         vec![("anthropic", LocalProbe::Missing)],
         Vec::new(),
     );
@@ -183,7 +183,7 @@ fn referenced_unresolved_provider_warns_with_login_remediation() {
 fn unreferenced_unresolved_provider_is_pass_without_remediation() {
     let context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         vec![("anthropic", LocalProbe::Missing)],
         Vec::new(),
     );
@@ -215,9 +215,16 @@ fn version_too_old_fails_with_migrate_remediation() {
     );
 }
 
+/// The `version` stamp the running build writes, as raw config text: every
+/// fixture whose raw config must PASS the version preflight renders from the
+/// const, so a schema bump needs no fixture edit here.
+fn current_version_stamp() -> String {
+    format!("version = {CURRENT_CONFIG_VERSION}\n")
+}
+
 #[test]
 fn version_current_passes() {
-    let raw = format!("version = {CURRENT_CONFIG_VERSION}\n");
+    let raw = current_version_stamp();
     let context = ctx(Config::default(), Some(&raw), Vec::new(), Vec::new());
     let findings = section_version(&context);
     assert_eq!(findings[0].status, Status::Pass);
@@ -232,7 +239,7 @@ fn present_but_broken_config_reports_fail_not_pass() {
     // healthy.
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -254,7 +261,7 @@ fn corrupted_store_reports_error_not_no_seats() {
     // be mislabeled as "nobody logged in".
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -279,7 +286,7 @@ fn corrupted_store_reports_error_not_no_seats() {
 fn no_seats_warns_without_inheriting_exit_two() {
     let context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -296,7 +303,12 @@ fn expired_seat_warns_valid_seat_passes() {
         ("anthropic".to_string(), token_record(2_000)),
         ("codex#work".to_string(), token_record_no_refresh(500)),
     ];
-    let context = ctx(Config::default(), Some("version = 3\n"), Vec::new(), seats);
+    let context = ctx(
+        Config::default(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        seats,
+    );
     let findings = section_auth(&context);
     assert_eq!(find(&findings, "auth", "anthropic").status, Status::Pass);
     let expired = find(&findings, "auth", "codex#work");
@@ -344,7 +356,7 @@ async fn one_credential_state_agrees_across_report_surfaces() {
     let secret_checks = gather_secret_checks(&cfg, &[("anthropic", probe)]);
     let mut context = ctx(
         cfg,
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         vec![("anthropic", probe)],
         vec![("anthropic".to_string(), rec)],
     );
@@ -383,7 +395,7 @@ fn capability_section_drops_absorbed_findings_on_default_config() {
     // matrix panel, and there is no legacy key to nudge.
     let context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -429,7 +441,7 @@ fn config_with_overrides() -> Config {
 fn override_cells_land_on_the_matrix_panel_with_source_tags() {
     let context = ctx(
         config_with_overrides(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -662,7 +674,12 @@ fn legacy_nudge_absent_without_legacy_lists() {
          unsupported = [\"web_search\"]\n",
     )
     .expect("config parses");
-    let context = ctx(config, Some("version = 3\n"), Vec::new(), Vec::new());
+    let context = ctx(
+        config,
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
     let findings = section_capability(&context);
     assert!(
         findings.iter().all(|f| f.name != "legacy keys"),
@@ -676,7 +693,7 @@ fn schema_version_is_six() {
 
     let context = ctx(
         config_with_overrides(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -726,7 +743,7 @@ fn findings_sorted_deterministically_and_exit_matches() {
     let cfg = config_referencing_anthropic();
     let a = build_report(&ctx(
         cfg.clone(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         vec![
             ("anthropic", LocalProbe::Present),
             ("codex", LocalProbe::Missing),
@@ -735,7 +752,7 @@ fn findings_sorted_deterministically_and_exit_matches() {
     ));
     let b = build_report(&ctx(
         cfg,
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         // Reversed probe order must not change the sorted output.
         vec![
             ("codex", LocalProbe::Missing),
@@ -753,7 +770,7 @@ fn findings_sorted_deterministically_and_exit_matches() {
 fn json_report_carries_schema_version_findings_and_panels() {
     let context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -783,7 +800,7 @@ fn a_panel() -> WouldTrimPanel {
 fn probe_section_is_one_finding_per_provider_via_shared_mapping() {
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -817,7 +834,7 @@ fn probe_section_is_one_finding_per_provider_via_shared_mapping() {
 fn forwarded_probe_is_informational_pass_not_warn() {
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -838,7 +855,7 @@ fn forwarded_probe_is_informational_pass_not_warn() {
 fn no_free_endpoint_probe_warns_not_silent_pass() {
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -860,7 +877,7 @@ fn probe_section_keeps_exit_deterministic_across_ordering() {
     let forward = {
         let mut c = ctx(
             Config::default(),
-            Some("version = 3\n"),
+            Some(&current_version_stamp()),
             Vec::new(),
             Vec::new(),
         );
@@ -873,7 +890,7 @@ fn probe_section_keeps_exit_deterministic_across_ordering() {
     let reversed = {
         let mut c = ctx(
             Config::default(),
-            Some("version = 3\n"),
+            Some(&current_version_stamp()),
             Vec::new(),
             Vec::new(),
         );
@@ -904,7 +921,7 @@ fn probe_section_keeps_exit_deterministic_across_ordering() {
 fn would_trim_panel_populates_report_and_human_render() {
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -925,7 +942,7 @@ fn would_trim_panel_populates_report_and_human_render() {
 fn no_data_would_trim_is_none_and_omitted_from_human_render() {
     let context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -943,7 +960,7 @@ fn no_data_would_trim_is_none_and_omitted_from_human_render() {
 fn would_trim_panel_serializes_under_panels_in_json() {
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -984,7 +1001,7 @@ async fn full_run_leaves_config_dir_byte_identical() {
     let cfg_dir = tmp.path().join("routectl");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     let config_path = cfg_dir.join("config.toml");
-    std::fs::write(&config_path, b"version = 3\n").unwrap();
+    std::fs::write(&config_path, current_version_stamp().as_bytes()).unwrap();
 
     // Seed a credentials file the store will read, at 0600 (the loader
     // refuses a world-readable credentials file). A doctor run must
@@ -1042,7 +1059,11 @@ async fn present_but_unparseable_config_yields_fail_end_to_end() {
     // Parseable `version` key, but an unknown field the typed load
     // (deny_unknown_fields) rejects -- the raw preflight passes yet the
     // config is broken.
-    std::fs::write(&config_path, b"version = 3\nbogus_key = true\n").unwrap();
+    std::fs::write(
+        &config_path,
+        format!("version = {CURRENT_CONFIG_VERSION}\nbogus_key = true\n").as_bytes(),
+    )
+    .unwrap();
 
     let context = gather_context(&config_path).await;
     let report = build_report(&context);
@@ -1062,7 +1083,7 @@ async fn present_but_unparseable_config_yields_fail_end_to_end() {
 fn clean_config_passes_validation() {
     let context = ctx(
         config_referencing_anthropic(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -1081,7 +1102,7 @@ fn semantic_validation_error_reports_fail() {
         "sonnet".to_string(),
         ModelEntry::new("ghost", "claude-sonnet-4-5"),
     );
-    let context = ctx(cfg, Some("version = 3\n"), Vec::new(), Vec::new());
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
     let findings = section_config(&context);
     let f = find(&findings, "config", "validation");
     assert_eq!(f.status, Status::Fail);
@@ -1272,7 +1293,12 @@ fn config_findings_never_leak_secret_material() {
             "file:///nonexistent/leaky-secret-path",
         ),
     );
-    let mut context = ctx(cfg.clone(), Some("version = 3\n"), Vec::new(), Vec::new());
+    let mut context = ctx(
+        cfg.clone(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
     context.secret_checks = gather_secret_checks(&cfg, &[]);
     let findings = section_config(&context);
     let blob = findings
@@ -1308,7 +1334,7 @@ fn orphan_managed_secret_warns_and_is_not_deleted() {
 
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -1376,7 +1402,7 @@ fn unreferenced_oauth_seat_warns_by_name() {
     let orphans = gather_orphan_seats(&cfg, &seats);
     assert_eq!(orphans, vec!["codex".to_string()]);
 
-    let mut context = ctx(cfg, Some("version = 3\n"), Vec::new(), seats);
+    let mut context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), seats);
     context.orphan_seats = orphans;
     let findings = section_seat_orphans(&context);
     let f = find(&findings, "seats", "codex");
@@ -1439,7 +1465,7 @@ fn labelled_ref_does_not_cover_a_sibling_label() {
 fn labelled_orphan_remediation_carries_the_label() {
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -1494,7 +1520,7 @@ fn orphan_seat_report_never_leaks_token_material() {
 
     let mut context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         seats.clone(),
     );
@@ -1562,7 +1588,7 @@ fn seat_pool_findings_are_pass_without_remediation_and_never_move_the_exit() {
     // Arrange
     let context = ctx(
         config_with_pool_and_pinned_refs(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         vec![
             ("anthropic".to_string(), token_record(9_000)),
@@ -1626,7 +1652,12 @@ fn seat_pool_findings_stay_pass_with_unknown_count_when_the_store_is_unreadable(
          seat_selection = \"round-robin\"\n",
     )
     .expect("fixture config parses");
-    let mut context = ctx(config, Some("version = 3\n"), Vec::new(), Vec::new());
+    let mut context = ctx(
+        config,
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
     context.auth_store_error = Some("oauth credentials store could not be opened".to_string());
 
     // Act
@@ -1665,7 +1696,7 @@ fn pools_section_is_in_both_section_lists_and_renders_its_title() {
 
     let context = ctx(
         config_with_pool_and_pinned_refs(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -1688,7 +1719,11 @@ async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
     let config_path = cfg_dir.join("config.toml");
     std::fs::write(
         &config_path,
-        b"version = 3\n[providers.anthropic]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic#seat-b\"\n",
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\nkind = \
+             \"anthropic-api\"\napi_key_ref = \"oauth://anthropic#seat-b\"\n"
+        )
+        .as_bytes(),
     )
     .unwrap();
 
@@ -1746,7 +1781,11 @@ async fn full_run_leaves_secret_dir_byte_identical() {
     let config_path = cfg_dir.join("config.toml");
     std::fs::write(
         &config_path,
-        b"version = 3\n[providers.anthropic]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n",
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\nkind = \
+             \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n"
+        )
+        .as_bytes(),
     )
     .unwrap();
 
@@ -1961,7 +2000,11 @@ async fn gather_context_no_network_yields_no_probe_results() {
     let config_path = cfg_dir.join("config.toml");
     std::fs::write(
         &config_path,
-        b"version = 3\n[providers.anthropic]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n",
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\nkind = \
+             \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n"
+        )
+        .as_bytes(),
     )
     .unwrap();
     let creds_path = cfg_dir.join("credentials.json");
@@ -1998,7 +2041,7 @@ async fn gather_context_no_network_yields_no_probe_results() {
 fn build_report_no_network_matches_network_minus_probe() {
     let mut context = ctx(
         config_referencing_anthropic(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         vec![("anthropic", LocalProbe::Present)],
         Vec::new(),
     );
@@ -2042,7 +2085,7 @@ async fn network_and_no_network_gather_agree_outside_probe() {
     let cfg_dir = tmp.path().join("routectl");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     let config_path = cfg_dir.join("config.toml");
-    std::fs::write(&config_path, b"version = 3\n").unwrap();
+    std::fs::write(&config_path, current_version_stamp().as_bytes()).unwrap();
     let creds_path = cfg_dir.join("credentials.json");
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2413,7 +2456,7 @@ fn freshness_registered_in_both_section_lists_and_render_title() {
     );
     let context = ctx(
         Config::default(),
-        Some("version = 3\n"),
+        Some(&current_version_stamp()),
         Vec::new(),
         Vec::new(),
     );
@@ -2481,7 +2524,7 @@ mod matrix_panel {
     fn matrix_ctx(source: CapabilityMatrixSource, priors: Vec<PriorCell>) -> DoctorContext {
         let base = ctx(
             matrix_config(),
-            Some("version = 3\n"),
+            Some(&current_version_stamp()),
             Vec::new(),
             Vec::new(),
         );
@@ -2883,7 +2926,12 @@ mod seeded_matrix_surfaces {
                 }),
                 panel_unavailable: None,
             },
-            ..ctx(config, Some("version = 3\n"), Vec::new(), Vec::new())
+            ..ctx(
+                config,
+                Some(&current_version_stamp()),
+                Vec::new(),
+                Vec::new(),
+            )
         };
 
         // Act 2: build the report and both render surfaces.
@@ -2969,7 +3017,7 @@ mod seeded_matrix_surfaces {
             capability_matrix: CapabilityMatrixSource::Empty,
             ..ctx(
                 config_at(ledger),
-                Some("version = 3\n"),
+                Some(&current_version_stamp()),
                 Vec::new(),
                 Vec::new(),
             )
@@ -2978,7 +3026,7 @@ mod seeded_matrix_surfaces {
             capability_matrix: CapabilityMatrixSource::Unavailable("revision_mismatch"),
             ..ctx(
                 config_at(ledger),
-                Some("version = 3\n"),
+                Some(&current_version_stamp()),
                 Vec::new(),
                 Vec::new(),
             )

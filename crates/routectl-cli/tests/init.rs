@@ -28,7 +28,7 @@ use routectl_cli::commands::init::scaffold::scaffold_seed;
 use routectl_cli::commands::init::{self, CredentialCapture, InitArgs, InitIo, Offer};
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_core::Result;
-use routectl_router::{Config, build_provider, parse_config};
+use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config};
 use tokio::net::TcpListener;
 
 mod common;
@@ -662,8 +662,8 @@ async fn scaffold_refuses_an_existing_config_and_leaves_it_byte_identical() {
     let _xdg = scope_xdg();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let existing = "version = 3\n[server]\nhost = \"10.0.0.1\"\n";
-    std::fs::write(&path, existing).unwrap();
+    let existing = format!("version = {CURRENT}\n[server]\nhost = \"10.0.0.1\"\n");
+    std::fs::write(&path, &existing).unwrap();
 
     let err = init::run_with_io(
         &path,

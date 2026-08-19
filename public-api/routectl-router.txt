@@ -6582,6 +6582,8 @@ pub routectl_router::Refusal::EgressAllowlist::fields: alloc::vec::Vec<alloc::st
 pub routectl_router::Refusal::Malformed
 pub routectl_router::Refusal::Malformed::entries: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::Refusal::Malformed::source: routectl_router::RefusalSource
+pub routectl_router::Refusal::SeatSelectionRelocation
+pub routectl_router::Refusal::SeatSelectionRelocation::entries: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::Refusal
 pub fn routectl_router::Refusal::clone(&self) -> routectl_router::Refusal
 impl core::cmp::Eq for routectl_router::Refusal
@@ -7395,6 +7397,62 @@ impl<T> typenum::type_operators::Same for routectl_router::catalog::BakedPricing
 pub type routectl_router::catalog::BakedPricingRow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::catalog::BakedPricingRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::catalog::BakedPricingRow::into_shared(self) -> Shared
+pub struct routectl_router::BareOauthRef
+pub routectl_router::BareOauthRef::entry: alloc::string::String
+pub routectl_router::BareOauthRef::family: alloc::string::String
+impl core::clone::Clone for routectl_router::BareOauthRef
+pub fn routectl_router::BareOauthRef::clone(&self) -> routectl_router::BareOauthRef
+impl core::cmp::Eq for routectl_router::BareOauthRef
+impl core::cmp::PartialEq for routectl_router::BareOauthRef
+pub fn routectl_router::BareOauthRef::eq(&self, &routectl_router::BareOauthRef) -> bool
+impl core::fmt::Debug for routectl_router::BareOauthRef
+pub fn routectl_router::BareOauthRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::BareOauthRef
+impl core::marker::Freeze for routectl_router::BareOauthRef
+impl core::marker::Send for routectl_router::BareOauthRef
+impl core::marker::Sync for routectl_router::BareOauthRef
+impl core::marker::Unpin for routectl_router::BareOauthRef
+impl core::marker::UnsafeUnpin for routectl_router::BareOauthRef
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::BareOauthRef
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::BareOauthRef
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::BareOauthRef where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::BareOauthRef::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::BareOauthRef where U: core::convert::From<T>
+pub fn routectl_router::BareOauthRef::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::BareOauthRef where U: core::convert::Into<T>
+pub type routectl_router::BareOauthRef::Error = core::convert::Infallible
+pub fn routectl_router::BareOauthRef::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::BareOauthRef where U: core::convert::TryFrom<T>
+pub type routectl_router::BareOauthRef::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::BareOauthRef::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::BareOauthRef where T: core::clone::Clone
+pub type routectl_router::BareOauthRef::Owned = T
+pub fn routectl_router::BareOauthRef::clone_into(&self, &mut T)
+pub fn routectl_router::BareOauthRef::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::BareOauthRef where T: core::clone::Clone
+pub fn routectl_router::BareOauthRef::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::BareOauthRef where T: 'static + ?core::marker::Sized
+pub fn routectl_router::BareOauthRef::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::BareOauthRef where T: ?core::marker::Sized
+pub fn routectl_router::BareOauthRef::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::BareOauthRef where T: ?core::marker::Sized
+pub fn routectl_router::BareOauthRef::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::BareOauthRef where T: core::clone::Clone
+pub unsafe fn routectl_router::BareOauthRef::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::BareOauthRef
+pub fn routectl_router::BareOauthRef::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::BareOauthRef where T: core::clone::Clone
+pub fn routectl_router::BareOauthRef::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::BareOauthRef
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::BareOauthRef where T: ?core::marker::Sized
+pub fn routectl_router::BareOauthRef::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::BareOauthRef::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::BareOauthRef
+impl<T> tracing::instrument::WithSubscriber for routectl_router::BareOauthRef
+impl<T> typenum::type_operators::Same for routectl_router::BareOauthRef
+pub type routectl_router::BareOauthRef::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BareOauthRef where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::BareOauthRef::into_shared(self) -> Shared
 pub struct routectl_router::BedrockGlobalConfig
 pub routectl_router::BedrockGlobalConfig::allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::BedrockGlobalConfig::allowed_body_fields: alloc::vec::Vec<alloc::string::String>
@@ -12041,6 +12099,120 @@ impl<T> typenum::type_operators::Same for routectl_router::Sample
 pub type routectl_router::Sample::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::Sample where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::Sample::into_shared(self) -> Shared
+pub struct routectl_router::SeatPoolAccount
+pub routectl_router::SeatPoolAccount::already_present: bool
+pub routectl_router::SeatPoolAccount::entry_name: alloc::string::String
+pub routectl_router::SeatPoolAccount::secret_ref: alloc::string::String
+impl core::clone::Clone for routectl_router::SeatPoolAccount
+pub fn routectl_router::SeatPoolAccount::clone(&self) -> routectl_router::SeatPoolAccount
+impl core::cmp::Eq for routectl_router::SeatPoolAccount
+impl core::cmp::PartialEq for routectl_router::SeatPoolAccount
+pub fn routectl_router::SeatPoolAccount::eq(&self, &routectl_router::SeatPoolAccount) -> bool
+impl core::fmt::Debug for routectl_router::SeatPoolAccount
+pub fn routectl_router::SeatPoolAccount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::SeatPoolAccount
+impl core::marker::Freeze for routectl_router::SeatPoolAccount
+impl core::marker::Send for routectl_router::SeatPoolAccount
+impl core::marker::Sync for routectl_router::SeatPoolAccount
+impl core::marker::Unpin for routectl_router::SeatPoolAccount
+impl core::marker::UnsafeUnpin for routectl_router::SeatPoolAccount
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::SeatPoolAccount
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::SeatPoolAccount
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::SeatPoolAccount where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::SeatPoolAccount::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::SeatPoolAccount where U: core::convert::From<T>
+pub fn routectl_router::SeatPoolAccount::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::SeatPoolAccount where U: core::convert::Into<T>
+pub type routectl_router::SeatPoolAccount::Error = core::convert::Infallible
+pub fn routectl_router::SeatPoolAccount::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::SeatPoolAccount where U: core::convert::TryFrom<T>
+pub type routectl_router::SeatPoolAccount::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::SeatPoolAccount::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::SeatPoolAccount where T: core::clone::Clone
+pub type routectl_router::SeatPoolAccount::Owned = T
+pub fn routectl_router::SeatPoolAccount::clone_into(&self, &mut T)
+pub fn routectl_router::SeatPoolAccount::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::SeatPoolAccount where T: core::clone::Clone
+pub fn routectl_router::SeatPoolAccount::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::SeatPoolAccount where T: 'static + ?core::marker::Sized
+pub fn routectl_router::SeatPoolAccount::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::SeatPoolAccount where T: ?core::marker::Sized
+pub fn routectl_router::SeatPoolAccount::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::SeatPoolAccount where T: ?core::marker::Sized
+pub fn routectl_router::SeatPoolAccount::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::SeatPoolAccount where T: core::clone::Clone
+pub unsafe fn routectl_router::SeatPoolAccount::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::SeatPoolAccount
+pub fn routectl_router::SeatPoolAccount::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::SeatPoolAccount where T: core::clone::Clone
+pub fn routectl_router::SeatPoolAccount::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::SeatPoolAccount
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::SeatPoolAccount where T: ?core::marker::Sized
+pub fn routectl_router::SeatPoolAccount::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::SeatPoolAccount::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::SeatPoolAccount
+impl<T> tracing::instrument::WithSubscriber for routectl_router::SeatPoolAccount
+impl<T> typenum::type_operators::Same for routectl_router::SeatPoolAccount
+pub type routectl_router::SeatPoolAccount::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::SeatPoolAccount where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::SeatPoolAccount::into_shared(self) -> Shared
+pub struct routectl_router::SeatPoolMove
+pub routectl_router::SeatPoolMove::accounts: alloc::vec::Vec<routectl_router::SeatPoolAccount>
+pub routectl_router::SeatPoolMove::entry: alloc::string::String
+pub routectl_router::SeatPoolMove::pool: alloc::string::String
+impl core::clone::Clone for routectl_router::SeatPoolMove
+pub fn routectl_router::SeatPoolMove::clone(&self) -> routectl_router::SeatPoolMove
+impl core::cmp::Eq for routectl_router::SeatPoolMove
+impl core::cmp::PartialEq for routectl_router::SeatPoolMove
+pub fn routectl_router::SeatPoolMove::eq(&self, &routectl_router::SeatPoolMove) -> bool
+impl core::fmt::Debug for routectl_router::SeatPoolMove
+pub fn routectl_router::SeatPoolMove::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::SeatPoolMove
+impl core::marker::Freeze for routectl_router::SeatPoolMove
+impl core::marker::Send for routectl_router::SeatPoolMove
+impl core::marker::Sync for routectl_router::SeatPoolMove
+impl core::marker::Unpin for routectl_router::SeatPoolMove
+impl core::marker::UnsafeUnpin for routectl_router::SeatPoolMove
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::SeatPoolMove
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::SeatPoolMove
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::SeatPoolMove where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::SeatPoolMove::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::SeatPoolMove where U: core::convert::From<T>
+pub fn routectl_router::SeatPoolMove::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::SeatPoolMove where U: core::convert::Into<T>
+pub type routectl_router::SeatPoolMove::Error = core::convert::Infallible
+pub fn routectl_router::SeatPoolMove::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::SeatPoolMove where U: core::convert::TryFrom<T>
+pub type routectl_router::SeatPoolMove::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::SeatPoolMove::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::SeatPoolMove where T: core::clone::Clone
+pub type routectl_router::SeatPoolMove::Owned = T
+pub fn routectl_router::SeatPoolMove::clone_into(&self, &mut T)
+pub fn routectl_router::SeatPoolMove::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::SeatPoolMove where T: core::clone::Clone
+pub fn routectl_router::SeatPoolMove::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::SeatPoolMove where T: 'static + ?core::marker::Sized
+pub fn routectl_router::SeatPoolMove::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::SeatPoolMove where T: ?core::marker::Sized
+pub fn routectl_router::SeatPoolMove::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::SeatPoolMove where T: ?core::marker::Sized
+pub fn routectl_router::SeatPoolMove::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::SeatPoolMove where T: core::clone::Clone
+pub unsafe fn routectl_router::SeatPoolMove::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::SeatPoolMove
+pub fn routectl_router::SeatPoolMove::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::SeatPoolMove where T: core::clone::Clone
+pub fn routectl_router::SeatPoolMove::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::SeatPoolMove
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::SeatPoolMove where T: ?core::marker::Sized
+pub fn routectl_router::SeatPoolMove::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::SeatPoolMove::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::SeatPoolMove
+impl<T> tracing::instrument::WithSubscriber for routectl_router::SeatPoolMove
+impl<T> typenum::type_operators::Same for routectl_router::SeatPoolMove
+pub type routectl_router::SeatPoolMove::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::SeatPoolMove where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::SeatPoolMove::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::SeatQuotaConfig
 pub routectl_router::SeatQuotaConfig::enabled: bool
 impl core::clone::Clone for routectl_router::SeatQuotaConfig
@@ -13105,10 +13277,12 @@ pub trait routectl_router::LedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::LedgerReader::read_reuse_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::LedgerSampleRow>
 pub fn routectl_router::apply_catalog_overlay(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, &routectl_router::config::Config, &routectl_router::CatalogOverlay) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>
 pub fn routectl_router::apply_config_transforms(&mut toml_edit::document::DocumentMut, u32) -> core::result::Result<alloc::vec::Vec<routectl_router::StepOutcome>, routectl_router::Refusal>
+pub fn routectl_router::apply_seat_pool_move(&mut toml_edit::document::DocumentMut, &routectl_router::SeatPoolMove)
 pub fn routectl_router::apply_trim_plan(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimPlan) -> routectl_core::schema::ChatRequest
 pub fn routectl_router::baked_row_map() -> alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CatalogRow>
 pub fn routectl_router::baked_shrink_counts() -> routectl_router::ShrinkCounts
 pub fn routectl_router::baked_table_rows() -> alloc::vec::Vec<routectl_router::catalog::BakedPricingRow>
+pub fn routectl_router::bare_oauth_pool_candidates(&toml_edit::document::DocumentMut) -> alloc::vec::Vec<routectl_router::BareOauthRef>
 pub fn routectl_router::break_even_k(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate) -> core::option::Option<f64>
 pub fn routectl_router::build_import_candidate(routectl_router::CandidateOrigin, &serde_json::value::Value, &serde_json::value::Value, &str) -> routectl_router::ImportCandidate
 pub async fn routectl_router::build_provider(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
@@ -13151,6 +13325,7 @@ pub fn routectl_router::lookup_overlay_cell<'a>(&str, &str, &'a routectl_router:
 pub fn routectl_router::lookup_with_overrides(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> routectl_router::catalog::CatalogRow
 pub fn routectl_router::merge(core::option::Option<&routectl_router::catalog::CatalogRow>, core::option::Option<&core::option::Option<routectl_router::OverlayCell>>) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::migrate_v2_to_v3(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
+pub fn routectl_router::migrate_v3_to_v4(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
 pub fn routectl_router::near_lossless_candidate(&routectl_core::schema::ChatRequest, &[routectl_router::ElisionMark]) -> core::option::Option<routectl_router::PrefixReductionCandidate>
 pub fn routectl_router::normalize_capability_overrides(&mut toml_edit::document::DocumentMut) -> core::result::Result<bool, routectl_router::Refusal>
 pub fn routectl_router::overall_exit(&[routectl_router::Finding]) -> i32

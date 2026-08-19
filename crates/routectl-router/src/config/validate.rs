@@ -6,9 +6,12 @@ use crate::config::Config;
 /// `1` -> `2` retires the legacy `[cache_pricing]` override table into the
 /// catalog overlay; `2` -> `3` retires the raw-status retry
 /// allow/deny escape hatch in favor of per-class policy
-/// (`[retry.classes.*]` / provider `class_overrides`). Both transforms
-/// run via `crate::config_migrate` under `config migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 3;
+/// (`[retry.classes.*]` / provider `class_overrides`); `3` -> `4` moves the
+/// `seat_selection` knob off the provider entry onto the `[pools.<name>]`
+/// block that groups the accounts, making explicit pools the only
+/// multi-seat shape. Every transform runs via `crate::config_migrate`
+/// under `config migrate`.
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
 
 pub(super) const fn default_config_version() -> u32 {
     1

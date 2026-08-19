@@ -90,15 +90,24 @@ async fn boot_and_await_health(config: Arc<routectl_router::Config>) -> String {
 
 /// Migrate `body` in a temp dir with `--yes`, returning the migrated config
 /// text and the (parsed) Config ready to boot.
-fn migrate_temp(body: &str, expected_from: u32) -> (tempfile::TempDir, routectl_router::Config) {
+async fn migrate_temp(
+    body: &str,
+    expected_from: u32,
+) -> (tempfile::TempDir, routectl_router::Config) {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let overlay_path = dir.path().join("catalog_overlay.json");
+    // A credentials path inside the temp dir: the store opens EMPTY, so the
+    // migration's seat-materialization phase is a no-op and the operator's
+    // real credentials are never read.
+    let credentials_path = dir.path().join("credentials.json");
     let body = body.replace("__API_KEY_REF__", &common::file_ref("test-key"));
     std::fs::write(&config_path, body).unwrap();
 
-    let result = config_migrate_cmd::run_at(&config_path, &overlay_path, false, true)
-        .expect("migration must succeed");
+    let result =
+        config_migrate_cmd::run_at(&config_path, &overlay_path, &credentials_path, false, true)
+            .await
+            .expect("migration must succeed");
     assert_eq!(
         result,
         MigrateResult::Migrated {
@@ -107,14 +116,20 @@ fn migrate_temp(body: &str, expected_from: u32) -> (tempfile::TempDir, routectl_
     );
 
     let text = std::fs::read_to_string(&config_path).unwrap();
-    assert!(text.contains("version = 3"), "migrated file: {text}");
+    assert!(
+        text.contains(&format!(
+            "version = {}",
+            routectl_router::CURRENT_CONFIG_VERSION
+        )),
+        "migrated file: {text}"
+    );
     let config = routectl_router::parse_config(&text).expect("migrated config parses");
     (dir, config)
 }
 
 #[tokio::test]
 async fn serve_boots_on_a_migrated_v2_config() {
-    let (_dir, config) = migrate_temp(V2_CONFIG, 2);
+    let (_dir, config) = migrate_temp(V2_CONFIG, 2).await;
     let base = boot_and_await_health(Arc::new(config)).await;
 
     let resp = reqwest::get(format!("{base}/health")).await.unwrap();
@@ -123,9 +138,90 @@ async fn serve_boots_on_a_migrated_v2_config() {
 
 #[tokio::test]
 async fn serve_boots_on_a_migrated_v1_config() {
-    let (_dir, config) = migrate_temp(V1_CONFIG, 1);
+    let (_dir, config) = migrate_temp(V1_CONFIG, 1).await;
     let base = boot_and_await_health(Arc::new(config)).await;
 
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// A previous-version config whose provider entry carries a BARE `oauth://`
+/// ref and the retired provider-level `seat_selection`. With more than one
+/// stored seat for the family, the migration materializes explicit account
+/// entries plus a pool -- and the emitted file must BOOT, not merely pass
+/// `config check` (check never calls `build_provider`).
+fn previous_version_bare_oauth_config() -> String {
+    format!(
+        "version = {}\n\
+         \n\
+         [server]\n\
+         host = \"127.0.0.1\"\n\
+         port = 0\n\
+         \n\
+         [providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         seat_selection = \"round-robin\"\n\
+         \n\
+         [models.opus]\n\
+         provider = \"anthropic-managed\"\n\
+         upstream = \"claude-opus-4-8\"\n\
+         \n\
+         [aliases]\n\
+         default = \"opus\"\n",
+        routectl_router::CURRENT_CONFIG_VERSION - 1
+    )
+}
+
+/// Seed a credential store at `path` with one inert record per seat key, at
+/// the `0o600` the store requires. Written directly rather than through a
+/// login flow: the migration only ever reads seat KEYS.
+fn seed_seats(path: &std::path::Path, seat_keys: &[&str]) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let record = serde_json::json!({
+        "access_token": "not-a-real-token",
+        "refresh_token": "not-a-real-token",
+        "expires_at_unix": 4_000_000_000_u64,
+        "obtained_at_unix": 1_000_u64,
+    });
+    let providers: serde_json::Map<String, serde_json::Value> = seat_keys
+        .iter()
+        .map(|key| ((*key).to_string(), record.clone()))
+        .collect();
+    let body = serde_json::json!({
+        "schema_version": routectl_auth::oauth::SCHEMA_VERSION,
+        "providers": providers,
+    });
+    std::fs::write(path, body.to_string()).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[tokio::test]
+async fn serve_boots_on_a_migrated_multi_seat_pool_config() {
+    // Arrange: two stored seats, so the bare ref materializes into a pool.
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let overlay_path = dir.path().join("catalog_overlay.json");
+    let credentials_path = dir.path().join("credentials.json");
+    std::fs::write(&config_path, previous_version_bare_oauth_config()).unwrap();
+    seed_seats(&credentials_path, &["anthropic", "anthropic#work"]);
+
+    // Act
+    config_migrate_cmd::run_at(&config_path, &overlay_path, &credentials_path, false, true)
+        .await
+        .expect("the combined migration must succeed");
+
+    // Assert: the emitted file carries the pool and its account entries ...
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(text.contains("[pools.anthropic]"), "migrated file: {text}");
+    assert!(
+        text.contains("[providers.anthropic-work]"),
+        "migrated file: {text}"
+    );
+    // ... parses, and BOOTS.
+    let config = routectl_router::parse_config(&text).expect("migrated config parses");
+    let base = boot_and_await_health(Arc::new(config)).await;
     let resp = reqwest::get(format!("{base}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
 }
@@ -160,8 +256,11 @@ fn migrate_force_alias_still_skips_confirmation_and_warns() {
     );
     let text = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        text.contains("version = 3"),
-        "the alias must skip the confirm and write v3: {text}"
+        text.contains(&format!(
+            "version = {}",
+            routectl_router::CURRENT_CONFIG_VERSION
+        )),
+        "the alias must skip the confirm and write the current version: {text}"
     );
 }
 

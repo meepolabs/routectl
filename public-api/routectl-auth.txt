@@ -857,6 +857,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_auth::oauth::types::Tok
 impl<T> typenum::type_operators::Same for routectl_auth::oauth::types::TokenRecord
 pub type routectl_auth::oauth::types::TokenRecord::Output = T
 pub const routectl_auth::oauth::SCHEMA_VERSION: u32
+pub fn routectl_auth::oauth::credentials_default_path() -> routectl_auth::oauth::OAuthResult<std::path::PathBuf>
 pub const fn routectl_auth::oauth::known_provider_ids() -> &'static [&'static str]
 pub async fn routectl_auth::oauth::run_login(&str, &routectl_auth::OAuthStore, routectl_auth::LoginOptions) -> routectl_auth::oauth::OAuthResult<alloc::string::String>
 pub fn routectl_auth::oauth::seat_key(&str, core::option::Option<&str>) -> alloc::string::String

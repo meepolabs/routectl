@@ -38,6 +38,20 @@ pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
 pub use store::{LocalProbe, OAuthStore, OpenOutcome};
+
+/// Where the credentials store lives by default
+/// (`$XDG_CONFIG_HOME/routectl/credentials.json`, falling back to
+/// `$HOME/.config`). Exposed so a caller that opens the store at an
+/// explicit path -- and so stays hermetic in tests -- can still resolve
+/// the production path, instead of reaching for `open_default` and losing
+/// that seam.
+///
+/// # Errors
+///
+/// Fails when neither `XDG_CONFIG_HOME` nor `HOME` is set.
+pub fn credentials_default_path() -> OAuthResult<std::path::PathBuf> {
+    file_io::default_path()
+}
 pub use types::{
     AccountInfo, CredentialsFile, SCHEMA_VERSION, SecretToken, TokenRecord, seat_key, unix_now,
 };

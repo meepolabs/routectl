@@ -21,14 +21,16 @@ use routectl_auth::{MemoryStore, SecretStore};
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_cli::server::CompositeStore;
 use routectl_core::Result;
-use routectl_router::{Config, build_provider, parse_config};
+use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config};
 use tokio::net::TcpListener;
 
 mod common;
 
-const V3_BASE: &str = "\
-version = 3
+fn current_base() -> String {
+    format!("version = {CURRENT}\n{BASE_BODY}")
+}
 
+const BASE_BODY: &str = "\
 [server]
 host = \"127.0.0.1\"
 port = 8787
@@ -249,7 +251,7 @@ async fn env_shape_checks_builds_and_boots() {
     set_env(key, "env-shape-secret-value-not-real");
 
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = base_args("anthropic-api", "claude");
     a.api_key_env = Some(key.to_string());
@@ -271,7 +273,7 @@ async fn env_shape_checks_builds_and_boots() {
 async fn managed_file_shape_checks_builds_and_boots() {
     let _xdg = scope_xdg();
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = base_args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
@@ -294,7 +296,7 @@ async fn managed_file_shape_checks_builds_and_boots() {
 async fn oauth_shape_checks_builds_and_boots() {
     let xdg = scope_xdg();
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     // `--kind anthropic` delegates to the login flow; the stub provisions a
     // token into the scoped credentials.json so no live browser is needed.
@@ -320,7 +322,7 @@ async fn oauth_shape_checks_builds_and_boots() {
 async fn forwarded_shape_checks_builds_and_boots() {
     let _xdg = scope_xdg();
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let mut a = base_args("anthropic-api", "fwd");
     a.credential_source = Some("forwarded".to_string());
@@ -368,7 +370,7 @@ fn every_provider_add_input_is_expressible_as_a_flag() {
 #[test]
 fn missing_required_input_without_tty_errors_within_bounded_time() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     // Run on a worker thread and collect the outcome through a channel with a
     // bounded receive: a hang (e.g. a regression that blocked on stdin) never
@@ -401,10 +403,8 @@ fn missing_required_input_without_tty_errors_within_bounded_time() {
 
 #[tokio::test]
 async fn adding_a_provider_preserves_comments_and_section_order() {
-    let body = "\
-# top-of-file operator note
-version = 3
-
+    let body = format!("# top-of-file operator note\nversion = {CURRENT}\n")
+        + "\
 [aliases]
 default = \"gpt\"
 
@@ -423,7 +423,7 @@ base_url = \"http://127.0.0.1:1\"
 api_key_ref = \"literal:test-key\"
 ";
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), body);
+    let path = write_config(dir.path(), &body);
 
     let mut a = base_args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
@@ -462,7 +462,7 @@ api_key_ref = \"literal:test-key\"
 async fn oauth_add_audits_the_resolved_kind() {
     let _xdg = scope_xdg();
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
 
     let (_r, events) = routectl_testkit::with_capture(async {
         provider_add::run_with_io(
@@ -535,7 +535,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     let env_secret = "leak-env-secret-value-not-real";
     set_env(key, env_secret);
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let (_r, events) = routectl_testkit::with_capture(async {
         let mut a = base_args("anthropic-api", "claude");
         a.api_key_env = Some(key.to_string());
@@ -550,7 +550,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     // stdin -> managed file://
     let stdin_secret = "leak-stdin-secret-value-not-real";
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let (_r, events) = routectl_testkit::with_capture(async {
         let mut a = base_args("openai-compat", "grok");
         a.base_url = Some("https://api.x.example/v1".to_string());
@@ -569,7 +569,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     // hidden prompt -> managed file://
     let prompt_secret = "leak-prompt-secret-value-not-real";
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let (_r, events) = routectl_testkit::with_capture(async {
         let mut a = base_args("openai-compat", "grok2");
         a.base_url = Some("https://api.x.example/v1".to_string());
@@ -590,7 +590,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     // path must still never surface the value in a tracing event.
     let literal_secret = "leak-literal-secret-value-not-real";
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), V3_BASE);
+    let path = write_config(dir.path(), &current_base());
     let (result, events) = routectl_testkit::with_capture(async {
         let mut a = base_args("openai-compat", "grok3");
         a.base_url = Some("https://api.x.example/v1".to_string());

@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 
 use routectl_cli::commands;
-use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig};
+use routectl_router::{
+    AliasValue, CURRENT_CONFIG_VERSION as CURRENT, Config, ModelEntry, ProviderEntry, RetryPolicy,
+    ServerConfig,
+};
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -858,7 +861,11 @@ fn empty_label_is_rejected_at_runtime() {
 fn config_check_surfaces_did_you_mean_for_unknown_field() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, "version = 3\n[server]\nprt = 8080\n").unwrap();
+    std::fs::write(
+        &config_path,
+        format!("version = {CURRENT}\n[server]\nprt = 8080\n"),
+    )
+    .unwrap();
     let path = config_path.to_str().unwrap();
 
     let (code, stderr) = run_routectl(&["--config", path, "config", "check"]);
@@ -876,7 +883,11 @@ fn config_check_surfaces_did_you_mean_for_unknown_field() {
 fn serve_cold_start_surfaces_did_you_mean_for_unknown_field() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, "version = 3\n[server]\nprt = 8080\n").unwrap();
+    std::fs::write(
+        &config_path,
+        format!("version = {CURRENT}\n[server]\nprt = 8080\n"),
+    )
+    .unwrap();
     let path = config_path.to_str().unwrap();
 
     let (code, stderr) = run_routectl(&["--config", path, "serve"]);
@@ -911,9 +922,9 @@ fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
 /// PARSES but is semantically invalid (a reserved `[retry.classes.feature-unsupported]`
 /// override), the real binary must exit non-zero AND render the full
 /// error list with the source-line prefix -- not abort on the load-time
-/// fail-fast gate that would print only the first plain error. `version = 3`
-/// keeps the file at the current version so it loads and the block stays on
-/// its written line.
+/// fail-fast gate that would print only the first plain error. The current
+/// `version` stamp keeps the file loadable so the block stays on its written
+/// line.
 #[test]
 fn config_check_renders_source_line_for_semantically_invalid_config() {
     let dir = tempfile::tempdir().unwrap();
@@ -921,7 +932,7 @@ fn config_check_renders_source_line_for_semantically_invalid_config() {
     // The reserved class block is line 3 (version, blank line, then header).
     std::fs::write(
         &config_path,
-        "version = 3\n\n[retry.classes.feature-unsupported]\nfallback = false\n",
+        format!("version = {CURRENT}\n\n[retry.classes.feature-unsupported]\nfallback = false\n"),
     )
     .unwrap();
     let path = config_path.to_str().unwrap();
@@ -947,7 +958,7 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
     let config_path = dir.path().join("config.toml");
     std::fs::write(
         &config_path,
-        "version = 3\n\n[retry.classes.feature-unsupported]\nfallback = false\n",
+        format!("version = {CURRENT}\n\n[retry.classes.feature-unsupported]\nfallback = false\n"),
     )
     .unwrap();
     let path = config_path.to_str().unwrap();
@@ -995,7 +1006,7 @@ fn write_oauth_config(dir: &std::path::Path, ref_uri: &str) -> std::path::PathBu
     std::fs::write(
         &config_path,
         format!(
-            "version = 3\n\
+            "version = {CURRENT}\n\
              [providers.managed]\n\
              kind = \"anthropic-api\"\n\
              api_key_ref = \"{ref_uri}\"\n\
@@ -1128,11 +1139,13 @@ fn config_check_omits_the_seat_block_without_any_oauth_ref() {
     let config_path = tmp.path().join("config.toml");
     std::fs::write(
         &config_path,
-        "version = 3\n\
-         [providers.plain]\n\
-         kind = \"openai-compat\"\n\
-         base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_KEY\"\n",
+        format!(
+            "version = {CURRENT}\n\
+             [providers.plain]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://example.invalid\"\n\
+             api_key_ref = \"env://ROUTECTL_TEST_KEY\"\n"
+        ),
     )
     .unwrap();
     let path = config_path.to_str().unwrap();

@@ -728,6 +728,7 @@ fn describe_reduction(outcome: &ReductionOutcome, enabled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::CURRENT_CONFIG_VERSION;
     use routectl_router::lookup;
 
     use routectl_core::SystemContent;
@@ -1084,7 +1085,7 @@ fast = "sonnet"
     /// unknown upstream that prices to the unverified catch-all (sentinel
     /// treatment).
     fn economics_config() -> Config {
-        toml::from_str(economics_config_toml()).expect("test config should deserialize")
+        toml::from_str(&economics_config_toml()).expect("test config should deserialize")
     }
 
     #[test]
@@ -1709,9 +1710,10 @@ fast = "sonnet"
 
     /// The TOML text `economics_config()` parses. Extracted so the overlay
     /// end-to-end tests can write the SAME config to a real file on disk.
-    fn economics_config_toml() -> &'static str {
-        r#"
-version = 3
+    fn economics_config_toml() -> String {
+        format!(
+            r#"
+version = {CURRENT_CONFIG_VERSION}
 [providers.anthro]
 kind = "anthropic-api"
 api_key_ref = "literal:placeholder"
@@ -1733,6 +1735,7 @@ upstream = "totally-unknown-model-xyz"
 heavy = "opus"
 mystery = "mystery_model"
 "#
+        )
     }
 
     #[test]

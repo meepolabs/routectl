@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use routectl_router::CURRENT_CONFIG_VERSION as CURRENT;
+
 mod common;
 
 /// The real `routectl` binary under test, resolved by cargo for this
@@ -39,9 +41,11 @@ const COMMAND_BUDGET: Duration = Duration::from_mins(1);
 /// call), an `oauth://` provider (probed read-only, no refresh), and a
 /// static api-key provider pointed at a closed loopback port (Unreachable
 /// -> Fail -> nonzero).
-const MIXED_CONFIG: &str = "\
-version = 3
+fn mixed_config() -> String {
+    format!("version = {}\n{MIXED_CONFIG_BODY}", CURRENT)
+}
 
+const MIXED_CONFIG_BODY: &str = "\
 [providers.anthropic-forwarded]
 kind = \"anthropic-api\"
 base_url = \"https://api.anthropic.com\"
@@ -67,9 +71,11 @@ default = \"sonnet\"
 /// A clean config: the forwarded provider (skip) plus the oauth provider
 /// (reachable, future-expiry credential). No unreachable provider, so a
 /// probe or doctor run over it is all PASS/WARN -> exit 0.
-const HEALTHY_CONFIG: &str = "\
-version = 3
+fn healthy_config() -> String {
+    format!("version = {CURRENT}\n{HEALTHY_CONFIG_BODY}")
+}
 
+const HEALTHY_CONFIG_BODY: &str = "\
 [providers.anthropic-forwarded]
 kind = \"anthropic-api\"
 base_url = \"https://api.anthropic.com\"
@@ -95,9 +101,11 @@ const OAUTH_PROVIDER: &str = "anthropic";
 /// at a closed loopback port so its probe refuses instantly) plus a
 /// provider-scoped override. Seeds the doctor capability matrix with two
 /// lanes to pivot and an override layer that overrules a learned negative.
-const CAPABILITY_CONFIG: &str = "\
-version = 3
+fn capability_config() -> String {
+    format!("version = {}\n{CAPABILITY_CONFIG_BODY}", CURRENT)
+}
 
+const CAPABILITY_CONFIG_BODY: &str = "\
 [providers.local]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:1\"
@@ -365,7 +373,7 @@ fn parse_json(result: &CmdResult) -> serde_json::Value {
 #[test]
 fn probe_and_doctor_leave_every_artifact_byte_identical() {
     let xdg = tempfile::tempdir().unwrap();
-    let config = write_config(xdg.path(), MIXED_CONFIG);
+    let config = write_config(xdg.path(), &mixed_config());
     let creds = seed_credentials(xdg.path(), OAUTH_PROVIDER);
     let overlay = seed_overlay(xdg.path());
     let usage = seed_usage_db(xdg.path());
@@ -420,7 +428,7 @@ fn probe_exit_is_zero_when_healthy_and_nonzero_with_an_unreachable_provider() {
     seed_credentials(xdg.path(), OAUTH_PROVIDER);
     seed_overlay(xdg.path());
 
-    let healthy = write_config(xdg.path(), HEALTHY_CONFIG);
+    let healthy = write_config(xdg.path(), &healthy_config());
     let healthy_run = run_bounded(xdg.path(), &healthy, &["provider", "probe"]);
     assert_eq!(
         healthy_run.code,
@@ -429,7 +437,7 @@ fn probe_exit_is_zero_when_healthy_and_nonzero_with_an_unreachable_provider() {
         healthy_run.context()
     );
 
-    let mixed = write_config(xdg.path(), MIXED_CONFIG);
+    let mixed = write_config(xdg.path(), &mixed_config());
     let mut codes = Vec::new();
     for _ in 0..3 {
         let run = run_bounded(xdg.path(), &mixed, &["provider", "probe"]);
@@ -454,7 +462,7 @@ fn doctor_exit_is_zero_when_healthy_and_nonzero_with_an_unreachable_provider() {
     seed_overlay(xdg.path());
     seed_usage_db(xdg.path());
 
-    let healthy = write_config(xdg.path(), HEALTHY_CONFIG);
+    let healthy = write_config(xdg.path(), &healthy_config());
     let healthy_run = run_bounded(xdg.path(), &healthy, &["doctor"]);
     assert_eq!(
         healthy_run.code,
@@ -463,7 +471,7 @@ fn doctor_exit_is_zero_when_healthy_and_nonzero_with_an_unreachable_provider() {
         healthy_run.context()
     );
 
-    let mixed = write_config(xdg.path(), MIXED_CONFIG);
+    let mixed = write_config(xdg.path(), &mixed_config());
     let mut codes = Vec::new();
     for _ in 0..3 {
         let run = run_bounded(xdg.path(), &mixed, &["doctor"]);
@@ -496,7 +504,7 @@ fn json_stdout_stays_clean_while_a_provider_is_built_without_a_log_override() {
     // at the default INFO level -- the exact tracing that used to interleave
     // with `--json` stdout. `run_bounded` sets no ROUTECTL_LOG, so this pins
     // the default-level contract, not a suppressed one.
-    let config = write_config(xdg.path(), MIXED_CONFIG);
+    let config = write_config(xdg.path(), &mixed_config());
 
     for args in [
         ["provider", "probe", "--json"].as_slice(),
@@ -532,7 +540,7 @@ fn probe_json_is_valid_and_carries_schema_version() {
     let xdg = tempfile::tempdir().unwrap();
     seed_credentials(xdg.path(), OAUTH_PROVIDER);
     seed_overlay(xdg.path());
-    let config = write_config(xdg.path(), MIXED_CONFIG);
+    let config = write_config(xdg.path(), &mixed_config());
 
     let run = run_bounded(xdg.path(), &config, &["provider", "probe", "--json"]);
     let value = parse_json(&run);
@@ -559,7 +567,7 @@ fn doctor_json_is_valid_and_carries_schema_version() {
     seed_credentials(xdg.path(), OAUTH_PROVIDER);
     seed_overlay(xdg.path());
     seed_usage_db(xdg.path());
-    let config = write_config(xdg.path(), MIXED_CONFIG);
+    let config = write_config(xdg.path(), &mixed_config());
 
     let run = run_bounded(xdg.path(), &config, &["doctor", "--json"]);
     let value = parse_json(&run);
@@ -593,7 +601,7 @@ fn doctor_binary_renders_seeded_capability_matrix_and_freshness() {
     let xdg = tempfile::tempdir().unwrap();
     seed_overlay(xdg.path());
     seed_capability_ledger(xdg.path());
-    let config = write_config(xdg.path(), CAPABILITY_CONFIG);
+    let config = write_config(xdg.path(), &capability_config());
 
     // Human render: the replayed matrix state line, the seeded verdict tokens
     // (an override cell overruling the seeded negative), and the freshness
@@ -679,7 +687,7 @@ fn forwarded_provider_is_an_informational_skip_in_both_surfaces() {
     seed_credentials(xdg.path(), OAUTH_PROVIDER);
     seed_overlay(xdg.path());
     seed_usage_db(xdg.path());
-    let config = write_config(xdg.path(), MIXED_CONFIG);
+    let config = write_config(xdg.path(), &mixed_config());
 
     // provider probe --json: the forwarded provider's outcome is `Skipped`.
     let probe = run_bounded(xdg.path(), &config, &["provider", "probe", "--json"]);
@@ -731,10 +739,11 @@ fn forwarded_provider_is_an_informational_skip_in_both_surfaces() {
 fn doctor_version_finding_never_echoes_a_secret_from_a_parse_error() {
     const SECRET: &str = "sk-live-DOCTOR-VERSION-LEAK";
     let xdg = tempfile::tempdir().unwrap();
-    // version = 3 passes the raw version preflight, so the typed load runs and
+    // The current version stamp passes the raw version preflight, so the typed load runs and
     // fails on the mistyped `port`: serde emits `invalid type: string
     // "sk-live-...", expected u16`, inlining the secret unless redacted.
-    let body = format!("version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = \"{SECRET}\"\n");
+    let body =
+        format!("version = {CURRENT}\n\n[server]\nhost = \"127.0.0.1\"\nport = \"{SECRET}\"\n");
     let config = write_config(xdg.path(), &body);
 
     let human = run_bounded(xdg.path(), &config, &["doctor"]);
@@ -787,7 +796,7 @@ fn doctor_auth_finding_never_discloses_the_credentials_store_path() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    let config = write_config(xdg.path(), HEALTHY_CONFIG);
+    let config = write_config(xdg.path(), &healthy_config());
 
     let store_path = creds.display().to_string();
     let dir_path = dir.display().to_string();

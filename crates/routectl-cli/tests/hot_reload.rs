@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use routectl_router::Config;
+use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config};
 use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -41,7 +41,7 @@ fn config_text_with_alias(alias: &str) -> String {
     let key_ref = common::file_ref("test-key");
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -391,7 +391,7 @@ fn config_text_with_reserved_class_override(alias: &str) -> String {
     let key_ref = common::file_ref("test-key");
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -510,7 +510,7 @@ fn config_text_with_unknown_server_field(alias: &str) -> String {
     let key_ref = common::file_ref("test-key");
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -905,7 +905,7 @@ fn config_text_with_rate_limited_cap(upstream_uri: &str, retry_cap: u32) -> Stri
     let key_ref = common::file_ref("test-key");
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -976,7 +976,7 @@ async fn same_provider_dispatch_count(
 fn v3_config_with_alias(alias: &str) -> String {
     let key_ref = common::file_ref("test-key");
     format!(
-        r#"version = 3
+        r#"version = {CURRENT}
 
 [server]
 host = "127.0.0.1"
@@ -1477,7 +1477,7 @@ fn kill_switch_config(
     let marker = marker_alias.map_or_else(String::new, |a| format!("{a} = \"m_b\"\n"));
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -1756,7 +1756,7 @@ fn reduction_config(upstream_uri: &str, enabled: bool, marker_alias: Option<&str
     let marker = marker_alias.map_or_else(String::new, |a| format!("{a} = \"m_up\"\n"));
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -1793,7 +1793,7 @@ fn reduction_config_unparseable(upstream_uri: &str, enabled: bool, marker_alias:
     let key_ref = common::file_ref("test-key");
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
@@ -1827,7 +1827,7 @@ fn reduction_chain_config(a_url: &str, b_url: &str, enabled: bool, marker_alias:
     let key_ref = common::file_ref("test-key");
     format!(
         r#"
-version = 3
+version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
