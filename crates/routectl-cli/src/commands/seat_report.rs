@@ -128,7 +128,6 @@ pub(crate) fn describe_row(row: &SeatPoolRow) -> String {
 /// no header noise.
 // Rendered as a returned line vector rather than printed, so the block is
 // testable without stdout capture.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn seat_pool_lines(rows: &[SeatPoolRow]) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();

@@ -3678,8 +3678,18 @@ stored seat grouped under its provider -- the default renders as
 `<provider> (default)`, labeled seats as `<provider>#<label>` -- each
 with its own expiry.
 
-**Seat selection.** A per-provider `seat_selection` knob picks how
-dispatch chooses among the pool's seats:
+Seats are NOT declared in this file. They live in the credential store
+(`credentials.json`), and the only way to add one is to log in:
+`routectl login <provider> --label <name>`. The config's `api_key_ref`
+selects among the seats already stored; it never creates one. `routectl
+config check` and `routectl doctor` both report, per provider entry, how
+many stored seats its ref resolves to and which labels they carry.
+
+**Seat selection.** A `seat_selection` knob picks how dispatch chooses
+among the pool's seats. It takes effect only when a pool resolves to more
+than one stored seat -- with a single seat (or a `#label`-pinned ref)
+there is nothing to choose between, and every strategy behaves
+identically:
 
 ```toml
 [providers.anthropic-managed]

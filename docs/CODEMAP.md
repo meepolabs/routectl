@@ -4089,7 +4089,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pointing at the `config.toml` line that produced it; `derive_dotted_path`
   conservatively recognizes leading `[a.b.c]` headers and
   ``alias/model/provider `X` `` clauses, and unresolvable messages fall back
-  unchanged (a display aid only, never a taxonomy change). `EXAMPLE_CONFIG`
+  unchanged (a display aid only, never a taxonomy change). `check` also prints
+  the informational OAuth seat-pool block from
+  `seat_report::seat_pool_lines`, counting seats through a direct
+  `OAuthStore::open_default` (never the composite, whose absent oauth arm
+  would fabricate a "1 seat" reading); the block never enters `CheckReport`
+  and never moves the exit code. `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
   example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
   gate-loads it so no build can emit an example it cannot itself parse.

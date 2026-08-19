@@ -968,6 +968,184 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
     );
 }
 
+// -- `config check`'s informational OAuth seat-pool block. Spawned through
+// the real binary so the assertions cover what an operator actually reads,
+// including the exit code the block must never move.
+
+/// Run `routectl <args...>` with `XDG_CONFIG_HOME` pointed at `xdg` (so a
+/// seeded credentials.json is visible) and return `(exit_code, stdout,
+/// stderr)`.
+fn run_routectl_with_xdg(xdg: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", xdg)
+        .output()
+        .expect("spawn routectl binary");
+    let code = out.status.code().unwrap_or(-1);
+    (
+        code,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Write a config whose single provider entry resolves through `ref_uri`.
+fn write_oauth_config(dir: &std::path::Path, ref_uri: &str) -> std::path::PathBuf {
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = 3\n\
+             [providers.managed]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"{ref_uri}\"\n\
+             auth_kind = \"oauth-bearer\"\n"
+        ),
+    )
+    .expect("write config");
+    config_path
+}
+
+#[test]
+fn config_check_reports_stored_seats_for_a_pool_ref() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_credentials(
+        tmp.path(),
+        &[
+            ("anthropic", "default@example.com"),
+            ("anthropic#seat-b", "seat-b@example.com"),
+        ],
+    );
+    let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert_eq!(code, 0, "seat block is informational: {stdout} / {stderr}");
+    assert!(
+        stdout.contains("oauth seat pools:"),
+        "expected the seat-pool block header, got: {stdout}"
+    );
+    assert!(
+        stdout
+            .contains("managed: pool ref oauth://anthropic resolves to 2 seats (default, seat-b)"),
+        "expected both seats named under the entry key, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("seat_selection fill-first (default)"),
+        "expected the strategy clause, got: {stdout}"
+    );
+}
+
+/// Negative control for the block above: the fixture's token material,
+/// account identity, and store path must never reach check's stdout. The
+/// seat LABEL does (asserted in the test above), which is what proves this
+/// scan can bite.
+#[test]
+fn config_check_seat_block_leaks_no_credential_material() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_credentials(tmp.path(), &[("anthropic", "leaky@example.com")]);
+    let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
+    let path = config_path.to_str().unwrap();
+
+    let (_code, stdout, _stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    for sentinel in [
+        "seeded-access-anthropic",
+        "seeded-refresh-anthropic",
+        "acct-anthropic",
+        "leaky@example.com",
+        "credentials.json",
+    ] {
+        assert!(
+            !stdout.contains(sentinel),
+            "credential-adjacent material leaked ({sentinel}): {stdout}"
+        );
+    }
+}
+
+/// No credentials file under a perfectly valid config dir opens as an EMPTY
+/// store, which is an accurate answer ("nothing logged in") rather than an
+/// unknown one.
+#[test]
+fn config_check_reports_no_stored_seats_for_an_empty_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert_eq!(
+        code, 0,
+        "an empty store is not a failure: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("pool ref oauth://anthropic has no stored seats"),
+        "expected the empty-store wording, got: {stdout}"
+    );
+}
+
+/// With neither `HOME` nor `XDG_CONFIG_HOME` set the store cannot be opened
+/// at all: the count renders unknown, the strategy still renders, no path is
+/// disclosed, and check still exits 0.
+#[test]
+fn config_check_reports_unknown_seat_count_when_the_store_cannot_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
+    let path = config_path.to_str().unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args(["--config", path, "config", "check"])
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("spawn routectl binary");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an unreadable store must not fail check: {stdout}"
+    );
+    assert!(
+        stdout.contains("seat count unknown (credential store unavailable)"),
+        "expected the unknown-count wording, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("seat_selection fill-first (default)"),
+        "the strategy is config-derived and stays known, got: {stdout}"
+    );
+}
+
+/// An api-key-only config carries no `oauth://` ref, so the whole block --
+/// header included -- is suppressed.
+#[test]
+fn config_check_omits_the_seat_block_without_any_oauth_ref() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "version = 3\n\
+         [providers.plain]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://example.invalid\"\n\
+         api_key_ref = \"env://ROUTECTL_TEST_KEY\"\n",
+    )
+    .unwrap();
+    let path = config_path.to_str().unwrap();
+
+    let (_code, stdout, _stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert!(
+        !stdout.contains("oauth seat pools"),
+        "no oauth ref must mean no header noise, got: {stdout}"
+    );
+}
+
 // -- centralized config-validation suite: the shared ordered function is
 // wired into every config surface, so the SAME bad configs are rejected on
 // all four caller paths (config check, test, prompt-size, serve pre-parse
