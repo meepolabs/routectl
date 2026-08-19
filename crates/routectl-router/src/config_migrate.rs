@@ -442,10 +442,11 @@ pub enum Refusal {
         fields: Vec<String>,
     },
     /// A provider-level `seat_selection` the v3 -> v4 rung cannot relocate
-    /// onto a pool block without guessing.
+    /// onto a pool block without guessing -- including two entries whose
+    /// derived pool names collide.
     SeatSelectionRelocation {
-        /// One line per provider entry, naming the entry and why its knob
-        /// has no derivable pool.
+        /// One line per problem, naming the provider entr(ies) and why the
+        /// knob has no derivable pool.
         entries: Vec<String>,
     },
 }
@@ -1326,7 +1327,8 @@ const SEAT_SELECTION_KEY: &str = "seat_selection";
 /// Returns [`Refusal::SeatSelectionRelocation`] -- with NO mutation -- when
 /// a present `seat_selection` has no derivable pool (no `oauth://` ref to
 /// name a family, an unusable family token, or a derived pool name held by
-/// an unrelated entry, a model nickname, or a hand-authored pool block).
+/// an unrelated entry, a model nickname, or a hand-authored pool block), or
+/// when two entries derive the SAME pool name.
 pub fn migrate_v3_to_v4(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
     let mut moves = Vec::new();
     let mut problems = Vec::new();
@@ -1336,6 +1338,7 @@ pub fn migrate_v3_to_v4(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
             Err(problem) => problems.push(problem),
         }
     }
+    problems.extend(colliding_pool_derivations(&moves));
     if !problems.is_empty() {
         return Err(Refusal::SeatSelectionRelocation { entries: problems });
     }
@@ -1349,6 +1352,42 @@ pub fn migrate_v3_to_v4(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
         from_version: 3,
         to_version: 4,
     })
+}
+
+/// One problem line per pool name that MORE THAN ONE planned move derives,
+/// naming every entry that claims it.
+///
+/// Each move writes the pool block with its own entry as a member and its own
+/// relocated `seat_selection`, so two moves onto one pool name would merge
+/// entries the operator kept separate -- possibly separate egresses -- and let
+/// the later knob silently overwrite the earlier one. Refused instead: which
+/// accounts share a pool is an operator statement, not something derivable
+/// from a shared provider family.
+fn colliding_pool_derivations(moves: &[SeatPoolMove]) -> Vec<String> {
+    let mut claimants: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for mv in moves {
+        claimants
+            .entry(mv.pool.as_str())
+            .or_default()
+            .push(mv.entry.as_str());
+    }
+    claimants
+        .into_iter()
+        .filter(|(_, entries)| entries.len() > 1)
+        .map(|(pool, entries)| {
+            format!(
+                "{}: each carry `seat_selection` and each derive the pool name `{pool}` from \
+                 the same provider family; grouping them into one pool would merge accounts \
+                 you kept separate and drop all but one `seat_selection` value -- write the \
+                 `[pools.<name>]` blocks for this provider by hand, then rerun",
+                entries
+                    .iter()
+                    .map(|e| format!("[providers.{e}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect()
 }
 
 /// Provider entry names carrying a provider-level `seat_selection`, in
@@ -2857,6 +2896,41 @@ default = \"opus\"
 
         // Assert
         assert_eq!(again.to_string(), once);
+    }
+
+    #[test]
+    fn v3_to_v4_refuses_two_same_family_entries_deriving_one_pool() {
+        // Arrange: two OAuth entries on the SAME family, each carrying the
+        // retired knob and each pointing at a DIFFERENT egress. Both derive
+        // the pool name `anthropic`.
+        let src = "version = 3\n\
+             [providers.primary]\n\
+             kind = \"anthropic-api\"\n\
+             base_url = \"https://one.example\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             seat_selection = \"round-robin\"\n\
+             [providers.secondary]\n\
+             kind = \"anthropic-api\"\n\
+             base_url = \"https://two.example\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             seat_selection = \"sticky\"\n";
+        let mut doc = doc_of(src);
+
+        // Act
+        let err = migrate_v3_to_v4(&mut doc).expect_err("one derived pool, two claimants");
+
+        // Assert: one line naming BOTH entries, document byte-untouched.
+        let Refusal::SeatSelectionRelocation { ref entries } = err else {
+            panic!("err: {err:?}");
+        };
+        assert_eq!(entries.len(), 1, "entries: {entries:?}");
+        assert!(entries[0].contains("[providers.primary]"), "{entries:?}");
+        assert!(entries[0].contains("[providers.secondary]"), "{entries:?}");
+        assert_eq!(
+            doc.to_string(),
+            src,
+            "a refusal must not mutate the document"
+        );
     }
 
     #[test]
