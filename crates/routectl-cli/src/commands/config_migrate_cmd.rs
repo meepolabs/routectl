@@ -1444,6 +1444,85 @@ default = \"opus\"
         );
     }
 
+    /// CONVERGENCE PIN over the REAL pipeline: run the migration, then run
+    /// the login planner over its COMMITTED output. Every seat the
+    /// migration materialized must plan `Nothing`.
+    ///
+    /// Asserted against the actual migrated file rather than a
+    /// hand-assembled fixture, so a drift in what the migration WRITES
+    /// (a different entry name, a member the pool omits, an auth field the
+    /// clone drops) fails here instead of passing a fixture that agrees
+    /// with neither writer.
+    ///
+    /// The source entry states `auth_kind` because convergence is a claim
+    /// about a WELL-FORMED config: an entry consuming an `oauth://`
+    /// subscription ref under the default `api-key` selector sends
+    /// `x-api-key` with a bearer token, and the sibling test below pins
+    /// that login SURFACES that (pre-existing) drift rather than pooling
+    /// around it.
+    #[tokio::test]
+    async fn the_login_planner_proposes_nothing_over_the_migrations_committed_output() {
+        // Arrange
+        let f = fixture(&V3_BARE_OAUTH.replace(
+            "api_key_ref = \"oauth://anthropic\"",
+            "api_key_ref = \"oauth://anthropic\"\nauth_kind = \"oauth-bearer\"",
+        ));
+        seed_seats(&f, &["anthropic", "anthropic#work", "anthropic#personal"]);
+        f.migrate(false, true).await.expect("combined migrate");
+        let text = read(&f.config);
+        let config = parse_config(&text).expect("migrated config parses");
+
+        // Act / Assert: one arm per stored seat, the default seat included.
+        for label in [None, Some("work"), Some("personal")] {
+            let planned = crate::commands::login_surface::plan(&config, "anthropic", label)
+                .expect("the planner accepts a known login id");
+            assert!(
+                matches!(
+                    planned,
+                    crate::commands::login_surface::SurfacePlan::Nothing { .. }
+                ),
+                "a login right after a migration must write nothing; seat {label:?} got \
+                 {planned:?} over:\n{text}"
+            );
+            assert!(
+                crate::commands::login_surface::render_delta(&planned).is_empty(),
+                "seat {label:?} rendered a delta"
+            );
+        }
+    }
+
+    /// The other direction, pinned so neither writer's behavior can change
+    /// silently: when the pre-migration entry consumed an `oauth://` ref
+    /// under the DEFAULT `api-key` selector, the migration faithfully
+    /// preserves that (it clones what the operator wrote), and the login
+    /// planner then REFUSES rather than growing a pool around an egress
+    /// that would 401. The refusal names the field, never its value.
+    #[tokio::test]
+    async fn a_migrated_entry_missing_its_auth_selector_refuses_the_login_write() {
+        // Arrange: V3_BARE_OAUTH states no `auth_kind`, so every migrated
+        // account defaults to `api-key` while carrying a subscription ref.
+        let f = fixture(V3_BARE_OAUTH);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        f.migrate(false, true).await.expect("combined migrate");
+        let config = parse_config(&read(&f.config)).expect("migrated config parses");
+
+        // Act
+        let planned = crate::commands::login_surface::plan(&config, "anthropic", None)
+            .expect("the planner accepts a known login id");
+
+        // Assert
+        let rendered = match &planned {
+            crate::commands::login_surface::SurfacePlan::Refuse(reason) => reason.to_string(),
+            other => panic!("expected an auth-drift refusal, got {other:?}"),
+        };
+        assert!(rendered.contains("auth_kind"), "{rendered}");
+        assert!(rendered.contains("Nothing was written"), "{rendered}");
+        assert!(
+            crate::commands::login_surface::render_delta(&planned).is_empty(),
+            "a refusal must render no delta"
+        );
+    }
+
     #[tokio::test]
     async fn a_single_seat_bare_ref_migrates_without_a_structural_rewrite() {
         // Arrange: exactly one stored seat -- at v4 a bare ref means the

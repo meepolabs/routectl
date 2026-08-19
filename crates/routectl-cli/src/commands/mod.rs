@@ -17,6 +17,7 @@ pub mod edit_pipeline;
 pub mod init;
 pub mod login;
 pub mod login_provider_block;
+pub mod login_surface;
 pub mod logout;
 pub mod parse_error_redaction;
 pub mod probe;

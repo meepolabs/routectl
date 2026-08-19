@@ -13352,6 +13352,7 @@ pub fn routectl_router::shrink_guard(&routectl_router::ShrinkCounts, &routectl_r
 pub const fn routectl_router::stale_after_days() -> i64
 pub fn routectl_router::today_epoch_day() -> i64
 pub fn routectl_router::trimmed_prefix_fingerprint(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimPlan) -> u64
+pub fn routectl_router::upsert_pool_members(&mut toml_edit::document::DocumentMut, &str, &[&str])
 pub fn routectl_router::validate_alias_chain_targets(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_alias_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_creds_refs(&routectl_router::config::Config) -> routectl_core::error::Result<()>

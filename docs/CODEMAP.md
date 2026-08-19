@@ -1364,7 +1364,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   An accounts-free move (the single-seat `seat_selection` relocation) leaves
   model references alone -- one member, identical breadth, and a member inherits
   its pool's strategy through `Config::seat_selection_for` either way.
-  Idempotent over its own output. `models_routed_at(&DocumentMut, entry) ->
+  Idempotent over its own output. `upsert_pool_members(&mut DocumentMut, pool,
+  members)` is the member-union primitive underneath it, exported because the
+  login auto-surface grows the same pools: it creates `pools` and the block
+  when absent, unions members without duplicating (within one call's list as
+  well as against the block's existing members), and leaves everything else
+  on the block (an existing `seat_selection`, an `accepts_new_logins` marker)
+  verbatim -- so a rerun changes no byte and two writers never need to know
+  what the other wrote. `models_routed_at(&DocumentMut, entry) ->
   Vec<String>` is the read-only counterpart, for the change summary the
   operator confirms.
   `normalize_capability_overrides(&mut DocumentMut) -> Result<bool, Refusal>`
@@ -4298,12 +4305,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (source=baked/import/user/disabled + verified_at) and per-class retry policy
   (source=config vs baked-default). No generic per-key provenance tree
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
-  config.toml-mutating commands (`config set/unset`, `provider add`): the raw
-  version/legacy preflights, the in-memory `parse_config` +
-  `collect_config_validation` gate plus its error rendering, and the pre-lock
-  high-consequence confirmation prompt. One home so every mutating command
-  refuses stale/legacy files, re-validates candidates, and prompts on
-  egress-defining edits identically
+  config.toml-mutating commands (`config set/unset`, `provider add`, the login
+  auto-surface): the raw version/legacy preflights, the in-memory
+  `parse_config` + `collect_config_validation` gate plus its error rendering,
+  the pre-lock high-consequence confirmation prompt, and `parse_document` +
+  `insert_provider_block` (format-preserving `[providers.<name>]`
+  insert/replace, deterministic so a write closure reproduces under the lock
+  exactly what planning gated). One home so every mutating command refuses
+  stale/legacy files, re-validates candidates, and prompts on egress-defining
+  edits identically
 - `src/commands/provider_env.rs` -- conventional per-provider-kind credential
   env-var table (`anthropic-api`->`ANTHROPIC_API_KEY`,
   `openai-compat`/`openai-responses`->`OPENAI_API_KEY`), gated on
@@ -4356,12 +4366,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   post-confirm `put` share one canonical base
 - `src/commands/provider_add/toml_edit.rs` -- config.toml provider-block edit
   + commit: `provider_table` serializes a `ProviderEntry` to a minimal
-  non-inline table (prunes serde-default empties), `insert_provider_block`
-  surgically inserts/replaces `[providers.<name>]` preserving comments +
-  ordering, and `commit` re-reads under the advisory lock + revision check and
-  writes the same deterministic insert atomically through
-  `routectl_router::edit_config_toml` (re-gated; a stale snapshot or gate
-  failure writes nothing)
+  non-inline table (prunes serde-default empties), and `commit` re-reads under
+  the advisory lock + revision check and writes the same deterministic insert
+  atomically through `routectl_router::edit_config_toml` (re-gated; a stale
+  snapshot or gate failure writes nothing). The document parse and the
+  `[providers.<name>]` insert themselves live in `edit_pipeline` -- shared with
+  the login auto-surface
 - `src/commands/init/mod.rs` -- `routectl init` guided first-run setup.
   Defines the interactive seam (`InitIo: AddIo` -- one fake drives every
   wizard prompt AND the inherited credential seams; `RealInitIo` delegates the
@@ -4506,7 +4516,35 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `[providers.<name>]` entry for a logged-in seat (`kind` from
   `provider_kind_for_oauth_id`, auth selector + endpoint from the one local
   shape table, `api_key_ref` via `SecretRef::Display` so a `--label` seat keeps
-  its `#<label>`). Mutates no config and emits no credential material
+  its `#<label>`). The entry NAME delegates to
+  `seat_naming::account_entry_name`, so the printed name and the name a config
+  write picks are one string (falling back to the plain label-suffixed
+  derivation only when the convention refuses a token). `ProviderBlock::render`
+  prints the block, `entry_table` returns the same fields as a `toml_edit`
+  table for the write path (one row set, no render-then-parse round trip), and
+  `with_entry_name` renames the key when the config being edited is the naming
+  authority. `required_auth_fields(oauth_id)` exposes just the `kind` + auth
+  selector an entry MUST carry, for the auto-surface's drift check. Mutates no
+  config and emits no credential material
+- `src/commands/login_surface.rs` -- the PURE planner behind login's config
+  auto-surface. `ref_matches(&Config, &SecretRef)` finds the entries already
+  consuming a seat's credential through `secret_uris()` -- reconciliation is by
+  REF, never by generated name, so an operator's hand-named entry is grown
+  rather than duplicated. `plan(&Config, family, label) -> SurfacePlan`
+  implements the resolution table: 2+ ref matches refuse and name the
+  candidates; one match already pooled plans `Nothing` (a pinned pool adds a
+  note and is never auto-joined, and an entry listed by 2+ pools refuses rather
+  than letting map order pick a holder); one match outside a pool joins the
+  family's single growth pool or creates one -- derived from
+  `growth_pools_for_family` DIRECTLY, never through the convention's
+  default-seat placement, so an unrelated entry squatting `<family>-default`
+  cannot turn a determined join into a pool creation; zero matches add the
+  account entry too. `SeatNamingError` surfaces verbatim, and a matched entry
+  whose required auth fields drifted refuses naming the FIELD NAMES only. `render_delta` is THE
+  renderer for the shown diff, the decline print and the recovery block --
+  typed plan data only, never a byte diff -- and writes
+  `accepts_new_logins = true` ONLY on a pool the plan creates. No IO, no store,
+  no clock
 - `src/commands/logout.rs` -- `routectl logout <provider> [--label <name>]` --
   removes one seat (`--label` removes only the named seat; no label removes
   the default) from the credentials store; first-time logout reported but not
