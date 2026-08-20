@@ -3540,8 +3540,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   detached builder is DELAYED, never shed. Latency is
   the SUM of the four builders rather than the max, deliberately accepted.
   Composed into `{panels:{usage,health,config,doctor}}` -- each an INDEPENDENT
-  per-panel envelope with its OWN `schema_version` (usage = 3, health = 5,
-  config = 2, doctor = 4)/`as_of`/availability, with NO outer envelope version
+  per-panel envelope with its OWN `schema_version` (each panel module's own
+  `SCHEMA_VERSION` const -- `DOCTOR_SCHEMA_VERSION` for
+  doctor)/`as_of`/availability, with NO outer envelope version
   (push-ready: a future push event is the same per-panel shape keyed by panel
   name). Reuses the same builders the per-panel endpoints call, so one panel's
   source failure OR panic renders only THAT panel unavailable and leaves
@@ -3725,7 +3726,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `build_report_no_network(&ctx)` (never
   `gather_probe_results`/`section_probe`); the async disk-I/O gather runs
   under `guard_panel`'s `spawn_blocking` via `Handle::current().block_on`.
-  Embeds the resulting `DoctorReport` (schema_version 4, reused verbatim) and
+  Embeds the resulting `DoctorReport` (its own `schema_version`, reused
+  verbatim; the panel re-exports it as `DOCTOR_SCHEMA_VERSION`) and
   a reachability summary DERIVED from one live `route_targets(...)` read of
   each target's last settled outcome (`ok` -> `reachable`, none-yet ->
   `unknown`, any failure family / gate refusal -> `degraded`) -- never a
@@ -4879,13 +4881,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   future durable import outcome that renders nothing today) holds every
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
-  name, status) via `build_report_over` into `DoctorReport { schema_version =
-  6 (UNSTABLE pre-1.0; any structural/semantic change, incl. additive, bumps
-  it -- v4 supersedes the capability override/prior/learned findings with the
-  `capability_matrix` panel and adds the freshness section, v5 adds the
-  `seats` orphan-seat section, v6 adds the additive `pools` seat-pool
-  section), findings, panels
-  }`; `run` renders human or `--json` and returns `overall_exit`. Data
+  name, status) via `build_report_over` into `DoctorReport { schema_version,
+  findings, panels }` (the number and its per-bump history live on the
+  `SCHEMA_VERSION` const's own doc comment; UNSTABLE pre-1.0, so any
+  structural or semantic change, additive included, bumps it); `run` renders
+  human or `--json` and returns `overall_exit`. Data
   collection lives in `gather.rs`, the section producers in `sections.rs`, the
   capability matrix panel builder in `matrix.rs`, human rendering in
   `render.rs`
@@ -5143,3 +5143,34 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   tests for the Anthropic SSE forward-compat opaque-events fix; hand-crafted
   SSE wire-byte fixtures driven egress -> canonical -> ingress, asserting
   verbatim re-emission of unknown content_block types
+
+## routectl-testkit
+
+Dev-dependency crate: shared test doubles and harnesses every other crate's
+  suites consume. It is a regular workspace member with a public API and its
+  own `public-api/` baseline, so its modules get rows here like any other
+  crate's -- what the header's sidecar exclusion omits is `*_tests.rs`
+  companions, not this crate. A helper lives here rather than in a `tests/`
+  support module whenever its callers span both compilation shapes
+  (`#[cfg(test)]` inside `src/` and `tests/` integration binaries), since a
+  dev-dependency crate is the only home that reaches both.
+
+- `src/lib.rs` -- crate root; the in-process `tracing` capture double
+  (`CapturedEvent` + `capture_events` / `with_capture` / `capture_lines`,
+  thread-local subscriber for the captured closure's own thread only) plus the
+  `ScopedEnv` re-export. Carries `#![warn(missing_docs)]`
+- `src/scoped_env.rs` -- `ScopedEnv`, a restore-on-drop guard over one
+  environment variable; std-only, and its `#[serial_test::serial]` requirement
+  at call sites is a caller contract the guard cannot enforce
+- `src/redirect_pin.rs` -- `CrossHostRedirect`, the two-mock-server
+  cross-host-redirect pin every credentialed egress lane's redirect regression
+  test drives (`start` / `origin_uri` / `assert_not_followed` /
+  `assert_target_untouched`)
+- `src/bench_alloc.rs` -- `CountingAllocator` global allocator plus the
+  deterministic `BenchCase` / `run_alloc_count` measurement harness the perf
+  benches share (simple and batched case shapes, wall-time via criterion or
+  allocation counts under `BENCH_ALLOC_COUNT=1`)
+- `src/bench_fixtures.rs` -- `SpectrumProfile` -> `BenchFixture` synthetic
+  request fixtures for the perf benches: the canonical `ChatRequest` plus raw
+  wire bytes in both ingress dialects, seeded pseudo-random so two runs are
+  byte-identical

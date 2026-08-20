@@ -2241,6 +2241,60 @@ fn no_network_sections_are_sections_minus_probe() {
     );
 }
 
+/// The operator-facing battery table in `docs/CONFIGURATION.md`, as the
+/// section key of each row in document order.
+///
+/// The table went stale twice by omission (a new section landed with no row),
+/// which no gate caught: the table is prose, and the section list it documents
+/// lives in another crate directory. `include_str!` also makes a moved or
+/// renamed docs file a compile error rather than a silently skipped check.
+fn documented_battery_sections() -> Vec<String> {
+    const CONFIGURATION_MD: &str = include_str!("../../../../../docs/CONFIGURATION.md");
+    const TABLE_INTRO: &str = "The battery sections, in render order:";
+
+    let mut lines = CONFIGURATION_MD.lines();
+    lines
+        .by_ref()
+        .find(|line| line.trim() == TABLE_INTRO)
+        .expect("battery table intro line present in docs/CONFIGURATION.md");
+
+    lines
+        .skip_while(|line| !line.starts_with("| Section "))
+        .skip(2)
+        .take_while(|line| line.starts_with('|'))
+        .map(|row| {
+            let first_cell = row
+                .trim_start_matches('|')
+                .split('|')
+                .next()
+                .expect("a table row has a first cell");
+            let key = first_cell
+                .split('`')
+                .nth(1)
+                .expect("each battery row names its section key in backticks");
+            key.to_string()
+        })
+        .collect()
+}
+
+/// Every [`SECTIONS`] key is documented in the battery table, in render
+/// order, and the table names no section the battery does not run.
+#[test]
+fn battery_table_documents_every_section_in_render_order() {
+    // Arrange: the section keys the command runs, in render order.
+    let rendered: Vec<String> = SECTIONS.iter().map(|(key, _)| (*key).to_string()).collect();
+
+    // Act: the section keys the operator docs publish, in document order.
+    let documented = documented_battery_sections();
+
+    // Assert: same keys, same order -- an added section with no row, a
+    // removed section with a surviving row, and a reordered battery all fail.
+    assert_eq!(
+        documented, rendered,
+        "docs/CONFIGURATION.md's battery table must list every SECTIONS key in render order"
+    );
+}
+
 /// The no-network gather leaves `probe_results` empty (no
 /// `gather_probe_results` -> no `CompositeStore`/`probe_all` dial), and a
 /// report built from it carries no `probe` section rows.

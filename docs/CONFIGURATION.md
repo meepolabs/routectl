@@ -3490,6 +3490,46 @@ The ordered section list is the command's single extension point
 (`SECTIONS` in `crates/routectl-cli/src/commands/doctor/mod.rs`); the
 offline status surface renders the same list minus `probe`.
 
+#### The seat-pool readout (`pools`), shared with `config check`
+
+`doctor`'s `pools` section and the `oauth seat pools:` block `routectl
+config check` prints are the SAME rows rendered two ways, so the two
+surfaces can never disagree about a pool. Read them for the answer to
+"which account will actually serve this model, and is it logged in":
+
+- **One line per `[pools.<name>]` block** -- its members and the seat each
+  member's `api_key_ref` names (`<entry>=<seat>`, `=none` for a member
+  declaring no `oauth://` ref), its `seat_selection`, and whether it
+  `accepts_new_logins`. A member the credential store holds no seat for is
+  named explicitly.
+- **Then one line per `oauth://` provider entry NO pool claims.** A bare
+  ref reads as "pins the default seat", a `#<label>` ref as "pins 1 seat";
+  neither carries a strategy, and the line says so -- `seat_selection` is a
+  property of a pool, so a standalone entry has nothing to select between.
+- **Member entries are not repeated as standalone rows.** The pool line
+  already names every member and its seat; a second per-member line would
+  read as an independent dispatch target.
+
+In `doctor` the same rows carry a status: a pool whose every member has a
+stored credential is PASS, a pool missing SOME member's credential is a
+WARN naming the members to log in (or remove), and a pool NO member of
+which has one is a FAIL -- every model naming that pool is unroutable
+until one member resolves. The per-entry rows are always informational
+PASS. When the credential store will not open, presence is reported as
+unknown and neither status is claimed (the `auth` section owns that FAIL);
+`config check` renders the same rows with the counts as unknown and its
+own exit stays governed by the validator suite, not by this block.
+
+The block is omitted entirely when the config declares no pool and no
+provider entry carries an `oauth://` ref, so an api-key-only config gets no
+header noise.
+
+LIMIT worth knowing before trusting it: neither surface builds a router, so
+both report CONFIG-and-STORE presence only. A member whose credential is
+stored but whose provider the factory could not construct is visible only
+to a surface that has a built router (`serve`, or `/status/health` on a
+running daemon).
+
 Neither command reads a secret it does not need: like
 [`catalog export`](#routectl-catalog-export), a probe or doctor run reads
 only what it classifies and never discloses a credential value.
@@ -3511,6 +3551,11 @@ when set, and if any `[providers.X]` Bedrock entry sets an
 actually reaches the upstream). A partial Bedrock allowlist silently
 breaks every Bedrock request, so the validator surfaces it as a clean
 `Error::Config` at startup rather than a runtime 400.
+
+On a config declaring pools or `oauth://` refs, `config check` also prints
+the seat-pool readout ahead of its warnings and errors -- the same rows
+`doctor`'s `pools` section renders, documented under
+[The seat-pool readout](#the-seat-pool-readout-pools-shared-with-config-check).
 
 `config show` prints the post-merge view: `env://`, `file://`, and
 `oauth://` references remain as opaque URIs (they are non-secret
