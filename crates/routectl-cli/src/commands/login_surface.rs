@@ -49,8 +49,7 @@ use routectl_router::seat_naming::{
     seat_secret_ref,
 };
 use routectl_router::{
-    Config, ConfigWriteError, EditOutcome, ProviderEntry, parse_config,
-    upsert_pool_members as upsert_pool,
+    Config, ConfigWriteError, EditOutcome, parse_config, upsert_pool_members as upsert_pool,
 };
 use toml_edit::{DocumentMut, Item};
 
@@ -59,7 +58,7 @@ use super::edit_pipeline::{
     preflight, render_gate_errors,
 };
 use super::login_provider_block::{
-    ProviderBlock, provider_block, required_auth_fields, toml_key, toml_string,
+    ProviderBlock, entry_field_str, provider_block, required_auth_fields, toml_key, toml_string,
 };
 use super::login_surface_availability::availability_gap;
 use super::parse_error_redaction::{CONFIG_UNREADABLE, redact_parse_error};
@@ -469,17 +468,6 @@ fn drifted_auth_fields(
         drifted.push(key);
     }
     (!drifted.is_empty()).then_some(drifted)
-}
-
-/// One string-valued field of a provider entry, read through its own
-/// serialization so the compared token is exactly what the parser accepts
-/// (the auth-selector enums are kebab-case on the wire).
-fn entry_field_str(entry: &ProviderEntry, key: &str) -> Option<String> {
-    toml::Value::try_from(entry)
-        .ok()?
-        .get(key)?
-        .as_str()
-        .map(str::to_string)
 }
 
 /// Render `plan` as pasteable TOML: the provider entry it creates (when

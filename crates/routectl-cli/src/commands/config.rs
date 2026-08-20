@@ -4,6 +4,7 @@ use routectl_auth::{OAuthStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result, sanitize_for_log_with_cap};
 use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_dotted_path};
 
+use crate::commands::login_provider_block::auth_selector_gap;
 use crate::commands::seat_report::{
     pool_rows, seat_pool_lines, seat_reference_is_stored, stored_seat_pool_rows,
 };
@@ -206,6 +207,13 @@ pub struct CheckReport {
 /// suite returns bare messages; the `config: ` prefix is re-added so each
 /// listed error reads the same as when these validators surfaced through
 /// `Error::Config` directly.
+///
+/// The suite's own warnings are carried through and joined by
+/// `oauth_auth_selector_warnings`, the one finding that cannot live in the
+/// router's shared suite (it reads the CLI-side auth-shape table). Only
+/// `check` renders the warning half; the gate callers
+/// (`edit_pipeline::gate`, `doctor`) read `errors` alone, so an advisory
+/// finding never blocks a write.
 pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport {
     let mut errors: Vec<String> = Vec::new();
 
@@ -235,10 +243,50 @@ pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport
             .map(|e| locate(raw_text, format!("config: {e}"))),
     );
 
-    CheckReport {
-        errors,
-        warnings: validation.warnings,
-    }
+    let mut warnings = validation.warnings;
+    warnings.extend(oauth_auth_selector_warnings(config, raw_text));
+
+    CheckReport { errors, warnings }
+}
+
+/// Advisory findings for a provider entry that consumes an `oauth://`
+/// credential without the auth selector that surface needs: the bearer would
+/// be dispatched on the API-key header and rejected upstream.
+///
+/// Lives CLI-side, next to the rest of the config-check additions, because
+/// the auth-shape authority it reads (`login_provider_block`'s table, via
+/// `auth_selector_gap`) lives here -- moving the check into the router's
+/// shared suite would mean either duplicating that table or lifting it into
+/// the router purely to satisfy the call direction. Everything the check
+/// needs is derivable from a parsed `Config`, so `config check`, `doctor`,
+/// and the edit-pipeline gate all see it through `validation_report`.
+///
+/// WARN, not error: `auth_kind` was not always enforced, so configs written
+/// before it exists in the wild carry this shape on entries an operator may
+/// have long stopped routing traffic to. A hard failure would refuse to load
+/// such a config outright -- taking down every other provider in it -- for a
+/// defect that is per-entry and only bites on dispatch.
+fn oauth_auth_selector_warnings(config: &Config, raw_text: Option<&str>) -> Vec<String> {
+    config
+        .providers
+        .iter()
+        .filter_map(|(name, entry)| {
+            let gap = auth_selector_gap(entry)?;
+            let found = match &gap.found {
+                Some(value) => format!("is `{value}`"),
+                None => "is unset".to_string(),
+            };
+            Some(locate(
+                raw_text,
+                format!(
+                    "provider `{name}`: api_key_ref names the managed `{}` OAuth seat but \
+                     `{}` {found}; that dispatches the bearer on the API-key surface, which \
+                     the upstream rejects with 401. Set `{} = \"{}\"`.",
+                    gap.family, gap.key, gap.key, gap.required,
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// Collect the secret-ref PARSE errors across every provider entry: the
@@ -727,5 +775,91 @@ base_url = "https://svc:sk-userinfo-FAKE@internal.example:8443/v1?key=sk-query-F
             first.contains("NOT round-trippable"),
             "the notice must say the dump is not round-trippable; got: {first}"
         );
+    }
+}
+
+#[cfg(test)]
+mod oauth_auth_selector_tests {
+    use super::validation_report;
+    use routectl_router::Config;
+
+    fn report_of(toml_text: &str) -> super::CheckReport {
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+        validation_report(&config, Some(toml_text))
+    }
+
+    /// `config check` must SURFACE the mismatch: without this the entry
+    /// reports `ok` and only fails on the first dispatched request.
+    #[test]
+    fn config_check_warns_on_an_oauth_ref_missing_its_auth_selector() {
+        // Arrange
+        let toml_text = "[providers.claude]\n\
+                         kind = \"anthropic-api\"\n\
+                         api_key_ref = \"oauth://anthropic\"\n";
+
+        // Act
+        let report = report_of(toml_text);
+
+        // Assert: a warning naming the entry and the field to set, and NOT
+        // an error -- the config still loads.
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let warning = report
+            .warnings
+            .iter()
+            .find(|w| w.contains("claude"))
+            .unwrap_or_else(|| panic!("no warning for the entry: {:?}", report.warnings));
+        assert!(warning.contains("auth_kind"), "{warning}");
+        assert!(warning.contains("oauth-bearer"), "{warning}");
+    }
+
+    /// The negative: the correctly shaped entry produces NO warning at all,
+    /// so an existing valid config is unaffected.
+    #[test]
+    fn config_check_stays_silent_on_a_correct_oauth_bearer_entry() {
+        let toml_text = "[providers.claude]\n\
+                         kind = \"anthropic-api\"\n\
+                         api_key_ref = \"oauth://anthropic\"\n\
+                         auth_kind = \"oauth-bearer\"\n";
+
+        let report = report_of(toml_text);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    /// The warning carries the source line, like every other located
+    /// finding, so an operator can jump straight to the entry.
+    #[test]
+    fn the_warning_carries_the_offending_source_line() {
+        let toml_text = "[providers.other]\n\
+                         kind = \"openai-compat\"\n\
+                         base_url = \"https://example.invalid/v1\"\n\
+                         api_key_ref = \"env://KEY\"\n\
+                         \n\
+                         [providers.claude]\n\
+                         kind = \"anthropic-api\"\n\
+                         api_key_ref = \"oauth://anthropic\"\n";
+
+        let report = report_of(toml_text);
+
+        let warning = report
+            .warnings
+            .first()
+            .unwrap_or_else(|| panic!("expected one warning: {:?}", report.warnings));
+        assert!(warning.starts_with("(line 6): "), "{warning}");
+    }
+
+    /// The shipped example documents the shape operators copy: it must not
+    /// itself trip the warning.
+    #[test]
+    fn the_shipped_example_config_trips_no_auth_selector_warning() {
+        let report = report_of(super::EXAMPLE_CONFIG);
+
+        let tripped: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("api_key_ref names the managed"))
+            .collect();
+        assert!(tripped.is_empty(), "{tripped:?}");
     }
 }

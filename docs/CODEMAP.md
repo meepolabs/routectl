@@ -4235,7 +4235,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per provider entry no pool claims), reading seat presence through a direct
   `OAuthStore::open_default` (never the composite, whose absent oauth arm
   would fabricate a present-seat reading); the block never enters `CheckReport`
-  and never moves the exit code. `EXAMPLE_CONFIG`
+  and never moves the exit code. `validation_report` also carries
+  `oauth_auth_selector_warnings`, the one config-check finding that cannot live
+  in the router's shared suite: it reads `login_provider_block::
+  auth_selector_gap` (the CLI-side auth-shape authority) to WARN when an entry's
+  `api_key_ref` names a managed OAuth seat while its auth selector still points
+  at the API-key surface -- a 401-on-first-dispatch shape that predates
+  auth-selector enforcement, so it warns rather than errors (only `check`
+  renders the warning half; the gate callers read `errors` alone, so it never
+  blocks a write). `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
   example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
   gate-loads it so no build can emit an example it cannot itself parse, and a
@@ -4579,7 +4587,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   table for the write path (one row set, no render-then-parse round trip), and
   `with_entry_name` renames the key when the config being edited is the naming
   authority. `required_auth_fields(oauth_id)` exposes just the `kind` + auth
-  selector an entry MUST carry, for the auto-surface's drift check. `toml_key` /
+  selector an entry MUST carry, for the auto-surface's drift check;
+  `auth_selector_gap(&ProviderEntry)` reads the same table from the other
+  direction -- given an entry whose `api_key_ref` is an `oauth://` seat, whether
+  its auth selector still points at the API-key surface -- which is what
+  `config check` warns on (silent on a foreign `kind`, where the selector key
+  may not exist on that variant at all). `entry_field_str` is the shared
+  read-through-serialization accessor both checks compare with. `toml_key` /
   `toml_string` render operator-written names as TOML: `toml_string` escapes the
   full control set TOML forbids in a basic string (not just quote/backslash), so
   a member or label carrying a newline cannot make the PRINTED delta
