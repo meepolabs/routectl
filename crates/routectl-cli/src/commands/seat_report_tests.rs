@@ -4,7 +4,7 @@ use routectl_router::config::SeatSelection;
 
 use super::{
     PoolHealth, SeatCount, SeatPoolRow, describe_pool, describe_row, pool_rows, seat_pool_lines,
-    selection_label, stored_seat_pool_rows,
+    seat_reference_is_stored, selection_label, stored_seat_pool_rows,
 };
 
 /// A config with one anthropic-api provider entry whose credential ref is
@@ -678,5 +678,83 @@ fn the_migrated_shape_renders_as_one_pool_naming_its_accounts() {
         ),
         "{}",
         lines[1]
+    );
+}
+
+// ---- seat_reference_is_stored: the presence answer config check's
+// secret-ref validation reads instead of resolving a token ----
+
+/// A bare ref names the DEFAULT seat: the store holding it is the whole
+/// question, and a labelled sibling does not answer it (schema version 4
+/// retired the bare-ref-expands-to-every-seat reading).
+#[test]
+fn a_bare_ref_is_stored_only_when_the_default_seat_is() {
+    // Arrange
+    let with_default = keys(&["anthropic", "anthropic#work"]);
+    let labels_only = keys(&["anthropic#work"]);
+
+    // Act + Assert
+    assert!(seat_reference_is_stored("anthropic", None, &with_default));
+    assert!(!seat_reference_is_stored("anthropic", None, &labels_only));
+}
+
+/// A `#label` ref names exactly its own seat: a stored default does not
+/// stand in for it, and a sibling label does not either.
+#[test]
+fn a_pinned_ref_is_stored_only_when_that_label_is() {
+    // Arrange
+    let stored = keys(&["anthropic", "anthropic#other"]);
+
+    // Act + Assert
+    assert!(!seat_reference_is_stored(
+        "anthropic",
+        Some("work"),
+        &stored
+    ));
+    assert!(seat_reference_is_stored(
+        "anthropic",
+        Some("other"),
+        &stored
+    ));
+}
+
+/// A provider whose name PREFIXES another's does not borrow its seats: the
+/// `#` separator is what keeps the two apart.
+#[test]
+fn a_prefix_sibling_providers_seats_do_not_satisfy_a_ref() {
+    // Arrange: only the sibling family has seats stored.
+    let stored = keys(&["anthropic-eu", "anthropic-eu#work"]);
+
+    // Act + Assert
+    assert!(!seat_reference_is_stored("anthropic", None, &stored));
+    assert!(!seat_reference_is_stored(
+        "anthropic",
+        Some("work"),
+        &stored
+    ));
+}
+
+/// The presence answer and the seat-pool block's own rendered presence
+/// clause are ONE join: whatever the block says about a ref, the warning
+/// decision agrees with. Pinned here because the two render inches apart in
+/// `config check` output, where a disagreement reads as a bug in both.
+#[test]
+fn the_presence_answer_agrees_with_the_rendered_block() {
+    // Arrange: a bare ref against a labels-only store -- the case where a
+    // wrong join would warn while the block says the opposite.
+    let config = config_with_ref("oauth://anthropic", None);
+    let stored = keys(&["anthropic#work"]);
+
+    // Act
+    let row = one_row(&config, Some(&stored));
+    let stored_by_helper = seat_reference_is_stored("anthropic", None, &stored);
+
+    // Assert
+    let rendered_as_stored = !describe_row(&row).contains("no stored credential for it");
+    assert_eq!(
+        stored_by_helper,
+        rendered_as_stored,
+        "the warning decision and the block must not disagree: {}",
+        describe_row(&row)
     );
 }

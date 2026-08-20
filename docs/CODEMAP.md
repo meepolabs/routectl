@@ -4194,13 +4194,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   suite). Its own `[models.X] provider` walk resolves against providers AND
   pools in ONE namespace, matching the factory's build walk -- a pool name
   there is a valid target, so a pool-backed model is not reported as an unknown
-  provider. On `check`, each semantic error is passed through `locate` ->
+  provider. `oauth://` refs are validated by PRESENCE against the same seat-key
+  snapshot the seat block reads (`seat_report::seat_reference_is_stored`),
+  never through `SecretStore::get` -- resolution would refresh a near-expiry
+  token, i.e. a network call plus a credential-store write on a read-only
+  command; the three-way taxonomy is stored -> silent, no match -> path-free
+  unresolved warning, store unopenable -> static cannot-verify warning.
+  Non-oauth refs (`env://` / `file://`) still resolve through the store. On
+  `check`, each semantic error is passed through `locate` ->
   `locate_dotted_path` (fed the raw config text) to gain a `(line N): ` prefix
   pointing at the `config.toml` line that produced it; `derive_dotted_path`
   conservatively recognizes leading `[a.b.c]` headers and
   ``alias/model/provider `X` `` clauses, and unresolvable messages fall back
-  unchanged (a display aid only, never a taxonomy change). `check` also prints
-  the informational OAuth seat-pool block from
+  unchanged (a display aid only, never a taxonomy change). Every reported
+  error/warning line prints through `safe_line`
+  (`sanitize_for_log_with_cap`, 512 chars) -- the one render point that
+  control-char-filters the whole validator suite's operator-written keys, so a
+  CR/LF/ANSI-bearing key cannot span lines or forge a report entry. `check`
+  also prints the informational OAuth seat-pool block from
   `seat_report::seat_pool_lines` (one line per `[pools.<name>]` block, then one
   per provider entry no pool claims), reading seat presence through a direct
   `OAuthStore::open_default` (never the composite, whose absent oauth arm
@@ -4626,7 +4637,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ref pins exactly ONE seat -- the default for a bare ref -- so the strategy is
   stated on the POOL, never on a standalone entry); `seat_pool_lines` renders
   the check block (pools first, then only the entries no pool claims) and
-  `selection_label` names each strategy. Signatures take seat KEYS only, never
+  `selection_label` names each strategy. `seat_reference_is_stored` is the
+  presence half of the same join, read by `config check`'s secret-ref
+  validation so its warnings cannot disagree with the block printed above them.
+  Signatures take seat KEYS only, never
   a `TokenRecord`, so token material cannot reach the render; labels, pool
   names and entry names go through `routectl_core::sanitize_for_log`
 - `src/commands/staleness_hint.rs` -- catalog-overlay staleness nudge for the

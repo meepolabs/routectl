@@ -1565,3 +1565,254 @@ fn config_unset_declines_a_high_consequence_removal_on_a_silent_stdin() {
         "a declined removal must not write"
     );
 }
+
+// -- config check's secret-ref validation: read-only by construction, and
+// control-char-filtered at the one point it prints operator-written keys.
+
+/// Seed a credentials file holding ONLY labelled seats (no unlabeled default
+/// record), each with an access token INSIDE the near-expiry refresh lead --
+/// the shape a resolving read tries to refresh. Written through raw JSON for
+/// the same reason [`seed_credentials`] is.
+fn seed_near_expiry_seats(xdg: &std::path::Path, seats: &[&str]) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut provider_map = serde_json::Map::new();
+    for seat in seats {
+        provider_map.insert(
+            (*seat).to_string(),
+            json!({
+                "access_token": "seeded-access-near-expiry",
+                "refresh_token": "seeded-refresh-near-expiry",
+                "token_type": "Bearer",
+                // Well inside the 300s refresh lead, but not yet expired: a
+                // resolving read refreshes here, a presence read does not.
+                "expires_at_unix": now + 30,
+                "scopes": ["openid", "offline_access"],
+                "account": { "email": "near@example.com", "account_id": "acct-near" },
+                "obtained_at_unix": now
+            }),
+        );
+    }
+    let creds_json = json!({ "schema_version": 1, "providers": provider_map });
+    let creds_path = xdg.join("routectl").join("credentials.json");
+    std::fs::create_dir_all(creds_path.parent().unwrap()).expect("mkdir creds parent");
+    std::fs::write(
+        &creds_path,
+        serde_json::to_vec_pretty(&creds_json).expect("serialize creds"),
+    )
+    .expect("write creds");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600");
+    }
+}
+
+/// A `[pools.<name>]` block whose members each pin their own labelled seat is
+/// fully resolved when the store holds those seats: `config check` reports NO
+/// warning, attempts NO token refresh, and leaves the store byte-identical.
+///
+/// This is the whole defect in one fixture. The pre-fix path resolved every
+/// ref through `SecretStore::get`, so a near-expiry seat sent it into the
+/// refresh path -- a POST to the provider's token endpoint plus a credential
+/// write -- during a read-only command, and then reported the failed refresh
+/// as an unresolved reference on a pool whose every seat was stored.
+#[test]
+fn config_check_neither_refreshes_nor_warns_for_a_stored_pool() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_near_expiry_seats(tmp.path(), &["anthropic#a", "anthropic#b"]);
+    let creds_path = tmp.path().join("routectl").join("credentials.json");
+    let before = std::fs::read(&creds_path).expect("read seeded creds");
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [providers.seat-a]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#a\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             [providers.seat-b]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#b\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             [pools.anthropic]\n\
+             members = [\"seat-a\", \"seat-b\"]\n"
+        ),
+    )
+    .expect("write labels-only pool config");
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert_eq!(
+        code, 0,
+        "a fully-stored pool must check ok: {stdout} {stderr}"
+    );
+    assert!(
+        !stdout.contains("warnings ("),
+        "every member's seat is stored, so nothing is unresolved: {stdout}"
+    );
+    // A refresh ATTEMPT is what the read-only guarantee forbids; pre-fix its
+    // failure was reported verbatim on this surface.
+    assert!(
+        !stdout.contains("refresh"),
+        "check must attempt no token refresh: {stdout}"
+    );
+    let after = std::fs::read(&creds_path).expect("read creds after check");
+    assert_eq!(
+        before, after,
+        "config check must not rewrite the credential store"
+    );
+}
+
+/// A bare ref whose default seat is NOT stored still warns -- the taxonomy is
+/// preserved, not dropped, by moving to a presence read. The wording names
+/// the scheme and no storage path.
+#[test]
+fn config_check_warns_path_free_for_an_unstored_oauth_seat() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_near_expiry_seats(tmp.path(), &["anthropic#a"]);
+    let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert_eq!(code, 0, "an unresolved ref is a warning: {stdout} {stderr}");
+    let warning = stdout
+        .lines()
+        .find(|line| line.contains("unresolved secret-ref"))
+        .expect("the unstored default seat must warn");
+    assert!(
+        warning.contains("scheme `oauth://`"),
+        "the warning must name the scheme: {warning}"
+    );
+    assert!(
+        !warning.contains("credentials.json") && !warning.contains(".config"),
+        "the warning must disclose no storage path: {warning}"
+    );
+}
+
+/// A store that cannot be OPENED yields a cannot-verify warning, never an
+/// unresolved claim: absence is unknowable, so sending the operator to
+/// `login` for a credential that may well be stored is the wrong answer.
+#[test]
+fn config_check_cannot_verify_an_oauth_ref_when_the_store_will_not_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = write_oauth_config(tmp.path(), "oauth://anthropic");
+    let path = config_path.to_str().unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args(["--config", path, "config", "check"])
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("spawn routectl binary");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an unreadable store must not fail check: {stdout}"
+    );
+    let warning = stdout
+        .lines()
+        .find(|line| line.contains("secret-ref (scheme `oauth://`)"))
+        .expect("an unopenable store must warn about the ref");
+    assert!(
+        warning.contains("cannot verify"),
+        "an unknowable answer must not be reported as unresolved: {warning}"
+    );
+    assert!(
+        !warning.contains("credentials.json") && !warning.contains(".config"),
+        "the warning must disclose no storage path: {warning}"
+    );
+}
+
+/// Every validator formats operator-written TOML keys into its message, so a
+/// key bearing CR/LF plus an ANSI sequence would span lines and forge a
+/// fabricated report entry. Each reported line must render one-line and
+/// neutralized -- and the count in the header must match the lines printed.
+#[test]
+fn config_check_renders_a_hostile_config_key_on_one_neutral_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    // An alias key carrying a carriage return, a newline, and an ANSI colour
+    // sequence. Written via TOML escapes so the bytes land verbatim in the key.
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [aliases]\n\
+             \"ev\\r\\nil\\u001B[31m*x\" = \"ghost\"\n"
+        ),
+    )
+    .expect("write hostile config");
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, _stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert_ne!(
+        code, 0,
+        "the hostile key is also an invalid pattern: {stdout}"
+    );
+    assert!(
+        !stdout.contains('\r') && !stdout.contains('\u{1b}'),
+        "no control byte from the key may reach stdout: {stdout:?}"
+    );
+    // The header states a count; exactly that many `  - ` lines must follow,
+    // so a key that smuggled in a newline cannot present as an extra entry.
+    let reported: usize = stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("errors (")
+                .and_then(|rest| rest.strip_suffix("):"))
+                .and_then(|n| n.parse().ok())
+        })
+        .expect("the errors header must state a count");
+    let rendered = stdout.lines().filter(|l| l.starts_with("  - ")).count();
+    assert_eq!(
+        reported, rendered,
+        "one line per reported error, no forged entries: {stdout}"
+    );
+}
+
+/// The filtering must not touch a benign message: the longest legitimate
+/// validator error runs past the shared 256-char log-field cap, so a
+/// too-tight ceiling would truncate real remediation text.
+#[test]
+fn config_check_renders_a_benign_long_validator_message_verbatim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    // A model naming an unknown provider: a plain-ASCII message with a
+    // known verbatim tail.
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [models.orphan]\n\
+             provider = \"ghost-provider\"\n\
+             upstream = \"gpt-x\"\n"
+        ),
+    )
+    .expect("write config");
+    let path = config_path.to_str().unwrap();
+
+    let (_code, stdout, _stderr) =
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "check"]);
+
+    assert!(
+        stdout.contains(
+            "model `orphan` references unknown provider or pool `ghost-provider` \
+             (not in [providers] or [pools])"
+        ),
+        "a benign message must survive byte-unchanged: {stdout}"
+    );
+}

@@ -403,6 +403,25 @@ fn present_seat_labels(
     }
 }
 
+/// Whether `stored_seat_keys` holds the seat an `oauth://` ref names, for the
+/// read-only validation `config check` runs over every credential ref.
+///
+/// PRESENCE, not resolution: it compares seat keys against a snapshot and
+/// never resolves a token, so it cannot trigger the near-expiry refresh (a
+/// network POST plus a credential-file write) that `SecretStore::get` does on
+/// a nominally read-only command.
+///
+/// Defined as the presence half of [`present_seat_labels`] rather than its own
+/// join, so `config check`'s warnings and the seat-pool block printed directly
+/// above them cannot disagree about whether a ref's seat is stored.
+pub(crate) fn seat_reference_is_stored(
+    provider: &str,
+    label: Option<&str>,
+    stored_seat_keys: &[String],
+) -> bool {
+    !present_seat_labels(provider, label, stored_seat_keys).is_empty()
+}
+
 /// How many labels a sentence lists before collapsing the tail. A pool may
 /// hold up to 32 members, and the sentence is printed ahead of the `config
 /// check` warnings and errors -- an uncapped list would bury them. The COUNT
