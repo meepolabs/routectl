@@ -1188,6 +1188,7 @@ pub fn routectl_core::log_safe::redact_prompts_enabled() -> bool
 pub fn routectl_core::log_safe::redact_prompts_in(&serde_json::value::Value) -> serde_json::value::Value
 pub fn routectl_core::log_safe::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_for_log(&str) -> alloc::string::String
+pub fn routectl_core::log_safe::sanitize_for_log_with_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_upstream_body(&str) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_upstream_body_with_byte_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String
@@ -5472,6 +5473,7 @@ pub fn routectl_core::redact_prompts_enabled() -> bool
 pub fn routectl_core::redact_prompts_in(&serde_json::value::Value) -> serde_json::value::Value
 pub fn routectl_core::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_for_log(&str) -> alloc::string::String
+pub fn routectl_core::sanitize_for_log_with_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body_with_byte_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String

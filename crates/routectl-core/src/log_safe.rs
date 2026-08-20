@@ -103,6 +103,17 @@ pub fn sanitize_for_log(s: &str) -> String {
     sanitize_capped(s, MAX)
 }
 
+/// Variant of [`sanitize_for_log`] taking an explicit CHARACTER cap, for a
+/// one-line operator-facing surface whose legitimate messages run past the
+/// 256-char log-field budget -- a config validator error quoting a TOML key
+/// plus its remediation sentence reaches ~320 chars, and the default cap
+/// would truncate a benign message to buy nothing. The control-char / ANSI
+/// filtering is identical; only the length ceiling moves, so the caller
+/// still bounds the line rather than printing unbounded operator input.
+pub fn sanitize_for_log_with_cap(s: &str, cap: usize) -> String {
+    sanitize_capped(s, cap)
+}
+
 /// Log-safe rendering for a client-controlled string that MAY embed raw
 /// request content -- e.g. a normalization-error `detail` that formats a
 /// malformed request fragment (a tool_use block, a content part) into its

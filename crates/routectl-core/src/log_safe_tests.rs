@@ -7,7 +7,7 @@
 use super::{
     MAX, MAX_DEBUG_BODY_BYTES, clean_upstream_error_body, extract_upstream_message,
     is_json_error_envelope, redact_prompts_with_flag, sanitize_capped, sanitize_detail_with_flag,
-    sanitize_for_log, sanitize_upstream_body,
+    sanitize_for_log, sanitize_for_log_with_cap, sanitize_upstream_body,
 };
 use serde_json::json;
 
@@ -2173,4 +2173,39 @@ fn extract_upstream_message_falls_back_when_error_message_is_not_a_string() {
     // rather than stringifying the non-string node.
     let body = r#"{"error":{"message":123}}"#;
     assert_eq!(extract_upstream_message(body), sanitize_upstream_body(body));
+}
+
+// ---- sanitize_for_log_with_cap: same filter, caller-chosen ceiling ----
+
+#[test]
+fn explicit_cap_filters_control_bytes_exactly_as_the_default_does() {
+    // The only difference from `sanitize_for_log` is the ceiling; the
+    // control-byte / ANSI substitution must be identical.
+    assert_eq!(sanitize_for_log_with_cap("a\r\nb", 512), "a??b");
+    assert_eq!(
+        sanitize_for_log_with_cap("\x1b[31mred\x1b[0m", 512),
+        "?[31mred?[0m"
+    );
+}
+
+#[test]
+fn explicit_cap_admits_a_message_past_the_default_ceiling() {
+    // The motivating case: a legitimate operator-facing message longer
+    // than MAX must survive whole under a wider cap.
+    let long = "a".repeat(MAX + 100);
+
+    assert_eq!(sanitize_for_log(&long).chars().count(), MAX);
+    assert_eq!(
+        sanitize_for_log_with_cap(&long, 512).chars().count(),
+        MAX + 100
+    );
+}
+
+#[test]
+fn explicit_cap_still_truncates_past_its_own_ceiling() {
+    // A wider ceiling is still a ceiling: unbounded operator input
+    // cannot reach the surface through this helper.
+    let long = "a".repeat(600);
+
+    assert_eq!(sanitize_for_log_with_cap(&long, 512).chars().count(), 512);
 }

@@ -1,15 +1,18 @@
 //! `routectl config <subcommand>` -- check, show, example.
 
 use routectl_auth::{OAuthStore, SecretRef, SecretStore};
-use routectl_core::{Error, Result};
+use routectl_core::{Error, Result, sanitize_for_log_with_cap};
 use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_dotted_path};
 
-use crate::commands::seat_report::{pool_rows, seat_pool_lines, stored_seat_pool_rows};
+use crate::commands::seat_report::{
+    pool_rows, seat_pool_lines, seat_reference_is_stored, stored_seat_pool_rows,
+};
 use crate::server::CompositeStore;
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
-/// every secret reference (env / file / oauth; `literal:` refs are rejected),
-/// and report any aliases that reference unknown providers.
+/// every secret reference (env / file; `oauth://` refs are checked for
+/// PRESENCE only, and `literal:` refs are rejected), and report any aliases
+/// that reference unknown providers.
 ///
 /// `raw_text` is the config file's original TOML, threaded through so a
 /// semantic error whose message names a config key/path can be rendered with
@@ -23,24 +26,8 @@ use crate::server::CompositeStore;
 pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     let secrets = CompositeStore::open_default().await?;
     let mut errors: Vec<String> = secret_ref_parse_errors(config, raw_text);
-    let mut warnings: Vec<String> = Vec::new();
-
-    for (name, entry) in &config.providers {
-        for uri in entry.secret_uris() {
-            // Parse errors are collected separately above; here we only
-            // resolve the refs that parse, so an unparseable ref is skipped
-            // rather than double-reported.
-            let Ok(parsed) = SecretRef::parse(uri) else {
-                continue;
-            };
-            if let Err(e) = secrets.get(&parsed).await {
-                warnings.push(format!(
-                    "provider `{name}`: cannot resolve secret-ref (scheme `{}`): {e}",
-                    scheme_of(uri),
-                ));
-            }
-        }
-    }
+    let stored = stored_seat_keys().await;
+    let mut warnings: Vec<String> = secret_ref_resolution_warnings(config, &secrets, &stored).await;
 
     // v0.6.0: every [models.X].provider must reference a known
     // [providers] entry, plus the shared startup validator suite that
@@ -63,7 +50,6 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
         config.server.host, config.server.port
     );
 
-    let stored = stored_seat_keys().await;
     let seat_lines = seat_pool_lines(
         &pool_rows(config, stored.as_deref()),
         &stored_seat_pool_rows(config, stored.as_deref()),
@@ -78,20 +64,116 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     if !warnings.is_empty() {
         println!("\nwarnings ({}):", warnings.len());
         for w in &warnings {
-            println!("  - {w}");
+            println!("  - {}", safe_line(w));
         }
     }
 
     if !errors.is_empty() {
         println!("\nerrors ({}):", errors.len());
         for e in &errors {
-            println!("  - {e}");
+            println!("  - {}", safe_line(e));
         }
         return Err(Error::Config(format!("{} config error(s)", errors.len())));
     }
 
     println!("\nok.");
     Ok(())
+}
+
+/// Longest reported error/warning line, in characters. Every validator
+/// formats operator-written TOML keys into its message, and the longest
+/// legitimate one (a `[bedrock] allowed_body_fields` remediation) runs past
+/// 300 chars -- so the shared 256-char log-field budget would truncate a
+/// benign message. This ceiling bounds the line without reaching any real
+/// one.
+const MAX_REPORTED_LINE_CHARS: usize = 512;
+
+/// One-line rendering of a reported error or warning.
+///
+/// Every validator interpolates operator-written table keys and values into
+/// its message, so this one render point control-char-filters the whole
+/// suite's output: a config key bearing a newline plus an ANSI sequence would
+/// otherwise span lines and forge a fabricated report entry. Mirrors the
+/// filtering the doctor render applies to the same validator messages.
+fn safe_line(message: &str) -> String {
+    sanitize_for_log_with_cap(message, MAX_REPORTED_LINE_CHARS)
+}
+
+/// Read-only resolution check of every provider's secret refs.
+///
+/// `oauth://` refs are checked against `stored_seat_keys` for PRESENCE
+/// instead of being resolved: `SecretStore::get` refreshes a near-expiry
+/// token, which means a network POST to the provider's token endpoint plus a
+/// credentials-file write during a command an operator expects to only read.
+/// Presence answers the question check actually asks -- is the credential
+/// this ref names there -- and cannot mutate anything. Non-oauth refs
+/// (`env://` / `file://`) resolve as before: their resolution is a local read
+/// with no side effect.
+///
+/// The three-way taxonomy for an `oauth://` ref:
+///   - store readable and a named seat is stored -> silent;
+///   - store readable, no seat matches -> unresolved warning;
+///   - store unreadable (`stored_seat_keys` is `None`) -> a static
+///     cannot-verify warning, since absence is unknowable.
+///
+/// Every message names the SCHEME only -- never the ref, the seat, or the
+/// store path.
+async fn secret_ref_resolution_warnings(
+    config: &Config,
+    secrets: &CompositeStore,
+    stored_seat_keys: &Option<Vec<String>>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (name, entry) in &config.providers {
+        for uri in entry.secret_uris() {
+            // Parse errors are collected separately by
+            // `secret_ref_parse_errors`; here we only check the refs that
+            // parse, so an unparseable ref is skipped rather than
+            // double-reported.
+            let Ok(parsed) = SecretRef::parse(uri) else {
+                continue;
+            };
+            if let SecretRef::OAuth { provider, label } = &parsed {
+                if let Some(warning) =
+                    oauth_presence_warning(name, provider, label.as_deref(), stored_seat_keys)
+                {
+                    warnings.push(warning);
+                }
+                continue;
+            }
+            if let Err(e) = secrets.get(&parsed).await {
+                warnings.push(format!(
+                    "provider `{name}`: cannot resolve secret-ref (scheme `{}`): {e}",
+                    scheme_of(uri),
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+/// The presence verdict for one `oauth://` ref, or `None` when the store
+/// holds a seat the ref names (the silent, healthy case).
+fn oauth_presence_warning(
+    entry: &str,
+    provider: &str,
+    label: Option<&str>,
+    stored_seat_keys: &Option<Vec<String>>,
+) -> Option<String> {
+    match stored_seat_keys {
+        // Unknowable, not absent: claiming "unresolved" here would send the
+        // operator to `routectl login` for a credential that may well be
+        // stored. The seat-pool block above renders the same distinction.
+        None => Some(format!(
+            "provider `{entry}`: cannot verify secret-ref (scheme `oauth://`): \
+             the credential store could not be opened"
+        )),
+        Some(keys) if seat_reference_is_stored(provider, label, keys) => None,
+        Some(_) => Some(format!(
+            "provider `{entry}`: unresolved secret-ref (scheme `oauth://`): \
+             no stored credential for the seat it names; run `routectl login` for it"
+        )),
+    }
 }
 
 /// Snapshot of the credential store's seat keys for the informational
