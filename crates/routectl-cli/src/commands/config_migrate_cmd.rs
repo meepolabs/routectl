@@ -22,13 +22,15 @@
 //!   3. Enumerate stored OAuth seats READ-ONLY and plan phase 2 against the
 //!      pure candidate: for each provider entry whose BARE `oauth://` ref
 //!      covered more than one stored seat, the naming module derives the
-//!      account entries and the pool that replace it. An unreadable store, a
-//!      name collision, two labels generating one name, two entries sharing
-//!      one OAuth family, or a derived pool name held by a pool the migration
-//!      did not create refuses the whole migration -- a v4 file whose bare ref
-//!      silently stopped covering its sibling seats is structurally excluded,
-//!      and so is one that merges accounts the operator kept on separate
-//!      egresses.
+//!      account entries and the pool that replace it -- plus, for an entry
+//!      NAMED after its own provider family, the `<family>-default` name it
+//!      moves to so `[pools.<family>]` can take the name it holds. An
+//!      unreadable store, a name collision, two labels generating one name,
+//!      two entries sharing one OAuth family, or a derived pool name held by
+//!      a pool the migration did not create refuses the whole migration -- a
+//!      v4 file whose bare ref silently stopped covering its sibling seats is
+//!      structurally excluded, and so is one that merges accounts the
+//!      operator kept on separate egresses.
 //!   4. Gate the COMBINED candidate (phase 1 + phase 2) through the shared
 //!      `parse_config` + `validation_report` suite; a gate failure renders
 //!      the report and writes nothing.
@@ -211,10 +213,12 @@ fn seat_enumeration_refusal(reason: &str) -> String {
 /// one-seat family is the same credential the v3 ref resolved to, so there
 /// is nothing to materialize and no pool to create.
 ///
-/// Generated names come from `seat_naming::plan_pool_materialization`
+/// Generated names come from `seat_naming::plan_entry_materialization`
 /// against the candidate config, byte-for-byte the names the login writer
-/// will later generate. `already_present` / `pool_exists` make a rerun over
-/// the migration's own output a no-op.
+/// will later generate -- including the rename a FAMILY-NAMED entry needs
+/// (`[providers.anthropic]` carrying `oauth://anthropic` vacates the name to
+/// `anthropic-default` so `[pools.anthropic]` can take it). `already_present`
+/// / `pool_exists` make a rerun over the migration's own output a no-op.
 ///
 /// `preexisting_pools` names the `[pools.*]` blocks the file carried BEFORE
 /// the migration planned anything, so a pool this migration is about to
@@ -225,7 +229,8 @@ fn seat_enumeration_refusal(reason: &str) -> String {
 /// A [`SeatMaterializationRefusal`] -- two bare refs on one provider family,
 /// or a derived pool name held by a pool the migration did not create -- or a
 /// `SeatNamingError` from the naming module, surfaced verbatim: a generated
-/// name held by an unrelated entry, two labels generating one name, an
+/// name held by an unrelated entry (including a rename target `<family>-default`
+/// held by a DIFFERENT credential), two labels generating one name, an
 /// unusable label token, the reserved `default` label, or a pool name held by
 /// a provider entry or a model nickname. Never softened -- a lossy rewrite
 /// would point a config entry at the wrong credential.
@@ -252,8 +257,9 @@ fn plan_seat_materialization(
                 .to_string(),
             ));
         }
-        let plan = routectl_router::seat_naming::plan_pool_materialization(
+        let plan = routectl_router::seat_naming::plan_entry_materialization(
             candidate,
+            &entry,
             &family,
             labels.iter().map(Option::as_deref),
         )
@@ -263,9 +269,12 @@ fn plan_seat_materialization(
                  [providers.{entry}]) as explicit accounts: {e}. Nothing was written"
             ))
         })?;
-        // The entry itself IS the default-seat member and keeps its name, so
-        // only the labelled seats materialize as new entries.
+        let renamed_entry = plan.renamed_entry;
+        // The entry itself IS the default-seat member and (after any rename)
+        // carries the default seat's ref, so only the labelled seats
+        // materialize as new entries.
         let accounts: Vec<SeatPoolAccount> = plan
+            .pool
             .accounts
             .into_iter()
             .filter(|account| account.label.is_some())
@@ -278,15 +287,20 @@ fn plan_seat_materialization(
         // A move the config already satisfies is dropped, not planned: with
         // every account present and the pool listing them, applying it would
         // change nothing, and carrying it would make a rerun report a pending
-        // write that does not exist.
-        let satisfied = plan.pool_exists
+        // write that does not exist. A pending rename is never satisfied --
+        // the entry still holds the name the pool needs.
+        let satisfied = renamed_entry.is_none()
+            && plan.pool.pool_exists
             && accounts.iter().all(|a| a.already_present)
-            && candidate.pools.get(&plan.pool_name).is_some_and(|pool| {
-                pool.members.contains(&entry)
-                    && accounts
-                        .iter()
-                        .all(|a| pool.members.contains(&a.entry_name))
-            });
+            && candidate
+                .pools
+                .get(&plan.pool.pool_name)
+                .is_some_and(|pool| {
+                    pool.members.contains(&entry)
+                        && accounts
+                            .iter()
+                            .all(|a| pool.members.contains(&a.entry_name))
+                });
         if satisfied {
             continue;
         }
@@ -294,10 +308,10 @@ fn plan_seat_materialization(
         // membership is an operator statement about which accounts share an
         // egress, and phase 2 cannot tell an intentionally pinned set from an
         // incomplete one.
-        if preexisting_pools.contains(&plan.pool_name) {
+        if preexisting_pools.contains(&plan.pool.pool_name) {
             return Err(Error::Config(
                 SeatMaterializationRefusal::ExistingPool {
-                    pool: plan.pool_name,
+                    pool: plan.pool.pool_name,
                     entry,
                     family,
                 }
@@ -306,7 +320,8 @@ fn plan_seat_materialization(
         }
         moves.push(SeatPoolMove {
             entry,
-            pool: plan.pool_name,
+            rename_to: renamed_entry,
+            pool: plan.pool.pool_name,
             accounts,
         });
     }
@@ -493,7 +508,7 @@ pub async fn run_at(
             &candidate_text,
             from_version,
             to_version,
-            &plan.removed_keys,
+            &plan,
             &doc,
             &phase_two,
         );
@@ -510,10 +525,14 @@ pub async fn run_at(
         return Ok(MigrateResult::DryRun);
     }
 
+    // The plan MOVES into the commit below, so the rename list the two
+    // operator-facing renders need is taken while it is still in hand.
+    let renamed = plan.renamed_entries.clone();
+
     // ONE acknowledgement for the combined change, now that the candidate is
     // known valid and a write is known to be pending. A declined prompt
     // leaves both files byte-identical.
-    if !confirm_migration(from_version, to_version, &doc, &phase_two, yes) {
+    if !confirm_migration(from_version, to_version, &renamed, &doc, &phase_two, yes) {
         println!("aborted; nothing further written.");
         audit_event(
             config_path,
@@ -567,7 +586,7 @@ pub async fn run_at(
         "written",
         None,
     );
-    render_success(from_version, to_version, &doc, &phase_two);
+    render_success(from_version, to_version, &renamed, &doc, &phase_two);
     Ok(MigrateResult::Migrated { from_version })
 }
 
@@ -939,7 +958,7 @@ fn render_dry_run(
     candidate_text: &str,
     from_version: u32,
     to_version: u32,
-    removed: &[String],
+    plan: &MigrationPlan,
     original: &DocumentMut,
     phase_two: &[SeatPoolMove],
 ) {
@@ -961,38 +980,52 @@ fn render_dry_run(
     } else {
         println!("summary: migrates config from version {from_version} to {to_version}");
     }
-    if removed.is_empty() && phase_two.is_empty() {
+    let lines = change_summary(
+        &plan.removed_keys,
+        &plan.renamed_entries,
+        original,
+        phase_two,
+    );
+    if lines.is_empty() {
         println!("  (no keys removed; version stamp only)");
     } else {
-        for key in removed {
-            println!("  - removes `{key}`");
-        }
-        for line in seat_materialization_summary(original, phase_two) {
+        for line in lines {
             println!("  - {line}");
         }
     }
     println!("dry-run: nothing was written.");
 }
 
-/// One summary line per phase-2 move, naming the pool and the account
-/// entries it materializes. Names only -- a seat LABEL is operator-authored
-/// but a generated entry name carries no token, account id, or storage path,
-/// and the surrounding candidate block already renders the file verbatim.
 /// One summary line per phase-2 move, naming the pool, the account entries
-/// it materializes, and the models it repoints onto the pool.
+/// it materializes, the rename the source entry takes when the pool needs its
+/// name, and the models it repoints onto the pool.
 ///
 /// `original` is the PRE-migration document, so the repointed nicknames are
 /// the ones that named the entry before the rewrite -- which is what the
-/// operator is being asked to confirm.
+/// operator is being asked to confirm. `pure_renames` maps a pure-rung rename
+/// source to its target: a family-named entry carrying `seat_selection` is
+/// renamed by phase 1, so phase 2 sees (and pools) the RENAMED name, and the
+/// models that must be looked up in `original` are the ones that named the
+/// entry under its ORIGINAL key.
 ///
 /// Names only -- a seat LABEL is operator-authored but a generated entry
 /// name, a pool name and a model nickname carry no token, account id, or
 /// storage path, and the surrounding candidate block already renders the
 /// file verbatim.
-fn seat_materialization_summary(original: &DocumentMut, phase_two: &[SeatPoolMove]) -> Vec<String> {
+fn seat_materialization_summary(
+    original: &DocumentMut,
+    phase_two: &[SeatPoolMove],
+    pure_renames: &[(String, String)],
+) -> Vec<String> {
     phase_two
         .iter()
         .map(|mv| {
+            // The name this entry had in the ORIGINAL file: its own, unless
+            // phase 1 renamed it on the way here.
+            let was = pure_renames
+                .iter()
+                .find(|(_, to)| *to == mv.entry)
+                .map_or(mv.entry.as_str(), |(from, _)| from.as_str());
             let added: Vec<&str> = mv
                 .accounts
                 .iter()
@@ -1001,14 +1034,14 @@ fn seat_materialization_summary(original: &DocumentMut, phase_two: &[SeatPoolMov
                 .collect();
             let mut line = if added.is_empty() {
                 format!(
-                    "adds `[pools.{}]` grouping the stored seats of `[providers.{}]` \
+                    "adds `[pools.{}]` grouping the stored seats of `[providers.{was}]` \
                      (every account entry already present)",
-                    mv.pool, mv.entry
+                    mv.pool
                 )
             } else {
                 format!(
                     "adds `[pools.{}]` plus account entr{} {} so each stored seat of \
-                     `[providers.{}]` is addressable (a bare `oauth://` ref means the \
+                     `[providers.{was}]` is addressable (a bare `oauth://` ref means the \
                      default seat at version {CURRENT_CONFIG_VERSION})",
                     mv.pool,
                     if added.len() == 1 { "y" } else { "ies" },
@@ -1017,11 +1050,18 @@ fn seat_materialization_summary(original: &DocumentMut, phase_two: &[SeatPoolMov
                         .map(|name| format!("`{name}`"))
                         .collect::<Vec<_>>()
                         .join(", "),
-                    mv.entry,
                 )
             };
+            if let Some(renamed) = mv.rename_to.as_deref().or_else(|| {
+                pure_renames
+                    .iter()
+                    .find(|(_, to)| *to == mv.entry)
+                    .map(|(_, to)| to.as_str())
+            }) {
+                line.push_str(&rename_clause(was, renamed));
+            }
             if !mv.accounts.is_empty() {
-                let repointed = models_routed_at(original, &mv.entry);
+                let repointed = models_routed_at(original, was);
                 if !repointed.is_empty() {
                     line.push_str(&format!(
                         "; repoints model{} {} onto `{}` so they keep dispatching across \
@@ -1041,12 +1081,50 @@ fn seat_materialization_summary(original: &DocumentMut, phase_two: &[SeatPoolMov
         .collect()
 }
 
-/// The completion line, naming the seat materialization when phase 2 did
-/// any: an operator who just gained provider entries needs to know before
+/// The clause naming one provider-entry rename and why it happens. Shared so
+/// the phase-1-only path (a family-named entry whose family turned out to be
+/// single-seat, renamed purely to free the pool name) and the combined path
+/// word it identically.
+fn rename_clause(from: &str, to: &str) -> String {
+    format!(
+        "; renames `[providers.{from}]` to `[providers.{to}]` because the `[pools.{from}]` \
+         block takes the plain provider-family name and providers, pools and model nicknames \
+         share one namespace"
+    )
+}
+
+/// Every change line for the summary the operator confirms: the removed keys,
+/// the phase-1 renames no phase-2 move already narrates, and the phase-2
+/// materializations.
+fn change_summary(
+    removed: &[String],
+    renamed: &[(String, String)],
+    original: &DocumentMut,
+    phase_two: &[SeatPoolMove],
+) -> Vec<String> {
+    let mut lines: Vec<String> = removed
+        .iter()
+        .map(|key| format!("removes `{key}`"))
+        .collect();
+    // A rename phase 2 also reports is narrated once, in its own richer line
+    // (which names the pool and the repointed models alongside it).
+    for (from, to) in renamed {
+        if !phase_two.iter().any(|mv| mv.entry == *to) {
+            lines.push(rename_clause(from, to).trim_start_matches("; ").to_string());
+        }
+    }
+    lines.extend(seat_materialization_summary(original, phase_two, renamed));
+    lines
+}
+
+/// The completion line, naming the seat materialization (and any provider
+/// rename) when the migration did either: an operator who just gained
+/// provider entries -- or whose entry just moved -- needs to know before
 /// pointing a model at the pool.
 fn render_success(
     from_version: u32,
     to_version: u32,
+    renamed: &[(String, String)],
     original: &DocumentMut,
     phase_two: &[SeatPoolMove],
 ) {
@@ -1058,7 +1136,7 @@ fn render_success(
     } else {
         println!("migrated config to version {to_version}.");
     }
-    for line in seat_materialization_summary(original, phase_two) {
+    for line in change_summary(&[], renamed, original, phase_two) {
         println!("  - {line}");
     }
     if !phase_two.is_empty() {
@@ -1074,11 +1152,13 @@ fn render_success(
 /// prompt; a non-interactive run (no TTY on stdin) without `--yes` declines
 /// immediately without reading, so a silent pipe cannot hang it.
 /// Never called while the write lock is held. Called ONCE for the combined
-/// change (version stamp, key relocation, and any seat materialization),
-/// including a same-version normalization (`from_version == to_version`).
+/// change (version stamp, key relocation, any provider rename, and any seat
+/// materialization), including a same-version normalization
+/// (`from_version == to_version`).
 fn confirm_migration(
     from_version: u32,
     to_version: u32,
+    renamed: &[(String, String)],
     original: &DocumentMut,
     phase_two: &[SeatPoolMove],
     yes: bool,
@@ -1110,7 +1190,7 @@ fn confirm_migration(
              after migration."
         );
     }
-    for line in seat_materialization_summary(original, phase_two) {
+    for line in change_summary(&[], renamed, original, phase_two) {
         println!("  - {line}");
     }
     print!("proceed? [y/N] ");
@@ -1312,7 +1392,39 @@ upstream = \"claude-opus-4-8\"
 default = \"opus\"
 ";
 
-    /// A plausible token record. Values are inert: nothing in the migration
+    /// The FAMILY-NAMED shape: a v3 entry keyed by the provider family
+    /// itself, carrying a bare multi-seat `oauth://anthropic` ref, with two
+    /// models naming it. This is what the pre-pool quickstart taught, so it
+    /// is the most likely real migration input -- and the pool needs the
+    /// exact name the entry holds, so the entry moves to `anthropic-default`
+    /// and its models follow before the pool repoint runs.
+    const V3_FAMILY_NAMED: &str = "\
+# operator note: keep me
+version = 3
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+# the entry the quickstart told me to write
+[providers.anthropic]
+kind = \"anthropic-api\"
+api_key_ref = \"oauth://anthropic\"
+auth_kind = \"oauth-bearer\"
+seat_selection = \"round-robin\"
+
+[models.opus]
+provider = \"anthropic\"
+upstream = \"claude-opus-4-8\"
+
+[models.sonnet]
+provider = \"anthropic\"
+upstream = \"claude-sonnet-4-8\"
+
+[aliases]
+default = \"opus\"
+";
+
     /// path resolves or presents a token, and the seat KEYS are all phase 2
     /// reads.
     fn token_record() -> routectl_auth::oauth::types::TokenRecord {
@@ -1398,6 +1510,314 @@ default = \"opus\"
         );
         // Comments survive, and the result passes the shared gate.
         assert!(text.contains("# operator note: keep me"), "{text}");
+        gate(&text).expect("the migrated config must pass the gate");
+    }
+
+    // -----------------------------------------------------------------
+    // The FAMILY-NAMED shape: the entry holds the name the pool needs, so
+    // it moves to `<family>-default` inside the same combined diff.
+    // -----------------------------------------------------------------
+
+    /// GOLDEN: the exact shape the pre-pool quickstart taught migrates with
+    /// no hand-edits. The entry vacates the family name, both its models
+    /// follow the rename and then land on the pool, and the emitted file
+    /// passes the shared gate.
+    #[tokio::test]
+    async fn a_family_named_entry_is_renamed_and_pooled_in_one_change() {
+        // Arrange: three stored seats, so the bare ref is multi-seat.
+        let f = fixture(V3_FAMILY_NAMED);
+        seed_seats(&f, &["anthropic", "anthropic#work", "anthropic#personal"]);
+
+        // Act
+        let result = f.migrate(false, true).await.expect("combined migrate");
+
+        // Assert
+        assert_eq!(result, MigrateResult::Migrated { from_version: 3 });
+        let text = read(&f.config);
+        let migrated = parse_config(&text).expect("migrated config parses");
+
+        // The entry moved to the default-seat account name, taking its body
+        // (and its header comment) with it -- the family name is now free.
+        assert!(!text.contains("[providers.anthropic]\n"), "{text}");
+        assert!(text.contains("[providers.anthropic-default]"), "{text}");
+        assert!(
+            text.contains("# the entry the quickstart told me to write"),
+            "the renamed entry keeps its header comment: {text}"
+        );
+        let renamed = migrated
+            .providers
+            .get("anthropic-default")
+            .expect("the renamed entry exists");
+        assert_eq!(
+            renamed.secret_uris(),
+            vec!["oauth://anthropic"],
+            "the renamed entry keeps the DEFAULT-seat ref it had"
+        );
+
+        // The pool took the vacated family name and lists every seat.
+        assert_eq!(
+            migrated.pools["anthropic"].members,
+            vec![
+                "anthropic-default".to_string(),
+                "anthropic-personal".to_string(),
+                "anthropic-work".to_string(),
+            ],
+            "{text}"
+        );
+        // The relocated knob landed on the pool, not on any provider entry.
+        assert_eq!(
+            migrated.pools["anthropic"].seat_selection,
+            routectl_router::config::SeatSelection::RoundRobin
+        );
+
+        // BOTH models followed the rename and then landed on the pool. A
+        // model left naming `anthropic-default` would have lost two seats;
+        // one left naming `anthropic` would not resolve at all.
+        for nickname in ["opus", "sonnet"] {
+            assert_eq!(
+                migrated.models[nickname].provider, "anthropic",
+                "model `{nickname}` must route at the pool: {text}"
+            );
+        }
+        assert!(text.contains("# operator note: keep me"), "{text}");
+        gate(&text).expect("the migrated config must pass the gate");
+    }
+
+    /// The rename is the naming module's derivation, asserted against it: the
+    /// migration and the login writer must agree byte-for-byte, so a login
+    /// right after this migration proposes nothing for any stored seat.
+    #[tokio::test]
+    async fn a_renamed_family_entry_converges_with_the_login_writer() {
+        // Arrange
+        let f = fixture(V3_FAMILY_NAMED);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        f.migrate(false, true).await.expect("combined migrate");
+        let text = read(&f.config);
+        let config = parse_config(&text).expect("migrated config parses");
+
+        // Act / Assert: the entry name is the convention's, not this test's.
+        let expected = routectl_router::seat_naming::account_entry_name("anthropic", None)
+            .expect("the convention names the default seat");
+        assert!(config.providers.contains_key(&expected), "{text}");
+        for label in [None, Some("work")] {
+            let planned = crate::commands::login_surface::plan(&config, "anthropic", label)
+                .expect("the planner accepts a known login id");
+            assert!(
+                matches!(
+                    planned,
+                    crate::commands::login_surface::SurfacePlan::Nothing { .. }
+                ),
+                "a login right after a migration must write nothing; seat {label:?} got \
+                 {planned:?} over:\n{text}"
+            );
+        }
+    }
+
+    /// Idempotence over the migration's OWN output: the rename has landed,
+    /// so a rerun finds nothing to do and leaves the file byte-identical. A
+    /// second rename attempt would be the failure this pins -- the family
+    /// name is free again, so a planner that did not check would re-derive it.
+    #[tokio::test]
+    async fn a_renamed_family_migration_is_idempotent_on_a_rerun() {
+        // Arrange
+        let f = fixture(V3_FAMILY_NAMED);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        f.migrate(false, true).await.expect("first migrate");
+        let once = read(&f.config);
+
+        // Act
+        let result = f.migrate(false, true).await.expect("rerun");
+
+        // Assert
+        assert_eq!(result, MigrateResult::AlreadyCurrent);
+        assert_eq!(read(&f.config), once);
+    }
+
+    /// The rename is part of what the operator is asked to approve, so it has
+    /// to be BOTH in the dry-run candidate bytes and in the change summary --
+    /// a diff that renamed silently would move an entry the operator never
+    /// agreed to move.
+    #[tokio::test]
+    async fn a_family_rename_shows_in_the_dry_run_candidate_and_summary() {
+        // Arrange
+        let f = fixture(V3_FAMILY_NAMED);
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let plan = f.plan_combined().await;
+        let result = f.migrate(true, false).await.expect("dry-run");
+
+        // Assert: the candidate carries the rename and the repoint ...
+        assert_eq!(result, MigrateResult::DryRun);
+        assert!(
+            plan.contains("[providers.anthropic-default]"),
+            "the candidate must carry the rename: {plan}"
+        );
+        assert!(
+            !plan.contains("[providers.anthropic]\n"),
+            "no entry may still hold the pool's name: {plan}"
+        );
+        // ... and the summary names it in words.
+        let original = V3_FAMILY_NAMED
+            .parse::<DocumentMut>()
+            .expect("fixture parses");
+        let inventory = enumerate_seats(&f.credentials).await.expect("seats");
+        let from_version = raw_version_of(&original).expect("raw version");
+        let pure = plan_migration(&original, from_version, &BTreeMap::new(), &f.overlay)
+            .expect("pure plan");
+        let phase_two =
+            plan_phase_two(&pure, &original, from_version, &inventory).expect("phase 2 plans");
+        let lines = change_summary(&[], &pure.renamed_entries, &original, &phase_two);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("renames"), "{lines:?}");
+        assert!(lines[0].contains("anthropic-default"), "{lines:?}");
+
+        // Nothing was written.
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// The rename NEVER displaces a credential: when `<family>-default` is
+    /// already held by an entry authenticating with something else, there is
+    /// no name for the family-named entry to take, so the whole migration
+    /// refuses and the file stays byte-identical.
+    #[tokio::test]
+    async fn a_taken_rename_target_refuses_byte_identical() {
+        // Arrange: `anthropic-default` exists carrying a DIFFERENT credential.
+        let f = fixture(&V3_FAMILY_NAMED.replace(
+            "[models.opus]",
+            "[providers.anthropic-default]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"env://SOMETHING_ELSE\"\n\
+             \n\
+             [models.opus]",
+        ));
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("a taken rename target must refuse");
+
+        // Assert: the naming module's own wording, and nothing written.
+        let rendered = err.to_string();
+        assert!(rendered.contains("anthropic-default"), "{rendered}");
+        assert!(rendered.contains("Nothing was written"), "{rendered}");
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// A family-named entry sitting beside an entry that ALSO carries a bare
+    /// `oauth://<family>` ref is the family-fan-out class, not a rename
+    /// question: the two entries may name deliberately distinct egresses, so
+    /// phase 2 has no single pool to group and refuses before the rename is
+    /// considered. Pinned so the rename cannot quietly acquire the power to
+    /// merge two egresses.
+    #[tokio::test]
+    async fn a_family_named_entry_beside_a_second_bare_entry_refuses_as_fan_out() {
+        // Arrange: TWO entries carry a bare `oauth://anthropic` ref.
+        let f = fixture(&V3_FAMILY_NAMED.replace(
+            "[models.opus]",
+            "[providers.anthropic-default]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             \n\
+             [models.opus]",
+        ));
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+        let before = std::fs::read(&f.config).unwrap();
+
+        // Act
+        let err = f.migrate(false, true).await.expect_err("fan-out refuses");
+
+        // Assert
+        let rendered = err.to_string();
+        assert!(rendered.contains("[providers.anthropic]"), "{rendered}");
+        assert!(
+            rendered.contains("[providers.anthropic-default]"),
+            "{rendered}"
+        );
+        assert_eq!(std::fs::read(&f.config).unwrap(), before);
+    }
+
+    /// PHASE 2 owns the rename on its own when the entry carries NO
+    /// `seat_selection`: the pure rung has nothing to relocate, so no pool
+    /// block and no rename come from it, and the family name is vacated only
+    /// because the store says the family is multi-seat. Pinned separately
+    /// because it exercises `SeatPoolMove::rename_to` rather than the pure
+    /// rung's path.
+    #[tokio::test]
+    async fn a_knobless_family_named_entry_is_renamed_by_phase_two_alone() {
+        // Arrange
+        let f = fixture(&V3_FAMILY_NAMED.replace("seat_selection = \"round-robin\"\n", ""));
+        seed_seats(&f, &["anthropic", "anthropic#work"]);
+
+        // Act
+        f.migrate(false, true).await.expect("combined migrate");
+
+        // Assert
+        let text = read(&f.config);
+        let migrated = parse_config(&text).expect("migrated config parses");
+        assert!(
+            migrated.providers.contains_key("anthropic-default"),
+            "{text}"
+        );
+        assert!(!migrated.providers.contains_key("anthropic"), "{text}");
+        assert_eq!(
+            migrated.pools["anthropic"].members,
+            vec![
+                "anthropic-default".to_string(),
+                "anthropic-work".to_string()
+            ],
+            "{text}"
+        );
+        // No knob to relocate means the pool takes the default strategy.
+        assert_eq!(
+            migrated.pools["anthropic"].seat_selection,
+            routectl_router::config::SeatSelection::default()
+        );
+        for nickname in ["opus", "sonnet"] {
+            assert_eq!(
+                migrated.models[nickname].provider, "anthropic",
+                "model `{nickname}` must route at the pool: {text}"
+            );
+        }
+        gate(&text).expect("the migrated config must pass the gate");
+    }
+
+    /// A SINGLE-seat family-named entry is left alone: at v4 its bare ref
+    /// means the default seat, which IS its one seat, so there is nothing to
+    /// pool and no reason to move the entry or churn its models. Only the
+    /// pure rung's knob relocation applies -- and that relocation renames
+    /// too, because the pool it creates needs the same name.
+    #[tokio::test]
+    async fn a_single_seat_family_named_entry_only_relocates_its_knob() {
+        // Arrange
+        let f = fixture(V3_FAMILY_NAMED);
+        seed_seats(&f, &["anthropic"]);
+
+        // Act
+        f.migrate(false, true).await.expect("migrate");
+
+        // Assert: no labelled-seat accounts materialized ...
+        let text = read(&f.config);
+        assert!(!text.contains("[providers.anthropic-work]"), "{text}");
+        let migrated = parse_config(&text).expect("migrated config parses");
+        // ... but the pool still needs the family name, so the entry vacated
+        // it and both models followed the rename (not the pool repoint --
+        // a one-member pool has the same breadth as its member).
+        assert_eq!(
+            migrated.pools["anthropic"].members,
+            vec!["anthropic-default".to_string()],
+            "{text}"
+        );
+        for nickname in ["opus", "sonnet"] {
+            assert_eq!(
+                migrated.models[nickname].provider, "anthropic-default",
+                "model `{nickname}` must follow the renamed entry: {text}"
+            );
+        }
         gate(&text).expect("the migrated config must pass the gate");
     }
 
@@ -1639,6 +2059,7 @@ default = \"opus\"
             .expect("fixture parses");
         let moves = vec![SeatPoolMove {
             entry: "anthropic-managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: vec![SeatPoolAccount {
                 entry_name: "anthropic-work".to_string(),
@@ -1647,7 +2068,7 @@ default = \"opus\"
             }],
         }];
 
-        let lines = seat_materialization_summary(&original, &moves);
+        let lines = seat_materialization_summary(&original, &moves, &[]);
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("[pools.anthropic]"), "{lines:?}");
@@ -2179,11 +2600,11 @@ default = \"opus\"
             "test harness stdin must be non-interactive for this assertion",
         );
         assert!(
-            !confirm_migration(3, 4, &DocumentMut::new(), &[], false),
+            !confirm_migration(3, 4, &[], &DocumentMut::new(), &[], false),
             "non-TTY without --yes must decline",
         );
         assert!(
-            confirm_migration(3, 4, &DocumentMut::new(), &[], true),
+            confirm_migration(3, 4, &[], &DocumentMut::new(), &[], true),
             "--yes must still proceed byte-identically",
         );
     }

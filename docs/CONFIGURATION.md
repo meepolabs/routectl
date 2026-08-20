@@ -3959,6 +3959,16 @@ one confirmation, applied as a unit:
   `oauth://<family>#<label>` ref) and a pool listing them alongside the
   original entry, so every seat that used to be reachable still is.
 - A single stored seat needs no rewrite: the default seat IS that seat.
+- An entry NAMED after its own provider family (`[providers.anthropic]`
+  carrying `oauth://anthropic` -- what earlier quickstarts taught) holds
+  the exact name the pool must take, and providers, pools and model
+  nicknames share one namespace. Such an entry is RENAMED to
+  `<family>-default` -- the name its own default-seat ref would generate
+  anyway -- and every `[models.X]` naming it follows the rename. This is
+  part of the same all-or-nothing change: the rename appears in the
+  combined diff and in the confirmation, so no entry moves without your
+  say-so. It refuses instead if `<family>-default` is already held by an
+  entry authenticating with a different credential.
 
 Comments and key order survive. Re-running is a no-op. Nothing is written
 unless the whole change is valid and confirmed -- `--dry-run` prints the

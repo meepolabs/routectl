@@ -3,8 +3,9 @@
 //! strings and every refusal class rather than round-tripping.
 
 use super::{
-    SeatNamingError, account_entry_name, growth_pools_for_family, plan_new_seat,
-    plan_pool_materialization, pool_name, seat_secret_ref,
+    SeatNamingError, account_entry_name, family_default_rename, growth_pools_for_family,
+    plan_entry_materialization, plan_new_seat, plan_pool_materialization, pool_name,
+    seat_secret_ref,
 };
 use crate::config::Config;
 
@@ -151,6 +152,128 @@ fn re_deriving_over_its_own_output_reports_everything_already_present() {
     // Assert
     assert!(plan.pool_exists);
     assert!(plan.accounts.iter().all(|a| a.already_present));
+}
+
+/// An entry NAMED after its own provider family holds the name the pool
+/// needs, so the convention says it moves to the default-seat account name.
+/// Any other name keeps itself.
+#[test]
+fn only_a_family_named_entry_is_told_to_move_to_the_default_account_name() {
+    assert_eq!(
+        family_default_rename("anthropic", "anthropic").unwrap(),
+        Some("anthropic-default".to_string())
+    );
+    assert_eq!(
+        family_default_rename("anthropic-managed", "anthropic").unwrap(),
+        None
+    );
+    assert_eq!(
+        family_default_rename("anthropic-default", "anthropic").unwrap(),
+        None
+    );
+}
+
+/// The family-named shape materializes: the entry vacates the family name,
+/// the pool takes it, and the entry's own name does NOT read as a collision
+/// with the pool it is making room for.
+#[test]
+fn a_family_named_entry_materializes_with_a_rename_and_no_self_collision() {
+    // Arrange
+    let config = parse(
+        "[providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n",
+    );
+
+    // Act
+    let plan = plan_entry_materialization(&config, "anthropic", "anthropic", [None, Some("work")])
+        .expect("the family-named shape materializes");
+
+    // Assert
+    assert_eq!(plan.renamed_entry.as_deref(), Some("anthropic-default"));
+    assert_eq!(plan.pool.pool_name, "anthropic");
+    assert!(!plan.pool.pool_exists);
+    let names: Vec<&str> = plan
+        .pool
+        .accounts
+        .iter()
+        .map(|a| a.entry_name.as_str())
+        .collect();
+    assert_eq!(names, ["anthropic-default", "anthropic-work"]);
+}
+
+/// The same derivation over a NON-family-named entry plans no rename, and
+/// the pool-name collision check is unchanged: only the entry that is
+/// vacating the name is discounted.
+#[test]
+fn a_non_family_named_entry_materializes_without_a_rename() {
+    // Arrange
+    let config = parse(
+        "[providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n",
+    );
+
+    // Act
+    let plan = plan_entry_materialization(&config, "anthropic-managed", "anthropic", [None])
+        .expect("plans");
+
+    // Assert
+    assert_eq!(plan.renamed_entry, None);
+    assert_eq!(plan.pool.pool_name, "anthropic");
+}
+
+/// A DIFFERENT entry holding the family name still collides: the entry being
+/// materialized is not the one vacating it, so the pool has nowhere to go.
+#[test]
+fn a_third_entry_holding_the_family_name_still_refuses() {
+    // Arrange
+    let config = parse(
+        "[providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"env://SOMETHING_ELSE\"\n",
+    );
+
+    // Act
+    let err = plan_entry_materialization(&config, "anthropic-managed", "anthropic", [None])
+        .expect_err("refuses");
+
+    // Assert
+    assert!(
+        matches!(err, SeatNamingError::PoolNameTaken { ref name } if name == "anthropic"),
+        "got {err:?}"
+    );
+}
+
+/// The rename never displaces a credential: `<family>-default` already held
+/// by another entry leaves the family-named entry nowhere to move.
+#[test]
+fn a_taken_rename_target_refuses_as_an_entry_name_collision() {
+    // Arrange
+    let config = parse(
+        "[providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [providers.anthropic-default]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"env://SOMETHING_ELSE\"\n",
+    );
+
+    // Act
+    let err = plan_entry_materialization(&config, "anthropic", "anthropic", [None, Some("work")])
+        .expect_err("refuses");
+
+    // Assert
+    assert!(
+        matches!(
+            err,
+            SeatNamingError::EntryNameTaken { ref name } if name == "anthropic-default"
+        ),
+        "got {err:?}"
+    );
 }
 
 /// A generated entry name held by an entry with a DIFFERENT credential is

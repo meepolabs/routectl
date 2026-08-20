@@ -16,6 +16,12 @@
 //! - the account entry for the DEFAULT seat takes `<family>-default`,
 //! - the account entry for a labelled seat takes `<family>-<label>`.
 //!
+//! One consequence has its own derivation ([`family_default_rename`]): a
+//! provider entry NAMED after its own family holds the name the pool must
+//! take, so materializing that family's seats moves the entry onto
+//! `<family>-default` -- the name its own bare (default-seat) ref would
+//! generate anyway.
+//!
 //! Mapping is EXACT or refused. A label is never normalized, truncated, or
 //! case-folded to make it fit a name: a label that cannot appear verbatim
 //! in a config entry name, two labels that would generate one name, and a
@@ -145,6 +151,20 @@ pub struct PoolMaterialization {
     pub accounts: Vec<GeneratedAccount>,
 }
 
+/// One provider entry's full move into its family's pool: the pool and
+/// accounts its seats materialize into, plus the rename the entry itself
+/// needs when it holds the name the pool must take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EntryMaterialization {
+    /// The `[providers.<name>]` key the source entry moves to, or `None`
+    /// when it keeps the name it has. Set only for an entry named after its
+    /// own provider family -- see [`family_default_rename`].
+    pub renamed_entry: Option<String>,
+    /// The pool and per-seat accounts the family materializes into.
+    pub pool: PoolMaterialization,
+}
+
 /// Where a newly logged-in seat lands: the entry name it takes and the
 /// growth-marked pool that would receive it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +213,38 @@ pub fn account_entry_name(family: &str, label: Option<&str>) -> Result<String, S
     }
 }
 
+/// The account-entry name a provider entry must move to so the POOL can
+/// claim the plain family name, or `None` when the entry does not hold that
+/// name.
+///
+/// A config authored before pools existed commonly names its single OAuth
+/// entry after the family itself (`[providers.anthropic]` carrying
+/// `oauth://anthropic`). The pool needs that exact name, and providers,
+/// pools and model nicknames share one namespace -- so materializing the
+/// family's seats means moving the entry onto the DEFAULT-seat account name.
+/// Its bare ref IS the default seat's credential, so `<family>-default` is
+/// the only name it can take, and deriving it here rather than at the two
+/// call sites is what keeps the migrator and the login writer in agreement.
+///
+/// PURE: it answers what the convention requires, not whether the target
+/// name is free. Each caller checks occupancy against the namespace it can
+/// see (a typed `Config` for [`plan_pool_materialization`], the raw document
+/// for the pure migration rung) and refuses rather than displacing an entry.
+///
+/// # Errors
+///
+/// [`SeatNamingError::UnusableToken`] for a family token that cannot appear
+/// verbatim in a config key.
+pub fn family_default_rename(
+    entry_name: &str,
+    family: &str,
+) -> Result<Option<String>, SeatNamingError> {
+    if entry_name == pool_name(family)? {
+        return account_entry_name(family, None).map(Some);
+    }
+    Ok(None)
+}
+
 /// The `oauth://` ref for one seat of a provider family.
 pub fn seat_secret_ref(family: &str, label: Option<&str>) -> String {
     match label {
@@ -219,9 +271,62 @@ pub fn plan_pool_materialization<'a>(
     family: &str,
     labels: impl IntoIterator<Item = Option<&'a str>>,
 ) -> Result<PoolMaterialization, SeatNamingError> {
+    plan_pool_names(config, family, labels, None)
+}
+
+/// Derive one provider entry's full move into its family's pool: the pool
+/// and per-seat accounts of [`plan_pool_materialization`], plus the rename
+/// `entry_name` itself needs when it holds the plain family name the pool
+/// must take.
+///
+/// This is the derivation the migration's store-aware phase uses, and the
+/// only one that can answer the family-named shape (`[providers.anthropic]`
+/// carrying `oauth://anthropic`): the entry vacates the family name for the
+/// pool and moves to `<family>-default`, so the pool-name occupancy check
+/// discounts the entry that is vacating.
+///
+/// # Errors
+///
+/// Every class [`plan_pool_materialization`] refuses on, plus
+/// [`SeatNamingError::EntryNameTaken`] when the rename target
+/// `<family>-default` is already held by a DIFFERENT provider entry -- the
+/// rename would have to displace a second credential, which is never a
+/// rewrite this module performs.
+pub fn plan_entry_materialization<'a>(
+    config: &Config,
+    entry_name: &str,
+    family: &str,
+    labels: impl IntoIterator<Item = Option<&'a str>>,
+) -> Result<EntryMaterialization, SeatNamingError> {
+    let renamed_entry = family_default_rename(entry_name, family)?;
+    if let Some(renamed) = &renamed_entry
+        && config.providers.contains_key(renamed)
+    {
+        return Err(SeatNamingError::EntryNameTaken {
+            name: renamed.clone(),
+        });
+    }
+    let vacating = renamed_entry.as_ref().map(|_| entry_name);
+    let pool = plan_pool_names(config, family, labels, vacating)?;
+    Ok(EntryMaterialization {
+        renamed_entry,
+        pool,
+    })
+}
+
+/// Shared body of the two derivations. `vacating` names the provider entry
+/// that is being renamed away from the pool name, and so must not count as
+/// holding it.
+fn plan_pool_names<'a>(
+    config: &Config,
+    family: &str,
+    labels: impl IntoIterator<Item = Option<&'a str>>,
+    vacating: Option<&str>,
+) -> Result<PoolMaterialization, SeatNamingError> {
     let pool = pool_name(family)?;
     let pool_exists = config.pools.contains_key(&pool);
-    if !pool_exists && (config.providers.contains_key(&pool) || config.models.contains_key(&pool)) {
+    let held_by_provider = config.providers.contains_key(&pool) && vacating != Some(pool.as_str());
+    if !pool_exists && (held_by_provider || config.models.contains_key(&pool)) {
         return Err(SeatNamingError::PoolNameTaken { name: pool });
     }
 
