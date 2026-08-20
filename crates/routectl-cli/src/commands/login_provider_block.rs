@@ -13,8 +13,8 @@
 //! drift from the parser that reads it back.
 
 use routectl_auth::SecretRef;
-use routectl_router::provider_kind_for_oauth_id;
 use routectl_router::seat_naming::account_entry_name;
+use routectl_router::{ProviderEntry, provider_kind_for_oauth_id};
 use toml_edit::Table;
 
 /// The auth-selector field and endpoint an `oauth://<id>` credential must
@@ -164,6 +164,69 @@ pub fn required_auth_fields(oauth_id: &str) -> Option<RequiredAuthFields> {
         kind,
         auth_selector: shape.auth_field,
     })
+}
+
+/// An entry whose `api_key_ref` names a managed OAuth seat while its
+/// auth-selector field selects a different surface.
+pub struct AuthSelectorGap {
+    /// The login-provider id the ref names. Effectively closed-vocabulary:
+    /// [`auth_selector_gap`] returns `None` unless the id is one the shape
+    /// table knows, and the ref's `#<label>` fragment is dropped, so no
+    /// operator-chosen token rides along.
+    pub family: String,
+    /// The auth-selector key the entry must carry.
+    pub key: &'static str,
+    /// The value that key must hold for the OAuth surface.
+    pub required: &'static str,
+    /// The value the entry carries today (`None` when the field is absent
+    /// from the entry's serialization).
+    pub found: Option<String>,
+}
+
+/// Whether `entry` consumes an `oauth://` credential on a surface whose
+/// auth selector it does not set, i.e. the bearer would be dispatched on
+/// the API-key surface and rejected.
+///
+/// Grounded in [`required_auth_fields`] -- the single auth-shape authority
+/// -- so a family whose variant carries no selector field yields nothing,
+/// and a family whose required value is the serde default never reports a
+/// gap on an entry that simply omits the key.
+///
+/// Silent when the entry's `kind` does not match the family's: the selector
+/// key may not even exist on that variant (the entries are
+/// `deny_unknown_fields`), so naming it would be unactionable. Also silent
+/// for a non-`oauth://` ref, whose surface is the operator's own call.
+#[must_use]
+pub fn auth_selector_gap(entry: &ProviderEntry) -> Option<AuthSelectorGap> {
+    let SecretRef::OAuth { provider, .. } = SecretRef::parse(entry.api_key_ref()?).ok()? else {
+        return None;
+    };
+    let required = required_auth_fields(&provider)?;
+    if entry.kind_str() != required.kind {
+        return None;
+    }
+    let (key, value) = required.auth_selector?;
+    let found = entry_field_str(entry, key);
+    if found.as_deref() == Some(value) {
+        return None;
+    }
+    Some(AuthSelectorGap {
+        family: provider,
+        key,
+        required: value,
+        found,
+    })
+}
+
+/// One string-valued field of a provider entry, read through its own
+/// serialization so the compared token is exactly what the parser accepts
+/// (the auth-selector enums are kebab-case on the wire).
+pub(crate) fn entry_field_str(entry: &ProviderEntry, key: &str) -> Option<String> {
+    toml::Value::try_from(entry)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(str::to_string)
 }
 
 impl ProviderBlock {
@@ -583,5 +646,150 @@ mod tests {
             "{}",
             renamed.render()
         );
+    }
+}
+
+#[cfg(test)]
+mod auth_selector_gap_tests {
+    use super::{auth_selector_gap, provider_block};
+    use routectl_router::{Config, ProviderEntry};
+
+    fn entry(toml_text: &str) -> ProviderEntry {
+        let cfg: Config = toml::from_str(toml_text).expect("entry must parse");
+        cfg.providers
+            .into_values()
+            .next()
+            .expect("one provider entry")
+    }
+
+    /// The defect the whole check exists for: an `oauth://anthropic` ref on
+    /// an entry that never selects the bearer surface, so the token is sent
+    /// as `x-api-key` and 401s.
+    #[test]
+    fn an_oauth_ref_without_its_auth_selector_reports_the_gap() {
+        // Arrange
+        let entry = entry(
+            "[providers.claude]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n",
+        );
+
+        // Act
+        let gap = auth_selector_gap(&entry).expect("a bare oauth ref must report a gap");
+
+        // Assert
+        assert_eq!(gap.family, "anthropic");
+        assert_eq!(gap.key, "auth_kind");
+        assert_eq!(gap.required, "oauth-bearer");
+        assert_eq!(gap.found.as_deref(), Some("api-key"));
+    }
+
+    /// The negative the acceptance names: a correctly shaped oauth-bearer
+    /// entry passes silently.
+    #[test]
+    fn an_oauth_bearer_entry_reports_no_gap() {
+        let entry = entry(
+            "[providers.claude]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             auth_kind = \"oauth-bearer\"\n",
+        );
+
+        assert!(auth_selector_gap(&entry).is_none());
+    }
+
+    /// A labelled seat is the same entry shape; the label must not change
+    /// the verdict, and the reported family carries no fragment.
+    #[test]
+    fn a_labelled_oauth_ref_is_judged_on_its_family_alone() {
+        let bad = entry(
+            "[providers.claude]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#seat-b\"\n",
+        );
+        let good = entry(
+            "[providers.claude]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#seat-b\"\n\
+             auth_kind = \"oauth-bearer\"\n",
+        );
+
+        let gap = auth_selector_gap(&bad).expect("gap");
+        assert_eq!(gap.family, "anthropic");
+        assert!(auth_selector_gap(&good).is_none());
+    }
+
+    /// The gemini cloud-code surface is the second selector key: the same
+    /// check must name `auth_mode`, not `auth_kind`.
+    #[test]
+    fn a_bare_antigravity_ref_reports_the_auth_mode_gap() {
+        let entry = entry(
+            "[providers.g]\n\
+             kind = \"gemini\"\n\
+             api_key_ref = \"oauth://antigravity\"\n",
+        );
+
+        let gap = auth_selector_gap(&entry).expect("gap");
+        assert_eq!(gap.key, "auth_mode");
+        assert_eq!(gap.required, "cloud-code");
+    }
+
+    /// An `env://` or `file://` key is the operator's own surface call --
+    /// the check is scoped to managed OAuth seats.
+    #[test]
+    fn a_non_oauth_ref_reports_no_gap() {
+        let entry = entry(
+            "[providers.direct]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"env://ANTHROPIC_API_KEY\"\n",
+        );
+
+        assert!(auth_selector_gap(&entry).is_none());
+    }
+
+    /// A ref whose family expects a different `kind` is silent: the
+    /// selector key may not exist on the variant the entry actually is, so
+    /// naming it would be unactionable advice.
+    #[test]
+    fn an_oauth_ref_on_a_foreign_kind_reports_no_gap() {
+        let entry = entry(
+            "[providers.mixed]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://example.invalid/v1\"\n\
+             api_key_ref = \"oauth://anthropic\"\n",
+        );
+
+        assert!(auth_selector_gap(&entry).is_none());
+    }
+
+    /// An unknown oauth family has no shape to check against.
+    #[test]
+    fn an_unknown_oauth_family_reports_no_gap() {
+        let entry = entry(
+            "[providers.x]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://not-a-provider\"\n",
+        );
+
+        assert!(auth_selector_gap(&entry).is_none());
+    }
+
+    /// The check and the block renderer read ONE table: every block login
+    /// prints must itself be gap-free, which is what makes the printed
+    /// shape and the validated shape the same shape.
+    #[test]
+    fn every_printed_login_block_is_gap_free() {
+        for id in routectl_auth::oauth::known_provider_ids() {
+            for label in [None, Some("seat-b")] {
+                let block = provider_block(id, label).expect("block");
+                let cfg: Config = toml::from_str(&block.render()).expect("block parses");
+                for (name, entry) in &cfg.providers {
+                    assert!(
+                        auth_selector_gap(entry).is_none(),
+                        "login block for `{id}` (entry `{name}`) reports its own gap"
+                    );
+                }
+            }
+        }
     }
 }
