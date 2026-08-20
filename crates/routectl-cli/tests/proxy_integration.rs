@@ -424,7 +424,12 @@ async fn mitm_absent_does_not_trip_the_hard_refuse_on_a_non_loopback_bind() {
     ));
 
     let base_url = format!("http://127.0.0.1:{port}");
+    // `biased;` with the return branch first: an unbiased select! picks
+    // randomly when both arms are ready, so a regression that returns
+    // right after answering the health request could win the coin flip
+    // and pass. Polling order must make an early return always lose.
     tokio::select! {
+        biased;
         served = &mut handle => panic!(
             "a non-loopback bind with [mitm] absent and listener auth configured must not error \
              out, but serve_on_listener returned: {served:?}"
@@ -432,6 +437,11 @@ async fn mitm_absent_does_not_trip_the_hard_refuse_on_a_non_loopback_bind() {
         () = await_health(&base_url) => {}
     }
 
+    assert!(
+        !handle.is_finished(),
+        "serve_on_listener must still be serving after /health answered: a return right after \
+         the health response is the same hard-refuse regression, arriving late"
+    );
     handle.abort();
 }
 
