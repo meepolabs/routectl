@@ -37,7 +37,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use routectl_auth::SecretRef;
 use routectl_core::failure_class::{FailureClass, class_guidance_for_status};
-use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value};
+use toml_edit::{Array, DocumentMut, Item, Key, Table, TableLike, Value};
 
 use crate::catalog::{CachePricingOverride, CachePricingSelector};
 use crate::catalog_overlay::{self, OverlayCell, OverlaySource};
@@ -103,6 +103,13 @@ pub struct MigrationPlan {
     /// Human-readable descriptions of the keys this migration removes, for
     /// a dry-run change summary. Derived purely from the original document.
     pub removed_keys: Vec<String>,
+    /// The provider entries the PURE v3 -> v4 rung renames, as
+    /// `(from, to)` pairs in document order: an entry holding its own
+    /// provider-family name vacates it for the `[pools.<family>]` block the
+    /// knob relocation creates. Derived purely from the original document,
+    /// for the same change summary -- a rename the operator is not shown is a
+    /// rename they never agreed to.
+    pub renamed_entries: Vec<(String, String)>,
     /// The per-rung outcomes, in ladder order.
     pub steps: Vec<StepOutcome>,
 }
@@ -1042,21 +1049,43 @@ pub fn bare_oauth_pool_candidates(doc: &DocumentMut) -> Vec<BareOauthRef> {
 /// lets the command compose one combined diff and reproduce it byte-for-byte
 /// under the write lock.
 ///
-/// The ORIGINAL entry is always the pool's first member and keeps its
-/// operator-chosen name: at v4 its bare `oauth://<family>` ref means the
-/// default seat, and every `[models.X] provider` value naming it keeps
-/// resolving. Only the family's LABELLED seats materialize as new entries,
-/// under the names the naming convention derives.
+/// The ORIGINAL entry is always the pool's first member. It keeps its
+/// operator-chosen name in the ordinary case: at v4 its bare
+/// `oauth://<family>` ref means the default seat, and every `[models.X]
+/// provider` value naming it keeps resolving. Only the family's LABELLED
+/// seats materialize as new entries, under the names the naming convention
+/// derives.
+///
+/// The ONE exception is `rename_to`: an entry NAMED after its own provider
+/// family holds the very name the pool must take (providers, pools and
+/// model nicknames share one namespace), so it moves to the default-seat
+/// account name the convention derives for it. That shape is what a config
+/// authored before pools existed looks like, so the migration renames rather
+/// than refusing and leaving the operator to hand-edit the entry and every
+/// model naming it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatPoolMove {
     /// The provider entry the move starts from: the pool's default-seat
-    /// member.
+    /// member, named as it appears in the document BEFORE the move.
     pub entry: String,
+    /// The name `entry` is renamed to, or `None` when it keeps its own.
+    /// Set only for an entry holding its family's plain name, which the
+    /// pool needs -- see [`crate::seat_naming::family_default_rename`].
+    pub rename_to: Option<String>,
     /// The `[pools.<name>]` key the accounts group under.
     pub pool: String,
     /// One account entry per LABELLED seat, in write order. Each is a copy
     /// of `entry` carrying that seat's `#label` ref.
     pub accounts: Vec<SeatPoolAccount>,
+}
+
+impl SeatPoolMove {
+    /// The name the pool's default-seat member carries AFTER the move: the
+    /// rename target when one is planned, else the entry's own name.
+    #[must_use]
+    pub fn member_name(&self) -> &str {
+        self.rename_to.as_deref().unwrap_or(&self.entry)
+    }
 }
 
 /// One account entry a [`SeatPoolMove`] writes.
@@ -1077,14 +1106,18 @@ pub struct SeatPoolAccount {
 ///
 /// The pool takes the plain provider-family name from
 /// [`crate::seat_naming::pool_name`] -- never a rule restated here, because
-/// the migration and the login writer must generate identical names.
+/// the migration and the login writer must generate identical names. An
+/// entry that itself HOLDS that name vacates it, moving to the default-seat
+/// account name [`crate::seat_naming::family_default_rename`] derives; the
+/// models naming it follow the rename.
 ///
 /// # Errors
 ///
 /// Returns a description of why the move has no single answer: no
-/// `oauth://` ref to derive a family from, an unusable family token, or a
-/// derived pool name already held by a provider entry, a model nickname, or
-/// a hand-authored pool block. The caller turns these into one
+/// `oauth://` ref to derive a family from, an unusable family token, a
+/// derived pool name already held by an unrelated entry, a model nickname,
+/// or a hand-authored pool block, or a rename target already held by a
+/// different entry. The caller turns these into one
 /// [`Refusal::SeatSelectionRelocation`], leaving the document untouched.
 fn plan_seat_pool_move(doc: &DocumentMut, entry_name: &str) -> Result<SeatPoolMove, String> {
     let entry = doc
@@ -1100,12 +1133,50 @@ fn plan_seat_pool_move(doc: &DocumentMut, entry_name: &str) -> Result<SeatPoolMo
              `{PROVIDER_SECRET_REF_KEY}`, so no provider family names its pool"
         )
     })?;
-    let pool = derive_pool_name(doc, entry_name, &family)?;
+    let rename_to = plan_family_rename(doc, entry_name, &family)?;
+    let pool = derive_pool_name(doc, entry_name, &family, rename_to.is_some())?;
     Ok(SeatPoolMove {
         entry: entry_name.to_string(),
+        rename_to,
         pool,
         accounts: Vec::new(),
     })
+}
+
+/// The name a family-named provider entry vacates its family name for, or
+/// `None` when the entry is not family-named.
+///
+/// The derivation is the naming module's; the occupancy check is this
+/// caller's, against the raw document (the pure rung has no typed `Config`).
+/// A target already held by a different entry refuses: the migration never
+/// displaces one credential's entry with another's.
+fn plan_family_rename(
+    doc: &DocumentMut,
+    entry_name: &str,
+    family: &str,
+) -> Result<Option<String>, String> {
+    let renamed = crate::seat_naming::family_default_rename(entry_name, family).map_err(|e| {
+        format!("[providers.{entry_name}]: account entry name for provider family `{family}`: {e}")
+    })?;
+    let Some(renamed) = renamed else {
+        return Ok(None);
+    };
+    if provider_entry_exists(doc, &renamed) {
+        return Err(format!(
+            "[providers.{entry_name}] holds the plain family name `{family}`, which the \
+             `[pools.{family}]` block must take, so the entry moves to `{renamed}` -- but a \
+             `[providers.{renamed}]` entry already exists and authenticates with its own \
+             credential. Rename one of them by hand, then rerun"
+        ));
+    }
+    Ok(Some(renamed))
+}
+
+/// Whether `[providers.<name>]` is present in the document.
+fn provider_entry_exists(doc: &DocumentMut, name: &str) -> bool {
+    doc.get("providers")
+        .and_then(Item::as_table_like)
+        .is_some_and(|providers| providers.contains_key(name))
 }
 
 /// The `[pools.<name>]` key one provider entry's accounts group under, or a
@@ -1114,17 +1185,20 @@ fn plan_seat_pool_move(doc: &DocumentMut, entry_name: &str) -> Result<SeatPoolMo
 ///
 /// Providers, pools and model nicknames share ONE namespace on a
 /// `[models.X] provider` value, so a derived pool name held by any of them
-/// is a refusal rather than a guess -- including the case where the entry
-/// itself already holds its family's plain name, because taking it for the
-/// pool would repoint every model naming that entry.
-fn derive_pool_name(doc: &DocumentMut, entry_name: &str, family: &str) -> Result<String, String> {
+/// is a refusal rather than a guess. `entry_vacates_pool_name` says the
+/// entry being moved is the one holding that name and is about to give it
+/// up, so it does not count as a collision -- that shape is a rename, not an
+/// unrelated claimant.
+fn derive_pool_name(
+    doc: &DocumentMut,
+    entry_name: &str,
+    family: &str,
+    entry_vacates_pool_name: bool,
+) -> Result<String, String> {
     let pool = crate::seat_naming::pool_name(family).map_err(|e| {
         format!("[providers.{entry_name}]: pool name for provider family `{family}`: {e}")
     })?;
-    let held_by_provider = doc
-        .get("providers")
-        .and_then(Item::as_table_like)
-        .is_some_and(|providers| providers.contains_key(&pool));
+    let held_by_provider = !entry_vacates_pool_name && provider_entry_exists(doc, &pool);
     let held_by_model = doc
         .get("models")
         .and_then(Item::as_table_like)
@@ -1149,10 +1223,17 @@ fn derive_pool_name(doc: &DocumentMut, entry_name: &str, family: &str) -> Result
     Ok(pool)
 }
 
-/// Apply one [`SeatPoolMove`] to `doc`, format-preserving: move the entry's
-/// `seat_selection` (when present) onto the pool block, clone the entry once
-/// per labelled seat, write `[pools.<name>]` listing the entry plus every
-/// account, and repoint the models that routed at the entry onto the pool.
+/// Apply one [`SeatPoolMove`] to `doc`, format-preserving: rename the entry
+/// when the pool needs its name, move the entry's `seat_selection` (when
+/// present) onto the pool block, clone the entry once per labelled seat,
+/// write `[pools.<name>]` listing the entry plus every account, and repoint
+/// the models that routed at the entry onto the pool.
+///
+/// ORDER MATTERS. The rename runs FIRST and takes the models with it, so a
+/// model naming the family-named entry follows it to `<family>-default`
+/// before the pool repoint decides whether it should name the pool instead.
+/// Composed the other way round, a renamed entry would leave its models
+/// pointing at a `[providers.X]` key that no longer exists.
 ///
 /// The repoint is what PRESERVES DISPATCH BREADTH, and it runs exactly when
 /// the move materializes labelled-seat accounts. Under v3 a bare
@@ -1171,28 +1252,64 @@ fn derive_pool_name(doc: &DocumentMut, entry_name: &str, family: &str) -> Result
 ///
 /// Every map walk goes through [`TableLike`] so an inline `providers = { ...
 /// }` / `models = { ... }` shape is handled as well as the standard-table
-/// one. Idempotent: an account already present with the right ref is left
-/// alone, a member already listed is not duplicated, and a model already
-/// naming the pool is not rewritten.
+/// one. Idempotent: an already-applied rename is a no-op (the source key is
+/// gone and the target already carries the entry), an account already present
+/// with the right ref is left alone, a member already listed is not
+/// duplicated, and a model already naming the pool is not rewritten.
 pub fn apply_seat_pool_move(doc: &mut DocumentMut, mv: &SeatPoolMove) {
-    let selection = take_provider_seat_selection(doc, &mv.entry);
+    if let Some(renamed) = &mv.rename_to {
+        rename_provider_entry(doc, &mv.entry, renamed);
+    }
+    let member = mv.member_name().to_string();
+    let selection = take_provider_seat_selection(doc, &member);
 
     for account in &mv.accounts {
-        clone_provider_entry(doc, &mv.entry, account);
+        clone_provider_entry(doc, &member, account);
     }
-    let mut members = vec![mv.entry.as_str()];
+    let mut members = vec![member.as_str()];
     members.extend(mv.accounts.iter().map(|a| a.entry_name.as_str()));
     write_pool_block(doc, &mv.pool, &members, selection);
     if !mv.accounts.is_empty() {
-        repoint_models_at_pool(doc, &mv.entry, &mv.pool);
+        repoint_models_at(doc, &member, &mv.pool);
     }
 }
 
-/// Repoint every `[models.X] provider` value naming `entry` at `pool`.
+/// Move a `[providers.<from>]` block to `[providers.<to>]`, taking the
+/// models that named it along, format-preserving: the block's own body,
+/// comments and position are the item's, and the key's decor (the comment
+/// lines attached to the header) rides on the key.
+///
+/// A no-op when `from` is absent (an already-applied rename) or when `to` is
+/// occupied -- the caller derives `to` through the naming module, which
+/// refuses an occupied target rather than displacing a credential, so
+/// reaching either arm means the rename has already landed.
+fn rename_provider_entry(doc: &mut DocumentMut, from: &str, to: &str) {
+    let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    if providers.contains_key(to) {
+        return;
+    }
+    let Some(key) = providers.key(from).cloned() else {
+        return;
+    };
+    let Some(item) = providers.remove(from) else {
+        return;
+    };
+    let renamed = Key::new(to)
+        .with_leaf_decor(key.leaf_decor().clone())
+        .with_dotted_decor(key.dotted_decor().clone());
+    providers.entry_format(&renamed).or_insert(item);
+    repoint_models_at(doc, from, to);
+}
+
+/// Repoint every `[models.X] provider` value naming `from` at `to`.
 ///
 /// `[models.X] provider` resolves against providers and pools in ONE
-/// namespace, so this is a rename of the target, not a new field.
-fn repoint_models_at_pool(doc: &mut DocumentMut, entry: &str, pool: &str) {
+/// namespace, so this is a rename of the target, not a new field -- which is
+/// why the same rewrite serves both moving models onto a pool and following
+/// a renamed provider entry.
+fn repoint_models_at(doc: &mut DocumentMut, from: &str, to: &str) {
     let Some(models) = doc.get_mut("models").and_then(Item::as_table_like_mut) else {
         return;
     };
@@ -1200,8 +1317,8 @@ fn repoint_models_at_pool(doc: &mut DocumentMut, entry: &str, pool: &str) {
         let Some(model) = item.as_table_like_mut() else {
             continue;
         };
-        if model.get("provider").and_then(Item::as_str) == Some(entry) {
-            model.insert("provider", toml_edit::value(pool));
+        if model.get("provider").and_then(Item::as_str) == Some(from) {
+            model.insert("provider", toml_edit::value(to));
         }
     }
 }
@@ -1546,6 +1663,7 @@ pub fn plan_migration(
     let steps = apply_config_transforms(&mut doc, raw_version).map_err(MigrateError::Refused)?;
 
     let removed_keys = collect_removed_keys(base_doc, raw_version);
+    let renamed_entries = collect_renamed_entries(base_doc, raw_version);
     let to = steps.last().map_or(raw_version, |s| s.to_version);
 
     let write_kind = if steps.is_empty() {
@@ -1561,8 +1679,31 @@ pub fn plan_migration(
         to,
         write_kind,
         removed_keys,
+        renamed_entries,
         steps,
     })
+}
+
+/// The `(from, to)` renames the PURE v3 -> v4 rung performs, derived from the
+/// ORIGINAL document, for the change summary.
+///
+/// Only the knob-relocation path renames here: an entry carrying
+/// `seat_selection` and holding the plain family name its new pool block
+/// needs. A family-named entry with no knob is phase 2's to rename, if its
+/// family turns out to be multi-seat -- which this pure planner cannot know.
+/// Refusals are not re-derived: this runs only after the rung itself planned
+/// successfully.
+fn collect_renamed_entries(doc: &DocumentMut, raw_version: u32) -> Vec<(String, String)> {
+    if raw_version > 3 {
+        return Vec::new();
+    }
+    provider_entries_with_seat_selection(doc)
+        .into_iter()
+        .filter_map(|entry| {
+            let mv = plan_seat_pool_move(doc, &entry).ok()?;
+            mv.rename_to.map(|to| (mv.entry, to))
+        })
+        .collect()
 }
 
 /// Human-readable descriptions of the keys the migration removes, derived
@@ -3107,6 +3248,7 @@ default = \"opus\"
         );
         let mv = SeatPoolMove {
             entry: "managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: vec![SeatPoolAccount {
                 entry_name: "anthropic-work".to_string(),
@@ -3136,6 +3278,194 @@ default = \"opus\"
         );
     }
 
+    /// The rename half of the primitive, and the ORDER it composes in: the
+    /// entry vacates the family name and its models follow it, THEN the pool
+    /// repoint moves those models onto the pool. Composed the other way the
+    /// models would name a provider key that no longer exists.
+    #[test]
+    fn apply_seat_pool_move_renames_the_entry_then_repoints_onto_the_pool() {
+        // Arrange: the family-named shape, with a model on it.
+        let mut doc = doc_of(
+            "version = 4\n\
+             # keep this comment on the entry\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             [models.opus]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "anthropic".to_string(),
+            rename_to: Some("anthropic-default".to_string()),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert: the entry moved (comment intact), the pool took the vacated
+        // name with the renamed entry as its first member, the labelled seat
+        // cloned off the RENAMED entry, and the model lands on the POOL.
+        let out = doc.to_string();
+        assert!(out.contains("[providers.anthropic-default]"), "{out}");
+        assert!(!out.contains("[providers.anthropic]\n"), "{out}");
+        assert!(out.contains("# keep this comment on the entry"), "{out}");
+        assert!(
+            out.contains("members = [\"anthropic-default\", \"anthropic-work\"]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("api_key_ref = \"oauth://anthropic#work\""),
+            "{out}"
+        );
+        assert_eq!(
+            models_routed_at(&doc, "anthropic"),
+            vec!["opus".to_string()]
+        );
+        assert!(
+            models_routed_at(&doc, "anthropic-default").is_empty(),
+            "the repoint must not leave the model on the renamed entry: {out}"
+        );
+    }
+
+    /// A rename with NO accounts (the pure rung's knob relocation on a
+    /// family-named single-seat entry) still moves the entry, and the model
+    /// follows the RENAME rather than jumping to the one-member pool -- fewer
+    /// bytes changed, identical breadth.
+    #[test]
+    fn a_rename_without_accounts_takes_the_models_to_the_renamed_entry() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [models.opus]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "anthropic".to_string(),
+            rename_to: Some("anthropic-default".to_string()),
+            pool: "anthropic".to_string(),
+            accounts: Vec::new(),
+        };
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert
+        let out = doc.to_string();
+        assert!(out.contains("members = [\"anthropic-default\"]"), "{out}");
+        assert_eq!(
+            models_routed_at(&doc, "anthropic-default"),
+            vec!["opus".to_string()],
+            "{out}"
+        );
+    }
+
+    /// Idempotence over the rename: the source key is gone and the target
+    /// holds the entry, so a replayed move changes no bytes. Without this the
+    /// locked-write replay (which reapplies the same plan) would double-write.
+    #[test]
+    fn a_rename_is_a_no_op_over_its_own_output() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [models.opus]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude\"\n",
+        );
+        let mv = SeatPoolMove {
+            entry: "anthropic".to_string(),
+            rename_to: Some("anthropic-default".to_string()),
+            pool: "anthropic".to_string(),
+            accounts: vec![SeatPoolAccount {
+                entry_name: "anthropic-work".to_string(),
+                secret_ref: "oauth://anthropic#work".to_string(),
+                already_present: false,
+            }],
+        };
+        apply_seat_pool_move(&mut doc, &mv);
+        let once = doc.to_string();
+
+        // Act
+        apply_seat_pool_move(&mut doc, &mv);
+
+        // Assert
+        assert_eq!(doc.to_string(), once);
+    }
+
+    /// The pure rung renames a family-named entry that carries the retired
+    /// knob: the pool block it creates needs the name the entry holds.
+    #[test]
+    fn v3_to_v4_renames_a_family_named_entry_carrying_the_knob() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 3\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             seat_selection = \"round-robin\"\n\
+             [models.opus]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude\"\n",
+        );
+
+        // Act
+        migrate_v3_to_v4(&mut doc).expect("the family-named shape migrates");
+
+        // Assert
+        let out = doc.to_string();
+        assert!(out.contains("[providers.anthropic-default]"), "{out}");
+        assert!(out.contains("[pools.anthropic]"), "{out}");
+        assert!(out.contains("members = [\"anthropic-default\"]"), "{out}");
+        assert!(out.contains("seat_selection = \"round-robin\""), "{out}");
+        assert_eq!(
+            models_routed_at(&doc, "anthropic-default"),
+            vec!["opus".to_string()],
+            "the model must follow the renamed entry: {out}"
+        );
+    }
+
+    /// The rename never displaces a credential: a `<family>-default` entry
+    /// already present makes the move unresolvable, so the rung refuses with
+    /// the document byte-untouched.
+    #[test]
+    fn v3_to_v4_refuses_when_the_rename_target_is_taken() {
+        // Arrange
+        let src = "version = 3\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             seat_selection = \"round-robin\"\n\
+             [providers.anthropic-default]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"env://SOMETHING_ELSE\"\n";
+        let mut doc = doc_of(src);
+
+        // Act
+        let err = migrate_v3_to_v4(&mut doc).expect_err("taken target -> refuse");
+
+        // Assert
+        assert!(
+            matches!(err, Refusal::SeatSelectionRelocation { ref entries }
+                if entries.len() == 1 && entries[0].contains("anthropic-default")),
+            "err: {err:?}"
+        );
+        assert_eq!(doc.to_string(), src);
+    }
+
     #[test]
     fn apply_seat_pool_move_is_a_no_op_over_its_own_output() {
         // Arrange
@@ -3147,6 +3477,7 @@ default = \"opus\"
         );
         let mv = SeatPoolMove {
             entry: "managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: vec![SeatPoolAccount {
                 entry_name: "anthropic-work".to_string(),
@@ -3194,6 +3525,7 @@ default = \"opus\"
         );
         let mv = SeatPoolMove {
             entry: "managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: vec![SeatPoolAccount {
                 entry_name: "anthropic-work".to_string(),
@@ -3255,6 +3587,7 @@ default = \"opus\"
         );
         let mv = SeatPoolMove {
             entry: "managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: Vec::new(),
         };
@@ -3280,6 +3613,7 @@ default = \"opus\"
         );
         let mv = SeatPoolMove {
             entry: "managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: vec![SeatPoolAccount {
                 entry_name: "anthropic-work".to_string(),
@@ -3312,6 +3646,7 @@ default = \"opus\"
         );
         let mv = SeatPoolMove {
             entry: "managed".to_string(),
+            rename_to: None,
             pool: "anthropic".to_string(),
             accounts: vec![SeatPoolAccount {
                 entry_name: "anthropic-work".to_string(),

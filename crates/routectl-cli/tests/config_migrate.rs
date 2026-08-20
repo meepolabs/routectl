@@ -173,6 +173,33 @@ fn previous_version_bare_oauth_config() -> String {
     )
 }
 
+/// The FAMILY-NAMED variant of the shape above: the entry is keyed by the
+/// provider family itself, which is what the pre-pool quickstart taught. The
+/// pool needs that exact name, so the migration moves the entry to
+/// `anthropic-default` and its models follow before landing on the pool.
+fn previous_version_family_named_config() -> String {
+    format!(
+        "version = {}\n\
+         \n\
+         [server]\n\
+         host = \"127.0.0.1\"\n\
+         port = 0\n\
+         \n\
+         [providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         seat_selection = \"round-robin\"\n\
+         \n\
+         [models.opus]\n\
+         provider = \"anthropic\"\n\
+         upstream = \"claude-opus-4-8\"\n\
+         \n\
+         [aliases]\n\
+         default = \"opus\"\n",
+        routectl_router::CURRENT_CONFIG_VERSION - 1
+    )
+}
+
 /// Seed a credential store at `path` with one inert record per seat key, at
 /// the `0o600` the store requires. Written directly rather than through a
 /// login flow: the migration only ever reads seat KEYS.
@@ -226,49 +253,50 @@ async fn serve_boots_on_a_migrated_multi_seat_pool_config() {
     assert_eq!(resp.status(), 200);
 }
 
+/// A secret store that resolves any ref, so every seat builds and the pool
+/// is fully usable -- the migration's own output is what is under test, not
+/// credential resolution.
+struct AnySecret;
+
+#[async_trait::async_trait]
+impl routectl_auth::SecretStore for AnySecret {
+    async fn get(&self, _: &routectl_auth::SecretRef) -> routectl_core::Result<String> {
+        Ok("token".into())
+    }
+    async fn set(&self, _: &routectl_auth::SecretRef, _: &str) -> routectl_core::Result<()> {
+        Ok(())
+    }
+    async fn delete(&self, _: &routectl_auth::SecretRef) -> routectl_core::Result<()> {
+        Ok(())
+    }
+}
+
 /// CAPACITY PRESERVATION -- the load-bearing property of the whole migration.
 ///
 /// Under v3 a bare `oauth://anthropic` ref on a provider entry expanded to
-/// EVERY stored seat, so `[models.opus] provider = "anthropic-managed"`
-/// dispatched across both seats. Under v4 that same ref means the DEFAULT SEAT
-/// alone. So if the migration materializes the pool but leaves the model
-/// naming the entry, the operator comes out of `config migrate` dispatching
-/// across ONE seat instead of two -- silent capacity loss through the
-/// migration whose entire purpose is behavior preservation.
+/// EVERY stored seat, so the `[models.opus]` naming that entry dispatched
+/// across both seats. Under v4 that same ref means the DEFAULT SEAT alone. So
+/// if the migration materializes the pool but leaves the model naming the
+/// entry, the operator comes out of `config migrate` dispatching across ONE
+/// seat instead of two -- silent capacity loss through the migration whose
+/// entire purpose is behavior preservation.
 ///
 /// Asserted against the real build path (the same
 /// `build_resolved_models_reported` `serve` runs), not against config text: the
 /// question is how many seats the model actually DISPATCHES over.
-#[tokio::test]
-async fn a_migrated_multi_seat_config_still_dispatches_across_every_seat() {
-    use std::collections::BTreeMap;
-
-    use routectl_auth::{SecretRef, SecretStore};
+/// `expected_members` pins which entry names the pool ends up grouping, which
+/// is where the family-named shape differs (its entry is renamed).
+async fn assert_migration_preserves_dispatch_breadth(body: &str, expected_members: &[&str]) {
+    use routectl_auth::SecretStore;
     use routectl_router::{BuildOptions, build_resolved_models_reported};
 
-    /// Resolves any ref, so both seats build and the pool is fully usable.
-    struct AnySecret;
-
-    #[async_trait::async_trait]
-    impl SecretStore for AnySecret {
-        async fn get(&self, _: &SecretRef) -> routectl_core::Result<String> {
-            Ok("token".into())
-        }
-        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
-            Ok(())
-        }
-        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
-            Ok(())
-        }
-    }
-
-    // Arrange: a v3 config whose ONE provider entry has a bare ref, with two
-    // stored seats -- exactly the shape that dispatched across 2 seats at v3.
+    // Arrange: two stored seats -- exactly the shape that dispatched across 2
+    // seats at v3.
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let overlay_path = dir.path().join("catalog_overlay.json");
     let credentials_path = dir.path().join("credentials.json");
-    std::fs::write(&config_path, previous_version_bare_oauth_config()).unwrap();
+    std::fs::write(&config_path, body).unwrap();
     seed_seats(&credentials_path, &["anthropic", "anthropic#work"]);
 
     // Act
@@ -314,15 +342,66 @@ async fn a_migrated_multi_seat_config_still_dispatches_across_every_seat() {
 
     // Belt-and-suspenders on the same property from the config side: the
     // model's provider value names the pool, and the pool lists both accounts.
-    let model_target: &BTreeMap<String, _> = &config.models;
-    assert_eq!(model_target["opus"].provider, "anthropic");
-    assert_eq!(
-        config.pools["anthropic"].members,
-        vec![
-            "anthropic-managed".to_string(),
-            "anthropic-work".to_string()
-        ]
+    assert_eq!(config.models["opus"].provider, "anthropic");
+    let members: Vec<&str> = config.pools["anthropic"]
+        .members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(members, expected_members, "migrated file:\n{text}");
+}
+
+#[tokio::test]
+async fn a_migrated_multi_seat_config_still_dispatches_across_every_seat() {
+    assert_migration_preserves_dispatch_breadth(
+        &previous_version_bare_oauth_config(),
+        &["anthropic-managed", "anthropic-work"],
+    )
+    .await;
+}
+
+/// The family-named shape reaches the same breadth, THROUGH a rename: the
+/// entry vacates `anthropic` for the pool and the model follows it there. Two
+/// ways this could silently lose a seat -- the model left on the renamed entry
+/// (1 seat), or left naming a key nothing defines (build failure) -- are both
+/// covered by the shared assertions.
+#[tokio::test]
+async fn a_migrated_family_named_config_still_dispatches_across_every_seat() {
+    assert_migration_preserves_dispatch_breadth(
+        &previous_version_family_named_config(),
+        &["anthropic-default", "anthropic-work"],
+    )
+    .await;
+}
+
+/// The family-named shape also has to BOOT, not merely build: the rename
+/// rewrites the key every model reference resolves against.
+#[tokio::test]
+async fn serve_boots_on_a_migrated_family_named_config() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let overlay_path = dir.path().join("catalog_overlay.json");
+    let credentials_path = dir.path().join("credentials.json");
+    std::fs::write(&config_path, previous_version_family_named_config()).unwrap();
+    seed_seats(&credentials_path, &["anthropic", "anthropic#work"]);
+
+    // Act
+    config_migrate_cmd::run_at(&config_path, &overlay_path, &credentials_path, false, true)
+        .await
+        .expect("the combined migration must succeed");
+
+    // Assert: the entry moved, the pool took its name, and the result boots.
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        text.contains("[providers.anthropic-default]"),
+        "migrated file: {text}"
     );
+    assert!(text.contains("[pools.anthropic]"), "migrated file: {text}");
+    let config = routectl_router::parse_config(&text).expect("migrated config parses");
+    let base = boot_and_await_health(Arc::new(config)).await;
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(resp.status(), 200);
 }
 
 /// The deprecated `--force` alias still skips the confirmation and migrates,

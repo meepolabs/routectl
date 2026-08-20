@@ -1340,11 +1340,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `migrate_v3_to_v4(&mut DocumentMut) -> Result<StepOutcome, Refusal>` stamps
   the LITERAL `4` and relocates every provider-level `seat_selection` onto a
   `[pools.<name>]` block whose sole member is that entry, taking the pool name
-  from `seat_naming::pool_name` (never a rule restated here). Refuses with
+  from `seat_naming::pool_name` (never a rule restated here). An entry that
+  itself HOLDS that plain family name vacates it, renamed to
+  `seat_naming::family_default_rename`'s `<family>-default`. Refuses with
   `Refusal::SeatSelectionRelocation` -- document byte-untouched -- when a
   present knob has no derivable pool (no `oauth://` ref to name a family, an
   unusable family token, or a derived pool name held by a provider entry, a
-  model nickname, or a hand-authored pool block), or when two entries derive
+  model nickname, or a hand-authored pool block), when a rename target is held
+  by a different entry, or when two entries derive
   the SAME pool name (`colliding_pool_derivations`: grouping them would merge
   accounts the operator kept separate and drop all but one `seat_selection`).
   A file carrying no such knob
@@ -1353,18 +1356,28 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `bare_oauth_pool_candidates(&DocumentMut) -> Vec<BareOauthRef{entry, family}>`
   is the PURE input that half reads -- every provider entry carrying a BARE
   `oauth://` ref, in document order. `apply_seat_pool_move(&mut DocumentMut,
-  &SeatPoolMove{entry, pool, accounts: Vec<SeatPoolAccount{entry_name,
-  secret_ref, already_present}>})` is its write primitive: clones the entry
+  &SeatPoolMove{entry, rename_to, pool, accounts: Vec<SeatPoolAccount{entry_name,
+  secret_ref, already_present}>})` is its write primitive: renames the entry
+  when `rename_to` is set (`rename_provider_entry`, key decor and header
+  comment preserved, models following it), clones the entry
   once per labelled seat with that seat's ref, unions the member list onto
   `[pools.<pool>]`, relocates the knob, and -- when the move materializes
   accounts -- REPOINTS every `[models.X] provider` naming the entry at the pool
-  (`repoint_models_at_pool`). The repoint is what preserves DISPATCH BREADTH: a
+  (`repoint_models_at`, the same rewrite both the rename and the pool move
+  use). ORDER IS LOAD-BEARING: the rename runs first and takes the models with
+  it, so the pool repoint then moves them off the RENAMED name; the other order
+  would leave models naming a provider key that no longer exists.
+  `SeatPoolMove::member_name()` is the post-rename member name.
+  The repoint is what preserves DISPATCH BREADTH: a
   v3 bare ref expanded to every stored seat, a v4 one means the default seat
   alone, so a model left on the entry would silently drop from N seats to 1.
   An accounts-free move (the single-seat `seat_selection` relocation) leaves
   model references alone -- one member, identical breadth, and a member inherits
   its pool's strategy through `Config::seat_selection_for` either way.
-  Idempotent over its own output. `upsert_pool_members(&mut DocumentMut, pool,
+  Idempotent over its own output, rename included.
+  `MigrationPlan::renamed_entries: Vec<(from, to)>` reports the pure rung's
+  renames for the operator-facing change summary (`collect_renamed_entries`,
+  derived purely from the original document). `upsert_pool_members(&mut DocumentMut, pool,
   members)` is the member-union primitive underneath it, exported because the
   login auto-surface grows the same pools: it creates `pools` and the block
   when absent, unions members without duplicating (within one call's list as
@@ -2314,7 +2327,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (plain provider-family name), `account_entry_name` (`<family>-default` /
   `<family>-<label>`), `seat_secret_ref`, `plan_pool_materialization` (every
   name one family's seats take, with `already_present` / `pool_exists` so
-  re-deriving over its own output is a no-op), `plan_new_seat` (the typed
+  re-deriving over its own output is a no-op), `family_default_rename` (the
+  name an entry keyed by its OWN family must move to so the pool can take the
+  family name -- pure, occupancy checked by each caller against the namespace
+  it can see), `plan_entry_materialization` -> `EntryMaterialization
+  {renamed_entry, pool}` (the migration's derivation: the pool plus the
+  vacating rename, with the entry that is vacating discounted from the
+  pool-name collision check), `plan_new_seat` (the typed
   resolver: which `accepts_new_logins` pool serves `oauth://<provider>` and
   what entry a new seat takes), `growth_pools_for_family`. Exact mapping or
   refuse -- `SeatNamingError` {UnusableToken, ReservedLabel,
@@ -4259,13 +4278,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `OAuthStore::open` and keys its seats by provider family, and
   `plan_seat_materialization` turns each `bare_oauth_pool_candidates` entry
   whose family holds MORE THAN ONE seat into a `SeatPoolMove` via
-  `seat_naming::plan_pool_materialization` (byte-for-byte the names the login
-  writer generates; a fully-satisfied move is dropped so a rerun reports no
-  pending write). A single-seat family is a structural no-op by construction
+  `seat_naming::plan_entry_materialization` (byte-for-byte the names the login
+  writer generates, INCLUDING the `rename_to` a family-named entry needs --
+  `[providers.anthropic]` carrying `oauth://anthropic` vacates the name to
+  `anthropic-default` so `[pools.anthropic]` can take it, the shape earlier
+  quickstarts taught; a fully-satisfied move is dropped so a rerun reports no
+  pending write, and a pending rename is never "satisfied"). A single-seat family is a structural no-op by construction
   (at v4 a bare ref means the default seat). An unreadable store refuses the
   WHOLE migration (`seat_enumeration_refusal`, path-free via
   `sanitize_store_open_error`) rather than stamp the version alone and silently
-  narrow the ref; a `SeatNamingError` surfaces unsoftened. Two further
+  narrow the ref; a `SeatNamingError` surfaces unsoftened (a `<family>-default`
+  rename target held by a DIFFERENT credential is `EntryNameTaken`). Two further
   fail-closed classes live in `SeatMaterializationRefusal`:
   `FamilyFanOut` (2+ provider entries carry a bare `oauth://<family>` ref for
   ONE family -- merging them would group entries that may name deliberately
@@ -4284,8 +4307,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   its verbatim source-line preview via
   `redact_parse_error`/`is_source_snippet_row` first -- the offending config
   line may carry a `literal:` credential, so only the header line/column +
-  message kind are kept); `--dry-run` renders the candidate + the plan's
-  `removed_keys` summary and writes nothing (no temp copy -- planning never
+  message kind are kept); `--dry-run` renders the candidate + the
+  `change_summary` (the plan's `removed_keys`, its `renamed_entries`, and the
+  per-move `seat_materialization_summary` -- a rename phase 2 also narrates is
+  reported once, in the richer line that names the pool and the repointed
+  models beside it) and writes nothing (no temp copy -- planning never
   touched the real files); otherwise ACKNOWLEDGE every real write
   (`confirm_migration` -- interactive `y` / `--yes`, with `--force` kept one
   release as a deprecated hidden alias for `--yes`;
