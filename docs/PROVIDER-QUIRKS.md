@@ -617,6 +617,19 @@ hosts is always an explicit `base_url` edit.
 ids on a `gemini`-kind entry -- the model name rides in the request
 envelope, so no separate provider kind is involved.
 
+**Deprecated model aliases:** the `gemini-2.5-*` ids routectl's own docs
+once recommended for this lane -- `gemini-2.5-flash` and `gemini-2.5-pro` --
+still route here, but only as server-side aliases the upstream keeps
+answering; the catalog's own labels show a different model behind them, and
+`gemini-2.5-pro` has been returning a no-capacity verdict for consumer
+seats. They are no longer documented as cloud-code ids. An entry that still
+configures one on this lane earns a config-load WARNING naming a verified
+replacement (`gemini-3.1-flash-lite`); routing is unchanged and config load
+still succeeds. The same ids on an `api-key`-mode gemini entry are LIVE and
+never warn -- the WARNING is scoped to the cloud-code lane. Verified
+replacements, and the fact that the id set churns weekly, are in
+[TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-kind--gemini-auth_mode--cloud-code-antigravity-oauth).
+
 **Reused unchanged from the api-key path:** `thinkingConfig` budget
 mapping, `thoughtSignature` reasoning replay, `functionDeclarations`
 tool schema, structured-output (`responseMimeType` / `responseSchema`)

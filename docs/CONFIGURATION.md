@@ -1118,8 +1118,15 @@ api_key_ref = "oauth://antigravity"
 
 [models.gemini-flash]
 provider = "gemini-cloud-code"
-upstream = "gemini-2.5-flash"
+upstream = "gemini-3.1-flash-lite"
 ```
+
+Cloud-code model ids are the upstream's own, and it churns them; pick one
+verified against the live lane (see
+[TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-kind--gemini-auth_mode--cloud-code-antigravity-oauth))
+rather than reusing a name from the api-key lane. The `gemini-2.5-*` ids
+still resolve here as server-side aliases, but routectl no longer documents
+them and WARNs when one is configured on this lane.
 
 Auth decision: by default Gemini auth is API-key only, via the
 `x-goog-api-key` header. Setting `auth_mode = "cloud-code"` adds an
