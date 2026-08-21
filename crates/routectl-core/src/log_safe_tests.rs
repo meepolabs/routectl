@@ -781,10 +781,16 @@ fn redact_client_metadata_collapses_whole_object_when_on_verbatim_when_off() {
     // OpenAI Responses `client_metadata`: forwarded verbatim by the
     // egress and swept into `provider_extras` by ingress (not in
     // HANDLED_TOP_LEVEL_FIELDS), so it is caller-controlled the same way
-    // `metadata` is. Same whole-object collapse.
+    // `metadata` is. Same whole-object collapse. The codex installation
+    // id the ChatgptOauth egress stamps in here rides the same collapse,
+    // so narrowing it to a key allowlist must fail this test.
     let body = json!({
         "model": "gpt-5",
-        "client_metadata": {"user_id": "alice", "note": "anything"},
+        "client_metadata": {
+            "user_id": "alice",
+            "note": "anything",
+            "x-codex-installation-id": "iid-abc",
+        },
     });
 
     let on = redact_prompts_with_flag(&body, true);

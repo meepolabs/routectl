@@ -480,3 +480,129 @@ fn provider_extras_client_metadata_forwards() {
         json!({"user_id": "u-123", "session": "s-abc"})
     );
 }
+
+// ---------------------------------------------------------------------------
+// client_metadata: installation id (ChatgptOauth lane only)
+// ---------------------------------------------------------------------------
+
+/// A ChatgptOauth config carrying a resolved installation id.
+fn cfg_with_installation_id(installation_id: &str) -> OpenAiResponsesConfig {
+    let mut c = cfg();
+    c.installation_id = Some(installation_id.into());
+    c
+}
+
+#[test]
+fn installation_id_stamped_into_client_metadata_on_chatgpt_oauth() {
+    // Arrange
+    let req = req_with(vec![user_text("ping")]);
+
+    // Act
+    let v = translate_to_json(&cfg_with_installation_id("iid-abc"), &req);
+
+    // Assert
+    assert_eq!(
+        v["client_metadata"],
+        json!({"x-codex-installation-id": "iid-abc"}),
+        "got: {v}"
+    );
+}
+
+#[test]
+fn installation_id_merges_alongside_request_client_metadata_keys() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({
+        "client_metadata": {"user_id": "u-123"}
+    }));
+
+    // Act
+    let v = translate_to_json(&cfg_with_installation_id("iid-abc"), &req);
+
+    // Assert
+    assert_eq!(
+        v["client_metadata"],
+        json!({"user_id": "u-123", "x-codex-installation-id": "iid-abc"}),
+        "got: {v}"
+    );
+}
+
+#[test]
+fn resolved_installation_id_wins_over_request_supplied_value() {
+    // Arrange: a request-reachable client_metadata already carrying the key.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({
+        "client_metadata": {"x-codex-installation-id": "spoofed-iid"}
+    }));
+
+    // Act
+    let v = translate_to_json(&cfg_with_installation_id("iid-abc"), &req);
+
+    // Assert
+    assert_eq!(
+        v["client_metadata"]["x-codex-installation-id"], "iid-abc",
+        "resolved installation id must win over a request-supplied one: {v}"
+    );
+}
+
+#[test]
+fn non_object_client_metadata_is_replaced_with_installation_id_object() {
+    // Arrange: a request-supplied non-object client_metadata, which would
+    // otherwise suppress the stamp entirely.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({
+        "client_metadata": "not-an-object"
+    }));
+
+    // Act
+    let v = translate_to_json(&cfg_with_installation_id("iid-abc"), &req);
+
+    // Assert
+    assert_eq!(
+        v["client_metadata"],
+        json!({"x-codex-installation-id": "iid-abc"}),
+        "non-object client_metadata must be replaced by the stamped object: {v}"
+    );
+}
+
+#[test]
+fn absent_installation_id_creates_no_client_metadata_object() {
+    // Arrange: the default ChatgptOauth cfg resolves no installation id.
+    let req = req_with(vec![user_text("ping")]);
+    assert!(
+        cfg().installation_id.is_none(),
+        "fixture guard: cfg() must carry no installation_id"
+    );
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(
+        v.get("client_metadata").is_none(),
+        "no installation_id must leave client_metadata absent: {v}"
+    );
+}
+
+#[test]
+fn api_key_lane_body_omits_installation_id_from_client_metadata() {
+    // Arrange: an ApiKey config carrying an installation_id, which would
+    // be stamped on the ChatgptOauth lane.
+    let mut c = cfg_api_key();
+    c.installation_id = Some("iid-abc".into());
+    assert_eq!(
+        c.auth_kind,
+        AuthKind::ApiKey,
+        "fixture guard: this negative must run on the ApiKey lane"
+    );
+    let req = req_with(vec![user_text("ping")]);
+
+    // Act
+    let v = translate_to_json(&c, &req);
+
+    // Assert
+    assert!(
+        v.get("client_metadata").is_none(),
+        "ApiKey lane must carry no codex installation id: {v}"
+    );
+}

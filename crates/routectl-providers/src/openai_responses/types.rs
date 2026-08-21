@@ -74,6 +74,11 @@ pub struct ResponsesRequest {
     /// Forwarded verbatim from `provider_extras["client_metadata"]`.
     /// Accepts any JSON shape so the egress does not force a
     /// string-string constraint that upstream may not require.
+    ///
+    /// On the `ChatgptOauth` lane the resolved installation id is also
+    /// stamped in here under `x-codex-installation-id` (codex carries it
+    /// in the body on the streaming call, not as a header); the resolved
+    /// id wins over any request-carried value for that key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_metadata: Option<serde_json::Value>,
 

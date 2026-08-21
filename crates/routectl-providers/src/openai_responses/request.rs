@@ -66,6 +66,9 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
 
     extras::apply_reasoning(&mut request, req);
     extras::merge_provider_extras(&mut request, req, cfg.auth_kind);
+    // Runs after merge_provider_extras so the stamp lands on the merged
+    // object; the resolved id wins over any request-carried value.
+    extras::apply_installation_id(&mut request, cfg.auth_kind, cfg.installation_id.as_deref());
     // Honor the canonical structured-output directive onto `text.format`.
     // Runs after merge_provider_extras so a `verbosity` sibling lifted into
     // provider_extras["text"] survives and the format merges alongside it.
