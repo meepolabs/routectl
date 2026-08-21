@@ -915,4 +915,46 @@ mod tests {
         let u = resp.usage.expect("usage present");
         assert_eq!(u.server_tool_use, None);
     }
+
+    // -- thinking.display=omitted response shape ------------------------
+
+    /// `thinking.display: "omitted"` returns a thinking block with EMPTY
+    /// text and a full signature. Normalization must keep the detail
+    /// (the signature is what makes the turn replayable) rather than
+    /// dropping it as empty. Paired with a populated-text control so an
+    /// unconditional drop cannot pass.
+    #[test]
+    fn empty_thinking_text_with_signature_keeps_the_reasoning_detail() {
+        for (thinking, label) in [("", "omitted-display shape"), ("visible", "control")] {
+            // Arrange
+            let blocks = vec![
+                ContentBlock::Thinking {
+                    thinking: thinking.to_string(),
+                    signature: "EqoCCkYIBxgCKkASDGZvbw==".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                    cache_control: None,
+                    citations: None,
+                },
+            ];
+
+            // Act
+            let (text, details, _tool_calls, _parts) =
+                walk_content_blocks("test", &blocks).expect("normalization must succeed");
+
+            // Assert
+            assert_eq!(text, "answer", "visible text is unaffected ({label})");
+            assert_eq!(details.len(), 1, "the thinking detail survives ({label})");
+            assert_eq!(
+                details[0].payload["text"], thinking,
+                "text preserved ({label})"
+            );
+            assert_eq!(
+                details[0].payload["signature"], "EqoCCkYIBxgCKkASDGZvbw==",
+                "the signature must survive so the turn stays replayable ({label})"
+            );
+        }
+    }
 }

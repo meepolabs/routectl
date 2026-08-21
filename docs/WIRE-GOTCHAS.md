@@ -218,6 +218,36 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   path and the streaming `messageStop` path, gated on
   `stop_reason == "stop_sequence"`.
 
+- **`thinking.display: "omitted"` returns an EMPTY thinking block, not
+  no block.** `thinking.display` is a closed two-value enum
+  (`"summarized"` | `"omitted"`); anything else 400s upstream, so the
+  Anthropic ingress rejects unknown values locally
+  (`ingress/anthropic/parse.rs::translate_thinking_display`). Under
+  `"omitted"` Anthropic still emits a `thinking` block -- with empty
+  `thinking` text and a FULL signature -- both non-streaming and
+  streaming. Billing is unchanged (thinking tokens are still charged).
+  Two consequences routectl depends on:
+  - The empty-text-plus-signature block must survive normalization and
+    replay. Every drop/skip decision on the thinking path keys on the
+    SIGNATURE, never on the text
+    (`anthropic_api/response.rs::walk_content_blocks`,
+    `anthropic_api/messages.rs::is_anthropic_emittable_detail`), so an
+    omitted-display turn stays replayable.
+  - Streaming sends `content_block_start` + `signature_delta` +
+    `content_block_stop` with NO `thinking_delta` at all. The SSE
+    decoder's empty-block drop guard requires empty text AND an absent
+    signature, so this shape still emits its aggregated detail
+    (`anthropic_api/sse.rs`).
+
+  The canonical carrier is `reasoning.exclude` (`Some(true)` ->
+  `"omitted"`, `Some(false)` -> `"summarized"`). An ABSENT display
+  stays absent on the wire: the upstream default is model-dependent, so
+  emitting an explicit value would override a newer model's own choice.
+  Bedrock Converse acceptance of the field is UNMEASURED, so the
+  Converse egress strips `display` from the
+  `additionalModelRequestFields` bag with a WARN
+  (`bedrock/converse/extras.rs::insert_thinking`).
+
 - **Anthropic streaming reasoning replay residual.** The SSE decoder
   buffers `thinking_delta` text and `signature_delta` on the open
   block, then emits one aggregated `ReasoningDetail` at

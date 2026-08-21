@@ -273,6 +273,13 @@ request knob:
   caller owns the outcome). This is the escape hatch, not a drop.
 - **`promptVariables` / `requestMetadata` / `performanceConfig`.** Not
   exposed; no request surface.
+- **`thinking.display`.** Stripped from the
+  `additionalModelRequestFields` bag with a WARN. Whether Converse's
+  validator accepts the field is unmeasured, so routectl does not risk a
+  400 on every thinking request; reasoning text comes back per the model
+  default. The direct `anthropic-api` shape honors the field. Grep the
+  WARN `dropping thinking.display` when a caller reports the setting
+  being ignored on a Bedrock alias.
 
 **Example provider + model:**
 
