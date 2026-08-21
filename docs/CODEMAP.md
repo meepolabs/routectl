@@ -859,8 +859,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 
 - `src/gemini/mod.rs` -- `GeminiProvider` + `GeminiConfig` (fields: `id`,
   `auth`, `base_url`, `header_extras`, `user_agent`, `mode`); `new_with_auth`
-  (api-key) vs `new_cloud_code` (bearer + `Arc<dyn CloudProjectCache>`);
-  dispatches `complete`/`stream` to the api-key or cloud-code arm by
+  (api-key) vs `new_cloud_code` (bearer + `Arc<dyn CloudProjectCache>`,
+  `base_url` defaulting to the DAILY Cloud Code host and carrying the whole
+  lane -- generate + `loadCodeAssist` + `onboardUser`); re-exports
+  `PROD_BASE_URL` / `DAILY_BASE_URL` plus the `is_prod_host(&str)` predicate
+  (exact parsed-host match, so router surfaces name the production host
+  without copying a literal); dispatches `complete`/`stream` to the api-key or
+  cloud-code arm by
   `GeminiAuthMode`; builds the `models/{model}:generateContent` /
   `:streamGenerateContent?alt=sse` URLs and the `GEMINI_FORMAT` (`gemini-v1`)
   reasoning tag; SSE drain; `resolve_lock` single-flight serializing cold
@@ -1277,7 +1282,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (userinfo/path/query/fragment dropped, unparseable or ambiguous-`@` input
   fail-safe to `None`); a second consumer is `ProviderEntry::redact_secrets`
   via `redact_base_url`, so its `None` must never be softened into a
-  raw-string fallback
+  raw-string fallback. `configured_base_url` reports config verbatim with one
+  exception: an unset-`base_url` `cloud-code` gemini entry reports the daily
+  Cloud Code host, because the api-key public default is a host that lane
+  never talks to
 - `src/schema_gen.rs` -- `render_schema_json() -> String`: the single source
   of the committed `routectl.schema.json` at the repo root, rendered from
   `schemars::schema_for!(Config)` as pretty JSON with a trailing newline

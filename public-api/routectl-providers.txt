@@ -963,7 +963,6 @@ pub routectl_providers::gemini::GeminiConfig::base_url: alloc::string::String
 pub routectl_providers::gemini::GeminiConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::gemini::GeminiConfig::id: alloc::string::String
 pub routectl_providers::gemini::GeminiConfig::mode: routectl_providers::gemini::GeminiAuthMode
-pub routectl_providers::gemini::GeminiConfig::onboard_base_url: alloc::string::String
 pub routectl_providers::gemini::GeminiConfig::onboard_poll_interval: core::time::Duration
 pub routectl_providers::gemini::GeminiConfig::project_cache: core::option::Option<alloc::sync::Arc<dyn routectl_core::cloud_project::CloudProjectCache>>
 pub routectl_providers::gemini::GeminiConfig::user_agent: core::option::Option<alloc::string::String>
@@ -1059,6 +1058,9 @@ impl<T> typenum::type_operators::Same for routectl_providers::gemini::GeminiProv
 pub type routectl_providers::gemini::GeminiProvider::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::gemini::GeminiProvider where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::gemini::GeminiProvider::into_shared(self) -> Shared
+pub const routectl_providers::gemini::DAILY_BASE_URL: &str
+pub const routectl_providers::gemini::PROD_BASE_URL: &str
+pub fn routectl_providers::gemini::is_prod_host(&str) -> bool
 pub mod routectl_providers::mantle
 pub struct routectl_providers::mantle::MantleAuth
 pub routectl_providers::mantle::MantleAuth::creds: routectl_providers::bedrock::auth::ResolvedCreds

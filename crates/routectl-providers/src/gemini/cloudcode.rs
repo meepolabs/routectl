@@ -14,7 +14,9 @@
 //! ports the reference `FetchProjectID` flow -- `loadCodeAssist` to read an
 //! already-provisioned project, falling back to `onboardUser` (polled) when
 //! none exists. The resolved id is cached by the caller so the onboarding
-//! HTTP is never re-run once known.
+//! HTTP is never re-run once known. All three calls -- generate,
+//! `loadCodeAssist`, `onboardUser` -- go to the ONE configured base: there
+//! is no separate onboarding host, so a pinned base moves the whole lane.
 
 use std::time::Duration;
 
@@ -25,9 +27,13 @@ use serde_json::{Value, json};
 use routectl_core::{Error, Result, sanitize_for_log, sanitize_upstream_body};
 
 // Wire constants. Kept private to this module: they are part of the
-// Cloud Code dialect, not configurable provider knobs.
+// Cloud Code dialect, not configurable provider knobs. The two host
+// constants are the single source of the Cloud Code hosts and are
+// re-exported from `gemini` so router-side surfaces never copy the literals.
 
+/// Production Cloud Code host.
 pub const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
+/// Daily Cloud Code host -- the default for a `cloud-code` entry.
 pub const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 
 pub const GENERATE_PATH: &str = "/v1internal:generateContent";
@@ -259,14 +265,10 @@ fn map_onboarding_error(
 pub async fn load_code_assist(
     client: &Client,
     token: &str,
-    generate_base: &str,
+    base: &str,
     provider_id: &str,
 ) -> Result<Value> {
-    let url = format!(
-        "{}{}",
-        generate_base.trim_end_matches('/'),
-        LOAD_CODE_ASSIST_PATH
-    );
+    let url = format!("{}{}", base.trim_end_matches('/'), LOAD_CODE_ASSIST_PATH);
     let body = json!({"metadata": {"ideType": "ANTIGRAVITY"}});
     let rb = onboarding_headers(client.post(&url), token).header("user-agent", SHORT_USER_AGENT);
     let resp = rb
@@ -338,16 +340,12 @@ pub async fn load_code_assist(
 pub async fn onboard_user(
     client: &Client,
     token: &str,
-    onboard_base: &str,
+    base: &str,
     tier_id: &str,
     poll_interval: Duration,
     provider_id: &str,
 ) -> Result<String> {
-    let url = format!(
-        "{}{}",
-        onboard_base.trim_end_matches('/'),
-        ONBOARD_USER_PATH
-    );
+    let url = format!("{}{}", base.trim_end_matches('/'), ONBOARD_USER_PATH);
     let body = json!({
         "tier_id": tier_id,
         "metadata": {
@@ -455,29 +453,21 @@ pub async fn onboard_user(
 
 /// Resolve the Cloud Code project id: read it from `loadCodeAssist`, or
 /// onboard via `onboardUser` when no project is provisioned yet. Ports the
-/// reference `FetchProjectID` flow.
+/// reference `FetchProjectID` flow. Both calls target the same `base` as
+/// generate.
 pub async fn resolve_project_id(
     client: &Client,
     token: &str,
-    generate_base: &str,
-    onboard_base: &str,
+    base: &str,
     poll_interval: Duration,
     provider_id: &str,
 ) -> Result<String> {
-    let load_resp = load_code_assist(client, token, generate_base, provider_id).await?;
+    let load_resp = load_code_assist(client, token, base, provider_id).await?;
     if let Some(project) = extract_project_id(&load_resp) {
         return Ok(project);
     }
     let tier = default_tier(&load_resp);
-    onboard_user(
-        client,
-        token,
-        onboard_base,
-        &tier,
-        poll_interval,
-        provider_id,
-    )
-    .await
+    onboard_user(client, token, base, &tier, poll_interval, provider_id).await
 }
 
 #[cfg(test)]

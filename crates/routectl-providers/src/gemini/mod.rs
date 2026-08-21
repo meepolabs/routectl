@@ -30,7 +30,41 @@ pub(crate) mod schema;
 pub(crate) mod sse;
 pub(crate) mod types;
 
-pub use cloudcode::GeminiAuthMode;
+pub use cloudcode::{DAILY_BASE_URL, GeminiAuthMode, PROD_BASE_URL};
+
+/// True when `base_url`'s host is EXACTLY the host of [`PROD_BASE_URL`]
+/// (case-insensitive), independent of scheme, port, path, query, fragment,
+/// or `user:pass@` credentials -- i.e. the entry egresses to the production
+/// Cloud Code host rather than the daily host or an enterprise mirror.
+///
+/// Exported so router-side surfaces can ask the question without copying a
+/// host literal: [`PROD_BASE_URL`] and [`DAILY_BASE_URL`] stay the single
+/// source of the host strings, and the expected host is derived from
+/// [`PROD_BASE_URL`] here rather than restated.
+///
+/// A precise host match, NOT a substring / suffix test: a `contains` check
+/// would also match a sibling-domain takeover (`<prod-host>.evil.example`),
+/// the host embedded in a path (`https://proxy.example/<prod-host>`), or a
+/// credentials-suffix smuggle (`https://<prod-host>@evil.example`).
+///
+/// Parses with the same URL parser the request path uses and compares
+/// `host_str()` case-insensitively, which closes the resolver-divergence
+/// class BY CONSTRUCTION: a hand-rolled authority split disagrees with the
+/// WHATWG URL rules (e.g. under a special scheme a backslash is a path
+/// separator), so an authority like `https://evil.example\@<prod-host>/`
+/// egresses to `evil.example` while a naive `@`-split would read it as the
+/// production host. Invalid URLs and URLs with no host return `false`.
+pub fn is_prod_host(base_url: &str) -> bool {
+    let expected = reqwest::Url::parse(PROD_BASE_URL)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string));
+    match (reqwest::Url::parse(base_url), expected) {
+        (Ok(url), Some(expected)) => url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case(&expected)),
+        _ => false,
+    }
+}
 
 /// Format tag stamped on every reasoning_details entry emitted by the
 /// Gemini provider. A downstream ingress echoing reasoning back must see
@@ -60,9 +94,6 @@ pub struct GeminiConfig {
     pub mode: GeminiAuthMode,
     /// Project-id cache for the Cloud Code path. `None` in `ApiKey` mode.
     pub project_cache: Option<Arc<dyn CloudProjectCache>>,
-    /// Base URL for the Cloud Code `onboardUser` endpoint (the reference
-    /// onboards against the "daily" host). Unused in `ApiKey` mode.
-    pub onboard_base_url: String,
     /// Poll interval between `onboardUser` attempts.
     pub onboard_poll_interval: Duration,
 }
@@ -77,7 +108,6 @@ impl std::fmt::Debug for GeminiConfig {
             .field("user_agent", &self.user_agent)
             .field("mode", &self.mode)
             .field("project_cache", &self.project_cache.is_some())
-            .field("onboard_base_url", &self.onboard_base_url)
             .field("onboard_poll_interval", &self.onboard_poll_interval)
             .finish()
     }
@@ -104,14 +134,16 @@ impl GeminiConfig {
             user_agent: None,
             mode: GeminiAuthMode::ApiKey,
             project_cache: None,
-            onboard_base_url: cloudcode::DAILY_BASE_URL.to_string(),
             onboard_poll_interval: ONBOARD_POLL_INTERVAL,
         }
     }
 
     /// Construct a Cloud Code ("antigravity") egress: bearer-token auth
-    /// against `cloudcode-pa.googleapis.com`, project id resolved lazily
-    /// through `project_cache` (onboarding against the daily host).
+    /// against the daily Cloud Code host ([`DAILY_BASE_URL`]), project id
+    /// resolved lazily through `project_cache`. ONE `base_url` carries every
+    /// Cloud Code call -- generate, `loadCodeAssist`, and `onboardUser` --
+    /// so pinning it (to [`PROD_BASE_URL`] or an enterprise mirror) moves
+    /// the whole lane, never a subset of it.
     pub fn new_cloud_code(
         id: impl Into<String>,
         auth: Arc<dyn TokenSource>,
@@ -120,12 +152,11 @@ impl GeminiConfig {
         Self {
             id: id.into(),
             auth,
-            base_url: cloudcode::PROD_BASE_URL.to_string(),
+            base_url: cloudcode::DAILY_BASE_URL.to_string(),
             header_extras: Vec::new(),
             user_agent: Some(cloudcode::SHORT_USER_AGENT.to_string()),
             mode: GeminiAuthMode::CloudCode,
             project_cache: Some(project_cache),
-            onboard_base_url: cloudcode::DAILY_BASE_URL.to_string(),
             onboard_poll_interval: ONBOARD_POLL_INTERVAL,
         }
     }
@@ -206,7 +237,6 @@ impl GeminiProvider {
             &self.client,
             token,
             &self.cfg.base_url,
-            &self.cfg.onboard_base_url,
             self.cfg.onboard_poll_interval,
             &self.cfg.id,
         )
@@ -672,6 +702,80 @@ fn map_gemini_upstream_error(
     ))
 }
 
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn is_prod_host_matches_only_the_exact_production_host() {
+        // Exact host, with and without a path / port, and any case, matches.
+        assert!(is_prod_host(PROD_BASE_URL));
+        assert!(is_prod_host(
+            "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
+        ));
+        assert!(is_prod_host("https://cloudcode-pa.googleapis.com:443/v1"));
+        assert!(is_prod_host("https://CloudCode-PA.GoogleAPIs.Com"));
+        // A credentials prefix on the authority is stripped by the parser
+        // before the host check, so it cannot smuggle a different real host.
+        assert!(is_prod_host(
+            "https://user:pass@cloudcode-pa.googleapis.com"
+        ));
+
+        // The daily default is NOT the production host -- the whole point of
+        // the predicate is telling these two apart.
+        assert!(!is_prod_host(DAILY_BASE_URL));
+        // Sibling-domain takeover, host-in-path, and a credentials-suffix
+        // smuggle must NOT match.
+        assert!(!is_prod_host(
+            "https://cloudcode-pa.googleapis.com.evil.example"
+        ));
+        assert!(!is_prod_host(
+            "https://proxy.example/cloudcode-pa.googleapis.com"
+        ));
+        assert!(!is_prod_host(
+            "https://cloudcode-pa.googleapis.com@evil.example"
+        ));
+        assert!(!is_prod_host("https://googleapis.com"));
+        assert!(!is_prod_host("not a url"));
+    }
+
+    #[test]
+    fn is_prod_host_backslash_authority_matches_the_parsers_egress_host() {
+        // NEGATIVE CONTROL against a hand-rolled authority split. Under a
+        // special scheme the WHATWG URL parser treats a backslash as a path
+        // separator, so this authority egresses to `evil.example`; a naive
+        // split on the last `@` would read it as the production host and
+        // grant it production treatment.
+        assert_eq!(
+            reqwest::Url::parse("https://evil.example\\@cloudcode-pa.googleapis.com/")
+                .unwrap()
+                .host_str(),
+            Some("evil.example"),
+            "parser egress host is evil.example, not the production host"
+        );
+        assert!(!is_prod_host(
+            "https://evil.example\\@cloudcode-pa.googleapis.com/"
+        ));
+    }
+
+    #[test]
+    fn cloud_code_constructor_defaults_to_the_daily_host() {
+        let auth: Arc<dyn TokenSource> = Arc::new(StaticToken::new("ya29.test"));
+        let cache: Arc<dyn CloudProjectCache> =
+            Arc::new(routectl_core::InMemoryProjectCache::new());
+        let cfg = GeminiConfig::new_cloud_code("gemini:test", auth, cache);
+        assert_eq!(cfg.base_url, DAILY_BASE_URL);
+        assert!(!is_prod_host(&cfg.base_url));
+    }
+
+    #[test]
+    fn api_key_constructor_keeps_the_public_rest_default() {
+        let cfg = GeminiConfig::new("gemini:test", "k");
+        assert_eq!(cfg.base_url, DEFAULT_BASE_URL);
+        assert!(matches!(cfg.mode, GeminiAuthMode::ApiKey));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end tests (wiremock-driven complete path)
 // ---------------------------------------------------------------------------
@@ -702,7 +806,6 @@ mod e2e_tests {
         let auth: Arc<dyn TokenSource> = Arc::new(StaticToken::new(CLOUD_CODE_TOKEN));
         let mut cfg = GeminiConfig::new_cloud_code("gemini:test", auth, cache);
         cfg.base_url = base_url.to_string();
-        cfg.onboard_base_url = base_url.to_string();
         cfg.onboard_poll_interval = std::time::Duration::from_millis(1);
         GeminiProvider::new(cfg)
     }
@@ -1147,6 +1250,67 @@ mod e2e_tests {
 
         let resp = provider.complete(base_req()).await.expect("complete ok");
         assert_eq!(resp.id, "resp-abc");
+    }
+
+    /// One configured `base_url` carries the WHOLE cloud-code lane. The
+    /// provider is built by pinning `base_url` alone -- the single seam an
+    /// operator has -- and all three call classes must land on that one
+    /// server, each exactly once. A second host knob would let onboarding
+    /// silently egress somewhere the pin never named.
+    #[tokio::test]
+    async fn one_configured_base_receives_generate_load_and_onboard() {
+        // Arrange: one server, one pin.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "allowedTiers": [{"id": "free-tier", "isDefault": true}]
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(ONBOARD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "done": true,
+                        "response": {"cloudaicompanionProject": "proj-one-base"}
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "proj-one-base"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let auth: Arc<dyn TokenSource> = Arc::new(StaticToken::new(CLOUD_CODE_TOKEN));
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let mut cfg = GeminiConfig::new_cloud_code("gemini:test", auth, cache);
+        cfg.base_url = server.uri();
+        cfg.onboard_poll_interval = std::time::Duration::from_millis(1);
+        let provider = GeminiProvider::new(cfg);
+
+        // Act
+        provider.complete(base_req()).await.expect("complete ok");
+
+        // Assert: each `.expect(1)` verifies on server drop.
+        drop(provider);
+        server.verify().await;
     }
 
     #[tokio::test]
