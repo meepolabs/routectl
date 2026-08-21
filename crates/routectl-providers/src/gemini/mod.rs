@@ -459,7 +459,10 @@ impl GeminiProvider {
             ));
         }
         if status >= 400 {
-            let err = self.map_error_response(resp, status).await;
+            let err = cloudcode::annotate_host_rejection(
+                self.map_error_response(resp, status).await,
+                &cloudcode::host_label(&self.cfg.base_url),
+            );
             if cloudcode::is_project_mismatch(&err)
                 && let Some(cache) = self.cfg.project_cache.as_ref()
                 && let Err(e) = cache.clear_if_matches(&project).await
@@ -553,7 +556,10 @@ impl GeminiProvider {
             ));
         }
         if status >= 400 {
-            let err = self.map_error_response(resp, status).await;
+            let err = cloudcode::annotate_host_rejection(
+                self.map_error_response(resp, status).await,
+                &cloudcode::host_label(&self.cfg.base_url),
+            );
             if cloudcode::is_project_mismatch(&err)
                 && let Some(cache) = self.cfg.project_cache.as_ref()
                 && let Err(e) = cache.clear_if_matches(&project).await
@@ -1889,5 +1895,103 @@ mod e2e_tests {
             cache.get().await.is_none(),
             "mismatch must clear the stale project"
         );
+    }
+
+    /// A quota rejection reaching the caller must carry the host diagnostic
+    /// with its structured surface intact: the router's class policy and
+    /// breaker read `status` / `upstream_type` / `retry_after`, so the
+    /// annotation cannot cost them.
+    fn assert_quota_annotated(err: &Error, host: &str) {
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                retry_after,
+                body,
+                ..
+            } => {
+                assert_eq!(*status, 429, "original upstream status must be preserved");
+                assert_eq!(
+                    upstream_type.as_deref(),
+                    Some("RESOURCE_EXHAUSTED"),
+                    "the classifier must survive the annotation"
+                );
+                assert_eq!(
+                    *retry_after,
+                    Some(std::time::Duration::from_secs(7)),
+                    "the reset hint must survive the annotation"
+                );
+                assert!(
+                    body.contains(host),
+                    "the suffix must name the host that served: {body}"
+                );
+                assert!(
+                    body.contains("base_url"),
+                    "the suffix must name the recovery knob: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    fn quota_response() -> ResponseTemplate {
+        ResponseTemplate::new(429)
+            .insert_header("content-type", "application/json")
+            .insert_header("retry-after", "7")
+            .set_body_string(
+                r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}"#,
+            )
+    }
+
+    #[tokio::test]
+    async fn complete_quota_rejection_carries_the_host_diagnostic() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .respond_with(quota_response())
+            .mount(&server)
+            .await;
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::with("proj-1"));
+        let provider = make_cloud_code_provider(&server.uri(), cache.clone());
+        let host = cloudcode::host_label(&server.uri());
+
+        // Act
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("a 429 must surface as an error");
+
+        // Assert
+        assert_quota_annotated(&err, &host);
+        assert_eq!(
+            cache.get().await.as_deref(),
+            Some("proj-1"),
+            "a quota verdict is not a project verdict: the cache must stay intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_quota_rejection_carries_the_host_diagnostic() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(STREAM_PATH))
+            .respond_with(quota_response())
+            .mount(&server)
+            .await;
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::with("proj-1"));
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+        let host = cloudcode::host_label(&server.uri());
+
+        // Act
+        let err = provider
+            .stream(base_req())
+            .await
+            .err()
+            .expect("a 429 must surface as an error, not open a stream");
+
+        // Assert
+        assert_quota_annotated(&err, &host);
     }
 }

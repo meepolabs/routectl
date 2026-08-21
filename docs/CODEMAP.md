@@ -898,7 +898,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   onboardUser only; control-plane headers; `is_project_mismatch`
   predicate (bare `PERMISSION_DENIED`/`NOT_FOUND` classifier on an `Upstream`
   error only; auth/quota/5xx/transport left untouched) gating the mod.rs cache
-  invalidation
+  invalidation; `annotate_host_rejection` + `host_label` suffix one fixed
+  host-diagnostic sentence (naming the egress host and the `base_url` recovery
+  path, hedged -- never asserting a host mismatch) onto the mismatch classes
+  plus `RESOURCE_EXHAUSTED`, rebuilding the `Upstream` error with
+  status/retry_after/classifier/request-id preserved; other classes pass
+  through unchanged and no request is ever reissued
 - `src/gemini/auth.rs` -- `apply` injects the `x-goog-api-key` header (no
   `Authorization`) for the api-key mode; key resolved per request so a managed
   token source can rotate
@@ -1438,8 +1443,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
   `validate_bedrock_global_config`, `validate_bedrock_invoke_model_family`,
   `class_policy_warnings`,
-  `codex_identity_warnings`) so `crate::factory::X` and the `lib.rs` `pub use
-  factory::{...}` block resolve unchanged
+  `codex_identity_warnings`, `cloudcode_host_warnings`) so
+  `crate::factory::X` and the `lib.rs` `pub use factory::{...}` block resolve
+  unchanged
 - `src/factory/build.rs` -- secret resolution +
   `build_provider`/`build_resolved_models`; one build arm per `ProviderEntry`
   kind (incl. the `gemini`-feature-gated arm: the `ApiKey` mode resolves the
@@ -1545,7 +1551,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a per-block marker (`supports_per_block_breakpoints` false: Bedrock
   `api_shape = "invoke"`, openai-compat, openai-responses, gemini), where the
   knob is inert (advisory only, never a load error), naming the shape for a
-  Bedrock entry and the kind otherwise via `inert_per_block_surface`
+  Bedrock entry and the kind otherwise via `inert_per_block_surface`;
+  `cloudcode_host_warnings` flags a `cloud-code` gemini entry whose `base_url`
+  pins the PRODUCTION cloud-code host (exact parsed-host match via
+  `routectl_providers::gemini::is_prod_host`, lookalike-safe) while the lane
+  default is the daily host (advisory only; the pin is honored verbatim).
+  Units live in the `#[path]`-included `warnings_tests.rs`
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file

@@ -182,6 +182,63 @@ fn inert_per_block_surface(entry: &ProviderEntry) -> String {
     format!("kind = \"{}\"", entry.kind_str())
 }
 
+/// Advisory (never fatal) load-time check on the Cloud Code host surface:
+/// warn when a `cloud-code` Gemini entry pins `base_url` at the PRODUCTION
+/// Cloud Code host. The pin is honored verbatim -- routectl never rewrites
+/// it and never issues a second request against the other host -- but the
+/// lane default is the daily host, and a consumer seat (one not covered by
+/// the GCP terms of service) serves on daily, so a production pin is a
+/// plausible cause of a permission / quota rejection the operator would
+/// otherwise read as an account problem.
+///
+/// The host test is [`routectl_providers::gemini::is_prod_host`]: an exact
+/// match on the PARSED host, so a lookalike authority
+/// (`<prod-host>.example.test`, `<prod-host>@evil.example`, the host inside
+/// a path) does not fire the warning. Silent for an unset `base_url` (that
+/// entry takes the daily default), an explicit daily or enterprise-mirror
+/// pin, and every `api-key` entry -- the Cloud Code hosts are not on the
+/// api-key lane at all.
+///
+/// Not `const`: with `gemini` enabled the body allocates and formats. Only
+/// the reduced build collapses to the empty-`Vec` arm, and constness is
+/// part of the recorded public API -- so it cannot vary by feature.
+#[allow(clippy::missing_const_for_fn)]
+pub fn cloudcode_host_warnings(config: &crate::config::Config) -> Vec<String> {
+    #[cfg(feature = "gemini")]
+    {
+        use routectl_providers::gemini::GeminiAuthMode;
+
+        config
+            .providers
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry,
+                    ProviderEntry::Gemini {
+                        auth_mode: GeminiAuthMode::CloudCode,
+                        base_url,
+                        ..
+                    } if routectl_providers::gemini::is_prod_host(base_url)
+                )
+            })
+            .map(|(provider_name, _)| {
+                format!(
+                    "[providers.{provider_name}] base_url pins this cloud-code entry to the \
+                     production cloud-code host; the lane default is the daily host, and \
+                     consumer (non-GCP-ToS) seats serve on the daily host. If this entry is \
+                     rejected on permission or quota, the pin is a candidate cause -- unset \
+                     base_url to serve on the daily default."
+                )
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = config;
+        Vec::new()
+    }
+}
+
 /// Advisory (never fatal) load-time check on the codex identity surface:
 /// warn when a chatgpt-oauth openai-responses provider overrides the
 /// `version` or `user-agent` identity header via `header_extras` with a
@@ -240,3 +297,7 @@ pub fn codex_identity_warnings(config: &crate::config::Config) -> Vec<String> {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+#[path = "warnings_tests.rs"]
+mod warnings_tests;

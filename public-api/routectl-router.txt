@@ -13361,6 +13361,7 @@ pub fn routectl_router::check_drift_and_persist_state(&[(alloc::string::String, 
 pub const fn routectl_router::class_debits(&routectl_core::failure_class::FailureClass) -> bool
 pub fn routectl_router::class_policy_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub const fn routectl_router::classify_field(routectl_router::ImpactField) -> routectl_router::ImpactClass
+pub fn routectl_router::cloudcode_host_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::codex_identity_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::collect_config_validation(&routectl_router::config::Config) -> routectl_router::ConfigValidation
 pub fn routectl_router::collect_near_lossless_marks(&routectl_core::schema::ChatRequest, usize, usize) -> routectl_router::NearLosslessMarks
