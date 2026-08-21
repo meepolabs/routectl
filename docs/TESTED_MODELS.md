@@ -304,16 +304,26 @@ cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix oauth_antigravity -- --nocapture --test-threads=1
 ```
 
+The servable-set sweep below is `#[ignore]`d -- it burns one live call per
+id, so it runs on demand only, never as part of the matrix above:
+```bash
+cargo test -p routectl-cli --features live-integration --release \
+  --test live_matrix -- --ignored oauth_antigravity_servable_set_sweep \
+  --nocapture --test-threads=1
+```
+
 The lane serves Anthropic model ids alongside the gemini ones through the
 same envelope (`model` names the id; the request body stays native-Gemini
 shape).
 
+### Durable matrix rows (always-run set)
+
 | Model | Mode | Status | Notes |
 |---|---|---|---|
-| `gemini-2.5-flash` | complete (oauth://antigravity) | PASS | `tokens=9 content="pong"`. Bearer resolved through `OAuthStore` (tempdir credentials.json); project id auto-resolved live via loadCodeAssist -> onboardUser. |
-| `gemini-2.5-flash` | stream (oauth://antigravity) | PASS | `chunks=3 content="pong"`. |
-| `gemini-2.5-flash` | thinking (`reasoning.effort`) | PASS | `rd=1 fmt=gemini-v1 reasoning_tokens=204`. Positive control for the reasoning channel on this transport. |
-| `gemini-2.5-pro` | complete + stream (oauth://antigravity) | GAP | 503 `UNAVAILABLE` / `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for model gemini-2.5-pro on the server") on the observed run. Transport-independent: a server-side capacity verdict, not a routectl defect. |
+| `gemini-3.1-flash-lite` | complete (oauth://antigravity) | PASS | `tokens=9 content="pong"`. Bearer resolved through `OAuthStore` (tempdir credentials.json); project id auto-resolved live via loadCodeAssist -> onboardUser. |
+| `gemini-3.1-flash-lite` | stream (oauth://antigravity) | PASS | `content="pong"`; 6/6 on repeated stream opens. |
+| `gemini-3.1-flash-lite` | thinking (`reasoning.effort`) | PASS | `rd=1 fmt=gemini-v1 reasoning_tokens=127..149` across repeated probes. Positive control for the reasoning channel on this transport. |
+| `gemini-3.1-pro-low` | complete (oauth://antigravity) | PASS | `tokens=81 content="pong"`. Pro-class pin. |
 | `claude-sonnet-4-6` | complete (oauth://antigravity) | PASS | `tokens=20 content="pong"`. |
 | `claude-sonnet-4-6` | stream (oauth://antigravity) | PASS | `chunks=4 content="pong"`. |
 | `claude-sonnet-4-6` | tool call (`ToolDef::Custom`) | PASS | `finish_reason=tool_calls`, one `tool_calls` entry naming `get_weather` with `arguments={"city":"Paris"}`. Round-trips through the shared gemini `functionDeclarations` translation UNMODIFIED. |
@@ -327,11 +337,70 @@ budget-probe row above asserts that in the live matrix: a budget at or above
 quoting Anthropic's own "`max_tokens` must be greater than
 `thinking.budget_tokens`" message. So the config is understood; the 200
 response simply carries no `thought: true` part and no
-`usageMetadata.thoughtsTokenCount`. The gemini-2.5-flash row above is the
-paired positive control: the identical `thinkingConfig` on the same lane
-DOES return both. The claude thinking test therefore asserts acceptance and
-records the return channel, flipping to PASS on its own if the lane starts
-serving thoughts.
+`usageMetadata.thoughtsTokenCount`. The `gemini-3.1-flash-lite` thinking row
+above is the paired positive control: the identical `thinkingConfig` on the
+same lane DOES return both. The claude thinking test therefore asserts
+acceptance and records the return channel, flipping to PASS on its own if the
+lane starts serving thoughts.
+
+### Servable-set verification snapshot
+
+Verified as of 2026-08-21 against the live `fetchAvailableModels` catalog.
+Google churns these ids on a weekly cadence; this table is a point-in-time
+verification snapshot, NOT a registry -- re-verify before trusting any id.
+Each row below completed one end-to-end non-stream request through
+routectl's own cloud-code lane.
+
+Ids are literal and are the only load-bearing value. The catalog's own
+`displayName` labels drift from them: `gemini-2.5-flash`,
+`gemini-2.5-flash-lite` and `gemini-2.5-flash-thinking` all label as
+"Gemini 3.1 Flash Lite"; `gemini-3-flash-agent` labels as "Gemini 3.5 Flash
+(High)"; `gemini-3.5-flash-extra-low` labels as "Gemini 3.5 Flash (Low)" and
+`gemini-3.5-flash-low` as "Gemini 3.5 Flash (Medium)". Do not infer a
+model's family or tier from its label.
+
+| Model | Mode | Status | Notes |
+|---|---|---|---|
+| `claude-opus-4-6-thinking` | complete | PASS | `tokens=20 content="pong"` |
+| `claude-sonnet-4-6` | complete | PASS | `tokens=20 content="pong"` |
+| `gemini-2.5-flash-lite` | complete | PASS | `tokens=9 content="pong"` |
+| `gemini-2.5-flash-thinking` | complete | PASS | `tokens=9 content="pong"` |
+| `gemini-3-flash` | complete | PASS | `tokens=81 content="pong"`; intermittently empty stream opens observed |
+| `gemini-3-flash-agent` | complete | PASS | `tokens=81 content="pong"` |
+| `gemini-3.1-flash-image` | complete | PASS | `tokens=9 content="pong"` |
+| `gemini-3.1-flash-lite` | complete | PASS | `tokens=9 content="pong"`; the flash-class durable pin |
+| `gemini-3.1-pro-low` | complete | PASS | `tokens=81 content="pong"`; the pro-class durable pin |
+| `gemini-3.5-flash-extra-low` | complete | PASS | `tokens=84 content="pong"` |
+| `gemini-3.5-flash-low` | complete | PASS | `tokens=81 content="pong"`; intermittently empty stream opens observed |
+| `gemini-3.6-flash-high` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
+| `gemini-3.6-flash-low` | complete | PASS | `tokens=84 content=null` (usage accounted, empty text on that call); intermittently empty stream opens observed |
+| `gemini-3.6-flash-medium` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
+| `gemini-pro-agent` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
+| `gpt-oss-120b-medium` | complete | PASS | `tokens=118 rd=1 fmt=gemini-v1 content="pong"` |
+
+`gemini-2.5-flash` also completed on this run, but the catalog's own label
+says the upstream serves flash-lite behind that id and routectl's docs
+previously recommended it -- it is treated as a deprecated alias (see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)),
+not as a row to copy.
+
+Present in the catalog but NOT verified on this run:
+
+- `gemini-2.5-pro` -- 503 `UNAVAILABLE` / `MODEL_CAPACITY_EXHAUSTED` ("No
+  capacity available for model gemini-2.5-pro on the server", `error_number
+  2010`) on every attempt including two retries. A server-side capacity
+  verdict for this seat, not a routectl defect and not a quota (429).
+- `gemini-3.1-pro-high` -- 400 `INVALID_ARGUMENT` ("Request contains an
+  invalid argument.", no field named). The catalog itself lists this id
+  under its deprecated ids with `gemini-pro-agent` as the replacement, and
+  `gemini-pro-agent` verifies, so the rejection is consistent with an id the
+  upstream has retired behind a successor.
+
+The sweep covers the servable subset of the catalog: `chat_*` and `tab_*`
+ids and label-less `*-tiered` variants are excluded as non-inference or
+non-addressable entries. Streaming is out of scope for the sweep (it is
+non-stream only); the stream notes above come from a separate throwaway
+pass and are an upstream flakiness signal, not a recorded verdict.
 
 Deterministic coverage (GREEN in CI now): the Cloud Code transport is
 pinned by wiremock tests in `crates/routectl-providers/src/gemini/mod.rs`
