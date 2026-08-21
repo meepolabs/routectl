@@ -5012,10 +5012,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (route-referenced-but-unusable -> WARN + login remediation), version via
   `preflight_config_version` (too-old -> FAIL + `config migrate`, too-new ->
   FAIL + upgrade, present-but-broken -> FAIL not all-PASS), config via the
-  shared `validation_report` (short-circuited to one `Warn` "validation
-  skipped" + the secret checks when the typed load failed, so a broken file
-  never emits a spurious validation `Pass`) + the leak-safe secret-presence
-  scan, auth (no seats/expired -> WARN, store-open error -> FAIL), pools
+  shared `validation_report` (BOTH halves rendered -- each error a `Fail`, each
+  advisory a `Warn` through the same `sanitize_for_log_with_cap` seam, and the single
+  `Pass` only when both halves are empty; short-circuited to one `Warn`
+  "validation skipped" + the secret checks when the typed load failed, so a
+  broken file never emits a spurious validation `Pass`) + the leak-safe
+  secret-presence scan, auth (no seats/expired -> WARN, store-open error ->
+  FAIL), pools
   (`section_seat_pools` + `pool_finding`: one finding per `[pools.<name>]`
   block from `seat_report::describe_pool` -- Warn naming a member with no
   stored credential, Fail when no member has one, so this section CAN move the

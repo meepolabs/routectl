@@ -87,7 +87,10 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
 /// 300 chars -- so the shared 256-char log-field budget would truncate a
 /// benign message. This ceiling bounds the line without reaching any real
 /// one.
-const MAX_REPORTED_LINE_CHARS: usize = 512;
+///
+/// Shared with the doctor render of the same validator messages so both
+/// report surfaces truncate at one ceiling.
+pub(crate) const MAX_REPORTED_LINE_CHARS: usize = 512;
 
 /// One-line rendering of a reported error or warning.
 ///
@@ -210,10 +213,10 @@ pub struct CheckReport {
 ///
 /// The suite's own warnings are carried through and joined by
 /// `oauth_auth_selector_warnings`, the one finding that cannot live in the
-/// router's shared suite (it reads the CLI-side auth-shape table). Only
-/// `check` renders the warning half; the gate callers
-/// (`edit_pipeline::gate`, `doctor`) read `errors` alone, so an advisory
-/// finding never blocks a write.
+/// router's shared suite (it reads the CLI-side auth-shape table). `check`
+/// and `doctor` render the warning half; the gate caller
+/// (`edit_pipeline::gate`) reads `errors` alone, so an advisory finding
+/// never blocks a write.
 pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport {
     let mut errors: Vec<String> = Vec::new();
 

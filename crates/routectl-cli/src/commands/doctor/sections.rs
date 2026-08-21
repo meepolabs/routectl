@@ -1,7 +1,7 @@
 //! Doctor section producers.
 
 use routectl_auth::oauth::types::TokenRecord;
-use routectl_core::sanitize_for_log;
+use routectl_core::sanitize_for_log_with_cap;
 use routectl_router::{
     ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding, Status,
     UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
@@ -10,6 +10,7 @@ use routectl_router::{
 use crate::commands::capability_legacy::{
     LEGACY_ALLOWED_BETAS, LEGACY_ALLOWED_BODY_FIELDS, LEGACY_UNSUPPORTED_FEATURES,
 };
+use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -151,10 +152,17 @@ pub(super) fn section_version(ctx: &DoctorContext) -> Vec<Finding> {
     vec![finding]
 }
 
+/// One remediation string for every validator advisory. The warning texts
+/// carry their own fix instructions, so a per-warning remediation would
+/// duplicate them; this points at the advisory itself instead.
+const WARNING_REMEDIATION: &str =
+    "review the advisory, then re-run `routectl doctor` after fixing the config";
+
 /// Config-check section: the STATIC validator suite (reused via
-/// `validation_report`) rendered as findings, plus a read-only
-/// secret-presence scan. Resolves no secret value and refreshes no
-/// credential; every message names the scheme, never the value or ref.
+/// `validation_report`) rendered as findings -- both halves, errors as Fail
+/// and advisories as Warn -- plus a read-only secret-presence scan. Resolves
+/// no secret value and refreshes no credential; every message names the
+/// scheme, never the value or ref.
 pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
     let mut findings = Vec::new();
     if ctx.config_load_error.is_some() {
@@ -171,7 +179,7 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
         return findings;
     }
     let report = crate::commands::config::validation_report(&ctx.config, ctx.raw_config.as_deref());
-    if report.errors.is_empty() {
+    if report.errors.is_empty() && report.warnings.is_empty() {
         findings.push(Finding {
             section: "config",
             name: "validation".to_string(),
@@ -179,23 +187,33 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
             detail: "config passes the static validator suite".to_string(),
             remediation: None,
         });
-    } else {
-        for err in report.errors {
-            findings.push(Finding {
-                section: "config",
-                name: "validation".to_string(),
-                status: Status::Fail,
-                // Every validator formats operator-written table keys into its
-                // message, so this one render point control-char-filters the
-                // whole suite's output: a key bearing a newline plus an ANSI
-                // sequence would otherwise forge a fabricated finding line in
-                // the human render.
-                detail: sanitize_for_log(&err),
-                remediation: Some(
-                    "fix the config error above, then re-run `routectl doctor`".to_string(),
-                ),
-            });
-        }
+    }
+    for err in report.errors {
+        findings.push(Finding {
+            section: "config",
+            name: "validation".to_string(),
+            status: Status::Fail,
+            // Every validator formats operator-written table keys into its
+            // message, so this one render point control-char-filters the
+            // whole suite's output: a key bearing a newline plus an ANSI
+            // sequence would otherwise forge a fabricated finding line in
+            // the human render. The cap is shared with `config check` so a
+            // long-but-legitimate advisory is not truncated on one surface
+            // and whole on the other.
+            detail: sanitize_for_log_with_cap(&err, MAX_REPORTED_LINE_CHARS),
+            remediation: Some(
+                "fix the config error above, then re-run `routectl doctor`".to_string(),
+            ),
+        });
+    }
+    for warning in report.warnings {
+        findings.push(Finding {
+            section: "config",
+            name: "validation".to_string(),
+            status: Status::Warn,
+            detail: sanitize_for_log_with_cap(&warning, MAX_REPORTED_LINE_CHARS),
+            remediation: Some(WARNING_REMEDIATION.to_string()),
+        });
     }
     findings.extend(ctx.secret_checks.iter().map(secret_finding));
     findings
