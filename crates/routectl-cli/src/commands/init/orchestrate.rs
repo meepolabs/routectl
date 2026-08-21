@@ -5,8 +5,13 @@
 //! side-effecting core -- answer collection, plan application, the empty-offer
 //! credential capture branch, and the terminal-IO helpers -- exercised through
 //! the [`InitIo`] seam so the whole flow is testable without a TTY.
+//!
+//! The terminal-IO helpers carry the non-interactive contract: with no TTY on
+//! stdin every prompt declines rather than reading, so a silent pipe cannot
+//! hang the wizard. `--yes` is the sanctioned non-interactive path.
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal as _;
 use std::path::Path;
 
 use routectl_auth::{LocalProbe, OAuthStore};
@@ -22,12 +27,29 @@ use crate::commands::provider_add::{self, AddIo};
 use crate::commands::provider_env::env_var_for_kind;
 
 /// Print `label`, flush, and read one trimmed line. `None` on a read error
-/// (e.g. EOF stdin), so a non-interactive invocation declines rather than
-/// hangs -- matching the confirm pattern the mutating commands use.
+/// (e.g. EOF stdin) or when stdin is not a terminal, so a non-interactive
+/// invocation declines rather than hangs -- matching the confirm pattern the
+/// mutating commands use.
+///
+/// The label is printed either way, so a scripted caller sees which question
+/// was declined.
 pub(super) fn prompt(label: &str) -> Option<String> {
     use std::io::Write as _;
     print!("{label}");
     let _ = std::io::stdout().flush();
+    // A non-interactive caller with an open-but-silent stdin (a pipe that
+    // never sends a line or EOF) would otherwise block `read_line` forever.
+    // With no TTY there is no one to answer, so decline immediately -- the
+    // documented non-interactive contract is `--yes`. Every call site treats
+    // `None` exactly as it treats the blank answer an EOF stdin yields, so
+    // the closed-stdin outcome is unchanged.
+    if !std::io::stdin().is_terminal() {
+        println!(
+            "\nstdin is not a terminal; declining without prompting. \
+             Pass `--yes` to run init non-interactively."
+        );
+        return None;
+    }
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_err() {
         return None;
@@ -36,7 +58,8 @@ pub(super) fn prompt(label: &str) -> Option<String> {
 }
 
 /// A `[y/N]` confirmation defaulting to no: only an explicit yes accepts, and
-/// a read error / EOF declines.
+/// a read error / EOF / non-interactive stdin declines (via [`prompt`], so the
+/// terminal gate cannot drift between the two).
 pub(super) fn yes_no(label: &str) -> bool {
     let answer = prompt(label).unwrap_or_default().to_ascii_lowercase();
     matches!(answer.as_str(), "y" | "yes")
