@@ -141,6 +141,8 @@ creds  = { kind = "default-chain" }
 # kind        = "gemini"
 # api_key_ref = "oauth://antigravity"
 # auth_mode   = "cloud-code"
+# cloud_project_id = "my-project-1234"   # BARE id, never "projects/..."; skips discovery.
+# base_url    = "https://cloudcode-pa.googleapis.com"   # PROD/enterprise host; default is the daily one.
 
 # ---- Models (provider + upstream + reasoning capability) ----
 # Each model picks its provider ENTRY or its POOL, names the upstream

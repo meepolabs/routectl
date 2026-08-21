@@ -278,9 +278,10 @@ for the full mapping and the before/after fidelity note.
 
 ## Cloud Code Gemini (`kind = "gemini"`, `auth_mode = "cloud-code"`, antigravity OAuth)
 
-Hits the Cloud Code ("antigravity") surface: `cloudcode-pa`
+Hits the Cloud Code ("antigravity") surface: the daily Cloud Code host's
 `/v1internal:{generate,stream}Content` with an OAuth bearer
-(`Authorization: Bearer <token>`, NOT `x-goog-api-key`). The inner
+(`Authorization: Bearer <token>`, NOT `x-goog-api-key`); `base_url` moves
+the whole lane to the production host when a seat needs it. The inner
 Gemini translation is reused unchanged from the api-key path; only the
 transport wrapper, auth, base, and project resolution differ. See
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)
@@ -330,7 +331,7 @@ per-provider tables above; this table is the at-a-glance summary.
 | bedrock (invoke + converse) | yes | yes | Anthropic body on InvokeModel; vendor-neutral Converse |
 | openai-responses | stream-only (`complete` force-streams) | yes | Flat Responses tool shape, encrypted_content reasoning replay |
 | **gemini (native)** | yes | yes | Full on the four named features: systemInstruction, thinkingConfig, functionDeclarations, usageMetadata cached-content + thoughts tokens |
-| **gemini (Cloud Code, OAuth)** | yes | yes | `auth_mode = "cloud-code"`: Bearer against cloudcode-pa `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows PENDING `routectl login antigravity` |
+| **gemini (Cloud Code, OAuth)** | yes | yes | `auth_mode = "cloud-code"`: Bearer against the daily Cloud Code host's `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows PENDING `routectl login antigravity` |
 
 ## Adding a new model
 
