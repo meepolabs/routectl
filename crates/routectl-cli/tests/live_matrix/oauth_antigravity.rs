@@ -56,6 +56,17 @@ const THINKING_PROMPT: &str = "A bat and a ball cost 1.10 together. The bat cost
      How much is the ball? Think it through, then answer.";
 const MAX_TOKENS_TOOL: u32 = 256;
 const MAX_TOKENS_THINKING: u32 = 2048;
+/// Reasoning budget set at `MAX_TOKENS_THINKING` -- Anthropic requires
+/// `max_tokens` to be strictly GREATER than `thinking.budget_tokens`, so
+/// an equal budget is the smallest value that provokes the rejection the
+/// discriminating probe below asserts on.
+const OVERBUDGET_THINKING_TOKENS: u32 = MAX_TOKENS_THINKING;
+/// Stable fragments of Anthropic's own rejection of a budget at or above
+/// `max_tokens` ("max_tokens must be greater than
+/// thinking.budget_tokens"). Quoted verbatim through the Cloud Code
+/// envelope, so their presence in the body proves `thinkingConfig` reached
+/// the claude upstream and was understood as `thinking.budget_tokens`.
+const ANTHROPIC_BUDGET_REJECTION: &[&str] = &["must be greater than", "budget_tokens"];
 const THINKING_EFFORT: &str = "low";
 
 fn read_bearer() -> Option<String> {
@@ -243,6 +254,24 @@ fn make_thinking_request(target: &str, stream: bool) -> ChatRequest {
     }
 }
 
+/// Request whose explicit reasoning budget deliberately exceeds
+/// `max_tokens`. Anthropic rejects that combination, which is what makes
+/// it a DISCRIMINATING probe: only a request whose `thinkingConfig`
+/// actually reached the claude upstream can earn the rejection.
+fn make_overbudget_thinking_request(target: &str) -> ChatRequest {
+    ChatRequest {
+        model: target.to_string(),
+        messages: vec![user_message(THINKING_PROMPT)].into(),
+        max_tokens: Some(MAX_TOKENS_THINKING),
+        stream: Some(false),
+        reasoning: Some(ReasoningConfig {
+            max_tokens: Some(OVERBUDGET_THINKING_TOKENS),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauth_antigravity_complete_via_seeded_record() {
     let Some(router) = build_router_or_skip(MODELS).await else {
@@ -401,21 +430,29 @@ async fn oauth_antigravity_claude_stream() {
 
     let mut text = String::new();
     let mut chunks = 0usize;
-    while let Ok(Some(item)) =
-        tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), stream.next()).await
-    {
-        let chunk = match item {
-            Ok(c) => c,
-            Err(e) => panic!(
-                "claude stream chunk error model={model} after {chunks} chunks {}",
-                wire_evidence(&e)
-            ),
-        };
-        chunks += 1;
-        for ch in &chunk.choices {
-            if let Some(c) = ch.delta.content.as_deref() {
-                text.push_str(c);
+    loop {
+        match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), stream.next()).await {
+            Ok(Some(item)) => {
+                let chunk = match item {
+                    Ok(c) => c,
+                    Err(e) => panic!(
+                        "claude stream chunk error model={model} after {chunks} chunks {}",
+                        wire_evidence(&e)
+                    ),
+                };
+                chunks += 1;
+                for ch in &chunk.choices {
+                    if let Some(c) = ch.delta.content.as_deref() {
+                        text.push_str(c);
+                    }
+                }
             }
+            Ok(None) => break,
+            Err(elapsed) => panic!(
+                "claude stream chunk timed out ({elapsed}) model={model} chunks={chunks} \
+                 text_so_far={text:?} -- a per-chunk timeout is a stalled stream, never a \
+                 clean end of stream"
+            ),
         }
     }
     eprintln!(
@@ -469,7 +506,31 @@ async fn oauth_antigravity_claude_tool_call_round_trip() {
         "tool call must name the tool we defined; got {:?}",
         calls[0]
     );
-    eprintln!("PASS oauth-antigravity claude tool-call model={model} tool={name}");
+    // The arguments ride as a JSON-encoded string under
+    // `function.arguments` (the OpenAI tool-call shape the gemini response
+    // lift emits). Asserting the name alone would pass on an empty or
+    // wrong-argument call, which is not a round trip.
+    let raw_arguments = calls[0]
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .and_then(|a| a.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "tool call must carry function.arguments; got {:?}",
+                calls[0]
+            )
+        });
+    let arguments: serde_json::Value = serde_json::from_str(raw_arguments)
+        .unwrap_or_else(|e| panic!("function.arguments must be JSON: {raw_arguments:?} ({e})"));
+    assert_eq!(
+        arguments.get("city").and_then(|c| c.as_str()),
+        Some("Paris"),
+        "the tool call must carry the city from the prompt; got {arguments}"
+    );
+    eprintln!(
+        "PASS oauth-antigravity claude tool-call model={model} tool={name} \
+         arguments={arguments}"
+    );
 }
 
 /// Reasoning round-trip on the Cloud Code lane, asserted against a
@@ -507,13 +568,15 @@ async fn oauth_antigravity_gemini_thinking_round_trip() {
 }
 
 /// Claude thinking on the Cloud Code lane. The request must be ACCEPTED
-/// with the thinking config attached (that is the shared-translation
-/// assertion: the config reaches upstream and is understood). Whether
-/// reasoning comes BACK is recorded, not asserted: the lane does not
-/// return thought parts for claude ids today, and the gemini positive
-/// control above proves that is upstream behavior rather than a
-/// translation defect. The recorded line flips to PASS on its own if the
-/// lane starts serving thoughts.
+/// with the thinking config attached, and whether reasoning comes BACK is
+/// recorded rather than asserted: the lane does not return thought parts
+/// for claude ids today, and the gemini positive control above proves that
+/// is upstream behavior rather than a translation defect. The recorded line
+/// flips to PASS on its own if the lane starts serving thoughts.
+///
+/// Acceptance alone does not prove the config traversed the envelope --
+/// `oauth_antigravity_claude_thinking_budget_reaches_upstream` below is the
+/// discriminating half of this pair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauth_antigravity_claude_thinking_request_accepted() {
     let Some(router) = build_router_or_skip(CLAUDE_MODELS).await else {
@@ -556,6 +619,68 @@ async fn oauth_antigravity_claude_thinking_request_accepted() {
              -- upstream returns no thought parts for claude ids on this lane"
         );
     }
+}
+
+/// Discriminating counterpart to the GAP observation above: the normal
+/// request proves only that a 200 came back, which a lane that DROPPED
+/// `thinkingConfig` would also produce. A reasoning budget at or above
+/// `max_tokens` is a combination only Anthropic rejects, so a 400
+/// `INVALID_ARGUMENT` quoting Anthropic's own `budget_tokens` message
+/// proves the config traversed the Cloud Code envelope into the claude
+/// upstream and was understood there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oauth_antigravity_claude_thinking_budget_reaches_upstream() {
+    let Some(router) = build_router_or_skip(CLAUDE_MODELS).await else {
+        skip_notice("claude-thinking-budget-probe");
+        return;
+    };
+
+    let model = CLAUDE_THINKING_MODEL;
+    let req = make_overbudget_thinking_request(model);
+    let result = tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), router.complete(req))
+        .await
+        .expect("claude overbudget thinking probe timed out");
+
+    let err = match result {
+        Ok(resp) => panic!(
+            "an over-budget thinking request must be REJECTED upstream; a 200 means the \
+             thinkingConfig never reached claude. model={model} observed={}",
+            observe_reasoning(&resp)
+        ),
+        Err(e) => e,
+    };
+    let evidence = wire_evidence(&err);
+    eprintln!("oauth-antigravity claude thinking budget probe model={model} {evidence}");
+
+    let routectl_core::Error::Upstream {
+        status,
+        upstream_type,
+        body,
+        ..
+    } = &err
+    else {
+        panic!("expected an upstream rejection, got {evidence}");
+    };
+    assert_eq!(
+        *status, 400,
+        "an over-budget thinking budget must earn a 400: {evidence}"
+    );
+    assert_eq!(
+        upstream_type.as_deref(),
+        Some("INVALID_ARGUMENT"),
+        "the classifier must lift from the Cloud Code envelope: {evidence}"
+    );
+    for fragment in ANTHROPIC_BUDGET_REJECTION {
+        assert!(
+            body.contains(fragment),
+            "the body must quote Anthropic's own budget rejection ({fragment:?}) -- that is \
+             what proves thinkingConfig reached the claude upstream: {evidence}"
+        );
+    }
+    eprintln!(
+        "PASS oauth-antigravity claude thinking budget reaches upstream model={model} \
+         status=400 upstream_type=INVALID_ARGUMENT"
+    );
 }
 
 /// What a response carried back on the reasoning channel.

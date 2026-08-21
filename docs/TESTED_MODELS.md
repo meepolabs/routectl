@@ -318,10 +318,12 @@ shape).
 | `claude-sonnet-4-6` | stream (oauth://antigravity) | PASS | `chunks=4 content="pong"`. |
 | `claude-sonnet-4-6` | tool call (`ToolDef::Custom`) | PASS | `finish_reason=tool_calls`, one `tool_calls` entry naming `get_weather` with `arguments={"city":"Paris"}`. Round-trips through the shared gemini `functionDeclarations` translation UNMODIFIED. |
 | `claude-opus-4-6-thinking` | thinking (`reasoning.effort`) | PARTIAL | Request ACCEPTED (200) with the thinking config attached and answered normally, but the upstream returns no thought parts: `rd=0 reasoning_tokens=None`. Not a translation defect -- see the gap note below. |
+| `claude-opus-4-6-thinking` | thinking budget probe (`reasoning.max_tokens` >= `max_tokens`) | PASS | 400 `INVALID_ARGUMENT` quoting Anthropic's "``max_tokens`` must be greater than ``thinking.budget_tokens``". The discriminating half of the pair above: only a request whose `thinkingConfig` reached the claude upstream can earn this rejection. |
 
 Claude thinking gap (observed, upstream-side): `thinkingConfig.thinkingBudget`
-demonstrably reaches Anthropic's `thinking.budget_tokens` on this lane -- a
-budget at or above `maxOutputTokens` comes back as a 400 `INVALID_ARGUMENT`
+demonstrably reaches Anthropic's `thinking.budget_tokens` on this lane -- the
+budget-probe row above asserts that in the live matrix: a budget at or above
+`maxOutputTokens` comes back as a 400 `INVALID_ARGUMENT`
 quoting Anthropic's own "`max_tokens` must be greater than
 `thinking.budget_tokens`" message. So the config is understood; the 200
 response simply carries no `thought: true` part and no
@@ -354,7 +356,7 @@ per-provider tables above; this table is the at-a-glance summary.
 | bedrock (invoke + converse) | yes | yes | Anthropic body on InvokeModel; vendor-neutral Converse |
 | openai-responses | stream-only (`complete` force-streams) | yes | Flat Responses tool shape, encrypted_content reasoning replay |
 | **gemini (native)** | yes | yes | Full on the four named features: systemInstruction, thinkingConfig, functionDeclarations, usageMetadata cached-content + thoughts tokens |
-| **gemini (Cloud Code, OAuth)** | yes | yes | `auth_mode = "cloud-code"`: Bearer against the daily Cloud Code host's `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows PENDING `routectl login antigravity` |
+| **gemini (Cloud Code, OAuth)** | yes | yes | `auth_mode = "cloud-code"`: Bearer against the daily Cloud Code host's `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows require a bearer token and SKIP without one -- outcomes recorded above |
 
 ## Adding a new model
 

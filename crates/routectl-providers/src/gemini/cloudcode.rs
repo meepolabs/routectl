@@ -234,6 +234,11 @@ pub(super) fn host_label(base_url: &str) -> String {
     }
 }
 
+/// Key [`annotate_host_rejection`] writes the diagnostic under when the
+/// upstream body is a JSON object. Namespaced as routectl-owned so it can
+/// never collide with a Google-authored field in the same envelope.
+const HOST_REJECTION_HINT_KEY: &str = "routectl_hint";
+
 /// Fixed diagnostic sentence appended by [`annotate_host_rejection`]. Names
 /// possibilities only: on the Cloud Code lane a permission / not-found /
 /// quota verdict from the host in play is indistinguishable from the same
@@ -244,11 +249,18 @@ const HOST_REJECTION_HINT: &str = "This Cloud Code request egressed to the host 
      serves on the other Cloud Code host, adjust `base_url` on the provider entry -- routectl does \
      not retry against a different host.";
 
-/// Suffix a fixed host-diagnostic sentence onto the classes of Cloud Code
+/// Attach a fixed host-diagnostic sentence to the classes of Cloud Code
 /// rejection a wrong-host lane can produce: the [`is_project_mismatch`] set
 /// (`PERMISSION_DENIED` / `NOT_FOUND`) plus `RESOURCE_EXHAUSTED`. Every
 /// other class -- `UNAUTHENTICATED`, any 5xx, a transport failure, any
 /// non-`Upstream` variant -- returns unchanged, byte-identical.
+///
+/// A Cloud Code rejection body is a JSON error envelope, and the
+/// client-facing sinks mine it by PARSING it (`error.message`,
+/// `error.param`). So the diagnostic goes INSIDE the envelope under a
+/// routectl-owned key rather than as a prose suffix: a suffix would break
+/// the parse and cost the client the upstream's own message. Prose suffix
+/// remains the fallback for a body that is not valid JSON.
 ///
 /// The rebuild preserves the whole structured surface (`status`,
 /// `retry_after`, `upstream_type`, `upstream_code`, `upstream_request_id`)
@@ -272,7 +284,7 @@ pub(super) fn annotate_host_rejection(err: Error, effective_host: &str) -> Error
         } if is_host_sensitive_class(&upstream_type) => Error::upstream_full(
             provider,
             status,
-            format!("{body} (cloud-code host: {effective_host}) {HOST_REJECTION_HINT}"),
+            annotated_rejection_body(&body, effective_host),
             retry_after,
             Some(String::from(upstream_type)),
             upstream_code.map(String::from),
@@ -280,6 +292,35 @@ pub(super) fn annotate_host_rejection(err: Error, effective_host: &str) -> Error
         .with_upstream_request_id(upstream_request_id.map(String::from)),
         other => other,
     }
+}
+
+/// Build the annotated body for a host-sensitive rejection.
+///
+/// JSON object: the hint is injected under
+/// [`HOST_REJECTION_HINT_KEY`] inside the `error` object when the envelope
+/// carries one (that is where a reader looks), else at the top level, and the
+/// envelope is re-serialized so the client-facing extractors still parse it.
+/// Anything else (non-JSON, or JSON that is not an object): fall back to the
+/// prose suffix, since there is no envelope to preserve.
+fn annotated_rejection_body(body: &str, effective_host: &str) -> String {
+    let hint = format!("(cloud-code host: {effective_host}) {HOST_REJECTION_HINT}");
+    let Some(mut envelope) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .filter(serde_json::Value::is_object)
+    else {
+        return format!("{body} {hint}");
+    };
+    let target = match envelope.get_mut("error") {
+        Some(err_obj) if err_obj.is_object() => err_obj,
+        _ => &mut envelope,
+    };
+    if let Some(map) = target.as_object_mut() {
+        map.insert(
+            HOST_REJECTION_HINT_KEY.to_string(),
+            serde_json::Value::String(hint.clone()),
+        );
+    }
+    serde_json::to_string(&envelope).unwrap_or_else(|_| format!("{body} {hint}"))
 }
 
 /// The Google canonical classifiers a wrong-host Cloud Code lane can
@@ -805,12 +846,21 @@ mod tests {
     }
 
     /// Full-surface upstream error: every structured field populated, so a
-    /// rebuild that drops one is visible.
+    /// rebuild that drops one is visible. The body is the JSON error envelope
+    /// a real Cloud Code rejection carries.
     fn full_upstream(status: u16, upstream_type: &str) -> Error {
         Error::upstream_full(
             "gemini:test",
             status,
-            "original body",
+            serde_json::json!({
+                "error": {
+                    "code": status,
+                    "message": "original upstream message",
+                    "status": upstream_type,
+                    "param": "project",
+                }
+            })
+            .to_string(),
             Some(Duration::from_secs(31)),
             Some(upstream_type.to_string()),
             Some(status.to_string()),
@@ -852,21 +902,98 @@ mod tests {
                     assert_eq!(got_type.as_deref(), Some(upstream_type));
                     assert_eq!(upstream_code.as_deref(), Some(status.to_string().as_str()));
                     assert_eq!(upstream_request_id.as_deref(), Some("req-abc"));
+
+                    let parsed: serde_json::Value = serde_json::from_str(&body).expect(
+                        "the annotated body must stay parseable JSON -- the client-facing \
+                         extractors mine it by parsing",
+                    );
+                    assert_eq!(
+                        parsed["error"]["message"], "original upstream message",
+                        "the upstream's own message must survive: {body}"
+                    );
+                    assert_eq!(
+                        parsed["error"]["param"], "project",
+                        "the upstream's own param must survive: {body}"
+                    );
+                    assert_eq!(parsed["error"]["status"], upstream_type);
+                    let hint = parsed["error"][HOST_REJECTION_HINT_KEY]
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            panic!("hint must land inside the error object: {body}")
+                        });
                     assert!(
-                        body.starts_with("original body"),
-                        "the upstream detail must be kept ahead of the suffix: {body}"
+                        hint.contains("daily-cloudcode-pa.googleapis.com"),
+                        "the hint must name the effective host: {hint}"
                     );
                     assert!(
-                        body.contains("daily-cloudcode-pa.googleapis.com"),
-                        "the suffix must name the effective host: {body}"
-                    );
-                    assert!(
-                        body.contains("base_url"),
-                        "the suffix must name the recovery knob: {body}"
+                        hint.contains("base_url"),
+                        "the hint must name the recovery knob: {hint}"
                     );
                 }
                 other => panic!("expected Error::Upstream, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn annotate_host_rejection_injects_at_top_level_without_an_error_object() {
+        let err = Error::upstream_full(
+            "gemini:test",
+            403,
+            "{\"message\":\"forbidden\"}",
+            None,
+            Some("PERMISSION_DENIED".to_string()),
+            None,
+        );
+
+        let annotated = annotate_host_rejection(err, "cloudcode-pa.googleapis.com");
+
+        let body = upstream_body(&annotated);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must stay JSON: {body}");
+        assert_eq!(parsed["message"], "forbidden", "siblings preserved: {body}");
+        assert!(
+            parsed[HOST_REJECTION_HINT_KEY]
+                .as_str()
+                .is_some_and(|hint| hint.contains("cloudcode-pa.googleapis.com")),
+            "the hint goes top-level when there is no error object: {body}"
+        );
+    }
+
+    #[test]
+    fn annotate_host_rejection_suffixes_prose_onto_a_non_json_body() {
+        // Nothing to preserve in a non-JSON body (an HTML gateway page, a
+        // cap-exceeded placeholder), so the prose suffix is the fallback.
+        let err = Error::upstream_full(
+            "gemini:test",
+            429,
+            "quota exceeded",
+            None,
+            Some("RESOURCE_EXHAUSTED".to_string()),
+            None,
+        );
+
+        let body = upstream_body(&annotate_host_rejection(
+            err,
+            "daily-cloudcode-pa.googleapis.com",
+        ));
+
+        assert!(
+            body.starts_with("quota exceeded"),
+            "the upstream detail stays ahead of the suffix: {body}"
+        );
+        assert!(
+            body.contains("daily-cloudcode-pa.googleapis.com") && body.contains("base_url"),
+            "the suffix must name the host and the recovery knob: {body}"
+        );
+    }
+
+    /// Pull the body out of an `Error::Upstream`, panicking on any other
+    /// variant.
+    fn upstream_body(err: &Error) -> String {
+        match err {
+            Error::Upstream { body, .. } => body.clone(),
+            other => panic!("expected Error::Upstream, got {other:?}"),
         }
     }
 

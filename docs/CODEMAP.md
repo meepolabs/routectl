@@ -910,10 +910,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   onboardUser only; control-plane headers; `is_project_mismatch`
   predicate (bare `PERMISSION_DENIED`/`NOT_FOUND` classifier on an `Upstream`
   error only; auth/quota/5xx/transport left untouched) gating the mod.rs cache
-  invalidation; `annotate_host_rejection` + `host_label` suffix one fixed
+  invalidation; `annotate_host_rejection` + `host_label` attach one fixed
   host-diagnostic sentence (naming the egress host and the `base_url` recovery
   path, hedged -- never asserting a host mismatch) onto the mismatch classes
-  plus `RESOURCE_EXHAUSTED`, rebuilding the `Upstream` error with
+  plus `RESOURCE_EXHAUSTED`, injected INSIDE the JSON error envelope under a
+  routectl-owned key (prose suffix only for a non-JSON body) so the
+  client-facing extractors still parse it, rebuilding the `Upstream` error with
   status/retry_after/classifier/request-id preserved; other classes pass
   through unchanged and no request is ever reissued
 - `src/gemini/auth.rs` -- `apply` injects the `x-goog-api-key` header (no

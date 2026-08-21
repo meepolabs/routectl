@@ -599,9 +599,13 @@ if you need to match a specific install.
 earned rejection look identical on the wire, so routectl annotates rather
 than guesses. On a `PERMISSION_DENIED`, `NOT_FOUND`, or
 `RESOURCE_EXHAUSTED` verdict, the returned error body gains a fixed
-suffix naming the host the request actually egressed to and saying the
+sentence naming the host the request actually egressed to and saying the
 rejection can ALSO come from serving on a host this seat is not entitled
-to, with `base_url` named as the recovery path. The annotation is hedged
+to, with `base_url` named as the recovery path. The sentence goes INSIDE
+the upstream JSON error envelope under a routectl-owned `routectl_hint`
+key (falling back to a prose suffix only when the body is not valid JSON),
+so the envelope still parses and the client keeps the upstream's own
+`error.message` and `error.param`. The annotation is hedged
 deliberately -- it never asserts a host mismatch as fact -- and preserves
 the error's status, retry-after, classifier, and upstream request id, so
 retry and breaker behavior are unchanged. Every other class passes

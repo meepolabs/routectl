@@ -513,6 +513,53 @@ async fn openai_envelope_param_null_for_non_upstream_error() {
 }
 
 #[tokio::test]
+async fn openai_envelope_survives_the_cloud_code_host_annotation() {
+    // The Cloud Code lane annotates a host-sensitive rejection by injecting
+    // its diagnostic INSIDE the upstream JSON error envelope (under
+    // `error.routectl_hint`) rather than suffixing prose onto the body,
+    // precisely so this sink still parses the envelope. Both extractors here
+    // gate on `serde_json::from_str`, so an annotated 403 must still deliver
+    // the upstream's own message and param.
+    let annotated = serde_json::json!({
+        "error": {
+            "code": 403,
+            "message": "Permission denied on resource project foo",
+            "status": "PERMISSION_DENIED",
+            "param": "project",
+            "routectl_hint": "(cloud-code host: daily-cloudcode-pa.googleapis.com) \
+                              adjust `base_url` on the provider entry",
+        }
+    })
+    .to_string();
+    let err = Error::Upstream {
+        provider: "gemini_cloudcode".into(),
+        status: 403,
+        retry_after: None,
+        upstream_type: Some("PERMISSION_DENIED".into()),
+        upstream_code: Some("403".into()),
+        upstream_request_id: None,
+        body: annotated,
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    let message = body["error"]["message"]
+        .as_str()
+        .expect("client message present");
+    assert!(
+        message.contains("Permission denied on resource project foo"),
+        "the annotation must not cost the client the upstream detail: {message:?}"
+    );
+    assert_eq!(
+        body["error"]["param"], "project",
+        "the annotation must not cost the client the upstream param"
+    );
+}
+
+#[tokio::test]
 async fn anthropic_envelope_ignores_upstream_param() {
     // The Anthropic envelope has no `param` field even when the upstream
     // body carried one.
