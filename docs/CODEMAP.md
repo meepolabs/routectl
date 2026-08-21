@@ -876,7 +876,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lane -- generate + `loadCodeAssist` + `onboardUser`); re-exports
   `PROD_BASE_URL` / `DAILY_BASE_URL` plus the `is_prod_host(&str)` predicate
   (exact parsed-host match, so router surfaces name the production host
-  without copying a literal); dispatches `complete`/`stream` to the api-key or
+  without copying a literal) and `deprecated_alias_replacement(&str)`; dispatches `complete`/`stream` to the api-key or
   cloud-code arm by
   `GeminiAuthMode`; builds the `models/{model}:generateContent` /
   `:streamGenerateContent?alt=sse` URLs and the `GEMINI_FORMAT` (`gemini-v1`)
@@ -901,7 +901,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/gemini/cloudcode.rs` -- Cloud Code ("antigravity") egress:
   `GeminiAuthMode` enum; `PROD_BASE_URL` / `DAILY_BASE_URL` (the single
   source of both Cloud Code hosts; DAILY is the lane default) and the
-  `/v1internal:{generate,stream}Content` paths; `{project,request,model}` request envelope + `response`-wrapper
+  `/v1internal:{generate,stream}Content` paths;
+  `deprecated_alias_replacement` (the single home for the server-side
+  deprecated-alias map: exactly the two ids routectl's own docs recommended,
+  mapped to sweep-verified replacements; cloud-code lane only); `{project,request,model}` request envelope + `response`-wrapper
   unwrap (non-stream and per-SSE-chunk); project-id resolution via
   `loadCodeAssist` falling back to polled `onboardUser`, cached through a
   `CloudProjectCache`; the one composed `identity::antigravity` UA on all
@@ -1458,7 +1461,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
   `validate_bedrock_global_config`, `validate_bedrock_invoke_model_family`,
   `class_policy_warnings`,
-  `codex_identity_warnings`, `cloudcode_host_warnings`) so
+  `codex_identity_warnings`, `cloudcode_host_warnings`,
+  `cloudcode_model_warnings`) so
   `crate::factory::X` and the `lib.rs` `pub use factory::{...}` block resolve
   unchanged
 - `src/factory/build.rs` -- secret resolution +
@@ -1571,8 +1575,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `cloudcode_host_warnings` flags a `cloud-code` gemini entry whose `base_url`
   pins the PRODUCTION cloud-code host (exact parsed-host match via
   `routectl_providers::gemini::is_prod_host`, lookalike-safe) while the lane
-  default is the daily host (advisory only; the pin is honored verbatim).
-  Units live in the `#[path]`-included `warnings_tests.rs`
+  default is the daily host (advisory only; the pin is honored verbatim);
+  `cloudcode_model_warnings` joins each `[models.X]` entry to its
+  `[providers.X]` row and flags a cloud-code-lane entry whose `upstream` hits
+  `routectl_providers::gemini::deprecated_alias_replacement`, naming the
+  verified replacement -- the auth-mode gate is load-bearing, since the same
+  ids stay current on the api-key lane (advisory only). Units live in the
+  `#[path]`-included `warnings_tests.rs`
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file

@@ -37,6 +37,35 @@ pub const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 /// Daily Cloud Code host -- the default for a `cloud-code` entry.
 pub const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 
+/// The replacement id for a Cloud Code model id Google has deprecated
+/// server-side, or `None` when `upstream` is not a known deprecated alias.
+///
+/// This mirrors GOOGLE'S server-side alias state, not a routectl policy: the
+/// ids below still resolve on the Cloud Code lane today, but they resolve to
+/// something other than what their name says, and Google churns the catalog
+/// on a weekly cadence. The list is deliberately tiny -- exactly the two ids
+/// routectl's own docs and examples recommended for the cloud-code lane, so
+/// an operator who copied config from this repo gets told what to move to.
+/// Ids circulating elsewhere are not listed: routectl never handed them out,
+/// and guessing at another tool's aliases would warn on config routectl
+/// knows nothing about.
+///
+/// Replacements are pinned from a live end-to-end verification against the
+/// Cloud Code catalog; a future churn pass re-verifies and edits HERE, the
+/// single home for the mapping.
+///
+/// Scope: the CLOUD CODE lane only. `gemini-2.5-flash` is a live, current id
+/// on the native api-key REST surface -- a caller must gate on the
+/// `cloud-code` auth mode before treating a hit here as a finding.
+#[must_use]
+pub const fn deprecated_alias_replacement(upstream: &str) -> Option<&'static str> {
+    match upstream.as_bytes() {
+        b"gemini-2.5-flash" => Some("gemini-3.1-flash-lite"),
+        b"gemini-2.5-pro" => Some("gemini-3.1-pro-low"),
+        _ => None,
+    }
+}
+
 pub const GENERATE_PATH: &str = "/v1internal:generateContent";
 pub const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
@@ -798,6 +827,36 @@ mod tests {
                 );
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deprecated_alias_replacement_maps_only_the_two_doc_recommended_ids() {
+        assert_eq!(
+            deprecated_alias_replacement("gemini-2.5-flash"),
+            Some("gemini-3.1-flash-lite")
+        );
+        assert_eq!(
+            deprecated_alias_replacement("gemini-2.5-pro"),
+            Some("gemini-3.1-pro-low")
+        );
+        // The replacements themselves, near-miss ids, and the empty string
+        // must not map -- otherwise the WARN would tell an operator to
+        // change config that is already correct.
+        for current in [
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-pro-low",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash-thinking",
+            "gemini-2.5-flash ",
+            "GEMINI-2.5-FLASH",
+            "",
+        ] {
+            assert_eq!(
+                deprecated_alias_replacement(current),
+                None,
+                "`{current}` must not be treated as a deprecated alias"
+            );
         }
     }
 

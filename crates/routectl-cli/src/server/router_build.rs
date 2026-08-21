@@ -109,6 +109,13 @@ pub async fn build_router_from_config_with_overlay(
         tracing::warn!(warning = %warning, "cloud-code host warning");
     }
 
+    // A cloud-code Gemini model entry pinning an upstream id Google has
+    // deprecated server-side still serves, but not what the id names.
+    // Advisory only.
+    for warning in routectl_router::cloudcode_model_warnings(&config) {
+        tracing::warn!(warning = %warning, "cloud-code model warning");
+    }
+
     // Reject malformed `[registry]` glob keys at startup so query-time
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;

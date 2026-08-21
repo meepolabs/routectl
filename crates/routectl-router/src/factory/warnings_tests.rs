@@ -3,7 +3,7 @@
 
 #![cfg(feature = "gemini")]
 
-use super::cloudcode_host_warnings;
+use super::{cloudcode_host_warnings, cloudcode_model_warnings};
 use crate::config::Config;
 
 fn parse(toml_text: &str) -> Config {
@@ -146,6 +146,108 @@ fn collect_config_validation_surfaces_the_pin_as_a_warning_not_an_error() {
     assert!(
         validation.errors.is_empty(),
         "a production pin is advisory and must never fail the load: {:?}",
+        validation.errors
+    );
+}
+
+/// One `[models.m]` entry bound to a single Gemini provider on `auth_mode`,
+/// pinning `upstream`.
+fn model_config(auth_mode: &str, upstream: &str) -> Config {
+    parse(&format!(
+        "version = 2\n\
+         [providers.g]\n\
+         kind = \"gemini\"\n\
+         api_key_ref = \"oauth://antigravity\"\n\
+         auth_mode = \"{auth_mode}\"\n\
+         [models.m]\n\
+         provider = \"g\"\n\
+         upstream = \"{upstream}\"\n"
+    ))
+}
+
+#[test]
+fn warns_on_a_cloud_code_entry_pinning_a_deprecated_alias() {
+    for (upstream, replacement) in [
+        ("gemini-2.5-flash", "gemini-3.1-flash-lite"),
+        ("gemini-2.5-pro", "gemini-3.1-pro-low"),
+    ] {
+        // Arrange
+        let config = model_config("cloud-code", upstream);
+
+        // Act
+        let warnings = cloudcode_model_warnings(&config);
+
+        // Assert
+        assert_eq!(
+            warnings.len(),
+            1,
+            "{upstream} is a deprecated cloud-code id and must warn once: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("[models.m]"),
+            "the warning must name the model entry key: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains(upstream),
+            "the warning must name the deprecated id: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains(replacement),
+            "the warning must name the verified replacement: {}",
+            warnings[0]
+        );
+    }
+}
+
+#[test]
+fn silent_for_an_api_key_gemini_entry_on_the_same_upstream_id() {
+    // The load-bearing negative: gemini-2.5-flash is a LIVE id on the
+    // native api-key REST lane, so that config is correct as written and a
+    // WARN there would be a false positive telling the operator to break it.
+    // The positive above (same id, cloud-code mode) proves this is not
+    // vacuous -- only the lane differs.
+    for upstream in ["gemini-2.5-flash", "gemini-2.5-pro"] {
+        let warnings = cloudcode_model_warnings(&model_config("api-key", upstream));
+        assert!(
+            warnings.is_empty(),
+            "{upstream} is current on the api-key lane and must stay silent: {warnings:?}"
+        );
+    }
+}
+
+#[test]
+fn silent_for_a_cloud_code_entry_pinning_a_verified_id() {
+    for upstream in ["gemini-3.1-flash-lite", "gemini-3.1-pro-low"] {
+        let warnings = cloudcode_model_warnings(&model_config("cloud-code", upstream));
+        assert!(
+            warnings.is_empty(),
+            "{upstream} is verified on the cloud-code lane: {warnings:?}"
+        );
+    }
+}
+
+#[test]
+fn collect_config_validation_surfaces_the_deprecated_alias_as_a_warning_not_an_error() {
+    // Arrange
+    let config = model_config("cloud-code", "gemini-2.5-flash");
+
+    // Act
+    let validation = super::super::validate::collect_config_validation(&config);
+
+    // Assert
+    assert!(
+        validation
+            .warnings
+            .iter()
+            .any(|w| w.contains("[models.m]") && w.contains("gemini-3.1-flash-lite")),
+        "the deprecated-alias line must reach .warnings: {:?}",
+        validation.warnings
+    );
+    assert!(
+        validation.errors.is_empty(),
+        "a deprecated alias is advisory and must never fail the load: {:?}",
         validation.errors
     );
 }
