@@ -10,10 +10,14 @@
 //!     client.
 //!   - `anthropic` -- the Claude Code SDK (Stainless) fingerprint
 //!     consumed by the anthropic-api egress (OauthBearer).
+//!   - `antigravity` -- the Antigravity IDE fingerprint consumed by the
+//!     gemini cloud-code egress (bearer token).
 //!
-//! Both submodules expose their constants plus a
-//! `default_identity_headers()` builder the relevant provider calls
-//! directly; nothing else duplicates these literals.
+//! Each submodule exposes its constants plus the builder the relevant
+//! provider calls directly (`default_identity_headers()` for the header
+//! sets, a composed User-Agent for the cloud-code lane); nothing else
+//! duplicates these literals.
 
 pub mod anthropic;
+pub mod antigravity;
 pub mod codex;

@@ -1064,6 +1064,10 @@ pub const fn routectl_core::identity::anthropic::default_claude_code_anthropic_b
 pub fn routectl_core::identity::anthropic::default_claude_code_identity_headers() -> alloc::vec::Vec<(&'static str, &'static str)>
 pub fn routectl_core::identity::anthropic::default_claude_code_user_agent() -> &'static str
 pub fn routectl_core::identity::anthropic::is_anthropic_api_host(&str) -> bool
+pub mod routectl_core::identity::antigravity
+pub const routectl_core::identity::antigravity::IDE_NAME: &str
+pub const routectl_core::identity::antigravity::PINNED_IDE_VERSION: &str
+pub fn routectl_core::identity::antigravity::antigravity_user_agent() -> &'static str
 pub mod routectl_core::identity::codex
 pub struct routectl_core::identity::codex::CodexIdentity
 impl routectl_core::identity::codex::CodexIdentity
