@@ -29,6 +29,6 @@ pub use validate::{
     validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use warnings::{
-    class_policy_warnings, cloudcode_host_warnings, codex_identity_warnings,
-    per_block_breakpoint_warnings,
+    class_policy_warnings, cloudcode_host_warnings, cloudcode_model_warnings,
+    codex_identity_warnings, per_block_breakpoint_warnings,
 };

@@ -239,6 +239,68 @@ pub fn cloudcode_host_warnings(config: &crate::config::Config) -> Vec<String> {
     }
 }
 
+/// Advisory (never fatal) load-time check on the Cloud Code model-id
+/// surface: warn when a `[models.X]` entry served by a `cloud-code` Gemini
+/// provider pins an `upstream` id Google has deprecated server-side. The id
+/// still resolves upstream, so the request succeeds -- but it is served by
+/// whatever Google now aliases the name to, which is not what the config
+/// says. The message names the verified replacement so the fix is a single
+/// edit.
+///
+/// The provider-mode gate is load-bearing, not a scoping nicety:
+/// `gemini-2.5-flash` is a LIVE, current id on the native api-key REST
+/// surface. An `api-key` entry pinning it is correct config and must stay
+/// silent; only the `cloud-code` lane has the alias problem.
+///
+/// The alias list itself lives provider-side in
+/// [`routectl_providers::gemini::deprecated_alias_replacement`] -- one home
+/// to edit when Google churns the catalog again.
+///
+/// A `[models.X] provider` value naming a `[pools.X]` block rather than a
+/// `[providers.X]` entry is not inspected: the join here is against
+/// `config.providers` only.
+///
+/// Not `const`: with `gemini` enabled the body allocates and formats. Only
+/// the reduced build collapses to the empty-`Vec` arm, and constness is
+/// part of the recorded public API -- so it cannot vary by feature.
+#[allow(clippy::missing_const_for_fn)]
+pub fn cloudcode_model_warnings(config: &crate::config::Config) -> Vec<String> {
+    #[cfg(feature = "gemini")]
+    {
+        use routectl_providers::gemini::{GeminiAuthMode, deprecated_alias_replacement};
+
+        let mut warnings = Vec::new();
+        for (nickname, model) in &config.models {
+            if !matches!(
+                config.providers.get(&model.provider),
+                Some(ProviderEntry::Gemini {
+                    auth_mode: GeminiAuthMode::CloudCode,
+                    ..
+                })
+            ) {
+                continue;
+            }
+            if let Some(replacement) = deprecated_alias_replacement(&model.upstream) {
+                warnings.push(format!(
+                    "[models.{nickname}] upstream `{upstream}` is a deprecated Cloud Code \
+                     model id: Google still resolves it, but server-side it now aliases to \
+                     another model, so this entry does not serve what its id says. Set \
+                     upstream = \"{replacement}\" (verified end-to-end on the cloud-code \
+                     lane). The id remains current on the api-key Gemini lane -- only \
+                     cloud-code entries need the change.",
+                    upstream = model.upstream,
+                ));
+            }
+        }
+        warnings
+    }
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = config;
+        Vec::new()
+    }
+}
+
 /// Advisory (never fatal) load-time check on the codex identity surface:
 /// warn when a chatgpt-oauth openai-responses provider overrides the
 /// `version` or `user-agent` identity header via `header_extras` with a

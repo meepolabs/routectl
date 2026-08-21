@@ -31,7 +31,7 @@ pub(crate) mod schema;
 pub(crate) mod sse;
 pub(crate) mod types;
 
-pub use cloudcode::{DAILY_BASE_URL, GeminiAuthMode, PROD_BASE_URL};
+pub use cloudcode::{DAILY_BASE_URL, GeminiAuthMode, PROD_BASE_URL, deprecated_alias_replacement};
 
 /// True when `base_url`'s host is EXACTLY the host of [`PROD_BASE_URL`]
 /// (case-insensitive), independent of scheme, port, path, query, fragment,
