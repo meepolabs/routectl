@@ -95,6 +95,11 @@ pub struct GeminiConfig {
     pub mode: GeminiAuthMode,
     /// Project-id cache for the Cloud Code path. `None` in `ApiKey` mode.
     pub project_cache: Option<Arc<dyn CloudProjectCache>>,
+    /// Operator-supplied Cloud Code project id (BARE, no `projects/`
+    /// prefix). When set, it is preferred over the cache and over
+    /// discovery, and written through to the cache on use. `None` leaves
+    /// discovery as the only source.
+    pub cloud_project_id: Option<String>,
     /// Poll interval between `onboardUser` attempts.
     pub onboard_poll_interval: Duration,
 }
@@ -109,6 +114,7 @@ impl std::fmt::Debug for GeminiConfig {
             .field("user_agent", &self.user_agent)
             .field("mode", &self.mode)
             .field("project_cache", &self.project_cache.is_some())
+            .field("cloud_project_id", &self.cloud_project_id)
             .field("onboard_poll_interval", &self.onboard_poll_interval)
             .finish()
     }
@@ -135,6 +141,7 @@ impl GeminiConfig {
             user_agent: None,
             mode: GeminiAuthMode::ApiKey,
             project_cache: None,
+            cloud_project_id: None,
             onboard_poll_interval: ONBOARD_POLL_INTERVAL,
         }
     }
@@ -158,6 +165,7 @@ impl GeminiConfig {
             user_agent: Some(antigravity_user_agent().to_string()),
             mode: GeminiAuthMode::CloudCode,
             project_cache: Some(project_cache),
+            cloud_project_id: None,
             onboard_poll_interval: ONBOARD_POLL_INTERVAL,
         }
     }
@@ -171,6 +179,13 @@ pub struct GeminiProvider {
     /// concurrent cold-start requests runs onboarding once, not N times.
     /// Runtime-only state: it is NOT on the `Clone` `GeminiConfig`.
     resolve_lock: tokio::sync::Mutex<()>,
+    /// One-way latch: set once the host rejects
+    /// `cfg.cloud_project_id` as not applying to this seat, after which
+    /// the configured id is ignored and every request resolves through
+    /// discovery. Runtime-only state, like `resolve_lock` -- a restart
+    /// re-trusts the configured id, which is what an operator who fixed
+    /// the entry expects.
+    configured_rejected: std::sync::atomic::AtomicBool,
 }
 
 impl GeminiProvider {
@@ -188,6 +203,7 @@ impl GeminiProvider {
             cfg,
             client,
             resolve_lock: tokio::sync::Mutex::new(()),
+            configured_rejected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -213,9 +229,12 @@ impl GeminiProvider {
         format!("{base}{}", cloudcode::STREAM_PATH)
     }
 
-    /// Resolve the Cloud Code project id, preferring the cache. The warm
-    /// path reads the cache with NO lock held. On a miss it takes
-    /// `resolve_lock` and re-checks the cache under the lock (the
+    /// Resolve the Cloud Code project id. An operator-configured
+    /// `cfg.cloud_project_id` wins outright (until the host rejects it and
+    /// latches `configured_rejected`), writing through to the cache so the
+    /// value survives as the seat's persisted id. Otherwise the cache
+    /// decides: the warm path reads it with NO lock held, and on a miss the
+    /// code takes `resolve_lock` and re-checks the cache under the lock (the
     /// double-check is load-bearing: without it a post-invalidation herd
     /// would each re-run onboarding); only if still unresolved does it run
     /// the onboarding HTTP once and seed the cache. The lock never wraps the
@@ -227,6 +246,26 @@ impl GeminiProvider {
                 self.cfg.id
             ))
         })?;
+        // Deliberately unsynchronized against the latch: a rejection landing
+        // between this check and the return costs a bounded tail on the
+        // rejected id (a straggler may even re-persist it until the next
+        // project-verdict clears it), which the latch then excludes forever.
+        // Locking the configured path to close that window would put a mutex
+        // on every warm request to save one failure per process.
+        if let Some(configured) = self.configured_project_id() {
+            // Compare before put: `OAuthStoreProjectCache::put` is a disk
+            // write, and the steady state is "already equal".
+            if cache.get().await.as_deref() != Some(configured)
+                && let Err(e) = cache.put(configured.to_string()).await
+            {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    error = ?e,
+                    "gemini: persisting the configured cloud project id failed; serving the request with it anyway"
+                );
+            }
+            return Ok(configured.to_string());
+        }
         if let Some(p) = cache.get().await {
             return Ok(p);
         }
@@ -244,6 +283,45 @@ impl GeminiProvider {
         .await?;
         cache.put(p.clone()).await?;
         Ok(p)
+    }
+
+    /// The operator-configured project id, unless the host has already
+    /// rejected it for this seat.
+    fn configured_project_id(&self) -> Option<&str> {
+        if self
+            .configured_rejected
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        self.cfg.cloud_project_id.as_deref()
+    }
+
+    /// Handle a `>= 400` Cloud Code rejection of `project`: latch the
+    /// configured id off when the host rejected exactly that value, and
+    /// invalidate the cached id so the next request rediscovers. The
+    /// rejected request still returns its own error -- there is no
+    /// in-request retry.
+    async fn handle_project_rejection(&self, err: &Error, project: &str) {
+        if !cloudcode::is_project_mismatch(err) {
+            return;
+        }
+        if self.cfg.cloud_project_id.as_deref() == Some(project)
+            && !self
+                .configured_rejected
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                provider = %self.cfg.id,
+                cloud_project_id = project,
+                "gemini: upstream rejected the configured cloud project id; falling back to rediscovery"
+            );
+        }
+        if let Some(cache) = self.cfg.project_cache.as_ref()
+            && let Err(e) = cache.clear_if_matches(project).await
+        {
+            tracing::warn!(provider = %self.cfg.id, error = ?e, "gemini: cloud project cache clear failed");
+        }
     }
 
     fn build_headers(
@@ -463,12 +541,7 @@ impl GeminiProvider {
                 self.map_error_response(resp, status).await,
                 &cloudcode::host_label(&self.cfg.base_url),
             );
-            if cloudcode::is_project_mismatch(&err)
-                && let Some(cache) = self.cfg.project_cache.as_ref()
-                && let Err(e) = cache.clear_if_matches(&project).await
-            {
-                tracing::warn!(provider = %self.cfg.id, error = %e, "gemini: cloud project cache clear failed");
-            }
+            self.handle_project_rejection(&err, &project).await;
             return Err(err);
         }
 
@@ -560,12 +633,7 @@ impl GeminiProvider {
                 self.map_error_response(resp, status).await,
                 &cloudcode::host_label(&self.cfg.base_url),
             );
-            if cloudcode::is_project_mismatch(&err)
-                && let Some(cache) = self.cfg.project_cache.as_ref()
-                && let Err(e) = cache.clear_if_matches(&project).await
-            {
-                tracing::warn!(provider = %self.cfg.id, error = %e, "gemini: cloud project cache clear failed");
-            }
+            self.handle_project_rejection(&err, &project).await;
             return Err(err);
         }
 
@@ -1994,4 +2062,6 @@ mod e2e_tests {
         // Assert
         assert_quota_annotated(&err, &host);
     }
+
+    include!("cloud_project_id_tests.rs");
 }

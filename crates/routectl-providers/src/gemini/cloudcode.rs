@@ -508,7 +508,7 @@ pub async fn onboard_user(
                 .and_then(extract_project_id);
             return project.ok_or_else(|| {
                 Error::Internal(format!(
-                    "gemini provider `{provider_id}`: onboardUser completed without a project id"
+                    "gemini provider `{provider_id}`: onboardUser completed without a project id; if this seat already has a Cloud Code project, set cloud_project_id on the provider entry"
                 ))
             });
         }

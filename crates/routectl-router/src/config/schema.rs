@@ -1657,6 +1657,24 @@ pub enum ProviderEntry {
         /// `api_key_ref` MUST be an `oauth://<provider>` reference.
         #[serde(default)]
         auth_mode: GeminiAuthMode,
+        /// Cloud Code project id for this seat, in `cloud-code` mode. Give
+        /// the BARE id (`my-project-1234`), never the `projects/`-prefixed
+        /// resource name.
+        ///
+        /// Set it to skip discovery entirely: it is consulted before the
+        /// credential store's cached project id and before `loadCodeAssist`
+        /// / `onboardUser`, so a cold request goes straight to
+        /// `generateContent`. The value also writes through to the seat's
+        /// persisted project id, so later requests -- and other entries on
+        /// the same seat -- read it from the cache. Two entries naming the
+        /// same seat with different ids: last writer wins.
+        ///
+        /// If the host rejects the id as not applying to this seat, that
+        /// request fails and the entry falls back to discovery for the rest
+        /// of the process. Unset (or empty) leaves discovery as the only
+        /// source. Ignored in `api-key` mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cloud_project_id: Option<String>,
         /// Operator override for this entry's prompt-cache capability.
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2243,6 +2261,7 @@ impl ProviderEntry {
             payload_extras: None,
             user_agent: None,
             auth_mode: GeminiAuthMode::default(),
+            cloud_project_id: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             auto_emit_per_block_breakpoints: None,

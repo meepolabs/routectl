@@ -869,7 +869,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Gated on the `gemini` cargo feature.
 
 - `src/gemini/mod.rs` -- `GeminiProvider` + `GeminiConfig` (fields: `id`,
-  `auth`, `base_url`, `header_extras`, `user_agent`, `mode`); `new_with_auth`
+  `auth`, `base_url`, `header_extras`, `user_agent`, `mode`,
+  `cloud_project_id`); `new_with_auth`
   (api-key) vs `new_cloud_code` (bearer + `Arc<dyn CloudProjectCache>`,
   `base_url` defaulting to the DAILY Cloud Code host and carrying the whole
   lane -- generate + `loadCodeAssist` + `onboardUser`); re-exports
@@ -881,12 +882,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `:streamGenerateContent?alt=sse` URLs and the `GEMINI_FORMAT` (`gemini-v1`)
   reasoning tag; SSE drain; `resolve_lock` single-flight serializing cold
   Cloud Code project resolution (warm path reads the cache lock-free, then
-  double-checks under the lock before onboarding once); project-mismatch
-  cache-invalidation hook (`clear_if_matches`) on both cloud-code >=400 error
-  branches (complete + stream). Wiremock tests pin the cloud-code transport
+  double-checks under the lock before onboarding once); an operator-configured
+  `cloud_project_id` short-circuits resolution ahead of the cache with a
+  compare-before-put write-through (a put failure WARNs, never fails the
+  request), gated by the runtime-only `configured_rejected` one-way latch;
+  `handle_project_rejection` is the shared hook on both cloud-code >=400 error
+  branches (complete + stream) -- it latches the configured id off (WARN) when
+  the host rejected exactly that value and invalidates the cache
+  (`clear_if_matches`), never reissuing the request. Wiremock tests pin the
+  cloud-code transport
   (`envelope_wrap_and_response_unwrap`, `stream_unwraps_response_envelope`,
   `onboards_via_loadcodeassist`, `onboards_via_onboarduser`,
   `preserves_reasoning_and_structured_output`)
+- `src/gemini/cloud_project_id_tests.rs` -- `include!`d into `mod.rs`'s
+  `e2e_tests`: configured-id wiremock coverage (zero-discovery cold request,
+  compare-before-put, put-failure WARN, unset-knob regression pin, the
+  403 latch + rediscovery two-request pair, and the 429 non-latch)
 - `src/gemini/cloudcode.rs` -- Cloud Code ("antigravity") egress:
   `GeminiAuthMode` enum; `cloudcode-pa` `/v1internal:{generate,stream}Content`
   paths; `{project,request,model}` request envelope + `response`-wrapper
@@ -1171,7 +1182,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   its claiming pool's, else the `fill-first` default for a standalone provider)
 - `src/config/schema.rs` -- Config value types: `ProviderEntry` (one variant
   per provider kind incl. the `gemini`-feature-gated `Gemini { api_key_ref,
-  base_url, header_extras, payload_extras, user_agent, auth_mode, ... }`;
+  base_url, header_extras, payload_extras, user_agent, auth_mode,
+  cloud_project_id, ... }`;
   constructor `ProviderEntry::gemini`, `with_gemini_auth_mode` sets
   `GeminiAuthMode` {ApiKey default, CloudCode}, `kind_str() == "gemini"`;
   `api_key_ref()` exposes the primary key ref, `None` for Bedrock, so the
@@ -1451,7 +1463,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   kind (incl. the `gemini`-feature-gated arm: the `ApiKey` mode resolves the
   `x-goog-api-key` source, the `CloudCode` mode requires an `oauth://` ref,
   resolves the bearer, and wires an `OAuthStoreProjectCache` into
-  `GeminiConfig::new_cloud_code`); provider-or-pool resolution -- a
+  `GeminiConfig::new_cloud_code`, forwarding `cloud_project_id` with an empty
+  string normalized to unset); provider-or-pool resolution -- a
   `[models.X] provider` naming a `[pools]` block compiles through
   `compile_pool` into one seat per usable member (built from that member's own
   `api_key_ref`, credential probed first so a logged-out member is OMITTED

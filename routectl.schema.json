@@ -1590,6 +1590,13 @@
               "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
+            "cloud_project_id": {
+              "description": "Cloud Code project id for this seat, in `cloud-code` mode. Give\nthe BARE id (`my-project-1234`), never the `projects/`-prefixed\nresource name.\n\nSet it to skip discovery entirely: it is consulted before the\ncredential store's cached project id and before `loadCodeAssist`\n/ `onboardUser`, so a cold request goes straight to\n`generateContent`. The value also writes through to the seat's\npersisted project id, so later requests -- and other entries on\nthe same seat -- read it from the cache. Two entries naming the\nsame seat with different ids: last writer wins.\n\nIf the host rejects the id as not applying to this seat, that\nrequest fails and the entry falls back to discovery for the rest\nof the process. Unset (or empty) leaves discovery as the only\nsource. Ignored in `api-key` mode.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "header_extras": {
               "additionalProperties": {
                 "type": "string"

@@ -1037,6 +1037,7 @@ pub routectl_router::config::ProviderEntry::Gemini::auto_emit_per_block_breakpoi
 pub routectl_router::config::ProviderEntry::Gemini::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::Gemini::base_url: alloc::string::String
 pub routectl_router::config::ProviderEntry::Gemini::cache_capability: core::option::Option<routectl_router::CacheCapability>
+pub routectl_router::config::ProviderEntry::Gemini::cloud_project_id: core::option::Option<alloc::string::String>
 pub routectl_router::config::ProviderEntry::Gemini::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::config::ProviderEntry::Gemini::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_router::config::ProviderEntry::Gemini::reduction_enabled: core::option::Option<bool>
@@ -6429,6 +6430,7 @@ pub routectl_router::ProviderEntry::Gemini::auto_emit_per_block_breakpoints: cor
 pub routectl_router::ProviderEntry::Gemini::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::Gemini::base_url: alloc::string::String
 pub routectl_router::ProviderEntry::Gemini::cache_capability: core::option::Option<routectl_router::CacheCapability>
+pub routectl_router::ProviderEntry::Gemini::cloud_project_id: core::option::Option<alloc::string::String>
 pub routectl_router::ProviderEntry::Gemini::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::ProviderEntry::Gemini::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_router::ProviderEntry::Gemini::reduction_enabled: core::option::Option<bool>

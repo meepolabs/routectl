@@ -670,6 +670,7 @@ async fn build_provider_inner(
             payload_extras: _,
             user_agent,
             auth_mode,
+            cloud_project_id,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
             auto_emit_per_block_breakpoints: _,
@@ -719,6 +720,12 @@ async fn build_provider_inner(
                     if let Some(ua) = user_agent {
                         cfg.user_agent = Some(ua.clone());
                     }
+                    // An empty string is an operator leaving the knob blank,
+                    // not a project id: it must not shadow discovery.
+                    cfg.cloud_project_id = cloud_project_id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string);
                     cfg.header_extras = extras;
                     Ok(Arc::new(GeminiProvider::new(cfg)))
                 }
