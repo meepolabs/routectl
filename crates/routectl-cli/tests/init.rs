@@ -828,3 +828,61 @@ fn non_interactive_missing_value_run_terminates_without_hanging() {
     );
     assert!(!path.exists(), "the run wrote no config");
 }
+
+/// The wizard prompts under an OPEN-but-silent stdin: a pipe carrying neither
+/// a line nor an EOF. Only a real subprocess can hold that shape, which is why
+/// this lives beside the closed-stdin check rather than in the module's own
+/// unit tests. Every prompt must decline on the terminal gate -- before any
+/// `read_line` -- so the run still reaches the actionable next step instead of
+/// blocking at the first question.
+#[test]
+fn silent_stdin_declines_every_prompt_within_bounded_time() {
+    let bin = env!("CARGO_BIN_EXE_routectl");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let xdg = tempfile::tempdir().unwrap();
+
+    let mut child = Command::new(bin)
+        .args(["--config", path.to_str().unwrap(), "init"])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env_remove(ANTHROPIC_ENV_VAR)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl binary");
+    // Held open deliberately: dropping it would deliver an EOF, which is the
+    // case that already declined before the terminal gate existed.
+    let stdin = child.stdin.take().expect("piped stdin");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("poll the child") {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("init hung on an open-but-silent stdin");
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    drop(stdin);
+
+    let out = child.wait_with_output().expect("collect child output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a declined prompt is not an error: {stdout}",
+    );
+    assert!(
+        stdout.contains("stdin is not a terminal") && stdout.contains("--yes"),
+        "the decline must name the non-interactive contract:\n{stdout}",
+    );
+    assert!(
+        stdout.contains("routectl login anthropic"),
+        "the declined run still reaches the actionable next step:\n{stdout}",
+    );
+    assert!(!path.exists(), "a declined run wrote no config");
+}

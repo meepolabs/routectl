@@ -773,8 +773,17 @@ const fn rates_from_pricing(pricing: &routectl_router::PricingConfig) -> Rates {
 /// Prompt for confirmation after the estimate. A `y`/`yes` reply proceeds;
 /// anything else (including EOF or a read error on a non-interactive stdin)
 /// declines, so the probe never dispatches without an explicit go-ahead.
+///
+/// A non-interactive run (no TTY on stdin) declines immediately without
+/// reading: an open-but-silent pipe (a caller that never sends a line or an
+/// EOF) would otherwise block `read_line` forever. The estimate has already
+/// printed, so a scripted caller sees what was declined.
 fn confirm_after_estimate() -> bool {
-    use std::io::Write;
+    use std::io::{IsTerminal as _, Write as _};
+    if !std::io::stdin().is_terminal() {
+        println!("stdin is not a terminal; declining without prompting. Pass `--yes` to probe.");
+        return false;
+    }
     print!("proceed with the probe? [y/N] ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();

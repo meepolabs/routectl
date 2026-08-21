@@ -815,3 +815,68 @@ fn doctor_auth_finding_never_discloses_the_credentials_store_path() {
         json.context()
     );
 }
+
+// ---------------------------------------------------------------------
+// The capability probe's cost confirmation under an OPEN-but-silent stdin: a
+// pipe carrying neither a line nor an EOF. Only a real subprocess can hold
+// that shape. The gate fires before any `read_line`, so the run declines and
+// dispatches nothing instead of blocking at the prompt.
+// ---------------------------------------------------------------------
+
+#[test]
+fn silent_stdin_declines_the_probe_confirmation_within_bounded_time() {
+    let xdg = tempfile::tempdir().unwrap();
+    seed_credentials(xdg.path(), OAUTH_PROVIDER);
+    seed_overlay(xdg.path());
+    let config = write_config(xdg.path(), &healthy_config());
+
+    let mut child = Command::new(BIN)
+        .arg("--config")
+        .arg(&config)
+        .args(["probe", "--capabilities", "--alias", "sonnet"])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env_remove("ROUTECTL_CONFIG")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl binary");
+    // Held open deliberately: dropping it would deliver an EOF, which is the
+    // case that already declined before the terminal gate existed.
+    let stdin = child.stdin.take().expect("piped stdin");
+
+    let deadline = std::time::Instant::now() + COMMAND_BUDGET;
+    loop {
+        match child.try_wait().expect("poll the child") {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the capability probe hung on an open-but-silent stdin");
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    drop(stdin);
+
+    let out = child.wait_with_output().expect("collect child output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a decline is not an error: {stdout}"
+    );
+    assert!(
+        stdout.contains("estimate:"),
+        "the estimate prints either way, so a scripted caller sees the cost:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("stdin is not a terminal") && stdout.contains("--yes"),
+        "the decline must name the non-interactive contract:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("no probe dispatched"),
+        "a declined confirmation must dispatch nothing:\n{stdout}"
+    );
+}
