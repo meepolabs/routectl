@@ -427,6 +427,8 @@ fn scheme_of(uri: &str) -> &'static str {
         "file://"
     } else if uri.starts_with("literal:") {
         "literal:"
+    } else if uri.starts_with("oauth://") {
+        "oauth://"
     } else {
         "unknown"
     }
@@ -712,6 +714,89 @@ session_token_ref = ""
             parse_errors.is_empty(),
             "ref-less / empty creds fields must not surface a parse error: {parse_errors:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_error_scheme_wording_tests {
+    use super::*;
+
+    /// A malformed `oauth://` ref must name its own scheme in the
+    /// parse-error line. The line is the only thing an operator sees (the
+    /// raw ref is deliberately withheld), so rendering `unknown` for a
+    /// scheme the parser knows about points them at nothing.
+    #[test]
+    fn an_oauth_parse_error_names_the_oauth_scheme() {
+        // Arrange
+        let toml_text = "[providers.claude]\n\
+                         kind = \"anthropic-api\"\n\
+                         api_key_ref = \"oauth://anthropic#\"\n";
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        // Act
+        let errors = secret_ref_parse_errors(&config, Some(toml_text));
+
+        // Assert
+        let error = errors
+            .iter()
+            .find(|e| e.contains("claude"))
+            .unwrap_or_else(|| panic!("expected a parse error for the entry: {errors:?}"));
+        assert!(
+            error.contains("secret-ref parse failed (scheme `oauth://`)"),
+            "{error}"
+        );
+    }
+
+    /// The control: an existing scheme's wording is unchanged, so the
+    /// oauth arm added no shift to the rest of the taxonomy.
+    #[test]
+    fn an_env_parse_error_still_names_the_env_scheme() {
+        // Arrange
+        let toml_text = "[providers.compat]\n\
+                         kind = \"openai-compat\"\n\
+                         base_url = \"https://example.invalid/v1\"\n\
+                         api_key_ref = \"env://\"\n";
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        // Act
+        let errors = secret_ref_parse_errors(&config, Some(toml_text));
+
+        // Assert
+        let error = errors
+            .iter()
+            .find(|e| e.contains("compat"))
+            .unwrap_or_else(|| panic!("expected a parse error for the entry: {errors:?}"));
+        assert!(
+            error.contains("secret-ref parse failed (scheme `env://`)"),
+            "{error}"
+        );
+    }
+
+    /// A ref with no recognizable scheme still renders `unknown` -- the
+    /// fallthrough is what keeps an unprefixed, possibly-secret value out
+    /// of the message.
+    #[test]
+    fn a_schemeless_ref_still_renders_as_unknown() {
+        // Arrange
+        let toml_text = "[providers.compat]\n\
+                         kind = \"openai-compat\"\n\
+                         base_url = \"https://example.invalid/v1\"\n\
+                         api_key_ref = \"sk-not-a-ref\"\n";
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        // Act
+        let errors = secret_ref_parse_errors(&config, Some(toml_text));
+
+        // Assert
+        let error = errors
+            .iter()
+            .find(|e| e.contains("compat"))
+            .unwrap_or_else(|| panic!("expected a parse error for the entry: {errors:?}"));
+        assert!(
+            error.contains("secret-ref parse failed (scheme `unknown`)"),
+            "{error}"
+        );
+        assert!(!error.contains("sk-not-a-ref"), "{error}");
     }
 }
 
