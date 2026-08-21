@@ -233,8 +233,10 @@ the operator-supplied lists in TOML to gate which entries reach AWS:
 
 ```toml
 [bedrock]
-allowed_betas       = ["context-1m-2025-08-07", ...]
-allowed_body_fields = ["anthropic_version", "messages", ...]
+# List every flag / field you want to reach AWS; see examples/bedrock.toml
+# for the full empirical baseline.
+allowed_betas       = ["context-1m-2025-08-07"]
+allowed_body_fields = ["anthropic_version", "messages"]
 ```
 
 Empty lists (or omitted `[bedrock]` section) = pass-through (no
