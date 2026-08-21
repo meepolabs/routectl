@@ -830,7 +830,11 @@ license.
   to `"auto"` only when the caller set none, and overlays the Responses-dialect
   remainder (`summary`/`context`/`mode`/future) carried in
   `provider_extras["reasoning"]`; summary/context/mode are independently
-  emission-worthy, an explicit `enabled:false` (no effort) still omits
+  emission-worthy, an explicit `enabled:false` (no effort) still omits.
+  `apply_installation_id` stamps the resolved installation id into the body's
+  `client_metadata` under `x-codex-installation-id` on the ChatgptOauth lane
+  only (the resolved id wins over any request-carried `client_metadata` value,
+  which a non-object value is replaced by)
 - `src/openai_responses/response.rs` -- Responses response -> canonical
   (output walk, finish_reason from status, usage); stamps
   `lane_format_tag(auth_kind)` on every emitted reasoning detail

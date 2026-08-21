@@ -24,6 +24,11 @@
 //! `store: false` on every ChatGPT subscription request and routectl
 //! preserves that behavior to avoid the upstream rejecting the request
 //! for a policy mismatch.
+//!
+//! ChatGPT-OAuth `client_metadata`: the resolved per-installation id is
+//! stamped into the body's `client_metadata` object under
+//! `x-codex-installation-id`, matching where codex carries it on the
+//! streaming `/responses` call. Operator-supplied values win.
 
 use serde_json::{Map, Value};
 
@@ -176,6 +181,55 @@ pub(super) fn merge_provider_extras(
             // Responses API grows a new top-level field, we add it
             // here explicitly rather than silently passing through.
             _ => {}
+        }
+    }
+}
+
+/// Body key codex carries the per-installation id under, inside the
+/// top-level `client_metadata` object. Same spelling as the HTTP header
+/// name -- codex reuses the header spelling as the body key.
+const INSTALLATION_ID_METADATA_KEY: &str = "x-codex-installation-id";
+
+/// Stamp the resolved per-installation id into the request body's
+/// `client_metadata` object, creating that object when absent.
+///
+/// Gated to `ChatgptOauth`: the codex backend is the only surface that
+/// reads this key, and the ApiKey / BedrockMantle lanes must carry no
+/// codex fingerprint at all.
+///
+/// Must run AFTER `merge_provider_extras`, and the RESOLVED id wins
+/// unconditionally over whatever `client_metadata` carries at that point.
+/// That object is client-reachable: an inbound body's top-level
+/// `client_metadata` is swept into `provider_extras` and copied onto the
+/// request, so honoring a pre-existing value would let request bytes spoof
+/// (or, when non-object, suppress) the fingerprint routectl presents
+/// upstream. A genuine operator override belongs in a config surface such
+/// as `header_extras`, never in request bytes -- hence a non-object
+/// `client_metadata` is replaced rather than left in place.
+pub(super) fn apply_installation_id(
+    request: &mut ResponsesRequest,
+    auth_kind: AuthKind,
+    installation_id: Option<&str>,
+) {
+    if auth_kind != AuthKind::ChatgptOauth {
+        return;
+    }
+    let Some(iid) = installation_id else {
+        return;
+    };
+    let stamped = Value::String(iid.to_string());
+    match request
+        .client_metadata
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        Some(obj) => {
+            obj.insert(INSTALLATION_ID_METADATA_KEY.into(), stamped);
+        }
+        None => {
+            let mut obj = Map::new();
+            obj.insert(INSTALLATION_ID_METADATA_KEY.into(), stamped);
+            request.client_metadata = Some(Value::Object(obj));
         }
     }
 }
