@@ -1632,10 +1632,13 @@ pub enum ProviderEntry {
         api_key_ref: String,
         /// Endpoint base URL. Default (api-key mode):
         /// `https://generativelanguage.googleapis.com/v1beta`. In
-        /// `cloud-code` mode the effective default is
-        /// `cloudcode-pa.googleapis.com`; leave this unset for cloud-code
-        /// unless targeting a test/staging host (it is only forwarded to
-        /// the provider when it differs from the public-surface default).
+        /// `cloud-code` mode the effective default is the daily Cloud Code
+        /// host `https://daily-cloudcode-pa.googleapis.com`; set this only to
+        /// reach the production host `https://cloudcode-pa.googleapis.com`,
+        /// an enterprise mirror, or a test/staging host. One value carries
+        /// the whole cloud-code lane -- generateContent, loadCodeAssist, and
+        /// onboardUser all go to it -- and it is forwarded to the provider
+        /// only when it differs from the api-key default.
         #[serde(default = "default_gemini_base")]
         base_url: String,
         /// Provider-level header extras.

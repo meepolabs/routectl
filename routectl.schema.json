@@ -1551,7 +1551,7 @@
             },
             "base_url": {
               "default": "https://generativelanguage.googleapis.com/v1beta",
-              "description": "Endpoint base URL. Default (api-key mode):\n`https://generativelanguage.googleapis.com/v1beta`. In\n`cloud-code` mode the effective default is\n`cloudcode-pa.googleapis.com`; leave this unset for cloud-code\nunless targeting a test/staging host (it is only forwarded to\nthe provider when it differs from the public-surface default).",
+              "description": "Endpoint base URL. Default (api-key mode):\n`https://generativelanguage.googleapis.com/v1beta`. In\n`cloud-code` mode the effective default is the daily Cloud Code\nhost `https://daily-cloudcode-pa.googleapis.com`; set this only to\nreach the production host `https://cloudcode-pa.googleapis.com`,\nan enterprise mirror, or a test/staging host. One value carries\nthe whole cloud-code lane -- generateContent, loadCodeAssist, and\nonboardUser all go to it -- and it is forwarded to the provider\nonly when it differs from the api-key default.",
               "type": "string"
             },
             "cache_capability": {

@@ -111,6 +111,10 @@ pub struct ProviderCell {
     /// three are resolved at FACTORY time, which a pure derivation over
     /// `&Config` cannot reach without duplicating factory logic and minting a
     /// second source of truth. This field reports what the CONFIG says.
+    ///
+    /// The one exception is a `cloud-code` Gemini entry with `base_url` left
+    /// unset: reporting the api-key public base there would be a WRONG fact,
+    /// so such an entry reports the effective cloud-code host instead.
     pub endpoint_origin: Option<String>,
     /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
     /// `oauth`, ...), never the ref body. `None` for a variant with no single
@@ -295,13 +299,27 @@ const fn auth_token(entry: &ProviderEntry) -> Option<&'static str> {
 }
 
 /// The configured `base_url` for an entry, or `None` for a variant whose
-/// endpoint is derived at factory time rather than carried in config.
+/// endpoint is derived at factory time rather than carried in config. A
+/// cloud-code Gemini entry with no pin reports its effective cloud-code host.
 fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
     match entry {
         ProviderEntry::OpenaiCompat { base_url, .. }
         | ProviderEntry::AnthropicApi { base_url, .. } => Some(base_url),
         #[cfg(feature = "openai-responses")]
         ProviderEntry::OpenaiResponses { base_url, .. } => base_url.as_deref(),
+        // A cloud-code entry that never set `base_url` carries the api-key
+        // public default, which is not a host it ever talks to: the factory
+        // leaves the constructor's cloud-code default in place. Report that
+        // effective host rather than a value the lane cannot use. An explicit
+        // pin (production, enterprise mirror, staging) is reported verbatim.
+        #[cfg(feature = "gemini")]
+        ProviderEntry::Gemini {
+            base_url,
+            auth_mode: GeminiAuthMode::CloudCode,
+            ..
+        } if *base_url == crate::config::default_gemini_base() => {
+            Some(routectl_providers::gemini::DAILY_BASE_URL)
+        }
         #[cfg(feature = "gemini")]
         ProviderEntry::Gemini { base_url, .. } => Some(base_url),
         // Bedrock carries no base_url at all: the factory derives the host
@@ -974,6 +992,61 @@ auth_mode = "{auth_mode}"
                 "auth_mode {auth_mode} must project its own token"
             );
         }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_cloud_code_reports_its_effective_host_not_the_api_key_default() {
+        // An unset `base_url` on a cloud-code entry keeps the api-key public
+        // default in config, but the lane never talks to that host: the
+        // factory leaves the constructor's cloud-code default in place.
+        let unset = only_provider(
+            r#"
+version = 2
+
+[providers.g]
+kind = "gemini"
+api_key_ref = "oauth://antigravity"
+auth_mode = "cloud-code"
+"#,
+        );
+        assert_eq!(
+            unset.endpoint_origin.as_deref(),
+            endpoint_origin(routectl_providers::gemini::DAILY_BASE_URL).as_deref(),
+        );
+
+        // An explicit pin is reported verbatim -- never rewritten.
+        let pinned = only_provider(&format!(
+            r#"
+version = 2
+
+[providers.g]
+kind = "gemini"
+api_key_ref = "oauth://antigravity"
+auth_mode = "cloud-code"
+base_url = "{}"
+"#,
+            routectl_providers::gemini::PROD_BASE_URL
+        ));
+        assert_eq!(
+            pinned.endpoint_origin.as_deref(),
+            endpoint_origin(routectl_providers::gemini::PROD_BASE_URL).as_deref(),
+        );
+
+        // An api-key entry keeps reporting the public REST default.
+        let api_key = only_provider(
+            r#"
+version = 2
+
+[providers.g]
+kind = "gemini"
+api_key_ref = "env://GEMINI_API_KEY"
+"#,
+        );
+        assert_eq!(
+            api_key.endpoint_origin.as_deref(),
+            endpoint_origin(&crate::config::default_gemini_base()).as_deref(),
+        );
     }
 
     #[cfg(feature = "bedrock")]
