@@ -40,11 +40,43 @@ use routectl_providers::gemini::GeminiAuthMode;
 /// `OPENAI_OAUTH_ACCESS_TOKEN` convention used by `oauth_codex`
 /// (raw token, trimmed, skipped on empty).
 const ENV_BEARER: &str = "GEMINI_OAUTH_ACCESS_TOKEN";
-const MODELS: &[&str] = &["gemini-2.5-flash", "gemini-2.5-pro"];
+/// Gemini ids exercised by the always-run cases below, both verified
+/// end-to-end on this lane by the servable-set sweep. `MODELS[0]` is
+/// flash-class on purpose: it is the positive control for the claude
+/// thinking observation, so it must be an id that round-trips reasoning.
+const MODELS: &[&str] = &["gemini-3.1-flash-lite", "gemini-3.1-pro-low"];
 /// Claude model ids served by the same Cloud Code surface. Kept in a
 /// separate constant so the gemini tests above keep indexing `MODELS`
 /// unchanged -- adding a claude id must never repoint `MODELS[0]`.
 const CLAUDE_MODELS: &[&str] = &["claude-sonnet-4-6", "claude-opus-4-6-thinking"];
+/// Every id the live `fetchAvailableModels` catalog offered for this seat,
+/// transcribed from one raw response with the non-inference entries
+/// excluded: `chat_*` and `tab_*` (IDE-internal surfaces) and `*-tiered`
+/// ids carrying no `displayName` (routing placeholders, not servable ids).
+/// Google churns this catalog on a weekly cadence, so the list is a
+/// point-in-time transcription, not a registry -- it feeds the `#[ignore]`d
+/// sweep below and nothing else.
+const SERVABLE_MODELS: &[&str] = &[
+    "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-thinking",
+    "gemini-2.5-pro",
+    "gemini-3-flash",
+    "gemini-3-flash-agent",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-pro-high",
+    "gemini-3.1-pro-low",
+    "gemini-3.5-flash-extra-low",
+    "gemini-3.5-flash-low",
+    "gemini-3.6-flash-high",
+    "gemini-3.6-flash-low",
+    "gemini-3.6-flash-medium",
+    "gemini-pro-agent",
+    "gpt-oss-120b-medium",
+];
 const CLAUDE_TOOL_MODEL: &str = CLAUDE_MODELS[0];
 const CLAUDE_THINKING_MODEL: &str = CLAUDE_MODELS[1];
 const TIMEOUT_SECS: u64 = 60;
@@ -153,6 +185,16 @@ async fn build_router_for_oauth_antigravity(
         );
         aliases.insert((*t).to_string(), AliasValue::Single(nickname));
     }
+    // `sanitize_provider_name` maps '.' to '-', so two catalog ids that
+    // differ only in that position collapse onto one nickname: the map
+    // insert would silently overwrite, double-testing one id and skipping
+    // the other. A sweep that quietly drops a target is worse than a
+    // failing one.
+    assert_eq!(
+        models.len(),
+        targets.len(),
+        "nickname collision: sanitize_provider_name mapped two ids onto one entry in {targets:?}",
+    );
 
     let cfg = Arc::new(Config {
         server: Default::default(),
@@ -272,6 +314,38 @@ fn make_overbudget_thinking_request(target: &str) -> ChatRequest {
     }
 }
 
+/// Complete one non-streaming request and assert it came back with text.
+/// Factored out so the always-run case can cover EVERY `MODELS` entry: a
+/// configured id that no case requests is not covered by this matrix.
+async fn assert_complete_round_trip(router: &Arc<Router>, model: &str) {
+    let req = make_request(model, MAX_TOKENS_COMPLETE, false);
+    let result = tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), router.complete(req))
+        .await
+        .expect("oauth-antigravity completion timed out");
+    let resp = match result {
+        Ok(r) => r,
+        Err(e) => panic!(
+            "oauth-antigravity completion failed model={model} {}",
+            wire_evidence(&e)
+        ),
+    };
+
+    let preview = resp
+        .choices
+        .first()
+        .map(|c| match &c.message.content {
+            MessageContent::Text(t) => t.clone(),
+            _ => "<non-text>".into(),
+        })
+        .unwrap_or_default();
+    let tokens = resp.usage.as_ref().map_or(0, |u| u.total_tokens);
+    eprintln!("PASS oauth-antigravity complete model={model} tokens={tokens} content={preview:?}");
+    assert!(
+        !preview.is_empty(),
+        "expected non-empty completion text for {model}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauth_antigravity_complete_via_seeded_record() {
     let Some(router) = build_router_or_skip(MODELS).await else {
@@ -285,24 +359,11 @@ async fn oauth_antigravity_complete_via_seeded_record() {
         return;
     };
 
-    let model = MODELS[0];
-    let req = make_request(model, MAX_TOKENS_COMPLETE, false);
-    let result = tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), router.complete(req))
-        .await
-        .expect("oauth-antigravity completion timed out");
-    let resp = result.expect("oauth-antigravity completion failed");
-
-    let preview = resp
-        .choices
-        .first()
-        .map(|c| match &c.message.content {
-            MessageContent::Text(t) => t.clone(),
-            _ => "<non-text>".into(),
-        })
-        .unwrap_or_default();
-    let tokens = resp.usage.as_ref().map_or(0, |u| u.total_tokens);
-    eprintln!("PASS oauth-antigravity complete model={model} tokens={tokens} content={preview:?}");
-    assert!(!preview.is_empty(), "expected non-empty completion text");
+    // Serial on purpose: the cloud-code seat is quota-metered, and the
+    // per-model PASS lines stay legible in order.
+    for model in MODELS {
+        assert_complete_round_trip(&router, model).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -680,6 +741,49 @@ async fn oauth_antigravity_claude_thinking_budget_reaches_upstream() {
     eprintln!(
         "PASS oauth-antigravity claude thinking budget reaches upstream model={model} \
          status=400 upstream_type=INVALID_ARGUMENT"
+    );
+}
+
+/// Evidence sweep over the whole servable catalog: one COMPLETE call per
+/// `SERVABLE_MODELS` id, proving that routectl -- not merely the upstream
+/// -- serves each one. Kept out of the default live-matrix run because it
+/// burns one live call per id and goes red on its own as Google churns the
+/// catalog; run it deliberately when a fresh snapshot is needed:
+///
+///   GEMINI_OAUTH_ACCESS_TOKEN=... cargo test -p routectl-cli \
+///     --features live-integration --release --test live_matrix \
+///     oauth_antigravity_servable_set_sweep -- --ignored --nocapture \
+///     --test-threads=1
+#[ignore = "sweeps the whole servable set; burns one live call per id"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oauth_antigravity_servable_set_sweep() {
+    let Some(router) = build_router_or_skip(SERVABLE_MODELS).await else {
+        skip_notice("servable-set-sweep");
+        return;
+    };
+
+    let targets: Vec<String> = SERVABLE_MODELS.iter().map(|s| (*s).to_string()).collect();
+    let total = targets.len();
+    // Awaited one at a time rather than through `run_matrix`: that helper
+    // keeps PARALLEL_LIMIT calls in flight, and `--test-threads=1` only
+    // serializes test functions, not futures inside one. A quota-metered
+    // seat swept concurrently produces 429s that read as model verdicts.
+    let mut rows = Vec::with_capacity(total);
+    for target in targets {
+        rows.push(run_complete(router.clone(), target).await);
+    }
+    // `run_matrix` sorts before returning; print_summary output must not
+    // depend on which path produced the rows.
+    rows.sort_by(|a, b| a.target.cmp(&b.target));
+    print_summary("Cloud Code servable set", "complete", &rows);
+
+    let pass = rows.iter().filter(|r| r.ok).count();
+    // A dead bearer or an unresolvable project fails every id identically;
+    // without this gate the sweep would read as a wholly failing catalog.
+    assert!(
+        pass > 0,
+        "Cloud Code servable set: 0/{total} ids passed -- treat as an \
+         infrastructure failure (bearer / project resolution), not as model evidence"
     );
 }
 
