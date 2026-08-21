@@ -1568,6 +1568,7 @@ mod gemini_cloud_code_factory_tests {
                 payload_extras,
                 user_agent,
                 auth_mode,
+                cloud_project_id,
                 cache_capability,
                 auto_emit_top_level_breakpoint,
                 auto_emit_per_block_breakpoints,
@@ -1581,6 +1582,7 @@ mod gemini_cloud_code_factory_tests {
                 payload_extras,
                 user_agent,
                 auth_mode,
+                cloud_project_id,
                 cache_capability,
                 auto_emit_top_level_breakpoint,
                 auto_emit_per_block_breakpoints,
@@ -1729,6 +1731,106 @@ mod gemini_cloud_code_factory_tests {
             ),
             other => panic!("expected Error::Config, got {other:?}"),
         }
+    }
+
+    /// `cloud_code_entry` with `cloud_project_id` set to `value`.
+    fn cloud_code_entry_with_project(base_url: &str, value: &str) -> ProviderEntry {
+        let mut entry = cloud_code_entry(base_url);
+        if let ProviderEntry::Gemini {
+            cloud_project_id, ..
+        } = &mut entry
+        {
+            *cloud_project_id = Some(value.to_string());
+        }
+        entry
+    }
+
+    /// Discovery endpoints mounted as forbidden: reaching either means the
+    /// configured project id did not take effect.
+    async fn forbid_cloud_code_discovery(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1internal:loadCodeAssist"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1internal:onboardUser"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cloud_code_entry_forwards_the_configured_project_id() {
+        let server = MockServer::start().await;
+        forbid_cloud_code_discovery(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1internal:generateContent"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({"project": "cfg-proj-1"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({"response": gemini_ok_response()})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
+        let entry = cloud_code_entry_with_project(&server.uri(), "cfg-proj-1");
+
+        let provider = build_provider("gemini-cc", &entry, secrets)
+            .await
+            .expect("cloud-code provider builds");
+        provider
+            .complete(base_req())
+            .await
+            .expect("the configured project id serves the request");
+    }
+
+    #[tokio::test]
+    async fn cloud_code_entry_treats_an_empty_project_id_as_unset() {
+        // An operator leaving the knob blank must not shadow discovery with
+        // an empty project id.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1internal:loadCodeAssist"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({"cloudaicompanionProject": "proj-1"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1internal:generateContent"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({"project": "proj-1"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({"response": gemini_ok_response()})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
+        let entry = cloud_code_entry_with_project(&server.uri(), "");
+
+        let provider = build_provider("gemini-cc", &entry, secrets)
+            .await
+            .expect("cloud-code provider builds");
+        provider
+            .complete(base_req())
+            .await
+            .expect("an empty configured id must leave discovery in charge");
     }
 }
 

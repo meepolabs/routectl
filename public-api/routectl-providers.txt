@@ -960,6 +960,7 @@ pub fn routectl_providers::gemini::GeminiAuthMode::into_shared(self) -> Shared
 pub struct routectl_providers::gemini::GeminiConfig
 pub routectl_providers::gemini::GeminiConfig::auth: alloc::sync::Arc<dyn routectl_core::token_source::TokenSource>
 pub routectl_providers::gemini::GeminiConfig::base_url: alloc::string::String
+pub routectl_providers::gemini::GeminiConfig::cloud_project_id: core::option::Option<alloc::string::String>
 pub routectl_providers::gemini::GeminiConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::gemini::GeminiConfig::id: alloc::string::String
 pub routectl_providers::gemini::GeminiConfig::mode: routectl_providers::gemini::GeminiAuthMode
