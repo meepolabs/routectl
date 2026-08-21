@@ -22,6 +22,18 @@ list with more narrative.
 - **Native Gemini egress** (`kind = "gemini"`) -- Google
   `generateContent` / `streamGenerateContent` with API-key and Cloud
   Code OAuth (`oauth://antigravity`) auth modes.
+- **Operator-supplied Cloud Code project id** -- `cloud_project_id` on a
+  `gemini` provider entry names the seat's project outright (the BARE id,
+  never the `projects/`-prefixed resource name). It is consulted before
+  the credential store's cached id and before any onboarding call, so a
+  cold request goes straight to inference, and it writes through to the
+  seat's persisted id so other entries on the same seat pick it up (two
+  entries naming one seat: last writer wins). If the upstream rejects the
+  configured id as not applying to the seat, that request fails with one
+  warning naming the entry and the rejected id, and the entry falls back
+  to ordinary discovery for the rest of the process; quota, auth, and 5xx
+  failures never trigger the fallback, and a restart re-trusts the
+  configured value.
 - **Learned capability system** -- a per-target capability registry
   learned from live rejections and response evidence, persisted in
   the usage ledger and rebuilt at boot; consented active probes
@@ -159,6 +171,7 @@ list with more narrative.
 
 ### Fixed
 
+- **The Cloud Code (`auth_mode = "cloud-code"`) gemini lane no longer splits its traffic across two hosts.** Inference went to the production Cloud Code host while onboarding went to the daily one, so a consumer seat -- which is served on the daily host -- onboarded successfully and then had every inference request rejected on permission or quota, with nothing naming the endpoint as the cause. There is now exactly ONE `base_url` for the lane, defaulting to the daily host, and it moves `generateContent`, `loadCodeAssist` and `onboardUser` together: a production or enterprise seat sets that single value and the whole lane follows, and an explicitly configured value is forwarded verbatim, never rewritten. `config check` and startup emit a warning when a cloud-code entry pins the production host, `config show --effective` reports the host such an entry actually uses (it previously reported the api-key public base, a host this lane never talks to), and a permission / not-found / quota rejection now carries a suffix naming the host the request egressed to plus `base_url` as the recovery path -- hedged, since the same verdict can be earned honestly, and never acted on: no request is ever reissued against the other host. The client `User-Agent` is also composed from one pinned version and the real host platform rather than a stored literal, so the fingerprint no longer claims a platform routectl is not running on.
 - **`config migrate` no longer stalls on the config shape earlier quickstarts taught.** A version-3 entry named after its own provider family (`[providers.anthropic]` carrying a bare `oauth://anthropic`) holds the exact name the materialized pool must take, and providers, pools and model nicknames share one namespace -- so the migration correctly refused, leaving the operator to hand-rename the entry and every `[models.X]` naming it before rerunning. That is the most likely real migration input, so the rename is now part of the migration: the entry moves to `<family>-default` (the name its own default-seat ref would generate, derived by the same naming module the login writer uses, so a later login still proposes nothing), the models that named it follow the rename before the pool repoint decides they should name the pool, and the whole thing rides in the SAME all-or-nothing combined diff with the same single confirmation. Every fail-closed guarantee is unchanged: the rename shows in the combined candidate, the change summary and the dry-run; a `<family>-default` name already held by an entry with a DIFFERENT credential still refuses with `config.toml` byte-identical (the migration never displaces one credential's entry with another's); and re-running over the migration's own output is still a no-op. Both the store-aware phase and the pure `seat_selection`-relocation rung rename, so a family-named entry migrates whether or not it carried the retired knob.
 - **`config check` now flags an `oauth://` credential ref whose entry never selects the OAuth surface.** A provider entry pointing at a managed OAuth seat (`api_key_ref = "oauth://anthropic"`) but leaving its auth selector at the default (`auth_kind` unset, or `auth_mode` on a `gemini` entry) passed every validator, then dispatched the subscription bearer on the API-key header and 401'd on the first request -- with nothing in the config surfaces to say why. `config check` now emits a WARNING naming the entry, the selector key, and the value to set. WARNING rather than an error deliberately: the shape predates auth-selector enforcement, so hard-failing would refuse to load an otherwise-working config for a per-entry defect that only bites on dispatch. The required pairs come from the one auth-shape table the login output and the login auto-surface's drift check already read, so the shape `login` prints, the shape it validates, and the shape `config check` demands cannot diverge.
 

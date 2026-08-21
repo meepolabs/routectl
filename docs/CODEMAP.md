@@ -899,8 +899,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   compare-before-put, put-failure WARN, unset-knob regression pin, the
   403 latch + rediscovery two-request pair, and the 429 non-latch)
 - `src/gemini/cloudcode.rs` -- Cloud Code ("antigravity") egress:
-  `GeminiAuthMode` enum; `cloudcode-pa` `/v1internal:{generate,stream}Content`
-  paths; `{project,request,model}` request envelope + `response`-wrapper
+  `GeminiAuthMode` enum; `PROD_BASE_URL` / `DAILY_BASE_URL` (the single
+  source of both Cloud Code hosts; DAILY is the lane default) and the
+  `/v1internal:{generate,stream}Content` paths; `{project,request,model}` request envelope + `response`-wrapper
   unwrap (non-stream and per-SSE-chunk); project-id resolution via
   `loadCodeAssist` falling back to polled `onboardUser`, cached through a
   `CloudProjectCache`; the one composed `identity::antigravity` UA on all

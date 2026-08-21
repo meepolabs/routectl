@@ -527,6 +527,12 @@ Code ("antigravity") surface. The inner Gemini request/response/SSE
 translation is REUSED UNCHANGED from the api-key path; only the
 transport wrapper, auth, base, and project resolution differ.
 
+EXPERIMENTAL / best-effort: this is an internal Google surface with no
+published contract or compatibility promise. It is exercised against
+wiremock in CI and verified live only occasionally, so an upstream change
+can break the lane between routectl releases. Do not build a production
+dependency on it without a fallback chain entry.
+
 **Auth model:** OAuth bearer, sent as `Authorization: Bearer <token>`
 (NOT `x-goog-api-key`). The bearer is resolved per request from an
 `oauth://antigravity` `api_key_ref`, so a refreshed token rotates in
@@ -534,8 +540,18 @@ without a daemon restart. A one-time `routectl login antigravity` (live
 Google consent in a browser) mints the credential; the factory rejects
 any non-`oauth://` ref in this mode.
 
-**Base + path shape:** the base defaults to the `cloudcode-pa` endpoint
-and the provider appends the `v1internal` methods:
+**Base + path shape:** the base defaults to the DAILY Cloud Code host,
+`https://daily-cloudcode-pa.googleapis.com` -- consumer (non-GCP-ToS)
+seats are served there, and serving them on production earns a
+permission or quota rejection. Set `base_url` to
+`https://cloudcode-pa.googleapis.com` (or an enterprise mirror) for a
+production seat; an explicit value is forwarded verbatim, never
+rewritten, and `config check` plus startup emit a WARNING when a
+cloud-code entry pins the production host. There is exactly ONE base for
+the lane and it carries every method -- `generateContent`,
+`loadCodeAssist`, and `onboardUser` -- so a pin can never split
+inference onto one host and onboarding onto another. The provider
+appends the `v1internal` methods:
 
 - non-stream: `{base_url}/v1internal:generateContent`
 - stream:     `{base_url}/v1internal:streamGenerateContent`
@@ -547,12 +563,55 @@ send. On the response, the Cloud Code surface wraps the payload in a
 unwraps it per SSE chunk on the stream path, so downstream translation
 sees the same shape it would on the api-key path.
 
-**Project-id resolution:** the `project` field is resolved on first use
-via `loadCodeAssist`, falling back to `onboardUser` when loadCodeAssist
-does not yield a usable project. The resolved id is cached persistently
-in the OAuth credential record (`cloud_project_id`), so subsequent
-startups skip the resolution round trip. The onboarding calls carry the
-antigravity `User-Agent` and the Cloud Code control-plane headers.
+**Project-id resolution:** an operator-set `cloud_project_id` on the
+provider entry wins outright -- it is read before the credential store's
+cached id and before any onboarding call, so a cold request goes straight
+to `generateContent`, and the value writes through to the seat's
+persisted project id (two entries sharing a seat: last writer wins). With
+the field unset, the `project` field is resolved on first use via
+`loadCodeAssist`, falling back to `onboardUser` when loadCodeAssist does
+not yield a usable project; the resolved id is cached persistently in the
+OAuth credential record (`cloud_project_id`), so subsequent startups skip
+the resolution round trip. If the upstream rejects the CONFIGURED id as a
+project verdict (`PERMISSION_DENIED` or `NOT_FOUND`), that request fails,
+routectl WARNs once per process naming the entry and the rejected id, and
+latches the configured value off for the life of the process -- every
+later request rediscovers through the ordinary cache / onboarding path,
+and a restart re-trusts the field. There is no in-request retry, so a
+wrong configured id costs at most one failed request per process. Quota
+(`RESOURCE_EXHAUSTED`), `UNAUTHENTICATED`, 5xx, and transport failures
+are not project verdicts and never latch. The onboarding calls carry the
+same composed `User-Agent` as the inference calls plus the Cloud Code
+control-plane headers.
+
+**Client identity:** the `User-Agent` is composed, not a stored literal:
+`antigravity/<ideVersion> <os>/<arch>`, where the platform pair is the
+REAL host platform mapped into the reference client's vocabulary (macos
+-> darwin, windows -> windows, x86_64 -> amd64, aarch64 -> arm64, x86 ->
+386, anything else passed through). The same version and product name
+feed the `onboardUser` metadata, so no wire value is spelled twice.
+STALENESS RISK: `ideVersion` is a compiled pin with no live version
+fetcher behind it, so it drifts from real installs as the upstream client
+advances; a `user_agent` on the provider entry overrides the whole string
+if you need to match a specific install.
+
+**Host-rejection diagnostic:** a wrong-host lane and a legitimately
+earned rejection look identical on the wire, so routectl annotates rather
+than guesses. On a `PERMISSION_DENIED`, `NOT_FOUND`, or
+`RESOURCE_EXHAUSTED` verdict, the returned error body gains a fixed
+suffix naming the host the request actually egressed to and saying the
+rejection can ALSO come from serving on a host this seat is not entitled
+to, with `base_url` named as the recovery path. The annotation is hedged
+deliberately -- it never asserts a host mismatch as fact -- and preserves
+the error's status, retry-after, classifier, and upstream request id, so
+retry and breaker behavior are unchanged. Every other class passes
+through byte-identical. routectl NEVER auto-crosses to the other Cloud
+Code host: no request is reissued against a different base, so switching
+hosts is always an explicit `base_url` edit.
+
+**Claude model ids:** the same cloud-code lane serves `claude-*` upstream
+ids on a `gemini`-kind entry -- the model name rides in the request
+envelope, so no separate provider kind is involved.
 
 **Reused unchanged from the api-key path:** `thinkingConfig` budget
 mapping, `thoughtSignature` reasoning replay, `functionDeclarations`

@@ -1062,10 +1062,42 @@ Fields:
   - `"cloud-code"` -- the Cloud Code ("antigravity") OAuth-bearer path:
     `api_key_ref` MUST be an `oauth://` ref, the resolved bearer is sent
     as `Authorization: Bearer` (NOT `x-goog-api-key`), and the base
-    defaults to the `cloudcode-pa` `/v1internal:*` endpoint. The Cloud
-    Code project id is auto-resolved on first use and cached in the
-    credential record. See the cloud-code stanza below and
+    defaults to the DAILY Cloud Code host
+    (`https://daily-cloudcode-pa.googleapis.com`), whose `/v1internal:*`
+    methods are what a consumer (non-GCP-ToS) seat is served on. The
+    Cloud Code project id is auto-resolved on first use and cached in the
+    credential record. This lane is EXPERIMENTAL / best-effort: it speaks
+    an internal surface with no published contract, so a change upstream
+    can break it between routectl releases. See the cloud-code stanza
+    below and
     [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code).
+
+    `base_url` is the override for the PRODUCTION / enterprise host
+    (`https://cloudcode-pa.googleapis.com`, or an enterprise mirror).
+    There is exactly ONE base for the lane, and it moves every Cloud Code
+    call together -- `generateContent`, `loadCodeAssist`, and
+    `onboardUser` -- so a pin can never split inference onto one host and
+    onboarding onto another. An explicitly set `base_url` is forwarded
+    verbatim, never rewritten; `config check` and startup emit a WARNING
+    when a cloud-code entry pins the production host, since the lane
+    default is the daily one.
+- `cloud_project_id` (optional, `cloud-code` mode only) -- the Cloud Code
+  project id for this seat, as the BARE id (`my-project-1234`), never the
+  `projects/`-prefixed resource name. Set it to skip discovery entirely:
+  it is consulted BEFORE the credential store's cached project id and
+  before `loadCodeAssist` / `onboardUser`, so even a cold request goes
+  straight to `generateContent`. The value writes through to the seat's
+  persisted project id, so later requests -- and other entries on the
+  same seat -- read it from the cache; if two entries name the same seat
+  with different ids, last writer wins (routectl does not reconcile
+  them). If the upstream rejects the configured id as not applying to
+  this seat (a `PERMISSION_DENIED` or `NOT_FOUND` project verdict), that
+  request fails, routectl logs one WARNING naming the entry and the
+  rejected id, and the entry falls back to ordinary discovery for the
+  rest of the process (the warning is emitted once per process, and a
+  restart re-trusts the configured value). Quota, auth, and 5xx failures
+  are not project verdicts and never trigger the fallback. Unset or empty
+  leaves discovery as the only source; ignored in `api-key` mode.
 
 Cloud Code (OAuth) stanza. `routectl login antigravity` offers this entry
 under the convention's name (`antigravity-default`) plus its pool, so the
@@ -1077,8 +1109,12 @@ yourself:
 kind        = "gemini"
 auth_mode   = "cloud-code"
 api_key_ref = "oauth://antigravity"
-# base_url defaults to the cloudcode-pa endpoint in cloud-code mode;
-# omit it. The Cloud Code project id is auto-resolved and persisted.
+# base_url defaults to the daily cloud-code host in cloud-code mode; omit
+# it unless this seat serves on the production / enterprise host, in which
+# case the one value moves generate, loadCodeAssist and onboardUser
+# together. The Cloud Code project id is auto-resolved and persisted;
+# set cloud_project_id to the BARE id to skip discovery.
+# cloud_project_id = "my-project-1234"
 
 [models.gemini-flash]
 provider = "gemini-cloud-code"
@@ -1090,11 +1126,17 @@ Auth decision: by default Gemini auth is API-key only, via the
 OAuth-bearer path against the Cloud Code ("antigravity") surface: it
 requires a one-time `routectl login antigravity` (live Google consent in
 a browser) and an `oauth://antigravity` `api_key_ref`. In that mode the
-base defaults to the `cloudcode-pa` endpoint and the Cloud Code project
-id is auto-resolved (via loadCodeAssist, falling back to onboardUser) and
-cached in the credential record. Vertex AI / Google service-account ADC
-is still NOT implemented; it is reachable later by pointing `base_url` at
-a Vertex endpoint without a new provider kind.
+base defaults to the daily Cloud Code host
+(`https://daily-cloudcode-pa.googleapis.com`) -- consumer seats are
+served there -- and the Cloud Code project id is auto-resolved (via
+loadCodeAssist, falling back to onboardUser) and cached in the credential
+record, unless `cloud_project_id` names it outright. Pin `base_url` to
+`https://cloudcode-pa.googleapis.com` (or an enterprise mirror) for a
+production seat; that single value carries the whole lane. Treat this
+lane as EXPERIMENTAL / best-effort -- it is an internal surface with no
+published contract. Vertex AI / Google service-account ADC is still NOT
+implemented; it is reachable later by pointing `base_url` at a Vertex
+endpoint without a new provider kind.
 
 ## Per-provider capability filter (`unsupported_features`)
 
