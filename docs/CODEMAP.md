@@ -5243,7 +5243,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `oauth://codex` bearer source
 - `tests/live_matrix/responses_ingress_live.rs` -- `POST /v1/responses`
   ingress over HTTP via the real axum server
-- `tests/live_matrix/oauth_antigravity.rs` -- Cloud Code Gemini via
+- `tests/live_matrix/oauth_antigravity.rs` -- Cloud Code matrix (gemini +
+  claude ids, complete / stream / tool call / thinking) via
   routectl-managed `oauth://antigravity` bearer source
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against
   `api.anthropic.com`; gated by env token file

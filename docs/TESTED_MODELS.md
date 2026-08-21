@@ -304,18 +304,41 @@ cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix oauth_antigravity -- --nocapture --test-threads=1
 ```
 
+The lane serves Anthropic model ids alongside the gemini ones through the
+same envelope (`model` names the id; the request body stays native-Gemini
+shape).
+
 | Model | Mode | Status | Notes |
 |---|---|---|---|
-| `gemini-2.5-flash` | complete + stream (oauth://antigravity) | PENDING | Bearer resolved through `OAuthStore` (tempdir credentials.json); project id auto-resolved live via loadCodeAssist / onboardUser. Skipped (clean) until the operator runs `routectl login antigravity` and sets `GEMINI_OAUTH_ACCESS_TOKEN`. |
-| `gemini-2.5-pro` | complete + stream (oauth://antigravity) | PENDING | Same path; reasoning-capable. Skipped until the operator login + env var are present. |
+| `gemini-2.5-flash` | complete (oauth://antigravity) | PASS | `tokens=9 content="pong"`. Bearer resolved through `OAuthStore` (tempdir credentials.json); project id auto-resolved live via loadCodeAssist -> onboardUser. |
+| `gemini-2.5-flash` | stream (oauth://antigravity) | PASS | `chunks=3 content="pong"`. |
+| `gemini-2.5-flash` | thinking (`reasoning.effort`) | PASS | `rd=1 fmt=gemini-v1 reasoning_tokens=204`. Positive control for the reasoning channel on this transport. |
+| `gemini-2.5-pro` | complete + stream (oauth://antigravity) | GAP | 503 `UNAVAILABLE` / `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for model gemini-2.5-pro on the server") on the observed run. Transport-independent: a server-side capacity verdict, not a routectl defect. |
+| `claude-sonnet-4-6` | complete (oauth://antigravity) | PASS | `tokens=20 content="pong"`. |
+| `claude-sonnet-4-6` | stream (oauth://antigravity) | PASS | `chunks=4 content="pong"`. |
+| `claude-sonnet-4-6` | tool call (`ToolDef::Custom`) | PASS | `finish_reason=tool_calls`, one `tool_calls` entry naming `get_weather` with `arguments={"city":"Paris"}`. Round-trips through the shared gemini `functionDeclarations` translation UNMODIFIED. |
+| `claude-opus-4-6-thinking` | thinking (`reasoning.effort`) | PARTIAL | Request ACCEPTED (200) with the thinking config attached and answered normally, but the upstream returns no thought parts: `rd=0 reasoning_tokens=None`. Not a translation defect -- see the gap note below. |
+
+Claude thinking gap (observed, upstream-side): `thinkingConfig.thinkingBudget`
+demonstrably reaches Anthropic's `thinking.budget_tokens` on this lane -- a
+budget at or above `maxOutputTokens` comes back as a 400 `INVALID_ARGUMENT`
+quoting Anthropic's own "`max_tokens` must be greater than
+`thinking.budget_tokens`" message. So the config is understood; the 200
+response simply carries no `thought: true` part and no
+`usageMetadata.thoughtsTokenCount`. The gemini-2.5-flash row above is the
+paired positive control: the identical `thinkingConfig` on the same lane
+DOES return both. The claude thinking test therefore asserts acceptance and
+records the return channel, flipping to PASS on its own if the lane starts
+serving thoughts.
 
 Deterministic coverage (GREEN in CI now): the Cloud Code transport is
 pinned by wiremock tests in `crates/routectl-providers/src/gemini/mod.rs`
 that run keyless in CI today --
 `envelope_wrap_and_response_unwrap` (non-stream), `stream_unwraps_response_envelope`
 (stream), `onboards_via_loadcodeassist`, `onboards_via_onboarduser`, and
-`preserves_reasoning_and_structured_output`. The live rows above are
-PENDING the one-time operator login and skip cleanly until then.
+`preserves_reasoning_and_structured_output`. The live rows above require the
+one-time operator login and skip cleanly without
+`GEMINI_OAUTH_ACCESS_TOKEN`.
 
 ## Client x provider compatibility matrix
 
