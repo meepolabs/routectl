@@ -59,6 +59,7 @@ pub const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// `cloud-code` auth mode before treating a hit here as a finding.
 #[must_use]
 pub const fn deprecated_alias_replacement(upstream: &str) -> Option<&'static str> {
+    // Matching on bytes, not &str, is what lets this be `const fn`.
     match upstream.as_bytes() {
         b"gemini-2.5-flash" => Some("gemini-3.1-flash-lite"),
         b"gemini-2.5-pro" => Some("gemini-3.1-pro-low"),

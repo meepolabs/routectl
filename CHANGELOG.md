@@ -34,6 +34,13 @@ list with more narrative.
   to ordinary discovery for the rest of the process; quota, auth, and 5xx
   failures never trigger the fallback, and a restart re-trusts the
   configured value.
+- **Deprecated cloud-code alias warning** -- a config load emits an
+  advisory when a model entry on a cloud-code gemini provider routes
+  `gemini-2.5-flash` or `gemini-2.5-pro` (still-serving server-side
+  aliases the docs no longer recommend), naming a live-verified
+  replacement. The same ids on the API-key lane stay silent; routing
+  never changes. The cloud-code model documentation is rewritten as a
+  dated verification snapshot against the live catalog.
 - **Learned capability system** -- a per-target capability registry
   learned from live rejections and response evidence, persisted in
   the usage ledger and rebuilt at boot; consented active probes
