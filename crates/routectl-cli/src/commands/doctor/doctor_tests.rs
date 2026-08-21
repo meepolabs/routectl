@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use routectl_auth::{OAuthError, OAuthStore};
+use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::{
     AliasValue, CURRENT_CONFIG_VERSION, CatalogImportState, CatalogOverlay, ModelEntry,
     ProviderEntry,
@@ -688,8 +689,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_seven() {
-    assert_eq!(SCHEMA_VERSION, 7);
+fn schema_version_is_eight() {
+    assert_eq!(SCHEMA_VERSION, 8);
 
     let context = ctx(
         config_with_overrides(),
@@ -698,7 +699,7 @@ fn schema_version_is_seven() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 7);
+    assert_eq!(report.schema_version, 8);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -1077,20 +1078,181 @@ async fn present_but_unparseable_config_yields_fail_end_to_end() {
     assert_ne!(overall_exit(&report.findings), 0);
 }
 
-/// A config referencing an anthropic provider through an alias is clean:
-/// the config section reports a single Pass for the validator suite.
+/// The alias-reaching config with its auth selector set, so the
+/// advisory half of the validator suite is empty too. `Config::default()`
+/// alone would not do: the config section's Pass is only meaningful on a
+/// config that actually carries providers and models.
+fn clean_config() -> Config {
+    let mut cfg = config_referencing_anthropic();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic").with_auth_kind(AuthKind::OauthBearer),
+    );
+    cfg
+}
+
+/// A config carrying the advisory half only -- an `oauth://` ref whose
+/// auth selector is unset -- must render one Warn finding per warning and
+/// NOT the "passes the static validator suite" Pass, whose message the
+/// advisory contradicts.
 #[test]
-fn clean_config_passes_validation() {
+fn validator_warnings_render_as_warn_findings_without_a_pass() {
+    // Arrange: no errors, at least one warning.
+    let cfg = config_referencing_anthropic();
+    let report = crate::commands::config::validation_report(&cfg, None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(!report.warnings.is_empty(), "fixture must warn");
+    let expected_warnings = report.warnings.len();
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
+    // Act
+    let findings = section_config(&context);
+
+    // Assert
+    let validation: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "validation")
+        .collect();
+    assert_eq!(validation.len(), expected_warnings, "{validation:?}");
+    for f in &validation {
+        assert_eq!(f.status, Status::Warn);
+        assert!(f.remediation.is_some(), "{f:?}");
+    }
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.section == "config" && f.status == Status::Pass),
+        "the validator Pass must not claim a clean suite alongside an advisory: {findings:?}"
+    );
+}
+
+/// The doctor render shares `config check`'s ceiling, so a long-but-benign
+/// advisory (the auth-selector gap message runs past the 256-char log-field
+/// budget once the provider name is long) reaches the operator whole.
+#[test]
+fn a_long_validator_warning_renders_untruncated_in_the_finding_detail() {
+    // Arrange: one advisory warning, longer than the 256-char log budget.
+    let mut cfg = Config::default();
+    let long_name = "anthropic-seat-for-the-shared-review-workload-primary";
+    cfg.providers.insert(
+        long_name.to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    let report = crate::commands::config::validation_report(&cfg, None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    let warning = report.warnings[0].clone();
+    assert!(
+        warning.chars().count() > 256,
+        "fixture guard: warning must exceed the 256-char budget, got {}",
+        warning.chars().count()
+    );
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
+    // Act
+    let findings = section_config(&context);
+
+    // Assert
+    let validation: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "validation")
+        .collect();
+    assert_eq!(validation.len(), 1, "{validation:?}");
+    assert_eq!(validation[0].status, Status::Warn);
+    assert_eq!(
+        validation[0].detail, warning,
+        "the doctor render must not truncate a legitimate advisory"
+    );
+}
+
+/// A warnings-only config is exit-code-neutral: the WARN findings render and
+/// the overall exit stays 0, so an advisory never turns a healthy doctor run
+/// into a failing one.
+#[test]
+fn a_warnings_only_config_renders_warn_findings_and_exits_zero() {
     let context = ctx(
         config_referencing_anthropic(),
         Some(&current_version_stamp()),
-        Vec::new(),
+        vec![("anthropic", LocalProbe::Present)],
         Vec::new(),
     );
+
+    let report = build_report(&context);
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.section == "config" && f.name == "validation" && f.status == Status::Warn),
+        "expected a config validation Warn: {:?}",
+        report.findings
+    );
+    assert!(
+        report.findings.iter().all(|f| f.status != Status::Fail),
+        "fixture must carry no Fail: {:?}",
+        report.findings
+    );
+    assert_eq!(overall_exit(&report.findings), 0);
+}
+
+/// Errors do not suppress advisories: a config tripping both halves renders
+/// every error as a Fail AND every warning as a Warn.
+#[test]
+fn errors_and_warnings_are_both_rendered() {
+    let mut cfg = config_referencing_anthropic();
+    cfg.models.insert(
+        "ghost-bound".to_string(),
+        ModelEntry::new("ghost", "claude-sonnet-4-5"),
+    );
+    let report = crate::commands::config::validation_report(&cfg, None);
+    assert!(!report.errors.is_empty(), "fixture must error");
+    assert!(!report.warnings.is_empty(), "fixture must warn");
+    let (expected_fails, expected_warns) = (report.errors.len(), report.warnings.len());
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
     let findings = section_config(&context);
-    let f = find(&findings, "config", "validation");
-    assert_eq!(f.status, Status::Pass);
-    assert!(f.remediation.is_none());
+
+    let validation: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "validation")
+        .collect();
+    assert_eq!(
+        validation
+            .iter()
+            .filter(|f| f.status == Status::Fail)
+            .count(),
+        expected_fails,
+        "{validation:?}"
+    );
+    assert_eq!(
+        validation
+            .iter()
+            .filter(|f| f.status == Status::Warn)
+            .count(),
+        expected_warns,
+        "{validation:?}"
+    );
+}
+
+/// The Pass finding survives on a config tripping neither half -- the
+/// positive control for the two negative gates above.
+#[test]
+fn clean_config_passes_validation() {
+    let cfg = clean_config();
+    let report = crate::commands::config::validation_report(&cfg, None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
+    let findings = section_config(&context);
+
+    let validation: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "validation")
+        .collect();
+    assert_eq!(validation.len(), 1, "{validation:?}");
+    assert_eq!(validation[0].status, Status::Pass);
+    assert!(validation[0].remediation.is_none());
 }
 
 /// A model pointing at a provider absent from `[providers]` is a semantic
@@ -1144,6 +1306,47 @@ fn a_control_byte_bearing_config_key_cannot_forge_a_finding_line() {
         f.detail.chars().all(|c| c.is_ascii_graphic() || c == ' '),
         "{:?}",
         f.detail
+    );
+}
+
+/// The warning half runs through the SAME control-char filter as the error
+/// half: a warning message embeds the operator-written provider name, so an
+/// unsanitized advisory render would forge a fabricated finding line just as
+/// an unsanitized error would.
+#[test]
+fn a_control_byte_bearing_config_key_cannot_forge_a_finding_line_through_a_warning() {
+    // Arrange: an `oauth://` ref with no auth selector trips the advisory,
+    // whose message formats the provider name verbatim.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "claude\n  \u{1b}[32mPASS forged: all good".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
+    // Act
+    let findings = section_config(&context);
+
+    // Assert
+    let warnings: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "validation" && f.status == Status::Warn)
+        .collect();
+    assert!(!warnings.is_empty(), "{findings:?}");
+    for f in &warnings {
+        assert!(!f.detail.contains('\n'), "{:?}", f.detail);
+        assert!(!f.detail.contains('\u{1b}'), "{:?}", f.detail);
+        assert!(
+            f.detail.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+            "{:?}",
+            f.detail
+        );
+    }
+    // Positive control: the sanitized detail still names the entry, so the
+    // filter is not passing by emptying the message.
+    assert!(
+        warnings.iter().any(|f| f.detail.contains("claude")),
+        "{warnings:?}"
     );
 }
 
@@ -2360,7 +2563,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 7);
+    assert_eq!(no_net.schema_version, 8);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

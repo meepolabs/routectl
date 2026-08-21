@@ -74,7 +74,11 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// growth marker) with the per-ref rows reduced to the entries no pool claims.
 /// The section can also now Warn (a member with no stored credential) and Fail
 /// (a pool with none), so it is no longer exit-code-neutral.
-const SCHEMA_VERSION: u32 = 7;
+///
+/// v7 -> v8: the `config` section renders the validator suite's WARNING half
+/// as Warn findings alongside the error half, and its single Pass finding now
+/// requires BOTH halves empty.
+const SCHEMA_VERSION: u32 = 8;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
