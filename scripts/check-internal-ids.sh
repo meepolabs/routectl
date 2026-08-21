@@ -112,6 +112,14 @@ is_excluded() {
 # because `scan_text` runs one case-SENSITIVE pattern per tier.
 # MEASURED: all cores return zero lines across all tracked files minus
 # `EXCLUDE_PATHS`.
+#
+# KNOWN COVERAGE GAP, accepted: short lowercase prefix-hyphen-token ids
+# (a two-letter lowercase prefix, a hyphen, then a slug or digits) are NOT
+# matched by either tier. That shape is indistinguishable from ordinary
+# hyphenated lowercase identifiers and slugs in tracked content, so a
+# pattern for it would block legitimate commits. Keeping ids of that shape
+# out of code and commit messages is the author's and reviewer's job, not
+# this gate's.
 PATTERNS=(
     'R2-[A-Za-z0-9][A-Za-z0-9_-]*'
     'RV-[0-9]+'

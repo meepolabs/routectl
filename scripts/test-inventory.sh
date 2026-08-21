@@ -27,6 +27,14 @@
 # is deliberately left unset so the pinned stable is selected through the
 # rustup proxy -- unlike the nightly public-api.sh, no override is needed.
 #
+# Build directory: an inherited CARGO_TARGET_DIR is deliberately IGNORED.
+# The enumeration always builds into the script's own
+# $REPO_ROOT/.cargo-target-inventory. A target dir warmed at one commit
+# fails to rebuild the test binaries at another (stale artifacts of
+# renamed/moved items surface as compile errors), which would break the
+# before/after dump pair this tool exists to produce -- so the dump must
+# not be steerable into whatever dir the calling shell happens to export.
+#
 # All cargo output is redirected to a file and parsed from there rather
 # than through a pipe, so the full enumeration is captured intact and can
 # be re-inspected after the run.
@@ -64,7 +72,7 @@ dump() {
     mkdir -p "$outdir"
     outdir="$(cd "$outdir" && pwd)"
 
-    local target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/.cargo-target-inventory}"
+    local target_dir="$REPO_ROOT/.cargo-target-inventory"
     local raw="$outdir/$RAW_LOG_NAME"
 
     # Clear any prior dump artifacts so a re-run never mixes two enumerations.
