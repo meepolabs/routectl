@@ -369,7 +369,7 @@ model's family or tier from its label.
 | `gemini-3-flash-agent` | complete | PASS | `tokens=81 content="pong"` |
 | `gemini-3.1-flash-image` | complete | PASS | `tokens=9 content="pong"` |
 | `gemini-3.1-flash-lite` | complete | PASS | `tokens=9 content="pong"`; the flash-class durable pin |
-| `gemini-3.1-pro-low` | complete | PASS | `tokens=81 content="pong"`; the pro-class durable pin |
+| `gemini-3.1-pro-low` | complete | PASS | `tokens=81 content="pong"`; the pro-class durable pin; intermittently empty stream opens observed |
 | `gemini-3.5-flash-extra-low` | complete | PASS | `tokens=84 content="pong"` |
 | `gemini-3.5-flash-low` | complete | PASS | `tokens=81 content="pong"`; intermittently empty stream opens observed |
 | `gemini-3.6-flash-high` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
