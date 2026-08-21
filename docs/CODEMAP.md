@@ -5114,7 +5114,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   store + credentials.json) with an isolated usage DB; env-mutating cases are
   serialized and readiness is polled off `/health`
 - `tests/documented_provider_blocks.rs` -- docs-vs-schema tripwire: every
-  fenced `toml` block in `docs/CONFIGURATION.md` and `README.md`, plus all of
+  fenced `toml` block in `docs/CONFIGURATION.md`, `README.md`,
+  `docs/PROVIDER-QUIRKS.md` and `docs/REMOTE-CONTROL.md`, plus all of
   `examples/config.toml`, must deserialize into `Config` (every section, not
   just `[providers.X]`) with each provider entry parsing as the variant its
   own `kind` names, so a key documented on a table that has none fails here
@@ -5122,7 +5123,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   carrying `version` is a WHOLE config an operator can save, so it also runs
   the version preflight plus `commands::config::validation_report` (alias
   cycles and patterns, model/pool references) -- parse-clean is not
-  load-clean. All three sources are `include_str!`d; fragment blocks (a
+  load-clean. All five sources are `include_str!`d; fragment blocks (a
   placeholder table missing its required keys) are skipped by design, and
   per-source non-zero floors keep the skip rule from going vacuous
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control

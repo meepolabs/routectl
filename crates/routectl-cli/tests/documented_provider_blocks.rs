@@ -17,8 +17,9 @@
 //! after they copied the block out of the docs; with it, the docs and the
 //! schema drift apart at commit time instead.
 //!
-//! Sources: `docs/CONFIGURATION.md` and `README.md` (every fenced ```toml
-//! block) and `examples/config.toml` (whole file). All three are
+//! Sources: `docs/CONFIGURATION.md`, `README.md`,
+//! `docs/PROVIDER-QUIRKS.md` and `docs/REMOTE-CONTROL.md` (every fenced
+//! ```toml block) plus `examples/config.toml` (whole file). All are
 //! `include_str!`d, so moving or renaming any of them is a compile error
 //! rather than a silently skipped check.
 
@@ -29,6 +30,8 @@ use routectl_router::{Config, preflight_config_version};
 
 const CONFIGURATION_MD: &str = include_str!("../../../docs/CONFIGURATION.md");
 const README_MD: &str = include_str!("../../../README.md");
+const PROVIDER_QUIRKS_MD: &str = include_str!("../../../docs/PROVIDER-QUIRKS.md");
+const REMOTE_CONTROL_MD: &str = include_str!("../../../docs/REMOTE-CONTROL.md");
 const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.toml");
 
 /// Top-level `Config` tables that are MAPS of typed entries, paired with
@@ -166,6 +169,19 @@ impl Checked {
     }
 }
 
+/// Scan every fenced ```toml block in one markdown source, asserting each
+/// against the schema, and total up what was actually checkable.
+fn check_markdown_source(label: &str, markdown: &str) -> Checked {
+    let mut checked = Checked::default();
+    for (line, body) in toml_blocks(markdown) {
+        let origin = format!("{label} fenced toml block at line {line}");
+        if let Some(shape) = assert_block_matches_schema(&origin, &body) {
+            checked.add(&shape);
+        }
+    }
+    checked
+}
+
 /// Assert `toml_src` deserializes into the schema types it names -- and,
 /// when it is a whole config, that it also loads. `origin` identifies the
 /// block in every failure message.
@@ -229,14 +245,7 @@ fn assert_whole_config_loads(origin: &str, toml_src: &str, cfg: &Config) {
 
 #[test]
 fn documented_config_blocks_parse_and_whole_configs_validate() {
-    let mut checked = Checked::default();
-
-    for (line, body) in toml_blocks(CONFIGURATION_MD) {
-        let origin = format!("docs/CONFIGURATION.md fenced toml block at line {line}");
-        if let Some(shape) = assert_block_matches_schema(&origin, &body) {
-            checked.add(&shape);
-        }
-    }
+    let checked = check_markdown_source("docs/CONFIGURATION.md", CONFIGURATION_MD);
 
     // A refactor that breaks the fence scanner or the block classifier
     // would otherwise leave this test vacuously green over zero blocks.
@@ -281,14 +290,7 @@ fn the_example_config_parses_and_validates() {
 /// still would not load. Held to the same bar as the reference docs here.
 #[test]
 fn readme_config_blocks_parse_and_whole_configs_validate() {
-    let mut checked = Checked::default();
-
-    for (line, body) in toml_blocks(README_MD) {
-        let origin = format!("README.md fenced toml block at line {line}");
-        if let Some(shape) = assert_block_matches_schema(&origin, &body) {
-            checked.add(&shape);
-        }
-    }
+    let checked = check_markdown_source("README.md", README_MD);
 
     // The README carries exactly one config block today, and it is a whole
     // config. Asserting both are non-zero keeps a fence-scanner or
@@ -301,5 +303,55 @@ fn readme_config_blocks_parse_and_whole_configs_validate() {
     assert!(
         checked.whole_configs >= 1,
         "expected the README quickstart to publish a whole config"
+    );
+}
+
+/// The provider-quirks recipes are the blocks an operator copies when a
+/// specific upstream misbehaves -- per-model knobs, auth selectors, header
+/// and payload extras, timeout bumps. Every one of them names a concrete
+/// provider kind, so a knob written on the wrong table is exactly the class
+/// this harness catches. None carries a `version` key: they are recipes to
+/// merge into a config, not configs to save, so there is no whole-config
+/// floor here.
+#[test]
+fn provider_quirks_config_blocks_parse() {
+    let checked = check_markdown_source("docs/PROVIDER-QUIRKS.md", PROVIDER_QUIRKS_MD);
+
+    // 14 of the 16 fenced blocks are checkable today (28 units); the other
+    // two are the "...the fields above, plus:" provider snippets the skip
+    // rule on `classify` covers. Floors sit below today's counts so
+    // ordinary recipe edits do not trip them.
+    assert!(
+        checked.blocks >= 12,
+        "expected the quirks recipes to carry many config blocks, checked only {}",
+        checked.blocks
+    );
+    assert!(
+        checked.units >= 24,
+        "expected the quirks recipes to populate many config tables, checked only {}",
+        checked.units
+    );
+}
+
+/// The remote-control doc publishes the `[mitm]` front-proxy block and the
+/// forwarded-credential provider entry -- both schema-typed, and the
+/// `[mitm]` one carries a removed-field preflight, so a stale key here is
+/// a config an operator cannot load.
+#[test]
+fn remote_control_config_blocks_parse() {
+    let checked = check_markdown_source("docs/REMOTE-CONTROL.md", REMOTE_CONTROL_MD);
+
+    // Two of the three fenced blocks are checkable; the third is the bare
+    // `[mitm]` header shown for its defaults, an empty singleton section
+    // the skip rule treats as a fragment.
+    assert!(
+        checked.blocks >= 2,
+        "expected the remote-control doc to carry its config blocks, checked only {}",
+        checked.blocks
+    );
+    assert!(
+        checked.units >= 2,
+        "expected the remote-control doc to populate its config tables, checked only {}",
+        checked.units
     );
 }
