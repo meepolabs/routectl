@@ -471,7 +471,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `selectable`                   | `[models.X]`        | default true                                                           |
 | `supports_adaptive_thinking`   | `[models.X]`        | bool, default false; selects adaptive vs legacy thinking wire shape    |
 | `effort_levels`                | `[models.X]`        | array<string>, default ["low","medium","high"]; empty = pass-through   |
-| `max_thinking_budget`          | `[models.X]`        | u32, default 0 (no cap); declared model budget ceiling in tokens       |
+| `max_thinking_budget`          | `[models.X]`        | u32, default 0 (no cap); declared model budget ceiling in tokens; anthropic-api + bedrock-invoke + bedrock-converse only |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
@@ -1766,10 +1766,19 @@ filtering.
 
 Declares the model's maximum thinking-token budget in tokens. `0` means
 "not a budget-capped model" -- the egress falls back to its own
-inference-time defaults. Non-zero values are forwarded as the ceiling
-for the egress's budget negotiation. Only relevant on the legacy
-`supports_adaptive_thinking = false` path; the adaptive path uses effort
-strings and has no budget field.
+inference-time defaults. Non-zero values cap the negotiated budget DOWN
+before the upstream's own budget window clamp runs.
+
+Only consumed by the Anthropic-shape thinking builder: `anthropic-api`,
+`bedrock-invoke` (which delegates body construction to the same
+normalizer), and `bedrock-converse` (which reuses the same thinking
+builder). The other egresses (`gemini`, `openai-compat`,
+`openai-responses`) never read it -- setting it on a model of those
+kinds has no effect and emits no diagnostic; steer those with
+`effort_levels` and the caller's own budget instead.
+
+Only relevant on the legacy `supports_adaptive_thinking = false` path;
+the adaptive path uses effort strings and has no budget field.
 
 #### `max_output_tokens` (Option<u32>, default None)
 
