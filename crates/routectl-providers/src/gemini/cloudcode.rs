@@ -213,6 +213,85 @@ pub(super) fn is_project_mismatch(err: &Error) -> bool {
     )
 }
 
+/// The host (plus explicit port, when the URL carries one) of `base_url`,
+/// for naming the egress host in an operator-facing diagnostic.
+///
+/// Parsed rather than substringed, for two reasons. The parser's host is the
+/// host the request actually egressed to, so the diagnostic cannot name a
+/// different authority than the one that answered. And `base_url` may carry
+/// `user:pass@` credentials, which the raw string would leak into an error
+/// body that reaches the caller and the logs -- the parsed host drops them.
+/// A `base_url` with no parseable host cannot have produced an upstream
+/// response at all, so that arm yields a neutral placeholder.
+pub(super) fn host_label(base_url: &str) -> String {
+    match reqwest::Url::parse(base_url) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_string(),
+            (None, _) => "unknown".to_string(),
+        },
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// Fixed diagnostic sentence appended by [`annotate_host_rejection`]. Names
+/// possibilities only: on the Cloud Code lane a permission / not-found /
+/// quota verdict from the host in play is indistinguishable from the same
+/// verdict earned honestly, so the sentence must never assert a host
+/// mismatch as fact.
+const HOST_REJECTION_HINT: &str = "This Cloud Code request egressed to the host named above; a \
+     rejection here can also come from serving on a host this seat is not entitled to. If the seat \
+     serves on the other Cloud Code host, adjust `base_url` on the provider entry -- routectl does \
+     not retry against a different host.";
+
+/// Suffix a fixed host-diagnostic sentence onto the classes of Cloud Code
+/// rejection a wrong-host lane can produce: the [`is_project_mismatch`] set
+/// (`PERMISSION_DENIED` / `NOT_FOUND`) plus `RESOURCE_EXHAUSTED`. Every
+/// other class -- `UNAUTHENTICATED`, any 5xx, a transport failure, any
+/// non-`Upstream` variant -- returns unchanged, byte-identical.
+///
+/// The rebuild preserves the whole structured surface (`status`,
+/// `retry_after`, `upstream_type`, `upstream_code`, `upstream_request_id`)
+/// via `Error::upstream_full` + `with_upstream_request_id`, the same path
+/// [`map_onboarding_error`] uses: the router's class policy and breaker read
+/// those fields, so a diagnostic that dropped one would silently change
+/// routing behavior.
+///
+/// Diagnostic only: it never rewrites `base_url` and never issues a second
+/// request against the other host.
+pub(super) fn annotate_host_rejection(err: Error, effective_host: &str) -> Error {
+    match err {
+        Error::Upstream {
+            provider,
+            status,
+            body,
+            retry_after,
+            upstream_type: Some(upstream_type),
+            upstream_code,
+            upstream_request_id,
+        } if is_host_sensitive_class(&upstream_type) => Error::upstream_full(
+            provider,
+            status,
+            format!("{body} (cloud-code host: {effective_host}) {HOST_REJECTION_HINT}"),
+            retry_after,
+            Some(String::from(upstream_type)),
+            upstream_code.map(String::from),
+        )
+        .with_upstream_request_id(upstream_request_id.map(String::from)),
+        other => other,
+    }
+}
+
+/// The Google canonical classifiers a wrong-host Cloud Code lane can
+/// produce: the [`is_project_mismatch`] set plus the quota verdict. Any
+/// other token is left alone by [`annotate_host_rejection`].
+fn is_host_sensitive_class(upstream_type: &str) -> bool {
+    matches!(
+        upstream_type,
+        "PERMISSION_DENIED" | "NOT_FOUND" | "RESOURCE_EXHAUSTED"
+    )
+}
+
 /// Map an onboarding (`loadCodeAssist` / `onboardUser`) HTTP failure into a
 /// routectl upstream error, preserving the Google Cloud Code classifier
 /// (`error.status` / `error.code`) and any rate-limit reset hint. Lifts the
@@ -723,6 +802,158 @@ mod tests {
     #[test]
     fn is_project_mismatch_false_for_non_upstream_variant() {
         assert!(!is_project_mismatch(&Error::Auth("token expired".into())));
+    }
+
+    /// Full-surface upstream error: every structured field populated, so a
+    /// rebuild that drops one is visible.
+    fn full_upstream(status: u16, upstream_type: &str) -> Error {
+        Error::upstream_full(
+            "gemini:test",
+            status,
+            "original body",
+            Some(Duration::from_secs(31)),
+            Some(upstream_type.to_string()),
+            Some(status.to_string()),
+        )
+        .with_upstream_request_id(Some("req-abc".to_string()))
+    }
+
+    #[test]
+    fn annotate_host_rejection_preserves_the_whole_structured_surface() {
+        for (status, upstream_type) in [
+            (403, "PERMISSION_DENIED"),
+            (404, "NOT_FOUND"),
+            (429, "RESOURCE_EXHAUSTED"),
+        ] {
+            // Arrange
+            let err = full_upstream(status, upstream_type);
+
+            // Act
+            let annotated = annotate_host_rejection(err, "daily-cloudcode-pa.googleapis.com");
+
+            // Assert
+            match annotated {
+                Error::Upstream {
+                    provider,
+                    status: got_status,
+                    body,
+                    retry_after,
+                    upstream_type: got_type,
+                    upstream_code,
+                    upstream_request_id,
+                } => {
+                    assert_eq!(provider, "gemini:test");
+                    assert_eq!(got_status, status, "status must survive the rebuild");
+                    assert_eq!(
+                        retry_after,
+                        Some(Duration::from_secs(31)),
+                        "retry_after drives breaker parking and must survive"
+                    );
+                    assert_eq!(got_type.as_deref(), Some(upstream_type));
+                    assert_eq!(upstream_code.as_deref(), Some(status.to_string().as_str()));
+                    assert_eq!(upstream_request_id.as_deref(), Some("req-abc"));
+                    assert!(
+                        body.starts_with("original body"),
+                        "the upstream detail must be kept ahead of the suffix: {body}"
+                    );
+                    assert!(
+                        body.contains("daily-cloudcode-pa.googleapis.com"),
+                        "the suffix must name the effective host: {body}"
+                    );
+                    assert!(
+                        body.contains("base_url"),
+                        "the suffix must name the recovery knob: {body}"
+                    );
+                }
+                other => panic!("expected Error::Upstream, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn annotate_host_rejection_never_asserts_a_mismatch_as_fact() {
+        let annotated = annotate_host_rejection(
+            full_upstream(429, "RESOURCE_EXHAUSTED"),
+            "daily-cloudcode-pa.googleapis.com",
+        );
+        let body = annotated.to_string();
+        assert!(
+            body.contains("can also come from"),
+            "the sentence must stay hedged -- a quota verdict on the daily host is \
+             indistinguishable from real quota: {body}"
+        );
+    }
+
+    #[test]
+    fn annotate_host_rejection_passes_other_classes_through_unchanged() {
+        // UNAUTHENTICATED is a credential verdict and a 500 is a server
+        // fault: neither says anything about which host served, so both must
+        // come back byte-identical.
+        for (status, upstream_type) in [(401, "UNAUTHENTICATED"), (500, "INTERNAL")] {
+            let before = full_upstream(status, upstream_type);
+            let before_debug = format!("{before:?}");
+            let after = annotate_host_rejection(before, "cloudcode-pa.googleapis.com");
+            assert_eq!(
+                format!("{after:?}"),
+                before_debug,
+                "{upstream_type} must pass through unmodified"
+            );
+        }
+    }
+
+    #[test]
+    fn annotate_host_rejection_passes_unclassified_and_non_upstream_errors_through() {
+        // No classifier token lifted (transport failure), and a non-Upstream
+        // variant: the annotation has nothing to key on in either case.
+        let transport = Error::upstream("gemini:test", 0, "connection reset");
+        let transport_debug = format!("{transport:?}");
+        assert_eq!(
+            format!(
+                "{:?}",
+                annotate_host_rejection(transport, "cloudcode-pa.googleapis.com")
+            ),
+            transport_debug
+        );
+
+        let auth = Error::Auth("token expired".into());
+        let auth_debug = format!("{auth:?}");
+        assert_eq!(
+            format!(
+                "{:?}",
+                annotate_host_rejection(auth, "cloudcode-pa.googleapis.com")
+            ),
+            auth_debug
+        );
+    }
+
+    #[test]
+    fn host_label_names_the_parsed_host_and_drops_credentials() {
+        assert_eq!(
+            host_label(DAILY_BASE_URL),
+            "daily-cloudcode-pa.googleapis.com"
+        );
+        assert_eq!(host_label(PROD_BASE_URL), "cloudcode-pa.googleapis.com");
+        assert_eq!(
+            host_label("https://cloudcode-pa.googleapis.com/v1internal:generateContent"),
+            "cloudcode-pa.googleapis.com",
+            "the path must not reach the label"
+        );
+        assert_eq!(
+            host_label("http://127.0.0.1:8080/v1internal"),
+            "127.0.0.1:8080",
+            "an explicit port disambiguates a local test host"
+        );
+        // A credentials prefix would otherwise ride into an error body that
+        // reaches the caller and the logs.
+        assert_eq!(
+            host_label("https://user:pass@cloudcode-pa.googleapis.com"),
+            "cloudcode-pa.googleapis.com"
+        );
+        assert!(
+            !host_label("https://user:pass@cloudcode-pa.googleapis.com").contains("pass"),
+            "the label must never carry a credential"
+        );
+        assert_eq!(host_label("not a url"), "unknown");
     }
 
     /// Spawn a one-shot raw TCP server that replies with `status` and a

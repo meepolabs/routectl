@@ -28,4 +28,7 @@ pub use validate::{
     validate_codex_version, validate_mitm_config, validate_pools,
     validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
-pub use warnings::{class_policy_warnings, codex_identity_warnings, per_block_breakpoint_warnings};
+pub use warnings::{
+    class_policy_warnings, cloudcode_host_warnings, codex_identity_warnings,
+    per_block_breakpoint_warnings,
+};

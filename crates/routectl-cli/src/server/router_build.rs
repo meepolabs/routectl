@@ -103,6 +103,12 @@ pub async fn build_router_from_config_with_overlay(
         tracing::warn!(warning = %warning, "per-block breakpoint warning");
     }
 
+    // A cloud-code Gemini entry pinned to the production Cloud Code host
+    // keeps that pin, but the lane default is the daily host. Advisory only.
+    for warning in routectl_router::cloudcode_host_warnings(&config) {
+        tracing::warn!(warning = %warning, "cloud-code host warning");
+    }
+
     // Reject malformed `[registry]` glob keys at startup so query-time
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;
