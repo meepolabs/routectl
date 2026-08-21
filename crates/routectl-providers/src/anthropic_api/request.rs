@@ -108,7 +108,7 @@ pub(crate) const fn clamp_sampling_for_thinking(
     top_p: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
     let temperature = match thinking {
-        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive) => Some(1.0f64),
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. }) => Some(1.0f64),
         _ => temperature,
     };
     let top_p = if temperature.is_some() { None } else { top_p };

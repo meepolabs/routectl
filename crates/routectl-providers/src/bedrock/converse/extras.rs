@@ -234,8 +234,23 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
     let Some(thinking) = build_thinking(req, cfg.adaptive_thinking.unwrap_or(false)) else {
         return;
     };
-    let is_adaptive = matches!(thinking, ThinkingConfig::Adaptive);
-    if let Ok(v) = serde_json::to_value(&thinking) {
+    let is_adaptive = matches!(thinking, ThinkingConfig::Adaptive { .. });
+    if let Ok(mut v) = serde_json::to_value(&thinking) {
+        // Bedrock Converse acceptance of `thinking.display` is
+        // UNMEASURED -- no live probe has confirmed the field passes the
+        // additionalModelRequestFields validator. Strip it rather than
+        // risk a 400 on every thinking request that happens to carry an
+        // explicit display. The strip is deliberately positioned on the
+        // serialized value (not the enum) so nothing else in the bag can
+        // pick the key up later.
+        if let Some(stripped) = v.as_object_mut().and_then(|o| o.remove("display")) {
+            tracing::warn!(
+                stripped_display = ?stripped,
+                "bedrock-converse: dropping thinking.display; the field's \
+                 acceptance on Converse is unverified. Reasoning text will \
+                 be returned per the model default."
+            );
+        }
         bag.insert("thinking".to_string(), v);
     }
     if is_adaptive {
@@ -918,6 +933,80 @@ mod tests {
         assert!(
             !logs_contain("secret-widget-name"),
             "the caller-controlled schema name must never be logged"
+        );
+    }
+
+    // -- thinking.display strip ----------------------------------------
+
+    /// Helper: `req_with_thinking()` plus an explicit display request.
+    fn req_with_thinking_display(exclude: bool) -> ChatRequest {
+        let mut req = req_with_thinking();
+        req.reasoning.as_mut().expect("reasoning set").exclude = Some(exclude);
+        req
+    }
+
+    /// Negative: `display` never reaches the Converse bag, because its
+    /// acceptance on additionalModelRequestFields is unverified.
+    #[traced_test]
+    #[test]
+    fn converse_bag_thinking_never_carries_display() {
+        for exclude in [true, false] {
+            // Arrange
+            let cfg = fake_cfg();
+            let req = req_with_thinking_display(exclude);
+
+            // Act
+            let bag = build_additional_fields(&cfg, &req, None).expect("thinking fills the bag");
+
+            // Assert
+            let thinking = bag["thinking"]
+                .as_object()
+                .expect("thinking must be an object");
+            assert!(
+                thinking.get("display").is_none(),
+                "display must be stripped from the Converse bag; got: {bag}"
+            );
+            assert!(
+                thinking.get("type").is_some(),
+                "positive control: the rest of the thinking shape survives"
+            );
+        }
+        assert!(
+            logs_contain("dropping thinking.display"),
+            "the strip must WARN so an operator can see the discard"
+        );
+    }
+
+    /// Positive control for the strip above: the SAME canonical input on
+    /// the direct-Anthropic path DOES carry `display`, so the negative
+    /// cannot pass vacuously via a build_thinking that never emits it.
+    #[test]
+    fn direct_anthropic_path_keeps_display_for_the_same_input() {
+        let req = req_with_thinking_display(true);
+
+        let thinking =
+            crate::anthropic_api::request::build_thinking(&req, false).expect("thinking is active");
+        let body = serde_json::to_value(&thinking).expect("thinking serializes");
+
+        assert_eq!(
+            body["display"], "omitted",
+            "direct Anthropic keeps display; only Converse strips it"
+        );
+    }
+
+    /// No display requested -> nothing to strip and no WARN.
+    #[traced_test]
+    #[test]
+    fn converse_bag_without_requested_display_logs_no_strip_warn() {
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+
+        let bag = build_additional_fields(&cfg, &req, None).expect("thinking fills the bag");
+
+        assert!(bag["thinking"].get("display").is_none());
+        assert!(
+            !logs_contain("dropping thinking.display"),
+            "no display requested -> no strip WARN"
         );
     }
 }

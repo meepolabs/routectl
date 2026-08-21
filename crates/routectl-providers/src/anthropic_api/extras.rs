@@ -24,7 +24,7 @@ use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
 use super::tools::{PARALLEL_TOOL_CALLS_KEY, TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
-use super::types::{OutputConfig, ThinkingConfig};
+use super::types::{OutputConfig, ThinkingConfig, ThinkingDisplay};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
 /// Anthropic-shape requests when the caller omits the field AND the
@@ -158,6 +158,16 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         return Some(ThinkingConfig::Disabled);
     }
 
+    // Absent means absent: `reasoning.exclude == None` must leave
+    // `thinking.display` off the wire entirely, because Anthropic's
+    // default is model-dependent and an explicit value would override
+    // whatever a newer model chooses for itself.
+    let display = match r.exclude {
+        Some(true) => Some(ThinkingDisplay::Omitted),
+        Some(false) => Some(ThinkingDisplay::Summarized),
+        None => None,
+    };
+
     // Did the caller actually ask for thinking? Any of: explicit
     // enabled=true, a budget, an effort string (other than "none").
     let thinking_active = r.enabled == Some(true)
@@ -185,7 +195,7 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
                  Set reasoning.effort to steer instead."
             );
         }
-        return Some(ThinkingConfig::Adaptive);
+        return Some(ThinkingConfig::Adaptive { display });
     }
 
     // Legacy wire shape constraint: Anthropic requires
@@ -234,6 +244,7 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Explicit),
+            display,
         });
     }
     if let Some(effort) = r.effort.as_deref() {
@@ -250,12 +261,14 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
+            display,
         });
     }
     // r.enabled == Some(true) without budget or effort.
     let budget = apply_operator_cap(max / 2, operator_cap);
     Some(ThinkingConfig::Enabled {
         budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
+        display,
     })
 }
 
@@ -314,7 +327,7 @@ pub(super) fn build_output_config(
     req: &ChatRequest,
     thinking: &Option<ThinkingConfig>,
 ) -> Option<OutputConfig> {
-    if matches!(thinking, Some(ThinkingConfig::Adaptive)) {
+    if matches!(thinking, Some(ThinkingConfig::Adaptive { .. })) {
         Some(OutputConfig {
             effort: derive_effort(req),
         })
@@ -875,7 +888,8 @@ mod tests {
             matches!(
                 thinking,
                 Some(ThinkingConfig::Enabled {
-                    budget_tokens: 24576
+                    budget_tokens: 24576,
+                    display: None
                 })
             ),
             "expected exact table budget 24576, got {thinking:?}"
@@ -1001,3 +1015,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "extras_thinking_display_tests.rs"]
+mod thinking_display_tests;

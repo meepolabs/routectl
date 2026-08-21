@@ -843,3 +843,9 @@ mod sse_usage_tests;
 #[cfg(test)]
 #[path = "sse_context_management_tests.rs"]
 mod sse_context_management_tests;
+
+// Streaming pins for the `thinking.display: "omitted"` shape: an
+// empty-text but SIGNED thinking block.
+#[cfg(test)]
+#[path = "sse_thinking_display_tests.rs"]
+mod sse_thinking_display_tests;

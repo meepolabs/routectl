@@ -11,3 +11,4 @@ use routectl_testkit::{CapturedEvent, capture_events};
 
 include!("messages_reasoning_warn_tests.rs");
 include!("messages_replay_invariant_warn_tests.rs");
+include!("messages_thinking_display_tests.rs");

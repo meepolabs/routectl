@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
 use routectl_core::cache_control;
-use routectl_core::{ChatRequest, Error, ReasoningConfig, Result};
+use routectl_core::{ChatRequest, Error, ReasoningConfig, Result, sanitize_detail_for_log};
 
 // Referenced only by the inline test module (`parse_tests.rs`) via
 // `use super::*`; test-gated so they do not flag as unused in the
@@ -99,7 +99,7 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
 
     // Translate thinking config.
     if let Some(t) = thinking {
-        req.reasoning = Some(translate_thinking(&t));
+        req.reasoning = Some(translate_thinking(&t)?);
     }
 
     // Lift output_config.effort into canonical req.reasoning.effort.
@@ -375,7 +375,7 @@ const fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
-fn translate_thinking(t: &Value) -> ReasoningConfig {
+fn translate_thinking(t: &Value) -> Result<ReasoningConfig> {
     let kind = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
     // Anthropic's `budget_tokens` is JSON-int (effectively u64) but
     // the canonical `ReasoningConfig.max_tokens` is u32. A naked cast
@@ -399,22 +399,67 @@ fn translate_thinking(t: &Value) -> ReasoningConfig {
                 n as u32
             }
         });
+    // `display` is validated for every thinking type, not only the ones
+    // that honor it: the field is a closed enum upstream, so an illegal
+    // value earns the local 400 even where the value is then ignored.
+    let display = translate_thinking_display(t)?;
     match kind {
-        "enabled" => ReasoningConfig {
+        "enabled" => Ok(ReasoningConfig {
             enabled: Some(true),
             max_tokens: budget,
+            exclude: display,
             ..Default::default()
-        },
-        "disabled" => ReasoningConfig {
+        }),
+        "disabled" => Ok(ReasoningConfig {
             enabled: Some(false),
             ..Default::default()
-        },
-        "adaptive" => ReasoningConfig {
+        }),
+        "adaptive" => Ok(ReasoningConfig {
             enabled: Some(true),
+            exclude: display,
             ..Default::default()
-        },
-        _ => ReasoningConfig::default(),
+        }),
+        _ => Ok(ReasoningConfig::default()),
     }
+}
+
+/// Map Anthropic's `thinking.display` onto the canonical
+/// `ReasoningConfig.exclude`. `display` is a closed two-value enum
+/// upstream, so an unrecognized value is rejected locally with a 400
+/// rather than forwarded to earn a slower upstream 400.
+///
+/// Absent stays absent (`None`): Anthropic's default is model-dependent,
+/// and materializing an explicit value here would override whatever a
+/// newer model chooses for itself.
+fn translate_thinking_display(t: &Value) -> Result<Option<bool>> {
+    let Some(raw) = t.get("display") else {
+        return Ok(None);
+    };
+    let requested = raw.as_str();
+    let exclude = match requested {
+        Some("omitted") => Some(true),
+        Some("summarized") => Some(false),
+        _ => {
+            // The rejected value stays out of the 400 body -- the client sent
+            // it and the field plus its two legal values is the whole
+            // remediation; the value itself goes to the debug log only.
+            tracing::debug!(
+                thinking_display = %sanitize_detail_for_log(&raw.to_string()),
+                "anthropic ingress: thinking.display rejected"
+            );
+            return Err(Error::Validation(
+                "anthropic ingress: thinking.display must be one of \
+                 \"summarized\" or \"omitted\""
+                    .to_string(),
+            ));
+        }
+    };
+    tracing::debug!(
+        thinking_display = ?requested,
+        exclude = ?exclude,
+        "anthropic ingress: thinking.display translated to reasoning.exclude"
+    );
+    Ok(exclude)
 }
 
 fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
@@ -430,3 +475,7 @@ fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
 #[cfg(test)]
 #[path = "parse_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "parse_thinking_display_tests.rs"]
+mod thinking_display_tests;
