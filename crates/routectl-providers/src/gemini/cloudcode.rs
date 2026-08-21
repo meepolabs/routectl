@@ -24,6 +24,7 @@ use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use routectl_core::identity::antigravity::{IDE_NAME, PINNED_IDE_VERSION, antigravity_user_agent};
 use routectl_core::{Error, Result, sanitize_for_log, sanitize_upstream_body};
 
 // Wire constants. Kept private to this module: they are part of the
@@ -41,17 +42,11 @@ pub const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
 const ONBOARD_USER_PATH: &str = "/v1internal:onboardUser";
 
-/// Short User-Agent sent on generate / stream / loadCodeAssist. Pinned to
-/// the reference client's fallback version; routectl does
-/// not run a live version-fetcher.
-pub const SHORT_USER_AGENT: &str =
-    "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
-/// Node User-Agent sent only on onboardUser (the reference uses the
-/// google-api-nodejs-client UA there).
-const NODE_USER_AGENT: &str = "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64) google-api-nodejs-client/10.3.0";
+/// Pinned pending capture from a real client onboarding: the repro account
+/// is already provisioned, so the fresh-account `onboardUser` path cannot
+/// be observed live.
 const GOOG_API_CLIENT: &str = "gl-node/22.21.1";
 
-const IDE_VERSION: &str = "1.0.13";
 const DEFAULT_TIER: &str = "free-tier";
 
 const ONBOARD_MAX_ATTEMPTS: u32 = 5;
@@ -270,7 +265,8 @@ pub async fn load_code_assist(
 ) -> Result<Value> {
     let url = format!("{}{}", base.trim_end_matches('/'), LOAD_CODE_ASSIST_PATH);
     let body = json!({"metadata": {"ideType": "ANTIGRAVITY"}});
-    let rb = onboarding_headers(client.post(&url), token).header("user-agent", SHORT_USER_AGENT);
+    let rb =
+        onboarding_headers(client.post(&url), token).header("user-agent", antigravity_user_agent());
     let resp = rb
         .json(&body)
         .send()
@@ -350,14 +346,14 @@ pub async fn onboard_user(
         "tier_id": tier_id,
         "metadata": {
             "ide_type": "ANTIGRAVITY",
-            "ide_version": IDE_VERSION,
-            "ide_name": "antigravity",
+            "ide_version": PINNED_IDE_VERSION,
+            "ide_name": IDE_NAME,
         },
     });
 
     for attempt in 0..ONBOARD_MAX_ATTEMPTS {
         let rb = onboarding_headers(client.post(&url), token)
-            .header("user-agent", NODE_USER_AGENT)
+            .header("user-agent", antigravity_user_agent())
             .header("x-goog-api-client", GOOG_API_CLIENT);
         let resp = rb
             .json(&body)

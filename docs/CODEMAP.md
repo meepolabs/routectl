@@ -196,7 +196,7 @@ license.
   `routectl-cli/tests/common/mod.rs`
 - `src/identity/mod.rs` -- provider identity-header module root; one canonical
   home for the compiled HTTP-fingerprint constants and default-header builders
-  (`pub mod codex; pub mod anthropic;`)
+  (`pub mod codex; pub mod anthropic; pub mod antigravity;`)
 - `src/identity/codex.rs` -- shared codex CLI HTTP fingerprint (UA,
   originator, residency) + `default_identity_headers()`
   (originator/residency/version trio); consumed by both the openai-responses
@@ -238,6 +238,17 @@ license.
   re-typing the wire strings), consumed by the
   anthropic-api provider's header composition (`build_headers`) and the
   beta-decision 4xx observability
+- `src/identity/antigravity.rs` -- compiled Antigravity IDE identity for the
+  gemini cloud-code lane: `PINNED_IDE_VERSION` (the client's `ideVersion`, a
+  compiled pin with no live fetcher), `IDE_NAME`, a private pure
+  `compose(os, arch)` mapping Rust's `OS`/`ARCH` into the reference client's
+  wire vocabulary (macos -> darwin, x86_64 -> amd64, aarch64 -> arm64,
+  x86 -> 386, else passthrough), and `antigravity_user_agent()` -- a
+  `OnceLock`-memoized `antigravity/{version} {os}/{arch}` composed from the
+  REAL host platform. Single source of the three wire values consumed by
+  `gemini/cloudcode.rs` (UA on all three calls + the `onboardUser`
+  `ide_version`/`ide_name` metadata) and seeded into
+  `GeminiConfig.user_agent` by `new_cloud_code`
 - `src/error.rs` -- `Error` enum
   (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...)
   and `Result` alias; `Error::Upstream` carries a structural `retry_after:
@@ -881,8 +892,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   paths; `{project,request,model}` request envelope + `response`-wrapper
   unwrap (non-stream and per-SSE-chunk); project-id resolution via
   `loadCodeAssist` falling back to polled `onboardUser`, cached through a
-  `CloudProjectCache`; antigravity short UA on generate/stream/loadCodeAssist
-  + Node UA on onboardUser; control-plane headers; `is_project_mismatch`
+  `CloudProjectCache`; the one composed `identity::antigravity` UA on all
+  three calls (generate/stream via the client default, loadCodeAssist and
+  onboardUser per-request) plus a `gl-node` `x-goog-api-client` on
+  onboardUser only; control-plane headers; `is_project_mismatch`
   predicate (bare `PERMISSION_DENIED`/`NOT_FOUND` classifier on an `Upstream`
   error only; auth/quota/5xx/transport left untouched) gating the mod.rs cache
   invalidation

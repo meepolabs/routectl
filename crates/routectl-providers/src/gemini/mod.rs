@@ -16,6 +16,7 @@ use futures::stream::{BoxStream, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
 
+use routectl_core::identity::antigravity::antigravity_user_agent;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, CloudProjectCache, Error, Provider, Result, StaticToken,
     TokenSource, debug_upstream_error_body, extract_upstream_message, is_json_error_envelope,
@@ -154,7 +155,7 @@ impl GeminiConfig {
             auth,
             base_url: cloudcode::DAILY_BASE_URL.to_string(),
             header_extras: Vec::new(),
-            user_agent: Some(cloudcode::SHORT_USER_AGENT.to_string()),
+            user_agent: Some(antigravity_user_agent().to_string()),
             mode: GeminiAuthMode::CloudCode,
             project_cache: Some(project_cache),
             onboard_poll_interval: ONBOARD_POLL_INTERVAL,
@@ -1309,6 +1310,71 @@ mod e2e_tests {
         provider.complete(base_req()).await.expect("complete ok");
 
         // Assert: each `.expect(1)` verifies on server drop.
+        drop(provider);
+        server.verify().await;
+    }
+
+    /// The composed Antigravity User-Agent reaches the wire on ALL THREE
+    /// cloud-code call classes -- generate (client-level, seeded by the
+    /// constructor), loadCodeAssist and onboardUser (per-request headers).
+    /// Any one of them falling back to a different UA re-splits the lane's
+    /// fingerprint, which is exactly what the abandoned two-literal shape
+    /// did.
+    #[tokio::test]
+    async fn composed_user_agent_ships_on_generate_load_and_onboard() {
+        // Arrange
+        let ua = antigravity_user_agent();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .and(header("user-agent", ua))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "allowedTiers": [{"id": "free-tier", "isDefault": true}]
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(ONBOARD_PATH))
+            .and(header("user-agent", ua))
+            .and(header("x-goog-api-client", "gl-node/22.21.1"))
+            .and(body_partial_json(json!({
+                "metadata": {"ide_version": "1.23.2", "ide_name": "antigravity"}
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "done": true,
+                        "response": {"cloudaicompanionProject": "proj-ua"}
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(header("user-agent", ua))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        // Act
+        provider.complete(base_req()).await.expect("complete ok");
+
+        // Assert: each `.expect(1)` only matches when the UA header did.
         drop(provider);
         server.verify().await;
     }
