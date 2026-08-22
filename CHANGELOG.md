@@ -16,6 +16,28 @@ list with more narrative.
 
 ### Added
 
+- **Operators can veto a capability strip** -- `[capability]` grows an
+  `essential` list of capability keys that must never be stripped in
+  place. When a target only fails on a listed key, routectl routes the
+  request to a target that supports it instead of removing the capability
+  and proceeding, so an operator who considers a feature load-bearing no
+  longer has to accept routectl's baked strip-vs-route judgment for it.
+  The list is global (droppability is operator intent that holds for every
+  target, unlike `[capability.overrides]`, where support is a per-target
+  fact) and hot-reloadable. It only ever TIGHTENS: it can turn a strip
+  into a route-away, never the reverse -- making a capability droppable
+  needs a strip recipe in code, and a strip without one would dispatch a
+  request guaranteed to fail. It is not a support override either: it
+  changes only the response to a learned negative, never masking it
+  (`force_supported`) or hard-dropping the target (`unsupported`), and
+  flipping the list preserves the learned negatives it affects rather than
+  re-probing them. Accepts any known capability key except
+  `reasoning_replay`, whose strip is managed by the target lane's replay
+  path rather than this key-only consult; an unknown key or that carve-out
+  fails config load naming the key, on both `routectl config check` and
+  the runtime load. An empty or absent list leaves dispatch behavior
+  byte-identical. See [CONFIGURATION.md](docs/CONFIGURATION.md).
+
 - **Cost accounting works out of the box** -- when `[registry]` carries no
   pricing for an upstream, routectl now prices its usage from the baked
   catalog's own rates instead of reporting it unpriced. An operator

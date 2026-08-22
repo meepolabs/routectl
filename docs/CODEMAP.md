@@ -1229,7 +1229,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carries `class_overrides: BTreeMap<u16, ConfigFailureClass>` (operator remap
   of a raw upstream status to a failure class), both empty-by-default and
   defined in `src/class_policy.rs`; `CapabilityConfig` (global `[capability]`:
-  `enabled`, `decay_hours`, `inferred_window_hours`, `staleness_hint_days`)
+  `enabled`, `decay_hours`, `inferred_window_hours`, `staleness_hint_days`,
+  plus the global `essential` capability-key list that reclassifies a
+  droppable's learned negative from strip to route-away -- tightening-only,
+  validated against the known-key set minus `reasoning_replay`)
   drives the learned-capability registry and is hot-reloadable;
   `WindowGateConfig` (global `[window_gate]`: `enabled`, default true) is the
   hot-reloadable kill switch for the proactive context-window gate;
@@ -1511,6 +1514,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   through by all four config surfaces -- `config check`, `test`,
   `prompt-size`, and the `serve` pre-parse gate -- so a validator can never be
   silently present on one path and missing from another; the suite also runs
+  `validate_capability_essential` (rejects a `[capability] essential` entry
+  that is neither a well-known capability key nor a `capability_strip`
+  `STRIP_ACTIONS` member per `is_strippable`, naming the key, and rejects
+  `reasoning_replay` naming the lane-managed replay carve-out) and
   `validate_float_fields` (rejects a non-finite float leaf -- NaN/inf in a
   `[registry]`/`[cache_pricing]` price or a non-positive/non-finite
   `retry.backoff_multiplier`) and `validate_base_urls` (rejects an
@@ -2253,7 +2260,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   > learned strip/route > verified-working mask > catalog prior, all under the
   capability kill switch; F2 learned negatives always route away, never strip;
   a resident acting VerifiedWorking positive masks a `Some(false)` catalog
-  prior via `learned_capabilities.is_verified_working`),
+  prior via `learned_capabilities.is_verified_working`; both the strip verdict
+  and the probe-bypass strip WARN consult
+  `capability_strip::effective_action_for` with the `[capability] essential`
+  list so verdict and WARN cannot drift),
   `beta_pinned_for_target`, `override_forces_supported`,
   `apply_strip_interceptor` (the pre-dispatch strip hook -> `StripDecision`),
   the `FilterSource`/`StripDecision` enums, and the
@@ -2709,6 +2719,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `strip_beta_tokens(feature_key)`
   exposes the beta surface so the dispatch layer's operator-floor-pin guard
   can route away when a stripped token would be re-added downstream.
+  The droppable namespace lives in ONE `STRIP_ACTIONS` const table of
+  `(key, StripKind)` rows: `action_for` resolves its `Strip` verdicts through
+  it and `strippable_keys()` / `is_strippable(key)` (crate-internal: the
+  module is `pub(crate)`) enumerate it, so config validation's accept set
+  auto-extends in the same edit that adds a droppable and no second list can
+  fall behind.
+  `effective_action_for(feature_key, essential)` is `action_for` as
+  the operator's `[capability] essential` list modifies it: a listed key
+  becomes `RouteAway`, everything else keeps the baked verdict. Stateless and
+  tightening-only; `action_for` itself stays a pure baked table because the
+  interceptor documents purity, and an essential-flagged key routes away
+  upstream of dispatch so it never reaches the interceptor.
   `StripInterceptor` (impl of `RequestInterceptor`) applies the transform
   under a snapshot -> strict-pre-check -> strip-in-sorted-key-order ->
   narrow-post-strip-check -> rollback discipline over a per-attempt clone: it
@@ -3398,8 +3420,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   inert on replay. Tests in the `#[path]`-included `ledger_reader_tests.rs`
 - `src/server/router_build.rs` -- Router construction from a parsed config +
   catalog overlay: `build_router_from_config_with_overlay` (the shared build
-  path reused by boot and every hot-reload -- runs the full startup validation
-  gauntlet then installs resolved models + the retained overlay via
+  path reused by boot and every hot-reload -- runs the whole shared
+  `collect_config_validation` suite and returns its first error BEFORE any
+  construction, so a programmatic caller reaching this builder directly can
+  never build a Router whose invalid config sits inert, then emits each
+  advisory-warning category on its own log line, runs the build-path-only
+  `[mitm]` validator, and installs resolved models + the retained overlay via
   `Router::install_catalog_overlay`, which stamps its revision too) and the
   `#[cfg(test)]` empty-overlay wrapper `build_router_from_config`. Split out
   of `serve` so the `reload` coordinator depends on this builder directly,

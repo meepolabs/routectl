@@ -1644,6 +1644,7 @@ pub fn routectl_router::CalibrationConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::CapabilityConfig
 pub routectl_router::config::CapabilityConfig::decay_hours: u64
 pub routectl_router::config::CapabilityConfig::enabled: bool
+pub routectl_router::config::CapabilityConfig::essential: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::config::CapabilityConfig::inferred_window_hours: u64
 pub routectl_router::config::CapabilityConfig::overrides: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::OverrideEntry>
 pub routectl_router::config::CapabilityConfig::staleness_hint_days: u64
@@ -8291,6 +8292,7 @@ pub fn routectl_router::CalibrationRebuildSummary::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::CapabilityConfig
 pub routectl_router::CapabilityConfig::decay_hours: u64
 pub routectl_router::CapabilityConfig::enabled: bool
+pub routectl_router::CapabilityConfig::essential: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::CapabilityConfig::inferred_window_hours: u64
 pub routectl_router::CapabilityConfig::overrides: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::OverrideEntry>
 pub routectl_router::CapabilityConfig::staleness_hint_days: u64

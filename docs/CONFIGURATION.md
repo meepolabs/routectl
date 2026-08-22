@@ -3092,6 +3092,10 @@ inferred_window_hours = 1
 # Display-only -- surfaced in doctor / CLI hints, never wired into the
 # act path. Default 14.
 staleness_hint_days = 14
+# Capability keys declared ESSENTIAL globally: a target that only fails on
+# one of them is routed away from rather than having the capability
+# stripped in place. Default empty (the baked strip-vs-route table applies).
+essential = []
 ```
 
 - **`enabled`** (bool, default true) -- the master switch. When off, any
@@ -3107,6 +3111,50 @@ staleness_hint_days = 14
   **display-only**: it drives the stale-cell flag in the `routectl
   doctor` capability matrix and the CLI staleness hint, and is never
   wired into router construction or the act path.
+
+### Global essential capabilities (`essential`)
+
+Some capabilities routectl knows how to **strip**: when a target only
+fails on one of them, the request proceeds against that target with the
+capability removed rather than routing elsewhere. `essential` is the
+operator's veto over that choice. A key listed here is treated as
+essential everywhere: a learned negative on it routes the request away to
+a target that supports it, and nothing is stripped.
+
+```toml
+[capability]
+essential = ["advisor", "context_management"]
+```
+
+- **Accepted keys** -- any capability key routectl knows: the well-known
+  keys (`web_search`, `computer_use`, `structured_output`,
+  `prompt_caching`, `thinking`) plus every key the strip table can act on
+  (`advisor`, `context_management`). An unknown key fails config load
+  naming the key, so a typo surfaces instead of sitting inert. Listing a
+  key that already routes away is accepted as an idempotent declaration.
+- **`reasoning_replay` is not accepted** and is rejected naming the
+  carve-out. Replayed reasoning artifacts are dropped by the target
+  lane's own replay path rather than by this key-only consult, so replay
+  negatives never reach it -- accepting the key would pin a
+  meaningful-looking no-op into the config vocabulary.
+- **Tightening only** -- this list can turn a strip into a route-away; it
+  can never turn a route-away into a strip. There is deliberately no
+  config path to the loosening direction: making a capability droppable
+  requires a strip recipe in code, since a strip with no recipe would
+  dispatch a request that is guaranteed to fail.
+- **Not a support override** -- `essential` changes only the RESPONSE to a
+  learned negative. It does not mask a negative the way
+  `[capability.overrides].force_supported` does, and it does not
+  hard-drop a target the way `unsupported` does. The negative itself
+  stays exactly as learned.
+- **Global, unlike `[capability.overrides]`** -- the absence of a
+  target-spec path segment is the point: droppability is operator intent
+  that holds for every target, while support is a per-target fact.
+- **Hot-reloadable, and it keeps learned state** -- the list is re-read
+  on every router build, so adding or removing a key takes effect on
+  reload. Flipping it does NOT expire the learned negatives it affects:
+  they are still true, and re-probing one would send a request the
+  operator just declared should route away.
 
 Operator capability overrides nest under this parent as
 `[capability.overrides]` (keyed by `"provider"` or `"provider:nickname"`)

@@ -254,7 +254,11 @@ impl Router {
     ///
     /// Strip-vs-route verdict: when the learned pass finds acting negatives,
     /// each is classified by
-    /// [`capability_strip::action_for`](crate::capability_strip::action_for).
+    /// [`capability_strip::effective_action_for`](crate::capability_strip::effective_action_for)
+    /// -- the baked
+    /// [`action_for`](crate::capability_strip::action_for) table as the
+    /// operator's `[capability] essential` list tightens it, so a
+    /// globally-essential droppable routes away instead of stripping.
     /// If EVERY acting negative is a droppable `Strip` capability detected in
     /// phase F1 that no operator beta floor pins to the wire, the target is NOT
     /// unsupported -- it returns `None` and the strip keys land in
@@ -350,9 +354,14 @@ impl Router {
                         // not a droppable wire token, so stripping cannot make
                         // the request succeed. A pinned strip would be re-added
                         // downstream, so its "success" is false -- route away.
+                        // The consult reads the operator `essential` list, so a
+                        // globally-essential droppable routes away too.
                         if phase == FailurePhase::F1
                             && matches!(
-                                crate::capability_strip::action_for(feature),
+                                crate::capability_strip::effective_action_for(
+                                    feature,
+                                    &self.config.capability.essential,
+                                ),
                                 crate::capability_strip::CapabilityAction::Strip(_)
                             )
                             && !self.beta_pinned_for_target(target, feature)
@@ -386,7 +395,10 @@ impl Router {
                         // admitted probe bypasses stripping regardless of phase,
                         // so no F2 negative is ever actually stripped here.
                         if matches!(
-                            crate::capability_strip::action_for(feature),
+                            crate::capability_strip::effective_action_for(
+                                feature,
+                                &self.config.capability.essential,
+                            ),
                             crate::capability_strip::CapabilityAction::Strip(_)
                         ) && !self.beta_pinned_for_target(target, feature)
                         {

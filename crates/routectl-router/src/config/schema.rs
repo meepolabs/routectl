@@ -120,7 +120,10 @@ impl Default for ReductionConfig {
 /// `overrides` is the operator capability-override map. It nests under
 /// this existing `[capability]` parent as `[capability.overrides]` -- no
 /// new top-level Config section is introduced, so the config-classify
-/// coverage in routectl-cli stays exhaustive.
+/// coverage in routectl-cli stays exhaustive. `essential` is a sibling
+/// GLOBAL list (no target-spec path segment -- that absence IS its
+/// global-ness), deliberately not target-scoped: droppability is operator
+/// intent that holds everywhere, while support is a per-target fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -149,6 +152,28 @@ pub struct CapabilityConfig {
     /// against any known-capability list here.
     #[serde(default)]
     pub overrides: BTreeMap<String, OverrideEntry>,
+    /// Capability keys the operator declares ESSENTIAL globally: a target
+    /// that only fails on one of them is routed away from rather than
+    /// having the capability stripped in place. Absent (or a key absent
+    /// from the list) means the baked strip-vs-route default applies.
+    ///
+    /// This surface only ever TIGHTENS: it can turn a baked strip into a
+    /// route-away, never a baked route-away into a strip. Loosening needs
+    /// a code-gated strip recipe, so there is no config path to it.
+    ///
+    /// It reclassifies a learned negative's RESPONSE, never the negative
+    /// itself: it does not mask a negative the way `force_supported`
+    /// does, and it does not hard-drop a target the way `unsupported`
+    /// does.
+    ///
+    /// Accepts any known capability key EXCEPT `reasoning_replay`, whose
+    /// strip is lane-managed rather than key-only: replay negatives never
+    /// reach this consult, so listing it would be a meaningful-looking
+    /// no-op. The dispatch-time replay strip-repair branch is out of this
+    /// field's scope entirely -- it fires only after a proven upstream
+    /// rejection, where the alternative is a hard failure.
+    #[serde(default)]
+    pub essential: Vec<String>,
 }
 
 impl Default for CapabilityConfig {
@@ -159,6 +184,7 @@ impl Default for CapabilityConfig {
             inferred_window_hours: default_inferred_window_hours(),
             staleness_hint_days: default_staleness_hint_days(),
             overrides: BTreeMap::new(),
+            essential: Vec::new(),
         }
     }
 }
