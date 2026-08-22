@@ -3747,6 +3747,8 @@ pub async fn routectl_router::router::Router::complete_with_options(&self, route
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
 pub async fn routectl_router::router::Router::stream_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::DispatchedStream
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::context_window_for(&self, &str) -> core::option::Option<u32>
+impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
@@ -11800,6 +11802,7 @@ pub routectl_router::ResolvedModel::supports_adaptive_thinking: bool
 pub routectl_router::ResolvedModel::upstream: alloc::string::String
 pub routectl_router::ResolvedModel::visible_routectl_provider: bool
 impl routectl_router::ResolvedModel
+pub fn routectl_router::ResolvedModel::context_window_tokens(&self) -> core::option::Option<u32>
 pub fn routectl_router::ResolvedModel::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::sync::Arc<dyn routectl_core::provider::Provider>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ResolvedModel::with_auth_secret_ref(self, routectl_auth::secret_ref::SecretRef) -> Self
 pub fn routectl_router::ResolvedModel::with_effective_row(self, routectl_router::catalog::EffectiveRow) -> Self
@@ -12013,6 +12016,8 @@ pub async fn routectl_router::router::Router::complete(&self, routectl_core::sch
 pub async fn routectl_router::router::Router::complete_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::Dispatched
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
 pub async fn routectl_router::router::Router::stream_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::DispatchedStream
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::context_window_for(&self, &str) -> core::option::Option<u32>
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 impl routectl_router::router::Router

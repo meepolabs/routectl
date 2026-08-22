@@ -283,6 +283,26 @@ impl ResolvedModel {
         }
     }
 
+    /// This model's confirmed context window in tokens, or `None` when the
+    /// window is unconfirmed (`EffectiveRow::Disabled` / `Missing`, or a
+    /// present row leaving `max_context_tokens` unset).
+    ///
+    /// THE one read of the overlay-corrected window: the proactive window
+    /// gate and the `/v1/models` discovery payload both call it, so a
+    /// client can never be told a window the router would not gate on.
+    ///
+    /// `Some(0)` degrades to `None`. Import and overlay validation already
+    /// reject a zero window, so this is defense-in-depth: were one to slip
+    /// through, discovery omits the field and the gate keeps the target,
+    /// instead of a window every request is "too large" for.
+    #[must_use]
+    pub fn context_window_tokens(&self) -> Option<u32> {
+        self.effective_row
+            .priced()
+            .and_then(|row| row.max_context_tokens)
+            .filter(|window| *window > 0)
+    }
+
     /// Stamp the precomputed two-layer catalog merge for this model.
     /// Called by `factory::apply_catalog_overlay` as a post-pass over the
     /// resolved table so `build_resolved_models` itself never needs to

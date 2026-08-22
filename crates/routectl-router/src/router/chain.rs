@@ -58,6 +58,45 @@ impl Router {
         }
     }
 
+    /// The context window in tokens routectl would report for the wire
+    /// model `model`, or `None` when it is unconfirmed. Backs the
+    /// `context_length` field on `GET /v1/models`.
+    ///
+    /// Resolution mirrors `dispatch_chain`'s first two steps only:
+    /// exact-then-glob alias match, else a direct `[models]` nickname. The
+    /// window is read off the FIRST chain entry through
+    /// [`ResolvedModel::context_window_tokens`] -- the same accessor the
+    /// proactive window gate reads, so a client is never told a window the
+    /// router would not gate on.
+    ///
+    /// FIRST-CONFIGURED-TARGET semantics, deliberately: at dispatch time the
+    /// capability pre-filter runs BEFORE the window gate, so a request can be
+    /// served by a later chain target whose window differs from the one
+    /// reported here. The reported figure is the first CONFIGURED target's,
+    /// not a prediction of which target will serve -- discovery describes the
+    /// route's head, it does not simulate a dispatch.
+    ///
+    /// No `default` catch-all fallback (unlike `dispatch_chain`): every id
+    /// this method is asked about is a listed alias key or nickname (the
+    /// `default` key is excluded from the discovery payload before emit), so
+    /// a catch-all branch would only give arbitrary unrouted input a
+    /// dispatch-like answer no caller wants.
+    ///
+    /// Never goes through `dispatch_chain`: that increments pool-dispatch
+    /// metrics and rotates round-robin state, and a discovery read must not
+    /// perturb routing.
+    #[must_use]
+    pub fn context_window_for(&self, model: &str) -> Option<u32> {
+        let first = match self.resolve_v6_alias(model) {
+            Ok(Some(chain)) => chain.into_iter().next(),
+            Ok(None) => self.resolve_nickname(model),
+            // Alias-recursion-depth config errors are swallowed: discovery
+            // must omit the field, never fail the whole list for one entry.
+            Err(_) => None,
+        }?;
+        first.context_window_tokens()
+    }
+
     /// Consult the catch-all `default` alias. Returns the resolved
     /// chain, or `None` if no `default` key is configured. Recurses
     /// through nested alias keys identically to `resolve_v6_alias`.

@@ -189,13 +189,10 @@ impl Router {
         for (idx, target) in chain.iter().enumerate() {
             // An unconfirmed window (unset, `Disabled`, or `Missing`) KEEPS
             // the target: skipping is the aggressive behavior here, and an
-            // unknown fact never enables it.
-            let Some(window) = target
-                .model
-                .effective_row
-                .priced()
-                .and_then(|row| row.max_context_tokens)
-            else {
+            // unknown fact never enables it. The accessor is shared with the
+            // `/v1/models` discovery read, so the two surfaces cannot report
+            // different windows for one target.
+            let Some(window) = target.model.context_window_tokens() else {
                 continue;
             };
             // Serializing the request is the expensive part, so it happens

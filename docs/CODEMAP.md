@@ -1999,7 +1999,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per usable pool member, shared by Arc across every model
   naming that pool, `None` when `provider` names a plain `[providers]` entry);
-  `reported_model: Option<String>` (per-model response-echo override)
+  `reported_model: Option<String>` (per-model response-echo override);
+  `context_window_tokens()` -- THE shared read of the overlay-corrected
+  catalog window (`Some(0)` degrades to `None`), consumed by both the
+  proactive window gate and `/v1/models` discovery
 - `src/router/mod.rs` -- the `Router` type family + construction/lifecycle
   plus submodule wiring; the dispatch retry state machine itself lives in
   `dispatch.rs`. Holds the `Router` struct (providers map, per-`[models.X]`
@@ -2193,7 +2196,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `expand_chain_to_targets` (+ its only-when-None post-loop provider_kind
   fill) and `push_seat_targets`, plus the
   `into_one_dispatch_target`/`dispatch_target_for_seat`
-  (provider_kind-at-construction) target builders
+  (provider_kind-at-construction) target builders. Also owns
+  `context_window_for` -- the public discovery read backing `/v1/models`
+  `context_length`: alias-then-nickname resolution, FIRST chain entry,
+  `ResolvedModel::context_window_tokens`, no `default` fallback and never
+  `dispatch_chain` (no metrics or rotation perturbation)
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
@@ -2357,7 +2364,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   immediately after `filter_chain_by_features`, so the ordering makes "last
   surviving target" mean last after the hard capability drops):
   `filter_chain_by_window` skips a target whose confirmed
-  `max_context_tokens` clearly cannot hold `context_trim::estimate_total_tokens`
+  window (read via `ResolvedModel::context_window_tokens`, the accessor
+  `/v1/models` discovery shares) clearly cannot hold
+  `context_trim::estimate_total_tokens`
   AS CORRECTED by the target's own learned per-lane factor (`calibration`; the
   corrected figure is a LOCAL here and deliberately not a shared helper the
   trim / advisory estimate call sites could adopt, and an uncorrected lane
@@ -3466,7 +3475,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/mod.rs` -- groups per-route HTTP handlers
 - `src/handlers/health.rs` -- `GET /health` returning version + status
 - `src/handlers/models.rs` -- `GET /v1/models` listing aliases + `[models]`
-  keys (skips `default`, skips `selectable=false`); on the forwarded
+  keys (skips `default`, skips `selectable=false`), each entry emitted through
+  the private `ModelListEntry` serialize struct carrying `context_length` read
+  off the resolved table via `Router::context_window_for` (omitted when the
+  window is unconfirmed); on the forwarded
   (pure-proxy) lane (`forwarded_proxy_target`:
   `Router::has_forwarded_provider` AND the request arrived via the MITM
   reinject leg carrying a captured client bearer AND the forwarded provider's
