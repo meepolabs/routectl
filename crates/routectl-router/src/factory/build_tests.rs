@@ -975,6 +975,237 @@ mod build_resolved_models_tests {
             "a null-disabled cell must fold to the conservative sentinel behavior"
         );
     }
+
+    // -------------------------------------------------------------------
+    // The output-ceiling fill: `max_output_tokens` taken from the resolved
+    // catalog row when, and only when, the config left it unset.
+    // -------------------------------------------------------------------
+
+    /// One anthropic-api provider plus one model on `upstream`, built through
+    /// the real factory. Returns the stamped table so each fill assertion
+    /// exercises the production path rather than a hand-built `ResolvedModel`.
+    async fn stamped_one_model(
+        nickname: &str,
+        entry: ModelEntry,
+        overlay: &CatalogOverlay,
+    ) -> Arc<ResolvedModel> {
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
+            vec![(nickname, entry)],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("the model builds");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        apply_catalog_overlay(models, &cfg, overlay)
+            .get(nickname)
+            .cloned()
+            .expect("the stamped entry")
+    }
+
+    #[tokio::test]
+    async fn an_unset_config_ceiling_is_filled_from_the_resolved_catalog_row() {
+        // Differential against the row rather than against a literal: the
+        // baked table can revise a ceiling without this test becoming a
+        // second, stale copy of the figure.
+        let model = stamped_one_model(
+            "opus",
+            ModelEntry::new("anthropic", "claude-opus-4-6"),
+            &CatalogOverlay::default(),
+        )
+        .await;
+
+        let confirmed = model
+            .output_ceiling_tokens()
+            .expect("the baked table confirms a ceiling for this selector");
+        assert_eq!(
+            model.max_output_tokens, confirmed,
+            "a model whose config sets no max_output_tokens must carry the \
+             ceiling its resolved catalog row confirms"
+        );
+        assert_ne!(
+            model.max_output_tokens, 0,
+            "the unset sentinel must not survive the fill"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_ceiling_wins_over_the_catalog_byte_for_byte() {
+        // 32000 is deliberately NOT any baked figure: an operator lowering the
+        // ceiling for a low-cap deployment must not have it raised back.
+        const CONFIGURED: u32 = 32_000;
+        let model = stamped_one_model(
+            "opus",
+            ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(CONFIGURED),
+            &CatalogOverlay::default(),
+        )
+        .await;
+
+        assert_eq!(
+            model.max_output_tokens, CONFIGURED,
+            "the operator's own max_output_tokens must survive the fill verbatim"
+        );
+        assert_ne!(
+            model.output_ceiling_tokens(),
+            Some(CONFIGURED),
+            "the catalog must be confirming a DIFFERENT ceiling, else this test \
+             would pass without the config-wins gate doing anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_whose_catalog_row_confirms_no_ceiling_is_left_unset() {
+        // An openai-compat deepseek upstream: the glob spans models with
+        // genuinely different ceilings, so the row is output-ambiguous and
+        // bakes nothing. The sentinel must survive end to end -- the egress
+        // then applies its own baseline.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![(
+                "deepseek",
+                ProviderEntry::openai_compat(
+                    "https://api.deepseek.com/v1",
+                    crate::test_secret::file_ref("k"),
+                ),
+            )],
+            vec![("chat", ModelEntry::new("deepseek", "deepseek-v3"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("the model builds");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+
+        let stamped = apply_catalog_overlay(models, &cfg, &CatalogOverlay::default());
+        let chat = stamped.get("chat").expect("chat entry");
+        assert_eq!(
+            chat.output_ceiling_tokens(),
+            None,
+            "an output-ambiguous glob must confirm no ceiling"
+        );
+        assert_eq!(
+            chat.max_output_tokens, 0,
+            "with no confirmed ceiling the unset sentinel must survive, so the \
+             egress falls through to its own baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_ceiling_in_the_overlay_degrades_to_no_fill() {
+        // Defense-in-depth on the accessor's `Some(0) -> None` weld: overlay
+        // load and import both reject a zero ceiling, so this cell is
+        // constructed in-memory to reach the state they exclude. A zero
+        // reaching `max_output_tokens` would 400 every anthropic-shape request
+        // that omitted `max_tokens`.
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "anthropic-api:claude-opus-4-6*".to_string(),
+            Some(crate::catalog_overlay::OverlayCell {
+                source: crate::catalog_overlay::OverlaySource::User,
+                verified_at: "2026-07-01".to_string(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                max_output_tokens: Some(0),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
+                capabilities: None,
+            }),
+        );
+        let overlay = CatalogOverlay {
+            schema_version: crate::catalog_overlay::CATALOG_OVERLAY_SCHEMA_VERSION,
+            revision: 1,
+            cells,
+        };
+
+        let model = stamped_one_model(
+            "opus",
+            ModelEntry::new("anthropic", "claude-opus-4-6"),
+            &overlay,
+        )
+        .await;
+
+        assert_eq!(
+            model.output_ceiling_tokens(),
+            None,
+            "Some(0) must degrade to None at the accessor"
+        );
+        assert_eq!(
+            model.max_output_tokens, 0,
+            "a zero overlay ceiling must produce NO fill, not a zero ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_startup_provenance_read_names_exactly_the_filled_models() {
+        // The startup line's source of truth. Three models: one filled, one
+        // pinned by config, one whose row confirms nothing -- only the first
+        // may be reported, because the line's whole purpose is naming figures
+        // the operator did NOT write.
+        // `pooled` routes at a POOL: its `provider_name` is the pool name,
+        // which is not a provider kind, so a config-only re-derivation of the
+        // predicate would silently omit it.
+        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
+        let mut cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["pooled"]);
+        cfg.providers.insert(
+            "anthropic".into(),
+            ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+        );
+        cfg.providers.insert(
+            "vendor".into(),
+            ProviderEntry::openai_compat(
+                "https://example.invalid",
+                crate::test_secret::file_ref("k"),
+            ),
+        );
+        cfg.models.insert(
+            "pooled".into(),
+            ModelEntry::new("anthropic-pool", "claude-opus-4-6"),
+        );
+        cfg.models.insert(
+            "filled".into(),
+            ModelEntry::new("anthropic", "claude-opus-4-6"),
+        );
+        cfg.models.insert(
+            "pinned".into(),
+            ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(32_000),
+        );
+        cfg.models
+            .insert("neither".into(), ModelEntry::new("vendor", "deepseek-v3"));
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("the models build");
+        assert!(
+            built.failed.is_empty(),
+            "expected no failures: {:?}",
+            built.failed
+        );
+        assert!(
+            built.models["pooled"].seats.is_some(),
+            "test premise: `pooled` must be pool-backed"
+        );
+        let stamped = apply_catalog_overlay(built.models, &cfg, &CatalogOverlay::default());
+
+        let mut router = crate::router::Router::new(Arc::new(cfg));
+        router.install_resolved_models(stamped);
+        let reported = router.catalog_filled_output_ceilings();
+        let names: Vec<&str> = reported.iter().map(|(n, _)| *n).collect();
+
+        assert_eq!(
+            names,
+            vec!["filled", "pooled"],
+            "only the models the fill actually changed may be reported"
+        );
+        for (_, ceiling) in &reported {
+            assert_ne!(*ceiling, 32_000, "a pinned value must not be reported");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry,
-    PricingSource, ProviderEntry, Source, catalog_import_state_default_path, derive_effective_view,
+    PricingSource, Source, catalog_import_state_default_path, derive_effective_view,
     effective_pricing, load_last_import, rebuild_capabilities_into, today_epoch_day,
 };
 
@@ -25,7 +25,7 @@ use crate::server::ledger_reader::{BoundaryOutcome, LedgerCapabilityReader, clas
 
 use super::{
     CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, FreshnessInputs,
-    PricingRow, PricingRowSource, PriorCell,
+    KnobRow, OutputCeilingSource, PricingRow, PricingRowSource, PriorCell,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -102,6 +102,12 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
     let pricing = overlay
         .as_ref()
         .map(|overlay| derive_pricing_rows(&config, overlay));
+    // Same reasoning for the ceiling attribution: the overlay can correct a
+    // baked ceiling and can disable a cell outright, so an unreadable overlay
+    // would have this section name a figure the served router does not use.
+    let knobs = overlay
+        .as_ref()
+        .map(|overlay| derive_knob_rows(&config, overlay));
     let capability = build_capability_inputs(&config, config_parse_error, overlay);
     let capability_matrix =
         gather_capability_matrix(&config, config_parse_failed, overlay_revision);
@@ -130,11 +136,53 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         capability_matrix,
         freshness,
         pricing,
+        knobs,
     }
+}
+
+/// One knob row per `[models.X]` entry, naming where its outbound
+/// `max_output_tokens` ceiling comes from.
+///
+/// The catalog cell is resolved through the same `resolve_effective_row`
+/// selector `derive_effective_view` uses, and the ceiling is read off it
+/// through the shared `output_ceiling_tokens` accessor -- so the row cannot
+/// claim a source the factory's fill would not produce for the same config.
+///
+/// Config is checked FIRST and short-circuits, matching the precedence the
+/// dispatch path resolves in: an operator's own value wins whole, so what the
+/// catalog would have said is not a fact about what gets sent.
+pub(super) fn derive_knob_rows(config: &Config, overlay: &CatalogOverlay) -> Vec<KnobRow> {
+    derive_effective_view(config, overlay)
+        .models
+        .into_iter()
+        .map(|cell| {
+            let configured = config
+                .models
+                .get(&cell.nickname)
+                .and_then(|entry| entry.max_output_tokens)
+                .filter(|ceiling| *ceiling > 0);
+            let source = match (configured, cell.row.output_ceiling_tokens()) {
+                (Some(ceiling), _) => OutputCeilingSource::Config(ceiling),
+                (None, Some(ceiling)) => OutputCeilingSource::Catalog(ceiling),
+                (None, None) => OutputCeilingSource::Default,
+            };
+            KnobRow {
+                nickname: cell.nickname,
+                provider_kind: cell.provider_kind,
+                upstream: cell.upstream,
+                source,
+            }
+        })
+        .collect()
 }
 
 /// One pricing row per `[models.X]` entry, resolved through the shared
 /// `effective_pricing` boundary.
+///
+/// The kind comes from `provider_kind_for_target`, which resolves a pool-backed
+/// model off a member: `[models.X] provider` may name a pool, and an empty kind
+/// identifies no catalog cell, so a bare provider-table lookup would report
+/// every pooled model as unpriced.
 ///
 /// A managed-OAuth provider short-circuits to `Subscription` BEFORE any rate
 /// lookup, matching the order the usage report classifies a row in -- a
@@ -145,10 +193,7 @@ pub(super) fn derive_pricing_rows(config: &Config, overlay: &CatalogOverlay) -> 
         .models
         .iter()
         .map(|(nickname, entry)| {
-            let provider_kind = config
-                .providers
-                .get(&entry.provider)
-                .map_or("", ProviderEntry::kind_str);
+            let provider_kind = config.provider_kind_for_target(&entry.provider);
             PricingRow {
                 nickname: nickname.clone(),
                 provider: entry.provider.clone(),

@@ -5,7 +5,7 @@ use chrono::Local;
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::{
-    AliasValue, CURRENT_CONFIG_VERSION, CatalogImportState, CatalogOverlay, ModelEntry,
+    AliasValue, CURRENT_CONFIG_VERSION, CatalogImportState, CatalogOverlay, ModelEntry, PoolEntry,
     ProviderEntry,
 };
 use routectl_testkit::ScopedEnv;
@@ -14,15 +14,15 @@ use crate::commands::capability_legacy::present_legacy_capability_keys;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 
 use super::gather::{
-    build_capability_inputs, derive_pricing_rows, derive_prior_cells, gather_capability_matrix,
-    gather_context, gather_context_no_network, gather_orphan_seats, gather_orphan_secrets,
-    gather_secret_checks, sanitize_store_open_error,
+    build_capability_inputs, derive_knob_rows, derive_pricing_rows, derive_prior_cells,
+    gather_capability_matrix, gather_context, gather_context_no_network, gather_orphan_seats,
+    gather_orphan_secrets, gather_secret_checks, sanitize_store_open_error,
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
     freshness_findings, legacy_nudge, secret_finding, section_auth, section_capability,
-    section_config, section_pricing, section_probe, section_seat_orphans, section_seat_pools,
-    section_secret_orphans, section_version,
+    section_config, section_knobs, section_pricing, section_probe, section_seat_orphans,
+    section_seat_pools, section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -57,6 +57,7 @@ fn ctx(
 ) -> DoctorContext {
     let capability = build_capability_inputs(&config, None, Some(CatalogOverlay::default()));
     let pricing = Some(derive_pricing_rows(&config, &CatalogOverlay::default()));
+    let knobs = Some(derive_knob_rows(&config, &CatalogOverlay::default()));
     DoctorContext {
         config,
         raw_config: raw_config.map(str::to_string),
@@ -75,6 +76,7 @@ fn ctx(
         capability_matrix: CapabilityMatrixSource::Unavailable("no_data"),
         freshness: sample_freshness(),
         pricing,
+        knobs,
     }
 }
 
@@ -691,8 +693,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_nine() {
-    assert_eq!(SCHEMA_VERSION, 9);
+fn schema_version_is_ten() {
+    assert_eq!(SCHEMA_VERSION, 10);
 
     let context = ctx(
         config_with_overrides(),
@@ -701,7 +703,7 @@ fn schema_version_is_nine() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 9);
+    assert_eq!(report.schema_version, 10);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2403,6 +2405,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
         freshness: sample_freshness(),
         pricing: Some(Vec::new()),
+        knobs: Some(Vec::new()),
     };
     let report = build_report(&context);
 
@@ -2566,7 +2569,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 9);
+    assert_eq!(no_net.schema_version, 10);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2842,11 +2845,15 @@ fn import_state(date: &str) -> CatalogImportState {
 /// the wrong source would send an operator to the wrong knob.
 #[test]
 fn pricing_section_names_each_models_rate_source_by_nickname() {
-    // Arrange: four models, one per state.
+    // Arrange: five models, one per state.
     //   `filled`   -- an anthropic-api model the baked catalog prices, no
     //                 [registry] row -> Catalog.
     //   `explicit` -- the same upstream WITH a [registry] row -> Registry.
     //   `seat`     -- an oauth:// provider -> Subscription.
+    //   `pooled`   -- a model routed at a POOL of oauth:// members. A pool name
+    //                 is not a provider key, so a providers-only lookup would
+    //                 resolve neither the subscription nor a kind and misreport
+    //                 it as unpriced.
     //   `nothing`  -- an openai-compat model whose only matching baked cell is
     //                 the price-ambiguous catch-all -> Unpriced.
     let mut cfg = Config::default();
@@ -2866,6 +2873,10 @@ fn pricing_section_names_each_models_rate_source_by_nickname() {
         "vendor".to_string(),
         ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
     );
+    cfg.pools.insert(
+        "anthropic-pool".to_string(),
+        PoolEntry::new(vec!["seatprov".to_string()]),
+    );
     cfg.models.insert(
         "filled".to_string(),
         ModelEntry::new("paid", "claude-sonnet-4-6"),
@@ -2877,6 +2888,10 @@ fn pricing_section_names_each_models_rate_source_by_nickname() {
     cfg.models.insert(
         "seat".to_string(),
         ModelEntry::new("seatprov", "claude-sonnet-4-6"),
+    );
+    cfg.models.insert(
+        "pooled".to_string(),
+        ModelEntry::new("anthropic-pool", "claude-sonnet-4-6"),
     );
     cfg.models.insert(
         "nothing".to_string(),
@@ -2901,7 +2916,7 @@ fn pricing_section_names_each_models_rate_source_by_nickname() {
     // Assert: one row per configured model, each naming its own source.
     assert_eq!(
         findings.len(),
-        4,
+        5,
         "one row per configured model: {findings:?}"
     );
 
@@ -2929,6 +2944,20 @@ fn pricing_section_names_each_models_rate_source_by_nickname() {
         seat.detail.contains("billed by subscription"),
         "a managed-OAuth row must report as subscription: {}",
         seat.detail
+    );
+
+    let pooled = find(&findings, "pricing", "pooled");
+    assert!(
+        pooled.detail.contains("billed by subscription"),
+        "a pool of managed-OAuth members must report as subscription, not \
+         unpriced: {}",
+        pooled.detail
+    );
+    assert!(
+        !pooled.detail.contains("unpriced"),
+        "a pool name is not a provider key, but must not fall through to \
+         unpriced: {}",
+        pooled.detail
     );
 
     let nothing = find(&findings, "pricing", "nothing");
@@ -3803,4 +3832,211 @@ mod seeded_matrix_surfaces {
         assert_eq!(unavailable_avail["state"], Value::from("unavailable"));
         assert_eq!(unavailable_avail["code"], Value::from("revision_mismatch"));
     }
+}
+
+/// The knobs section names each configured model's `max_output_tokens` SOURCE.
+/// Naming the wrong one sends an operator to the wrong knob: a row reading
+/// "from [models.X]" for a catalog-filled model would have them hunt a config
+/// value that is not there, and the reverse would have them believe the catalog
+/// is about to raise a ceiling they pinned themselves.
+#[test]
+fn knobs_section_names_each_models_output_ceiling_source_by_nickname() {
+    // Arrange: three models, one per state.
+    //   `pinned`  -- an operator max_output_tokens -> Config.
+    //   `filled`  -- a Claude upstream the baked catalog confirms, config
+    //                silent -> Catalog.
+    //   `neither` -- an openai-compat upstream whose only matching cell is
+    //                output-ambiguous -> Default.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("env://ANTHROPIC_KEY"),
+    );
+    cfg.providers.insert(
+        "vendor".to_string(),
+        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
+    );
+    cfg.models.insert(
+        "pinned".to_string(),
+        ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(32_000),
+    );
+    cfg.models.insert(
+        "filled".to_string(),
+        ModelEntry::new("anthropic", "claude-opus-4-6"),
+    );
+    cfg.models.insert(
+        "neither".to_string(),
+        ModelEntry::new("vendor", "deepseek-v3"),
+    );
+
+    // Act
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_knobs(&context);
+
+    // Assert: one row per configured model, each naming its own source.
+    assert_eq!(
+        findings.len(),
+        3,
+        "one row per configured model: {findings:?}"
+    );
+
+    let pinned = find(&findings, "knobs", "pinned");
+    assert!(
+        pinned.detail.contains("32000") && pinned.detail.contains("from [models.pinned]"),
+        "an operator-pinned row must name its own value and source: {}",
+        pinned.detail
+    );
+
+    let filled = find(&findings, "knobs", "filled");
+    assert!(
+        filled.detail.contains("filled from the catalog"),
+        "a catalog-filled row must name the catalog: {}",
+        filled.detail
+    );
+    assert!(
+        !filled.detail.contains("32000"),
+        "the catalog row must report the CATALOG figure, not the sibling \
+         model's pinned one: {}",
+        filled.detail
+    );
+
+    let neither = find(&findings, "knobs", "neither");
+    assert!(
+        neither.detail.contains("catalog confirms no ceiling"),
+        "a row neither layer supplies must say so: {}",
+        neither.detail
+    );
+
+    // Purely informational: no row here can move the exit code.
+    for f in &findings {
+        assert_eq!(f.status, Status::Pass, "{f:?}");
+        assert!(f.remediation.is_none(), "{f:?}");
+    }
+}
+
+/// The doctor's catalog figure and the factory's fill must be the SAME number.
+/// They read one accessor, and this pins that they still agree: a doctor that
+/// named a ceiling the router does not apply is worse than no diagnostic, since
+/// an operator would tune against a figure that never reaches the wire.
+///
+/// A POOL-BACKED model is asserted alongside the plain one: `[models.X]
+/// provider` resolves against providers and pools in ONE namespace, so a
+/// kind lookup that consulted only `[providers]` would resolve an empty kind,
+/// hit no catalog cell, and report "no ceiling" for a model the factory fills
+/// at the very figure the plain row names.
+#[test]
+fn the_knobs_catalog_figure_matches_what_the_factory_fills() {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("env://ANTHROPIC_KEY"),
+    );
+    cfg.providers.insert(
+        "anthropic-seat".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    cfg.pools.insert(
+        "anthropic-pool".to_string(),
+        PoolEntry::new(vec!["anthropic-seat".to_string()]),
+    );
+    cfg.models.insert(
+        "filled".to_string(),
+        ModelEntry::new("anthropic", "claude-opus-4-6"),
+    );
+    cfg.models.insert(
+        "pooled".to_string(),
+        ModelEntry::new("anthropic-pool", "claude-opus-4-6"),
+    );
+
+    // The router-side truth: the very accessor the fill is gated on, resolved
+    // for the same selector.
+    let confirmed = routectl_router::resolve_effective_row(
+        "anthropic-api",
+        "claude-opus-4-6",
+        None,
+        &cfg.cache_pricing,
+        &CatalogOverlay::default(),
+    )
+    .output_ceiling_tokens()
+    .expect("test premise: the baked table confirms a ceiling for this selector");
+
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_knobs(&context);
+    let filled = find(&findings, "knobs", "filled").detail.clone();
+    let pooled = find(&findings, "knobs", "pooled").detail.clone();
+
+    assert!(
+        filled.contains(&confirmed.to_string()),
+        "the doctor row must name the ceiling the fill would apply ({confirmed}): {filled}"
+    );
+    assert!(
+        pooled.contains("filled from the catalog") && pooled.contains(&confirmed.to_string()),
+        "a pool-backed model must resolve its kind off a member and name the \
+         same catalog ceiling ({confirmed}): {pooled}"
+    );
+    assert!(
+        !pooled.contains("catalog confirms no ceiling"),
+        "a pool name is not a provider kind, but the pool must still resolve \
+         one: {pooled}"
+    );
+}
+
+/// The overlay both CORRECTS and DISABLES catalog ceilings, so when it could
+/// not be LOADED a baked figure may be exactly the one the router does not fill
+/// from. The available-overlay context below is the POSITIVE CONTROL, proving
+/// this selector DOES render a figure when the overlay is readable -- so its
+/// absence is the degradation firing, not a missing catalog cell.
+#[test]
+fn an_unloadable_overlay_reports_knobs_unavailable_never_the_baked_ceiling() {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("env://ANTHROPIC_KEY"),
+    );
+    cfg.models.insert(
+        "filled".to_string(),
+        ModelEntry::new("anthropic", "claude-opus-4-6"),
+    );
+    let resolved = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+
+    // Positive control: with the overlay available, a catalog figure renders.
+    let control = section_knobs(&resolved);
+    let control_detail = find(&control, "knobs", "filled").detail.clone();
+    assert!(
+        control_detail.contains("filled from the catalog"),
+        "test premise: an available overlay must attribute the fill: {control_detail}"
+    );
+
+    // Act: the same context with the overlay load having failed.
+    let degraded = DoctorContext {
+        knobs: None,
+        ..resolved
+    };
+    let findings = section_knobs(&degraded);
+
+    // Assert: one honest unavailable line, and NOT an attributed ceiling.
+    assert_eq!(
+        findings.len(),
+        1,
+        "one degradation line, not rows: {findings:?}"
+    );
+    let only = &findings[0];
+    assert_eq!(only.status, Status::Warn, "{only:?}");
+    assert!(
+        only.detail.contains("output-ceiling sources unavailable"),
+        "the line must name the degradation: {}",
+        only.detail
+    );
+    assert!(
+        only.remediation.is_some(),
+        "an unavailable section must name its fix: {only:?}"
+    );
+    assert!(
+        !only.detail.contains("filled from the catalog"),
+        "a superseded baked ceiling must never be attributed: {}",
+        only.detail
+    );
+
+    // Degradation, not failure: the exit code stays the version section's call.
+    assert_eq!(overall_exit(&findings), 0);
 }

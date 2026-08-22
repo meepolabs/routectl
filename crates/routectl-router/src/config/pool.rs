@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Config, SeatSelection};
+use super::{Config, ProviderEntry, SeatSelection};
 
 /// One `[pools.<name>]` entry: the member provider entries plus the policy
 /// that picks among them.
@@ -101,5 +101,34 @@ impl Config {
             .values()
             .find(|pool| pool.members.iter().any(|member| member == name))
             .map_or_else(SeatSelection::default, |pool| pool.seat_selection)
+    }
+
+    /// The catalog-selector provider kind for a `[models.X] provider` value,
+    /// or `""` when the value names neither a provider entry nor a pool with a
+    /// resolvable member.
+    ///
+    /// `[models.X] provider` resolves against providers and POOLS in one
+    /// namespace, so a bare `config.providers.get(...)` lookup misses for every
+    /// pool-backed model -- and an empty kind identifies no catalog cell at
+    /// all, silently blanking that model's pricing, context window, and output
+    /// ceiling. A pool therefore answers with a MEMBER's kind: `validate_pools`
+    /// rejects a pool whose members disagree on `kind_str()`, so the first
+    /// resolvable member is representative of the whole pool.
+    ///
+    /// Provider entries are consulted first, which is unambiguous because the
+    /// same validator rejects a name held by both a provider entry and a pool.
+    #[must_use]
+    pub fn provider_kind_for_target(&self, name: &str) -> &'static str {
+        if let Some(entry) = self.providers.get(name) {
+            return entry.kind_str();
+        }
+        self.pools
+            .get(name)
+            .and_then(|pool| {
+                pool.members
+                    .iter()
+                    .find_map(|member| self.providers.get(member))
+            })
+            .map_or("", ProviderEntry::kind_str)
     }
 }

@@ -303,6 +303,18 @@ impl ResolvedModel {
             .filter(|window| *window > 0)
     }
 
+    /// This model's catalog-confirmed output-token ceiling, or `None` when the
+    /// ceiling is unconfirmed.
+    ///
+    /// Delegates to [`crate::catalog::EffectiveRow::output_ceiling_tokens`] --
+    /// the ONE ceiling read the factory's unset-config fill and the doctor
+    /// `knobs` section share, so the diagnostic can never name a ceiling the
+    /// fill would not apply.
+    #[must_use]
+    pub fn output_ceiling_tokens(&self) -> Option<u32> {
+        self.effective_row.output_ceiling_tokens()
+    }
+
     /// Stamp the precomputed two-layer catalog merge for this model.
     /// Called by `factory::apply_catalog_overlay` as a post-pass over the
     /// resolved table so `build_resolved_models` itself never needs to

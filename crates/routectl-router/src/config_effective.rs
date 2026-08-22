@@ -41,10 +41,13 @@ use crate::override_registry::{OverrideRegistry, OverrideRow};
 pub struct ModelCell {
     /// The `[models.<nickname>]` key.
     pub nickname: String,
-    /// The `provider` this model references.
+    /// The `provider` this model references. May name a `[providers]` entry
+    /// or a `[pools]` block -- both live in one namespace.
     pub provider: String,
-    /// The referenced provider's kind token (empty when the provider is
-    /// unknown -- the same fallback the chain-build merge uses).
+    /// The kind token the catalog cell was looked up under: the referenced
+    /// provider entry's own kind, or for a pool-backed model a member's kind
+    /// (see [`Config::provider_kind_for_target`]). Empty when the reference
+    /// resolves to neither -- the same fallback the chain-build merge uses.
     pub provider_kind: String,
     /// The upstream model id forwarded to the provider.
     pub upstream: String,
@@ -384,10 +387,7 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         .models
         .iter()
         .map(|(nickname, entry)| {
-            let provider_kind = config
-                .providers
-                .get(&entry.provider)
-                .map_or("", ProviderEntry::kind_str);
+            let provider_kind = config.provider_kind_for_target(&entry.provider);
             ModelCell {
                 nickname: nickname.clone(),
                 provider: entry.provider.clone(),

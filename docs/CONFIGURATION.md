@@ -488,7 +488,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
-| `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> 64000 baseline); anthropic-api + bedrock-invoke only |
+| `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> catalog fill, else 64000 baseline); anthropic-api + bedrock-invoke only |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
@@ -1845,14 +1845,49 @@ the adaptive path uses effort strings and has no budget field.
 
 Per-model ceiling on the `max_tokens` value the Anthropic-shape egresses
 (`anthropic-api`, `bedrock-invoke`) inject when the caller omits the
-field. `None` (the default) falls through to a hardcoded baseline of
-`64000`.
+field. `None` (the default) does NOT go straight to the hardcoded
+baseline: routectl first fills the ceiling the model's own catalog row
+confirms, so a common Claude upstream gets its real ceiling without any
+entry here.
 
 Resolution chain at dispatch:
 
 1. `request.max_tokens` -- caller-supplied value always wins.
-2. `[models.X].max_output_tokens` -- operator override.
-3. `64000` -- hardcoded baseline.
+2. `[models.X].max_output_tokens` -- operator override, taken verbatim.
+   The catalog never raises or lowers a value you wrote.
+3. The two-layer catalog (baked ceilings, corrected by the catalog
+   overlay) for the model's `(provider kind, upstream)` pair, filled at
+   chain-build time when this key is unset -- but ONLY from a cell that
+   pins one figure. A glob spanning models with genuinely different
+   ceilings fills nothing rather than guessing, so a low-ceiling upstream
+   the catalog cannot resolve unambiguously still needs this key (or an
+   overlay cell via `routectl catalog set`).
+4. `64000` -- hardcoded baseline.
+
+`routectl doctor`'s **Model knobs** section names which of these resolved
+for every configured model, and one startup line names the models whose
+ceiling came from the catalog.
+
+**Spend note.** Reasoning tokens bill as output, and on the legacy
+(`supports_adaptive_thinking = false`) thinking path three budgets track
+the resolved ceiling because they pass through Anthropic's
+`budget_tokens < max_tokens` window clamp:
+
+1. `reasoning.effort = "max"` -- ceiling minus one, but ONLY when the
+   model's [`effort_levels`](#effort_levels) includes `"max"`. Under the
+   shipped default `["low", "medium", "high"]` the allowlist clamp
+   rewrites `max` to `high`, whose exact table budget (24576) the ceiling
+   never enters.
+2. `reasoning.enabled = true` with no effort or budget -- half the
+   ceiling.
+3. A caller-supplied `reasoning.max_tokens` ABOVE the previous ceiling --
+   it was capped at `ceiling - 1`, so a higher ceiling admits more of the
+   caller's ask.
+
+Every standard effort level (`minimal` through `xhigh`) resolves through
+an exact effort-to-budget table and is unaffected, as is any caller whose
+own `reasoning.max_tokens` already fit under the previous ceiling. Set
+this key to pin the previous figure.
 
 Only consumed by Anthropic-shape egresses (`anthropic-api` and
 `bedrock-invoke`). The other egresses (`openai-compat`,
@@ -1865,11 +1900,12 @@ already handles it). Exception: the `openai-responses` codex OAuth lane
 codex's request contract has no such field and the backend rejects the
 drift.
 
-Set this when an Anthropic-shape egress points at a model whose
-upstream `max_tokens` cap is below `64000` -- otherwise a caller that
-omits `max_tokens` triggers a 400 from the upstream's per-model
-validation. Rare in practice; typical claude-code clients send
-`max_tokens` explicitly.
+Set this when an Anthropic-shape egress points at a model whose upstream
+`max_tokens` cap is below the resolved ceiling AND the catalog does not
+confirm that cap for the selector -- otherwise a caller that omits
+`max_tokens` triggers a 400 from the upstream's per-model validation.
+Check `routectl doctor`'s **Model knobs** section first: if it reports the
+ceiling as catalog-filled at the right figure, this key is redundant.
 
 ```toml
 [models.opus-legacy]
@@ -3619,6 +3655,7 @@ The battery sections, in render order:
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty), and a WARN nudging `config migrate` when deprecated capability-list keys are still set. Never emits a FAIL, so it can never flip the exit code. |
 | Catalog freshness (`freshness`) | Three advisory rows on how current the catalog data is: the baked catalog version and snapshot date, the freshest overlay verification stamp and its age, and the last SUCCESSFUL `catalog import` with its row counts. A stale overlay or import is a WARN pointing at `catalog import`; never a FAIL. |
 | Cost pricing (`pricing`) | One row per configured model naming WHERE its cost rates come from -- an operator `[registry]` row (taken verbatim), the baked catalog's own rates (the auto-fill when `[registry]` is silent), a managed subscription (billed by seat, no per-token rate), or unpriced (neither layer has rates, so usage reports no cost for it). Every priced row names the resolved per-million input / output rates; a dimension the winning layer left unset reads `unset`, never `$0`, and a `[registry]` row that sets no rate at all says it prices nothing. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay supersedes baked rates, so reporting the baked figure could name a rate the bill does not use. Never FAILs, so it can never move the exit code. |
+| Model knobs (`knobs`) | One row per configured model naming WHERE its outbound `max_output_tokens` ceiling comes from -- the operator's own `[models.X]` value (which the catalog never overrides), the catalog fill (when `[models.X]` sets none and the model's resolved cell confirms one figure), or neither (the Anthropic-shape egresses then use their built-in baseline and every other egress forwards caller omission untouched). Every row names the resolved ceiling and the `(kind, upstream)` selector it was resolved for. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay both corrects and disables baked ceilings, so reporting the baked figure could name a ceiling the router does not use. Never FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:
 

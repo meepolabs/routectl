@@ -963,6 +963,125 @@ async fn a_refused_mitm_boot_never_opens_the_usage_ledger() {
     );
 }
 
+/// A config with one anthropic-api provider and one model per nickname, each on
+/// a Claude upstream the baked catalog confirms a ceiling for and none setting
+/// `max_output_tokens` -- so every model is a catalog fill.
+#[cfg(test)]
+fn config_with_ceiling_filled_models(nicknames: &[String]) -> Config {
+    use routectl_router::{ModelEntry, ProviderEntry};
+
+    let mut config = Config::default();
+    config.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+    );
+    for nickname in nicknames {
+        config.models.insert(
+            nickname.clone(),
+            ModelEntry::new("anthropic", "claude-opus-4-6"),
+        );
+    }
+    config
+}
+
+/// Build a Router over `nicknames` and return every event
+/// `log_catalog_filled_output_ceilings` emitted for it.
+#[cfg(test)]
+async fn ceiling_fill_log_events(nicknames: &[String]) -> Vec<routectl_testkit::CapturedEvent> {
+    let mut config = config_with_ceiling_filled_models(nicknames);
+    let _usage_dir = isolate_usage_db(&mut config);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let router = build_router_from_config(Arc::new(config), secrets)
+        .await
+        .expect("the models build");
+    assert_eq!(
+        router.catalog_filled_output_ceilings().len(),
+        nicknames.len(),
+        "test premise: every model must be a catalog fill"
+    );
+
+    let ((), events) =
+        routectl_testkit::with_capture(async { log_catalog_filled_output_ceilings(&router) }).await;
+    events
+}
+
+/// The startup line's list is BOUNDED but its count is not: a config with more
+/// filled models than the cap must still report the true total, name exactly
+/// `MAX_LISTED_FILLED_CEILINGS` of them, and say the list was cut. Without the
+/// bound one startup line becomes a scrolling wall on a large config.
+#[tokio::test]
+async fn the_ceiling_fill_line_truncates_its_list_but_never_its_count() {
+    // Arrange: one more model than the cap, zero-padded so BTreeMap order is
+    // the numeric order the assertions below read.
+    let nicknames: Vec<String> = (0..=MAX_LISTED_FILLED_CEILINGS)
+        .map(|i| format!("opus-{i:02}"))
+        .collect();
+
+    // Act
+    let events = ceiling_fill_log_events(&nicknames).await;
+
+    // Assert: one line, exact count, capped list, truncation stated.
+    assert_eq!(events.len(), 1, "one aggregate line: {events:?}");
+    let event = &events[0];
+    assert_eq!(
+        event.field("filled_count"),
+        Some(nicknames.len().to_string().as_str()),
+        "the count must be the full total, not the listed sample"
+    );
+    let listed = event.field("models").expect("the models field");
+    assert_eq!(
+        listed.matches('=').count(),
+        MAX_LISTED_FILLED_CEILINGS,
+        "the list must name exactly the cap: {listed}"
+    );
+    assert!(
+        listed.contains("opus-00=")
+            && !listed.contains(&format!("opus-{MAX_LISTED_FILLED_CEILINGS}=")),
+        "the list must be the first {MAX_LISTED_FILLED_CEILINGS} in order: {listed}"
+    );
+    assert!(
+        event.message.contains("(list truncated)"),
+        "a cut list must say so: {}",
+        event.message
+    );
+}
+
+/// A nickname is an operator-written table key, so it reaches the startup line
+/// as untrusted text: one carrying a newline plus an ANSI sequence could
+/// otherwise forge a whole log record. The raw name is asserted to CONTAIN
+/// those bytes first (the positive control), so a green assertion below means
+/// `sanitize_for_log` stripped them rather than the fixture never carrying them.
+#[tokio::test]
+async fn a_hostile_nickname_reaches_the_ceiling_fill_line_sanitized() {
+    // Arrange
+    let hostile = "opus\n\u{1b}[31mWARN forged record".to_string();
+    assert!(
+        hostile.contains('\n') && hostile.contains('\u{1b}'),
+        "positive control: the fixture must carry the bytes being filtered"
+    );
+
+    // Act
+    let events = ceiling_fill_log_events(std::slice::from_ref(&hostile)).await;
+
+    // Assert: the nickname is present in sanitized form, injection bytes gone.
+    assert_eq!(events.len(), 1, "one aggregate line: {events:?}");
+    let event = &events[0];
+    let listed = event.field("models").expect("the models field");
+    assert!(
+        !listed.contains('\n') && !listed.contains('\u{1b}'),
+        "the line must carry no newline or ANSI escape: {listed:?}"
+    );
+    assert!(
+        listed.contains("opus") && listed.contains('='),
+        "the sanitized nickname must still identify the model: {listed:?}"
+    );
+    assert_eq!(
+        event.field("filled_count"),
+        Some("1"),
+        "sanitizing must not change what was counted"
+    );
+}
+
 /// Build a minimal valid `UsageRecord` with the given id for drain
 /// tests. Mirrors the writer crate's own fixture shape.
 #[cfg(test)]

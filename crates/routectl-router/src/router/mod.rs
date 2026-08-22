@@ -1713,6 +1713,37 @@ impl Router {
         self.admit_quota_seats();
     }
 
+    /// The nicknames whose outbound output-token ceiling came from the catalog
+    /// rather than from config, each with the ceiling that was filled, in
+    /// nickname order.
+    ///
+    /// Read off the INSTALLED table, not re-derived from config: the fill runs
+    /// in `factory::apply_catalog_overlay`, whose per-model selector resolves a
+    /// pool-backed model's provider kind off a SEAT (a pool name is not a
+    /// provider kind). A config-only re-derivation would silently report
+    /// nothing for exactly the models a pool serves.
+    ///
+    /// A model is reported iff its `[models.X] max_output_tokens` is unset (or
+    /// the ignored `0`) AND its resolved cell confirms a ceiling -- the same
+    /// two conditions the fill itself is gated on, so this can only name a
+    /// model the fill actually changed.
+    #[must_use]
+    pub fn catalog_filled_output_ceilings(&self) -> Vec<(&str, u32)> {
+        self.resolved_models
+            .iter()
+            .filter(|(nickname, _)| {
+                self.config
+                    .models
+                    .get(*nickname)
+                    .and_then(|entry| entry.max_output_tokens)
+                    .is_none_or(|configured| configured == 0)
+            })
+            .filter_map(|(nickname, model)| {
+                Some((nickname.as_str(), model.output_ceiling_tokens()?))
+            })
+            .collect()
+    }
+
     /// Declare the OAuth account keys the quota store will hold readings for:
     /// every credential identity reachable from the resolved model table,
     /// counting both a pooled model's seats and a non-pooled model's own
