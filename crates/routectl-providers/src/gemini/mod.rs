@@ -1417,7 +1417,7 @@ mod e2e_tests {
             .and(header("user-agent", ua))
             .and(header("x-goog-api-client", "gl-node/22.21.1"))
             .and(body_partial_json(json!({
-                "metadata": {"ide_version": "1.23.2", "ide_name": "antigravity"}
+                "metadata": {"ide_version": "2.5.5", "ide_name": "antigravity"}
             })))
             .respond_with(
                 ResponseTemplate::new(200)

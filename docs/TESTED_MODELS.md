@@ -345,7 +345,11 @@ lane starts serving thoughts.
 
 ### Servable-set verification snapshot
 
-Verified as of 2026-08-21 against the live `fetchAvailableModels` catalog.
+Verified as of 2026-08-22. The bulk of the table below was swept on
+2026-08-21; the three `gemini-3.7-flash-*` rows were added on 2026-08-22,
+when a client update moved the pinned `ideVersion` and the newest tier
+appeared in the catalog (the pinned version GATES the catalog -- see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)).
 Google churns these ids on a weekly cadence; this table is a point-in-time
 verification snapshot, NOT a registry -- re-verify before trusting any id.
 Each row below completed one end-to-end non-stream request through
@@ -375,6 +379,9 @@ model's family or tier from its label.
 | `gemini-3.6-flash-high` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
 | `gemini-3.6-flash-low` | complete | PASS | `tokens=84 content=null` (usage accounted, empty text on that call); intermittently empty stream opens observed |
 | `gemini-3.6-flash-medium` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
+| `gemini-3.7-flash-high` | complete | PASS | Verified 2026-08-22. Raw wire: 200, `text="ok"`, thoughts tokens present (`thoughtsTokenCount=92`). Through routectl: non-empty text, `reasoning=293`. |
+| `gemini-3.7-flash-medium` | complete | PASS | Verified 2026-08-22. Raw wire: 200, `text="ok"`, thoughts tokens present. Through routectl: non-empty text, `reasoning=256`. |
+| `gemini-3.7-flash-low` | complete | PASS | Verified 2026-08-22. Raw wire: 200, `text="ok"`, thoughts tokens present. Through routectl: non-empty text, `reasoning=291`. |
 | `gemini-pro-agent` | complete | PASS | `tokens=82 content="pong"`; intermittently empty stream opens observed |
 | `gpt-oss-120b-medium` | complete | PASS | `tokens=118 rd=1 fmt=gemini-v1 content="pong"` |
 
@@ -394,11 +401,17 @@ Present in the catalog but NOT verified on this run:
   invalid argument.", no field named). The catalog itself lists this id
   under its deprecated ids with `gemini-pro-agent` as the replacement, and
   `gemini-pro-agent` verifies, so the rejection is consistent with an id the
-  upstream has retired behind a successor.
+  upstream has retired behind a successor. Still listed in the 2026-08-22
+  catalog, and still carried by `deprecatedModelIds` as mapping to
+  `gemini-pro-agent` -- catalog presence is not a verdict, so it stays
+  unverified until a live call on it succeeds.
 
 The sweep covers the servable subset of the catalog: `chat_*` and `tab_*`
 ids and label-less `*-tiered` variants are excluded as non-inference or
-non-addressable entries. Streaming is out of scope for the sweep (it is
+non-addressable entries (`gemini-3.6-flash-tiered` and
+`gemini-3.7-flash-tiered` are in the 2026-08-22 catalog and excluded on that
+rule -- neither carries a `displayName`). Streaming is out of scope for the
+sweep (it is
 non-stream only); the stream notes above come from a separate throwaway
 pass and are an upstream flakiness signal, not a recorded verdict.
 
