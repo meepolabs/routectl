@@ -2571,16 +2571,19 @@ selector unknown to the catalog (no baked row, no existing overlay
 cell) -- creating a brand-new selector is not supported by either verb.
 
 Supported `set` fields: `wm` (f32), `rm` (f32), `ttl_seconds` (u32),
-`min_prefix_tokens` (u32), `max_context_tokens` (u32), and a capability
+`min_prefix_tokens` (u32), `max_context_tokens` (u32),
+`max_output_tokens` (u32), and a capability
 flag via `cap:<name>=true|false`. `auto_cacher` / `has_storage_rent` /
 `storage_rent` are hard-rejected -- they live only on the baked table;
-`verified_at` is hard-rejected too, since `set` and `verify` alike
-always stamp it automatically to today (UTC).
+`source` and `verified_at` are hard-rejected too, since `set` and
+`verify` alike always stamp them automatically (a user cell, dated today
+UTC).
 
 A `wm` set below the conservative sentinel (`2.0`) is rejected unless
 the call also carries `--acknowledge-cost-risk`: a too-cheap write
 multiplier can make a cache break look falsely profitable. `rm` must be
-`> 0`; `max_context_tokens` must not be `0`.
+`> 0`; neither `max_context_tokens` nor `max_output_tokens` may be `0`
+(an unconfirmed figure is expressed by omitting the field).
 
 ```sh
 routectl catalog set openai-compat:my-cheap-host-* wm=1.0 --acknowledge-cost-risk

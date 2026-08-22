@@ -39,7 +39,8 @@
 //! neither vendored feed publishes cache TTL, minimum-prefix, or
 //! automatic-vs-explicit-cache-mode facts, so these stay curated constants
 //! in this file's selector tables, matching the documented behavior of
-//! each vendor's caching product. `max_context_tokens` and `capabilities`
+//! each vendor's caching product. `max_context_tokens`,
+//! `max_output_tokens`, and `capabilities`
 //! are always derived from the snapshots; `wm` / `rm` are derived when a
 //! source publishes cache pricing for the selector, else the selector is
 //! marked `economics_unconfirmed` and its economics mirror
@@ -55,6 +56,26 @@
 //! fail-closed discipline as `max_context_tokens`, since a wrong dollar
 //! rate compounds per token. Operator config still WINS over any baked rate
 //! (see [`crate::catalog::merge`]).
+//!
+//! OUTPUT CEILING: `max_output_tokens` is derived under STRICTER coherence
+//! than any other field (see `output_ceiling_for`). The litellm side is not
+//! read off the selector's one representative entry: EVERY litellm entry the
+//! selector's own glob spans has to publish the same figure, mechanically
+//! checked against the snapshot rather than trusted from a curated flag
+//! (`output_ambiguous` is asserted against that same derivation -- see
+//! `catalog_codegen_selectors`). On top of that unanimity, models.dev has to
+//! publish a figure too and agree with it, and the result may not exceed the
+//! selector's own confirmed context window. Single-source data is
+//! deliberately NOT enough: the two feeds disagree on output ceilings far
+//! more often than on windows (gateway and region re-listings of the same
+//! model cap output lower than the direct API does), so an uncorroborated
+//! figure is not evidence of a real limit. A wrong ceiling fails LOUDLY
+//! upstream when too high and truncates SILENTLY when too low, which makes
+//! absent strictly better than guessed -- so unlike every other field, a
+//! bare source disagreement here yields NO VALUE instead of failing
+//! generation. The allowlist still applies, as the way an operator records a
+//! deliberate resolution of one known mismatch; an allowlist value that is
+//! not itself a usable ceiling fails generation.
 
 use std::collections::BTreeMap;
 #[cfg(feature = "gen-catalog")]
@@ -68,13 +89,14 @@ use crate::catalog_codegen_selectors::{
     ANTHROPIC_SELECTORS, AutoCacherSelector, BEDROCK_SELECTORS, CATCH_ALL_ROWS,
     OPENAI_COMPAT_SELECTORS, OPENAI_RESPONSES_SELECTORS, TieredSelector,
 };
+use crate::glob::AliasPattern;
 
 /// Baked catalog schema version. Bump whenever this module's output
 /// changes materially (rows added/removed, a derivation rule changed) --
 /// NOT on a vendor-snapshot refresh that leaves the generated shape
 /// unchanged. Rendered into `catalog_baked.rs` as `CATALOG_VERSION: u32`.
 #[cfg(feature = "gen-catalog")]
-const CATALOG_VERSION: u32 = 2;
+const CATALOG_VERSION: u32 = 3;
 
 /// Display-only date the vendored snapshots under `catalog_data/` were
 /// fetched, hand-maintained here (never the wall clock -- see the module
@@ -107,7 +129,8 @@ const ALLOWLIST_JSON: &str = include_str!(concat!(
 /// calls) stay compiled and reachable regardless of `gen-catalog`:
 /// `crate::catalog_import::build_import_candidate` is the runtime caller
 /// that drives them unconditionally, reading `wm` / `rm` / `ttl_seconds`
-/// / `min_prefix_tokens` / `max_context_tokens` / `capabilities` off
+/// / `min_prefix_tokens` / `max_context_tokens` / `max_output_tokens` /
+/// `capabilities` off
 /// every derived cell (via its own group-and-agree mapping). Only
 /// `provider_kind` / `model_glob` / `auto_cacher` / `tier` stay
 /// gen-catalog-gated -- the import path re-derives its own selector
@@ -131,6 +154,7 @@ pub(crate) struct GeneratedCell {
     #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
     pub(crate) tier: Option<&'static str>,
     pub(crate) max_context_tokens: Option<u32>,
+    pub(crate) max_output_tokens: Option<u32>,
     pub(crate) input_cost_per_token: Option<f32>,
     pub(crate) output_cost_per_token: Option<f32>,
     pub(crate) capabilities: Vec<(&'static str, bool)>,
@@ -362,6 +386,10 @@ pub(crate) fn derive_cells(
                 auto_cacher: catch_all.auto_cacher,
                 tier: None,
                 max_context_tokens: None,
+                // A provider-kind catch-all matches every model the kind
+                // serves, at every ceiling, so there is no one output
+                // ceiling to bake -- fail-closed, same as its window.
+                max_output_tokens: None,
                 // A provider-kind catch-all has no backing model to price:
                 // it matches every model the kind serves, at every price
                 // point. Fail-closed, same as its `max_context_tokens`.
@@ -437,6 +465,15 @@ fn anthropic_like_cells(
         allowlist,
     )?;
     let capabilities = capabilities_for(&selector_id, entry, md_entry, allowlist)?;
+    let output_ceiling = output_ceiling_for(
+        &selector_id,
+        sel.model_glob,
+        sel.output_ambiguous,
+        ctx,
+        litellm,
+        md_entry,
+        allowlist,
+    )?;
     // Every tiered selector's glob is pinned to one model generation, whose
     // dated ids all price identically in both snapshots -- so unlike the
     // vendor-wide openai-compat prefixes, one rate is right for the whole
@@ -454,6 +491,7 @@ fn anthropic_like_cells(
         auto_cacher: false,
         tier: Some("5m"),
         max_context_tokens: ctx,
+        max_output_tokens: output_ceiling,
         input_cost_per_token,
         output_cost_per_token,
         capabilities: capabilities.clone(),
@@ -469,6 +507,7 @@ fn anthropic_like_cells(
             auto_cacher: false,
             tier: Some("1h"),
             max_context_tokens: ctx,
+            max_output_tokens: output_ceiling,
             input_cost_per_token,
             output_cost_per_token,
             capabilities,
@@ -509,6 +548,15 @@ fn auto_cacher_cell(
         )?
     };
     let capabilities = capabilities_for(&selector_id, entry, md_entry, allowlist)?;
+    let output_ceiling = output_ceiling_for(
+        &selector_id,
+        sel.model_glob,
+        sel.output_ambiguous,
+        ctx,
+        litellm,
+        md_entry,
+        allowlist,
+    )?;
     let (input_cost_per_token, output_cost_per_token) = base_rates_for(
         &selector_id,
         sel.price_ambiguous,
@@ -529,6 +577,7 @@ fn auto_cacher_cell(
             auto_cacher: sentinel.auto_cacher,
             tier: None,
             max_context_tokens: ctx,
+            max_output_tokens: output_ceiling,
             input_cost_per_token,
             output_cost_per_token,
             capabilities,
@@ -566,6 +615,7 @@ fn auto_cacher_cell(
         auto_cacher: sel.auto_cacher,
         tier: None,
         max_context_tokens: ctx,
+        max_output_tokens: output_ceiling,
         input_cost_per_token,
         output_cost_per_token,
         capabilities,
@@ -715,6 +765,171 @@ fn models_dev_context(entry: &Value) -> Option<u32> {
         .get("context")?
         .as_f64()
         .map(|v| v as u32)
+}
+
+/// Upper sanity bound on a baked output ceiling. No shipped model's
+/// output ceiling comes near a million tokens, so a larger figure is a
+/// source-data error (a context window landing in an output field, a unit
+/// slip) rather than a real limit -- and a wrongly-huge ceiling is exactly
+/// the value that gets every request rejected upstream.
+const MAX_OUTPUT_TOKENS_SAFETY_BOUND: u32 = 1_000_000;
+
+/// The allowlist field name (and the label in a generation error) for the
+/// output ceiling.
+const OUTPUT_CEILING_FIELD: &str = "max_output_tokens";
+
+/// One source's published output ceiling, narrowed to `u32` or dropped.
+///
+/// Rejects a non-finite, non-positive, or fractional figure (an output
+/// ceiling is a whole positive token count -- a fraction means the field
+/// held something other than a ceiling), and anything that overflows `u32`
+/// or exceeds [`MAX_OUTPUT_TOKENS_SAFETY_BOUND`]. A dropped figure leaves
+/// the source with no opinion, which the cross-check then treats as
+/// single-source or absent data rather than as a disagreement.
+fn narrow_output_ceiling(raw: f64) -> Option<u32> {
+    if !raw.is_finite() || raw <= 0.0 || raw.fract() != 0.0 {
+        return None;
+    }
+    let ceiling = u32::try_from(raw as u64).ok()?;
+    (ceiling <= MAX_OUTPUT_TOKENS_SAFETY_BOUND).then_some(ceiling)
+}
+
+fn litellm_output_ceiling(entry: &Value) -> Option<u32> {
+    f64_field(entry, OUTPUT_CEILING_FIELD).and_then(narrow_output_ceiling)
+}
+
+fn models_dev_output_ceiling(entry: &Value) -> Option<u32> {
+    entry
+        .get("limit")?
+        .get("output")?
+        .as_f64()
+        .and_then(narrow_output_ceiling)
+}
+
+/// Whether `model_glob` spans the litellm snapshot entry keyed `key`.
+///
+/// A litellm key prefixes a HOSTING ROUTE onto the vendor model id
+/// (`vertex_ai/claude-sonnet-4-6`,
+/// `bedrock/us-gov-east-1/anthropic.claude-sonnet-4-5-20250929-v1:0`), and
+/// a re-listing of the same model generation is precisely the entry a
+/// selector's glob has to agree with -- a gateway that caps output lower
+/// than the direct API is the disagreement this rule exists to catch. So
+/// the id after the last route segment is matched as well as the whole
+/// key. A bare `"*"` spans every entry (the provider catch-all shape
+/// [`AliasPattern`] itself rejects, handled here the way
+/// `crate::catalog`'s own selector matcher handles it).
+fn glob_spans_litellm_key(model_glob: &str, key: &str) -> bool {
+    if model_glob == "*" {
+        return true;
+    }
+    let Ok(pattern) = AliasPattern::parse(model_glob) else {
+        return false;
+    };
+    pattern.matches(key)
+        || key
+            .rsplit('/')
+            .next()
+            .is_some_and(|model_id| pattern.matches(model_id))
+}
+
+/// The single output ceiling that EVERY litellm entry the selector's glob
+/// spans publishes: `None` when two spanned entries disagree, or when no
+/// spanned entry publishes a usable figure.
+///
+/// Mechanically derived from the snapshot rather than read off the
+/// selector's one representative entry -- one entry's figure says nothing
+/// about the other ids the glob will match at dispatch time.
+fn litellm_unanimous_output_ceiling(litellm: &Value, model_glob: &str) -> Option<u32> {
+    let mut agreed: Option<u32> = None;
+    for (key, entry) in litellm.as_object()? {
+        if !glob_spans_litellm_key(model_glob, key) {
+            continue;
+        }
+        let Some(ceiling) = litellm_output_ceiling(entry) else {
+            continue;
+        };
+        match agreed {
+            None => agreed = Some(ceiling),
+            Some(previous) if previous == ceiling => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// Derive one selector's baked output ceiling under STRICT coherence (see
+/// the module doc's OUTPUT CEILING note). In order: every litellm entry the
+/// glob spans must agree on a figure that survives
+/// [`narrow_output_ceiling`]; models.dev must publish one too; the two must
+/// agree; and the result may not exceed the selector's own confirmed
+/// context window (a model cannot emit more than its window holds -- a
+/// selector with no confirmed window has nothing to check against and keeps
+/// the figure).
+///
+/// A cross-SOURCE disagreement yields NO VALUE rather than failing
+/// generation, unless the allowlist records a deliberate resolution for
+/// `"{selector_id}:max_output_tokens"` -- the one field where absent is
+/// strictly better than a fail-closed halt, since neither source's figure
+/// is more credible than the other's. An allowlist value that is not itself
+/// a usable ceiling DOES fail generation: a resolution nobody can bake is a
+/// mistake in the allowlist, not source noise.
+///
+/// `output_ambiguous` is a curated SUPPRESSOR, never a source of truth: it
+/// can only withhold a figure the snapshots would otherwise support, so a
+/// stale flag can never bake an incoherent ceiling. `output_ambiguous`
+/// disagreeing with the mechanical verdict is caught by
+/// `every_selectors_output_ambiguous_flag_matches_the_snapshots`.
+fn output_ceiling_for(
+    selector_id: &str,
+    model_glob: &str,
+    output_ambiguous: bool,
+    max_context_tokens: Option<u32>,
+    litellm: &Value,
+    models_dev_entry: Option<&Value>,
+    allowlist: &Allowlist,
+) -> Result<Option<u32>, String> {
+    if output_ambiguous {
+        return Ok(None);
+    }
+    let Some(litellm_ceiling) = litellm_unanimous_output_ceiling(litellm, model_glob) else {
+        return Ok(None);
+    };
+    // Single-source data is NOT enough here (unlike the context window):
+    // the two feeds disagree on output ceilings far more often than on
+    // windows, so an uncorroborated figure is not evidence of a real limit.
+    let Some(models_dev_ceiling) = models_dev_entry.and_then(models_dev_output_ceiling) else {
+        return Ok(None);
+    };
+    let resolved = if models_dev_ceiling == litellm_ceiling {
+        Some(litellm_ceiling)
+    } else {
+        allowlisted_output_ceiling(selector_id, models_dev_ceiling, litellm_ceiling, allowlist)?
+    };
+    Ok(resolved.filter(|ceiling| max_context_tokens.is_none_or(|window| *ceiling <= window)))
+}
+
+/// The allowlist's deliberate resolution of one known cross-source output
+/// -ceiling disagreement, or `None` when the allowlist does not carry the
+/// selector (no value baked -- see [`output_ceiling_for`]). `Err` when the
+/// recorded resolution is not a bakeable ceiling.
+fn allowlisted_output_ceiling(
+    selector_id: &str,
+    models_dev: u32,
+    litellm: u32,
+    allowlist: &Allowlist,
+) -> Result<Option<u32>, String> {
+    let key = format!("{selector_id}:{OUTPUT_CEILING_FIELD}");
+    let Some(resolved) = allowlist.resolved_f64(&key) else {
+        return Ok(None);
+    };
+    let raw = resolved?;
+    narrow_output_ceiling(raw).map(Some).ok_or_else(|| {
+        format!(
+            "cross_check_allowlist.json[\"{key}\"]: \"resolved\" {raw} is not a usable output \
+             ceiling (a whole token count in 1..={MAX_OUTPUT_TOKENS_SAFETY_BOUND}); the sources \
+             state models.dev={models_dev} litellm={litellm}"
+        )
+    })
 }
 
 /// models.dev publishes `cost.input` / `cost.output` in dollars per MILLION
@@ -884,6 +1099,10 @@ fn render_cell(out: &mut String, cell: &GeneratedCell) {
         None => "None".to_string(),
         Some(v) => format!("Some({v})"),
     };
+    let out_ceiling = match cell.max_output_tokens {
+        None => "None".to_string(),
+        Some(v) => format!("Some({v})"),
+    };
     let caps = if cell.capabilities.is_empty() {
         "BTreeMap::new()".to_string()
     } else {
@@ -909,6 +1128,7 @@ fn render_cell(out: &mut String, cell: &GeneratedCell) {
          \x20               auto_cacher: {},\n\
          \x20               tier: {},\n\
          \x20               max_context_tokens: {},\n\
+         \x20               max_output_tokens: {},\n\
          \x20               input_cost_per_token: {},\n\
          \x20               output_cost_per_token: {},\n\
          \x20               capabilities: {},\n\
@@ -923,6 +1143,7 @@ fn render_cell(out: &mut String, cell: &GeneratedCell) {
         cell.auto_cacher,
         tier,
         ctx,
+        out_ceiling,
         render_rate(cell.input_cost_per_token),
         render_rate(cell.output_cost_per_token),
         caps,
@@ -1205,5 +1426,413 @@ mod tests {
         assert_eq!(narrow_rate(f64::NAN), None);
         assert_eq!(narrow_rate(f64::INFINITY), None);
         assert_eq!(narrow_rate(-1.0e-6), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Output ceiling: glob-wide litellm unanimity, then two-source
+    // agreement, then the sanity and above-context guards. Every case drives
+    // `output_ceiling_for` on in-memory source `Value`s, so the assertions
+    // pin the RULE rather than whichever figures today's vendored snapshot
+    // happens to carry.
+    // -----------------------------------------------------------------------
+
+    /// A litellm-shaped SNAPSHOT holding one entry (`"m"`, the id the test
+    /// globs match) that publishes just an output ceiling.
+    fn litellm_ceiling(raw: Value) -> Value {
+        serde_json::json!({"m": {"max_output_tokens": raw}})
+    }
+
+    /// A models.dev-shaped entry publishing just an output ceiling.
+    fn models_dev_ceiling(raw: Value) -> Value {
+        serde_json::json!({"limit": {"output": raw}})
+    }
+
+    #[test]
+    fn output_ceiling_bakes_the_figure_both_sources_agree_on() {
+        // Arrange
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            Some(200_000),
+            &litellm_ceiling(serde_json::json!(64_000)),
+            Some(&models_dev_ceiling(serde_json::json!(64_000))),
+            &allowlist,
+        )
+        .expect("agreeing sources must derive");
+
+        // Assert
+        assert_eq!(ceiling, Some(64_000));
+    }
+
+    #[test]
+    fn output_ceiling_is_absent_when_the_two_sources_disagree() {
+        // Arrange: a real gap between the two feeds, no allowlist entry.
+        // Neither figure is more credible than the other, and a wrong
+        // ceiling is worse than an absent one -- so this yields NO VALUE
+        // rather than halting generation the way a price mismatch does.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            Some(1_000_000),
+            &litellm_ceiling(serde_json::json!(64_000)),
+            Some(&models_dev_ceiling(serde_json::json!(128_000))),
+            &allowlist,
+        )
+        .expect("a ceiling disagreement withholds a value rather than failing");
+
+        // Assert
+        assert_eq!(ceiling, None);
+    }
+
+    #[test]
+    fn output_ceiling_uses_the_allowlists_resolution_for_a_known_disagreement() {
+        // Arrange
+        let allowlist = Allowlist::parse(
+            r#"{"k:m:max_output_tokens": {"reason": "test", "resolved": 128000}}"#,
+        )
+        .expect("parse");
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            Some(1_000_000),
+            &litellm_ceiling(serde_json::json!(64_000)),
+            Some(&models_dev_ceiling(serde_json::json!(128_000))),
+            &allowlist,
+        )
+        .expect("an allowlisted mismatch must resolve");
+
+        // Assert
+        assert_eq!(ceiling, Some(128_000));
+    }
+
+    #[test]
+    fn output_ceiling_fails_generation_on_an_allowlist_resolution_that_is_not_a_ceiling() {
+        // Arrange: a resolution nobody can bake is a mistake in the
+        // allowlist, not source noise -- so it halts rather than silently
+        // withholding the value.
+        let allowlist =
+            Allowlist::parse(r#"{"k:m:max_output_tokens": {"reason": "test", "resolved": 0}}"#)
+                .expect("parse");
+
+        // Act
+        let err = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            None,
+            &litellm_ceiling(serde_json::json!(64_000)),
+            Some(&models_dev_ceiling(serde_json::json!(128_000))),
+            &allowlist,
+        )
+        .expect_err("an unbakeable allowlist resolution must fail generation");
+
+        // Assert
+        assert!(err.contains("max_output_tokens"), "reason: {err}");
+        assert!(err.contains("not a usable output ceiling"), "reason: {err}");
+    }
+
+    #[test]
+    fn output_ceiling_is_absent_for_an_output_ambiguous_selector_even_when_sources_agree() {
+        // Arrange: both sources agree, but the selector is flagged ambiguous,
+        // which suppresses the fill regardless of what the sources say.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            true,
+            Some(200_000),
+            &litellm_ceiling(serde_json::json!(64_000)),
+            Some(&models_dev_ceiling(serde_json::json!(64_000))),
+            &allowlist,
+        )
+        .expect("an ambiguous selector derives without failing");
+
+        // Assert
+        assert_eq!(ceiling, None, "an ambiguous glob must contribute nothing");
+    }
+
+    #[test]
+    fn output_ceiling_is_absent_when_two_glob_matched_litellm_entries_disagree() {
+        // Arrange: the selector's own glob spans a direct listing at 64000
+        // and a gateway re-listing at 16384. models.dev corroborates the
+        // higher figure, so trusting the representative entry alone would
+        // bake 64000 for every id the glob matches -- including the one the
+        // snapshot itself caps four times lower.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+        let litellm = serde_json::json!({
+            "claude-sonnet-4-6": {"max_output_tokens": 64_000},
+            "snowflake/claude-sonnet-4-6": {"max_output_tokens": 16_384},
+        });
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "anthropic-api:claude-sonnet-4-6*",
+            "claude-sonnet-4-6*",
+            false,
+            Some(1_000_000),
+            &litellm,
+            Some(&models_dev_ceiling(serde_json::json!(64_000))),
+            &allowlist,
+        )
+        .expect("a disagreeing glob derives without failing");
+
+        // Assert
+        assert_eq!(
+            ceiling, None,
+            "a glob spanning two different published ceilings must contribute nothing"
+        );
+    }
+
+    #[test]
+    fn output_ceiling_bakes_when_every_glob_matched_litellm_entry_agrees() {
+        // The positive control for the unanimity rule: the same glob shape,
+        // the same route-prefixed re-listings, all publishing one figure.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+        let litellm = serde_json::json!({
+            "claude-opus-4-7": {"max_output_tokens": 128_000},
+            "claude-opus-4-7-20260416": {"max_output_tokens": 128_000},
+            "vertex_ai/claude-opus-4-7": {"max_output_tokens": 128_000},
+            "claude-haiku-4-5": {"max_output_tokens": 8_192},
+        });
+
+        let ceiling = output_ceiling_for(
+            "anthropic-api:claude-opus-4-7*",
+            "claude-opus-4-7*",
+            false,
+            Some(1_000_000),
+            &litellm,
+            Some(&models_dev_ceiling(serde_json::json!(128_000))),
+            &allowlist,
+        )
+        .expect("derives");
+
+        assert_eq!(ceiling, Some(128_000));
+    }
+
+    #[test]
+    fn output_ceiling_needs_both_sources_since_one_alone_is_uncorroborated() {
+        // Arrange
+        let allowlist = Allowlist::parse("{}").expect("parse");
+        let litellm_only = litellm_ceiling(serde_json::json!(64_000));
+        let models_dev_only = models_dev_ceiling(serde_json::json!(64_000));
+
+        // Act / Assert: litellm alone.
+        assert_eq!(
+            output_ceiling_for("k:m", "m", false, None, &litellm_only, None, &allowlist)
+                .expect("derives"),
+            None,
+        );
+
+        // Act / Assert: models.dev alone (no litellm entry publishes a ceiling).
+        assert_eq!(
+            output_ceiling_for(
+                "k:m",
+                "m",
+                false,
+                None,
+                &serde_json::json!({"m": {}}),
+                Some(&models_dev_only),
+                &allowlist,
+            )
+            .expect("derives"),
+            None,
+        );
+    }
+
+    #[test]
+    fn output_ceiling_rejects_zero_negative_fractional_and_non_finite_figures() {
+        // Arrange: each degenerate figure is published by BOTH sources, so a
+        // disagreement can never be what drops it -- only the sanity filter.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        for raw in [
+            serde_json::json!(0),
+            serde_json::json!(-64_000),
+            serde_json::json!(64_000.5),
+            serde_json::json!(f64::MAX),
+        ] {
+            // Act
+            let ceiling = output_ceiling_for(
+                "k:m",
+                "m",
+                false,
+                None,
+                &litellm_ceiling(raw.clone()),
+                Some(&models_dev_ceiling(raw.clone())),
+                &allowlist,
+            )
+            .expect("a degenerate figure drops rather than failing generation");
+
+            // Assert
+            assert_eq!(ceiling, None, "figure {raw} must not bake");
+        }
+    }
+
+    #[test]
+    fn output_ceiling_rejects_a_figure_above_the_safety_bound() {
+        // Arrange: a plausible-looking figure that is nonetheless far past
+        // any real model's output ceiling -- a context window that landed in
+        // an output field.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+        let absurd = serde_json::json!(MAX_OUTPUT_TOKENS_SAFETY_BOUND + 1);
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            None,
+            &litellm_ceiling(absurd.clone()),
+            Some(&models_dev_ceiling(absurd)),
+            &allowlist,
+        )
+        .expect("derives");
+
+        // Assert
+        assert_eq!(ceiling, None);
+    }
+
+    #[test]
+    fn output_ceiling_rejects_a_ceiling_above_the_confirmed_context_window() {
+        // Arrange: both sources agree on 256000, but the selector's confirmed
+        // window is 200000 -- a model cannot emit more than its window holds,
+        // so the pair is incoherent regardless of their agreement.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            Some(200_000),
+            &litellm_ceiling(serde_json::json!(256_000)),
+            Some(&models_dev_ceiling(serde_json::json!(256_000))),
+            &allowlist,
+        )
+        .expect("derives");
+
+        // Assert
+        assert_eq!(ceiling, None);
+    }
+
+    #[test]
+    fn output_ceiling_keeps_a_ceiling_exactly_at_the_confirmed_context_window() {
+        // The window guard is `<=`: a ceiling equal to the window is
+        // coherent (every output token fits), only a larger one is not.
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        let ceiling = output_ceiling_for(
+            "k:m",
+            "m",
+            false,
+            Some(200_000),
+            &litellm_ceiling(serde_json::json!(200_000)),
+            Some(&models_dev_ceiling(serde_json::json!(200_000))),
+            &allowlist,
+        )
+        .expect("derives");
+
+        assert_eq!(ceiling, Some(200_000));
+    }
+
+    #[cfg(feature = "gen-catalog")]
+    #[test]
+    fn every_selectors_output_ambiguous_flag_matches_the_snapshots() {
+        // The curated `output_ambiguous` flag is an ASSERTION about the
+        // vendored snapshots, so it has to be checkable against them: a flag
+        // that says "ambiguous" where every spanned entry now agrees hides a
+        // derivable ceiling, and one that says "coherent" where they disagree
+        // documents a coherence the data does not have. Only the mechanical
+        // verdict ever drives the fill (see `output_ceiling_for`); this test
+        // is what keeps the annotation honest.
+        let litellm: Value = serde_json::from_str(LITELLM_JSON).expect("parse litellm snapshot");
+
+        let flagged: Vec<(String, bool)> = ANTHROPIC_SELECTORS
+            .iter()
+            .map(|sel| ("anthropic-api", sel.model_glob, sel.output_ambiguous))
+            .chain(
+                BEDROCK_SELECTORS
+                    .iter()
+                    .map(|sel| ("bedrock", sel.model_glob, sel.output_ambiguous)),
+            )
+            .chain(
+                OPENAI_RESPONSES_SELECTORS
+                    .iter()
+                    .map(|sel| ("openai-responses", sel.model_glob, sel.output_ambiguous)),
+            )
+            .chain(
+                OPENAI_COMPAT_SELECTORS
+                    .iter()
+                    .map(|sel| ("openai-compat", sel.model_glob, sel.output_ambiguous)),
+            )
+            .map(|(kind, glob, flag)| {
+                let derived_ambiguous = litellm_unanimous_output_ceiling(&litellm, glob).is_none();
+                (
+                    crate::catalog_state::selector_key(kind, glob),
+                    flag == derived_ambiguous,
+                )
+            })
+            .collect();
+
+        let disagreeing: Vec<&String> = flagged
+            .iter()
+            .filter_map(|(selector, agrees)| (!agrees).then_some(selector))
+            .collect();
+        assert!(
+            disagreeing.is_empty(),
+            "each selector's output_ambiguous flag disagrees with the vendored snapshots: \
+             {disagreeing:?}"
+        );
+    }
+
+    #[test]
+    fn baked_table_fills_the_output_ceiling_only_where_both_sources_cohere() {
+        // Guards the shipped classification against silent drift: the
+        // vendored snapshots cohere on the output ceiling for exactly the
+        // version-pinned Claude globs, and every vendor-wide prefix stays
+        // absent. Derived from the baked table itself, so it moves with a
+        // deliberate regeneration and fails on an accidental one.
+        let filled: Vec<String> = crate::catalog::baked_table_rows()
+            .into_iter()
+            .filter(|row| row.row.max_output_tokens.is_some())
+            .map(|row| crate::catalog_state::selector_key(row.provider_kind, row.model_glob))
+            .collect();
+
+        for selector in [
+            "anthropic-api:claude-opus-4-8*",
+            "anthropic-api:claude-opus-4-7*",
+            "anthropic-api:claude-opus-4-6*",
+            "anthropic-api:claude-opus-4-5*",
+            "bedrock:anthropic.claude-sonnet-4-6*",
+            "bedrock:anthropic.claude-haiku-4-5*",
+            "bedrock:anthropic.claude-opus-4-5*",
+        ] {
+            assert!(
+                filled.contains(&selector.to_string()),
+                "{selector} must carry a baked output ceiling; filled: {filled:?}"
+            );
+        }
+
+        // No vendor-wide prefix, and no provider catch-all, may carry one.
+        for selector in &filled {
+            assert!(
+                selector.starts_with("anthropic-api:claude-")
+                    || selector.starts_with("bedrock:anthropic.claude-"),
+                "{selector} must not carry a baked output ceiling"
+            );
+        }
     }
 }

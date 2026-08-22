@@ -162,6 +162,7 @@ pub routectl_router::catalog::CachePricingOverride::auto_cacher: core::option::O
 pub routectl_router::catalog::CachePricingOverride::has_storage_rent: core::option::Option<bool>
 pub routectl_router::catalog::CachePricingOverride::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CachePricingOverride::max_context_tokens: core::option::Option<u32>
+pub routectl_router::catalog::CachePricingOverride::max_output_tokens: core::option::Option<u32>
 pub routectl_router::catalog::CachePricingOverride::min_prefix_tokens: core::option::Option<u32>
 pub routectl_router::catalog::CachePricingOverride::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CachePricingOverride::override_acknowledges_cost_risk: bool
@@ -297,6 +298,7 @@ pub routectl_router::catalog::CatalogRow::auto_cacher: bool
 pub routectl_router::catalog::CatalogRow::capabilities: alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>
 pub routectl_router::catalog::CatalogRow::has_storage_rent: bool
 pub routectl_router::catalog::CatalogRow::max_context_tokens: core::option::Option<u32>
+pub routectl_router::catalog::CatalogRow::max_output_tokens: core::option::Option<u32>
 pub routectl_router::catalog::CatalogRow::min_prefix_tokens: u32
 pub routectl_router::catalog::CatalogRow::rm: f32
 pub routectl_router::catalog::CatalogRow::storage_rent: f32
@@ -5618,6 +5620,7 @@ pub routectl_router::ImpactField::Enablement
 pub routectl_router::ImpactField::HasStorageRent
 pub routectl_router::ImpactField::InputCostPerToken
 pub routectl_router::ImpactField::MaxContextTokens
+pub routectl_router::ImpactField::MaxOutputTokens
 pub routectl_router::ImpactField::MinPrefixTokens
 pub routectl_router::ImpactField::OutputCostPerToken
 pub routectl_router::ImpactField::Rm
@@ -7964,6 +7967,7 @@ pub routectl_router::CachePricingOverride::auto_cacher: core::option::Option<boo
 pub routectl_router::CachePricingOverride::has_storage_rent: core::option::Option<bool>
 pub routectl_router::CachePricingOverride::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::CachePricingOverride::max_context_tokens: core::option::Option<u32>
+pub routectl_router::CachePricingOverride::max_output_tokens: core::option::Option<u32>
 pub routectl_router::CachePricingOverride::min_prefix_tokens: core::option::Option<u32>
 pub routectl_router::CachePricingOverride::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::CachePricingOverride::override_acknowledges_cost_risk: bool
@@ -8744,6 +8748,7 @@ pub routectl_router::CatalogRow::auto_cacher: bool
 pub routectl_router::CatalogRow::capabilities: alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>
 pub routectl_router::CatalogRow::has_storage_rent: bool
 pub routectl_router::CatalogRow::max_context_tokens: core::option::Option<u32>
+pub routectl_router::CatalogRow::max_output_tokens: core::option::Option<u32>
 pub routectl_router::CatalogRow::min_prefix_tokens: u32
 pub routectl_router::CatalogRow::rm: f32
 pub routectl_router::CatalogRow::storage_rent: f32
@@ -10924,6 +10929,7 @@ pub struct routectl_router::OverlayCell
 pub routectl_router::OverlayCell::capabilities: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>>
 pub routectl_router::OverlayCell::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::OverlayCell::max_context_tokens: core::option::Option<u32>
+pub routectl_router::OverlayCell::max_output_tokens: core::option::Option<u32>
 pub routectl_router::OverlayCell::min_prefix_tokens: core::option::Option<u32>
 pub routectl_router::OverlayCell::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::OverlayCell::rm: core::option::Option<f32>

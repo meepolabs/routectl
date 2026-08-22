@@ -23,6 +23,7 @@ fn verify_at_stamps_existing_user_cell_updates_verified_at_only() {
             ttl_seconds: None,
             min_prefix_tokens: Some(512),
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -64,6 +65,7 @@ fn verify_at_flips_import_cell_source_to_user() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -149,6 +151,7 @@ fn blank_user_cell() -> OverlayCell {
         ttl_seconds: None,
         min_prefix_tokens: None,
         max_context_tokens: None,
+        max_output_tokens: None,
         input_cost_per_token: None,
         output_cost_per_token: None,
         capabilities: None,
@@ -226,6 +229,7 @@ fn set_at_on_an_import_cell_flips_source_to_user_and_keeps_unset_fields() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -446,6 +450,11 @@ fn validate_updates_enforces_the_override_validate_contract() {
     // max_context_tokens == 0 (the "window") rejected.
     assert!(validate_updates(&[FieldUpdate::MaxContextTokens(0)], true).is_err());
 
+    // max_output_tokens == 0 (the "ceiling") rejected on the same contract;
+    // a real ceiling passes.
+    assert!(validate_updates(&[FieldUpdate::MaxOutputTokens(0)], true).is_err());
+    assert!(validate_updates(&[FieldUpdate::MaxOutputTokens(64_000)], false).is_ok());
+
     // below-sentinel wm needs the ack flag; the same value with the ack
     // flag is accepted.
     assert!(validate_updates(&[FieldUpdate::Wm(1.0)], false).is_err());
@@ -455,6 +464,118 @@ fn validate_updates_enforces_the_override_validate_contract() {
     // untouched, already-below-sentinel `wm` inherited from a prior
     // cell is never re-validated by this call.
     assert!(validate_updates(&[FieldUpdate::Rm(0.2)], false).is_ok());
+}
+
+#[test]
+fn set_at_round_trips_max_output_tokens_through_the_overlay() {
+    // Arrange: a baked-known selector with no overlay cell yet.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    // Act
+    set_at(
+        "openai-compat:grok-*",
+        &["max_output_tokens=32000".to_string()],
+        false,
+        &path,
+    )
+    .expect("set must accept max_output_tokens");
+
+    // Assert: the value survives the write and the fail-closed load.
+    let overlay = load_catalog_overlay(&path).expect("load");
+    let cell = overlay
+        .cells
+        .get("openai-compat:grok-*")
+        .and_then(Option::as_ref)
+        .expect("cell present");
+    assert_eq!(cell.max_output_tokens, Some(32_000));
+    assert_eq!(cell.source, OverlaySource::User);
+}
+
+#[test]
+fn set_at_rejects_a_zero_max_output_tokens_before_writing() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    // Act
+    let err = set_at(
+        "openai-compat:grok-*",
+        &["max_output_tokens=0".to_string()],
+        false,
+        &path,
+    )
+    .expect_err("a zero output ceiling must be rejected");
+
+    // Assert
+    match err {
+        CatalogWriteError::Validation(reason) => {
+            assert!(reason.contains("max_output_tokens"), "reason: {reason}");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(!path.exists(), "nothing should have been written");
+}
+
+/// The WELD between [`OverlayCell`]'s field set and what `catalog set` can
+/// write: every field name on a serialized `OverlayCell` is either accepted
+/// by `parse_field` or named in `UNSUPPORTED_FIELDS` with a reason. A new
+/// overlay field lands here as a failure until it is deliberately wired or
+/// deliberately excluded, which is what keeps adding the next one a
+/// one-touch change instead of a silently-dropped write.
+///
+/// Field names come from `serde_json` rather than a hand-maintained list --
+/// a hand list is exactly the drift this test exists to catch.
+#[test]
+fn every_overlay_cell_field_is_settable_or_deliberately_excluded() {
+    // Arrange: a cell with every Option field SET, so nothing is skipped by
+    // `skip_serializing_if` and the serialized object names the full field
+    // set.
+    let fully_populated = OverlayCell {
+        source: OverlaySource::User,
+        verified_at: "2026-01-01".to_string(),
+        wm: Some(2.0),
+        rm: Some(0.1),
+        ttl_seconds: Some(300),
+        min_prefix_tokens: Some(1024),
+        max_context_tokens: Some(200_000),
+        max_output_tokens: Some(64_000),
+        input_cost_per_token: Some(3.0e-6),
+        output_cost_per_token: Some(1.5e-5),
+        capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
+    };
+    let serialized = serde_json::to_value(&fully_populated).expect("serialize");
+    let field_names: Vec<String> = serialized
+        .as_object()
+        .expect("an OverlayCell serializes to a JSON object")
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        field_names.len() >= 11,
+        "every field must serialize; got {field_names:?}"
+    );
+
+    // Act / Assert
+    for field in &field_names {
+        let excluded = UNSUPPORTED_FIELDS.iter().find(|(name, _)| name == field);
+        if let Some((_, reason)) = excluded {
+            assert!(
+                !reason.is_empty(),
+                "excluded field `{field}` must carry a reason"
+            );
+            continue;
+        }
+        // Not excluded -> `parse_field` must accept it. The value is a
+        // plausible one for every numeric field; a parse failure here means
+        // the field has no `FieldUpdate` arm.
+        parse_field(&format!("{field}=1")).unwrap_or_else(|e| {
+            panic!(
+                "OverlayCell field `{field}` is neither settable by `catalog set` nor named in \
+                 UNSUPPORTED_FIELDS with a reason: {e}"
+            )
+        });
+    }
 }
 
 #[test]
@@ -502,6 +623,7 @@ fn export_at_round_trips_back_into_an_equal_overlay() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -517,6 +639,7 @@ fn export_at_round_trips_back_into_an_equal_overlay() {
             ttl_seconds: None,
             min_prefix_tokens: Some(1024),
             max_context_tokens: Some(200_000),
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -657,6 +780,7 @@ fn user_cell_with_capability() -> OverlayCell {
         ttl_seconds: None,
         min_prefix_tokens: Some(1024),
         max_context_tokens: Some(200_000),
+        max_output_tokens: None,
         input_cost_per_token: None,
         output_cost_per_token: None,
         capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),

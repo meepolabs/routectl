@@ -19,6 +19,7 @@ fn cell(date: &str) -> OverlayCell {
         ttl_seconds: None,
         min_prefix_tokens: None,
         max_context_tokens: None,
+        max_output_tokens: None,
         input_cost_per_token: None,
         output_cost_per_token: None,
         capabilities: None,

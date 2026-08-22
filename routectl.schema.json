@@ -268,6 +268,15 @@
             "null"
           ]
         },
+        "max_output_tokens": {
+          "description": "Operator-supplied output-token ceiling. `Some` wins over the baked\nceiling (or the baked `None`); `None` inherits the baked value\nunchanged. `Some(0)` is rejected -- `None` is how a ceiling is left\nunconfirmed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "min_prefix_tokens": {
           "description": "Minimum-cacheable-prefix override, in tokens. `None` inherits the baked value.",
           "format": "uint32",
