@@ -105,6 +105,7 @@ pub(crate) fn verify_at(selector_raw: &str, path: &Path) -> Result<(), Box<dyn s
             ttl_seconds: existing.ttl_seconds,
             min_prefix_tokens: existing.min_prefix_tokens,
             max_context_tokens: existing.max_context_tokens,
+            max_output_tokens: existing.max_output_tokens,
             input_cost_per_token: existing.input_cost_per_token,
             output_cost_per_token: existing.output_cost_per_token,
             capabilities: existing.capabilities,
@@ -166,24 +167,62 @@ enum FieldUpdate {
     TtlSeconds(u32),
     MinPrefixTokens(u32),
     MaxContextTokens(u32),
+    MaxOutputTokens(u32),
     InputCostPerToken(f32),
     OutputCostPerToken(f32),
     /// A `cap:<name>=true|false` capability flag.
     Capability(String, bool),
 }
 
-/// Fields [`OverlayCell`] structurally cannot carry: they live only on the
-/// baked catalog table (settled: the import pipeline cannot produce a
-/// differing `auto_cacher`, and the storage-rent fields are
-/// reserved-unused on every baked row), so `set` hard-rejects an attempt to
-/// set them rather than silently drop them.
-const UNSUPPORTED_FIELDS: &[&str] = &["auto_cacher", "has_storage_rent", "storage_rent"];
+/// Field names `set` deliberately does NOT accept as a plain
+/// `field=value`, each with the reason the operator sees. Two kinds live
+/// here:
+///
+/// - Baked-only [`routectl_router::CatalogRow`] fields [`OverlayCell`]
+///   structurally cannot carry (settled: the import pipeline cannot produce
+///   a differing `auto_cacher`, and the storage-rent fields are
+///   reserved-unused on every baked row).
+/// - [`OverlayCell`] fields that exist but are not operator-assignable
+///   through this verb (provenance is stamped, capabilities have their own
+///   `cap:<name>` syntax).
+///
+/// Naming a field here is what makes its absence from `parse_field`'s match
+/// DELIBERATE rather than forgotten -- `every_overlay_cell_field_is_settable_or_deliberately_excluded`
+/// fails if an `OverlayCell` field is in neither place, so adding the next
+/// overlay field is a one-touch change.
+const UNSUPPORTED_FIELDS: &[(&str, &str)] = &[
+    (
+        "auto_cacher",
+        "this field lives only on the baked catalog table; the overlay has no field to carry it",
+    ),
+    (
+        "has_storage_rent",
+        "this field lives only on the baked catalog table; the overlay has no field to carry it",
+    ),
+    (
+        "storage_rent",
+        "this field lives only on the baked catalog table; the overlay has no field to carry it",
+    ),
+    (
+        "verified_at",
+        "verified_at is stamped automatically to today; it cannot be set directly",
+    ),
+    (
+        "source",
+        "source is stamped automatically (`set` always writes a user cell); it cannot be set \
+         directly",
+    ),
+    (
+        "capabilities",
+        "capability priors are set one at a time via `cap:<name>=true|false`, never as a whole map",
+    ),
+];
 
 /// Parse one `field=value` argument. Capability flags use the
 /// `cap:<name>=true|false` syntax (documented in `--help`); every other
-/// supported field is a bare name. `verified_at` and the baked-only fields
-/// are named explicitly in the error so the operator knows why they were
-/// rejected rather than getting a generic "unknown field".
+/// supported field is a bare name. A field in [`UNSUPPORTED_FIELDS`] is
+/// rejected with that entry's own reason so the operator knows WHY rather
+/// than getting a generic "unknown field".
 fn parse_field(raw: &str) -> Result<FieldUpdate, CatalogWriteError> {
     let (field, value) = raw
         .split_once('=')
@@ -206,19 +245,10 @@ fn parse_field(raw: &str) -> Result<FieldUpdate, CatalogWriteError> {
         return Ok(FieldUpdate::Capability(name.to_string(), flag));
     }
 
-    if field == "verified_at" {
+    if let Some((_, reason)) = UNSUPPORTED_FIELDS.iter().find(|(name, _)| *name == field) {
         return Err(CatalogWriteError::UnsupportedField {
             field: field.to_string(),
-            reason: "verified_at is stamped automatically to today; it cannot be set directly"
-                .to_string(),
-        });
-    }
-    if UNSUPPORTED_FIELDS.contains(&field) {
-        return Err(CatalogWriteError::UnsupportedField {
-            field: field.to_string(),
-            reason: "this field lives only on the baked catalog table; the overlay has no field \
-                     to carry it"
-                .to_string(),
+            reason: (*reason).to_string(),
         });
     }
 
@@ -228,14 +258,15 @@ fn parse_field(raw: &str) -> Result<FieldUpdate, CatalogWriteError> {
         "ttl_seconds" => parse_num(raw, value).map(FieldUpdate::TtlSeconds),
         "min_prefix_tokens" => parse_num(raw, value).map(FieldUpdate::MinPrefixTokens),
         "max_context_tokens" => parse_num(raw, value).map(FieldUpdate::MaxContextTokens),
+        "max_output_tokens" => parse_num(raw, value).map(FieldUpdate::MaxOutputTokens),
         "input_cost_per_token" => parse_num(raw, value).map(FieldUpdate::InputCostPerToken),
         "output_cost_per_token" => parse_num(raw, value).map(FieldUpdate::OutputCostPerToken),
         other => Err(CatalogWriteError::InvalidField {
             raw: raw.to_string(),
             reason: format!(
                 "unknown field `{other}`; supported fields are wm, rm, ttl_seconds, \
-                 min_prefix_tokens, max_context_tokens, input_cost_per_token, \
-                 output_cost_per_token, cap:<name>"
+                 min_prefix_tokens, max_context_tokens, max_output_tokens, \
+                 input_cost_per_token, output_cost_per_token, cap:<name>"
             ),
         }),
     }
@@ -263,6 +294,7 @@ fn apply_field_update(cell: &mut OverlayCell, update: FieldUpdate) {
         FieldUpdate::TtlSeconds(v) => cell.ttl_seconds = Some(v),
         FieldUpdate::MinPrefixTokens(v) => cell.min_prefix_tokens = Some(v),
         FieldUpdate::MaxContextTokens(v) => cell.max_context_tokens = Some(v),
+        FieldUpdate::MaxOutputTokens(v) => cell.max_output_tokens = Some(v),
         FieldUpdate::InputCostPerToken(v) => cell.input_cost_per_token = Some(v),
         FieldUpdate::OutputCostPerToken(v) => cell.output_cost_per_token = Some(v),
         FieldUpdate::Capability(name, flag) => {
@@ -289,7 +321,8 @@ fn selector_known(selector: &str, overlay: &CatalogOverlay) -> bool {
 }
 
 /// Reuse [`CachePricingOverride::validate`]'s degeneracy contract (`rm >
-/// 0`, `max_context_tokens != 0`, below-sentinel `wm` needs the ack flag)
+/// 0`, `max_context_tokens` / `max_output_tokens` != 0, below-sentinel `wm`
+/// needs the ack flag)
 /// against ONLY the fields THIS call is setting -- never against a field
 /// inherited unchanged from a prior cell. A baked/import cell can
 /// legitimately carry a `wm` below the sentinel already (auto-cachers
@@ -309,6 +342,7 @@ fn validate_updates(
             FieldUpdate::Wm(v) => ov.wm = Some(*v),
             FieldUpdate::Rm(v) => ov.rm = Some(*v),
             FieldUpdate::MaxContextTokens(v) => ov.max_context_tokens = Some(*v),
+            FieldUpdate::MaxOutputTokens(v) => ov.max_output_tokens = Some(*v),
             FieldUpdate::InputCostPerToken(v) => ov.input_cost_per_token = Some(*v),
             FieldUpdate::OutputCostPerToken(v) => ov.output_cost_per_token = Some(*v),
             FieldUpdate::TtlSeconds(_)
@@ -398,6 +432,7 @@ pub(crate) fn set_at(
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
                 capabilities: None,

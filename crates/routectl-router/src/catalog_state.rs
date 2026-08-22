@@ -119,7 +119,7 @@ impl<'de> Deserialize<'de> for CatalogState {
 /// [`into_catalog_row`](StoredRow::into_catalog_row) maps it onto the
 /// small fixed set of real `&'static str` tier tokens.
 ///
-/// Deliberately NOT `#[serde(default)]` -- mirrors
+/// Deliberately NOT `#[serde(default)]` as a struct -- mirrors
 /// [`crate::catalog_overlay::OverlayCell`]'s same deliberate choice: our
 /// own writer always emits every field (including `null` for an unset
 /// `Option`, since `CatalogRow`'s `Serialize` has no
@@ -128,6 +128,14 @@ impl<'de> Deserialize<'de> for CatalogState {
 /// defaulting a missing `wm`/`rm`/etc. to `0.0` would fabricate a false
 /// drift signal instead of routing the file through the `Corrupt` path
 /// [`check_drift_and_persist_state`] advertises.
+///
+/// `max_output_tokens` is the ONE exception, and per-field rather than
+/// struct-wide: a snapshot written by a build before the column existed
+/// legitimately has no such key, and the whole POINT of that snapshot is
+/// the drift diff on the very boot that introduces the column. Rejecting
+/// it as corrupt would skip the one comparison the operator needs. The
+/// default (`None`, "no ceiling observed") is also what the older build
+/// actually saw, so the diff it feeds is accurate rather than fabricated.
 #[derive(Debug, Deserialize)]
 struct StoredRow {
     wm: f32,
@@ -139,6 +147,8 @@ struct StoredRow {
     auto_cacher: bool,
     tier: Option<String>,
     max_context_tokens: Option<u32>,
+    #[serde(default)]
+    max_output_tokens: Option<u32>,
     input_cost_per_token: Option<f32>,
     output_cost_per_token: Option<f32>,
     capabilities: BTreeMap<String, bool>,
@@ -170,6 +180,7 @@ impl StoredRow {
             auto_cacher: self.auto_cacher,
             tier,
             max_context_tokens: self.max_context_tokens,
+            max_output_tokens: self.max_output_tokens,
             input_cost_per_token: self.input_cost_per_token,
             output_cost_per_token: self.output_cost_per_token,
             capabilities: self.capabilities,
@@ -416,8 +427,9 @@ pub enum ImpactClass {
     /// way `wm` does).
     CostAffecting,
     /// Changes WHETHER or HOW a request gets cached / routed
-    /// (`ttl_seconds`, `min_prefix_tokens`, `max_context_tokens`, a
-    /// capability flip, or a row's enable/disable state).
+    /// (`ttl_seconds`, `min_prefix_tokens`, `max_context_tokens`,
+    /// `max_output_tokens`, a capability flip, or a row's enable/disable
+    /// state).
     RoutingAffecting,
 }
 
@@ -476,6 +488,8 @@ pub enum ImpactField {
     MinPrefixTokens,
     /// The context window.
     MaxContextTokens,
+    /// The output-token ceiling.
+    MaxOutputTokens,
     /// The base input price, in dollars per token.
     InputCostPerToken,
     /// The base output price, in dollars per token.
@@ -502,7 +516,8 @@ pub enum ImpactField {
 /// [`ImpactClass`]): display-only (`verified_at`, `source`),
 /// cost-affecting (`wm`, `rm`, `auto_cacher`, the base per-token rates,
 /// plus the baked-only reserved economics fields), routing-affecting
-/// (`ttl_seconds`, `min_prefix_tokens`, `max_context_tokens`, a capability
+/// (`ttl_seconds`, `min_prefix_tokens`, `max_context_tokens`,
+/// `max_output_tokens`, a capability
 /// flip, or a row's enable/disable state). Reused verbatim by
 /// `crate::catalog_import::diff_overlay` for its own row labels.
 #[must_use]
@@ -520,6 +535,7 @@ pub const fn classify_field(field: ImpactField) -> ImpactClass {
         ImpactField::TtlSeconds
         | ImpactField::MinPrefixTokens
         | ImpactField::MaxContextTokens
+        | ImpactField::MaxOutputTokens
         | ImpactField::Capabilities
         | ImpactField::Enablement => ImpactClass::RoutingAffecting,
     }
@@ -609,6 +625,14 @@ fn diff_row(old: &CatalogRow, new: &CatalogRow) -> Option<(ImpactClass, String, 
             jv(new.max_context_tokens),
         );
     }
+    if old.max_output_tokens != new.max_output_tokens {
+        note(
+            ImpactField::MaxOutputTokens,
+            "max_output_tokens",
+            jv(old.max_output_tokens),
+            jv(new.max_output_tokens),
+        );
+    }
     if old.input_cost_per_token != new.input_cost_per_token {
         note(
             ImpactField::InputCostPerToken,
@@ -671,6 +695,7 @@ mod tests {
             auto_cacher: _,
             tier: _,
             max_context_tokens: _,
+            max_output_tokens: _,
             input_cost_per_token: _,
             output_cost_per_token: _,
             capabilities: _,
@@ -1109,6 +1134,7 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
                 capabilities: None,
@@ -1250,6 +1276,61 @@ mod tests {
             "a row missing a required field must warn as corrupt, not silently default: {events:?}"
         );
         assert!(events[0].message.contains("corrupt"));
+    }
+
+    #[test]
+    fn a_snapshot_written_before_the_output_ceiling_column_still_diffs_rather_than_reading_corrupt()
+    {
+        // Arrange: a state file in the shape a build BEFORE the
+        // `max_output_tokens` column wrote it -- every other field present,
+        // that one key simply absent. Rejecting it as corrupt would skip the
+        // one drift diff the column's introduction exists to surface.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let selector = selector_key(SELECTOR.0, SELECTOR.1);
+        let current = current_row();
+        assert!(
+            current.max_output_tokens.is_some(),
+            "this test needs an in-use selector whose CURRENT row carries a ceiling, so the \
+             absent prior key is a real diff"
+        );
+        let mut prior_row = serde_json::to_value(&current).expect("serialize row");
+        prior_row
+            .as_object_mut()
+            .expect("row serializes as an object")
+            .remove("max_output_tokens");
+        let prior = serde_json::json!({
+            "schema_version": CATALOG_STATE_SCHEMA_VERSION,
+            "last_seen_catalog_version": crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            "in_use_snapshot": {selector.clone(): prior_row},
+        });
+        std::fs::write(&path, serde_json::to_vec(&prior).unwrap()).unwrap();
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        // Assert
+        assert_eq!(
+            events.len(),
+            1,
+            "the older-shaped snapshot must produce exactly one drift log, not a corrupt \
+             warning: {events:?}"
+        );
+        assert!(
+            !events[0].message.contains("corrupt"),
+            "the absent column must not read as corruption: {events:?}"
+        );
+        assert_eq!(events[0].field("selector"), Some(selector.as_str()));
+        assert_eq!(events[0].field("impact_class"), Some("routing-affecting"));
+        assert!(
+            events[0]
+                .field("new")
+                .unwrap()
+                .contains("\"max_output_tokens\""),
+            "the diff must name the newly-baked ceiling: {events:?}"
+        );
     }
 
     #[test]

@@ -1604,7 +1604,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lookup index (`AliasPattern`, `PrefixIndex`)
 - `src/catalog.rs` -- two-layer catalog: layer 1 is the baked reference table
   (`CatalogRow`:
-  `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`input_cost_per_token`/`output_cost_per_token`/`capabilities`,
+  `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`max_output_tokens`/`input_cost_per_token`/`output_cost_per_token`/`capabilities`,
   keyed `(provider_kind, model[, tier])`, `TABLE` populated from
   `catalog_baked::baked_cells` at startup), layer 2 is `catalog_overlay.json`.
   `lookup(provider_kind, model, tier)` does three-tier fallback (exact-or-glob
@@ -1646,7 +1646,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`save`'s `expected_revision` rejects a stale write, no auto-retry); `load`
   additionally validates cell VALUE degeneracy per cell via the shared
   `catalog::cell_value_defects` predicate -- any HARD defect (rm <= 0 or
-  non-finite, non-finite wm, `max_context_tokens` of 0) fails closed naming
+  non-finite, non-finite wm, `max_context_tokens` or `max_output_tokens` of
+  0) fails closed naming
   the selector + field, the one SOFT below-sentinel `wm` defect warns and is
   accepted (a hot-reload load failure keeps the prior router live); writer
   extends the OAuth credentials-file atomic-write discipline with a
@@ -1729,14 +1730,27 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   representative model's rate, and `narrow_rate` drops any rate that is
   negative/non-finite at source OR that overflows to infinity / underflows a
   positive value to zero on the `f64 -> f32` cast (a source zero passes
-  through as a real free tier). Renders through
+  through as a real free tier). `max_output_tokens` (`output_ceiling_for`)
+  is the STRICTEST field: EVERY litellm entry the selector's own glob spans
+  (route-prefixed re-listings included) must publish the same sane figure,
+  models.dev must publish it too, and the result may not exceed the
+  selector's confirmed context window -- single-source data is deliberately
+  not enough, and a cross-source gap withholds the value instead of failing
+  generation (the allowlist records a deliberate resolution; a resolution
+  that is not itself a bakeable ceiling DOES fail). Renders through
   `rustfmt` before writing; the drift-guard test diffs byte-for-byte against
   the committed file
 - `src/catalog_codegen_selectors.rs` -- static data tables for
   `catalog_codegen.rs`: which vendored snapshot entries become baked cells,
   plus the curated per-family facts (`ttl_seconds`, `min_prefix_tokens`,
-  `auto_cacher`, `economics_unconfirmed`/`context_ambiguous`/`price_ambiguous`
-  escape hatches)
+  `auto_cacher`, and the
+  `economics_unconfirmed`/`context_ambiguous`/`price_ambiguous`/`output_ambiguous`
+  escape hatches -- `output_ambiguous` sits on BOTH selector types, since a
+  version-pinned Claude glob can span gateway re-listings that cap output
+  lower than the direct API does, and is a pure SUPPRESSOR asserted against
+  the snapshots by
+  `every_selectors_output_ambiguous_flag_matches_the_snapshots`, never the
+  derivation's source of truth)
 - `src/bin/gen_catalog.rs` -- `cargo run --bin gen_catalog` regenerates
   `src/catalog_baked.rs` from `catalog_data/` via
   `catalog_codegen::render_catalog_baked_rs`; fails loudly on a parse error or
@@ -1761,7 +1775,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   I/O/corruption error is caught and treated as rebuild-from-empty; writer
   discipline extends the OAuth file-write standard with the same post-rename
   parent-directory `fsync` as the overlay, but deliberately carries no
-  revision check (last-write-wins is harmless for rebuildable data)
+  revision check (last-write-wins is harmless for rebuildable data). Its
+  `StoredRow` deserialize target rejects a missing field as corrupt, with
+  `max_output_tokens` the one `#[serde(default)]` exception so a snapshot
+  written before that column still feeds the drift diff on the boot that
+  introduces it
 - `src/pricing.rs` -- THE price-unit conversion + precedence boundary. The
   canonical operator-facing unit is USD per MILLION tokens (`PricingConfig` /
   the usage leaf's `Rates`); the baked catalog's internal unit is USD per
@@ -4920,10 +4938,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
     existing overlay cell of either provenance) -- an unknown selector is a
     hard `CatalogWriteError::UnknownSelector`, the synthetic-row poisoning
     guard; fields are
-    `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`input_cost_per_token`/`output_cost_per_token`
+    `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`max_output_tokens`/`input_cost_per_token`/`output_cost_per_token`
     plus
     `cap:<name>=true|false` flags;
-    `auto_cacher`/`has_storage_rent`/`storage_rent`/`verified_at` hard-reject;
+    `UNSUPPORTED_FIELDS` names every deliberately-excluded field with its own
+    operator-facing reason
+    (`auto_cacher`/`has_storage_rent`/`storage_rent`/`source`/`verified_at`/`capabilities`),
+    welded to `OverlayCell`'s serialized field set by
+    `every_overlay_cell_field_is_settable_or_deliberately_excluded` so the next
+    overlay field is a one-touch change;
     value validation reuses `CachePricingOverride::validate` against ONLY the
     fields this call touches (`validate_updates`). `disable <selector>` writes
     JSON `null` for a known selector, discarding prior fields. `export`

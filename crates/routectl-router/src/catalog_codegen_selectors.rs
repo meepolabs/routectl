@@ -22,6 +22,22 @@ pub struct TieredSelector {
     pub litellm_key: &'static str,
     pub models_dev_model: &'static str,
     pub min_prefix_tokens: u32,
+    /// When `true`, `model_glob` spans litellm entries whose
+    /// `max_output_tokens` genuinely differ (a gateway or region-restricted
+    /// re-listing of the same model generation caps output lower than the
+    /// direct API does), so no single ceiling is right for the glob.
+    /// `max_output_tokens` on the generated row is forced `None`; every
+    /// other field is still derived. Same fail-closed posture as
+    /// [`AutoCacherSelector::context_ambiguous`], applied to the output
+    /// ceiling: a too-high ceiling gets requests rejected upstream and a
+    /// too-low one silently truncates, so ABSENT beats a guess.
+    ///
+    /// A DOCUMENTED ASSERTION, never the derivation's source of truth:
+    /// `catalog_codegen::output_ceiling_for` re-derives the verdict from
+    /// every spanned snapshot entry itself, and
+    /// `every_selectors_output_ambiguous_flag_matches_the_snapshots` fails
+    /// when this flag and the snapshots disagree.
+    pub output_ambiguous: bool,
 }
 
 /// Anthropic direct-API selectors. `models_dev` provider key is
@@ -33,42 +49,56 @@ pub const ANTHROPIC_SELECTORS: &[TieredSelector] = &[
         litellm_key: "claude-opus-4-8",
         models_dev_model: "claude-opus-4-8",
         min_prefix_tokens: 1024,
+        output_ambiguous: false,
     },
     TieredSelector {
         model_glob: "claude-sonnet-4-6*",
         litellm_key: "claude-sonnet-4-6",
         models_dev_model: "claude-sonnet-4-6",
         min_prefix_tokens: 1024,
+        // litellm lists this generation at three different ceilings across
+        // hosts (64000 direct / vertex / azure, 16384 on snowflake) and
+        // models.dev states 128000 -- no single ceiling holds for the glob.
+        output_ambiguous: true,
     },
     TieredSelector {
         model_glob: "claude-sonnet-4-5*",
         litellm_key: "claude-sonnet-4-5",
         models_dev_model: "claude-sonnet-4-5",
         min_prefix_tokens: 1024,
+        // The glob spans 64000 (direct / vertex / azure), 16384 (snowflake),
+        // and 8192 (gov-region bedrock re-listings).
+        output_ambiguous: true,
     },
     TieredSelector {
         model_glob: "claude-opus-4-7*",
         litellm_key: "claude-opus-4-7",
         models_dev_model: "claude-opus-4-7",
         min_prefix_tokens: 2048,
+        output_ambiguous: false,
     },
     TieredSelector {
         model_glob: "claude-opus-4-6*",
         litellm_key: "claude-opus-4-6",
         models_dev_model: "claude-opus-4-6",
         min_prefix_tokens: 4096,
+        output_ambiguous: false,
     },
     TieredSelector {
         model_glob: "claude-opus-4-5*",
         litellm_key: "claude-opus-4-5",
         models_dev_model: "claude-opus-4-5",
         min_prefix_tokens: 4096,
+        output_ambiguous: false,
     },
     TieredSelector {
         model_glob: "claude-haiku-4-5*",
         litellm_key: "claude-haiku-4-5",
         models_dev_model: "claude-haiku-4-5",
         min_prefix_tokens: 4096,
+        // The glob spans 64000 (direct / azure), 16384 (snowflake), and 8192
+        // (vertex).
+        output_ambiguous: true,
     },
 ];
 
@@ -81,24 +111,30 @@ pub const BEDROCK_SELECTORS: &[TieredSelector] = &[
         litellm_key: "anthropic.claude-sonnet-4-6",
         models_dev_model: "anthropic.claude-sonnet-4-6",
         min_prefix_tokens: 1024,
+        output_ambiguous: false,
     },
     TieredSelector {
         model_glob: "anthropic.claude-sonnet-4-5*",
         litellm_key: "anthropic.claude-sonnet-4-5-20250929-v1:0",
         models_dev_model: "anthropic.claude-sonnet-4-5-20250929-v1:0",
         min_prefix_tokens: 4096,
+        // The gov-region re-listings cap output at 8192 where the commercial
+        // regions allow 64000.
+        output_ambiguous: true,
     },
     TieredSelector {
         model_glob: "anthropic.claude-haiku-4-5*",
         litellm_key: "anthropic.claude-haiku-4-5-20251001-v1:0",
         models_dev_model: "anthropic.claude-haiku-4-5-20251001-v1:0",
         min_prefix_tokens: 4096,
+        output_ambiguous: false,
     },
     TieredSelector {
         model_glob: "anthropic.claude-opus-4-5*",
         litellm_key: "anthropic.claude-opus-4-5-20251101-v1:0",
         models_dev_model: "anthropic.claude-opus-4-5-20251101-v1:0",
         min_prefix_tokens: 4096,
+        output_ambiguous: false,
     },
 ];
 
@@ -147,6 +183,22 @@ pub struct AutoCacherSelector {
     /// dimension and not the other (`grok-*` prices within 2x but spans a
     /// 131K-to-2M window range).
     pub price_ambiguous: bool,
+    /// When `true`, `model_glob` matches litellm entries whose
+    /// `max_output_tokens` genuinely differ, so no single output ceiling is
+    /// right for the glob. `max_output_tokens` on the generated row is
+    /// forced `None`; every other field is still derived. Same fail-closed
+    /// posture as [`Self::context_ambiguous`], applied to the output
+    /// ceiling -- see [`TieredSelector::output_ambiguous`] for why a wrong
+    /// ceiling is worse than an absent one.
+    ///
+    /// Every vendor-prefix glob in [`OPENAI_COMPAT_SELECTORS`] and the
+    /// `openai-responses` catch-all sets this: a prefix spanning one
+    /// vendor's whole lineup (and the third-party gateway re-listings of
+    /// it) never lands on one ceiling.
+    ///
+    /// A DOCUMENTED ASSERTION, never the derivation's source of truth --
+    /// see [`TieredSelector::output_ambiguous`].
+    pub output_ambiguous: bool,
 }
 
 pub const OPENAI_RESPONSES_SELECTORS: &[AutoCacherSelector] = &[AutoCacherSelector {
@@ -163,6 +215,9 @@ pub const OPENAI_RESPONSES_SELECTORS: &[AutoCacherSelector] = &[AutoCacherSelect
     // snapshots price from $0.02/M (embeddings) to $150/M (o1-pro) -- no
     // single rate is defensible for the glob.
     price_ambiguous: true,
+    // Same reason applied to the output ceiling: the glob spans the whole
+    // OpenAI lineup, which the snapshots cap anywhere from 0 to 128000.
+    output_ambiguous: true,
 }];
 
 pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
@@ -179,6 +234,11 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // Pinned to one model (unlike the `deepseek-*` catch-all below):
         // every id this glob matches prices identically in both snapshots.
         price_ambiguous: false,
+        // The two sources disagree on the DIRECT deepseek ceiling (litellm
+        // 8192, models.dev 384000) and the glob also spans third-party
+        // re-listings at 384000. Neither source is corroborated by the
+        // other, so no figure is defensible: absent, not guessed.
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "deepseek-*",
@@ -191,6 +251,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         economics_unconfirmed: false,
         context_ambiguous: false,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "gemini-*",
@@ -203,6 +264,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         economics_unconfirmed: false,
         context_ambiguous: false,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "grok-*",
@@ -219,6 +281,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // most of the family.
         context_ambiguous: true,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "kimi-*",
@@ -231,6 +294,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         economics_unconfirmed: false,
         context_ambiguous: false,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "moonshot-*",
@@ -243,6 +307,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         economics_unconfirmed: false,
         context_ambiguous: false,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "mistral-*",
@@ -257,6 +322,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // of very different sizes in the vendored snapshot.
         context_ambiguous: true,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "qwen-*",
@@ -271,6 +337,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // (qwen-turbo / qwen-coder) tokens in the vendored snapshot.
         context_ambiguous: true,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "minimax-m3*",
@@ -285,6 +352,11 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // Pinned to the MiniMax-M3 generation, which prices identically in
         // both snapshots; the `minimax-*` catch-all below spans a 2x range.
         price_ambiguous: false,
+        // Every litellm entry this glob spans agrees at 512000, so the glob
+        // itself is coherent -- but models.dev states 128000 for the same
+        // generation, and that cross-source gap is what withholds the
+        // ceiling (see `catalog_codegen::output_ceiling_for`).
+        output_ambiguous: false,
     },
     AutoCacherSelector {
         model_glob: "minimax-*",
@@ -300,6 +372,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // window can be baked for the glob.
         context_ambiguous: true,
         price_ambiguous: true,
+        output_ambiguous: true,
     },
 ];
 

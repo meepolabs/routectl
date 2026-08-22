@@ -135,6 +135,11 @@ pub struct OverlayCell {
     /// Context-window override, in tokens. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Output-ceiling override, in tokens. Unset inherits the baked value.
+    /// `0` is rejected at load: unset is expressed by omitting the field,
+    /// never by a zero ceiling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// Base input price override, in dollars per token. Unset inherits the
     /// baked rate.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,7 +263,8 @@ pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
     // Cell VALUE degeneracy: the file is hand-editable, so a structurally
     // valid overlay can still carry a degenerate cell (rm <= 0, non-finite
     // wm/rm reachable from an f32-overflowing JSON literal, a zero context
-    // window). Run the shared value predicate per cell: any HARD defect
+    // window or output ceiling). Run the shared value predicate per cell: any
+    // HARD defect
     // fails closed, naming the selector and field; the one SOFT defect (a
     // finite below-sentinel wm) warns and is accepted -- an operator may
     // knowingly run a cheap write multiplier (settled constraint).
@@ -268,6 +274,7 @@ pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
             cell.wm,
             cell.rm,
             cell.max_context_tokens,
+            cell.max_output_tokens,
             cell.input_cost_per_token,
             cell.output_cost_per_token,
         ) {
@@ -492,6 +499,7 @@ mod tests {
             ttl_seconds: Some(300),
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -507,6 +515,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: Some(1024),
             max_context_tokens: Some(200_000),
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
@@ -691,7 +700,8 @@ mod tests {
     // cell, failing closed on a HARD defect and warn-and-accepting a SOFT
     // one. The overlay file is explicitly hand-editable, so load() is the
     // trust boundary for degenerate cell VALUES (rm <= 0, non-finite
-    // wm/rm, max_context_tokens 0), distinct from the structural checks
+    // wm/rm, max_context_tokens 0, max_output_tokens 0), distinct from the
+    // structural checks
     // above.
     // -----------------------------------------------------------------------
 
@@ -761,6 +771,45 @@ mod tests {
             }
             other => panic!("expected Corrupt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_rejects_zero_max_output_tokens_naming_the_field() {
+        // Arrange: a zero output ceiling would read as "emit nothing"
+        // downstream; omitting the field is how a ceiling is left unset.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""max_output_tokens":0"#)).unwrap();
+
+        // Act
+        let err = load(&path).expect_err("max_output_tokens 0 must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { reason, .. } => {
+                assert!(reason.contains("openai-compat:grok-*"), "reason: {reason}");
+                assert!(reason.contains("max_output_tokens"), "reason: {reason}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_accepts_a_positive_max_output_tokens() {
+        // The positive control for the zero-reject above: a real ceiling on
+        // the same fixture shape loads and round-trips.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""max_output_tokens":64000"#)).unwrap();
+
+        let overlay = load(&path).expect("a positive ceiling must load");
+
+        assert_eq!(
+            overlay.cells["openai-compat:grok-*"]
+                .as_ref()
+                .and_then(|c| c.max_output_tokens),
+            Some(64_000),
+        );
     }
 
     #[test]

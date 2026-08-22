@@ -12,7 +12,8 @@
 //! [`build_import_candidate`] groups the derived cells by selector and
 //! includes a field on the candidate [`OverlayCell`] ONLY when every cell
 //! in the group agrees on it; a disagreeing field is OMITTED and stays
-//! baked-authoritative. `rm` / `max_context_tokens` / the base per-token
+//! baked-authoritative. `rm` / `max_context_tokens` / `max_output_tokens` /
+//! the base per-token
 //! rates / `capabilities` are computed once per selector and shared across
 //! tiers, so they always agree and always import; a single-cell
 //! (auto-cacher) family agrees with itself trivially and imports every
@@ -219,7 +220,8 @@ fn admit_group(
 }
 
 /// Reject a candidate cell carrying a non-finite or non-positive `wm` /
-/// `rm`, a zero `max_context_tokens` / `ttl_seconds`, or a negative /
+/// `rm`, a zero `max_context_tokens` / `max_output_tokens` / `ttl_seconds`,
+/// or a negative /
 /// non-finite base per-token rate -- a vendor
 /// snapshot publishing a degenerate derived number (e.g. a negative or
 /// zero cache-read price, or an overflowing division) should skip that
@@ -250,6 +252,11 @@ fn validate_candidate_cell(key: &str, cell: &OverlayCell) -> Result<(), SkippedS
             "max_context_tokens",
             max_context_tokens.to_string(),
         ));
+    }
+    if let Some(max_output_tokens) = cell.max_output_tokens
+        && max_output_tokens == 0
+    {
+        return Err(invalid("max_output_tokens", max_output_tokens.to_string()));
     }
     if let Some(ttl_seconds) = cell.ttl_seconds
         && ttl_seconds == 0
@@ -285,6 +292,7 @@ fn group_and_agree(group: &[GeneratedCell], verified_at: &str) -> OverlayCell {
         ttl_seconds: agree(group, |cell| cell.ttl_seconds),
         min_prefix_tokens: agree(group, |cell| cell.min_prefix_tokens),
         max_context_tokens: agree(group, |cell| cell.max_context_tokens).flatten(),
+        max_output_tokens: agree(group, |cell| cell.max_output_tokens).flatten(),
         input_cost_per_token: agree(group, |cell| cell.input_cost_per_token).flatten(),
         output_cost_per_token: agree(group, |cell| cell.output_cost_per_token).flatten(),
         capabilities: agree(group, |cell| cell.capabilities.clone())
@@ -586,6 +594,14 @@ fn row(
         && candidate.max_context_tokens != effective_max_context
     {
         impact = escalate(impact, classify_field(ImpactField::MaxContextTokens));
+    }
+
+    let effective_max_output = existing_cell
+        .and_then(|c| c.max_output_tokens)
+        .or_else(|| baked.and_then(|b| b.max_output_tokens));
+    if candidate.max_output_tokens.is_some() && candidate.max_output_tokens != effective_max_output
+    {
+        impact = escalate(impact, classify_field(ImpactField::MaxOutputTokens));
     }
 
     let effective_input_cost = existing_cell
@@ -911,6 +927,7 @@ mod tests {
             auto_cacher: false,
             tier: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: Vec::new(),
@@ -1386,6 +1403,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -1429,6 +1447,7 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
                 capabilities: None,
@@ -1466,6 +1485,7 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
                 capabilities: None,
@@ -1619,6 +1639,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -1947,6 +1968,7 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
                 capabilities: None,

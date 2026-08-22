@@ -126,6 +126,19 @@ pub struct CatalogRow {
     /// answer; a guessed window would be a silent data error downstream
     /// (`context_fraction`, deferred to the display work).
     pub max_context_tokens: Option<u32>,
+    /// The model's maximum output-token ceiling, when every vendored entry
+    /// this `(provider_kind, model_glob)` cell spans agrees on one figure
+    /// AND both sources confirm it.
+    ///
+    /// `None` (fail-closed) when no single ceiling is defensible for the
+    /// cell -- a glob spanning models with genuinely different ceilings, a
+    /// structural catch-all with no backing model, or a figure that fails
+    /// the derivation's sanity bounds. Same discipline as
+    /// [`Self::max_context_tokens`]: `Some(0)` is a DATA BUG, never "unset"
+    /// -- a zero ceiling would read as "emit no output" downstream, so the
+    /// unset state is `None` and the overlay load path rejects `Some(0)`
+    /// outright.
+    pub max_output_tokens: Option<u32>,
     /// Base input price in dollars PER TOKEN, when both vendored sources
     /// confirm one rate for this exact `(provider_kind, model_glob)` cell.
     /// This is the absolute rate `wm` / `rm` are multipliers OF, so a
@@ -178,6 +191,7 @@ impl CatalogRow {
             auto_cacher: false,
             tier: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: BTreeMap::new(),
@@ -211,6 +225,7 @@ impl CatalogRow {
             auto_cacher: ov.auto_cacher.unwrap_or(self.auto_cacher),
             tier: self.tier,
             max_context_tokens: ov.max_context_tokens.or(self.max_context_tokens),
+            max_output_tokens: ov.max_output_tokens.or(self.max_output_tokens),
             input_cost_per_token: ov.input_cost_per_token.or(self.input_cost_per_token),
             output_cost_per_token: ov.output_cost_per_token.or(self.output_cost_per_token),
             capabilities: self.capabilities.clone(),
@@ -219,8 +234,9 @@ impl CatalogRow {
 }
 
 /// A degeneracy found in one catalog cell's economic values. The single
-/// home for the rm / max_context_tokens / wm invariants, shared by the
-/// overlay load path ([`crate::catalog_overlay::load`], fail-closed) and
+/// home for the rm / max_context_tokens / max_output_tokens / wm
+/// invariants, shared by the overlay load
+/// path ([`crate::catalog_overlay::load`], fail-closed) and
 /// [`CachePricingOverride::validate`] (ack-gated). The predicate only
 /// CLASSIFIES; each caller owns its posture on the result.
 ///
@@ -240,6 +256,10 @@ pub(crate) enum CellDefect {
     /// `max_context_tokens` is `Some(0)`: a zero window is a silent data
     /// error downstream; `None` is the way to leave it unconfirmed. HARD.
     ZeroMaxContextTokens,
+    /// `max_output_tokens` is `Some(0)`: a zero output ceiling would read as
+    /// "emit nothing" downstream; `None` is the way to leave it
+    /// unconfirmed. HARD.
+    ZeroMaxOutputTokens,
     /// `wm` is finite but below the sentinel's `wm` (2.0): a too-cheap
     /// write multiplier can make a cache break look falsely profitable.
     /// SOFT -- an operator may knowingly accept it.
@@ -284,6 +304,7 @@ impl CellDefect {
             Self::ReadMultiplier(_) => "rm",
             Self::WriteMultiplierNotFinite(_) | Self::WriteMultiplierBelowSentinel(_) => "wm",
             Self::ZeroMaxContextTokens => "max_context_tokens",
+            Self::ZeroMaxOutputTokens => "max_output_tokens",
             Self::BaseRate(which, _) => which.field(),
         }
     }
@@ -304,6 +325,10 @@ impl CellDefect {
                 "max_context_tokens must not be Some(0); use None to leave the window unconfirmed"
                     .to_string()
             }
+            Self::ZeroMaxOutputTokens => {
+                "max_output_tokens must not be Some(0); use None to leave the ceiling unconfirmed"
+                    .to_string()
+            }
             Self::WriteMultiplierBelowSentinel(wm) => format!(
                 "wm = {wm} is below the conservative sentinel wm = {}, which can make a cache \
                  break look falsely profitable",
@@ -320,14 +345,15 @@ impl CellDefect {
 
 /// The ONE copy of the cell-value invariants, shared by the overlay load
 /// path and [`CachePricingOverride::validate`]. Pure: it classifies the
-/// three economic value fields into [`CellDefect`]s and takes no posture.
-/// Field order (`wm`, `rm`, `max_context_tokens`) is deliberate -- callers
-/// that short-circuit on the first defect surface the same field they did
-/// before this predicate was extracted.
+/// four economic value fields into [`CellDefect`]s and takes no posture.
+/// Field order (`wm`, `rm`, `max_context_tokens`, `max_output_tokens`) is
+/// deliberate -- callers that short-circuit on the first defect surface the
+/// same field they did before this predicate was extracted.
 pub(crate) fn cell_value_defects(
     wm: Option<f32>,
     rm: Option<f32>,
     max_context_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
     input_cost_per_token: Option<f32>,
     output_cost_per_token: Option<f32>,
 ) -> Vec<CellDefect> {
@@ -346,6 +372,9 @@ pub(crate) fn cell_value_defects(
     }
     if max_context_tokens == Some(0) {
         defects.push(CellDefect::ZeroMaxContextTokens);
+    }
+    if max_output_tokens == Some(0) {
+        defects.push(CellDefect::ZeroMaxOutputTokens);
     }
     for (rate, which) in [
         (input_cost_per_token, BaseRate::Input),
@@ -410,6 +439,12 @@ pub struct CachePricingOverride {
     /// wrong -- e.g. the operator has confirmed the vendor's real window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Operator-supplied output-token ceiling. `Some` wins over the baked
+    /// ceiling (or the baked `None`); `None` inherits the baked value
+    /// unchanged. `Some(0)` is rejected -- `None` is how a ceiling is left
+    /// unconfirmed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// Operator-supplied base input price in dollars per token. `Some` wins
     /// over the baked rate (or the baked `None`); `None` inherits the baked
     /// value unchanged. Set this when the baked table has no rate for a cell,
@@ -425,16 +460,18 @@ pub struct CachePricingOverride {
 impl CachePricingOverride {
     /// Reject a degenerate override before it is merged onto a baked row.
     ///
-    /// The `wm` / `rm` / `max_context_tokens` structural invariants are the
-    /// shared `cell_value_defects` predicate; this method adds the
-    /// caller-owned posture on its result plus the `verified_at` check.
+    /// The `wm` / `rm` / `max_context_tokens` / `max_output_tokens`
+    /// structural invariants are the shared `cell_value_defects` predicate;
+    /// this method adds the caller-owned posture on its result plus the
+    /// `verified_at` check.
     ///
     /// RELIABILITY GUARD: a finite `wm` BELOW the sentinel's `wm` (2.0) is
     /// rejected unless `override_acknowledges_cost_risk = true` -- a too-cheap
     /// write multiplier makes a cache break look falsely profitable. Every
     /// other cell defect is rejected unconditionally (the ack flag does not
     /// exempt them): a non-positive OR non-finite `rm`, a non-finite `wm`, and
-    /// a `max_context_tokens` of `Some(0)`. A `verified_at` value that does not
+    /// a `max_context_tokens` / `max_output_tokens` of `Some(0)`. A
+    /// `verified_at` value that does not
     /// parse as `YYYY-MM-DD` is rejected so a malformed stamp fails fast at
     /// startup rather than silently going wrong later.
     /// Shared by the merge path ([`CatalogRow::with_overrides`]) and the
@@ -444,6 +481,7 @@ impl CachePricingOverride {
             self.wm,
             self.rm,
             self.max_context_tokens,
+            self.max_output_tokens,
             self.input_cost_per_token,
             self.output_cost_per_token,
         ) {
@@ -1025,6 +1063,7 @@ fn apply_overlay_cell(base: &CatalogRow, cell: &OverlayCell) -> CatalogRow {
         auto_cacher: base.auto_cacher,
         tier: base.tier,
         max_context_tokens: cell.max_context_tokens.or(base.max_context_tokens),
+        max_output_tokens: cell.max_output_tokens.or(base.max_output_tokens),
         input_cost_per_token: cell.input_cost_per_token.or(base.input_cost_per_token),
         output_cost_per_token: cell.output_cost_per_token.or(base.output_cost_per_token),
         capabilities: merge_capabilities(&base.capabilities, cell.capabilities.as_ref()),
@@ -1195,6 +1234,7 @@ mod tests {
             auto_cacher: _,
             tier: _,
             max_context_tokens: _,
+            max_output_tokens: _,
             input_cost_per_token: _,
             output_cost_per_token: _,
             capabilities: _,
@@ -2142,8 +2182,152 @@ mod tests {
         }
     }
 
-    // -- two-layer merge -------------------------------------------------
+    // -- max_output_tokens ----------------------------------------------------
 
+    #[test]
+    fn coherent_claude_glob_lookup_returns_the_baked_output_ceiling() {
+        // Arrange / Act: Opus 4.8's glob is pinned to one model generation
+        // whose ceiling both vendored sources confirm at 128000.
+        let r = lookup("anthropic-api", "claude-opus-4-8", None);
+
+        // Assert
+        assert_eq!(r.max_output_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn output_ambiguous_glob_bakes_no_ceiling() {
+        // A vendor-wide prefix spans models the snapshots cap very
+        // differently, so no single ceiling is defensible -- the same
+        // fail-closed answer `max_context_tokens` gives for a broad glob.
+        for (provider_kind, model) in [
+            ("openai-compat", "deepseek-v4-pro"),
+            ("openai-compat", "grok-4-3"),
+            ("openai-responses", "gpt-5.6"),
+        ] {
+            let r = lookup(provider_kind, model, None);
+            assert_eq!(
+                r.max_output_tokens, None,
+                "lookup({provider_kind:?}, {model:?}) must not bake an output ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn sentinel_max_output_tokens_is_none() {
+        assert_eq!(CatalogRow::sentinel().max_output_tokens, None);
+    }
+
+    #[test]
+    fn provider_catch_all_carries_no_output_ceiling() {
+        // A bare `"*"` matches every model the kind serves, at every
+        // ceiling.
+        let r = lookup("anthropic-api", "claude-haiku-3-5", None);
+        assert_eq!(r.max_output_tokens, None);
+    }
+
+    #[test]
+    fn every_baked_output_ceiling_fits_within_its_own_context_window() {
+        // Cross-field coherence on the SHIPPED table: a row that confirms
+        // both figures can never claim it emits more than its window holds.
+        for cell in TABLE.iter() {
+            if let (Some(ceiling), Some(window)) =
+                (cell.row.max_output_tokens, cell.row.max_context_tokens)
+            {
+                assert!(
+                    ceiling <= window,
+                    "{} {} bakes max_output_tokens {ceiling} above max_context_tokens {window}",
+                    cell.provider_kind,
+                    cell.model_glob,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_baked_row_carries_a_zero_output_ceiling() {
+        // `Some(0)` is a data bug, never "unset" -- `None` is the unset
+        // state (see `CatalogRow::max_output_tokens`).
+        for cell in TABLE.iter() {
+            assert_ne!(
+                cell.row.max_output_tokens,
+                Some(0),
+                "{} {} must express an unconfirmed ceiling as None",
+                cell.provider_kind,
+                cell.model_glob,
+            );
+        }
+    }
+
+    #[test]
+    fn with_overrides_output_ceiling_some_wins_over_baked_some_and_none() {
+        // Arrange: a baked row that HAS a ceiling, and one that does not.
+        let baked_some = lookup("anthropic-api", "claude-opus-4-8", None);
+        assert_eq!(baked_some.max_output_tokens, Some(128_000));
+        let baked_none = lookup("openai-compat", "grok-4-3", None);
+        assert_eq!(baked_none.max_output_tokens, None);
+        let ov = CachePricingOverride {
+            max_output_tokens: Some(32_000),
+            ..Default::default()
+        };
+
+        // Act / Assert: the override value wins in both directions.
+        assert_eq!(
+            baked_some
+                .with_overrides(&ov)
+                .expect("accepted")
+                .max_output_tokens,
+            Some(32_000),
+        );
+        assert_eq!(
+            baked_none
+                .with_overrides(&ov)
+                .expect("accepted")
+                .max_output_tokens,
+            Some(32_000),
+        );
+    }
+
+    #[test]
+    fn with_overrides_unset_output_ceiling_inherits_the_baked_value() {
+        // Arrange: an override touching an unrelated field only.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
+        let ov = CachePricingOverride {
+            ttl_seconds: Some(3_600),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert
+        assert_eq!(merged.max_output_tokens, baked.max_output_tokens);
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_output_tokens() {
+        // Arrange
+        let ov = CachePricingOverride {
+            max_output_tokens: Some(0),
+            ..Default::default()
+        };
+
+        // Act
+        let err = ov.validate().expect_err("Some(0) must be rejected");
+
+        // Assert
+        assert!(err.contains("max_output_tokens"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_positive_max_output_tokens() {
+        let ov = CachePricingOverride {
+            max_output_tokens: Some(64_000),
+            ..Default::default()
+        };
+        assert!(ov.validate().is_ok());
+    }
+
+    // -- two-layer merge -------------------------------------------------
     fn baked_fixture() -> CatalogRow {
         lookup("anthropic-api", "claude-opus-4-8", Some("5m"))
     }
@@ -2157,6 +2341,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -2172,6 +2357,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -2242,6 +2428,7 @@ mod tests {
             ttl_seconds: Some(9_999),
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
@@ -2252,6 +2439,39 @@ mod tests {
         // Untouched fields still inherit the baked row.
         assert_eq!(row.wm, baked.wm);
         assert_eq!(row.rm, baked.rm);
+    }
+
+    #[test]
+    fn merge_overlay_output_ceiling_applies_over_baked_and_unset_inherits() {
+        // Arrange: the baked Opus 4.8 fixture already carries a ceiling.
+        let baked = baked_fixture();
+        assert_eq!(baked.max_output_tokens, Some(128_000));
+        let overriding = Some(OverlayCell {
+            max_output_tokens: Some(32_000),
+            ..user_cell()
+        });
+        let untouched = Some(OverlayCell {
+            max_output_tokens: None,
+            ..user_cell()
+        });
+
+        // Act / Assert: the overlay's ceiling wins.
+        assert_eq!(
+            merge(Some(&baked), Some(&overriding))
+                .priced()
+                .expect("present")
+                .max_output_tokens,
+            Some(32_000),
+        );
+
+        // Act / Assert: an unset overlay field inherits the baked ceiling.
+        assert_eq!(
+            merge(Some(&baked), Some(&untouched))
+                .priced()
+                .expect("present")
+                .max_output_tokens,
+            baked.max_output_tokens,
+        );
     }
 
     #[test]
@@ -2269,6 +2489,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
@@ -2296,6 +2517,7 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
             input_cost_per_token: None,
             output_cost_per_token: None,
             capabilities: None,
