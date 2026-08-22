@@ -164,8 +164,10 @@ impl Router {
                 }
                 Some((feature, source)) => {
                     tracing::debug!(
-                        provider = %target.provider_name,
-                        model = %target.nickname.as_deref().unwrap_or(""),
+                        provider = %routectl_core::sanitize_for_log(&target.provider_name),
+                        model = %routectl_core::sanitize_for_log(
+                            target.nickname.as_deref().unwrap_or("")
+                        ),
                         capability_key = %feature,
                         source = %source.as_str(),
                         "target skipped: capability in unsupported_features list",

@@ -58,6 +58,134 @@ async fn build_router_from_config_rejects_forwarded_provider_on_non_anthropic_ho
     assert!(matches!(err, Error::Config(_)), "got: {err:?}");
 }
 
+/// A hostile provider key reaching an advisory startup warning must not
+/// survive into the log line: the `%`-rendered field writes its value
+/// verbatim, so a newline plus an ANSI CSI sequence in a `[providers.X]`
+/// key would forge a whole startup log record.
+///
+/// The first assertion is the positive control -- it proves the validator's
+/// own message really does carry the raw control bytes, so the sanitized
+/// assertion below is testing the sanitizer rather than an inert fixture.
+#[tokio::test]
+async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
+    let mut config: Config = toml::from_str(
+        "[providers.\"evil\\nkey\\u001B[31m\"]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://example.invalid\"\n\
+         api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+         auto_emit_per_block_breakpoints = true\n",
+    )
+    .expect("config must parse");
+    let _usage_dir = isolate_usage_db(&mut config);
+
+    let raw = routectl_router::per_block_breakpoint_warnings(&config);
+    let raw_message = raw.first().expect("the inert-knob warning must fire");
+    assert!(
+        raw_message.contains('\n') && raw_message.contains('\u{1b}'),
+        "fixture must carry raw control bytes pre-sanitize: {raw_message:?}"
+    );
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let (result, lines) = routectl_testkit::capture_lines(Box::pin(build_router_from_config(
+        Arc::new(config),
+        secrets,
+    )))
+    .await;
+    // `Router` is not `Debug`, so match rather than `expect`.
+    if let Err(e) = result {
+        panic!("an inert advisory knob must not fail the router build: {e:?}");
+    }
+
+    let warned: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("per-block breakpoint warning"))
+        .collect();
+    assert_eq!(warned.len(), 1, "captured lines: {lines:?}");
+    let line = warned[0];
+    assert!(!line.contains('\n'), "{line:?}");
+    assert!(!line.contains('\u{1b}'), "{line:?}");
+    assert!(line.contains("evil?key?[31m"), "{line:?}");
+}
+
+/// The whole captured startup line SET must be control-byte clean, not just
+/// the one loop a single test happens to name. The fixture fires two
+/// independent hostile loops off ONE provider key -- the per-block
+/// breakpoint advisory and the class-policy advisory (via a
+/// `[providers.X.class_overrides]` health-status remap) -- plus the
+/// provider-build failure warn that an absent `env://` ref produces, so a
+/// sink added to any of those paths without a sanitizer fails here.
+///
+/// Positive controls come first, as above: both validators' raw messages are
+/// asserted hostile before the rendered lines are asserted clean.
+#[tokio::test]
+async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
+    let mut config: Config = toml::from_str(
+        "[providers.\"evil\\nkey\\u001B[31m\"]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://example.invalid\"\n\
+         api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+         auto_emit_per_block_breakpoints = true\n\
+         [providers.\"evil\\nkey\\u001B[31m\".class_overrides]\n\
+         503 = \"bad-request\"\n\
+         [models.\"evil\\nmodel\\u001B[31m\"]\n\
+         provider = \"evil\\nkey\\u001B[31m\"\n\
+         upstream = \"some-upstream\"\n\
+         max_output_tokens = 0\n",
+    )
+    .expect("config must parse");
+    let _usage_dir = isolate_usage_db(&mut config);
+
+    for (label, raw) in [
+        (
+            "per-block breakpoint",
+            routectl_router::per_block_breakpoint_warnings(&config),
+        ),
+        (
+            "class policy",
+            routectl_router::class_policy_warnings(&config),
+        ),
+    ] {
+        let message = raw
+            .first()
+            .unwrap_or_else(|| panic!("the {label} advisory must fire for this fixture"));
+        assert!(
+            message.contains('\n') && message.contains('\u{1b}'),
+            "{label} fixture must carry raw control bytes pre-sanitize: {message:?}"
+        );
+    }
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let (result, lines) = routectl_testkit::capture_lines(Box::pin(build_router_from_config(
+        Arc::new(config),
+        secrets,
+    )))
+    .await;
+    // `Router` is not `Debug`, so match rather than `expect`.
+    if let Err(e) = result {
+        panic!("advisory warnings and an absent secret ref must not fail the build: {e:?}");
+    }
+
+    for line in &lines {
+        assert!(!line.contains('\u{1b}'), "captured line: {line:?}");
+        // The subscriber terminates each record with a newline, so an
+        // interior one is the forged-record signal.
+        assert!(
+            !line.trim_end_matches('\n').contains('\n'),
+            "captured line: {line:?}"
+        );
+    }
+    for msg in [
+        "per-block breakpoint warning",
+        "class policy warning",
+        "skipping provider (build failed)",
+    ] {
+        assert!(
+            lines.iter().any(|l| l.contains(msg)),
+            "expected a `{msg}` line; captured: {lines:?}"
+        );
+    }
+}
+
 /// The Bedrock invoke-lane model-family gate is wired into
 /// `build_router_from_config_with_overlay` itself, not only into the
 /// collected-validation path that `config check` and the serve pre-parse

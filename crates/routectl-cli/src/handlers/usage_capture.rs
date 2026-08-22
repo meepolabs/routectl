@@ -965,8 +965,8 @@ impl UsageCapture {
         let model = self.record.upstream.as_deref().unwrap_or("");
         if is_cache_thrash(strategy, cache_creation, cache_read) {
             tracing::warn!(
-                provider = %provider,
-                model = %model,
+                provider = %routectl_core::sanitize_for_log(provider),
+                model = %routectl_core::sanitize_for_log(model),
                 strategy = "auto_emitted",
                 cache_creation = cache_creation,
                 cache_read = cache_read,
@@ -974,8 +974,8 @@ impl UsageCapture {
             );
         } else {
             tracing::debug!(
-                provider = %provider,
-                model = %model,
+                provider = %routectl_core::sanitize_for_log(provider),
+                model = %routectl_core::sanitize_for_log(model),
                 strategy = "auto_emitted",
                 cache_creation = cache_creation,
                 cache_read = cache_read,
@@ -1015,8 +1015,8 @@ impl UsageCapture {
         if cache_active {
             tracing::info!(
                 request_id = %request_id,
-                provider = %provider,
-                model = %model,
+                provider = %routectl_core::sanitize_for_log(provider),
+                model = %routectl_core::sanitize_for_log(model),
                 strategy = %strategy,
                 cache_read = cache_read,
                 prompt = prompt,
@@ -1026,8 +1026,8 @@ impl UsageCapture {
         } else {
             tracing::debug!(
                 request_id = %request_id,
-                provider = %provider,
-                model = %model,
+                provider = %routectl_core::sanitize_for_log(provider),
+                model = %routectl_core::sanitize_for_log(model),
                 strategy = %strategy,
                 cache_read = cache_read,
                 prompt = prompt,

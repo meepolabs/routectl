@@ -117,7 +117,7 @@ impl Router {
         if decision.placed() {
             tracing::debug!(
                 event = "quota_placement",
-                model = %nickname,
+                model = %routectl_core::sanitize_for_log(nickname),
                 arm = ?decision,
                 below_cap_total = totals.below_cap,
                 all_capped_total = totals.all_capped,
@@ -128,7 +128,7 @@ impl Router {
         } else {
             tracing::warn!(
                 event = "quota_placement_fallback",
-                model = %nickname,
+                model = %routectl_core::sanitize_for_log(nickname),
                 arm = ?decision,
                 below_cap_total = totals.below_cap,
                 all_capped_total = totals.all_capped,

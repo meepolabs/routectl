@@ -352,7 +352,7 @@ fn emit_activation_delta(
     }
     for change in &delta.newly_activated {
         tracing::info!(
-            provider = %change.provider_id,
+            provider = %routectl_core::sanitize_for_log(&change.provider_id),
             kind = change.provider_kind,
             trigger = trigger.as_str(),
             transition = "activated",
@@ -362,7 +362,7 @@ fn emit_activation_delta(
     }
     for change in &delta.newly_deactivated {
         tracing::info!(
-            provider = %change.provider_id,
+            provider = %routectl_core::sanitize_for_log(&change.provider_id),
             kind = change.provider_kind,
             trigger = trigger.as_str(),
             transition = "deactivated",

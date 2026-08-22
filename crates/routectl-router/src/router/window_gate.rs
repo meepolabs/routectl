@@ -256,7 +256,7 @@ impl Router {
             tracing::warn!(
                 event = "window_gate_skip",
                 state_key = %report.state_key,
-                model = %report.nickname,
+                model = %routectl_core::sanitize_for_log(&report.nickname),
                 estimated_tokens,
                 corrected_tokens = report.corrected_tokens,
                 window_tokens = report.window,

@@ -270,7 +270,7 @@ fn build_candidate_cells(
 
         if ov.has_storage_rent.is_some() || ov.storage_rent.is_some() || ov.auto_cacher.is_some() {
             tracing::warn!(
-                selector = %selector,
+                selector = %routectl_core::sanitize_for_log(selector),
                 "cache-pricing migration: has_storage_rent/storage_rent/auto_cacher have no \
                  field on the catalog overlay (reserved/unused on every baked row today) and \
                  were dropped for this selector",

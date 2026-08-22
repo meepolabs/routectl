@@ -377,7 +377,7 @@ where
     let changed = changed_selectors(&cells_before, &saved.cells);
     tracing::info!(
         revision = saved.revision,
-        changed_selectors = %changed.join(","),
+        changed_selectors = %routectl_core::sanitize_for_log(&changed.join(",")),
         "catalog overlay write committed",
     );
 

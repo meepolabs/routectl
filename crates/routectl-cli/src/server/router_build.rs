@@ -6,8 +6,22 @@
 use std::sync::Arc;
 
 use routectl_auth::SecretStore;
-use routectl_core::{Error, Result};
+use routectl_core::{Error, Result, sanitize_for_log_with_cap};
 use routectl_router::{CatalogOverlay, Config, Router};
+
+use crate::commands::config::MAX_REPORTED_LINE_CHARS;
+
+/// Log-safe rendering of an advisory validator warning.
+///
+/// Every advisory validator interpolates operator-written table keys into
+/// its message, and a `%`-rendered tracing field reaches the log line
+/// verbatim -- so a `[models.X]` nickname bearing a newline plus an ANSI
+/// sequence would forge a startup log record. Same filter and same ceiling
+/// the `config check` and doctor renders of these very messages apply, so
+/// all three surfaces bound the line identically.
+fn sanitize_warning_for_log(warning: &str) -> String {
+    sanitize_for_log_with_cap(warning, MAX_REPORTED_LINE_CHARS)
+}
 
 /// Build a `Router` from the parsed config + a shared
 /// `Arc<dyn SecretStore>`, with an EMPTY catalog overlay. Thin wrapper kept
@@ -82,7 +96,7 @@ pub async fn build_router_from_config_with_overlay(
     // rejected.
     routectl_router::validate_class_policy(&config)?;
     for warning in routectl_router::class_policy_warnings(&config) {
-        tracing::warn!(warning = %warning, "class policy warning");
+        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "class policy warning");
     }
 
     // Reject divergent per-provider codex_version values (the codex
@@ -94,26 +108,26 @@ pub async fn build_router_from_config_with_overlay(
     // factory boundary every provider-construction path routes through.
     routectl_router::validate_codex_version(&config)?;
     for warning in routectl_router::codex_identity_warnings(&config) {
-        tracing::warn!(warning = %warning, "codex identity warning");
+        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "codex identity warning");
     }
 
     // `auto_emit_per_block_breakpoints` is inert on Bedrock Invoke (the
     // knob gates the Converse cachePoint surface). Advisory only.
     for warning in routectl_router::per_block_breakpoint_warnings(&config) {
-        tracing::warn!(warning = %warning, "per-block breakpoint warning");
+        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "per-block breakpoint warning");
     }
 
     // A cloud-code Gemini entry pinned to the production Cloud Code host
     // keeps that pin, but the lane default is the daily host. Advisory only.
     for warning in routectl_router::cloudcode_host_warnings(&config) {
-        tracing::warn!(warning = %warning, "cloud-code host warning");
+        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code host warning");
     }
 
     // A cloud-code Gemini model entry pinning an upstream id Google has
     // deprecated server-side still serves, but not what the id names.
     // Advisory only.
     for warning in routectl_router::cloudcode_model_warnings(&config) {
-        tracing::warn!(warning = %warning, "cloud-code model warning");
+        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code model warning");
     }
 
     // Reject malformed `[registry]` glob keys at startup so query-time

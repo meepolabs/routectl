@@ -83,9 +83,11 @@ pub fn load_and_merge_verifications(config: &mut Config) {
         Ok(v) => {
             let skipped = merge_verifications_into(config, &v);
             for sel in &skipped {
+                let selector_safe = routectl_core::sanitize_for_log(sel);
                 tracing::warn!(
-                    selector = %sel,
-                    "pricing verification for `{sel}` has a malformed date and was ignored"
+                    selector = %selector_safe,
+                    "pricing verification for `{selector_safe}` has a malformed date and was \
+                     ignored"
                 );
             }
         }

@@ -127,7 +127,7 @@ impl BuildOptions {
 
 /// Build one provider from its config entry, resolving secrets through
 /// `secrets` and applying `opts`.
-#[tracing::instrument(skip_all, fields(provider = %name))]
+#[tracing::instrument(skip_all, fields(provider = %routectl_core::sanitize_for_log(name)))]
 pub async fn build_provider_with_options(
     name: &str,
     entry: &ProviderEntry,
@@ -155,7 +155,7 @@ pub async fn build_provider_with_options(
             }
             Err(reason) => {
                 tracing::warn!(
-                    provider = %name,
+                    provider = %routectl_core::sanitize_for_log(name),
                     reason = %reason,
                     codex_version = %PINNED_CODEX_VERSION,
                     "invalid codex_version; falling back to the pinned codex identity",
@@ -223,7 +223,7 @@ pub(super) async fn build_provider_with_bedrock_model_override(
     build_provider_inner(name, entry, secrets, opts, bedrock_overrides, cached_auth).await
 }
 
-#[tracing::instrument(skip_all, fields(provider = %name))]
+#[tracing::instrument(skip_all, fields(provider = %routectl_core::sanitize_for_log(name)))]
 async fn build_provider_inner(
     name: &str,
     entry: &ProviderEntry,
@@ -830,18 +830,21 @@ fn resolve_max_thinking_entry_bytes(provider_name: &str, configured: Option<u32>
     let Some(v) = configured else {
         return default;
     };
+    // Operator-written `[providers.X]` table key, rendered by all three
+    // arms below (field plus message body) on an otherwise healthy build.
+    let provider_safe = routectl_core::sanitize_for_log(provider_name);
     if v == 0 {
         // Operator wrote `0`; treat as "unset" rather than letting a
         // zero cap silently disable the cache.
         tracing::warn!(
-            provider = %provider_name,
-            "[providers.{provider_name}] max_thinking_entry_bytes = 0 is not a valid cap (would disable the cache); falling back to the default ({default})"
+            provider = %provider_safe,
+            "[providers.{provider_safe}] max_thinking_entry_bytes = 0 is not a valid cap (would disable the cache); falling back to the default ({default})"
         );
         return default;
     }
     if v < MIN_THINKING_ENTRY_BYTES {
         tracing::warn!(
-            provider = %provider_name,
+            provider = %provider_safe,
             configured = v,
             min = MIN_THINKING_ENTRY_BYTES,
             "max_thinking_entry_bytes below minimum; clamping up"
@@ -850,7 +853,7 @@ fn resolve_max_thinking_entry_bytes(provider_name: &str, configured: Option<u32>
     }
     if v > MAX_THINKING_ENTRY_BYTES_CEILING {
         tracing::warn!(
-            provider = %provider_name,
+            provider = %provider_safe,
             configured = v,
             max = MAX_THINKING_ENTRY_BYTES_CEILING,
             "max_thinking_entry_bytes above ceiling; clamping down"
@@ -1164,7 +1167,7 @@ fn install_resolved_codex_identity(config: &Config) {
             for (name, entry) in &config.providers {
                 if entry.is_chatgpt_oauth_responses() {
                     tracing::info!(
-                        provider = %name,
+                        provider = %routectl_core::sanitize_for_log(name),
                         codex_version = %effective,
                         source,
                         "codex identity resolved"
@@ -1382,8 +1385,8 @@ pub async fn build_resolved_models_reported(
                             // `provider_failed`).
                             let msg = e.to_string();
                             tracing::warn!(
-                                provider = %entry.provider,
-                                model = %nickname,
+                                provider = %routectl_core::sanitize_for_log(&entry.provider),
+                                model = %routectl_core::sanitize_for_log(nickname),
                                 error = %msg,
                                 "skipping Bedrock model (creds resolution failed)",
                             );
@@ -1417,8 +1420,8 @@ pub async fn build_resolved_models_reported(
                     Err(e) => {
                         let msg = e.to_string();
                         tracing::warn!(
-                            provider = %entry.provider,
-                            model = %nickname,
+                            provider = %routectl_core::sanitize_for_log(&entry.provider),
+                            model = %routectl_core::sanitize_for_log(nickname),
                             error = %msg,
                             "skipping Bedrock model (build failed)",
                         );
@@ -1454,8 +1457,8 @@ pub async fn build_resolved_models_reported(
                 Err(e) => {
                     let msg = e.to_string();
                     tracing::warn!(
-                        provider = %entry.provider,
-                        model = %nickname,
+                        provider = %routectl_core::sanitize_for_log(&entry.provider),
+                        model = %routectl_core::sanitize_for_log(nickname),
                         error = %msg,
                         "skipping provider (build failed)",
                     );
@@ -1541,6 +1544,10 @@ fn apply_model_knobs(
     nickname: &str,
     entry: &crate::config::ModelEntry,
 ) -> ResolvedModel {
+    // The nickname is an operator-written `[models.X]` table key and both
+    // warns below render it (field plus message body) on SUCCESSFUL builds,
+    // so it is bound sanitized once here rather than at each use.
+    let model_safe = routectl_core::sanitize_for_log(nickname);
     if entry.supports_adaptive_thinking {
         resolved = resolved.with_supports_adaptive_thinking(true);
     }
@@ -1565,8 +1572,8 @@ fn apply_model_knobs(
     if let Some(ms) = entry.stream_first_byte_timeout_ms {
         if ms == 0 {
             tracing::warn!(
-                model = %nickname,
-                "[models.{nickname}] stream_first_byte_timeout_ms = 0 would abandon every stream before its first content-bearing chunk; ignoring the override"
+                model = %model_safe,
+                "[models.{model_safe}] stream_first_byte_timeout_ms = 0 would abandon every stream before its first content-bearing chunk; ignoring the override"
             );
         } else {
             resolved = resolved.with_stream_first_byte_timeout_ms(ms);
@@ -1575,8 +1582,8 @@ fn apply_model_knobs(
     if let Some(tokens) = entry.max_output_tokens {
         if tokens == 0 {
             tracing::warn!(
-                model = %nickname,
-                "[models.{nickname}] max_output_tokens = 0 would 400 every anthropic-shape request; ignoring the override"
+                model = %model_safe,
+                "[models.{model_safe}] max_output_tokens = 0 would 400 every anthropic-shape request; ignoring the override"
             );
         } else {
             resolved = resolved.with_max_output_tokens(tokens);
