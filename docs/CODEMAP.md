@@ -1187,6 +1187,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `with_accepts_new_logins`), plus `Config::seat_selection_for(name)` -- the
   ONE resolution of a dispatch target's in-force strategy (a pool's own, else
   its claiming pool's, else the `fill-first` default for a standalone provider)
+  -- and `Config::provider_kind_for_target(name)` -- the ONE
+  provider-or-pool-aware kind resolution for a `[models.X] provider` value
+  (provider entry's own `kind_str`, else a member's; `validate_pools` rejects a
+  mixed-kind pool, so the first resolvable member is representative), used by
+  every catalog-selector read so a pool-backed model does not resolve an empty
+  kind and miss its catalog cell
 - `src/config/schema.rs` -- Config value types: `ProviderEntry` (one variant
   per provider kind incl. the `gemini`-feature-gated `Gemini { api_key_ref,
   base_url, header_extras, payload_extras, user_agent, auth_mode,
@@ -1309,7 +1315,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`lookup_baked_with_overrides` + `lookup_overlay_cell` + `merge`) -- no
   `build_resolved_models`, no secret resolution, no network. `ModelCell`
   carries the merged `EffectiveRow` (source: baked/import/user/disabled) per
-  config-referenced `(provider_kind, upstream)`; `ClassPolicyCell` tags each
+  config-referenced `(provider_kind, upstream)`, the kind resolved through
+  `Config::provider_kind_for_target` so a pool-backed model reads a member's
+  kind rather than missing its catalog cell; `ClassPolicyCell` tags each
   failure class `ClassPolicySource::{Config, BakedDefault}` via
   `resolved_class`; `AliasChain` flattens each `[aliases]` entry into its
   ORDERED fallback chain via `AliasValue::nicknames` (Single -> one element,
@@ -1487,7 +1495,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   enumeration on either path; `apply_catalog_overlay`
   runs the two-layer catalog merge once at chain-build/load time and stamps
   the result onto each `ResolvedModel::effective_row`, so the dispatch path
-  never re-runs the merge per request; calls the row-reading `validate_*`
+  never re-runs the merge per request, and is ALSO the output-ceiling fill site
+  (a model whose config left `max_output_tokens` at the `0` sentinel takes the
+  merged row's confirmed ceiling via `output_ceiling_tokens`, making the
+  dispatch precedence config > catalog > egress baseline with no
+  routectl-providers change); calls the row-reading `validate_*`
   guards from `validate.rs` at construction time; the `AnthropicApi` arm, when
   `bedrock_mantle` is `Some` (cfg `bedrock`), derives `base_url` from
   `mantle::mantle_anthropic_base(region)`, resolves the AWS credential via
@@ -1619,7 +1631,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   -> EffectiveRow`
   (`Present{row, source, verified_at}` / `Disabled` / `Missing`) is the ONLY
   place provenance is computed -- `CatalogRow` itself carries none; overlay
-  wins over baked, JSON `null` disables. `CachePricingOverride` (config.toml
+  wins over baked, JSON `null` disables. `EffectiveRow::output_ceiling_tokens`
+  is THE ceiling read (`Some(0)` degrades to `None`), shared by the factory
+  fill and the doctor `knobs` section. `CachePricingOverride` (config.toml
   `[cache_pricing]`, legacy-retired at v2; `validate()` delegates its
   `wm`/`rm`/`max_context_tokens` structural checks to `cell_value_defects`
   then layers its ack-gated posture on the result) and `CachePricingSelector`
@@ -2054,7 +2068,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `reported_model: Option<String>` (per-model response-echo override);
   `context_window_tokens()` -- THE shared read of the overlay-corrected
   catalog window (`Some(0)` degrades to `None`), consumed by both the
-  proactive window gate and `/v1/models` discovery
+  proactive window gate and `/v1/models` discovery;
+  `output_ceiling_tokens()` -- the ceiling sibling, delegating to
+  `EffectiveRow::output_ceiling_tokens` so the factory's unset-config fill and
+  the doctor `knobs` section read one function
 - `src/router/mod.rs` -- the `Router` type family + construction/lifecycle
   plus submodule wiring; the dispatch retry state machine itself lives in
   `dispatch.rs`. Holds the `Router` struct (providers map, per-`[models.X]`
@@ -2085,7 +2102,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `carry_over_learned_from` reload carries +
   `install_catalog_overlay` (the
   single writer of the RETAINED accepted overlay and its revision stamp), the
-  `catalog_version` / `overlay_revision` / `catalog_overlay` getters and
+  `catalog_version` / `overlay_revision` / `catalog_overlay` getters,
+  `catalog_filled_output_ceilings` (the startup-provenance read: nicknames whose
+  `max_output_tokens` came from the catalog, off the INSTALLED table so a
+  pool-backed model is not silently omitted) and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
   registry so it stays encapsulated),
@@ -3375,7 +3395,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ledger-reading warms perform their own migrating open via `warm_open` and so
   sit ahead of the writer. Router construction is
   delegated to `router_build`. Boot seeds the initial activation inventory and
-  spawns the reload pipeline (both owned by the `reload` submodule); a
+  spawns the reload pipeline (both owned by the `reload` submodule).
+  `log_catalog_filled_output_ceilings` emits ONE aggregate startup line naming
+  the models whose output ceiling came from the catalog (exact count, list
+  bounded by `MAX_LISTED_FILLED_CEILINGS`, every nickname through
+  `sanitize_for_log`) -- here rather than inside `apply_catalog_overlay`, which
+  also runs on every reload and in many unit tests. A
   forwarded (pure-proxy) egress is an explicit `[providers.X]
   credential_source = "forwarded"` block -- no zero-config synthetic-egress
   injection
@@ -4847,9 +4872,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a zero-dep leaf the router must not depend on, and both units are already
   per-million, so it is a field-for-field carry with `reasoning_per_mtok` left
   unset for the caller that knows a row's reasoning structure.
-  `is_subscription(config, provider)` is THE managed-subscription predicate
-  (`api_key_ref` starts `oauth://`; `auth_kind` deliberately not consulted),
-  checked FIRST by every cost surface -- `usage::cost_for_row`,
+  `is_subscription(config, target)` is THE managed-subscription predicate
+  (`api_key_ref` starts `oauth://`; `auth_kind` deliberately not consulted).
+  `target` may be a provider entry OR a pool -- `[models.X] provider` resolves
+  against both in one namespace -- and a pool answers from its members, so a
+  pooled model is not misreported as unpriced. Checked FIRST by every cost
+  surface -- `usage::cost_for_row`,
   `doctor::gather::pricing_row_source`, `probe::capabilities::probe_rates` --
   before any rate lookup, so no surface can render a per-token figure for
   traffic that bills by seat
@@ -5097,7 +5125,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (config/credentials/overlay/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
   Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
-  `seats`, `secrets`, `probe`, `capability`, `freshness`, `pricing`) -- one
+  `seats`, `secrets`, `probe`, `capability`, `freshness`, `pricing`, `knobs`) -- one
   extension point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
@@ -5110,7 +5138,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   future durable import outcome that renders nothing today, plus the
   `Option<Vec<PricingRow>>` rate-source rows -- `None` when the overlay could
   not be loaded -- and their four-state
-  `PricingRowSource{Subscription,Registry,Catalog,Unpriced}`) holds every
+  `PricingRowSource{Subscription,Registry,Catalog,Unpriced}`, plus the
+  `Option<Vec<KnobRow>>` output-ceiling attribution rows -- also `None` when
+  the overlay could not be loaded -- and their three-state
+  `OutputCeilingSource{Config,Catalog,Default}`) holds every
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version,
@@ -5135,6 +5166,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   past the operator staleness hint, or a prior stamp past the same threshold
   via `is_stale_days`)
 - `src/commands/doctor/gather.rs` -- doctor data collection.
+  `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
+  entry: config `max_output_tokens` checked FIRST (an operator value wins
+  whole), else the resolved cell's ceiling through the shared
+  `EffectiveRow::output_ceiling_tokens` accessor the factory's fill reads, else
+  `Default`. Same overlay gating as pricing -- an unreadable overlay leaves
+  `knobs: None`, since the overlay both corrects and disables baked ceilings.
   `derive_pricing_rows(config, overlay)` resolves one `PricingRow` per
   `[models.X]` entry through the shared `effective_pricing` boundary (with
   `pricing::is_subscription` checked first), so the diagnostic can never claim
@@ -5233,6 +5270,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   from an empty operator `[registry]` row). A `pricing: None` context (overlay
   unreadable) collapses the section to the single `pricing_unavailable` Warn
   instead. NEVER `Fail`, so it can never move the exit code.
+  `section_knobs`/`knob_finding` are the ceiling sibling of that pair: one
+  informational `Pass` per configured model naming whether its outbound
+  `max_output_tokens` came from `[models.X]`, the catalog fill, or neither
+  (egress baseline), each detail naming the resolved figure and the
+  `(kind, upstream)` selector; a `knobs: None` context collapses to the single
+  `knobs_unavailable` Warn. NEVER `Fail`.
   NEVER auto-fixes: every WARN/FAIL names the fix
 - `src/commands/doctor/render.rs` -- human-text rendering of the
   `DoctorReport`: `render_human` walks `SECTIONS` in render order (per-section

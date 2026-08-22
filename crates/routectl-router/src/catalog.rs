@@ -1003,6 +1003,26 @@ impl EffectiveRow {
             Self::Disabled | Self::Missing => None,
         }
     }
+
+    /// The output-token ceiling this cell confirms, or `None` when it confirms
+    /// none (`Disabled` / `Missing`, or a present row whose glob spans models
+    /// that disagree on one figure).
+    ///
+    /// THE weld for the ceiling read. The factory's unset-config fill reaches
+    /// it through [`crate::ResolvedModel::output_ceiling_tokens`] and the
+    /// doctor `knobs` section calls it directly on a resolved cell, so the
+    /// diagnostic can never name a ceiling the fill would not apply.
+    ///
+    /// `Some(0)` degrades to `None`. Codegen derivation, import, and overlay
+    /// validation all reject a zero ceiling, so this is defense-in-depth: were
+    /// one to slip through, the fill declines and the egress keeps its
+    /// hardcoded baseline, instead of a `max_tokens` every request would 400 on.
+    #[must_use]
+    pub fn output_ceiling_tokens(&self) -> Option<u32> {
+        self.priced()
+            .and_then(|row| row.max_output_tokens)
+            .filter(|ceiling| *ceiling > 0)
+    }
 }
 
 /// Merge a baked catalog row with its overlay cell. Pure function, no

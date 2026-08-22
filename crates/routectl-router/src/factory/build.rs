@@ -1666,6 +1666,17 @@ fn pool_reports(
 /// `ResolvedModel::effective_row` directly instead of re-resolving.
 /// `tier` is fixed to `None` (the 5m default), matching the ONE tier the
 /// dispatch-path pricing call has ever priced against.
+///
+/// Also the OUTPUT-CEILING FILL site. A model whose config left
+/// `max_output_tokens` unset (the resolved `0` sentinel) takes the ceiling the
+/// merged row confirms for its selector, so a common Claude upstream gets its
+/// real ceiling without an operator writing one. The fill happens HERE rather
+/// than in `apply_model_knobs` because the effective row -- the only place the
+/// catalog figure exists -- is resolved on this pass; the precedence
+/// `config > catalog > egress baseline` then falls out of the egress's own
+/// existing ladder with no provider-side change. A configured value is never
+/// touched: the fill is gated on the sentinel, so what the operator wrote
+/// survives byte-for-byte.
 #[must_use]
 pub fn apply_catalog_overlay(
     models: BTreeMap<String, Arc<ResolvedModel>>,
@@ -1683,8 +1694,13 @@ pub fn apply_catalog_overlay(
                 &config.cache_pricing,
                 overlay,
             );
-            let stamped = Arc::new((*model).clone().with_effective_row(effective_row));
-            (nickname, stamped)
+            let mut stamped = (*model).clone().with_effective_row(effective_row);
+            if stamped.max_output_tokens == 0
+                && let Some(ceiling) = stamped.output_ceiling_tokens()
+            {
+                stamped = stamped.with_max_output_tokens(ceiling);
+            }
+            (nickname, Arc::new(stamped))
         })
         .collect()
 }

@@ -36,7 +36,7 @@ use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
     section_auth, section_capability, section_config, section_freshness, section_inventory,
-    section_pricing, section_probe, section_seat_orphans, section_seat_pools,
+    section_knobs, section_pricing, section_probe, section_seat_orphans, section_seat_pools,
     section_secret_orphans, section_version,
 };
 
@@ -82,7 +82,12 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// v8 -> v9: the additive `pricing` section joins the report, one finding per
 /// configured model naming where its cost rates come from (an operator
 /// `[registry]` row, the baked catalog, a managed subscription, or nothing).
-const SCHEMA_VERSION: u32 = 9;
+///
+/// v9 -> v10: the additive `knobs` section joins the report, one finding per
+/// configured model naming where its outbound `max_output_tokens` ceiling comes
+/// from (the operator's own `[models.X]` value, the catalog fill, or the
+/// egress's hardcoded baseline).
+const SCHEMA_VERSION: u32 = 10;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -105,6 +110,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("capability", section_capability),
     ("freshness", section_freshness),
     ("pricing", section_pricing),
+    ("knobs", section_knobs),
 ];
 
 /// The no-network subset of [`SECTIONS`]: [`SECTIONS`] MINUS the `probe`
@@ -127,6 +133,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("capability", section_capability),
     ("freshness", section_freshness),
     ("pricing", section_pricing),
+    ("knobs", section_knobs),
 ];
 
 /// The read-only inputs every section producer draws from, gathered once
@@ -193,6 +200,46 @@ pub(crate) struct DoctorContext {
     /// CORRECTION channel, so without it no resolved figure can be trusted and
     /// the section renders an honest unavailable line instead.
     pricing: Option<Vec<PricingRow>>,
+    /// The knobs section's rows: one per configured model, resolved once at
+    /// gather time so the section producer stays a pure mapping. `None` when
+    /// the catalog overlay could not be loaded -- the overlay both corrects and
+    /// disables catalog ceilings, so without it no source attribution can be
+    /// trusted and the section renders an honest unavailable line instead.
+    knobs: Option<Vec<KnobRow>>,
+}
+
+/// Where one configured model's outbound `max_output_tokens` ceiling comes
+/// from, and what it resolves to.
+///
+/// Resolved through the SAME `EffectiveRow::output_ceiling_tokens` accessor the
+/// factory's fill reads, so the diagnostic can never name a ceiling the served
+/// router would not apply.
+struct KnobRow {
+    /// The `[models.<nickname>]` key.
+    nickname: String,
+    /// The referenced provider's kind token (empty when the provider is
+    /// unknown to the config).
+    provider_kind: String,
+    /// The upstream model id the ceiling was resolved for.
+    upstream: String,
+    /// The resolved ceiling and the layer that supplied it.
+    source: OutputCeilingSource,
+}
+
+/// The three states a [`KnobRow`] can report, in the precedence order the
+/// dispatch path resolves them: config wins, else the catalog fill, else the
+/// Anthropic-shape egress's own hardcoded baseline.
+enum OutputCeilingSource {
+    /// The operator wrote `[models.X] max_output_tokens`; the catalog never
+    /// touches it.
+    Config(u32),
+    /// The config left the ceiling unset and the model's resolved catalog cell
+    /// confirmed one, so the factory filled it.
+    Catalog(u32),
+    /// Neither layer supplies a ceiling: the Anthropic-shape egresses fall
+    /// through to their hardcoded baseline and every other egress forwards
+    /// caller omission untouched.
+    Default,
 }
 
 /// Where one configured model's cost rates come from, and what they are.

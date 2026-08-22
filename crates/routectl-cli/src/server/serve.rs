@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use axum::Router as AxumRouter;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
-use routectl_core::{Error, Result};
+use routectl_core::{Error, Result, sanitize_for_log};
 use routectl_router::{ActivationState, CatalogOverlay, Config, check_drift_and_persist_state};
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tokio::net::TcpListener;
@@ -115,6 +115,56 @@ fn in_use_catalog_selectors(config: &Config) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Emit ONE aggregate startup line naming the models whose outbound
+/// output-token ceiling came from the catalog rather than from config, so an
+/// operator can see a figure they did not write before it shows up on the wire.
+///
+/// Emitted here rather than inside `apply_catalog_overlay` on purpose: that
+/// function also runs on every hot reload and in a great many unit tests, so a
+/// line there would be reload noise and test log spam. This is a startup-only
+/// observation of the table that is about to go live.
+///
+/// Silent when nothing was filled -- the common case for a config that sets
+/// every ceiling, and for one whose models resolve no catalog ceiling at all.
+///
+/// The list is BOUNDED: a config with hundreds of models must not turn one
+/// startup line into a scrolling wall, so the line names the first
+/// `MAX_LISTED_FILLED_CEILINGS` and reports the full count regardless. Every
+/// nickname is an operator-written `[models.X]` table key and reaches the line
+/// through `Display`, so each goes through `sanitize_for_log` first (a
+/// nickname carrying a newline plus an ANSI sequence would otherwise forge a
+/// startup log record).
+fn log_catalog_filled_output_ceilings(router: &routectl_router::Router) {
+    let filled = router.catalog_filled_output_ceilings();
+    if filled.is_empty() {
+        return;
+    }
+    let listed = filled
+        .iter()
+        .take(MAX_LISTED_FILLED_CEILINGS)
+        .map(|(nickname, ceiling)| format!("{}={ceiling}", sanitize_for_log(nickname)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::info!(
+        filled_count = filled.len(),
+        models = %listed,
+        "output-token ceilings filled from the catalog for {} model(s) that set no \
+         [models.X] max_output_tokens: {listed}{}",
+        filled.len(),
+        if filled.len() > MAX_LISTED_FILLED_CEILINGS {
+            " (list truncated)"
+        } else {
+            ""
+        },
+    );
+}
+
+/// Upper bound on how many nicknames the catalog-fill startup line names
+/// before truncating. The count is always exact; the list is a sample for an
+/// operator eyeballing the line, not an inventory (`routectl doctor`'s
+/// `knobs` section is the complete per-model view).
+const MAX_LISTED_FILLED_CEILINGS: usize = 12;
+
 /// The real `serve_on_listener` body. `config_path` follows the same
 /// semantics as `serve`: `Some(path)` installs the file-watch + SIGHUP
 /// coordinator; `None` skips the config-half of the watcher (the
@@ -169,6 +219,8 @@ pub async fn serve_on_listener_with_overlay(
             &dir.join("catalog_state.json"),
         );
     }
+
+    log_catalog_filled_output_ceilings(&router);
 
     // Both security refuses below run BEFORE the ledger-reading warms and
     // before the usage writer starts, so a boot that is going to be refused

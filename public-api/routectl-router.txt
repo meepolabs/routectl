@@ -9,6 +9,7 @@ pub routectl_router::catalog::EffectiveRow::Present::row: routectl_router::catal
 pub routectl_router::catalog::EffectiveRow::Present::source: routectl_router::catalog::Source
 pub routectl_router::catalog::EffectiveRow::Present::verified_at: alloc::string::String
 impl routectl_router::catalog::EffectiveRow
+pub fn routectl_router::catalog::EffectiveRow::output_ceiling_tokens(&self) -> core::option::Option<u32>
 pub const fn routectl_router::catalog::EffectiveRow::priced(&self) -> core::option::Option<&routectl_router::catalog::CatalogRow>
 impl core::clone::Clone for routectl_router::catalog::EffectiveRow
 pub fn routectl_router::catalog::EffectiveRow::clone(&self) -> routectl_router::catalog::EffectiveRow
@@ -1739,6 +1740,7 @@ pub routectl_router::config::Config::window_gate: routectl_router::WindowGateCon
 impl routectl_router::config::Config
 pub fn routectl_router::config::Config::pricing_for(&self, &str, &str) -> core::option::Option<&routectl_router::PricingConfig>
 impl routectl_router::config::Config
+pub fn routectl_router::config::Config::provider_kind_for_target(&self, &str) -> &'static str
 pub fn routectl_router::config::Config::seat_selection_for(&self, &str) -> routectl_router::config::SeatSelection
 impl core::clone::Clone for routectl_router::config::Config
 pub fn routectl_router::config::Config::clone(&self) -> routectl_router::config::Config
@@ -3787,6 +3789,7 @@ pub fn routectl_router::router::Router::carry_over_prefix_epochs_from(&mut self,
 pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
+pub fn routectl_router::router::Router::catalog_filled_output_ceilings(&self) -> alloc::vec::Vec<(&str, u32)>
 pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub const fn routectl_router::router::Router::has_forwarded_provider(&self) -> bool
@@ -5244,6 +5247,7 @@ pub routectl_router::EffectiveRow::Present::row: routectl_router::catalog::Catal
 pub routectl_router::EffectiveRow::Present::source: routectl_router::catalog::Source
 pub routectl_router::EffectiveRow::Present::verified_at: alloc::string::String
 impl routectl_router::catalog::EffectiveRow
+pub fn routectl_router::catalog::EffectiveRow::output_ceiling_tokens(&self) -> core::option::Option<u32>
 pub const fn routectl_router::catalog::EffectiveRow::priced(&self) -> core::option::Option<&routectl_router::catalog::CatalogRow>
 impl core::clone::Clone for routectl_router::catalog::EffectiveRow
 pub fn routectl_router::catalog::EffectiveRow::clone(&self) -> routectl_router::catalog::EffectiveRow
@@ -8897,6 +8901,7 @@ pub routectl_router::Config::window_gate: routectl_router::WindowGateConfig
 impl routectl_router::config::Config
 pub fn routectl_router::config::Config::pricing_for(&self, &str, &str) -> core::option::Option<&routectl_router::PricingConfig>
 impl routectl_router::config::Config
+pub fn routectl_router::config::Config::provider_kind_for_target(&self, &str) -> &'static str
 pub fn routectl_router::config::Config::seat_selection_for(&self, &str) -> routectl_router::config::SeatSelection
 impl core::clone::Clone for routectl_router::config::Config
 pub fn routectl_router::config::Config::clone(&self) -> routectl_router::config::Config
@@ -11929,6 +11934,7 @@ pub routectl_router::ResolvedModel::visible_routectl_provider: bool
 impl routectl_router::ResolvedModel
 pub fn routectl_router::ResolvedModel::context_window_tokens(&self) -> core::option::Option<u32>
 pub fn routectl_router::ResolvedModel::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::sync::Arc<dyn routectl_core::provider::Provider>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_router::ResolvedModel::output_ceiling_tokens(&self) -> core::option::Option<u32>
 pub fn routectl_router::ResolvedModel::with_auth_secret_ref(self, routectl_auth::secret_ref::SecretRef) -> Self
 pub fn routectl_router::ResolvedModel::with_effective_row(self, routectl_router::catalog::EffectiveRow) -> Self
 pub fn routectl_router::ResolvedModel::with_effort_levels(self, alloc::vec::Vec<alloc::string::String>) -> Self
@@ -12119,6 +12125,7 @@ pub fn routectl_router::router::Router::carry_over_prefix_epochs_from(&mut self,
 pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
+pub fn routectl_router::router::Router::catalog_filled_output_ceilings(&self) -> alloc::vec::Vec<(&str, u32)>
 pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub const fn routectl_router::router::Router::has_forwarded_provider(&self) -> bool

@@ -17,7 +17,9 @@ use crate::commands::seat_report::{
 };
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::{DoctorContext, FreshnessInputs, PricingRow, PricingRowSource};
+use super::{
+    DoctorContext, FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow, PricingRowSource,
+};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -822,4 +824,78 @@ fn render_rate(per_mtok: Option<f64>) -> String {
 /// wrap so an absurd config never reads as fresh.
 pub(super) fn staleness_threshold_days(hint_days: u64) -> i64 {
     i64::try_from(hint_days).unwrap_or(i64::MAX)
+}
+
+/// Knobs section: one deterministic row per configured model naming where its
+/// outbound `max_output_tokens` ceiling comes from. Purely informational --
+/// every state is a legitimate configuration -- so no row here can Fail and the
+/// section can never move the exit code.
+///
+/// An unresolvable overlay collapses the whole section to ONE unavailable line:
+/// see [`knobs_unavailable`].
+pub(super) fn section_knobs(ctx: &DoctorContext) -> Vec<Finding> {
+    match &ctx.knobs {
+        Some(rows) => rows.iter().map(knob_finding).collect(),
+        None => vec![knobs_unavailable()],
+    }
+}
+
+/// The section-unavailable finding: the catalog overlay could not be loaded.
+///
+/// The overlay both CORRECTS a baked ceiling and can disable a cell outright,
+/// so with it unreadable the baked ceiling for any selector may be exactly the
+/// one the served router does not fill from. Naming a superseded figure is
+/// worse than naming none.
+///
+/// `Warn`, matching the pricing section: it degrades honestly without flipping
+/// the exit code (the version section owns the overlay-load `Fail`).
+fn knobs_unavailable() -> Finding {
+    Finding {
+        section: "knobs",
+        name: "section".to_string(),
+        status: Status::Warn,
+        detail: "output-ceiling sources unavailable: the catalog overlay could not be loaded, so \
+                 no model's effective max_output_tokens can be attributed (the overlay corrects \
+                 and disables baked ceilings, so reporting the baked figure could name a ceiling \
+                 the router does not use)"
+            .to_string(),
+        remediation: Some(
+            "resolve the catalog-overlay error reported above, then re-run `routectl doctor`"
+                .to_string(),
+        ),
+    }
+}
+
+/// Pure mapping of one resolved [`KnobRow`] to its finding. The detail names
+/// the model's kind and upstream in every state so an operator can see WHICH
+/// selector was resolved, and every state names the ceiling that results.
+fn knob_finding(row: &KnobRow) -> Finding {
+    let selector = format!(
+        "kind {} upstream {}",
+        safe(&row.provider_kind),
+        safe(&row.upstream)
+    );
+    let detail = match row.source {
+        OutputCeilingSource::Config(ceiling) => format!(
+            "max_output_tokens {ceiling} from [models.{}] -- {selector}; the catalog never \
+             overrides an operator value",
+            safe(&row.nickname)
+        ),
+        OutputCeilingSource::Catalog(ceiling) => format!(
+            "max_output_tokens {ceiling} filled from the catalog ([models.X] sets none) -- \
+             {selector}; set max_output_tokens to pin your own"
+        ),
+        OutputCeilingSource::Default => format!(
+            "max_output_tokens unset and the catalog confirms no ceiling -- {selector}; the \
+             Anthropic-shape egresses fall back to their built-in baseline and every other \
+             egress forwards caller omission untouched"
+        ),
+    };
+    Finding {
+        section: "knobs",
+        name: safe(&row.nickname),
+        status: Status::Pass,
+        detail,
+        remediation: None,
+    }
 }

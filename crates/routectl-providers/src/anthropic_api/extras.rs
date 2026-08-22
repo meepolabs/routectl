@@ -1019,3 +1019,9 @@ mod tests {
 #[cfg(test)]
 #[path = "extras_thinking_display_tests.rs"]
 mod thinking_display_tests;
+
+// The spend coupling: which legacy-path thinking budgets move when the
+// router injects a higher `max_output_tokens` ceiling, and which do not.
+#[cfg(test)]
+#[path = "extras_ceiling_budget_coupling_tests.rs"]
+mod ceiling_budget_coupling_tests;

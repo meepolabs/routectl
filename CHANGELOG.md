@@ -16,6 +16,39 @@ list with more narrative.
 
 ### Added
 
+- **Output ceilings fill themselves from the catalog** -- a model whose
+  config sets no `[models.X] max_output_tokens` now takes the ceiling its
+  resolved catalog row confirms, so a common Claude upstream gets its real
+  ceiling instead of the Anthropic-shape egresses' built-in 64000 baseline.
+  Precedence is `[models.X]` > catalog > baseline: an operator value wins
+  byte-for-byte and is never raised, and a selector the catalog cannot pin
+  to one figure (a glob spanning models with different ceilings) fills
+  nothing rather than guessing. The catalog overlay corrects a ceiling the
+  baked table has wrong, the same channel that corrects rates and context
+  windows. One startup line names the models whose ceiling came from the
+  catalog (count exact, list bounded), and `routectl doctor` grows a **Model
+  knobs** section naming every configured model's ceiling source -- your
+  config, the catalog, or the baseline (doctor report schema 9 -> 10); if
+  the catalog overlay cannot be loaded that section reports unavailable
+  rather than a ceiling the overlay may supersede.
+
+  **Spend note.** Reasoning tokens bill as output, and three legacy-path
+  (`supports_adaptive_thinking = false`) thinking budgets track the resolved
+  ceiling because they pass through Anthropic's `budget < max_tokens` window
+  clamp: `reasoning.effort = "max"` (ceiling minus one, and ONLY when the
+  model's `[models.X] effort_levels` includes `"max"` -- under the shipped
+  default of `["low", "medium", "high"]` the clamp rewrites `max` to `high`,
+  a flat 24576 the ceiling never enters), `reasoning.enabled = true` with no
+  effort or budget (half the ceiling), and a caller-supplied
+  `reasoning.max_tokens` ABOVE the previous ceiling (it was being capped at
+  `ceiling - 1` and the higher ceiling admits more of the ask). An operator
+  who left `max_output_tokens` unset on Opus 4.6-4.8 will therefore see
+  those budgets rise after upgrading (64000 -> 128000 ceiling). Every
+  standard effort level (`minimal` through `xhigh`) resolves through the
+  exact effort-to-budget table and is unaffected, as is any caller whose own
+  `reasoning.max_tokens` already fit under 64000. Set
+  `[models.X] max_output_tokens = 64000` to keep the previous figures.
+
 - **Operators can veto a capability strip** -- `[capability]` grows an
   `essential` list of capability keys that must never be stripped in
   place. When a target only fails on a listed key, routectl routes the
