@@ -918,7 +918,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             db,
             k_calibration,
         } => {
-            let config = load_config(cli.config.as_deref())?;
+            let loaded = load_config_unvalidated_with_overlay(cli.config.as_deref())?;
             let window = if today {
                 commands::usage::WindowFlag::Today
             } else if this_week {
@@ -939,7 +939,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 db,
                 k_calibration,
             };
-            if let Err(e) = commands::usage::run(&config, &args) {
+            if let Err(e) = commands::usage::run(&loaded.config, &loaded.catalog_overlay, &args) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -1055,6 +1055,20 @@ fn load_config_with_overlay(
 ) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
     let path = resolve_config_path(explicit);
     Ok(server::load_effective_config(&path)?)
+}
+
+/// Config + catalog-overlay load WITHOUT the fail-fast startup validators, for
+/// a read-only report surface.
+///
+/// `usage` reads history and must render it even when the config carries a
+/// semantic error the validators would reject -- a report that refuses to run
+/// because some unrelated provider block is invalid tells the operator nothing
+/// about their spend. Parse-level failures still propagate.
+fn load_config_unvalidated_with_overlay(
+    explicit: Option<&std::path::Path>,
+) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
+    let path = resolve_config_path(explicit);
+    Ok(server::load_effective_config_unvalidated(&path)?)
 }
 
 /// Emit the catalog-overlay staleness hint for a loaded config, reading the

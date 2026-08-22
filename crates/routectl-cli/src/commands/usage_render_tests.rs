@@ -19,7 +19,7 @@ fn paid_row(db: &UsageDb, request_id: &str, input: Option<i64>, output: Option<i
 
 fn report_all(db: &UsageDb, config: &Config, by: Option<GroupDim>, detail: bool) -> WindowReport {
     let bounds = window_bounds(WindowFlag::All, fixed_now());
-    build_window_report(db, config, "t".into(), bounds, by, detail).unwrap()
+    build_window_report(db, config, &no_overlay(), "t".into(), bounds, by, detail).unwrap()
 }
 
 /// A `paid` row with an explicit model and outcome, for grouping/error tests.
@@ -1070,7 +1070,7 @@ fn since_with_until_builds_single_range_titled_block() {
     };
 
     // Act
-    let blocks = build_blocks(&db, &config, &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&db, &config, &no_overlay(), &args, fixed_now()).unwrap();
 
     // Assert
     assert_eq!(blocks.len(), 1);
@@ -1093,7 +1093,7 @@ fn since_without_until_builds_single_open_ended_block() {
     };
 
     // Act
-    let blocks = build_blocks(&db, &config, &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&db, &config, &no_overlay(), &args, fixed_now()).unwrap();
 
     // Assert
     assert_eq!(blocks.len(), 1);

@@ -153,6 +153,7 @@ fn era_report(db: &UsageDb, config: &Config) -> WindowReport {
     build_window_report(
         db,
         config,
+        &no_overlay(),
         "t".into(),
         window_bounds(WindowFlag::All, fixed_now()),
         Some(GroupDim::Provider),
@@ -366,6 +367,7 @@ fn ttft_samples_from_both_eras_land_in_one_display_group() {
     let report = build_window_report(
         &db,
         &config_shift_now_gemini(),
+        &no_overlay(),
         "t".into(),
         window_bounds(WindowFlag::All, fixed_now()),
         Some(GroupDim::Provider),

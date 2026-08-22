@@ -10,21 +10,22 @@ use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry, Source,
-    catalog_import_state_default_path, derive_effective_view, load_last_import,
-    rebuild_capabilities_into, today_epoch_day,
+    CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry,
+    PricingSource, ProviderEntry, Source, catalog_import_state_default_path, derive_effective_view,
+    effective_pricing, load_last_import, rebuild_capabilities_into, today_epoch_day,
 };
 
 use crate::commands::capability_legacy::present_legacy_capability_keys;
 use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
+use crate::commands::pricing::is_subscription;
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{BoundaryOutcome, LedgerCapabilityReader, classify_boundary};
 
 use super::{
     CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, FreshnessInputs,
-    PriorCell,
+    PricingRow, PricingRowSource, PriorCell,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -93,6 +94,14 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         last_import: load_last_import(&catalog_import_state_default_path()),
         import_result: None,
     };
+    // An overlay that would not load leaves pricing UNRESOLVABLE, not
+    // baked-only: the overlay is the correction channel, so a selector it
+    // disables or reprices would render its superseded baked figure here while
+    // the bill uses the corrected one. `None` renders an honest unavailable
+    // line instead.
+    let pricing = overlay
+        .as_ref()
+        .map(|overlay| derive_pricing_rows(&config, overlay));
     let capability = build_capability_inputs(&config, config_parse_error, overlay);
     let capability_matrix =
         gather_capability_matrix(&config, config_parse_failed, overlay_revision);
@@ -120,6 +129,64 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         capability,
         capability_matrix,
         freshness,
+        pricing,
+    }
+}
+
+/// One pricing row per `[models.X]` entry, resolved through the shared
+/// `effective_pricing` boundary.
+///
+/// A managed-OAuth provider short-circuits to `Subscription` BEFORE any rate
+/// lookup, matching the order the usage report classifies a row in -- a
+/// subscription is billed by seat, so what its per-token rates would have been
+/// is not a fact about the bill.
+pub(super) fn derive_pricing_rows(config: &Config, overlay: &CatalogOverlay) -> Vec<PricingRow> {
+    config
+        .models
+        .iter()
+        .map(|(nickname, entry)| {
+            let provider_kind = config
+                .providers
+                .get(&entry.provider)
+                .map_or("", ProviderEntry::kind_str);
+            PricingRow {
+                nickname: nickname.clone(),
+                provider: entry.provider.clone(),
+                provider_kind: provider_kind.to_string(),
+                upstream: entry.upstream.clone(),
+                source: pricing_row_source(config, overlay, provider_kind, entry),
+            }
+        })
+        .collect()
+}
+
+/// Classify ONE model's rate source. Subscription first, then the shared
+/// registry-or-catalog resolution.
+fn pricing_row_source(
+    config: &Config,
+    overlay: &CatalogOverlay,
+    provider_kind: &str,
+    entry: &routectl_router::ModelEntry,
+) -> PricingRowSource {
+    if is_subscription(config, &entry.provider) {
+        return PricingRowSource::Subscription;
+    }
+    match effective_pricing(
+        config,
+        overlay,
+        provider_kind,
+        &entry.upstream,
+        &entry.provider,
+    ) {
+        Some((pricing, PricingSource::Registry)) => PricingRowSource::Registry {
+            input_per_mtok: pricing.input_per_mtok,
+            output_per_mtok: pricing.output_per_mtok,
+        },
+        Some((pricing, PricingSource::Catalog)) => PricingRowSource::Catalog {
+            input_per_mtok: pricing.input_per_mtok,
+            output_per_mtok: pricing.output_per_mtok,
+        },
+        None => PricingRowSource::Unpriced,
     }
 }
 

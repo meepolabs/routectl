@@ -277,6 +277,118 @@ fn estimate_is_none_when_unpriced() {
     assert!(estimate.cost.is_none());
 }
 
+// --- probe_rates: the estimate's rate source -----------------------------
+
+/// The baked-catalog oracle the probe estimate must resolve for an
+/// unpriced-by-the-operator `anthropic-api` lane: `claude-sonnet-4-6` is baked
+/// at $3.00 input / $15.00 output per million tokens. Hand-read off the
+/// vendor's published price list, not off a program run.
+const PROBE_ORACLE_MODEL: &str = "claude-sonnet-4-6";
+const PROBE_ORACLE_INPUT_PER_MTOK: f64 = 3.0;
+const PROBE_ORACLE_OUTPUT_PER_MTOK: f64 = 15.0;
+
+/// A `LoadedConfig` carrying one provider (named `probed`) and no catalog
+/// overlay, so a rate lookup against it resolves purely from `[registry]` and
+/// the baked table.
+fn loaded_with_provider(
+    entry: routectl_router::ProviderEntry,
+) -> (crate::server::LoadedConfig, routectl_router::ProviderEntry) {
+    let mut config = routectl_router::Config::default();
+    config.providers.insert("probed".to_string(), entry.clone());
+    (
+        crate::server::LoadedConfig {
+            config,
+            catalog_overlay: routectl_router::CatalogOverlay::default(),
+        },
+        entry,
+    )
+}
+
+fn probe_target(model_id: &str) -> crate::commands::probe::resolve::ResolvedProbeTarget {
+    crate::commands::probe::resolve::ResolvedProbeTarget {
+        state_key: "lane".to_string(),
+        provider: "probed".to_string(),
+        model_id: model_id.to_string(),
+    }
+}
+
+/// The regression this guards: a managed-subscription lane's tokens bill by
+/// seat, so resolving rates for it would render a fabricated dollar figure in
+/// the estimate while `usage` and `doctor` correctly report `subscription`. The
+/// subscription check runs BEFORE any lookup, and the baked-priced upstream
+/// here is the POSITIVE CONTROL -- the very same selector DOES price for an
+/// API-key provider (asserted in the test below), so the absence is the
+/// subscription check firing, not a missing catalog cell.
+#[test]
+fn a_subscription_lane_estimates_no_figure_at_all() {
+    let (loaded, entry) = loaded_with_provider(routectl_router::ProviderEntry::anthropic_api(
+        "oauth://anthropic",
+    ));
+    let target = probe_target(PROBE_ORACLE_MODEL);
+
+    let rates = probe_rates(&loaded, &entry, &target);
+
+    assert!(
+        rates.is_none(),
+        "a managed-subscription lane must resolve no rates: {rates:?}"
+    );
+    let estimate = estimate_probe_cost(&ProbeCapability::ALL, rates.as_ref());
+    assert!(
+        estimate.cost.is_none(),
+        "a subscription lane's estimate must carry no dollar figure"
+    );
+}
+
+/// The auto-fill this feature exists for: an API-key lane the operator never
+/// priced now estimates off the baked catalog instead of reading `unpriced`.
+#[test]
+fn an_unpriced_api_key_lane_estimates_off_the_baked_catalog_oracle() {
+    let (loaded, entry) =
+        loaded_with_provider(routectl_router::ProviderEntry::anthropic_api("env://KEY"));
+    let target = probe_target(PROBE_ORACLE_MODEL);
+
+    let rates = probe_rates(&loaded, &entry, &target).expect("the baked oracle cell prices");
+
+    assert_eq!(rates.input_per_mtok, Some(PROBE_ORACLE_INPUT_PER_MTOK));
+    assert_eq!(rates.output_per_mtok, Some(PROBE_ORACLE_OUTPUT_PER_MTOK));
+    assert!(
+        estimate_probe_cost(&ProbeCapability::ALL, Some(&rates))
+            .cost
+            .is_some(),
+        "a catalog-filled lane must produce a dollar estimate"
+    );
+}
+
+/// Precedence: an operator `[registry]` row for the same upstream wins over
+/// the baked rates, so the estimate quotes what the operator will actually be
+/// billed at by their own accounting.
+#[test]
+fn an_operator_registry_row_wins_over_the_baked_rates() {
+    let (mut loaded, entry) =
+        loaded_with_provider(routectl_router::ProviderEntry::anthropic_api("env://KEY"));
+    loaded.config.registry.insert(
+        PROBE_ORACLE_MODEL.to_string(),
+        routectl_router::RegistryEntry {
+            pricing: Some(routectl_router::PricingConfig {
+                input_per_mtok: Some(0.5),
+                output_per_mtok: Some(1.5),
+                ..Default::default()
+            }),
+            provider: None,
+        },
+    );
+    let target = probe_target(PROBE_ORACLE_MODEL);
+
+    let rates = probe_rates(&loaded, &entry, &target).expect("the registry row prices");
+
+    assert_eq!(rates.input_per_mtok, Some(0.5));
+    assert_eq!(
+        rates.output_per_mtok,
+        Some(1.5),
+        "the operator's rate must win over the baked ${PROBE_ORACLE_OUTPUT_PER_MTOK}"
+    );
+}
+
 // --- revision stamp: write-then-rebuild ---------------------------------
 
 /// Build a default router (baked catalog version, overlay revision zero) and

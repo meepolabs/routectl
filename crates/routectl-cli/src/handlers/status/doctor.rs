@@ -33,9 +33,9 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
 
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
-/// [`DoctorReport`]'s own `schema_version` (8): the panel embeds that report
+/// [`DoctorReport`]'s own `schema_version` (9): the panel embeds that report
 /// verbatim, so it must not invent a parallel number.
-pub const DOCTOR_SCHEMA_VERSION: u32 = 8;
+pub const DOCTOR_SCHEMA_VERSION: u32 = 9;
 
 /// The no-network doctor report plus the circuit-derived reachability summary.
 #[derive(Debug, Clone, Serialize)]
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn no_config_path_yields_unavailable_panel() {
         let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-        assert_eq!(panel.schema_version, 8);
+        assert_eq!(panel.schema_version, 9);
         assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
         assert!(panel.data.is_none());
     }
@@ -272,12 +272,12 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert_eq!(json["schema_version"], 8);
+        assert_eq!(json["schema_version"], 9);
         assert!(json["unavailable"].is_null());
         let as_of = json["as_of"].as_str().expect("as_of present");
         assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-        assert_eq!(json["data"]["report"]["schema_version"], 8);
+        assert_eq!(json["data"]["report"]["schema_version"], 9);
         let findings = json["data"]["report"]["findings"].as_array().unwrap();
         assert!(
             !findings.is_empty(),

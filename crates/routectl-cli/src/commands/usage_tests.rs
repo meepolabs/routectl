@@ -4,9 +4,17 @@
 //! readability ceiling; included from there via `#[path = "usage_tests.rs"]`.
 
 use super::*;
-use routectl_router::{Config, PricingConfig, ProviderEntry, RegistryEntry};
+use routectl_router::{CatalogOverlay, Config, PricingConfig, ProviderEntry, RegistryEntry};
 use routectl_usage::{UsageDb, open};
 use tempfile::TempDir;
+
+/// An EMPTY catalog overlay: the default state of a machine that has never run
+/// `catalog import`. Tests that assert on baked-catalog auto-fill deliberately
+/// use this, so what they pin is the baked layer rather than an overlay
+/// correction.
+fn no_overlay() -> CatalogOverlay {
+    CatalogOverlay::default()
+}
 
 fn fixed_now() -> DateTime<Local> {
     // 2026-06-11 (Thursday) 14:30 local.
@@ -501,6 +509,7 @@ fn subscription_group_renders_na_subscription() {
     let report = build_window_report(
         &db,
         &config,
+        &no_overlay(),
         "t".into(),
         bounds,
         Some(GroupDim::Provider),
@@ -535,6 +544,7 @@ fn api_key_priced_group_shows_dollars() {
     let report = build_window_report(
         &db,
         &config,
+        &no_overlay(),
         "t".into(),
         bounds,
         Some(GroupDim::Provider),
@@ -587,6 +597,7 @@ fn mixed_priced_and_subscription_group_shows_dollars_plus_sub() {
     let report = build_window_report(
         &db,
         &config,
+        &no_overlay(),
         "t".into(),
         bounds,
         Some(GroupDim::Alias),
@@ -621,6 +632,7 @@ fn api_key_without_pricing_shows_na() {
     let report = build_window_report(
         &db,
         &config,
+        &no_overlay(),
         "t".into(),
         bounds,
         Some(GroupDim::Provider),
@@ -682,6 +694,7 @@ fn by_provider_rolls_up_and_totals_match() {
     let by_prov = build_window_report(
         &db,
         &config,
+        &no_overlay(),
         "t".into(),
         bounds,
         Some(GroupDim::Provider),
@@ -695,7 +708,8 @@ fn by_provider_rolls_up_and_totals_match() {
     assert_eq!(paid.output_tokens, 27);
 
     // Default view (by=None => per-model rows): one model "m" row + total.
-    let total = build_window_report(&db, &config, "t".into(), bounds, None, false).unwrap();
+    let total =
+        build_window_report(&db, &config, &no_overlay(), "t".into(), bounds, None, false).unwrap();
     assert_eq!(total.rows.len(), 2);
     let t = find(&total, "total");
     assert_eq!(t.requests, 3);
@@ -738,7 +752,8 @@ fn footer_cache_hit_rate_and_errors() {
     );
     let config = cost_config();
     let bounds = window_bounds(WindowFlag::All, fixed_now());
-    let report = build_window_report(&db, &config, "t".into(), bounds, None, false).unwrap();
+    let report =
+        build_window_report(&db, &config, &no_overlay(), "t".into(), bounds, None, false).unwrap();
     assert_eq!(report.total_errors, 1);
     assert_eq!(report.cache_hit_rate, None);
 }
@@ -752,7 +767,8 @@ fn footer_cache_hit_rate_none_when_no_tokens() {
     );
     let config = cost_config();
     let bounds = window_bounds(WindowFlag::All, fixed_now());
-    let report = build_window_report(&db, &config, "t".into(), bounds, None, false).unwrap();
+    let report =
+        build_window_report(&db, &config, &no_overlay(), "t".into(), bounds, None, false).unwrap();
     assert_eq!(report.cache_hit_rate, None);
 }
 
@@ -794,7 +810,7 @@ fn multi_window_summary_emits_four_blocks() {
         db: None,
         k_calibration: false,
     };
-    let blocks = build_blocks(&db, &config, &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&db, &config, &no_overlay(), &args, fixed_now()).unwrap();
     assert_eq!(blocks.len(), 4);
     assert!(blocks[0].contains("today"));
     assert!(blocks[3].contains("all time"));
@@ -822,7 +838,8 @@ fn detail_computes_ttft_percentiles_per_group() {
     }
     let config = cost_config();
     let bounds = window_bounds(WindowFlag::All, fixed_now());
-    let report = build_window_report(&db, &config, "t".into(), bounds, None, true).unwrap();
+    let report =
+        build_window_report(&db, &config, &no_overlay(), "t".into(), bounds, None, true).unwrap();
     let m = find(&report, "m");
     assert_eq!(m.ttft_p50_ms, Some(10));
     assert_eq!(m.ttft_p95_ms, Some(19));
@@ -918,7 +935,7 @@ fn build_output_k_calibration_returns_calibration_report_not_window_blocks() {
     };
 
     // Act
-    let output = build_output(&db, &config, &args, fixed_now()).unwrap();
+    let output = build_output(&db, &config, &no_overlay(), &args, fixed_now()).unwrap();
 
     // Assert: calibration-path output present (no-data message), not window blocks.
     assert!(
@@ -960,7 +977,7 @@ fn build_output_normal_returns_window_blocks_not_calibration_report() {
     };
 
     // Act
-    let output = build_output(&db, &config, &args, fixed_now()).unwrap();
+    let output = build_output(&db, &config, &no_overlay(), &args, fixed_now()).unwrap();
 
     // Assert: multi-window output present, no calibration header.
     assert!(
@@ -980,3 +997,4 @@ include!("usage_render_tests.rs");
 include!("usage_reduction_render_tests.rs");
 include!("usage_suppressed_render_tests.rs");
 include!("usage_era_pricing_tests.rs");
+include!("usage_catalog_fill_tests.rs");

@@ -1603,7 +1603,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `lookup(provider_kind, model, tier)` does three-tier fallback (exact-or-glob
   -> provider `"*"` catch-all -> conservative `CatalogRow::sentinel()`);
   `lookup_baked_with_overrides` reports a genuine catalog miss as `None`
-  instead of a sentinel. `merge(baked_row, overlay_cell) -> EffectiveRow`
+  instead of a sentinel. `resolve_effective_row(provider_kind, model, tier,
+  overrides, overlay) -> EffectiveRow` is THE shared resolution path
+  (`lookup_baked_with_overrides` + `lookup_overlay_cell` + `merge` in one
+  pure step), called by `factory::apply_catalog_overlay`,
+  `derive_effective_view`, and `pricing::effective_pricing` so no two surfaces
+  can resolve one selector to different rows. `merge(baked_row, overlay_cell)
+  -> EffectiveRow`
   (`Present{row, source, verified_at}` / `Disabled` / `Missing`) is the ONLY
   place provenance is computed -- `CatalogRow` itself carries none; overlay
   wins over baked, JSON `null` disables. `CachePricingOverride` (config.toml
@@ -1749,6 +1755,27 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   discipline extends the OAuth file-write standard with the same post-rename
   parent-directory `fsync` as the overlay, but deliberately carries no
   revision check (last-write-wins is harmless for rebuildable data)
+- `src/pricing.rs` -- THE price-unit conversion + precedence boundary. The
+  canonical operator-facing unit is USD per MILLION tokens (`PricingConfig` /
+  the usage leaf's `Rates`); the baked catalog's internal unit is USD per
+  TOKEN, and the two meet ONLY here. `pricing_from_catalog_row(&CatalogRow) ->
+  Option<PricingConfig>` converts as `(f64::from(v) * 1e6 * 1e4).round() /
+  1e4` -- rounded ONCE to the 1e-4 $/Mtok quantum, which is what makes every
+  distinct baked rate recover its exact decimal (a raw multiply leaves
+  representation dust) -- and fills INPUT + OUTPUT only, returning `None` when
+  a row prices neither. Cache `_per_mtok` dims are NEVER derived from
+  `wm`/`rm` (codegen emits economics-unconfirmed cells with sentinel
+  multipliers next to real base rates, and the row carries no flag to tell
+  them apart), so they stay `[registry]`-only. `effective_pricing(config,
+  overlay, provider_kind, upstream, provider) -> Option<(PricingConfig,
+  PricingSource{Registry,Catalog})>`: an operator `[registry]` row wins WHOLE
+  and verbatim (never a per-field merge -- `PricingConfig` has no
+  explicitly-unpriced sentinel, so a fill would overwrite deliberate
+  omissions), else `catalog::resolve_effective_row(...).priced()` feeds the
+  conversion; an EMPTY `provider_kind` and a `Disabled`/`Missing` cell both
+  yield `None` (unpriced, never a fabricated 0). The per-token `CatalogRow`
+  fields are `pub(crate)`, so the type wall -- not a convention -- keeps any
+  consumer outside this crate from joining the layers raw
 - `src/cost_gate.rs` -- PURE break-even cost gate consuming
   `catalog::CatalogRow`; advisory-only (no live mutation, no reuse estimator,
   no dispatch wiring). `break_even_k(row, &PrefixReductionCandidate{d,
@@ -4623,8 +4650,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   stays byte-identical): `resolve_target` reuses the alias resolution to get
   `(provider_kind = kind_str(), model = upstream)` offline,
   `build_economics(total_tokens, target, &ProjectionArgs)` resolves the
-  two-layer catalog merge itself via `lookup_baked_with_overrides` + `merge`
-  (the same entry the router's chain-build pass uses, since this offline
+  two-layer catalog merge itself via `catalog::resolve_effective_row`
+  (the same entry the router's chain-build pass and `pricing::effective_pricing`
+  use, since this offline
   command has no resolved-target chain to ride a precomputed `EffectiveRow`
   on) and calls the `cost_gate` (`break_even_k` / `evaluate`), and
   `print_economics` renders the resolved cell, its `trust_label` (`priced` /
@@ -4768,6 +4796,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   terminal-ness, `CI`, the `ROUTECTL_NO_STALENESS_HINT` kill switch,
   `[capability] staleness_hint_days`) at `doctor`, `catalog list`, and `config
   show` (non-JSON verbs only; never `serve`, `--json`, or an empty overlay)
+- `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams, both
+  `pub(super)` (visible across the `commands` tree, nowhere else). `rates_from_pricing(&PricingConfig) -> Rates` is the ONE carry
+  onto the usage leaf's rate struct, shared by the usage report and the probe
+  cost estimate; it lives CLI-side because `Rates` belongs to `routectl-usage`,
+  a zero-dep leaf the router must not depend on, and both units are already
+  per-million, so it is a field-for-field carry with `reasoning_per_mtok` left
+  unset for the caller that knows a row's reasoning structure.
+  `is_subscription(config, provider)` is THE managed-subscription predicate
+  (`api_key_ref` starts `oauth://`; `auth_kind` deliberately not consulted),
+  checked FIRST by every cost surface -- `usage::cost_for_row`,
+  `doctor::gather::pricing_row_source`, `probe::capabilities::probe_rates` --
+  before any rate lookup, so no surface can render a per-token figure for
+  traffic that bills by seat
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
   week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
@@ -4777,10 +4818,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   model|provider|alias` (or a single total), and bifurcates cost: a provider
   whose `[providers.X] api_key_ref` starts `oauth://` is subscription (`n/a
   (subscription)`, no $), an API-key provider prices its summed tokens via
-  `Config::pricing_for` -> `estimate_cost_tokens` (`$X.XX` or `n/a` when
-  unpriced) through `cost_for_row`, which yields the usage crate's `RowCost`
-  tri-state and is shared with `/status/query`'s pricing closure so the two
-  surfaces can never disagree about what a row costs. Reasoning tokens are
+  `routectl_router::effective_pricing` -> `rates_from_pricing` ->
+  `estimate_cost_tokens` (`$X.XX` or `n/a` when unpriced) through
+  `cost_for_row(config, overlay, row)`, which yields the usage crate's
+  `RowCost` tri-state and is shared with `/status/query`'s pricing closure so
+  the two surfaces can never disagree about what a row costs. An `[registry]`
+  row wins whole; in its absence the row's baked catalog rates fill in, keyed
+  by the PERSISTED `provider_kind` (a kindless row fills from no cell and
+  stays `Unpriced`). Reasoning tokens are
   priced from the row's PERSISTED `provider_kind` (disjoint for `gemini`,
   subsumed in the output count for every other kind), never from current
   config, so re-kinding a provider in place cannot reprice history; a row whose
@@ -4975,6 +5020,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   never trips the lane. `estimate_probe_cost` (always computed pre-dispatch,
   `total_calls * PROBE_PROFILE_V1.max_tokens` priced against the model's
   `Rates`) gates the run behind an operator confirmation (unless `--yes`).
+  Those `Rates` come from `probe_rates`, which resolves through
+  `pricing::is_subscription` FIRST (a managed-OAuth seat is billed by seat, so
+  the estimate reads `unpriced` and no rate is looked up) and otherwise through
+  `routectl_router::effective_pricing` -> `rates_from_pricing`, so the
+  pre-flight estimate, the usage report, and `doctor` can never disagree about
+  what a lane's tokens cost -- and a `[registry]`-silent upstream now estimates
+  off the baked catalog instead of reading `unpriced`.
   `run` and the wizard's `offer_scoped_probe` (the post-`provider add`/`init`
   hook, scoped to one provider, caller-supplied confirm) share the
   `dispatch_and_persist` tail (build bare provider + open ledger + run core +
@@ -4996,8 +5048,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (config/credentials/overlay/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
   Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
-  `seats`, `secrets`, `probe`, `capability`, `freshness`) -- one extension
-  point per
+  `seats`, `secrets`, `probe`, `capability`, `freshness`, `pricing`) -- one
+  extension point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
   per-layer `CapabilityInputs`/`CapabilityConfig`/`PriorCell` types and the
@@ -5006,7 +5058,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   matrix panel, plus the `FreshnessInputs` bundle -- baked catalog stamp,
   freshest overlay `verified_at`, staleness hint, pinned `today_epoch_day`,
   last successful import, plus a reserved `Option<ImportResult>` for the
-  future durable import outcome that renders nothing today) holds every
+  future durable import outcome that renders nothing today, plus the
+  `Option<Vec<PricingRow>>` rate-source rows -- `None` when the overlay could
+  not be loaded -- and their four-state
+  `PricingRowSource{Subscription,Registry,Catalog,Unpriced}`) holds every
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version,
@@ -5031,6 +5086,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   past the operator staleness hint, or a prior stamp past the same threshold
   via `is_stale_days`)
 - `src/commands/doctor/gather.rs` -- doctor data collection.
+  `derive_pricing_rows(config, overlay)` resolves one `PricingRow` per
+  `[models.X]` entry through the shared `effective_pricing` boundary (with
+  `pricing::is_subscription` checked first), so the diagnostic can never claim
+  a source the bill does not use; it is called ONLY when the overlay actually
+  loaded -- an unreadable overlay leaves `pricing: None` (the overlay is the
+  rate CORRECTION channel, so a baked figure could name a rate the bill does
+  not use).
   `gather_context_no_network` is the SINGLE shared gather body (per-layer
   `server::parse_config_only` + `server::load_overlay_default` so the
   capability panel degrades one layer without the other, raw-bytes read for
@@ -5111,6 +5173,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   hint, honest "no overlay verified stamp" when running on baked defaults;
   last SUCCESSFUL import date/age/counts, honest "no successful import
   recorded" when the sidecar is missing), all `Pass`/`Warn`, NEVER `Fail`.
+  `section_pricing`/`pricing_finding` map the gathered `PricingRow`s to one
+  informational `Pass` per configured model naming WHERE its cost rates come
+  from -- an operator `[registry]` row, the baked catalog (the auto-fill), a
+  managed subscription (checked FIRST, before any rate lookup), or unpriced --
+  each detail naming the resolved selector (provider, kind, upstream) and, for
+  the two priced states, the per-Mtok rates at two decimals like every other
+  money surface, with an unset dimension rendered `unset` rather than `$0` and
+  a winning row that sets NEITHER rate saying it prices nothing (reachable only
+  from an empty operator `[registry]` row). A `pricing: None` context (overlay
+  unreadable) collapses the section to the single `pricing_unavailable` Warn
+  instead. NEVER `Fail`, so it can never move the exit code.
   NEVER auto-fixes: every WARN/FAIL names the fix
 - `src/commands/doctor/render.rs` -- human-text rendering of the
   `DoctorReport`: `render_human` walks `SECTIONS` in render order (per-section

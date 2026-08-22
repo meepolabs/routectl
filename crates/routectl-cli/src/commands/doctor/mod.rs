@@ -36,8 +36,8 @@ use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
     section_auth, section_capability, section_config, section_freshness, section_inventory,
-    section_probe, section_seat_orphans, section_seat_pools, section_secret_orphans,
-    section_version,
+    section_pricing, section_probe, section_seat_orphans, section_seat_pools,
+    section_secret_orphans, section_version,
 };
 
 pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_error};
@@ -78,7 +78,11 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// v7 -> v8: the `config` section renders the validator suite's WARNING half
 /// as Warn findings alongside the error half, and its single Pass finding now
 /// requires BOTH halves empty.
-const SCHEMA_VERSION: u32 = 8;
+///
+/// v8 -> v9: the additive `pricing` section joins the report, one finding per
+/// configured model naming where its cost rates come from (an operator
+/// `[registry]` row, the baked catalog, a managed subscription, or nothing).
+const SCHEMA_VERSION: u32 = 9;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -100,6 +104,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("probe", section_probe),
     ("capability", section_capability),
     ("freshness", section_freshness),
+    ("pricing", section_pricing),
 ];
 
 /// The no-network subset of [`SECTIONS`]: [`SECTIONS`] MINUS the `probe`
@@ -121,6 +126,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("secrets", section_secret_orphans),
     ("capability", section_capability),
     ("freshness", section_freshness),
+    ("pricing", section_pricing),
 ];
 
 /// The read-only inputs every section producer draws from, gathered once
@@ -181,6 +187,52 @@ pub(crate) struct DoctorContext {
     /// freshest overlay verification, and the last SUCCESSFUL import. Purely
     /// additive to the context; gathered once like every other input.
     freshness: FreshnessInputs,
+    /// The pricing section's rows: one per configured model, resolved once at
+    /// gather time so the section producer stays a pure mapping. `None` when
+    /// the catalog overlay could not be loaded -- the overlay is the rate
+    /// CORRECTION channel, so without it no resolved figure can be trusted and
+    /// the section renders an honest unavailable line instead.
+    pricing: Option<Vec<PricingRow>>,
+}
+
+/// Where one configured model's cost rates come from, and what they are.
+///
+/// Resolved through the SAME `routectl_router::effective_pricing` boundary the
+/// usage report prices rows against, so the diagnostic can never claim a
+/// source the bill does not use.
+struct PricingRow {
+    /// The `[models.<nickname>]` key.
+    nickname: String,
+    /// The `provider` the model references.
+    provider: String,
+    /// The referenced provider's kind token (empty when the provider is
+    /// unknown to the config).
+    provider_kind: String,
+    /// The upstream model id the rates were resolved for.
+    upstream: String,
+    /// The resolved rates and the layer that supplied them.
+    source: PricingRowSource,
+}
+
+/// The four states a [`PricingRow`] can report, in the same vocabulary the
+/// usage report's cost column uses.
+enum PricingRowSource {
+    /// A managed-OAuth (`oauth://`) provider: billed by subscription, so no
+    /// per-token rate applies and none is looked up.
+    Subscription,
+    /// An operator `[registry]` pricing row, taken verbatim.
+    Registry {
+        input_per_mtok: Option<f64>,
+        output_per_mtok: Option<f64>,
+    },
+    /// The two-layer catalog's own baked rates, converted to per-million.
+    Catalog {
+        input_per_mtok: Option<f64>,
+        output_per_mtok: Option<f64>,
+    },
+    /// Neither layer prices this model: its usage reports as unpriced rather
+    /// than as a fabricated zero.
+    Unpriced,
 }
 
 /// Per-layer inputs the capability section maps to findings. The config

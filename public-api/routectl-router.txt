@@ -296,10 +296,8 @@ pub fn routectl_router::catalog::CachePricingSelector::into_shared(self) -> Shar
 pub routectl_router::catalog::CatalogRow::auto_cacher: bool
 pub routectl_router::catalog::CatalogRow::capabilities: alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>
 pub routectl_router::catalog::CatalogRow::has_storage_rent: bool
-pub routectl_router::catalog::CatalogRow::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CatalogRow::max_context_tokens: core::option::Option<u32>
 pub routectl_router::catalog::CatalogRow::min_prefix_tokens: u32
-pub routectl_router::catalog::CatalogRow::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CatalogRow::rm: f32
 pub routectl_router::catalog::CatalogRow::storage_rent: f32
 pub routectl_router::catalog::CatalogRow::tier: core::option::Option<&'static str>
@@ -373,6 +371,7 @@ pub fn routectl_router::catalog::lookup_baked_with_overrides(&str, &str, core::o
 pub fn routectl_router::catalog::lookup_overlay_cell<'a>(&str, &str, &'a routectl_router::CatalogOverlay) -> core::option::Option<&'a core::option::Option<routectl_router::OverlayCell>>
 pub fn routectl_router::catalog::lookup_with_overrides(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> routectl_router::catalog::CatalogRow
 pub fn routectl_router::catalog::merge(core::option::Option<&routectl_router::catalog::CatalogRow>, core::option::Option<&core::option::Option<routectl_router::OverlayCell>>) -> routectl_router::catalog::EffectiveRow
+pub fn routectl_router::catalog::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow
 pub const fn routectl_router::catalog::stale_after_days() -> i64
 pub fn routectl_router::catalog::today_epoch_day() -> i64
 pub fn routectl_router::catalog::validate_overrides(&alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::result::Result<(), alloc::string::String>
@@ -3273,6 +3272,67 @@ pub type routectl_router::pool_build::PoolReport::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolReport where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::pool_build::PoolReport::into_shared(self) -> Shared
 pub fn routectl_router::pool_build::unavailable_pool_error(&[routectl_router::pool_build::PoolReport]) -> core::option::Option<alloc::string::String>
+pub mod routectl_router::pricing
+pub enum routectl_router::pricing::PricingSource
+pub routectl_router::pricing::PricingSource::Catalog
+pub routectl_router::pricing::PricingSource::Registry
+impl core::clone::Clone for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::clone(&self) -> routectl_router::pricing::PricingSource
+impl core::cmp::Eq for routectl_router::pricing::PricingSource
+impl core::cmp::PartialEq for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::eq(&self, &routectl_router::pricing::PricingSource) -> bool
+impl core::fmt::Debug for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::pricing::PricingSource
+impl core::marker::StructuralPartialEq for routectl_router::pricing::PricingSource
+impl core::marker::Freeze for routectl_router::pricing::PricingSource
+impl core::marker::Send for routectl_router::pricing::PricingSource
+impl core::marker::Sync for routectl_router::pricing::PricingSource
+impl core::marker::Unpin for routectl_router::pricing::PricingSource
+impl core::marker::UnsafeUnpin for routectl_router::pricing::PricingSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pricing::PricingSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pricing::PricingSource
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pricing::PricingSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pricing::PricingSource where U: core::convert::From<T>
+pub fn routectl_router::pricing::PricingSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pricing::PricingSource where U: core::convert::Into<T>
+pub type routectl_router::pricing::PricingSource::Error = core::convert::Infallible
+pub fn routectl_router::pricing::PricingSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pricing::PricingSource where U: core::convert::TryFrom<T>
+pub type routectl_router::pricing::PricingSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pricing::PricingSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub type routectl_router::pricing::PricingSource::Owned = T
+pub fn routectl_router::pricing::PricingSource::clone_into(&self, &mut T)
+pub fn routectl_router::pricing::PricingSource::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub fn routectl_router::pricing::PricingSource::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pricing::PricingSource where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pricing::PricingSource where T: ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pricing::PricingSource where T: ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub unsafe fn routectl_router::pricing::PricingSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub fn routectl_router::pricing::PricingSource::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pricing::PricingSource
+impl<T> outref::AsOut<T> for routectl_router::pricing::PricingSource where T: core::marker::Copy
+pub fn routectl_router::pricing::PricingSource::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pricing::PricingSource where T: ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pricing::PricingSource::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pricing::PricingSource
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pricing::PricingSource
+impl<T> typenum::type_operators::Same for routectl_router::pricing::PricingSource
+pub type routectl_router::pricing::PricingSource::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pricing::PricingSource where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pricing::PricingSource::into_shared(self) -> Shared
+pub fn routectl_router::pricing::effective_pricing(&routectl_router::config::Config, &routectl_router::CatalogOverlay, &str, &str, &str) -> core::option::Option<(routectl_router::PricingConfig, routectl_router::pricing::PricingSource)>
 pub mod routectl_router::router
 pub struct routectl_router::router::CapabilityClearedEvent
 pub routectl_router::router::CapabilityClearedEvent::capability_key: alloc::string::String
@@ -6391,6 +6451,65 @@ impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolOutco
 pub type routectl_router::pool_build::PoolOutcome::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::pool_build::PoolOutcome::into_shared(self) -> Shared
+pub enum routectl_router::PricingSource
+pub routectl_router::PricingSource::Catalog
+pub routectl_router::PricingSource::Registry
+impl core::clone::Clone for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::clone(&self) -> routectl_router::pricing::PricingSource
+impl core::cmp::Eq for routectl_router::pricing::PricingSource
+impl core::cmp::PartialEq for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::eq(&self, &routectl_router::pricing::PricingSource) -> bool
+impl core::fmt::Debug for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::pricing::PricingSource
+impl core::marker::StructuralPartialEq for routectl_router::pricing::PricingSource
+impl core::marker::Freeze for routectl_router::pricing::PricingSource
+impl core::marker::Send for routectl_router::pricing::PricingSource
+impl core::marker::Sync for routectl_router::pricing::PricingSource
+impl core::marker::Unpin for routectl_router::pricing::PricingSource
+impl core::marker::UnsafeUnpin for routectl_router::pricing::PricingSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::pricing::PricingSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::pricing::PricingSource
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::pricing::PricingSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::pricing::PricingSource where U: core::convert::From<T>
+pub fn routectl_router::pricing::PricingSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::pricing::PricingSource where U: core::convert::Into<T>
+pub type routectl_router::pricing::PricingSource::Error = core::convert::Infallible
+pub fn routectl_router::pricing::PricingSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::pricing::PricingSource where U: core::convert::TryFrom<T>
+pub type routectl_router::pricing::PricingSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::pricing::PricingSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub type routectl_router::pricing::PricingSource::Owned = T
+pub fn routectl_router::pricing::PricingSource::clone_into(&self, &mut T)
+pub fn routectl_router::pricing::PricingSource::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub fn routectl_router::pricing::PricingSource::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::pricing::PricingSource where T: 'static + ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::pricing::PricingSource where T: ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::pricing::PricingSource where T: ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub unsafe fn routectl_router::pricing::PricingSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::pricing::PricingSource
+pub fn routectl_router::pricing::PricingSource::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::pricing::PricingSource where T: core::clone::Clone
+pub fn routectl_router::pricing::PricingSource::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::pricing::PricingSource
+impl<T> outref::AsOut<T> for routectl_router::pricing::PricingSource where T: core::marker::Copy
+pub fn routectl_router::pricing::PricingSource::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::pricing::PricingSource where T: ?core::marker::Sized
+pub fn routectl_router::pricing::PricingSource::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::pricing::PricingSource::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::pricing::PricingSource
+impl<T> tracing::instrument::WithSubscriber for routectl_router::pricing::PricingSource
+impl<T> typenum::type_operators::Same for routectl_router::pricing::PricingSource
+pub type routectl_router::pricing::PricingSource::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pricing::PricingSource where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::pricing::PricingSource::into_shared(self) -> Shared
 #[non_exhaustive] pub enum routectl_router::ProviderEntry
 #[non_exhaustive] pub routectl_router::ProviderEntry::AnthropicApi
 pub routectl_router::ProviderEntry::AnthropicApi::allowed_betas: alloc::vec::Vec<alloc::string::String>
@@ -8622,10 +8741,8 @@ pub fn routectl_router::CatalogOverlay::into_shared(self) -> Shared
 pub routectl_router::CatalogRow::auto_cacher: bool
 pub routectl_router::CatalogRow::capabilities: alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>
 pub routectl_router::CatalogRow::has_storage_rent: bool
-pub routectl_router::CatalogRow::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::CatalogRow::max_context_tokens: core::option::Option<u32>
 pub routectl_router::CatalogRow::min_prefix_tokens: u32
-pub routectl_router::CatalogRow::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::CatalogRow::rm: f32
 pub routectl_router::CatalogRow::storage_rent: f32
 pub routectl_router::CatalogRow::tier: core::option::Option<&'static str>
@@ -13380,6 +13497,7 @@ pub fn routectl_router::diff_activation(&routectl_router::ActivationState, &rout
 pub fn routectl_router::diff_has_no_effective_change(&routectl_router::ImportDiff) -> bool
 pub fn routectl_router::diff_overlay(&routectl_router::CatalogOverlay, &routectl_router::ImportCandidate, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CatalogRow>) -> routectl_router::ImportDiff
 pub fn routectl_router::edit_config_toml<E, F>(&std::path::Path, &[u8], F) -> core::result::Result<routectl_router::EditResult, routectl_router::ConfigWriteError<E>> where E: core::error::Error, F: core::ops::function::FnOnce(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::EditOutcome, E>
+pub fn routectl_router::effective_pricing(&routectl_router::config::Config, &routectl_router::CatalogOverlay, &str, &str, &str) -> core::option::Option<(routectl_router::PricingConfig, routectl_router::pricing::PricingSource)>
 pub fn routectl_router::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_router::ImpactClass) -> routectl_router::ImpactClass
 pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
@@ -13416,6 +13534,7 @@ pub fn routectl_router::provider_kind_for_oauth_id(&str) -> core::option::Option
 pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
 pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
+pub fn routectl_router::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::resolve_requested_capability(&str, &routectl_core::error::Error, &routectl_core::failure_class::ClassifiedFailure) -> core::option::Option<(alloc::string::String, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase)>
 pub fn routectl_router::resolved_codex_version(&routectl_router::config::Config) -> core::option::Option<alloc::string::String>
 pub fn routectl_router::save_catalog_overlay(&std::path::Path, u64, alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<routectl_router::OverlayCell>>) -> core::result::Result<routectl_router::CatalogOverlay, routectl_router::OverlayError>

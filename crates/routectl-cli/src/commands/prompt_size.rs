@@ -21,8 +21,8 @@ use routectl_core::{ChatRequest, Error, Result, scan_volatile};
 use routectl_router::{
     ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CatalogOverlay,
     Config, EffectiveRow, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig,
-    break_even_k, collect_config_validation, evaluate, lookup_baked_with_overrides,
-    lookup_overlay_cell, merge, propose_steady_state_trim,
+    break_even_k, collect_config_validation, evaluate, propose_steady_state_trim,
+    resolve_effective_row,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -277,9 +277,9 @@ fn build_steady_state_economics(
 /// `prompt-size` is an offline CLI: it has no resolved-target chain to ride
 /// a precomputed `EffectiveRow` on (riding the resolved target is a
 /// dispatch-path concern), so it resolves the merge here, at its own load
-/// point, through the SAME shared `lookup_baked_with_overrides` + `merge`
-/// entry the router's chain-build pass uses -- never a duplicate merge
-/// implementation.
+/// point, through the SAME shared `catalog::resolve_effective_row` entry the
+/// router's chain-build pass and the pricing boundary use -- never a duplicate
+/// merge implementation.
 fn price_candidate(
     candidate: PrefixReductionCandidate,
     target: Option<(&'static str, String)>,
@@ -289,15 +289,11 @@ fn price_candidate(
     would_trim: Option<bool>,
 ) -> EconomicsProjection {
     let (provider_kind, model, effective) = match &target {
-        Some((kind, model)) => {
-            let baked = lookup_baked_with_overrides(kind, model, Some(args.ttl_tier), overrides);
-            let overlay_cell = lookup_overlay_cell(kind, model, overlay);
-            (
-                Some((*kind).to_string()),
-                Some(model.clone()),
-                merge(baked.as_ref(), overlay_cell),
-            )
-        }
+        Some((kind, model)) => (
+            Some((*kind).to_string()),
+            Some(model.clone()),
+            resolve_effective_row(kind, model, Some(args.ttl_tier), overrides, overlay),
+        ),
         None => (None, None, EffectiveRow::Missing),
     };
     let row = effective.priced();
@@ -417,8 +413,8 @@ fn resolve_supports_top_level(config: &Config, alias: &str) -> Option<bool> {
 /// SAME config-only precedence as `resolve_supports_top_level` -- no live
 /// secret resolution, no provider build, no network. `provider_kind` is the
 /// stable `kind_str()` discriminant; `model` is the resolved upstream id. The
-/// cache-economics projection feeds these to `lookup_baked_with_overrides` +
-/// the two-layer merge. Returns `None` when any
+/// cache-economics projection feeds these to `resolve_effective_row`'s
+/// two-layer merge. Returns `None` when any
 /// hop cannot be resolved offline.
 fn resolve_target(config: &Config, alias: &str) -> Option<(&'static str, String)> {
     let value = resolve_alias_value(config, alias)?;

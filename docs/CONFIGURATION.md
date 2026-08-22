@@ -2380,11 +2380,30 @@ its multipliers are not trusted for a live decision.
 ## Pricing registry (`[registry."<pattern>".pricing]`)
 
 The optional `[registry]` table supplies per-upstream prices so usage
-rows can carry a cost estimate. routectl ships **no price defaults** --
-an upstream with no matching entry is simply unpriced. Cost is computed
-at **query time**, never persisted, so correcting a price later
-retroactively fixes the cost of every historical row priced by that
-entry.
+rows can carry a cost estimate. It is the **authority**, not the only
+source: where `[registry]` is silent, the baked catalog's own rates fill
+in, so a common upstream is priced out of the box without any
+`[registry]` entry at all. The precedence is:
+
+- A matching `[registry]` row wins **whole and verbatim** -- never merged
+  per field with the catalog, so a dimension you deliberately left unset
+  stays unset rather than being backfilled.
+- Otherwise the two-layer catalog (baked rates, corrected by the catalog
+  overlay) fills in for the `(provider kind, upstream)` pair, but ONLY
+  from a cell that carries real rates: an entry the overlay disabled, an
+  ambiguous catch-all cell that prices nothing, or a subject whose
+  provider kind is unknown all stay **unpriced**, never priced at zero.
+- A managed-subscription provider (`api_key_ref` starting `oauth://`) is
+  checked before either layer: it is billed by seat, so no per-token rate
+  applies and none is looked up.
+
+`routectl doctor`'s **Cost pricing** section names which of these
+resolved for every configured model, so you can see whether a figure came
+from your `[registry]` row or from the catalog.
+
+Cost is computed at **query time**, never persisted, so correcting a
+price later retroactively fixes the cost of every historical row priced
+by that entry.
 
 ```toml
 [registry."deepseek-*"]
@@ -3322,15 +3341,26 @@ dimension; omit `--by` for a single total row. `--detail` adds extra
 columns: the 5m/1h cache-write split, p95 (nearest-rank) and max
 latency, total wall-time (summed `latency_ms`), and server-tool counts.
 
-**Cost.** Cost is derived from `[registry]` pricing at read time. The
-dollar column has three states:
+**Cost.** Cost is derived at read time from the effective pricing for
+each row: a matching `[registry]` row wins whole, and where `[registry]`
+is silent the baked catalog's own rates fill in (see [Pricing
+registry](#pricing-registry-registrypatternpricing)). The dollar column
+has three states:
 
-- `$X.XX` -- an API-key provider with a matching `[registry]` price.
+- `$X.XX` -- an API-key provider whose upstream resolved a price, either
+  from a matching `[registry]` row or from the catalog. The catalog side
+  is keyed by the provider kind **persisted with the row**, never by what
+  the provider is configured as now, so re-kinding a provider in place
+  cannot reprice history.
 - `n/a (subscription)` -- a managed-OAuth provider (its
   `[providers.X] api_key_ref` starts with `oauth://`). Subscription usage
   has no per-token dollar cost; the **quota line** under the table is the
   real spend signal.
-- `n/a` -- an API-key provider whose upstream has no `[registry]` price.
+- `n/a` -- an API-key provider whose upstream neither `[registry]` nor the
+  catalog prices: no `[registry]` row matches AND the catalog has no cell
+  with real rates for it (the entry is overlay-disabled, its only matching
+  cell is an ambiguous catch-all, or the row carries no persisted provider
+  kind to key the catalog on).
 
 A footer reports the window's cache-hit-rate
 (`cache_read / (cache_read + input)`) and error count.
@@ -3537,6 +3567,7 @@ The battery sections, in render order:
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty), and a WARN nudging `config migrate` when deprecated capability-list keys are still set. Never emits a FAIL, so it can never flip the exit code. |
 | Catalog freshness (`freshness`) | Three advisory rows on how current the catalog data is: the baked catalog version and snapshot date, the freshest overlay verification stamp and its age, and the last SUCCESSFUL `catalog import` with its row counts. A stale overlay or import is a WARN pointing at `catalog import`; never a FAIL. |
+| Cost pricing (`pricing`) | One row per configured model naming WHERE its cost rates come from -- an operator `[registry]` row (taken verbatim), the baked catalog's own rates (the auto-fill when `[registry]` is silent), a managed subscription (billed by seat, no per-token rate), or unpriced (neither layer has rates, so usage reports no cost for it). Every priced row names the resolved per-million input / output rates; a dimension the winning layer left unset reads `unset`, never `$0`, and a `[registry]` row that sets no rate at all says it prices nothing. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay supersedes baked rates, so reporting the baked figure could name a rate the bill does not use. Never FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:
 

@@ -16,6 +16,31 @@ list with more narrative.
 
 ### Added
 
+- **Cost accounting works out of the box** -- when `[registry]` carries no
+  pricing for an upstream, routectl now prices its usage from the baked
+  catalog's own rates instead of reporting it unpriced. An operator
+  `[registry]` row still always wins, taken WHOLE and verbatim so a
+  deliberately omitted dimension is never backfilled. The canonical
+  operator-facing price unit is USD per million tokens; the catalog's
+  internal per-token rates convert at exactly one boundary, and the
+  per-token fields are no longer part of the router crate's public surface,
+  so no consumer can join the two unit systems raw. The fill covers the
+  input and output dimensions only -- cache rates stay `[registry]`-only,
+  since deriving them from a row's cache multipliers would fabricate
+  figures for cells whose multipliers are placeholders. A row the catalog
+  cannot price unambiguously stays unpriced rather than reading as free.
+  History is keyed by the provider kind PERSISTED with each row, so
+  re-kinding a provider cannot reprice the past, and a row with no recorded
+  kind fails closed to unpriced. Subscription providers are unaffected:
+  the subscription check still runs before any rate lookup, and the
+  `priced` / `unpriced` / `subscription` / `partial` cost vocabulary is
+  unchanged. `routectl doctor` grows a **Cost pricing** section naming each
+  configured model's rate source and resolved per-million rates (doctor
+  report schema 8 -> 9); if the catalog overlay cannot be loaded the section
+  reports unavailable rather than a rate the overlay may supersede.
+  `routectl probe --capabilities` estimates off the same resolution, so a
+  lane the operator never priced now shows a dollar estimate instead of
+  `unpriced` -- and a managed-subscription lane still shows none.
 - **`context_length` on `GET /v1/models`** -- each local discovery entry
   now carries the resolved target's context window in tokens, read from
   the same overlay-corrected catalog row the proactive context-window

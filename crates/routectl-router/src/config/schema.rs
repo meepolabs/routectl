@@ -600,11 +600,16 @@ fn default_mitm_host() -> String {
 }
 
 /// Per-million-token pricing for one `[registry.*]` entry. All fields
-/// are USD per million tokens and all are optional -- routectl ships no
-/// price defaults, so any field left unset means "this dimension is
-/// unpriced" and contributes nothing to a derived cost. Cost is computed
-/// at query time, never persisted, so a corrected price retroactively
-/// fixes historical rows.
+/// are USD per million tokens -- the CANONICAL operator-facing price unit
+/// throughout routectl -- and all are optional: routectl ships no price
+/// defaults, so any field left unset means "this dimension is unpriced" and
+/// contributes nothing to a derived cost. Cost is computed at query time,
+/// never persisted, so a corrected price retroactively fixes historical rows.
+///
+/// A row here wins WHOLE over the baked catalog's own rates, which fill in
+/// only when no row prices an upstream: this struct has no
+/// explicitly-unpriced sentinel, so a per-field fill could not tell a
+/// deliberate omission from an absent value.
 ///
 /// `Eq` is deliberately NOT derived: `f64` is not `Eq`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]

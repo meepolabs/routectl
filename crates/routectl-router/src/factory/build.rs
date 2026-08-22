@@ -6,7 +6,7 @@ use super::validate::validate_bedrock_allowlists;
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
 use super::warnings::warn_context_management_needs_preserve;
-use crate::catalog::{lookup_baked_with_overrides, lookup_overlay_cell, merge};
+use crate::catalog::resolve_effective_row;
 use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
@@ -1660,8 +1660,10 @@ fn pool_reports(
 /// shared config loader) call this too.
 ///
 /// The two-layer merge runs HERE, once, at chain-build/load time -- not
-/// per dispatch. `Router::record_would_trim` reads `ResolvedModel::effective_row`
-/// directly instead of re-running `lookup_baked_with_overrides` + `merge`.
+/// per dispatch, and through the shared `catalog::resolve_effective_row` so
+/// this pass and the cost-fill boundary can never resolve one selector to
+/// different rows. `Router::record_would_trim` reads
+/// `ResolvedModel::effective_row` directly instead of re-resolving.
 /// `tier` is fixed to `None` (the 5m default), matching the ONE tier the
 /// dispatch-path pricing call has ever priced against.
 #[must_use]
@@ -1674,14 +1676,13 @@ pub fn apply_catalog_overlay(
         .into_iter()
         .map(|(nickname, model)| {
             let provider_kind = resolved_provider_kind(&model, config);
-            let baked = lookup_baked_with_overrides(
+            let effective_row = resolve_effective_row(
                 provider_kind,
                 &model.upstream,
                 None,
                 &config.cache_pricing,
+                overlay,
             );
-            let overlay_cell = lookup_overlay_cell(provider_kind, &model.upstream, overlay);
-            let effective_row = merge(baked.as_ref(), overlay_cell);
             let stamped = Arc::new((*model).clone().with_effective_row(effective_row));
             (nickname, stamped)
         })
