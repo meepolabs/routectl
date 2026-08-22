@@ -1422,7 +1422,9 @@ struct DispatchTarget {
     /// Capability keys the feature filter decided to STRIP in place for
     /// this target rather than route away from -- the strip-vs-route
     /// verdict for a learned acting negative whose policy
-    /// ([`capability_strip::action_for`](crate::capability_strip::action_for))
+    /// ([`capability_strip::effective_action_for`](crate::capability_strip::effective_action_for)
+    /// -- the baked table as the operator's `[capability] essential` list
+    /// tightens it)
     /// is `Strip` and that no operator beta floor pins to the wire. Sorted
     /// normalized keys
     /// (`normalize_capability_key`), so the per-session cache prefix an
@@ -1520,6 +1522,12 @@ impl Router {
     /// Build a router from a config, provisioning a runtime gate for every
     /// configured provider. Resolved models and providers are registered
     /// separately.
+    ///
+    /// UNVALIDATED by design: this constructor runs no part of
+    /// [`collect_config_validation`](crate::collect_config_validation), so a
+    /// caller passing an unchecked `Config` gets a Router whose invalid
+    /// settings sit inert. Callers wanting the validated build path go
+    /// through the CLI's router builder, which runs the suite first.
     pub fn new(config: Arc<Config>) -> Self {
         let mut state = BTreeMap::new();
         for (name, entry) in &config.providers {

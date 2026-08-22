@@ -8,10 +8,12 @@
 //!   away from ([`CapabilityAction::RouteAway`]) or have the capability
 //!   stripped in place ([`CapabilityAction::Strip`]). The essentials
 //!   (`structured_output`, `computer_use`, `web_search`) are listed
-//!   EXPLICITLY as route-away for intent; the catch-all `_ => RouteAway`
-//!   is the fail-closed default -- an unmapped key is treated as
-//!   essential and never auto-stripped, because silently corrupting the
-//!   request semantics is the non-recoverable harm.
+//!   EXPLICITLY as route-away for intent; the droppables come from the
+//!   `STRIP_ACTIONS` table (also what [`strippable_keys`] enumerates, so
+//!   the two can never disagree), and a key in neither falls through to
+//!   the fail-closed default -- an unmapped key is treated as essential
+//!   and never auto-stripped, because silently corrupting the request
+//!   semantics is the non-recoverable harm.
 //! - [`strip_plan`] -- the per-key transform. Data-driven and able to
 //!   remove a capability across MORE THAN ONE request surface (a tool in
 //!   `tools`, a token in `anthropic_beta`, a key in `provider_extras`),
@@ -114,15 +116,67 @@ pub struct StripContext {
     pub strict: bool,
 }
 
+/// The droppable namespace: every key that strips, paired with the primary
+/// surface its strip touches. THE single source for both directions of the
+/// question -- [`action_for`] resolves a `Strip` verdict through this table
+/// and [`strippable_keys`] enumerates it -- so a new droppable added here
+/// widens the config accept set in the same edit, and no second list can
+/// fall behind. A key absent from the table falls through to the
+/// fail-closed `RouteAway` default.
+const STRIP_ACTIONS: &[(&str, StripKind)] = &[
+    (ADVISOR, StripKind::ToolParam),
+    (CONTEXT_MANAGEMENT, StripKind::BetaFlag),
+    (REASONING_REPLAY, StripKind::AssistantReasoning),
+];
+
 /// The single policy consult point. See the module docs.
 pub fn action_for(feature_key: &str) -> CapabilityAction {
     match feature_key {
         WEB_SEARCH | COMPUTER_USE | STRUCTURED_OUTPUT => CapabilityAction::RouteAway,
-        ADVISOR => CapabilityAction::Strip(StripKind::ToolParam),
-        CONTEXT_MANAGEMENT => CapabilityAction::Strip(StripKind::BetaFlag),
-        REASONING_REPLAY => CapabilityAction::Strip(StripKind::AssistantReasoning),
-        _ => CapabilityAction::RouteAway,
+        _ => STRIP_ACTIONS
+            .iter()
+            .find(|(key, _)| *key == feature_key)
+            .map_or(CapabilityAction::RouteAway, |(_, kind)| {
+                CapabilityAction::Strip(*kind)
+            }),
     }
+}
+
+/// Every key [`action_for`] maps to a `Strip` action, derived from the one
+/// [`STRIP_ACTIONS`] table that produces those verdicts. Config validation
+/// reads it so the operator-facing accept set auto-extends the moment a new
+/// droppable lands in the table.
+///
+/// `pub` only because this whole module is `pub(crate)`: the effective
+/// visibility is crate-internal, and this is not a public-API commitment.
+pub fn strippable_keys() -> impl Iterator<Item = &'static str> {
+    STRIP_ACTIONS.iter().map(|(key, _)| *key)
+}
+
+/// Whether [`action_for`] maps `feature_key` to a `Strip` action.
+pub fn is_strippable(feature_key: &str) -> bool {
+    strippable_keys().any(|key| key == feature_key)
+}
+
+/// [`action_for`] as an operator's `[capability] essential` list modifies
+/// it: a listed key becomes [`CapabilityAction::RouteAway`], every other
+/// key keeps its baked verdict. A stateless query-time transform, re-read
+/// from config on every consult -- it holds no state and expires nothing.
+///
+/// Tightening only: a listed key that already routes away is unchanged,
+/// and no list entry can ever turn a baked route-away into a strip.
+///
+/// `action_for` itself stays a pure baked table because the interceptor
+/// documents purity in `(req, ctx)`; an essential-flagged key is routed
+/// away upstream of dispatch and so never reaches the interceptor.
+///
+/// `pub` only because this whole module is `pub(crate)` -- see
+/// [`strippable_keys`].
+pub fn effective_action_for(feature_key: &str, essential: &[String]) -> CapabilityAction {
+    if essential.iter().any(|key| key == feature_key) {
+        return CapabilityAction::RouteAway;
+    }
+    action_for(feature_key)
 }
 
 /// The surfaces a single capability's strip touches. A `None`/empty
@@ -465,6 +519,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS;
     use routectl_core::{
         BEDROCK_MANTLE, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role,
     };
@@ -536,6 +591,91 @@ mod tests {
             CapabilityAction::Strip(StripKind::AssistantReasoning)
         );
         assert!(strip_plan(REASONING_REPLAY).is_none());
+
+        // `strippable_keys` and the Strip set are the same table by
+        // construction, so the risk this guards is the table growing a row
+        // whose key is not really strippable, or a key becoming strippable
+        // outside the table. Sweep a candidate set wider than the table --
+        // every well-known capability key, the table's own keys, and
+        // plausible future keys -- and assert set-equality between the keys
+        // action_for maps to Strip and the enumeration.
+        let candidates: Vec<&str> = WELL_KNOWN_CAPABILITY_KEYS
+            .iter()
+            .copied()
+            .chain(strippable_keys())
+            .chain([
+                "advisor",
+                "context_management",
+                "prefill",
+                "prefill_probe",
+                "citations",
+                "tool_choice",
+                "some_future_tool",
+                "",
+            ])
+            .collect();
+        let stripping: std::collections::BTreeSet<&str> = candidates
+            .iter()
+            .copied()
+            .filter(|key| matches!(action_for(key), CapabilityAction::Strip(_)))
+            .collect();
+        let enumerated: std::collections::BTreeSet<&str> = strippable_keys().collect();
+        assert_eq!(
+            stripping, enumerated,
+            "the keys action_for strips must be exactly what strippable_keys enumerates -- \
+             a droppable reachable outside STRIP_ACTIONS would shrink the operator-facing \
+             accept set below the real namespace"
+        );
+    }
+
+    // --- effective_action_for: the operator essential list ---
+
+    #[test]
+    fn essential_list_turns_a_baked_strip_into_route_away() {
+        // Arrange
+        let essential = vec![ADVISOR.to_string()];
+
+        // Act / Assert -- the listed key tightens to route-away while its
+        // droppable sibling keeps the baked verdict.
+        assert_eq!(
+            effective_action_for(ADVISOR, &essential),
+            CapabilityAction::RouteAway
+        );
+        assert_eq!(
+            effective_action_for(CONTEXT_MANAGEMENT, &essential),
+            CapabilityAction::Strip(StripKind::BetaFlag)
+        );
+    }
+
+    #[test]
+    fn an_empty_essential_list_reproduces_the_baked_table() {
+        for key in [
+            ADVISOR,
+            CONTEXT_MANAGEMENT,
+            REASONING_REPLAY,
+            WEB_SEARCH,
+            COMPUTER_USE,
+            STRUCTURED_OUTPUT,
+            "prefill",
+            "",
+        ] {
+            assert_eq!(
+                effective_action_for(key, &[]),
+                action_for(key),
+                "key {key} must be unchanged by an empty essential list"
+            );
+        }
+    }
+
+    #[test]
+    fn listing_an_already_route_away_key_is_idempotent() {
+        // Tightening a key that already routes away is a no-op, not an
+        // error -- the accept set admits such declarations.
+        let essential = vec![WEB_SEARCH.to_string()];
+        assert_eq!(
+            effective_action_for(WEB_SEARCH, &essential),
+            CapabilityAction::RouteAway
+        );
     }
 
     #[test]

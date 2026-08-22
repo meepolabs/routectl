@@ -1688,6 +1688,65 @@ mod collect_config_validation_tests {
         );
     }
 
+    /// Config surface for a `[capability] essential` list. Parsed through
+    /// the real serde path so the operator-written TOML shape is what the
+    /// validator sees.
+    fn essential_config(entries: &str) -> Config {
+        toml::from_str(&format!("[capability]\nessential = [{entries}]\n"))
+            .expect("fixture must parse")
+    }
+
+    #[test]
+    fn collects_the_unknown_essential_capability_error() {
+        let validation = collect_config_validation(&essential_config("\"advisorr\""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("advisorr") && validation.errors[0].contains("unknown"),
+            "error should name the unknown capability: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_reasoning_replay_essential_carve_out_error() {
+        let validation = collect_config_validation(&essential_config("\"reasoning_replay\""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("reasoning_replay")
+                && validation.errors[0].contains("replay path"),
+            "error should name the lane-managed replay carve-out: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn accepts_known_essential_capabilities_including_already_essential_ones() {
+        // web_search already routes away by the baked table, so listing it
+        // is an idempotent declaration rather than an error; advisor and
+        // context_management are the droppables the list actually tightens.
+        let validation = collect_config_validation(&essential_config(
+            "\"web_search\", \"advisor\", \"context_management\"",
+        ));
+
+        assert!(
+            validation.errors.is_empty(),
+            "known capability keys must be accepted: {:?}",
+            validation.errors
+        );
+    }
+
     #[test]
     fn a_clean_config_produces_no_errors() {
         let validation = collect_config_validation(&Config::default());

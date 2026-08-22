@@ -440,6 +440,46 @@ fn class_policy_reject_surfaces_through_load_effective_config() {
     );
 }
 
+/// The `[capability] essential` validator must reject at the SAME
+/// `load_effective_config` seam the config-check surface rejects at -- a
+/// runtime load that skipped it would let an unknown key sit inert in a
+/// live config while `config check` called the same file invalid.
+#[test]
+fn essential_capability_reject_surfaces_through_load_effective_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let key_ref = common::file_ref("test-key");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+version = {CURRENT}
+[server]
+host = "127.0.0.1"
+port = 0
+
+[capability]
+essential = ["advisorr"]
+
+[providers.fast]
+kind = "openai-compat"
+base_url = "http://127.0.0.1:1"
+api_key_ref = "{key_ref}"
+"#
+        ),
+    )
+    .unwrap();
+
+    let err = match routectl_cli::server::load_effective_config(&config_path) {
+        Ok(_) => panic!("an unknown [capability] essential key must be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("advisorr") && err.contains("unknown"),
+        "error must name the unknown capability, got: {err}"
+    );
+}
+
 /// End-to-end companion to the seam test above: writing a reload
 /// candidate carrying `[retry.classes.feature-unsupported]` at the
 /// running server's watched config path must NOT swap the live router

@@ -55,114 +55,62 @@ pub async fn build_router_from_config_with_overlay(
     catalog_overlay: &Arc<CatalogOverlay>,
     secrets: Arc<dyn SecretStore>,
 ) -> Result<Router> {
-    let mut router = Router::new(config.clone());
+    // The whole shared validation suite, in its one deterministic order,
+    // BEFORE any construction. Running the suite rather than a hand-picked
+    // subset is what keeps this builder's accept set identical to the one
+    // `config check` and the `serve` pre-parse gate report: a programmatic
+    // caller that reaches this function directly (tests, a library embedder)
+    // otherwise builds a Router whose invalid config sits inert.
+    if let Some(first) = routectl_router::collect_config_validation(&config)
+        .errors
+        .into_iter()
+        .next()
+    {
+        return Err(Error::Config(first));
+    }
 
-    // Surface incoherent `[bedrock]` config (e.g. populated
-    // `allowed_body_fields` missing routectl-mandatory keys) at
-    // startup instead of at first-request 400. Empty lists are
-    // pass-through and accepted; see `validate_bedrock_global_config`.
-    routectl_router::validate_bedrock_global_config(&config)?;
-
-    // Reject a `[models.X]` entry that routes a non-Anthropic model at a
-    // Bedrock provider on the InvokeModel lane. That lane assembles and
-    // parses the Anthropic wire shape, so the entry cannot work; failing
-    // here names the model and both lane options instead of leaving the
-    // operator with a first-request 400.
-    routectl_router::validate_bedrock_invoke_model_family(&config)?;
-
-    // Reject empty-string `thinking = ""` on any provider before
-    // building, so the operator gets a clean error rather than
-    // silently emitting `effort: ""` on every routed request.
-    routectl_router::validate_reasoning_defaults(&config)?;
-
-    // Reject `[aliases]` chains that reference unknown OR disabled
-    // `[models.X]` nicknames. Without this, dispatching against a
-    // typo'd alias chain returns `UnknownAlias` at request time with
-    // no breadcrumb back to the misconfiguration; failing here gives
-    // the operator the offending alias + nickname pair upfront.
-    routectl_router::validate_alias_chain_targets(&config)?;
-
-    // Reject malformed `[aliases]` glob keys (embedded/bare asterisks)
-    // at startup. Without this, `Router::new` warn-and-drops the
-    // malformed key and the request mis-routes while `config check`
-    // still reports ok.
-    routectl_router::validate_alias_patterns(&config)?;
-
-    // Reject the reserved `[retry.classes.feature-unsupported]` key and
-    // any `[providers.X.class_overrides]` remap targeting a class the
-    // router retries or debits for health. Advisory findings on the
-    // same surface (a health-status source remapped away from breaker
-    // accounting, an empty `ClassPolicy` block) are logged rather than
-    // rejected.
-    routectl_router::validate_class_policy(&config)?;
+    // The advisory findings, emitted per category so each startup log line
+    // names the surface an operator has to go look at.
     for warning in routectl_router::class_policy_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "class policy warning");
     }
-
-    // Reject divergent per-provider codex_version values (the codex
-    // identity is process-global, so a silent winner is forbidden) and
-    // syntactically illegal versions. Runs in the cheap pre-parse gate too;
-    // repeated here because this builder is reachable without that gate
-    // (tests, direct Config construction). The process-global identity
-    // itself is installed inside `build_resolved_models` -- the shared
-    // factory boundary every provider-construction path routes through.
-    routectl_router::validate_codex_version(&config)?;
     for warning in routectl_router::codex_identity_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "codex identity warning");
     }
-
     // `auto_emit_per_block_breakpoints` is inert on Bedrock Invoke (the
-    // knob gates the Converse cachePoint surface). Advisory only.
+    // knob gates the Converse cachePoint surface).
     for warning in routectl_router::per_block_breakpoint_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "per-block breakpoint warning");
     }
-
     // A cloud-code Gemini entry pinned to the production Cloud Code host
-    // keeps that pin, but the lane default is the daily host. Advisory only.
+    // keeps that pin, but the lane default is the daily host.
     for warning in routectl_router::cloudcode_host_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code host warning");
     }
-
     // A cloud-code Gemini model entry pinning an upstream id Google has
     // deprecated server-side still serves, but not what the id names.
-    // Advisory only.
     for warning in routectl_router::cloudcode_model_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code model warning");
     }
 
-    // Reject malformed `[registry]` glob keys at startup so query-time
-    // cost resolution never silently skips a key it cannot parse.
-    routectl_router::validate_registry_patterns(&config)?;
-
     // Reject an incoherent `[mitm]` block (bad upstream_origin, a
     // listen_port colliding with [server] port, an empty mitm_host) at
-    // startup. A no-op (`Ok(())`) when `[mitm]` is absent -- gated here
-    // on `mitm.is_some()` purely for readability at the call site, since
-    // the validator itself already treats absence as trivially valid.
+    // startup. NOT part of the shared suite -- it is specific to this
+    // router-build path. A no-op (`Ok(())`) when `[mitm]` is absent --
+    // gated here on `mitm.is_some()` purely for readability at the call
+    // site, since the validator itself already treats absence as
+    // trivially valid.
     if config.mitm.is_some() {
         routectl_router::validate_mitm_config(&config)?;
     }
-
-    // Provider-level credential_source coherence (forwarded => host pin +
-    // empty api_key_ref; own => key present). Also runs in the cheap
-    // pre-parse gate (`validate_effective_config`); repeated here because
-    // this builder is also reachable without that gate (tests, callers
-    // constructing a Config directly), and containment point (1) of the
-    // forwarded-credential invariant must hold on every build path.
-    routectl_router::validate_provider_credential_sources(&config)?;
-
-    // Reject a degenerate `[cache_pricing]` override (unparseable selector
-    // key or a multiplier that makes the break-even math degenerate) at
-    // startup. Without this, a bad override silently goes inert at lookup
-    // time and the operator never learns their correction did nothing;
-    // failing here names the offending selector upfront.
-    routectl_router::validate_overrides(&config.cache_pricing).map_err(Error::Config)?;
 
     // Advisory: warn (never fail) if the WHOLE baked catalog table's
     // snapshot has gone stale (> 90 days). A redesign dropped the per-row
     // `verified_at`, so this is now a single table-wide check rather than
     // per-cell (see `routectl_router::catalog::warn_if_stale`'s doc).
     routectl_router::catalog::warn_if_stale();
+
+    let mut router = Router::new(config.clone());
 
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)

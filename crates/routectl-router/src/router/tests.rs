@@ -1348,6 +1348,79 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
 }
 
 #[test]
+fn carry_over_preserves_learned_entries_across_an_essential_flip() {
+    use crate::learned_capability::RoutingDecision;
+    use routectl_core::capability::{FailurePhase, SignalTier};
+    use std::time::Instant;
+
+    // Arrange: a resident learned advisor negative, and a config flip that
+    // adds `essential = ["advisor"]`. Unlike an override-cell change this
+    // must NOT expire the entry: `essential` is a stateless query-time
+    // transform over the RESPONSE to a negative, so the negative itself
+    // stays true. Expiring it would send one doomed probe against the
+    // operator's stated route-away intent.
+    let before = Router::new(Arc::new(Config::default()));
+    let t0 = Instant::now();
+    before.learned_capabilities.observe(
+        "p",
+        "advisor",
+        "",
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+        EvidenceSource::Live,
+        t0,
+    );
+
+    let after_cfg: Config = toml::from_str(&format!(
+        "version = {version}\n\
+         [capability]\n\
+         essential = [\"advisor\"]\n",
+        version = crate::config::CURRENT_CONFIG_VERSION,
+    ))
+    .expect("config parses");
+    let mut after = Router::new(Arc::new(after_cfg));
+
+    // Act
+    after.carry_over_learned_from(&before);
+
+    // Assert: the entry rode across intact -- neither dropped nor lapsed.
+    assert_eq!(after.learned_capabilities.snapshot().len(), 1);
+    assert_eq!(after.metrics.invalidations_total(), 0);
+    assert_eq!(
+        after
+            .learned_capabilities
+            .acting_negative_for("p", "advisor", "", Instant::now()),
+        RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
+        "an essential flip must preserve the learned negative, not lapse it",
+    );
+
+    // ...and the post-swap Router answers the strip-vs-route consult with
+    // the flipped verdict, so the behavior change comes from the config
+    // re-read alone.
+    assert_eq!(
+        crate::capability_strip::effective_action_for(
+            "advisor",
+            &after.config.capability.essential
+        ),
+        crate::capability_strip::CapabilityAction::RouteAway,
+        "the post-swap consult must route away",
+    );
+    assert!(
+        matches!(
+            crate::capability_strip::effective_action_for(
+                "advisor",
+                &before.config.capability.essential
+            ),
+            crate::capability_strip::CapabilityAction::Strip(_)
+        ),
+        "the pre-swap consult stripped, so the verdict really flipped",
+    );
+}
+
+#[test]
 fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
     use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;

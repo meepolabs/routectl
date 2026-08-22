@@ -186,6 +186,30 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
     }
 }
 
+/// The builder runs the WHOLE shared validation suite, not a hand-picked
+/// subset: a validator present only in `collect_config_validation` would
+/// leave a programmatic caller (this crate's own tests, a library embedder)
+/// building a Router whose invalid setting sits inert. `[capability]
+/// essential` is the probe -- the builder never named that validator
+/// individually, so its rejection here can only come from the suite.
+#[tokio::test]
+async fn build_router_from_config_runs_the_shared_validation_suite() {
+    let mut config: Config =
+        toml::from_str("[capability]\nessential = [\"advisorr\"]\n").expect("config must parse");
+    let _usage_dir = isolate_usage_db(&mut config);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+
+    // `Router` is not `Debug`, so match rather than `expect_err`.
+    let err = match build_router_from_config(Arc::new(config), secrets).await {
+        Ok(_) => panic!("an unknown [capability] essential key must fail the router build"),
+        Err(e) => e,
+    };
+    let Error::Config(message) = &err else {
+        panic!("expected a config error, got: {err:?}");
+    };
+    assert!(message.contains("advisorr"), "{message}");
+}
+
 /// The Bedrock invoke-lane model-family gate is wired into
 /// `build_router_from_config_with_overlay` itself, not only into the
 /// collected-validation path that `config check` and the serve pre-parse

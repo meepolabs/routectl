@@ -1258,6 +1258,148 @@ fn filter_chain_keeps_stripped_target_and_tails_route_away() {
     );
 }
 
+// --- [capability] essential: the global droppability override ---
+
+/// Router whose `[capability] essential` list names `keys`, parsed through
+/// the real serde path so the TOML shape the operator writes is what the
+/// consult reads.
+fn essential_router(keys: &[&str]) -> Router {
+    let list = keys
+        .iter()
+        .map(|k| format!("\"{k}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let config: Config = toml::from_str(&format!(
+        "version = {version}\n[capability]\nessential = [{list}]\n",
+        version = crate::config::CURRENT_CONFIG_VERSION,
+    ))
+    .expect("config parses");
+    Router::new(Arc::new(config))
+}
+
+#[test]
+fn essential_advisor_routes_away_instead_of_stripping() {
+    // A learned F1 advisor negative is droppable by the baked table. With
+    // the operator declaring advisor essential the same negative must route
+    // away carrying no strip key; the positive control (identical fixture,
+    // no override) proves the fixture really does strip by default -- so the
+    // route-away is the override's effect and not a broken fixture.
+    let base = Instant::now();
+    let features = ["advisor".to_string()];
+
+    // Act / Assert -- essential list in force.
+    let overridden = essential_router(&["advisor"]);
+    overridden
+        .learned_capabilities
+        .import_entries(vec![acting_negative("nick", "advisor", base)]);
+    let mut admissions = Vec::new();
+    let mut strip_keys = Vec::new();
+    let decision = overridden.unsupported_feature_for_target(
+        &strip_target("nick"),
+        &features,
+        &mut admissions,
+        &mut strip_keys,
+    );
+    assert_eq!(
+        decision,
+        Some(("advisor".to_string(), FilterSource::Learned)),
+        "an essential-declared droppable must route away",
+    );
+    assert!(
+        strip_keys.is_empty(),
+        "an essential-declared capability is never stripped",
+    );
+
+    // Act / Assert -- positive control: no override, baked strip behavior.
+    let baked = Router::new(Arc::new(Config::default()));
+    baked
+        .learned_capabilities
+        .import_entries(vec![acting_negative("nick", "advisor", base)]);
+    let mut admissions = Vec::new();
+    let mut strip_keys = Vec::new();
+    let decision = baked.unsupported_feature_for_target(
+        &strip_target("nick"),
+        &features,
+        &mut admissions,
+        &mut strip_keys,
+    );
+    assert_eq!(
+        decision, None,
+        "without the override the same negative keeps the target supported",
+    );
+    assert_eq!(
+        strip_keys,
+        vec!["advisor".to_string()],
+        "without the override the capability is stripped in place",
+    );
+}
+
+#[test]
+fn essential_list_naming_another_key_leaves_advisor_strippable() {
+    // Removal direction, expressed as absence: a list that governs a
+    // DIFFERENT key restores the baked strip behavior for advisor, so
+    // dropping an entry from the list is a return to the default rather
+    // than a sticky state.
+    let router = essential_router(&["context_management"]);
+    let base = Instant::now();
+    router
+        .learned_capabilities
+        .import_entries(vec![acting_negative("nick", "advisor", base)]);
+
+    let mut admissions = Vec::new();
+    let mut strip_keys = Vec::new();
+    let decision = router.unsupported_feature_for_target(
+        &strip_target("nick"),
+        &["advisor".to_string()],
+        &mut admissions,
+        &mut strip_keys,
+    );
+
+    assert_eq!(decision, None, "advisor is not in the essential list");
+    assert_eq!(strip_keys, vec!["advisor".to_string()]);
+}
+
+#[test]
+fn essential_capability_fires_no_probe_bypass_strip_warn() {
+    // The ProbeAdmitted WARN reads the SAME consult as the verdict: an
+    // essential-declared capability is never strip-eligible, so the
+    // `probe_bypassed` strip WARN must not fire for it. The positive
+    // control (no override) proves the fixture does reach that WARN.
+    let base = Instant::now();
+    let features = ["advisor".to_string()];
+
+    let warn_outcomes = |router: &Router| -> Vec<String> {
+        router
+            .learned_capabilities
+            .import_entries(vec![probe_due_negative("nick", "advisor", base)]);
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        routectl_testkit::capture_events(|| {
+            router.unsupported_feature_for_target(
+                &strip_target("nick"),
+                &features,
+                &mut admissions,
+                &mut strip_keys,
+            );
+        })
+        .iter()
+        .filter(|event| event.message == "capability_strip_decision")
+        .filter_map(|event| event.field("outcome").map(str::to_string))
+        .collect()
+    };
+
+    // Act / Assert
+    assert!(
+        warn_outcomes(&essential_router(&["advisor"])).is_empty(),
+        "an essential capability was never strip-eligible, so no bypass WARN",
+    );
+    assert_eq!(
+        warn_outcomes(&Router::new(Arc::new(Config::default()))),
+        vec!["probe_bypassed".to_string()],
+        "the positive control must reach the probe-bypass WARN",
+    );
+}
+
 // --- apply_strip_interceptor: outcome mapping, mutation, metrics ---
 
 fn advisor_tool() -> ToolDef {

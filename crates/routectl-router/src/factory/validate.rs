@@ -4,6 +4,7 @@ use super::build::ipv4_compatible_embedded;
 use super::warnings::class_policy_warnings;
 use crate::config::{Config, CredentialSource, ProviderEntry};
 use routectl_core::Result;
+use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
 use routectl_core::identity::anthropic::is_anthropic_api_host;
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
@@ -1501,6 +1502,39 @@ pub fn resolved_codex_version(config: &Config) -> Option<String> {
         .find_map(|entry| entry.codex_version().map(str::to_owned))
 }
 
+/// Reject a config whose `[capability] essential` list names a key the
+/// strip-vs-route consult can never act on.
+///
+/// The accept set is every well-known capability key plus every key the
+/// baked strip table maps to a `Strip` action (which is what makes the set
+/// auto-extend when a droppable is added in code), MINUS
+/// [`REASONING_REPLAY`]: its strip is lane-managed rather than key-only, so
+/// replay negatives never reach the consult and listing the key would pin a
+/// meaningful-looking no-op into an operator-facing vocabulary. Listing a
+/// key that already routes away is accepted as an idempotent declaration.
+///
+/// Returns the first offending entry in config order, naming the key.
+fn validate_capability_essential(config: &Config) -> Result<(), String> {
+    for key in &config.capability.essential {
+        if key == REASONING_REPLAY {
+            return Err(format!(
+                "[capability] essential lists `{REASONING_REPLAY}`, which this list \
+                 cannot govern: replayed reasoning artifacts are dropped by the \
+                 target lane's replay path, not by the key-only strip consult -- \
+                 remove the entry"
+            ));
+        }
+        let known = WELL_KNOWN_CAPABILITY_KEYS.contains(&key.as_str())
+            || crate::capability_strip::is_strippable(key);
+        if !known {
+            return Err(format!(
+                "[capability] essential names unknown capability `{key}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Collected outcome of the shared config-validation suite:
 /// `errors` are hard-fail conditions, `warnings` are advisory.
 ///
@@ -1590,6 +1624,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(e);
     }
     if let Err(e) = crate::override_registry::validate_capability_overrides(config) {
+        errors.push(e);
+    }
+    if let Err(e) = validate_capability_essential(config) {
         errors.push(e);
     }
     if let Err(e) = validate_float_fields(config) {
