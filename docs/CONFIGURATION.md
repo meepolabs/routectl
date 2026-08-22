@@ -351,6 +351,18 @@ the `max_body_bytes` cap):
 only route outside the auth layer (so liveness probes work under
 `--unsafe-public`).
 
+Each `/v1/models` entry also carries `context_length` -- the context
+window in tokens of the id's resolved target, read from the same
+overlay-corrected catalog row the proactive window gate acts on, so a
+client and the router never disagree about a model's window. For a
+chain alias it is the FIRST configured target's window. The field is
+OMITTED when routectl has no confirmed window for that target (never
+`null`, never `0`). `routectl catalog set <selector>
+max_context_tokens=<n>` corrects a window for a selector the catalog
+already covers; for an upstream with no baked row or overlay cell,
+`catalog set` refuses to create the selector -- add the cell by editing
+`catalog_overlay.json` directly (see the overlay-file section below).
+
 **`max_body_bytes`** (u32, default 33554432 -- 32 MiB)
 
 Caps the inbound HTTP body size for `/v1/messages` and

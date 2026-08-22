@@ -16,6 +16,15 @@ list with more narrative.
 
 ### Added
 
+- **`context_length` on `GET /v1/models`** -- each local discovery entry
+  now carries the resolved target's context window in tokens, read from
+  the same overlay-corrected catalog row the proactive context-window
+  gate acts on, so a client and the router never disagree about a
+  model's window. A chain alias reports its FIRST configured target's
+  window. The field is omitted when routectl has no confirmed window
+  (never `null`, never `0`); a `max_context_tokens` overlay cell supplies
+  one for an upstream the baked catalog does not cover. Additive: no
+  existing field changes.
 - **OpenAI Responses ingress** -- a third ingress dialect at
   `POST /v1/responses`, feeding the same canonical request shape as
   the OpenAI Chat Completions and Anthropic Messages routes.

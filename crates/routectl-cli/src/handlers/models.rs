@@ -60,27 +60,44 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
         return resp;
     }
 
-    Json(local_models_list(&router.config)).into_response()
+    Json(local_models_list(&router)).into_response()
 }
 
-/// Build the local alias/model discovery payload from `config`. Pure
-/// (no I/O, no router state beyond the config snapshot already passed
-/// in) -- the forwarded-lane fallback path in [`list_models`] and every
-/// existing local-discovery caller share this one implementation.
-fn local_models_list(config: &routectl_router::Config) -> Value {
+/// One entry of the local `/v1/models` payload. `context_length` is an
+/// OpenRouter-compatible extension: an ABSENT key means routectl has no
+/// confirmed window for that id, which the `skip_serializing_if` makes
+/// structural -- no code path can emit `null` or `0` for it.
+#[derive(serde::Serialize)]
+struct ModelListEntry {
+    id: String,
+    object: &'static str,
+    created: i64,
+    owned_by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_length: Option<u32>,
+}
+
+/// Build the local alias/model discovery payload from `router`. No routing
+/// side effects -- the window read goes through
+/// `Router::context_window_for`, never `dispatch_chain`: the
+/// forwarded-lane fallback path in [`list_models`] and every existing
+/// local-discovery caller share this one implementation.
+fn local_models_list(router: &routectl_router::Router) -> Value {
+    let config = &router.config;
     let now = Utc::now().timestamp();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut entries: Vec<Value> = Vec::new();
-    let emit = |id: &str, entries: &mut Vec<Value>, seen: &mut BTreeSet<String>| {
+    let mut entries: Vec<ModelListEntry> = Vec::new();
+    let emit = |id: &str, entries: &mut Vec<ModelListEntry>, seen: &mut BTreeSet<String>| {
         if !seen.insert(id.to_string()) {
             return;
         }
-        entries.push(json!({
-            "id": id,
-            "object": "model",
-            "created": now,
-            "owned_by": "routectl",
-        }));
+        entries.push(ModelListEntry {
+            id: id.to_string(),
+            object: "model",
+            created: now,
+            owned_by: "routectl",
+            context_length: router.context_window_for(id),
+        });
     };
 
     for alias in config.aliases.keys() {

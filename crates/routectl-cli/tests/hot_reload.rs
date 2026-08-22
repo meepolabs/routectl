@@ -1136,6 +1136,151 @@ async fn retry_classes_cap_change_applies_after_reload() {
 }
 
 // -----------------------------------------------------------------
+// Catalog-overlay reload surfaces on /v1/models
+// -----------------------------------------------------------------
+
+/// Nickname and upstream of the single model in
+/// `overlay_window_config`. The upstream matches no baked catalog cell, so
+/// its window is unconfirmed until the overlay supplies one -- which makes
+/// "the key appeared" an unambiguous signal that the overlay went live.
+const OVERLAY_MODEL: &str = "windowed";
+const OVERLAY_UPSTREAM: &str = "no-such-model-in-any-catalog-cell";
+
+/// The window the overlay cell publishes for `OVERLAY_UPSTREAM`.
+const OVERLAY_WINDOW: u32 = 321_000;
+
+/// Single-model config whose upstream has no baked catalog row, so the
+/// model's context window comes from the overlay alone.
+fn overlay_window_config() -> String {
+    let key_ref = common::file_ref("test-key");
+    format!(
+        r#"
+version = {CURRENT}
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "{key_ref}"
+
+[models.{OVERLAY_MODEL}]
+provider = "anthropic"
+upstream = "{OVERLAY_UPSTREAM}"
+"#
+    )
+}
+
+/// Atomic-rename write of a `catalog_overlay.json` publishing
+/// `max_context_tokens = window` for `OVERLAY_UPSTREAM`. Mirrors
+/// `catalog_overlay::save`'s write pattern (tempfile in the same parent,
+/// rename onto the target), which is what the watcher is tuned for.
+fn write_overlay_atomic(overlay_path: &Path, window: u32, revision: u64) {
+    let overlay = json!({
+        "schema_version": 1,
+        "revision": revision,
+        "cells": {
+            format!("anthropic-api:{OVERLAY_UPSTREAM}"): {
+                "source": "user",
+                "verified_at": "2026-08-21",
+                "max_context_tokens": window,
+            }
+        }
+    });
+    let parent = overlay_path.parent().expect("overlay path has a parent");
+    std::fs::create_dir_all(parent).expect("mkdir overlay parent");
+    let tmp = tempfile::Builder::new()
+        .prefix(".catalog_overlay.tmp.")
+        .suffix(".json")
+        .tempfile_in(parent)
+        .unwrap();
+    std::fs::write(
+        tmp.path(),
+        serde_json::to_vec_pretty(&overlay).expect("serialize overlay"),
+    )
+    .unwrap();
+    tmp.persist(overlay_path).expect("persist overlay");
+}
+
+/// The `context_length` of the `/v1/models` entry for `id`, or `None` when
+/// the entry omits the key.
+async fn context_length_of(base_url: &str, id: &str) -> Option<u64> {
+    let resp = reqwest::get(format!("{base_url}/v1/models")).await.unwrap();
+    assert!(resp.status().is_success(), "GET /v1/models failed");
+    let body: Value = resp.json().await.unwrap();
+    body["data"]
+        .as_array()
+        .expect("data is an array")
+        .iter()
+        .find(|e| e["id"] == id)
+        .expect("the configured model must be listed")
+        .get("context_length")
+        .and_then(Value::as_u64)
+}
+
+/// An overlay written at the watched `catalog_overlay.json` path goes live
+/// on `/v1/models`: the second request sees the overlay's window where the
+/// first saw no `context_length` at all.
+///
+/// The pre-write observation is load-bearing: it proves the key's later
+/// appearance is the reload, not a value the baked table was already
+/// supplying. The write is re-issued on the restimulus cadence with a
+/// BUMPED revision each time, because a lone atomic rename is not reliably
+/// delivered to the watcher (see `poll_alias_with_restimulus`) -- every
+/// revision publishes the same window, so a re-delivered event is a no-op
+/// for the assertion.
+///
+/// `serial_test::serial` is non-negotiable: the overlay lives at a
+/// process-global `XDG_CONFIG_HOME`-derived path, so this test both pins and
+/// writes under that env var.
+#[tokio::test]
+#[serial_test::serial]
+async fn catalog_overlay_write_surfaces_new_context_length_after_reload() {
+    let xdg = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+    let overlay_path = routectl_router::overlay_default_path();
+    // The watcher registers the overlay's PARENT directory, so that
+    // directory has to exist before serve installs the watch -- on a real
+    // install it always does (the config lives there); this fixture's
+    // config lives in its own tempdir instead.
+    std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
+
+    let (base_url, _dir) = spawn_server_with_config_text(&overlay_window_config()).await;
+
+    // Before: no baked cell matches this upstream, so the key is absent.
+    assert_eq!(
+        context_length_of(&base_url, OVERLAY_MODEL).await,
+        None,
+        "the fixture upstream must start with an unconfirmed window",
+    );
+
+    // Act + Assert: publish the overlay and poll until the window surfaces.
+    let deadline = Instant::now() + RELOAD_WAIT_CEILING;
+    let mut revision = 1;
+    write_overlay_atomic(&overlay_path, OVERLAY_WINDOW, revision);
+    let mut last_write = Instant::now();
+    let mut observed = None;
+    while Instant::now() < deadline {
+        observed = context_length_of(&base_url, OVERLAY_MODEL).await;
+        if observed == Some(u64::from(OVERLAY_WINDOW)) {
+            break;
+        }
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            revision += 1;
+            write_overlay_atomic(&overlay_path, OVERLAY_WINDOW, revision);
+            last_write = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        observed,
+        Some(u64::from(OVERLAY_WINDOW)),
+        "the overlay's window did not surface on /v1/models within {RELOAD_WAIT_CEILING:?}",
+    );
+}
+
+// -----------------------------------------------------------------
 // Start-and-degrade on a broken credentials.json + hot-reload recovery
 // -----------------------------------------------------------------
 

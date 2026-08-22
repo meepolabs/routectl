@@ -161,6 +161,14 @@ async fn health_returns_ok() {
 // GET /v1/models
 // ---------------------------------------------------------------------------
 
+/// An upstream id the baked catalog confirms a context window for. The
+/// expected figure is read from `lookup()` rather than written out, so a
+/// catalog refresh moves both sides together.
+const KNOWN_WINDOW_UPSTREAM: &str = "claude-sonnet-4-6";
+
+/// An upstream id no catalog cell matches, so its window is unconfirmed.
+const BOGUS_UPSTREAM: &str = "no-such-model-in-any-catalog-cell";
+
 #[tokio::test]
 async fn models_lists_configured_aliases() {
     let config = openai_compat_config("http://127.0.0.1:1", "provider1", "my-alias");
@@ -249,6 +257,104 @@ async fn models_includes_alias_keys_and_nicknames() {
     assert!(
         ids.contains(&"fast-model"),
         "model nickname missing: {ids:?}"
+    );
+}
+
+/// The `context_length` of the `/v1/models` entry whose `id` is `id`.
+/// `None` means the entry OMITS the key -- the contract's
+/// window-is-unknown signal. The entry itself must exist; a missing one is
+/// a broken fixture, not an outcome under test.
+fn context_length_of(body: &Value, id: &str) -> Option<u32> {
+    let entry = body["data"]
+        .as_array()
+        .expect("data must be an array")
+        .iter()
+        .find(|e| e["id"] == id)
+        .unwrap_or_else(|| panic!("the configured id `{id}` must be listed: {body}"));
+    entry.get("context_length").map(|v| {
+        u32::try_from(v.as_u64().expect("context_length must be a number"))
+            .expect("context_length must fit u32")
+    })
+}
+
+/// `context_length` is the resolved target's catalog window, and the key is
+/// OMITTED (never null, never 0) when routectl has no confirmed window.
+///
+/// Both halves live in one test on purpose: the known-window model is the
+/// positive control for the omission assertion -- without it, a handler that
+/// dropped the field entirely would satisfy the omission half vacuously.
+///
+/// Typed field assertions rather than a body snapshot: `created` is a
+/// wall-clock stamp, so a snapshot of this payload could never be stable.
+/// The expected figure comes from the public catalog `lookup()` oracle, so
+/// the test states "whatever the catalog says for this cell" rather than
+/// re-hardcoding a window the baked table owns.
+///
+/// Runs on the real serve path (the only path that applies the catalog
+/// overlay) with `XDG_CONFIG_HOME` pinned at an empty tree, so the overlay
+/// resolves to the missing-file empty overlay and the baked lookup IS the
+/// effective row. `serial_test::serial` is non-negotiable: the pin mutates a
+/// process-global env var.
+#[tokio::test]
+#[serial_test::serial]
+async fn models_reports_the_catalog_context_window_and_omits_an_unknown_one() {
+    let xdg = tempfile::tempdir().unwrap();
+    let _guard = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api(common::file_ref("test-key")),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "known-window".to_string(),
+        ModelEntry::new("anthropic", KNOWN_WINDOW_UPSTREAM),
+    );
+    models.insert(
+        "unknown-window".to_string(),
+        ModelEntry::new("anthropic", BOGUS_UPSTREAM),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "known-alias".to_string(),
+        AliasValue::Single("known-window".to_string()),
+    );
+
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+    let base = helpers::spawn_test_server(config).await;
+    let body: Value = reqwest::get(format!("{base}/v1/models"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let expected = routectl_router::lookup("anthropic-api", KNOWN_WINDOW_UPSTREAM, None)
+        .max_context_tokens
+        .expect("the baked catalog must confirm a window for the known-window fixture");
+    assert_eq!(
+        context_length_of(&body, "known-window"),
+        Some(expected),
+        "a confirmed catalog window must surface as context_length: {body}"
+    );
+    // An alias resolves to its target's window through the same read.
+    assert_eq!(
+        context_length_of(&body, "known-alias"),
+        Some(expected),
+        "an alias must report its resolved target's window: {body}"
+    );
+    assert_eq!(
+        context_length_of(&body, "unknown-window"),
+        None,
+        "an unconfirmed window must OMIT the key -- never null, never 0: {body}"
     );
 }
 
