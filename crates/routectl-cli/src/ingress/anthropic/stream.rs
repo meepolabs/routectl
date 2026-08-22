@@ -110,9 +110,10 @@ pub(super) fn render_chunk_internal(
                 // First-wins: preserve the original stop_reason and log
                 // a WARN. Last-wins would silently rewrite the
                 // upstream's protocol violation in our wire output.
+                let finish_reason_safe = routectl_core::sanitize_for_log(fr);
                 tracing::warn!(
                     "anthropic ingress: dropping second finish_reason \
-                     (existing={:?}, new={fr}); upstream emitted two \
+                     (existing={:?}, new={finish_reason_safe}); upstream emitted two \
                      finish_reason chunks without an intervening usage \
                      chunk -- preserving the first",
                     state.pending_finish_reason,

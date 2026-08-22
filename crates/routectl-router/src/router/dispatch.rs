@@ -197,7 +197,7 @@ impl Router {
         }
         *warned = true;
         tracing::warn!(
-            provider = %provider_name,
+            provider = %routectl_core::sanitize_for_log(provider_name),
             "reasoning context/mode dropped: representable only on the OpenAI Responses egress"
         );
     }
@@ -402,8 +402,8 @@ impl Router {
             meta.cache_front_decision = Some(front_token);
             meta.cache_terminal_decision = Some(terminal_token);
             tracing::debug!(
-                provider = %provider_name,
-                model = %model,
+                provider = %routectl_core::sanitize_for_log(provider_name),
+                model = %routectl_core::sanitize_for_log(model),
                 strategy = terminal_token,
                 front_decision = front_token,
                 terminal_decision = terminal_token,
@@ -461,7 +461,7 @@ impl Router {
                 if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
                     tracing::warn!(
                         provider = provider_name,
-                        model = %target.nickname.as_deref().unwrap_or(""),
+                        model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                         gate_kind,
                         error = ?gate_err,
                         "gate blocked",
@@ -666,7 +666,7 @@ impl Router {
                             auth_retry_attempted = true;
                             tracing::debug!(
                                 provider = provider_name,
-                                model = %target.nickname.as_deref().unwrap_or(""),
+                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                 attempt = attempts_made,
                                 "upstream 401; refreshing auth and retrying once",
                             );
@@ -909,7 +909,7 @@ impl Router {
                         if can_retry_here {
                             tracing::debug!(
                                 provider = provider_name,
-                                model = %target.nickname.as_deref().unwrap_or(""),
+                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                 attempt = attempts_made,
                                 error = ?e,
                                 "retrying same provider",
@@ -953,7 +953,7 @@ impl Router {
                             if has_next {
                                 tracing::warn!(
                                     provider = provider_name,
-                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                     state_key = %state_key,
                                     error = ?e,
                                     "fallback to next",
@@ -961,7 +961,7 @@ impl Router {
                             } else {
                                 tracing::warn!(
                                     provider = provider_name,
-                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                     state_key = %state_key,
                                     error = ?e,
                                     "chain exhausted; no fallback target available; request will fail",
@@ -1162,8 +1162,8 @@ impl Router {
             meta.cache_front_decision = Some(front_token);
             meta.cache_terminal_decision = Some(terminal_token);
             tracing::debug!(
-                provider = %provider_name,
-                model = %model,
+                provider = %routectl_core::sanitize_for_log(provider_name),
+                model = %routectl_core::sanitize_for_log(model),
                 strategy = terminal_token,
                 front_decision = front_token,
                 terminal_decision = terminal_token,
@@ -1220,7 +1220,7 @@ impl Router {
                 if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
                     tracing::warn!(
                         provider = provider_name,
-                        model = %target.nickname.as_deref().unwrap_or(""),
+                        model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                         gate_kind,
                         error = ?gate_err,
                         "stream gate blocked",
@@ -1426,7 +1426,7 @@ impl Router {
                             auth_retry_attempted = true;
                             tracing::debug!(
                                 provider = provider_name,
-                                model = %target.nickname.as_deref().unwrap_or(""),
+                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                 attempt = attempts_made,
                                 "stream 401 pre-content; refreshing auth and retrying once",
                             );
@@ -1604,7 +1604,7 @@ impl Router {
                             if has_next {
                                 tracing::warn!(
                                     provider = provider_name,
-                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                     error = ?e,
                                     "stream fallback to next",
                                 );
@@ -1621,7 +1621,7 @@ impl Router {
                                 // happened.
                                 tracing::warn!(
                                     provider = provider_name,
-                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
                                     error = ?e,
                                     "stream chain exhausted; no fallback target available; request will fail",
                                 );
@@ -1956,7 +1956,7 @@ impl Router {
                         tracing::warn!(
                             session_key_hash = crate::log_hash::salted_log_hash(session_key),
                             provider_kind = provider_kind.unwrap_or(""),
-                            model = %served_model,
+                            model = %routectl_core::sanitize_for_log(served_model),
                             "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",
                         );
                     }
@@ -2242,8 +2242,8 @@ fn apply_context_reduction(
     }
     if let Some(ReductionOutcome::Applied(delta)) = &outcome {
         tracing::debug!(
-            provider = %provider_name,
-            model = %model,
+            provider = %routectl_core::sanitize_for_log(provider_name),
+            model = %routectl_core::sanitize_for_log(model),
             strategy = token,
             strings_minified = delta.strings_minified,
             bytes_saved = delta.bytes_saved,

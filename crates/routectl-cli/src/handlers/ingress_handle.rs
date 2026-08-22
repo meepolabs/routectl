@@ -1094,7 +1094,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             ..
         } => {
             tracing::error!(
-                provider = %provider,
+                provider = %routectl_core::sanitize_for_log(provider),
                 status = *status,
                 upstream_type = ?upstream_type,
                 "upstream error sanitized in HTTP response"
@@ -1108,7 +1108,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         Error::NormalizeRequest(provider, detail) => {
             let safe_detail = routectl_core::sanitize_detail_for_log(detail);
             tracing::error!(
-                provider = %provider,
+                provider = %routectl_core::sanitize_for_log(provider),
                 detail = %safe_detail,
                 "request normalization failed; suppressed in HTTP response"
             );
@@ -1117,7 +1117,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         Error::NormalizeResponse(provider, detail) => {
             let safe_detail = routectl_core::sanitize_detail_for_log(detail);
             tracing::error!(
-                provider = %provider,
+                provider = %routectl_core::sanitize_for_log(provider),
                 detail = %safe_detail,
                 "response normalization failed; suppressed in HTTP response"
             );
@@ -1129,10 +1129,10 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         // feature-list-derived detail in the second, so both sanitize.
         // Log at WARN and return an opaque message.
         Error::NotImplemented(provider, detail) => {
-            let safe_provider = routectl_core::sanitize_detail_for_log(provider);
+            let provider_safe = routectl_core::sanitize_detail_for_log(provider);
             let safe_detail = routectl_core::sanitize_detail_for_log(detail);
             tracing::warn!(
-                provider = %safe_provider,
+                provider = %provider_safe,
                 detail = %safe_detail,
                 "capability not implemented; suppressed in HTTP response"
             );
@@ -1144,9 +1144,9 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         // class message so the client learns nothing about the
         // configured provider set.
         Error::UnknownProvider(provider) => {
-            let safe_provider = routectl_core::sanitize_detail_for_log(provider);
+            let provider_safe = routectl_core::sanitize_detail_for_log(provider);
             tracing::error!(
-                provider = %safe_provider,
+                provider = %provider_safe,
                 "unknown provider suppressed in HTTP response"
             );
             "requested target is not configured".to_string()

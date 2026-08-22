@@ -834,7 +834,7 @@ fn load_v1_cache_pricing(
             let skipped = super::catalog::merge_verifications_into(&mut config, &v);
             for sel in &skipped {
                 tracing::warn!(
-                    selector = %sel,
+                    selector = %routectl_core::sanitize_for_log(sel),
                     "pricing verification has a malformed date and was ignored during migration"
                 );
             }

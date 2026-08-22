@@ -201,16 +201,16 @@ pub fn merge_header_extras(
     for (k, v) in model_extras {
         if is_auth_reserved(k) {
             tracing::warn!(
-                provider = %provider_name,
-                header = %k,
+                provider = %routectl_core::sanitize_for_log(provider_name),
+                header = %routectl_core::sanitize_for_log(k),
                 "ignoring auth-reserved header from [models.X] header_extras",
             );
             continue;
         }
         if is_managed_reserved(k) {
             tracing::debug!(
-                provider = %provider_name,
-                header = %k,
+                provider = %routectl_core::sanitize_for_log(provider_name),
+                header = %routectl_core::sanitize_for_log(k),
                 "dropping managed-reserved header from [models.X] header_extras",
             );
             continue;
@@ -303,7 +303,7 @@ pub fn merge_header_extras(
 
     if !merged.is_empty() {
         tracing::debug!(
-            provider = %provider_name,
+            provider = %routectl_core::sanitize_for_log(provider_name),
             header_keys = ?merged.keys().collect::<Vec<_>>(),
             "composed header_extras (provider + model + list-valued union)",
         );
@@ -379,9 +379,9 @@ fn deep_merge_value(dst: &mut Value, src: &Value, provider_name: &str, src_layer
                     }
                     Some(_) => {
                         tracing::debug!(
-                            provider = %provider_name,
+                            provider = %routectl_core::sanitize_for_log(provider_name),
                             layer = %src_layer,
-                            key = %k,
+                            key = %routectl_core::sanitize_for_log(k),
                             "payload_extras: leaf collision; {src_layer} wins",
                         );
                         d.insert(k.clone(), v.clone());

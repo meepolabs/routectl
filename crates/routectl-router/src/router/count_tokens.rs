@@ -131,9 +131,11 @@ impl Router {
         for candidate in chain {
             if !seat_can_count_tokens(candidate.provider_kind, &candidate.upstream) {
                 tracing::debug!(
-                    provider = %candidate.provider_name,
+                    provider = %routectl_core::sanitize_for_log(&candidate.provider_name),
                     kind = candidate.provider_kind.unwrap_or("unknown"),
-                    model = %candidate.nickname.as_deref().unwrap_or(""),
+                    model = %routectl_core::sanitize_for_log(
+                        candidate.nickname.as_deref().unwrap_or("")
+                    ),
                     "provider skipped: seat cannot count_tokens",
                 );
                 continue;
@@ -233,8 +235,8 @@ impl Router {
                 self.gate_check(&target.state_key, &target.provider_name)
             {
                 tracing::warn!(
-                    provider = %target.provider_name,
-                    model = %model_label,
+                    provider = %routectl_core::sanitize_for_log(&target.provider_name),
+                    model = %routectl_core::sanitize_for_log(model_label),
                     gate_kind,
                     error = ?gate_err,
                     "count_tokens gate blocked",

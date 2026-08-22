@@ -1551,9 +1551,14 @@ impl Router {
                     // shouldn't happen, but treat as exact-only.
                 }
                 Err(e) => {
+                    // Both fields carry the operator-written `[aliases]`
+                    // key (the parse error quotes it back), and this
+                    // fires BEFORE `validate_alias_patterns` rejects the
+                    // key -- so a key bearing a newline would forge a
+                    // second startup record through the `%` render.
                     tracing::warn!(
-                        pattern = %key,
-                        error = %e,
+                        pattern = %routectl_core::sanitize_for_log(key),
+                        error = %routectl_core::sanitize_for_log(&e),
                         "rejecting invalid alias glob pattern; entry ignored",
                     );
                 }

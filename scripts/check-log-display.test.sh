@@ -33,9 +33,16 @@ run_source() {
         cp "$SCANNER" scripts/check-log-display.sh
         printf '%s\n' "$allowlist_body" >tools/log-display-allowlist.txt
         printf '%s\n' "$source" >crates/routectl-providers/src/probe.rs
-        # The scanner requires the ingress path to exist as well.
-        mkdir -p crates/routectl-cli/src/ingress
+        # The scanner requires every configured search path to exist.
+        mkdir -p crates/routectl-cli/src/ingress crates/routectl-cli/src/server \
+            crates/routectl-cli/src/handlers crates/routectl-cli/src/commands \
+            crates/routectl-cli/src/proxy crates/routectl-router/src
         : >crates/routectl-cli/src/ingress/.keep
+        : >crates/routectl-cli/src/server/.keep
+        : >crates/routectl-cli/src/handlers/.keep
+        : >crates/routectl-cli/src/commands/.keep
+        : >crates/routectl-cli/src/proxy/.keep
+        : >crates/routectl-router/src/.keep
         if [[ -n "$extra_setup" ]]; then
             eval "$extra_setup" || exit 2
         fi
@@ -113,6 +120,34 @@ assert_fail_closed() {
     fi
 }
 
+# Same as `run_source`, but the source lands on a CONFIG_KEY_PATHS member
+# instead of the wire-only providers path.
+run_config_source() {
+    local source="$1"
+    run_source "fn unrelated() {}" "" \
+        "printf '%s\\n' ${source@Q} >crates/routectl-router/src/probe.rs"
+}
+
+assert_config_caught() {
+    local desc="$1" source="$2"
+    if run_config_source "$source"; then
+        echo "FAIL: expected CAUGHT but passed -- $desc"
+        fails=$((fails + 1))
+    else
+        echo "PASS: caught -- $desc"
+    fi
+}
+
+assert_config_clean() {
+    local desc="$1" source="$2"
+    if run_config_source "$source"; then
+        echo "PASS: clean -- $desc"
+    else
+        echo "FAIL: expected CLEAN but caught -- $desc"
+        fails=$((fails + 1))
+    fi
+}
+
 assert_caught "raw % on a wire field" "type_tag" "v"
 assert_caught "raw % on a second wire field name" "block_type" "v"
 assert_clean "sanitized % on a wire field" "type_tag" "sanitize_for_log(v)"
@@ -120,7 +155,8 @@ assert_clean "path-qualified sanitizer on a wire field" \
     "type_tag" "routectl_core::sanitize_for_log(v)"
 assert_clean "sanitize_detail_for_log counts as sanitized" \
     "type_tag" "sanitize_detail_for_log(v)"
-assert_clean "non-wire field name is out of scope" "provider" "v"
+assert_clean "non-wire field name is out of scope" "status" "v"
+assert_clean "a config-key field is out of scope on a wire-only path" "provider" "v"
 assert_clean "allowlisted path+field" "type_tag" "v" \
     "crates/routectl-providers/src/probe.rs:type_tag  # test fixture"
 assert_clean "allowlist comments and blank lines are ignored" "type_tag" "v" \
@@ -172,6 +208,124 @@ assert_source_clean "positional shorthand on a non-wire field is out of scope" \
     tracing::warn!(%method, "probe");
 }'
 
+# The config-key tier: `provider` / `model` / `warning` on a startup or
+# routing path, where the value is an operator-written config table key.
+assert_config_caught "raw % on a config-key field, on a config-key path" \
+    'fn probe(v: &str) {
+    tracing::warn!(provider = %v, "probe");
+}'
+
+assert_config_caught "raw % on a validator-message field" \
+    'fn probe(warning: &str) {
+    tracing::warn!(warning = %warning, "probe");
+}'
+
+assert_config_clean "sanitized % on a config-key field" \
+    'fn probe(v: &str) {
+    tracing::warn!(model = %routectl_core::sanitize_for_log(v), "probe");
+}'
+
+assert_config_clean "a surface-named sanitizer in the family counts as sanitized" \
+    'fn probe(v: &str) {
+    tracing::warn!(warning = %sanitize_warning_for_log(v), "probe");
+}'
+
+assert_config_clean "sanitize_for_log_with_cap counts as sanitized" \
+    'fn probe(v: &str) {
+    tracing::warn!(warning = %sanitize_for_log_with_cap(v, 512), "probe");
+}'
+
+assert_config_caught "positional shorthand on a config-key field" \
+    'fn probe(provider: &str) {
+    tracing::warn!(%provider, "probe");
+}'
+
+# Shape 4: a `_safe` local, accepted only when its `let` really sanitizes.
+assert_config_clean "a _safe local backed by a sanitizing let is accepted" \
+    'fn probe(v: &str) {
+    let provider_safe = routectl_core::sanitize_for_log(v);
+    tracing::warn!(provider = %provider_safe, "probe {provider_safe}");
+    tracing::warn!(provider = %provider_safe, "second arm");
+}'
+
+assert_config_caught "a _safe local with NO sanitizing let is not accepted" \
+    'fn probe(v: &str) {
+    let provider_safe = v.to_string();
+    tracing::warn!(provider = %provider_safe, "probe");
+}'
+
+# The `_safe` pairing is file-scoped, not scope-aware: a single sanitized
+# `let` must not vouch for a second, unsanitized origin of the same name
+# anywhere in the file. Four ways to introduce one, all findings.
+assert_config_caught "an inner shadow of a _safe local is not laundered by the outer sanitized let" \
+    'fn probe(v: &str) {
+    let provider_safe = routectl_core::sanitize_for_log(v);
+    tracing::warn!(provider = %provider_safe, "outer");
+    if v.is_empty() {
+        let provider_safe = v.to_string();
+        tracing::warn!(provider = %provider_safe, "inner shadow");
+    }
+}'
+
+assert_config_caught "a raw _safe let in a SECOND function is not laundered by the first" \
+    'fn sanitizing(v: &str) {
+    let provider_safe = routectl_core::sanitize_for_log(v);
+    tracing::warn!(provider = %provider_safe, "clean arm");
+}
+fn wrong_function(v: &str) {
+    let provider_safe = v.to_string();
+    tracing::warn!(provider = %provider_safe, "raw arm");
+}'
+
+assert_config_caught "a _safe PARAMETER is not laundered by a sanitized let elsewhere in the file" \
+    'fn sanitizing(v: &str) {
+    let provider_safe = routectl_core::sanitize_for_log(v);
+    tracing::warn!(provider = %provider_safe, "clean arm");
+}
+fn taking_param(provider_safe: &str) {
+    tracing::warn!(provider = %provider_safe, "raw arm");
+}'
+
+assert_config_caught "a mut re-assignment after the sanitized let is not laundered" \
+    'fn probe(v: &str) {
+    let mut provider_safe = routectl_core::sanitize_for_log(v);
+    provider_safe = v.to_string();
+    tracing::warn!(provider = %provider_safe, "probe");
+}'
+
+# SANITIZERS is a closed list of four names, not an open family shape: a
+# helper merely NAMED like a sanitizer proves nothing.
+assert_config_caught "an invented sanitize_*_for_log name is not accepted" \
+    'fn probe(v: &str) {
+    tracing::warn!(provider = %sanitize_nothing_for_log(v), "probe");
+}'
+
+# Shape 5: `{field}` interpolated into the message body renders through
+# Display with no field ever present.
+assert_config_caught "a config-key field interpolated into the message body" \
+    'fn probe(provider: &str) {
+    tracing::warn!(count = 1, "no route for [providers.{provider}]");
+}'
+
+assert_source_caught "a wire field interpolated into a multiline message body" \
+    'fn probe(finish_reason: &str) {
+    tracing::warn!(
+        chunks = 2,
+        "second finish_reason (new={finish_reason}) on one stream"
+    );
+}'
+
+assert_source_clean "a _safe capture in the message body is out of scope for shape 5" \
+    'fn probe(v: &str) {
+    let finish_reason_safe = routectl_core::sanitize_for_log(v);
+    tracing::warn!("second finish_reason (new={finish_reason_safe})");
+}'
+
+assert_source_clean "a non-field capture in the message body is out of scope" \
+    'fn probe(host: &str) {
+    tracing::warn!("routectl bound to {host}");
+}'
+
 assert_source_clean "a commented-out call is prose, not a call site" \
     'fn probe(_v: &str) {
     // historical shape: tracing::warn!(type_tag = %v, "probe");
@@ -179,6 +333,10 @@ assert_source_clean "a commented-out call is prose, not a call site" \
 
 assert_fail_closed "a missing search path is a gate failure, not a vacuous PASS" \
     'rm -rf crates/routectl-cli/src/ingress'
+assert_fail_closed "a missing config-key search path is a gate failure too" \
+    'rm -rf crates/routectl-router/src'
+assert_fail_closed "a .rs outside every tier and undeclared is a gate failure" \
+    'printf "fn orphan() {}\n" >crates/routectl-cli/src/orphan.rs'
 assert_fail_closed "an absent rg is a gate failure, not a vacuous PASS" \
     'mkdir -p stubbin
      for tool in bash git sed mktemp; do
