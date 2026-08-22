@@ -2,10 +2,12 @@
 //!
 //! Reads the local SQLite usage DB (never writes it), rolls the
 //! finest-grained aggregate rows up to a display dimension, derives cost
-//! at query time from the `[registry]` pricing table, and prints an ASCII
-//! report. Subscription providers (managed-OAuth, `api_key_ref` starting
-//! `oauth://`) carry no per-token dollar cost; their dollar column reads
-//! `n/a (subscription)` and the quota line is the real spend signal.
+//! at query time from the `[registry]` pricing table (falling back to the
+//! baked catalog's own rates for an upstream the operator has not priced),
+//! and prints an ASCII report. Subscription providers (managed-OAuth,
+//! `api_key_ref` starting `oauth://`) carry no per-token dollar cost; their
+//! dollar column reads `n/a (subscription)` and the quota line is the real
+//! spend signal.
 //!
 //! The clap parsing, the window math, the rollup + cost core, and the
 //! stdout formatting are deliberately separate so the correctness-critical
@@ -17,15 +19,17 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 
-use routectl_router::Config;
+use routectl_router::{CatalogOverlay, Config, effective_pricing};
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
-    NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, Rates, ReductionSummary,
+    NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, ReductionSummary,
     RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions, UsageDb,
     WouldTrimSummary, aggregate, cache_decision_summary, estimate_cost_tokens,
     k_calibration_summary, latest_quota_by_seat, near_lossless_attribution_summary, open_readonly,
     reduction_summary, shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
+
+use crate::commands::pricing::{is_subscription, rates_from_pricing};
 
 /// Parsed `routectl usage` arguments, already validated by clap.
 #[derive(Debug, Clone)]
@@ -398,7 +402,8 @@ fn parse_local_date_end(s: &str) -> Result<i64, UsageError> {
 /// formatter renders. Cost is intentionally tri-state: `priced_total_usd`
 /// is the summed dollar cost of API-key rows that had a price;
 /// `any_subscription` flags that managed-OAuth rows contributed (no $);
-/// `any_unpriced` flags API-key rows with no `[registry]` price.
+/// `any_unpriced` flags API-key rows that NEITHER the `[registry]` table nor
+/// the baked catalog prices.
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
     pub label: String,
@@ -488,34 +493,6 @@ pub struct WindowReport {
     pub suppressed_sessions: SuppressedSessions,
 }
 
-/// True iff `provider` is a managed-OAuth subscription provider: its
-/// configured `api_key_ref` begins with `oauth://`. A row whose provider
-/// is unknown to the config or absent is NOT subscription (it simply
-/// carries no cost). This is the ONLY subscription signal -- auth_kind is
-/// deliberately not consulted.
-fn is_subscription(config: &Config, provider: &str) -> bool {
-    config
-        .providers
-        .get(provider)
-        .and_then(|p| p.api_key_ref())
-        .is_some_and(|r| r.starts_with("oauth://"))
-}
-
-/// Convert the router's per-million-token pricing into the usage crate's
-/// leaf-safe `Rates`. `reasoning_per_mtok` starts unset; `cost_for_row`
-/// promotes it to the output rate only for a row whose PERSISTED provider kind
-/// reports reasoning disjointly from output.
-const fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
-    Rates {
-        input_per_mtok: p.input_per_mtok,
-        output_per_mtok: p.output_per_mtok,
-        reasoning_per_mtok: None,
-        cache_read_per_mtok: p.cache_read_per_mtok,
-        cache_write_5m_per_mtok: p.cache_write_5m_per_mtok,
-        cache_write_1h_per_mtok: p.cache_write_1h_per_mtok,
-    }
-}
-
 /// The provider kind whose reasoning tokens are DISJOINT from its output count
 /// (Gemini reports `thoughtsTokenCount` separately from
 /// `candidatesTokenCount`), so it alone prices reasoning as its own dimension.
@@ -575,6 +552,13 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// first (it overrides pricing); then a priced API-key row prices its
 /// summed tokens; everything else is unpriced.
 ///
+/// Rates resolve through `routectl_router::effective_pricing`: an operator
+/// `[registry]` row wins whole, and only in its absence do the row's baked
+/// catalog rates fill in. The catalog side is keyed by the kind PERSISTED with
+/// the row, never by what the provider is configured as now -- re-kinding a
+/// provider must not reprice history -- so a row with no persisted kind fills
+/// from no catalog cell and stays `Unpriced`.
+///
 /// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
 /// whose kind an operator later changed keeps each era priced by what it was.
 /// A row with NO persisted kind and NONZERO reasoning tokens fails CLOSED as
@@ -586,7 +570,7 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// Returns the usage crate's `RowCost` verdict, which is also what the grouped
 /// query layer's pricing closure must yield -- so the CLI report and the
 /// `/status/query` endpoint price a row through exactly one function.
-pub(crate) fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
+pub(crate) fn cost_for_row(config: &Config, overlay: &CatalogOverlay, row: &AggRow) -> RowCost {
     let Some(provider) = row.key.provider.as_deref() else {
         return RowCost::Unpriced;
     };
@@ -596,10 +580,16 @@ pub(crate) fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
     let Some(upstream) = row.key.upstream.as_deref() else {
         return RowCost::Unpriced;
     };
-    let Some(pricing) = config.pricing_for(upstream, provider) else {
+    let Some((pricing, _)) = effective_pricing(
+        config,
+        overlay,
+        row.key.provider_kind.as_deref().unwrap_or_default(),
+        upstream,
+        provider,
+    ) else {
         return RowCost::Unpriced;
     };
-    let mut rates = rates_from_pricing(pricing);
+    let mut rates = rates_from_pricing(&pricing);
     match reasoning_structure(row.key.provider_kind.as_deref()) {
         // A disjoint-reasoning row bills its thinking tokens at the output
         // rate; a subsumed one already counted them inside output, so pricing
@@ -730,6 +720,7 @@ impl Acc {
 pub fn build_window_report(
     db: &UsageDb,
     config: &Config,
+    overlay: &CatalogOverlay,
     title: String,
     bounds: WindowBounds,
     by: Option<GroupDim>,
@@ -742,7 +733,7 @@ pub fn build_window_report(
     let mut total = Acc::default();
     for row in &rows {
         let label = group_label(&row.key, dim);
-        let cost = cost_for_row(config, row);
+        let cost = cost_for_row(config, overlay, row);
         groups.entry(label).or_default().add(row, cost);
         total.add(row, cost);
     }
@@ -1517,7 +1508,11 @@ pub fn render_k_calibration(cal: &KCalibration) -> String {
 ///
 /// When `--k-calibration` is set, emits only the calibration report over all
 /// history and returns immediately (window/by/detail flags are ignored).
-pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    config: &Config,
+    overlay: &CatalogOverlay,
+    args: &UsageArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = args
         .db
         .clone()
@@ -1544,7 +1539,7 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
     };
 
     let now = Local::now();
-    let output = build_output(&db, config, args, now)?;
+    let output = build_output(&db, config, overlay, args, now)?;
     print!("{output}");
     Ok(())
 }
@@ -1555,6 +1550,7 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
 pub fn build_output(
     db: &UsageDb,
     config: &Config,
+    overlay: &CatalogOverlay,
     args: &UsageArgs,
     now: DateTime<Local>,
 ) -> Result<String, UsageError> {
@@ -1562,7 +1558,7 @@ pub fn build_output(
         let cal = k_calibration_summary(db)?;
         return Ok(render_k_calibration(&cal));
     }
-    let blocks = build_blocks(db, config, args, now)?;
+    let blocks = build_blocks(db, config, overlay, args, now)?;
     Ok(blocks.join("\n"))
 }
 
@@ -1573,10 +1569,11 @@ pub fn build_output(
 pub fn build_blocks(
     db: &UsageDb,
     config: &Config,
+    overlay: &CatalogOverlay,
     args: &UsageArgs,
     now: DateTime<Local>,
 ) -> Result<Vec<String>, UsageError> {
-    let mut blocks = build_window_blocks(db, config, args, now)?;
+    let mut blocks = build_window_blocks(db, config, overlay, args, now)?;
     // Keep the legend out of the block count: append it to the last block so a
     // multi-window summary still yields exactly one block per window.
     if let Some(last) = blocks.last_mut() {
@@ -1590,6 +1587,7 @@ pub fn build_blocks(
 fn build_window_blocks(
     db: &UsageDb,
     config: &Config,
+    overlay: &CatalogOverlay,
     args: &UsageArgs,
     now: DateTime<Local>,
 ) -> Result<Vec<String>, UsageError> {
@@ -1599,7 +1597,7 @@ fn build_window_blocks(
             Some(until) => format!("== {since} .. {until} =="),
             None => format!("== since {since} =="),
         };
-        let report = build_window_report(db, config, title, bounds, args.by, args.detail)?;
+        let report = build_window_report(db, config, overlay, title, bounds, args.by, args.detail)?;
         return Ok(vec![render_report(&report)]);
     }
 
@@ -1613,8 +1611,15 @@ fn build_window_blocks(
         let mut blocks = Vec::with_capacity(windows.len());
         for (flag, title) in windows {
             let bounds = window_bounds(flag, now);
-            let report =
-                build_window_report(db, config, title.to_string(), bounds, args.by, args.detail)?;
+            let report = build_window_report(
+                db,
+                config,
+                overlay,
+                title.to_string(),
+                bounds,
+                args.by,
+                args.detail,
+            )?;
             blocks.push(render_report(&report));
         }
         return Ok(blocks);
@@ -1622,7 +1627,7 @@ fn build_window_blocks(
 
     let title = window_title(args.window);
     let bounds = window_bounds(args.window, now);
-    let report = build_window_report(db, config, title, bounds, args.by, args.detail)?;
+    let report = build_window_report(db, config, overlay, title, bounds, args.by, args.detail)?;
     Ok(vec![render_report(&report)])
 }
 

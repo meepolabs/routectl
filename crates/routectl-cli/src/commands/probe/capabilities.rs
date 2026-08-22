@@ -59,9 +59,11 @@ use routectl_core::failure_class::{FailureClass, classify};
 use routectl_core::{ChatRequest, ChatResponse, Provider};
 use routectl_router::{
     CATALOG_VERSION, DetectorContext, ObservationDirection, build_provider, detect,
-    overlay_revision, resolve_requested_capability,
+    effective_pricing, overlay_revision, resolve_requested_capability,
 };
 use routectl_usage::{CapabilityEvent, Rates};
+
+use crate::commands::pricing::{is_subscription, rates_from_pricing};
 
 use super::canary::{
     PROBE_PROFILE_V1, ProbeProfileV1, prompt_caching_canary, structured_output_canary,
@@ -601,10 +603,7 @@ pub async fn run(
         }
     };
 
-    let rates = loaded
-        .config
-        .pricing_for(&target.model_id, &target.provider)
-        .map(rates_from_pricing);
+    let rates = probe_rates(&loaded, entry, &target);
     let estimate = estimate_probe_cost(&capabilities, rates.as_ref());
     for line in render_estimate(&estimate) {
         println!("{line}");
@@ -727,10 +726,7 @@ pub async fn offer_scoped_probe(
     };
 
     let capabilities = ProbeCapability::ALL.to_vec();
-    let rates = loaded
-        .config
-        .pricing_for(&target.model_id, &target.provider)
-        .map(rates_from_pricing);
+    let rates = probe_rates(&loaded, entry, &target);
     let estimate = estimate_probe_cost(&capabilities, rates.as_ref());
     for line in render_estimate(&estimate) {
         println!("{line}");
@@ -741,6 +737,35 @@ pub async fn offer_scoped_probe(
     }
 
     dispatch_and_persist(&loaded, entry, &target, &capabilities, rates, false).await;
+}
+
+/// The rate table a probe estimate and its ledger events bill against.
+///
+/// A managed-OAuth provider short-circuits to `None` BEFORE any rate lookup,
+/// matching the order every other cost surface classifies in: the seat's
+/// traffic is billed by subscription, so a per-token figure for it would be
+/// fabricated -- the estimate reads `unpriced`, which is the honest answer.
+///
+/// Otherwise routes through the SHARED pricing boundary, so a pre-flight
+/// estimate cannot disagree with what the dispatched probe's rows are later
+/// priced at: the operator's `[registry]` row wins whole, and only in its
+/// absence do the provider kind's baked catalog rates fill in.
+fn probe_rates(
+    loaded: &crate::server::LoadedConfig,
+    entry: &routectl_router::ProviderEntry,
+    target: &super::resolve::ResolvedProbeTarget,
+) -> Option<Rates> {
+    if is_subscription(&loaded.config, &target.provider) {
+        return None;
+    }
+    effective_pricing(
+        &loaded.config,
+        &loaded.catalog_overlay,
+        entry.kind_str(),
+        &target.model_id,
+        &target.provider,
+    )
+    .map(|(pricing, _)| rates_from_pricing(&pricing))
 }
 
 /// Resolve the `--only` tokens to a capability set, or all capabilities when
@@ -755,19 +780,6 @@ fn select_capabilities(only: &[String]) -> Result<Vec<ProbeCapability>, String> 
                 .ok_or_else(|| format!("unknown capability `{token}` in --only"))
         })
         .collect()
-}
-
-/// Convert the router's per-million-token pricing into the usage crate's
-/// leaf-safe `Rates`.
-const fn rates_from_pricing(pricing: &routectl_router::PricingConfig) -> Rates {
-    Rates {
-        input_per_mtok: pricing.input_per_mtok,
-        output_per_mtok: pricing.output_per_mtok,
-        reasoning_per_mtok: None,
-        cache_read_per_mtok: pricing.cache_read_per_mtok,
-        cache_write_5m_per_mtok: pricing.cache_write_5m_per_mtok,
-        cache_write_1h_per_mtok: pricing.cache_write_1h_per_mtok,
-    }
 }
 
 /// Prompt for confirmation after the estimate. A `y`/`yes` reply proceeds;

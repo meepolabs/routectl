@@ -806,7 +806,7 @@
     },
     "PricingConfig": {
       "additionalProperties": false,
-      "description": "Per-million-token pricing for one `[registry.*]` entry. All fields\nare USD per million tokens and all are optional -- routectl ships no\nprice defaults, so any field left unset means \"this dimension is\nunpriced\" and contributes nothing to a derived cost. Cost is computed\nat query time, never persisted, so a corrected price retroactively\nfixes historical rows.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
+      "description": "Per-million-token pricing for one `[registry.*]` entry. All fields\nare USD per million tokens -- the CANONICAL operator-facing price unit\nthroughout routectl -- and all are optional: routectl ships no price\ndefaults, so any field left unset means \"this dimension is unpriced\" and\ncontributes nothing to a derived cost. Cost is computed at query time,\nnever persisted, so a corrected price retroactively fixes historical rows.\n\nA row here wins WHOLE over the baked catalog's own rates, which fill in\nonly when no row prices an upstream: this struct has no\nexplicitly-unpriced sentinel, so a per-field fill could not tell a\ndeliberate omission from an absent value.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
       "properties": {
         "cache_read_per_mtok": {
           "description": "USD per million tokens read from the prompt cache. `None` leaves it unpriced.",

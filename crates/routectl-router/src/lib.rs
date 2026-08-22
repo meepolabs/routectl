@@ -56,6 +56,7 @@ pub(crate) mod learned_replay;
 pub(crate) mod log_hash;
 pub(crate) mod override_registry;
 pub mod pool_build;
+pub mod pricing;
 pub(crate) mod quota;
 pub(crate) mod resolved;
 pub mod router;
@@ -83,7 +84,8 @@ pub use catalog::{
     BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
     baked_table_rows, epoch_day_age, is_cataloged_provider_kind, is_stale_days,
     is_stale_days_today, is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
-    lookup_with_overrides, merge, stale_after_days, today_epoch_day, validate_overrides,
+    lookup_with_overrides, merge, resolve_effective_row, stale_after_days, today_epoch_day,
+    validate_overrides,
 };
 pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
 pub use catalog_import::{
@@ -176,6 +178,7 @@ pub use override_registry::{
     validate_capability_overrides,
 };
 pub use pool_build::{PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolReport};
+pub use pricing::{PricingSource, effective_pricing};
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions,

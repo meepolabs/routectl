@@ -27,7 +27,7 @@ use routectl_providers::gemini::GeminiAuthMode;
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 
-use crate::catalog::{EffectiveRow, lookup_baked_with_overrides, lookup_overlay_cell, merge};
+use crate::catalog::{EffectiveRow, resolve_effective_row};
 use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ConfigFailureClass;
 #[cfg(feature = "bedrock")]
@@ -388,19 +388,18 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
                 .providers
                 .get(&entry.provider)
                 .map_or("", ProviderEntry::kind_str);
-            let baked = lookup_baked_with_overrides(
-                provider_kind,
-                &entry.upstream,
-                None,
-                &config.cache_pricing,
-            );
-            let overlay_cell = lookup_overlay_cell(provider_kind, &entry.upstream, overlay);
             ModelCell {
                 nickname: nickname.clone(),
                 provider: entry.provider.clone(),
                 provider_kind: provider_kind.to_string(),
                 upstream: entry.upstream.clone(),
-                row: merge(baked.as_ref(), overlay_cell),
+                row: resolve_effective_row(
+                    provider_kind,
+                    &entry.upstream,
+                    None,
+                    &config.cache_pricing,
+                    overlay,
+                ),
             }
         })
         .collect();

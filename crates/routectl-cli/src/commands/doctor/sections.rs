@@ -17,7 +17,7 @@ use crate::commands::seat_report::{
 };
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::{DoctorContext, FreshnessInputs};
+use super::{DoctorContext, FreshnessInputs, PricingRow, PricingRowSource};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -705,6 +705,116 @@ fn last_import_finding(f: &FreshnessInputs) -> Finding {
             remediation: None,
         },
     }
+}
+
+/// Pricing section: one deterministic row per configured model naming where
+/// its cost rates come from. Purely informational -- an unpriced model is a
+/// legitimate configuration (the operator may not care about cost accounting),
+/// so no row here can Fail, and the section can never move the exit code.
+///
+/// An unresolvable overlay collapses the whole section to ONE unavailable
+/// line: see [`pricing_unavailable`].
+pub(super) fn section_pricing(ctx: &DoctorContext) -> Vec<Finding> {
+    match &ctx.pricing {
+        Some(rows) => rows.iter().map(pricing_finding).collect(),
+        None => vec![pricing_unavailable()],
+    }
+}
+
+/// The section-unavailable finding: the catalog overlay could not be loaded.
+///
+/// The overlay is the rate CORRECTION channel -- it disables entries and
+/// supersedes baked rates -- so with it unreadable, the baked figure for any
+/// selector may be exactly the one the effective pricing does NOT use. A
+/// superseded dollar figure is worse than no figure, so the section reports
+/// nothing resolved rather than the baked layer alone.
+///
+/// `Warn`, matching [`capability_unavailable`]: it degrades honestly without
+/// flipping the exit code (the version section owns the overlay-load `Fail`).
+fn pricing_unavailable() -> Finding {
+    Finding {
+        section: "pricing",
+        name: "section".to_string(),
+        status: Status::Warn,
+        detail: "cost pricing unavailable: the catalog overlay could not be loaded, so no \
+                 model's effective rates can be resolved (the overlay supersedes baked rates, \
+                 so reporting the baked figure could name a rate the bill does not use)"
+            .to_string(),
+        remediation: Some(
+            "resolve the catalog-overlay error reported above, then re-run `routectl doctor`"
+                .to_string(),
+        ),
+    }
+}
+
+/// Pure mapping of one resolved [`PricingRow`] to its finding. The detail
+/// names the model's provider, kind, and upstream in every state so an
+/// operator can see WHICH selector was resolved, and the two priced states
+/// additionally name the resolved per-million rates.
+pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
+    let selector = format!(
+        "provider {} (kind {}) upstream {}",
+        safe(&row.provider),
+        safe(&row.provider_kind),
+        safe(&row.upstream)
+    );
+    let detail = match &row.source {
+        PricingRowSource::Subscription => {
+            format!("billed by subscription; no per-token rate applies -- {selector}")
+        }
+        PricingRowSource::Registry {
+            input_per_mtok,
+            output_per_mtok,
+        } => format!(
+            "priced from the [registry] table {} -- {selector}",
+            render_rates(*input_per_mtok, *output_per_mtok)
+        ),
+        PricingRowSource::Catalog {
+            input_per_mtok,
+            output_per_mtok,
+        } => format!(
+            "priced from the baked catalog {} -- {selector}",
+            render_rates(*input_per_mtok, *output_per_mtok)
+        ),
+        PricingRowSource::Unpriced => format!(
+            "unpriced: neither [registry] nor the catalog has rates -- {selector}; usage reports \
+             no cost for it"
+        ),
+    };
+    Finding {
+        section: "pricing",
+        name: safe(&row.nickname),
+        status: Status::Pass,
+        detail,
+        remediation: None,
+    }
+}
+
+/// Render one row's resolved per-million rates. A dimension the winning layer
+/// left unset renders as `unset`, never as `$0` -- an unpriced dimension
+/// contributes nothing to a cost and must not read as free.
+///
+/// A winning row that priced NEITHER dimension is a distinct state from a
+/// half-priced one, and only an operator `[registry]` row can reach it (a
+/// catalog row pricing neither dimension resolves to `Unpriced` upstream of
+/// here). "input unset / output unset" would read as a lookup that came up
+/// empty; the row is instead a deliberate act that charges nothing, so it says
+/// so.
+fn render_rates(input_per_mtok: Option<f64>, output_per_mtok: Option<f64>) -> String {
+    if input_per_mtok.is_none() && output_per_mtok.is_none() {
+        return "but that row sets no per-token rate, so it prices nothing".to_string();
+    }
+    format!(
+        "at input {} / output {} per Mtok",
+        render_rate(input_per_mtok),
+        render_rate(output_per_mtok)
+    )
+}
+
+/// One per-million rate as money: two decimals like every other dollar
+/// surface, or `unset` for a dimension the winning layer left absent.
+fn render_rate(per_mtok: Option<f64>) -> String {
+    per_mtok.map_or_else(|| "unset".to_string(), |v| format!("${v:.2}"))
 }
 
 /// The operator staleness hint as the `i64` the epoch-day checks take. A

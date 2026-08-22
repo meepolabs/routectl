@@ -65,8 +65,11 @@ pub struct QueryPricer {
 impl QueryPricer {
     /// The cost verdict for one fine-grained aggregate row, resolved against
     /// the pinned snapshot through the same function the CLI usage report uses.
+    /// The catalog overlay comes off the SAME pinned router the config does, so
+    /// one query can never price against a config generation and a foreign
+    /// overlay generation.
     pub fn price(&self, row: &AggRow) -> RowCost {
-        cost_for_row(&self.router.config, row)
+        cost_for_row(&self.router.config, self.router.catalog_overlay(), row)
     }
 }
 

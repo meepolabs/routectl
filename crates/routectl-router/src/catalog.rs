@@ -139,10 +139,17 @@ pub struct CatalogRow {
     /// catch-all with no backing model, stays ABSENT rather than carrying a
     /// guess. A guessed rate is a silent dollar error that compounds per
     /// token.
-    pub input_cost_per_token: Option<f32>,
-    /// Base output price in dollars PER TOKEN. Same confirmation and
-    /// fail-closed rules as [`Self::input_cost_per_token`].
-    pub output_cost_per_token: Option<f32>,
+    ///
+    /// CRATE-VISIBLE ON PURPOSE. Per-token is this table's internal unit;
+    /// the operator-facing canonical unit is per-MILLION. The single
+    /// conversion happens inside this crate (`crate::pricing`), so no
+    /// consumer outside it can join a per-token catalog rate with a
+    /// per-million config rate raw. The type wall IS the guard.
+    pub(crate) input_cost_per_token: Option<f32>,
+    /// Base output price in dollars PER TOKEN. Same confirmation,
+    /// fail-closed, and crate-visibility rules as
+    /// [`Self::input_cost_per_token`].
+    pub(crate) output_cost_per_token: Option<f32>,
     /// Capability priors keyed on the well-known namespace
     /// (`routectl_core::capability`). Absent key = NO PRIOR (distinct from
     /// `Some(false)`, an asserted absence). A baked row carries the priors its
@@ -1076,6 +1083,29 @@ pub fn lookup_overlay_cell<'a>(
         }
     }
     exact.or(star).map(|(_, cell)| cell)
+}
+
+/// Resolve the two-layer effective row for one `(provider_kind, model,
+/// tier)` selector: the baked layer (with any legacy `[cache_pricing]`
+/// override applied) merged with the overlay cell that matches the same
+/// selector.
+///
+/// THE shared resolution path. Every surface that needs an effective row for
+/// a selector calls this rather than re-assembling
+/// [`lookup_baked_with_overrides`] + [`lookup_overlay_cell`] + [`merge`]
+/// itself, so the economics view and the cost fill can never resolve one
+/// selector to two different rows.
+#[must_use]
+pub fn resolve_effective_row(
+    provider_kind: &str,
+    model: &str,
+    tier: Option<&str>,
+    overrides: &BTreeMap<String, CachePricingOverride>,
+    overlay: &CatalogOverlay,
+) -> EffectiveRow {
+    let baked = lookup_baked_with_overrides(provider_kind, model, tier, overrides);
+    let overlay_cell = lookup_overlay_cell(provider_kind, model, overlay);
+    merge(baked.as_ref(), overlay_cell)
 }
 
 #[cfg(test)]
