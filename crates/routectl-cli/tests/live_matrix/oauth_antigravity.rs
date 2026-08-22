@@ -52,10 +52,15 @@ const CLAUDE_MODELS: &[&str] = &["claude-sonnet-4-6", "claude-opus-4-6-thinking"
 /// Every id the live `fetchAvailableModels` catalog offered for this seat,
 /// transcribed from one raw response with the non-inference entries
 /// excluded: `chat_*` and `tab_*` (IDE-internal surfaces) and `*-tiered`
-/// ids carrying no `displayName` (routing placeholders, not servable ids).
+/// ids carrying no `displayName` (routing placeholders, not servable ids --
+/// `gemini-3.6-flash-tiered` and `gemini-3.7-flash-tiered` are in the
+/// catalog and excluded on that rule).
 /// Google churns this catalog on a weekly cadence, so the list is a
 /// point-in-time transcription, not a registry -- it feeds the `#[ignore]`d
-/// sweep below and nothing else.
+/// sweep below and nothing else. The catalog itself is also gated on
+/// `PINNED_IDE_VERSION`: the newest tier is invisible (and 404s) under a
+/// stale pin, so a shrunken sweep is a pin question before it is a model
+/// question.
 const SERVABLE_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
@@ -74,6 +79,9 @@ const SERVABLE_MODELS: &[&str] = &[
     "gemini-3.6-flash-high",
     "gemini-3.6-flash-low",
     "gemini-3.6-flash-medium",
+    "gemini-3.7-flash-high",
+    "gemini-3.7-flash-low",
+    "gemini-3.7-flash-medium",
     "gemini-pro-agent",
     "gpt-oss-120b-medium",
 ];

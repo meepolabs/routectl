@@ -16,13 +16,24 @@
 use std::env::consts;
 use std::sync::OnceLock;
 
-/// Antigravity `ideVersion` (its `product.json` value, NOT the IDE's own
-/// app version) that routectl reports on the Cloud Code lane.
+/// Antigravity `ideVersion` (the `ideVersion` key of the installed client's
+/// `product.json`, NOT its app `version`, which tracks the VS Code base and
+/// moves independently) that routectl reports on the Cloud Code lane.
+///
+/// CAPABILITY-BEARING, NOT COSMETIC: the upstream gates the model catalog on
+/// this version. A stale pin silently loses the newest model tier -- the
+/// catalog stops listing those ids and inference against one answers `404
+/// NOT_FOUND`, which reads as a bad model id rather than as a rejected
+/// client. Measured with one bearer, one project, one body and only the
+/// version differing: the pin preceding this one listed 25 catalog ids and
+/// 404'd `gemini-3.7-flash-high`, while this one lists 28 and answers it 200.
 ///
 /// STALENESS RISK: this is a compiled pin with no live version fetcher
-/// behind it. Roll it forward when the upstream client advances, or the
-/// fingerprint drifts from any real install.
-pub const PINNED_IDE_VERSION: &str = "1.23.2";
+/// behind it (deliberately -- the lane adds no egress to discover it). Roll
+/// it forward by hand when the upstream client updates; the ordered surfaces
+/// a bump must touch are in `docs/PROVIDER-QUIRKS.md` under the cloud-code
+/// client-identity paragraph.
+pub const PINNED_IDE_VERSION: &str = "2.5.5";
 
 /// Product name reported in the `User-Agent` and in the `onboardUser`
 /// metadata `ide_name` field.
@@ -66,38 +77,32 @@ mod tests {
     fn compose_maps_the_reference_client_platform_vocabulary() {
         assert_eq!(
             compose("macos", "aarch64"),
-            "antigravity/1.23.2 darwin/arm64"
+            "antigravity/2.5.5 darwin/arm64"
         );
-        assert_eq!(
-            compose("macos", "x86_64"),
-            "antigravity/1.23.2 darwin/amd64"
-        );
+        assert_eq!(compose("macos", "x86_64"), "antigravity/2.5.5 darwin/amd64");
         assert_eq!(
             compose("windows", "x86_64"),
-            "antigravity/1.23.2 windows/amd64"
+            "antigravity/2.5.5 windows/amd64"
         );
-        assert_eq!(compose("windows", "x86"), "antigravity/1.23.2 windows/386");
-        assert_eq!(
-            compose("linux", "aarch64"),
-            "antigravity/1.23.2 linux/arm64"
-        );
+        assert_eq!(compose("windows", "x86"), "antigravity/2.5.5 windows/386");
+        assert_eq!(compose("linux", "aarch64"), "antigravity/2.5.5 linux/arm64");
     }
 
     #[test]
     fn compose_passes_unmapped_os_and_arch_through_unchanged() {
         assert_eq!(
             compose("freebsd", "riscv64"),
-            "antigravity/1.23.2 freebsd/riscv64"
+            "antigravity/2.5.5 freebsd/riscv64"
         );
         // `linux` is already the wire spelling, so it must not be rewritten.
-        assert_eq!(compose("linux", "x86_64"), "antigravity/1.23.2 linux/amd64");
+        assert_eq!(compose("linux", "x86_64"), "antigravity/2.5.5 linux/amd64");
     }
 
     #[test]
     fn user_agent_pins_the_ide_version_and_carries_one_platform_pair() {
         let ua = antigravity_user_agent();
         assert!(
-            ua.starts_with("antigravity/1.23.2 "),
+            ua.starts_with("antigravity/2.5.5 "),
             "UA must lead with the product and pinned version; got {ua}"
         );
         let parts: Vec<&str> = ua.split(' ').collect();

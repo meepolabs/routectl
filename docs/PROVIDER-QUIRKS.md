@@ -590,10 +590,32 @@ REAL host platform mapped into the reference client's vocabulary (macos
 -> darwin, windows -> windows, x86_64 -> amd64, aarch64 -> arm64, x86 ->
 386, anything else passed through). The same version and product name
 feed the `onboardUser` metadata, so no wire value is spelled twice.
-STALENESS RISK: `ideVersion` is a compiled pin with no live version
-fetcher behind it, so it drifts from real installs as the upstream client
-advances; a `user_agent` on the provider entry overrides the whole string
-if you need to match a specific install.
+
+The pinned `ideVersion` is CAPABILITY-BEARING, not cosmetic: the upstream
+gates the model catalog on it. Under a stale pin the newest model tier
+disappears from `fetchAvailableModels` and inference against one of its
+ids answers `404 NOT_FOUND` -- which reads as a bad model id, not as a
+rejected client, so the loss is silent. There is no live version fetcher
+behind the pin (adding upstream egress to discover it is a standing
+non-goal), so it is refreshed BY HAND when the client updates. A
+`user_agent` on the provider entry overrides the whole string if you need
+to match a specific install without waiting for a release.
+
+Ordered surfaces a version bump must touch:
+
+1. Read the new value from the installed client's
+   `resources/app/product.json`, key `ideVersion` -- NOT the app
+   `version`, which tracks the VS Code base and moves independently.
+2. `PINNED_IDE_VERSION` in
+   `crates/routectl-core/src/identity/antigravity.rs`, plus every test
+   literal in that module and the composed-UA assertion in
+   `crates/routectl-providers/src/gemini/mod.rs`.
+3. `SERVABLE_MODELS` in
+   `crates/routectl-cli/tests/live_matrix/oauth_antigravity.rs` -- re-read
+   the live catalog under the new pin and add whatever ids appeared.
+4. The servable-set snapshot rows and date in
+   [TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-kind--gemini-auth_mode--cloud-code-antigravity-oauth),
+   with the live evidence for each new id.
 
 **Host-rejection diagnostic:** a wrong-host lane and a legitimately
 earned rejection look identical on the wire, so routectl annotates rather
