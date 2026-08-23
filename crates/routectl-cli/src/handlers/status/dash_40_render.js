@@ -489,7 +489,9 @@
     var span = WINDOWLESS_TABS[activeTab]
       ? WINDOWLESS_SPAN[activeTab]
       : WINDOW_SPAN[selectedWindow];
-    var view = TAB_SOURCES[activeTab][0] === QUERY_SOURCE ? queryView() : null;
+    var primaryName = TAB_SOURCES[activeTab][0];
+    var view = primaryName === QUERY_SOURCE ? queryView()
+      : (primaryName === QUERY_SERIES_SOURCE ? querySeriesView() : null);
     if (view) { return humanCount(view.totals.requests) + ' req ' + span; }
     var usage = SOURCES[activeTab === 'routing' ? USAGE_ALL_SOURCE : 'usage'];
     if (usage.state === 'live' && usage.data && usage.data.totals) {

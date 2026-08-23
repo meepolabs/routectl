@@ -56,7 +56,7 @@
   // a malformed same-version payload -- the throw lands on safeSection and
   // degrades this section alone.
   function buildOverviewLive() {
-    var view = queryView();
+    var view = querySeriesView();
     if (!view || !view.series) {
       throw new Error('overview query payload carries no series');
     }
@@ -67,7 +67,7 @@
     if (num0(view.totals.requests) <= 0) { return overviewEmpty(); }
     var row = providerRowWindow === selectedWindow ? providerRowView : null;
     var stack = tabStack();
-    stack.appendChild(providerSection(row || view));
+    stack.appendChild(providerRowSection(row || view));
     stack.appendChild(kpiSection(view));
     return stack;
   }
@@ -135,7 +135,15 @@
   // credential headroom is a fact about that provider; it comes from the usage
   // source, not the query one, so it is read through the seat index below and a
   // usage failure costs the seat surface alone.
-  function providerSection(view) {
+  //
+  // Named for the ROW it draws, not for its subject: every dash_*.js part is
+  // concatenated into one function scope, so a bare `providerSection` here would
+  // collide with the Config tab's same-named table builder. The later
+  // declaration wins for BOTH call sites, and Config's part is concatenated
+  // after this one, so it is THIS tab that loses: its row call would run the
+  // table builder and throw on the view it is handed, while Config keeps
+  // rendering correctly.
+  function providerRowSection(view) {
     var wrap = document.createElement('div');
     wrap.className = 'ovsection';
     wrap.appendChild(sectionHead('Providers', 'pick one to scope the whole page'));

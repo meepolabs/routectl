@@ -680,6 +680,534 @@ mod tests {
         out
     }
 
+    /// Whether `c` may appear in a JS identifier (ASCII subset: the dashboard
+    /// sources are ASCII-only).
+    fn is_ident_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_' || c == '$'
+    }
+
+    /// The identifier or keyword starting at `chars[at]`, empty when that
+    /// position does not begin one.
+    fn read_word(chars: &[char], at: usize) -> String {
+        chars[at.min(chars.len())..]
+            .iter()
+            .take_while(|c| is_ident_char(**c))
+            .collect()
+    }
+
+    /// Index of the first non-whitespace character at or after `at`.
+    fn skip_whitespace(chars: &[char], at: usize) -> usize {
+        let mut i = at;
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// Index just past the string literal opened at `chars[at]`, honoring
+    /// backslash escapes.
+    fn skip_string_literal(chars: &[char], at: usize) -> usize {
+        let quote = chars[at];
+        let mut i = at + 1;
+        while i < chars.len() {
+            if chars[i] == '\\' {
+                i += 2;
+                continue;
+            }
+            if chars[i] == quote {
+                return i + 1;
+            }
+            i += 1;
+        }
+        i
+    }
+
+    /// Every top-level declaration in a script concatenation, paired with the
+    /// part that declares it.
+    ///
+    /// The parts share ONE function scope: `page.rs` splices them into a single
+    /// `<script>` inside one IIFE, so a declaration is visible to every part and
+    /// two parts declaring the same name is a redeclaration, not two locals.
+    ///
+    /// Scope is read from BRACE DEPTH carried across the concatenation -- the
+    /// IIFE body is depth 1 -- not from indentation, so a reindented part is
+    /// still scanned and a nested declaration is still recognized as genuinely
+    /// local. Parenthesis nesting is tracked relative to the innermost brace, so
+    /// the IIFE's own unclosed `(` does not hide its body's statements.
+    ///
+    /// Every declaration form that can appear at that level is recognized:
+    /// `function`, `async function`, generator `function*`, and `var`/`let`/
+    /// `const` with any number of declarators. A declaring form the scan cannot
+    /// classify (a class, a module declaration, a destructuring pattern) PANICS
+    /// rather than being skipped: an unrecognized declaration is an unguarded
+    /// top-level name, which is the exact hazard this scan exists to catch, so
+    /// it fails the build instead of passing silently.
+    fn top_level_declarations(parts: &[&str]) -> Vec<(String, usize)> {
+        const UNSUPPORTED: [&str; 3] = ["class", "import", "export"];
+
+        let mut found = Vec::new();
+        let mut saved_nesting: Vec<i32> = Vec::new();
+        let mut nesting = 0i32;
+        let mut prev: Option<char> = None;
+        for (part, src) in parts.iter().enumerate() {
+            let stripped = strip_js_comments(src);
+            let chars: Vec<char> = stripped.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
+                if c.is_whitespace() {
+                    i += 1;
+                    continue;
+                }
+                if c == '\'' || c == '"' || c == '`' {
+                    i = skip_string_literal(&chars, i);
+                    prev = Some(c);
+                    continue;
+                }
+                let at_statement = saved_nesting.len() == 1
+                    && nesting == 0
+                    && matches!(prev, None | Some('{' | '}' | ';'));
+                if at_statement && is_ident_char(c) && !c.is_ascii_digit() {
+                    let word = read_word(&chars, i);
+                    match word.as_str() {
+                        "function" | "async" => {
+                            let mut j = i + word.len();
+                            if word == "async" {
+                                j = skip_whitespace(&chars, j);
+                                let next = read_word(&chars, j);
+                                assert_eq!(
+                                    next, "function",
+                                    "the dashboard script has a top-level `async {next}`, which \
+                                     the declaration scan cannot classify; an unrecognized \
+                                     declaration would leave its name unguarded against collision"
+                                );
+                                j += next.len();
+                            }
+                            j = skip_whitespace(&chars, j);
+                            if chars.get(j) == Some(&'*') {
+                                j = skip_whitespace(&chars, j + 1);
+                            }
+                            let name = read_word(&chars, j);
+                            assert!(
+                                !name.is_empty(),
+                                "the dashboard script has an unnamed top-level `{word}` \
+                                 declaration, which is not valid as a statement"
+                            );
+                            i = j + name.len();
+                            prev = name.chars().last();
+                            found.push((name, part));
+                            continue;
+                        }
+                        "var" | "let" | "const" => {
+                            let mut j = i + word.len();
+                            loop {
+                                j = skip_whitespace(&chars, j);
+                                let name = read_word(&chars, j);
+                                assert!(
+                                    !name.is_empty(),
+                                    "the dashboard script has a top-level `{word}` declarator the \
+                                     scan cannot classify (a destructuring pattern binds names it \
+                                     would not see); an unrecognized declaration would leave its \
+                                     names unguarded against collision"
+                                );
+                                j += name.len();
+                                found.push((name, part));
+                                // Skip this declarator's initializer, which may
+                                // carry balanced brackets and strings of its own;
+                                // only a separator at the declaration's own level
+                                // ends it.
+                                let mut inner = 0i32;
+                                let mut ended = false;
+                                while j < chars.len() {
+                                    let d = chars[j];
+                                    if d == '\'' || d == '"' || d == '`' {
+                                        j = skip_string_literal(&chars, j);
+                                        continue;
+                                    }
+                                    match d {
+                                        '(' | '[' | '{' => inner += 1,
+                                        ')' | ']' | '}' => inner -= 1,
+                                        ',' if inner == 0 => {
+                                            j += 1;
+                                            break;
+                                        }
+                                        ';' if inner == 0 => {
+                                            j += 1;
+                                            ended = true;
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                    j += 1;
+                                }
+                                if ended || j >= chars.len() {
+                                    break;
+                                }
+                            }
+                            i = j;
+                            prev = Some(';');
+                            continue;
+                        }
+                        other if UNSUPPORTED.contains(&other) => panic!(
+                            "the dashboard script has a top-level `{other}` declaration, which \
+                             the declaration scan cannot classify; an unrecognized declaration \
+                             would leave its name unguarded against collision"
+                        ),
+                        _ => {
+                            // An expression or control statement: no name enters
+                            // the shared scope, so skip the whole word rather
+                            // than re-testing each of its characters.
+                            i += word.len();
+                            prev = word.chars().last();
+                            continue;
+                        }
+                    }
+                }
+                match c {
+                    '{' => {
+                        saved_nesting.push(nesting);
+                        nesting = 0;
+                    }
+                    '}' => nesting = saved_nesting.pop().unwrap_or(0),
+                    '(' | '[' => nesting += 1,
+                    ')' | ']' => nesting -= 1,
+                    _ => {}
+                }
+                prev = Some(c);
+                i += 1;
+            }
+        }
+        found
+    }
+
+    /// The first top-level name declared twice in a script concatenation, with
+    /// the parts that declare it.
+    fn first_colliding_declaration(parts: &[&str]) -> Option<(String, usize, usize)> {
+        let mut first_seen: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for (name, part) in top_level_declarations(parts) {
+            if let Some(earlier) = first_seen.insert(name.clone(), part) {
+                return Some((name, earlier, part));
+            }
+        }
+        None
+    }
+
+    /// The dashboard parts share one function scope, so no two of them may
+    /// declare the same top-level name.
+    ///
+    /// A collision is SILENT and total: hoisting makes the last `function`
+    /// declaration win for every call site in every part, so one tab's builder
+    /// starts running another tab's -- which throws on the payload it is handed
+    /// and degrades that tab to its `invalid_payload` containment card forever,
+    /// with a healthy transport and a well-formed payload. Nothing else on this
+    /// page reports it: the source is `live`, the fetch is right, and only the
+    /// rendered section is wrong. That makes this the one structural hazard of
+    /// the multi-part authoring split worth a mechanical guard.
+    ///
+    /// That the scan still RECOGNIZES each declaration form is a separate
+    /// assertion (`top_level_declaration_scan_recognizes_every_declaration_form`),
+    /// per form, against synthetic sources.
+    #[test]
+    fn dashboard_script_parts_declare_no_colliding_top_level_names() {
+        if let Some((name, first, second)) = first_colliding_declaration(SCRIPT_PARTS) {
+            panic!(
+                "the dashboard script declares a top-level `{name}` in both script part {first} \
+                 and script part {second}; the parts share ONE function scope, so the later \
+                 declaration silently replaces the earlier one for every caller of both"
+            );
+        }
+    }
+
+    /// A script part body wrapped the way `page.rs` assembles the real ones, so
+    /// a synthetic declaration sits at the IIFE body's own depth.
+    fn synthetic_script(body: &str) -> String {
+        format!("'use strict';\n(function () {{\n{body}\n}})();\n")
+    }
+
+    /// Whether the declaration scan REFUSES a source rather than skipping past
+    /// a form it cannot classify. The panic message is the assertion's payload,
+    /// so the hook is silenced to keep a passing run's output clean.
+    fn declaration_scan_refuses(src: &str) -> bool {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(|| top_level_declarations(&[src]));
+        std::panic::set_hook(previous);
+        outcome.is_err()
+    }
+
+    /// Recognition guard on the declaration scan itself, one case per FORM.
+    ///
+    /// The collision test above is only as strong as what the scan sees, and a
+    /// count-based self-check cannot establish that: the ~300 ordinary `function`
+    /// declarations satisfy any plausible threshold on their own, so a scan that
+    /// silently stopped recognizing every OTHER form would still look healthy.
+    /// Each supported form is therefore fed in twice and must be reported as a
+    /// collision, with a paired negative for the scope rule (nested same-name
+    /// declarations ARE locals) and a paired refusal for the forms the scan
+    /// cannot classify.
+    #[test]
+    fn top_level_declaration_scan_recognizes_every_declaration_form() {
+        // Every body but the last is written at the two-space indentation the
+        // real parts use, so a scan re-anchored on indentation fails ONLY the
+        // indentation case and each other case indicts its own form alone.
+        for (form, body) in [
+            (
+                "async function",
+                "  async function dup() {}\n  async function dup() {}",
+            ),
+            (
+                "generator function",
+                "  function* dup() {}\n  function *dup() {}",
+            ),
+            (
+                "the later declarator of a multi-declarator var",
+                "  var ignored = 0, dup = function () { return { a: 1, b: 2 }; };\n\
+                 \x20 function dup() {}",
+            ),
+            ("let", "  let dup = 1;\n  let dup = 2;"),
+            ("const", "  const dup = 1;\n  const dup = 2;"),
+            (
+                "a declaration at non-standard indentation",
+                "\tfunction dup() {}\n        function dup() {}",
+            ),
+        ] {
+            let src = synthetic_script(body);
+            let collision = first_colliding_declaration(&[src.as_str()]);
+            assert_eq!(
+                collision.map(|(name, ..)| name),
+                Some("dup".to_string()),
+                "the declaration scan does not recognize {form}, so a collision in that form \
+                 would pass the dashboard collision guard unnoticed"
+            );
+        }
+
+        // Scope, the other half of the recognition contract: same-name
+        // declarations inside separate BLOCKS are locals, not a collision.
+        let nested =
+            synthetic_script("  if (1) { function dup() {} }\n  if (2) { function dup() {} }");
+        assert_eq!(
+            first_colliding_declaration(&[nested.as_str()]),
+            None,
+            "the declaration scan reports nested declarations as a top-level collision; it \
+             would fail the build on code that is correct"
+        );
+
+        for unsupported in ["  class Dup {}", "  var { dup } = obj;", "  async dup = 1;"] {
+            let src = synthetic_script(unsupported);
+            assert!(
+                declaration_scan_refuses(&src),
+                "the declaration scan silently skips `{}`, so the name it binds \
+                 enters the shared scope unguarded",
+                unsupported.trim()
+            );
+        }
+    }
+
+    /// Drift guard on the per-shape QUERY source split.
+    ///
+    /// Overview reads `/status/query` bucketed and Usage reads it series-less;
+    /// the two payloads are not interchangeable, since Overview's sparklines
+    /// cannot be drawn from a payload whose `series` is null. They therefore get
+    /// their OWN source records, and this pins both halves of the split: the two
+    /// records EXIST (each declared, distinct, and validated against the
+    /// server's `query` wire version through SOURCE_PANEL -- an unmapped source
+    /// would compare against `undefined` and degrade a live source to the
+    /// client's incompatible fallback), and the transport is WIRED to them (each
+    /// tab routed to its own record, and the outcome written to the record the
+    /// round was issued for rather than to a hardcoded one). Two records with
+    /// one of them unreachable is the same bug at one remove.
+    #[test]
+    fn dashboard_query_shapes_have_their_own_source_records() {
+        let script = script();
+        let sources = string_array("GET_SOURCES");
+        let panel_map = literal_body("SOURCE_PANEL", '{', '}');
+        let tab_sources = literal_body("TAB_SOURCES", '{', '}');
+
+        // The two source keys, read from their own declarations so a rename
+        // moves this test with them rather than pinning a spelling twice.
+        let mut keys = Vec::new();
+        for decl in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE"] {
+            let needle = format!("var {decl} =");
+            let at = script
+                .find(&needle)
+                .unwrap_or_else(|| panic!("dashboard JS declares `{needle}`"));
+            let value = script[at + needle.len()..]
+                .split(';')
+                .next()
+                .expect("declaration is terminated")
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_string();
+            assert!(
+                !sources.contains(&value),
+                "`{decl}` names `{value}`, which is already a GET source; a QUERY read \
+                 sharing a GET panel's record would let each overwrite the other"
+            );
+            keys.push(value);
+        }
+        assert_ne!(
+            keys[0], keys[1],
+            "the two QUERY reads must name DIFFERENT source records, or whichever tab polled \
+             last defines what the other renders from"
+        );
+
+        // The bucketed read is the query PANEL at another request shape, so its
+        // SOURCE_PANEL entry must name `query` specifically: an entry pointing
+        // anywhere else validates a live query envelope against another panel's
+        // version, which degrades it to the incompatible fallback.
+        assert_eq!(
+            object_entry(&panel_map, &keys[1]).as_deref(),
+            Some("query"),
+            "SOURCE_PANEL must map the bucketed QUERY source `{}` to the `query` panel, or its \
+             envelope is validated against the wrong wire version",
+            keys[1]
+        );
+        assert_eq!(
+            keys[0], "query",
+            "the series-less QUERY source must BE the query panel's own name (SOURCE_PANEL \
+             resolves an unmapped source to itself); rename it and it needs its own entry"
+        );
+
+        // Each query-backed tab's PRIMARY source (the first TAB_SOURCES entry)
+        // is the read that tab actually issues, and the two must not be the same
+        // record. TAB_SOURCES names the CONSTANTS, so this reads the identifiers.
+        let overview = tab_source_primary(&tab_sources, "overview");
+        let usage = tab_source_primary(&tab_sources, "usage");
+        assert_eq!(
+            overview, "QUERY_SERIES_SOURCE",
+            "Overview must read the bucketed QUERY source; it is the only one whose payload \
+             carries the series its sparklines are drawn from"
+        );
+        assert_eq!(
+            usage, "QUERY_SOURCE",
+            "Usage must read the series-less QUERY source, the shape it actually requests"
+        );
+
+        // WIRING. `querySourceFor` is what actually routes a round's response,
+        // so its two arms must name the same records TAB_SOURCES does -- a
+        // swapped arm leaves both records declared and both tabs rendering from
+        // one shape, which is the collapse this split undid.
+        let routing = function_body("querySourceFor");
+        assert_eq!(
+            returned_after(&routing, "'overview'").as_deref(),
+            Some("QUERY_SERIES_SOURCE"),
+            "querySourceFor must route Overview's round to the bucketed source record"
+        );
+        assert_eq!(
+            returned_after(&routing, "'usage'").as_deref(),
+            Some("QUERY_SOURCE"),
+            "querySourceFor must route Usage's round to the series-less source record"
+        );
+
+        // The round must ASK which record it is writing, and hand it on.
+        let round = function_body("queryRound");
+        assert!(
+            round.contains("querySourceFor(activeTab)") && round.contains("applyQueryOutcome("),
+            "the QUERY round must resolve its own source record through querySourceFor and pass \
+             it to applyQueryOutcome; a round that does not is writing a record it did not ask for"
+        );
+
+        // And the outcome must land on the record it was PASSED, never on a
+        // constant: a hardcoded record here writes one tab's response into the
+        // other tab's state no matter how correctly the round was routed.
+        let outcome = function_body("applyQueryOutcome");
+        assert!(
+            outcome.contains("renderPanelGuarded(source,") && outcome.contains("SOURCES[source]"),
+            "applyQueryOutcome must render and read through its `source` parameter"
+        );
+        for constant in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE"] {
+            assert!(
+                !outcome.contains(constant),
+                "applyQueryOutcome names `{constant}` directly; it must write only the record it \
+                 was passed, or one tab's outcome lands on the other tab's source"
+            );
+        }
+    }
+
+    /// The value of `key` in an object-literal body, unquoted, or `None` when
+    /// the key is absent.
+    fn object_entry(body: &str, key: &str) -> Option<String> {
+        body.split(',')
+            .filter_map(|entry| entry.split_once(':'))
+            .find(|(name, _)| name.trim().trim_matches(|c| c == '\'' || c == '"') == key)
+            .map(|(_, value)| {
+                value
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string()
+            })
+    }
+
+    /// The identifier a function body `return`s at its first `return` after
+    /// `anchor`. Reads the WIRING of a dispatch arm rather than its text, so a
+    /// reformatted arm still checks and a repointed one still fails.
+    fn returned_after(body: &str, anchor: &str) -> Option<String> {
+        let at = body.find(anchor)?;
+        let after = &body[at + anchor.len()..];
+        let at = after.find("return")? + "return".len();
+        let word: String = after[at..]
+            .trim_start()
+            .chars()
+            .take_while(|c| is_ident_char(*c))
+            .collect();
+        (!word.is_empty()).then_some(word)
+    }
+
+    /// The body of `function <name>(...) { ... }` in the dashboard script,
+    /// comments stripped and braces balanced (so a nested block or object
+    /// literal does not truncate it). An absent function fails.
+    fn function_body(name: &str) -> String {
+        let src = strip_js_comments(&script());
+        let needle = format!("function {name}(");
+        let at = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("dashboard JS declares `function {name}(`"));
+        let chars: Vec<char> = src[at..].chars().collect();
+        let mut i = chars
+            .iter()
+            .position(|c| *c == '{')
+            .unwrap_or_else(|| panic!("`{name}` has a body"));
+        let start = i + 1;
+        let mut depth = 0i32;
+        while i < chars.len() {
+            match chars[i] {
+                '\'' | '"' | '`' => {
+                    i = skip_string_literal(&chars, i);
+                    continue;
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return chars[start..i].iter().collect();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("`{name}` body is not closed");
+    }
+
+    /// The first entry of a `TAB_SOURCES` list, as the identifier it is written
+    /// as in the script.
+    fn tab_source_primary(tab_sources: &str, tab: &str) -> String {
+        let at = tab_sources
+            .find(&format!("{tab}:"))
+            .unwrap_or_else(|| panic!("TAB_SOURCES declares `{tab}`"));
+        tab_sources[at..]
+            .split('[')
+            .nth(1)
+            .unwrap_or_else(|| panic!("TAB_SOURCES `{tab}` opens a source list"))
+            .split([',', ']'])
+            .next()
+            .unwrap_or_else(|| panic!("TAB_SOURCES `{tab}` names at least one source"))
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string()
+    }
+
     /// Drift guard on the QUERY retry contract: which codes back off, and the
     /// ladder they back off on.
     ///

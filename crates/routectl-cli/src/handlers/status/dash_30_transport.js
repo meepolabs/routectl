@@ -93,6 +93,16 @@
     return null;
   }
 
+  // The source record a tab's QUERY response belongs to, or null when the tab is
+  // not query-backed. One record per SHAPE, not one per route: the two shapes
+  // answer with different payloads, so a single record would let whichever tab
+  // polled last define what the other renders from.
+  function querySourceFor(tab) {
+    if (tab === 'overview') { return QUERY_SERIES_SOURCE; }
+    if (tab === 'usage') { return QUERY_SOURCE; }
+    return null;
+  }
+
   function findShape(window, groupBy, wantBucket) {
     for (var i = 0; i < QUERY_SHAPES.length; i++) {
       var s = QUERY_SHAPES[i];
@@ -146,14 +156,15 @@
   // queryInFlight() instead.
   function queryRound() {
     var body = queryBodyFor(activeTab);
-    if (terminal || !body) { return Promise.resolve(); }
+    var source = querySourceFor(activeTab);
+    if (terminal || !body || !source) { return Promise.resolve(); }
     var key = queryBodyKey(body);
     if (queryRejectedKey === key) { return Promise.resolve(); }
     queryLastAttemptKey = key;
     queryLastAttemptAtMs = Date.now();
     return queryStatus(body).then(function (out) {
       if (!out || out.stale) { return; }
-      scheduleNextQuery(applyQueryOutcome(out, key));
+      scheduleNextQuery(applyQueryOutcome(source, out, key));
     }).catch(function () {
       // A render throw must not wedge the QUERY loop; treat it as a failed
       // round and keep the GET loop untouched.
@@ -178,30 +189,30 @@
     return (Date.now() - queryLastAttemptAtMs) >= BASE_MS;
   }
 
-  // Map a QUERY outcome onto the query source record. Returns whether the
-  // round counts as healthy for backoff purposes.
-  function applyQueryOutcome(out, key) {
+  // Map a QUERY outcome onto the query source record the round was issued for.
+  // Returns whether the round counts as healthy for backoff purposes.
+  function applyQueryOutcome(source, out, key) {
     if (out.kind === 'forbidden') { enterTerminal(); return false; }
     if (out.kind === 'rejected') {
       // A deterministic refusal of THIS body: stop retrying it, and say so
       // rather than showing a transport failure the operator cannot fix by
       // waiting.
       queryRejectedKey = key;
-      setSource(QUERY_SOURCE, {
+      setSource(source, {
         state: 'incompatible',
         code: 'query_rejected',
         data: null,
         badge: null
       });
-      renderSourceChanged(QUERY_SOURCE);
+      renderSourceChanged(source);
       return true;
     }
     if (out.kind !== 'ok') {
-      markSourceTransport(QUERY_SOURCE, out.kind === 'overloaded' ? 'stale' : 'dead');
+      markSourceTransport(source, out.kind === 'overloaded' ? 'stale' : 'dead');
       return false;
     }
-    renderPanelGuarded(QUERY_SOURCE, out.json);
-    var rec = SOURCES[QUERY_SOURCE];
+    renderPanelGuarded(source, out.json);
+    var rec = SOURCES[source];
     // A retryable data-source failure that arrived over a 200. A malformed
     // payload is NOT one: the source answered, so it earns no backoff.
     return !(rec.state === 'unavailable' && QUERY_RETRY_CODES[rec.code]);
@@ -223,6 +234,13 @@
   // it aborts the in-flight request (via the generation bump inside
   // queryStatus), clears a stale deterministic-refusal marker, and refreshes
   // immediately so an active tab never shows another selection's numbers.
+  //
+  // BOTH query sources are reset, not just the active tab's. Window, group-by,
+  // and provider scope are page-wide, so a change to any of them invalidates the
+  // payload each source holds; the inactive one is refetched when its tab is
+  // next selected (this same path runs on every tab switch). Leaving it holding
+  // the previous selection's numbers is what would put one window's figures
+  // under another window's picker.
   function queryInputChanged() {
     var body = queryBodyFor(activeTab);
     if (!body) {
@@ -233,7 +251,9 @@
     if (queryRejectedKey !== null && queryRejectedKey !== queryBodyKey(body)) {
       queryRejectedKey = null;
     }
-    setSource(QUERY_SOURCE, { state: 'loading', code: null, data: null });
+    [QUERY_SOURCE, QUERY_SERIES_SOURCE].forEach(function (name) {
+      setSource(name, { state: 'loading', code: null, data: null });
+    });
     clearTimeout(queryTimer);
     queryBackoffIndex = -1;
     queryRound();
