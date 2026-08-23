@@ -1924,6 +1924,7 @@ mod tests {
                 "openai-compat:grok-*",
                 &["min_prefix_tokens=256".to_string()],
                 false,
+                false,
                 &set_path,
             )
             .map_err(|e| e.to_string())

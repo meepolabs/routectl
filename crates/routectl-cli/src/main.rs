@@ -537,8 +537,8 @@ enum CatalogCmd {
     /// Write a `source: user` cell for a KNOWN selector (an existing
     /// baked row, or an existing overlay cell of either provenance),
     /// field by field. `selector` is `"provider_kind:model_glob"`.
-    /// Rejects a selector unknown to the catalog -- creating a brand-new
-    /// one is not supported by this verb.
+    /// Rejects a selector unknown to the catalog -- creating one is
+    /// `--create`'s job (see below).
     ///
     /// Each `field` is a `field=value` pair; supported fields are `wm`
     /// (f32), `rm` (f32), `ttl_seconds` (u32), `min_prefix_tokens` (u32),
@@ -555,6 +555,11 @@ enum CatalogCmd {
     /// `--acknowledge-cost-risk`; `rm` must be `> 0`; `max_context_tokens`
     /// and `max_output_tokens` must not be `0`; the per-token rates are
     /// dollars per token and must not be negative.
+    ///
+    /// `--create` inverts the admission rule to write a NARROW cell for a
+    /// selector the catalog does not cover yet (the alternative -- a
+    /// provider catch-all -- would apply the value to every sibling model
+    /// on that provider kind).
     Set {
         selector: String,
         #[arg(required = true, num_args = 1..)]
@@ -564,6 +569,16 @@ enum CatalogCmd {
         /// falsely profitable.
         #[arg(long = "acknowledge-cost-risk")]
         acknowledge_cost_risk: bool,
+        /// Create a brand-new overlay cell for a selector the catalog does
+        /// NOT cover (no baked row, no overlay cell). The selector must
+        /// name a cataloged `provider_kind` and one model -- an exact model
+        /// or a single trailing-asterisk prefix; the `*` catch-alls are
+        /// refused, since they would apply the value to every sibling
+        /// model. A selector that IS already known is refused too (use
+        /// `set` without the flag to edit it), so a typo can never fork an
+        /// existing cell.
+        #[arg(long)]
+        create: bool,
     },
     /// Write a JSON-null overlay cell for a KNOWN selector, disabling it
     /// regardless of what it previously carried. Rejects a selector
@@ -981,8 +996,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 selector,
                 fields,
                 acknowledge_cost_risk,
+                create,
             } => {
-                if let Err(e) = commands::catalog::set(&selector, &fields, acknowledge_cost_risk) {
+                if let Err(e) =
+                    commands::catalog::set(&selector, &fields, acknowledge_cost_risk, create)
+                {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }

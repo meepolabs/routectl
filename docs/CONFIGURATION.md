@@ -359,9 +359,10 @@ chain alias it is the FIRST configured target's window. The field is
 OMITTED when routectl has no confirmed window for that target (never
 `null`, never `0`). `routectl catalog set <selector>
 max_context_tokens=<n>` corrects a window for a selector the catalog
-already covers; for an upstream with no baked row or overlay cell,
-`catalog set` refuses to create the selector -- add the cell by editing
-`catalog_overlay.json` directly (see the overlay-file section below).
+already covers; for an upstream with no baked row or overlay cell, add
+`--create` to the same command to write a NARROW cell for that one model
+(`routectl catalog set --create openai-compat:my-model
+max_context_tokens=<n>`) -- see the `catalog set` section below.
 
 **`max_body_bytes`** (u32, default 33554432 -- 32 MiB)
 
@@ -2604,7 +2605,22 @@ either provenance), field by field; a field left unnamed inherits the
 prior cell's value. `disable <selector>` writes a JSON-null cell for a
 KNOWN selector, discarding whatever it previously carried. Both REJECT a
 selector unknown to the catalog (no baked row, no existing overlay
-cell) -- creating a brand-new selector is not supported by either verb.
+cell); creating one is `set --create`'s job (below), and `disable` has
+nothing to disable on a selector no layer covers.
+
+**`set --create`** writes a brand-new cell for a selector the catalog
+does NOT cover yet -- an upstream whose facts (a context window, a rate,
+a capability prior) routectl has no row for. The flag INVERTS the
+admission rule rather than relaxing it: with it, an already-known
+selector is refused (use plain `set` to edit that one), so a typo can
+never fork an existing cell into a competing second one. The created
+selector must name a cataloged `provider_kind` and ONE model -- an exact
+model id, or a single trailing-asterisk prefix. `*:<model>` and
+`<kind>:*` are both refused: a catch-all applies the value to every
+sibling model on the provider kind, which is precisely what a per-model
+create path exists to avoid. Everything past admission is the same code
+plain `set` runs -- the same field vocabulary, the same value
+validation, the same `source: user` / `verified_at` stamping.
 
 Supported `set` fields: `wm` (f32), `rm` (f32), `ttl_seconds` (u32),
 `min_prefix_tokens` (u32), `max_context_tokens` (u32),
@@ -2623,6 +2639,7 @@ multiplier can make a cache break look falsely profitable. `rm` must be
 
 ```sh
 routectl catalog set openai-compat:my-cheap-host-* wm=1.0 --acknowledge-cost-risk
+routectl catalog set --create openai-compat:my-model max_context_tokens=262144
 routectl catalog disable openai-compat:retired-model-*
 ```
 

@@ -5003,7 +5003,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
     `every_overlay_cell_field_is_settable_or_deliberately_excluded` so the next
     overlay field is a one-touch change;
     value validation reuses `CachePricingOverride::validate` against ONLY the
-    fields this call touches (`validate_updates`). `disable <selector>` writes
+    fields this call touches (`validate_updates`). `set --create` INVERTS that
+    admission rule for the explicit create path: an already-known selector is
+    a hard `SelectorAlreadyKnown` (a typo can never fork an existing cell) and
+    a brand-new one is admitted if `validate_creatable_selector` clears its
+    shape -- a cataloged `provider_kind` (never `*`) plus one model the
+    overlay lookup can serve (exact or single trailing-asterisk prefix, never
+    the `*` provider catch-all, whose value would hit every sibling model);
+    field parsing, value validation, and provenance stamping are the same code
+    either way. `disable <selector>` writes
     JSON `null` for a known selector, discarding prior fields. `export`
     serializes the on-disk overlay to pretty JSON (read-only, no credential
     material). Both `set`/`disable` stamp today (UTC) and print the same
