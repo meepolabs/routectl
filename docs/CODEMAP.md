@@ -1139,7 +1139,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   token, reason code, bool) -- never a token, path, or env value.
   `ActivationState` is a read-only newtype over a `BTreeMap<String,
   ActivationEntry>` (iter/get/len/is_empty; no mutation surface, honoring the
-  immutability invariant); growth types are `#[non_exhaustive]`
+  immutability invariant); growth types are `#[non_exhaustive]`. The
+  bare-vs-seat-labeled `oauth://<id>` parse is factored into
+  `oauth_id_from_api_key_ref` (crate-public), shared with
+  `router/chain.rs`'s `first_target_oauth_id`
 - `src/alloc_probe.rs` -- TEST-ONLY (`#[cfg(test)]`) `#[global_allocator]`
   installed by `lib.rs`: `ProbeAllocator` forwards to `System` and tallies
   allocations in THREAD-LOCAL cells, so `count_allocs(f) -> (T, u64)` can
@@ -2293,7 +2296,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `context_window_for` -- the public discovery read backing `/v1/models`
   `context_length`: alias-then-nickname resolution, FIRST chain entry,
   `ResolvedModel::context_window_tokens`, no `default` fallback and never
-  `dispatch_chain` (no metrics or rotation perturbation)
+  `dispatch_chain` (no metrics or rotation perturbation) -- and its sibling
+  `first_target_oauth_id`, backing the discovery-time credential check in
+  `handlers/models.rs`
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
@@ -3600,7 +3605,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   keys (skips `default`, skips `selectable=false`), each entry emitted through
   the private `ModelListEntry` serialize struct carrying `context_length` read
   off the resolved table via `Router::context_window_for` (omitted when the
-  window is unconfirmed); on the forwarded
+  window is unconfirmed, or per `is_oauth_credential_unresolved`'s
+  `Router::first_target_oauth_id`/`ActivationState` cross-check); on the forwarded
   (pure-proxy) lane (`forwarded_proxy_target`:
   `Router::has_forwarded_provider` AND the request arrived via the MITM
   reinject leg carrying a captured client bearer AND the forwarded provider's

@@ -1666,6 +1666,99 @@ fn context_window_for_is_none_for_a_configured_model_missing_from_the_installed_
     assert_eq!(router.context_window_for("installed"), Some(128_000));
 }
 
+// ---- first_target_oauth_id: the oauth-id read backing enrichment suppression ----
+
+#[test]
+fn first_target_oauth_id_reports_the_bare_oauth_id() {
+    let mut config = Config::default();
+    config.providers.insert(
+        "p".into(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    config.models.insert(
+        "claude".into(),
+        crate::config::ModelEntry::new("p", "claude"),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    resolved.insert(
+        "claude".into(),
+        Arc::new(ResolvedModel::new(
+            "claude",
+            "p",
+            make_provider("p"),
+            "claude",
+        )),
+    );
+    router.install_resolved_models(resolved);
+
+    assert_eq!(
+        router.first_target_oauth_id("claude"),
+        Some("anthropic".to_string())
+    );
+}
+
+#[test]
+fn first_target_oauth_id_strips_a_seat_label_suffix() {
+    let mut config = Config::default();
+    config.providers.insert(
+        "p".into(),
+        ProviderEntry::anthropic_api("oauth://anthropic#work"),
+    );
+    config.models.insert(
+        "claude".into(),
+        crate::config::ModelEntry::new("p", "claude"),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    resolved.insert(
+        "claude".into(),
+        Arc::new(ResolvedModel::new(
+            "claude",
+            "p",
+            make_provider("p"),
+            "claude",
+        )),
+    );
+    router.install_resolved_models(resolved);
+
+    assert_eq!(
+        router.first_target_oauth_id("claude"),
+        Some("anthropic".to_string()),
+        "a pool seat label after '#' must not leak into the reported oauth id",
+    );
+}
+
+#[test]
+fn first_target_oauth_id_is_none_for_an_api_key_or_env_ref() {
+    let mut config = Config::default();
+    config
+        .providers
+        .insert("p".into(), ProviderEntry::anthropic_api("literal:k"));
+    config.models.insert(
+        "claude".into(),
+        crate::config::ModelEntry::new("p", "claude"),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    resolved.insert(
+        "claude".into(),
+        Arc::new(ResolvedModel::new(
+            "claude",
+            "p",
+            make_provider("p"),
+            "claude",
+        )),
+    );
+    router.install_resolved_models(resolved);
+
+    assert_eq!(
+        router.first_target_oauth_id("claude"),
+        None,
+        "positive control: the same fixture with a non-oauth ref must not name an id",
+    );
+}
+
 #[test]
 fn the_gate_and_discovery_read_the_same_overlay_corrected_window() {
     // The weld, against the REAL overlay merge

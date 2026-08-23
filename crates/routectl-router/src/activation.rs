@@ -347,11 +347,19 @@ fn provider_alias_referenced(config: &Config, oauth_id: &str) -> bool {
 /// True when `api_key_ref` is `oauth://<oauth_id>` or
 /// `oauth://<oauth_id>#<seat-label>`.
 fn api_key_ref_names_oauth(api_key_ref: Option<&str>, oauth_id: &str) -> bool {
-    let Some(rest) = api_key_ref.and_then(|r| r.strip_prefix("oauth://")) else {
-        return false;
-    };
-    let provider = rest.split_once('#').map_or(rest, |(p, _)| p);
-    provider == oauth_id
+    api_key_ref.and_then(oauth_id_from_api_key_ref) == Some(oauth_id)
+}
+
+/// The OAuth provider id an `api_key_ref` names, or `None` when it is not
+/// an `oauth://` ref at all. Handles both the bare form
+/// (`oauth://<oauth_id>`) and the pool seat-labeled form
+/// (`oauth://<oauth_id>#<seat-label>`) -- shared by [`api_key_ref_names_oauth`]
+/// and the router's own discovery-time lookup so the two never drift on
+/// what an oauth ref looks like.
+#[must_use]
+pub fn oauth_id_from_api_key_ref(api_key_ref: &str) -> Option<&str> {
+    let rest = api_key_ref.strip_prefix("oauth://")?;
+    Some(rest.split_once('#').map_or(rest, |(p, _)| p))
 }
 
 /// All model nicknames reachable from the alias table, following nested
