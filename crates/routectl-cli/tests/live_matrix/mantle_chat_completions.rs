@@ -74,7 +74,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
     let provider: ArcAlias<dyn routectl_core::Provider> =
         ArcAlias::new(OpenAiCompatProvider::new(cfg));
 
-    let nickname = sanitize_provider_name(model_id);
+    let nickname = alias_nickname(model_id);
     let mut providers = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     let mut models = BTreeMap::new();

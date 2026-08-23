@@ -122,7 +122,7 @@ fn seed_credentials_file(
 /// session (the path under test).
 async fn build_router_for_oauth_codex(store: Arc<dyn routectl_auth::SecretStore>) -> Arc<Router> {
     let provider_name = format!("gpt-{}", sanitize_provider_name(MODEL));
-    let nickname = sanitize_provider_name(MODEL);
+    let nickname = alias_nickname(MODEL);
 
     let mut providers = BTreeMap::new();
     providers.insert(

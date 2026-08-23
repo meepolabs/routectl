@@ -46,8 +46,8 @@ fn read_gate() -> Option<(String, String)> {
 /// an ephemeral port. The API key is referenced via `env://` so the
 /// server's CompositeStore resolves it from the process env at boot.
 async fn spawn_server(target: &str, base_url: &str) -> String {
-    let nickname = sanitize_provider_name(target);
-    let provider_name = format!("responses-live-{nickname}");
+    let provider_name = format!("responses-live-{}", sanitize_provider_name(target));
+    let nickname = alias_nickname(target);
 
     let mut providers = BTreeMap::new();
     providers.insert(

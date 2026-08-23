@@ -46,7 +46,7 @@ async fn build_gemini_test_router(targets: &[&str]) -> Option<Arc<Router>> {
     let mut models = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     for t in targets {
-        let nickname = sanitize_provider_name(t);
+        let nickname = alias_nickname(t);
         models.insert(
             nickname.clone(),
             ModelEntry::new(provider_name.to_string(), (*t).to_string()),
