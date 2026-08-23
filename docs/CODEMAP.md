@@ -3103,7 +3103,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   included; a cost sum that an extreme configured
   rate overflowed to non-finite is a VALUE outcome (`cost_usd: None` +
   `unpriced`), never an assert, because the fold is network-reachable and the
-  release profile aborts on panic.
+  release profile aborts on panic. `RowCost::Subscription(Option<f64>)` carries
+  the API-equivalent value of a subscription row, folded into a SEPARATE
+  `equivalent_usd` / `any_equivalent` accumulator pair and surfaced as
+  `QueryMetrics::equivalent_cost_usd` -- `priced_usd` never sees a notional
+  dollar, so real spend and replacement value cannot conflate, and each channel
+  degrades to absent on non-finiteness without touching the other.
   `QueryResult`/`QueryGroup`/`QueryMetrics`/`CostStatus`/`QuerySeries`/`SeriesBucket`
   derive `Serialize`: the metric field names ARE the `/status/query` wire
   vocabulary, absent `Option`s serialize as explicit `null` (never skipped,
@@ -4902,7 +4907,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   subsumed in the output count for every other kind), never from current
   config, so re-kinding a provider in place cannot reprice history; a row whose
   kind is absent AND that reported nonzero reasoning fails CLOSED as
-  `Unpriced` rather than guessing a structure. `--detail` adds cache-write split + nearest-rank p95/max latency
+  `Unpriced` rather than guessing a structure. Both cost arms share ONE body:
+  `resolve_row_rates` (rate resolution + reasoning structure) and `price_row`
+  (token math) are called by `priced_usd` and by `equivalent_usd` alike, so an
+  API-equivalent figure and a real price can never disagree on basis. The
+  subscription arm alone wraps that body in `rates_cover_used_dimensions`
+  (complete-or-absent: any dimension with a nonzero count and no strictly
+  positive rate withholds the whole figure), yielding
+  `RowCost::Subscription(Option<f64>)`; the priced arm's missing-rate-contributes-zero
+  semantics are deliberately untouched, `cost_usd` being a forever contract.
+  `Acc` accumulates the equivalent in its own `equivalent_usd` /
+  `any_equivalent` pair, a non-finite per-row product reading absent before it
+  can poison the sum, and `cost_cell` renders both channels in one cell
+  (`n/a (sub ~$12.34)`, `$5.00 (+sub ~$12.34)`) falling back to the
+  equivalent-free strings when no equivalent resolved -- never summed, no new
+  column.
+  `--detail` adds cache-write split + nearest-rank p95/max latency
   + wall-time + server-tool counts, plus the advisory would-trim / shadow /
   near-lossless blocks and `render_reduction`: the lossless-minifier outcome
   block (per-decision histogram, summed raw counters, read-time-derived

@@ -998,3 +998,4 @@ include!("usage_reduction_render_tests.rs");
 include!("usage_suppressed_render_tests.rs");
 include!("usage_era_pricing_tests.rs");
 include!("usage_catalog_fill_tests.rs");
+include!("usage_equivalent_cost_tests.rs");

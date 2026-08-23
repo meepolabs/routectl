@@ -3449,6 +3449,25 @@ has three states:
   cell is an ambiguous catch-all, or the row carries no persisted provider
   kind to key the catalog on).
 
+**Subscription-equivalent value.** Where the effective rates cover every
+dimension a subscription row actually used, the cell also reports what
+that usage would have cost at API rates: `n/a (sub ~$12.34)`, or
+`$5.00 (+sub ~$12.34)` in a group that mixes both. The two figures are
+never added together -- the dollar amount is real spend, the `~$` amount
+is current replacement value.
+
+The equivalent is **complete or absent**: if any dimension with a nonzero
+count on the row (input, output, separately-billed reasoning, billed cache
+reads, either cache-write bucket) lacks a positive rate, the cell falls
+back to the plain `n/a (subscription)` / `+sub` string instead of showing
+a partial figure. The baked catalog never fills cache rates, so
+cache-active subscription traffic reads as absent until a `[registry]` row
+supplies complete rates -- cache read plus both cache-write buckets,
+alongside input and output. A `[registry]` row on an `oauth://` provider,
+which used to be inert config, is exactly what makes it resolve. A group
+whose subscription rows recorded no tokens at all resolves a measured
+`~$0.00`: nothing was used, so nothing is the honest equivalent.
+
 A footer reports the window's cache-hit-rate
 (`cache_read / (cache_read + input)`) and error count.
 
@@ -3584,6 +3603,13 @@ QUERY /status/query
 `model`, `provider`, `alias`; optional `alias` and `provider` keys narrow
 the result to one routing alias or served provider. Do not build a durable
 integration on the response shape before 1.0.
+
+Every metric set (groups, totals, and each series bucket) carries both cost
+channels side by side: `cost_usd` is real spend under `cost_status`, and
+`equivalent_cost_usd` is the API-equivalent value of the set's subscription
+rows under the same complete-or-absent rule the CLI cell applies. Both are
+`null` rather than `0` when nothing contributed, both sum bucket-wise to
+`totals`, and neither is ever folded into the other.
 
 ### `provider probe [<name>]` -- reachability, free-only
 

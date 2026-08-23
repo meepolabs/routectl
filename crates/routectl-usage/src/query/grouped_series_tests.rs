@@ -239,6 +239,63 @@ fn every_additive_bucket_metric_sums_to_the_window_totals() {
 }
 
 #[test]
+fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
+    // Arrange: four rows on a four-bucket grid, alternating a priced upstream
+    // with a subscription one, so each channel has contributions in two
+    // separate buckets and neither can be reconstructed from the other.
+    let (_dir, db) = open_db();
+    for (id, ts, upstream) in [
+        ("r1", 100, "u-priced"),
+        ("r2", 1100, "u-sub"),
+        ("r3", 2100, "u-priced"),
+        ("r4", 3100, "u-sub"),
+    ] {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                ts_start: ts,
+                upstream: Some(upstream),
+                input_tokens: Some(1000),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act
+    let result = query(
+        &db,
+        &bucketed(GroupDim::Model, 1000, 4),
+        |row| match row.key.upstream.as_deref() {
+            Some("u-priced") => RowCost::Priced(1.25),
+            _ => RowCost::Subscription(Some(2.5)),
+        },
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert: the hand-computed totals first -- real spend counts only the two
+    // priced rows, notional value only the two subscription ones.
+    assert_close(result.totals.cost_usd, 2.5);
+    assert_close(result.totals.equivalent_cost_usd, 5.0);
+
+    // Both cost channels are strictly additive, so the buckets sum to the
+    // totals they were folded beside -- separately, and never into each other.
+    let s = series(&result);
+    let summed_cost: f64 = s.buckets.iter().filter_map(|b| b.metrics.cost_usd).sum();
+    let summed_equivalent: f64 = s
+        .buckets
+        .iter()
+        .filter_map(|b| b.metrics.equivalent_cost_usd)
+        .sum();
+    assert_close(Some(summed_cost), result.totals.cost_usd.unwrap());
+    assert_close(
+        Some(summed_equivalent),
+        result.totals.equivalent_cost_usd.unwrap(),
+    );
+}
+
+#[test]
 fn a_bucket_with_no_rows_reports_zero_requests_and_no_derived_metrics() {
     // Arrange: one row in the first bucket only.
     let (_dir, db) = open_db();

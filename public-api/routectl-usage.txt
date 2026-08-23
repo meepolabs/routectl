@@ -302,7 +302,7 @@ impl<T> tracing::instrument::Instrument for routectl_usage::QueryError
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::QueryError
 pub enum routectl_usage::RowCost
 pub routectl_usage::RowCost::Priced(f64)
-pub routectl_usage::RowCost::Subscription
+pub routectl_usage::RowCost::Subscription(core::option::Option<f64>)
 pub routectl_usage::RowCost::Unpriced
 impl core::clone::Clone for routectl_usage::RowCost
 pub fn routectl_usage::RowCost::clone(&self) -> routectl_usage::RowCost
@@ -1003,6 +1003,7 @@ pub routectl_usage::QueryMetrics::cost_status: routectl_usage::CostStatus
 pub routectl_usage::QueryMetrics::cost_usd: core::option::Option<f64>
 pub routectl_usage::QueryMetrics::ctx_avg: core::option::Option<i64>
 pub routectl_usage::QueryMetrics::ctx_peak: core::option::Option<i64>
+pub routectl_usage::QueryMetrics::equivalent_cost_usd: core::option::Option<f64>
 pub routectl_usage::QueryMetrics::errors: i64
 pub routectl_usage::QueryMetrics::fallback_served: i64
 pub routectl_usage::QueryMetrics::input_tokens: i64

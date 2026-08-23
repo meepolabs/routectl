@@ -16,6 +16,39 @@ list with more narrative.
 
 ### Added
 
+- **Subscription usage carries an API-equivalent value** -- rows served by a
+  managed-OAuth seat have no per-token dollar cost, so they used to report a
+  bare `n/a (subscription)`. They now also report what that usage would have
+  cost at API rates: `n/a (sub ~$12.34)` in the `routectl usage --detail`
+  cost cell, `$5.00 (+sub ~$12.34)` in a group that mixes both, and a new
+  `equivalent_cost_usd` field beside `cost_usd` on every `/status/query`
+  metric set (groups, totals, and each series bucket; `schema_version` stays
+  1, the addition is purely additive). The rates are the same ones a priced
+  row resolves -- a `[registry]` row wins whole, the baked catalog fills in
+  behind it -- and the figure comes out of the same cost function, so an
+  equivalent and a real price can never disagree on reasoning structure or
+  cache basis.
+
+  The two numbers are never added together and never share a field: the
+  dollar figure stays real spend under the unchanged four-token
+  `cost_status` vocabulary, and the `~$` figure is current replacement
+  value -- what the usage would cost today, not spend and not realized
+  savings. Recomputing a past window after rates change may legitimately
+  move it, the same query-time doctrine `cost_usd` already follows.
+
+  **Complete or absent.** The equivalent appears only when every dimension
+  the row actually used resolved a positive rate; otherwise the cell reads
+  exactly as it did before rather than showing a partial figure, since a
+  base-tokens-only number understates a heavily cached workload by most of
+  its value. The baked catalog deliberately supplies no cache rates, so
+  cache-active subscription traffic reads as absent until a `[registry]`
+  row supplies complete rates -- cache read plus both cache-write buckets,
+  alongside input and output. A `[registry] pricing` row on an `oauth://`
+  provider was previously inert config (subscription detection
+  short-circuited ahead of every rate lookup) and is now live as the
+  equivalence basis -- an operator's declared API price is what their
+  subscription usage is valued at.
+
 - **Output ceilings fill themselves from the catalog** -- a model whose
   config sets no `[models.X] max_output_tokens` now takes the ceiling its
   resolved catalog row confirms, so a common Claude upstream gets its real

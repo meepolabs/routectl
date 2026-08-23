@@ -95,7 +95,7 @@ const SHARED: [&str; 12] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 11] = [
+const QUERY_ONLY: [&str; 12] = [
     "fallback_served",
     "ttft_p50_ms",
     "ttft_p95_ms",
@@ -106,6 +106,7 @@ const QUERY_ONLY: [&str; 11] = [
     "ctx_peak",
     "cache_hit_pct",
     "cost_usd",
+    "equivalent_cost_usd",
     "cost_status",
 ];
 
