@@ -25,7 +25,8 @@ list with more narrative.
   It inverts `set`'s admission rule rather than relaxing it: a selector
   that IS already known is refused (plain `set` edits that one), so a typo
   cannot fork an existing cell into a competing second one, and the created
-  selector must name a cataloged provider kind plus a single model -- an
+  selector must name a provider kind a `[providers.*]` block can declare
+  plus a single model -- an
   exact id or one trailing-asterisk prefix, never a `*` catch-all.
   Everything past admission is the code plain `set` already runs: same
   field vocabulary, same value validation, same `source: user` stamping.

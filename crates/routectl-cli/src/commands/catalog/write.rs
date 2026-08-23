@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use routectl_router::{
-    AliasPattern, CachePricingOverride, CachePricingSelector, CatalogOverlay, OverlayCell,
-    OverlayError, OverlaySource, baked_table_rows, catalog_state_selector_key,
-    is_cataloged_provider_kind, load_catalog_overlay, overlay_default_path,
-    with_overlay_write_lock,
+    AliasPattern, CONFIG_PROVIDER_KINDS, CachePricingOverride, CachePricingSelector,
+    CatalogOverlay, OverlayCell, OverlayError, OverlaySource, baked_table_rows,
+    catalog_state_selector_key, is_config_provider_kind, load_catalog_overlay,
+    overlay_default_path, with_overlay_write_lock,
 };
 
 use super::today_verified_at;
@@ -173,10 +173,13 @@ fn parse_selector(selector_raw: &str) -> Result<CachePricingSelector, CatalogWri
 /// Admission shape for a selector `--create` is about to introduce. Two
 /// independent bounds, both narrower than [`CachePricingSelector::parse`]:
 ///
-/// - The provider kind must be a kind the baked catalog knows
-///   ([`is_cataloged_provider_kind`]) -- a typo'd kind would write a cell
-///   that can never match a lookup, and the `"*"` cross-kind catch-all is
-///   not a narrow cell.
+/// - The provider kind must be one a `[providers.X]` block can declare
+///   ([`is_config_provider_kind`]) -- the vocabulary dispatch resolves
+///   against, so a cell under it is reachable. Deliberately NOT the baked
+///   catalog's kind set: an overlay lookup keys on the selector's own kind
+///   string, so a configurable kind with zero baked rows (today `gemini`)
+///   serves its overlay cells normally. The `"*"` cross-kind catch-all is
+///   excluded separately -- it is not a narrow cell.
 /// - The model segment must be a shape [`routectl_router::lookup_overlay_cell`]
 ///   can actually serve, minus the bare `"*"` provider catch-all: an exact
 ///   model, or a trailing-asterisk prefix over a non-empty stem. The
@@ -194,16 +197,17 @@ fn validate_creatable_selector(
 
     if selector.provider_kind == "*" {
         return Err(uncreatable(
-            "provider_kind `*` spans every provider kind; name one cataloged kind (e.g. \
+            "provider_kind `*` spans every provider kind; name one configurable kind (e.g. \
              `openai-compat`)"
                 .to_string(),
         ));
     }
-    if !is_cataloged_provider_kind(&selector.provider_kind) {
+    if !is_config_provider_kind(&selector.provider_kind) {
         return Err(uncreatable(format!(
-            "provider_kind `{}` is not a kind the catalog knows; a cell under it could never \
-             match a lookup",
-            selector.provider_kind
+            "provider_kind `{}` is not a kind a `[providers.*]` block can declare, so no \
+             configured provider would ever look this cell up; expected one of: {}",
+            selector.provider_kind,
+            CONFIG_PROVIDER_KINDS.join(", ")
         )));
     }
     if selector.model_glob == "*" {

@@ -1828,11 +1828,41 @@ pub struct BedrockMantleConfig {
     pub creds: BedrockCredsConfig,
 }
 
+/// Every provider-kind token an operator can write as `kind = "..."` in a
+/// `[providers.X]` block, under the feature set this binary was built with.
+/// The vocabulary [`ProviderEntry::kind_str`] draws from, listed in variant
+/// order, gated by the same `cfg`s -- a kind the build cannot construct is
+/// also a kind no config can name.
+///
+/// Distinct from `catalog::is_cataloged_provider_kind`, which answers the
+/// narrower "does the BAKED catalog carry rows for this kind?". A kind can be
+/// configurable with zero baked rows (today `gemini`); catalog lookups still
+/// serve overlay cells keyed on it.
+pub const CONFIG_PROVIDER_KINDS: &[&str] = &[
+    "openai-compat",
+    "anthropic-api",
+    #[cfg(feature = "bedrock")]
+    "bedrock",
+    #[cfg(feature = "openai-responses")]
+    "openai-responses",
+    #[cfg(feature = "gemini")]
+    "gemini",
+];
+
+/// True when `kind` is a provider-kind token a `[providers.X]` block can
+/// declare in this build -- membership in [`CONFIG_PROVIDER_KINDS`].
+#[must_use]
+pub fn is_config_provider_kind(kind: &str) -> bool {
+    CONFIG_PROVIDER_KINDS.contains(&kind)
+}
+
 impl ProviderEntry {
     /// Stable config-key token naming this entry's provider kind. Matches
     /// the `kind = "..."` discriminant in the TOML provider table, so the
     /// returned value round-trips with operator configuration and is safe
     /// to surface in usage accounting / logs.
+    ///
+    /// Every token this can return is in [`CONFIG_PROVIDER_KINDS`].
     pub const fn kind_str(&self) -> &'static str {
         match self {
             Self::OpenaiCompat { .. } => "openai-compat",

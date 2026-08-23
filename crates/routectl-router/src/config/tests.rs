@@ -46,6 +46,55 @@ fn kind_str_returns_stable_config_tokens() {
     }
 }
 
+/// The vocabulary and the discriminant must agree in both directions: every
+/// constructible entry's `kind_str()` is a listed token, and every listed
+/// token parses as a `kind = "..."` discriminant. A variant added without a
+/// vocabulary entry (or vice versa) fails here rather than silently narrowing
+/// a caller that gates on the list.
+#[test]
+fn config_provider_kinds_matches_the_kind_str_discriminants() {
+    let mut constructible: Vec<&'static str> = vec![
+        ProviderEntry::openai_compat("https://example.com/v1", "literal:k").kind_str(),
+        ProviderEntry::anthropic_api("literal:k").kind_str(),
+    ];
+    #[cfg(feature = "openai-responses")]
+    constructible.push(ProviderEntry::openai_responses("literal:k").kind_str());
+    #[cfg(feature = "gemini")]
+    constructible.push(ProviderEntry::gemini("literal:k").kind_str());
+    #[cfg(feature = "bedrock")]
+    constructible.push(
+        ProviderEntry::Bedrock {
+            region: "us-east-1".into(),
+            api_shape: super::BedrockApiShapeConfig::default(),
+            creds: super::BedrockCredsConfig::DefaultChain,
+            user_agent: None,
+            header_extras: std::collections::BTreeMap::new(),
+            payload_extras: None,
+            anthropic_beta: Vec::new(),
+            cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
+            reduction_enabled: None,
+            runtime: Default::default(),
+        }
+        .kind_str(),
+    );
+
+    constructible.sort_unstable();
+    let mut listed = super::CONFIG_PROVIDER_KINDS.to_vec();
+    listed.sort_unstable();
+    assert_eq!(constructible, listed);
+
+    for kind in super::CONFIG_PROVIDER_KINDS {
+        assert!(
+            super::is_config_provider_kind(kind),
+            "listed kind {kind:?} must pass the membership predicate",
+        );
+    }
+    assert!(!super::is_config_provider_kind("not-a-real-kind"));
+    assert!(!super::is_config_provider_kind("*"));
+}
+
 #[cfg(feature = "gemini")]
 #[test]
 fn gemini_constructor_defaults() {

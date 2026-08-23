@@ -18,11 +18,11 @@ pub(crate) use schema::default_anthropic_base;
 pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::routectl_config_dir;
 pub use schema::{
-    AliasValue, BedrockGlobalConfig, CacheCapability, CacheConfig, CalibrationConfig,
-    CapabilityConfig, CredentialSource, HistoryReasoning, LogConfig, MitmConfig, ModelEntry,
-    NicknameIter, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
+    AliasValue, BedrockGlobalConfig, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
+    CalibrationConfig, CapabilityConfig, CredentialSource, HistoryReasoning, LogConfig, MitmConfig,
+    ModelEntry, NicknameIter, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
     ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection,
-    ServerAuth, ServerConfig, TrimConfig, UsageConfig, WindowGateConfig,
+    ServerAuth, ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};

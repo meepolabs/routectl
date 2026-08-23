@@ -2616,11 +2616,16 @@ a capability prior) routectl has no row for. The flag INVERTS the
 admission rule rather than relaxing it: with it, an already-known
 selector is refused (use plain `set` to edit that one), so a typo can
 never fork an existing cell into a competing second one. The created
-selector must name a cataloged `provider_kind` and ONE model -- an exact
+selector must name a `provider_kind` a `[providers.*]` block can declare
+(`openai-compat`, `anthropic-api`, `bedrock`, `openai-responses`,
+`gemini`) and ONE model -- an exact
 model id, or a single trailing-asterisk prefix. `*:<model>` and
 `<kind>:*` are both refused: a catch-all applies the value to every
 sibling model on the provider kind, which is precisely what a per-model
-create path exists to avoid. Everything past admission is the same code
+create path exists to avoid. A kind carrying NO baked rows at all is
+still creatable -- an overlay cell is served on the selector's own kind
+string, so it does not need the baked table to have heard of the kind.
+Everything past admission is the same code
 plain `set` runs -- the same field vocabulary, the same value
 validation, the same `source: user` / `verified_at` stamping.
 
