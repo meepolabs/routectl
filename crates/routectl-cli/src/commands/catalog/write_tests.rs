@@ -472,7 +472,7 @@ fn set_at_create_rejects_a_selector_already_known_to_either_layer() {
 }
 
 #[test]
-fn set_at_create_rejects_an_uncataloged_provider_kind() {
+fn set_at_create_rejects_a_provider_kind_no_config_can_declare() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("catalog_overlay.json");
 
@@ -483,15 +483,72 @@ fn set_at_create_rejects_an_uncataloged_provider_kind() {
         true,
         &path,
     )
-    .expect_err("an uncataloged provider kind must be rejected");
+    .expect_err("a kind outside the config vocabulary must be rejected");
 
     match &err {
         CatalogWriteError::UncreatableSelector { reason, .. } => {
             assert!(reason.contains("not-a-real-kind"), "reason: {reason}");
+            // The reason an unknown kind is refused is that no configured
+            // provider could present it -- NOT that the baked catalog lacks
+            // rows for it, which is true of `gemini` too yet does not stop a
+            // lookup. A message claiming the latter would be false.
+            assert!(
+                reason.contains("`[providers.*]` block can declare"),
+                "the reason must name the config vocabulary: {reason}"
+            );
+            assert!(
+                reason.contains("openai-compat"),
+                "the reason must enumerate the accepted kinds: {reason}"
+            );
         }
         other => panic!("expected UncreatableSelector, got {other:?}"),
     }
     assert!(!path.exists(), "nothing should have been written");
+}
+
+/// The positive control for the bound above: `gemini` is a configurable kind
+/// with ZERO baked catalog rows, and an overlay lookup keys on the selector's
+/// own kind string -- so a created `gemini` cell must be admitted AND served.
+/// A bound tied to baked-table membership refuses this selector while the
+/// lookup it guards would have honored the cell.
+#[test]
+fn set_at_create_admits_a_configurable_kind_with_no_baked_rows() {
+    // Arrange: nothing in the baked table carries this kind.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+    assert!(
+        !baked_table_rows()
+            .iter()
+            .any(|cell| cell.provider_kind == "gemini"),
+        "this test's premise is that `gemini` has no baked rows",
+    );
+
+    // Act
+    set_at(
+        "gemini:gemini-3.5-pro",
+        &["max_context_tokens=777777".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect("a configurable kind with no baked rows must be creatable");
+
+    // Assert: the overlay lookup serves the cell for its own model...
+    let overlay = load_catalog_overlay(&path).expect("load");
+    let resolved = lookup_overlay_cell("gemini", "gemini-3.5-pro", &overlay)
+        .and_then(Option::as_ref)
+        .expect("the created cell must resolve for its own model");
+    assert_eq!(resolved.max_context_tokens, Some(777_777));
+
+    // ...and `catalog list`'s own row builder carries it.
+    let (rows, _punch_list) = build_list_data(&overlay);
+    assert!(
+        rows.iter()
+            .any(|row| row.first().is_some_and(|c| c == "gemini")
+                && row.get(1).is_some_and(|c| c == "gemini-3.5-pro")
+                && row.iter().any(|c| c.contains("777777"))),
+        "the created gemini selector must appear as a listing row carrying its window: {rows:?}",
+    );
 }
 
 #[test]

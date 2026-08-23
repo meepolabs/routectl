@@ -110,12 +110,12 @@ pub use catalog_state::{
     selector_key as catalog_state_selector_key,
 };
 pub use config::{
-    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CalibrationConfig,
-    CapabilityConfig, Config, ConfigVersionError, HistoryReasoning,
+    AliasValue, CONFIG_PROVIDER_KINDS, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig,
+    CalibrationConfig, CapabilityConfig, Config, ConfigVersionError, HistoryReasoning,
     LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
     RegistryEntry, RetryPolicy, SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
-    VersionTooNewError, WindowGateConfig, preflight_config_version,
+    VersionTooNewError, WindowGateConfig, is_config_provider_kind, preflight_config_version,
     preflight_legacy_mitm_credential_source, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]

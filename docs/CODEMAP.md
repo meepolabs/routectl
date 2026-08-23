@@ -1205,6 +1205,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   cloud_project_id, ... }`;
   constructor `ProviderEntry::gemini`, `with_gemini_auth_mode` sets
   `GeminiAuthMode` {ApiKey default, CloudCode}, `kind_str() == "gemini"`;
+  the `CONFIG_PROVIDER_KINDS` slice + `is_config_provider_kind` predicate name
+  the whole `kind = "..."` vocabulary under the build's feature set (welded to
+  the `kind_str()` discriminants by a drift test), for callers that must bound
+  a kind string against what a config can DECLARE rather than what the baked
+  catalog carries;
   `api_key_ref()` exposes the primary key ref, `None` for Bedrock, so the
   usage CLI can detect `oauth://` subscription providers; `cache_capability()`
   fails closed for anthropic-api on a non-default base URL, plus
@@ -5023,7 +5028,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
     admission rule for the explicit create path: an already-known selector is
     a hard `SelectorAlreadyKnown` (a typo can never fork an existing cell) and
     a brand-new one is admitted if `validate_creatable_selector` clears its
-    shape -- a cataloged `provider_kind` (never `*`) plus one model the
+    shape -- a `provider_kind` in `CONFIG_PROVIDER_KINDS` (never `*`; the
+    CONFIG vocabulary, not baked-table membership, so a kind with zero baked
+    rows like `gemini` is creatable) plus one model the
     overlay lookup can serve (exact or single trailing-asterisk prefix, never
     the `*` provider catch-all, whose value would hit every sibling model);
     field parsing, value validation, and provenance stamping are the same code

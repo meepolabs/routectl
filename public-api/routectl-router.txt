@@ -3033,7 +3033,9 @@ impl<T> typenum::type_operators::Same for routectl_router::WindowGateConfig
 pub type routectl_router::WindowGateConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::WindowGateConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::WindowGateConfig::into_shared(self) -> Shared
+pub const routectl_router::config::CONFIG_PROVIDER_KINDS: &[&str]
 pub const routectl_router::config::CURRENT_CONFIG_VERSION: u32
+pub fn routectl_router::config::is_config_provider_kind(&str) -> bool
 pub fn routectl_router::config::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
 pub fn routectl_router::config::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
 pub fn routectl_router::config::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
@@ -13464,6 +13466,7 @@ pub const routectl_router::ALIAS_MAX_RECURSION_DEPTH: usize
 pub const routectl_router::CATALOG_OVERLAY_SCHEMA_VERSION: u32
 pub const routectl_router::CATALOG_SNAPSHOT_DATE: &str
 pub const routectl_router::CATALOG_VERSION: u32
+pub const routectl_router::CONFIG_PROVIDER_KINDS: &[&str]
 pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::K_SESSION_CAPACITY: usize
 pub const routectl_router::MAX_POOL_MEMBERS: usize
@@ -13517,6 +13520,7 @@ pub fn routectl_router::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_router::ImpactClass) -> routectl_router::ImpactClass
 pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
 pub fn routectl_router::is_cataloged_provider_kind(&str) -> bool
+pub fn routectl_router::is_config_provider_kind(&str) -> bool
 pub fn routectl_router::is_import_cell(&routectl_router::CatalogOverlay, &str) -> bool
 pub fn routectl_router::is_stale_days(&str, i64, i64) -> bool
 pub fn routectl_router::is_stale_days_today(&str, i64) -> bool
