@@ -3188,6 +3188,13 @@ essential = ["advisor", "context_management"]
   (`advisor`, `context_management`). An unknown key fails config load
   naming the key, so a typo surfaces instead of sitting inert. Listing a
   key that already routes away is accepted as an idempotent declaration.
+- **Rejections quote the key** -- the offending entry is rendered inside
+  backticks (`` `advisor ` ``) so a defect you cannot see in prose, such
+  as a stray leading or trailing space, shows its exact bounds. When the
+  entry is an exact whitespace-or-case variant of an accepted key
+  (`"advisor "`, `"Advisor"`), the error adds a `did you mean `advisor`?`
+  hint naming which difference it is. A plain misspelling is already
+  visible in the quoted key and gets no guess.
 - **`reasoning_replay` is not accepted** and is rejected naming the
   carve-out. Replayed reasoning artifacts are dropped by the target
   lane's own replay path rather than by this key-only consult, so replay
