@@ -3,8 +3,9 @@
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::sanitize_for_log_with_cap;
 use routectl_router::{
-    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding, Status,
-    UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
+    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding,
+    PricingSource, Status, UnresolvedReason, compute_activation, epoch_day_age, is_stale_days,
+    preflight_config_version,
 };
 
 use crate::commands::capability_legacy::{
@@ -18,7 +19,8 @@ use crate::commands::seat_report::{
 
 use super::gather::{SecretCheck, SecretPresence};
 use super::{
-    DoctorContext, FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow, PricingRowSource,
+    DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow,
+    PricingRowSource,
 };
 
 /// Probe section: one finding per configured provider, mapped from its
@@ -753,6 +755,12 @@ fn pricing_unavailable() -> Finding {
 /// names the model's provider, kind, and upstream in every state so an
 /// operator can see WHICH selector was resolved, and the two priced states
 /// additionally name the resolved per-million rates.
+///
+/// A subscription row carries a SECOND clause: the bill is by seat, but the
+/// usage report still values that seat's traffic at API-equivalent rates, and
+/// that equivalent is complete-or-absent. Without the clause the section is
+/// silent on the one question the rule creates -- why an equivalent reads
+/// absent -- since the billed-by-seat statement is true either way.
 pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
     let selector = format!(
         "provider {} (kind {}) upstream {}",
@@ -761,9 +769,10 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
         safe(&row.upstream)
     );
     let detail = match &row.source {
-        PricingRowSource::Subscription => {
-            format!("billed by subscription; no per-token rate applies -- {selector}")
-        }
+        PricingRowSource::Subscription(basis) => format!(
+            "billed by subscription; no per-token rate applies -- {selector}; {}",
+            render_equivalence_basis(basis)
+        ),
         PricingRowSource::Registry {
             input_per_mtok,
             output_per_mtok,
@@ -789,6 +798,49 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
         status: Status::Pass,
         detail,
         remediation: None,
+    }
+}
+
+/// The subscription row's equivalence clause: whether `usage` can value this
+/// seat's traffic at API rates, and on which layer's rates.
+///
+/// The incomplete arm NAMES the dimensions without a rate, because a
+/// catalog-basis subscription model is always incomplete -- the catalog supplies
+/// base rates only -- and "incomplete" alone would leave the operator with
+/// nowhere to look.
+///
+/// "unpriced" is deliberately absent from every arm: that word is the
+/// [`PricingRowSource::Unpriced`] row's own vocabulary, and a subscription row
+/// is never in that state.
+fn render_equivalence_basis(basis: &EquivalenceBasis) -> String {
+    match basis {
+        EquivalenceBasis::Complete { source } => format!(
+            "usage values it at API-equivalent rates, complete via {}",
+            basis_layer(*source)
+        ),
+        EquivalenceBasis::Incomplete { source, missing } => format!(
+            "usage withholds the API-equivalent value for traffic that uses unrated dimensions \
+             ({}): {} carries no rate for them, and the equivalent is computed only when every \
+             dimension the traffic used resolves one; add a complete [registry] pricing row for \
+             this upstream to value cached traffic",
+            missing.join(", "),
+            basis_layer(*source)
+        ),
+        EquivalenceBasis::Unresolved => "usage reports NO API-equivalent value: neither \
+             [registry] nor the catalog resolves rates for this upstream, so there is nothing to \
+             value it at; add a [registry] pricing row for it"
+            .to_string(),
+    }
+}
+
+/// The operator-facing name of the layer an equivalence basis came from.
+const fn basis_layer(source: PricingSource) -> &'static str {
+    match source {
+        PricingSource::Registry => "the [registry] table",
+        // The catalog's cache dimensions are unset by construction (an
+        // unconfirmed multiplier would fabricate a figure), so this layer can
+        // only ever be a partial basis.
+        PricingSource::Catalog => "the baked catalog (base rates only)",
     }
 }
 

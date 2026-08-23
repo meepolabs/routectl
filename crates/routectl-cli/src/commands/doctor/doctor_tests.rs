@@ -693,8 +693,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_ten() {
-    assert_eq!(SCHEMA_VERSION, 10);
+fn schema_version_is_eleven() {
+    assert_eq!(SCHEMA_VERSION, 11);
 
     let context = ctx(
         config_with_overrides(),
@@ -703,7 +703,7 @@ fn schema_version_is_ten() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 10);
+    assert_eq!(report.schema_version, 11);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2569,7 +2569,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 10);
+    assert_eq!(no_net.schema_version, 11);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2977,6 +2977,206 @@ fn pricing_section_names_each_models_rate_source_by_nickname() {
         assert_eq!(f.status, Status::Pass, "{f:?}");
         assert!(f.remediation.is_none(), "{f:?}");
     }
+}
+
+/// A subscription model whose `[registry]` row prices EVERY dimension is the one
+/// configuration under which `usage` reports an API-equivalent value, so the row
+/// must say the basis is complete -- and must still lead with the billed-by-seat
+/// statement, which the equivalence clause does not replace.
+#[test]
+fn a_subscription_row_with_complete_registry_rates_reports_a_complete_basis() {
+    // Arrange: an oauth:// provider plus a [registry] row pricing all five
+    // dimensions the equivalent needs.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "seatprov".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    cfg.models.insert(
+        "seat".to_string(),
+        ModelEntry::new("seatprov", "priced-everywhere"),
+    );
+    cfg.registry.insert(
+        "priced-everywhere".to_string(),
+        routectl_router::RegistryEntry {
+            pricing: Some(routectl_router::PricingConfig {
+                input_per_mtok: Some(3.0),
+                output_per_mtok: Some(15.0),
+                cache_read_per_mtok: Some(0.3),
+                cache_write_5m_per_mtok: Some(3.75),
+                cache_write_1h_per_mtok: Some(6.0),
+            }),
+            provider: None,
+        },
+    );
+
+    // Act
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_pricing(&context);
+    let seat = find(&findings, "pricing", "seat");
+
+    // Assert: both clauses, and the priced-row vocabulary is not borrowed.
+    assert!(
+        seat.detail.contains("billed by subscription"),
+        "the billed-by-seat statement must survive the added clause: {}",
+        seat.detail
+    );
+    assert!(
+        seat.detail.contains("complete via the [registry] table"),
+        "a fully priced [registry] row is a complete equivalence basis: {}",
+        seat.detail
+    );
+    assert!(
+        !seat.detail.contains("NO API-equivalent"),
+        "a complete basis must not also claim the equivalent is absent: {}",
+        seat.detail
+    );
+    assert!(
+        !seat.detail.contains("priced from"),
+        "a subscription row must not read as priced by that layer: {}",
+        seat.detail
+    );
+}
+
+/// The catalog can never supply cache rates (it leaves them unset rather than
+/// deriving them from unconfirmed multipliers), so a subscription model with no
+/// `[registry]` row ALWAYS has an incomplete equivalence basis. That is the case
+/// an operator hits by default, and the row must name the three missing cache
+/// dimensions rather than saying "incomplete" and leaving them to guess.
+#[test]
+fn a_subscription_row_on_catalog_rates_names_the_missing_cache_dimensions() {
+    // Arrange: an oauth:// provider on an upstream the baked catalog prices,
+    // with no [registry] row -- base rates resolve, cache rates cannot.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "seatprov".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    cfg.models.insert(
+        "seat".to_string(),
+        ModelEntry::new("seatprov", "claude-sonnet-4-6"),
+    );
+
+    // Act
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_pricing(&context);
+    let seat = find(&findings, "pricing", "seat");
+
+    // Assert: the absent equivalent is explained by NAME, per dimension.
+    assert!(
+        seat.detail.contains("billed by subscription"),
+        "the billed-by-seat statement must survive the added clause: {}",
+        seat.detail
+    );
+    assert!(
+        seat.detail
+            .contains("withholds the API-equivalent value for traffic that uses"),
+        "an incomplete basis must scope the withholding to unrated-dimension traffic, \
+         never claim the value is unconditionally absent: {}",
+        seat.detail
+    );
+    assert!(
+        !seat.detail.contains("NO API-equivalent value"),
+        "an incomplete basis must not overclaim unconditional absence (base-only traffic \
+         still values): {}",
+        seat.detail
+    );
+    assert!(
+        seat.detail.contains("the baked catalog (base rates only)"),
+        "the partial basis must name its layer: {}",
+        seat.detail
+    );
+    for dimension in ["cache read", "cache write 5m", "cache write 1h"] {
+        assert!(
+            seat.detail.contains(dimension),
+            "the missing dimension `{dimension}` must be named: {}",
+            seat.detail
+        );
+    }
+    // The catalog DID price input and output, so neither is listed as missing.
+    assert!(
+        !seat.detail.contains("(input,"),
+        "a dimension the catalog priced must not read as missing: {}",
+        seat.detail
+    );
+}
+
+/// A subscription model on a selector NEITHER layer prices has no basis at all
+/// -- a distinct state from a partial one, since naming missing dimensions would
+/// imply the others resolved.
+#[test]
+fn a_subscription_row_with_no_resolvable_rates_reports_no_basis() {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "seatprov".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    cfg.models.insert(
+        "seat".to_string(),
+        ModelEntry::new("seatprov", "no-such-upstream-in-the-catalog"),
+    );
+
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_pricing(&context);
+    let seat = find(&findings, "pricing", "seat");
+
+    assert!(
+        seat.detail.contains("billed by subscription"),
+        "the billed-by-seat statement must survive the added clause: {}",
+        seat.detail
+    );
+    assert!(
+        seat.detail
+            .contains("neither [registry] nor the catalog resolves rates"),
+        "an unresolvable selector must say nothing prices it: {}",
+        seat.detail
+    );
+    assert!(
+        !seat.detail.contains("cache read"),
+        "with no basis at all, naming dimensions would imply a partial one: {}",
+        seat.detail
+    );
+}
+
+/// The equivalence clause is SUBSCRIPTION-only: a priced row's own detail is
+/// unchanged by this feature, since the complete-or-absent rule the clause
+/// explains applies to the equivalent channel alone.
+#[test]
+fn non_subscription_pricing_rows_carry_no_equivalence_clause() {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "paid".to_string(),
+        ProviderEntry::anthropic_api("env://PAID_KEY"),
+    );
+    cfg.providers.insert(
+        "vendor".to_string(),
+        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
+    );
+    cfg.models.insert(
+        "filled".to_string(),
+        ModelEntry::new("paid", "claude-sonnet-4-6"),
+    );
+    cfg.models.insert(
+        "nothing".to_string(),
+        ModelEntry::new("vendor", "some-unpriced-vendor-model"),
+    );
+
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_pricing(&context);
+
+    let filled = find(&findings, "pricing", "filled");
+    assert!(
+        !filled.detail.contains("API-equivalent"),
+        "a priced row has no equivalence basis to report: {}",
+        filled.detail
+    );
+
+    let nothing = find(&findings, "pricing", "nothing");
+    assert!(
+        !nothing.detail.contains("API-equivalent"),
+        "an unpriced API-key row has no equivalence basis to report: {}",
+        nothing.detail
+    );
 }
 
 /// A `[registry]` row whose every `*_per_mtok` field is optional-and-omitted is

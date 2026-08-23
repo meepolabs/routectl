@@ -4870,7 +4870,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   terminal-ness, `CI`, the `ROUTECTL_NO_STALENESS_HINT` kill switch,
   `[capability] staleness_hint_days`) at `doctor`, `catalog list`, and `config
   show` (non-JSON verbs only; never `serve`, `--json`, or an empty overlay)
-- `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams, both
+- `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams, all
   `pub(super)` (visible across the `commands` tree, nowhere else). `rates_from_pricing(&PricingConfig) -> Rates` is the ONE carry
   onto the usage leaf's rate struct, shared by the usage report and the probe
   cost estimate; it lives CLI-side because `Rates` belongs to `routectl-usage`,
@@ -4885,7 +4885,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   surface -- `usage::cost_for_row`,
   `doctor::gather::pricing_row_source`, `probe::capabilities::probe_rates` --
   before any rate lookup, so no surface can render a per-token figure for
-  traffic that bills by seat
+  traffic that bills by seat.
+  `missing_equivalence_dimensions(&PricingConfig) -> Vec<&'static str>` is the
+  DIAGNOSTIC half of the equivalent's complete-or-absent gate: the same
+  strictly-positive-rate rule `usage::rates_cover_used_dimensions` applies, minus
+  the token counts, returning the labels (`input`, `output`, `cache read`, `cache
+  write 5m`, `cache write 1h`) that do not resolve. Reasoning is not among them --
+  a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
+  `doctor::gather::equivalence_basis`
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
   week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
@@ -5158,7 +5165,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   future durable import outcome that renders nothing today, plus the
   `Option<Vec<PricingRow>>` rate-source rows -- `None` when the overlay could
   not be loaded -- and their four-state
-  `PricingRowSource{Subscription,Registry,Catalog,Unpriced}`, plus the
+  `PricingRowSource{Subscription(EquivalenceBasis),Registry,Catalog,Unpriced}`
+  whose subscription arm carries the API-equivalence tri-state
+  `EquivalenceBasis{Complete,Incomplete{missing},Unresolved}`, plus the
   `Option<Vec<KnobRow>>` output-ceiling attribution rows -- also `None` when
   the overlay could not be loaded -- and their three-state
   `OutputCeilingSource{Config,Catalog,Default}`) holds every
@@ -5194,11 +5203,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `knobs: None`, since the overlay both corrects and disables baked ceilings.
   `derive_pricing_rows(config, overlay)` resolves one `PricingRow` per
   `[models.X]` entry through the shared `effective_pricing` boundary (with
-  `pricing::is_subscription` checked first), so the diagnostic can never claim
-  a source the bill does not use; it is called ONLY when the overlay actually
-  loaded -- an unreadable overlay leaves `pricing: None` (the overlay is the
-  rate CORRECTION channel, so a baked figure could name a rate the bill does
-  not use).
+  `pricing::is_subscription` deciding the row's CLASS before the rates decide
+  anything), so the diagnostic can never claim a source the bill does not use; it
+  is called ONLY when the overlay actually loaded -- an unreadable overlay leaves
+  `pricing: None` (the overlay is the rate CORRECTION channel, so a baked figure
+  could name a rate the bill does not use). A subscription row still resolves
+  rates, for `equivalence_basis` alone: it folds the `effective_pricing` result
+  and `pricing::missing_equivalence_dimensions` into the `EquivalenceBasis`
+  tri-state, which is what the row's second clause reports (why the usage
+  report's `equivalent_cost_usd` reads absent) and never its price.
   `gather_context_no_network` is the SINGLE shared gather body (per-layer
   `server::parse_config_only` + `server::load_overlay_default` so the
   capability panel degrades one layer without the other, raw-bytes read for
@@ -5282,12 +5295,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `section_pricing`/`pricing_finding` map the gathered `PricingRow`s to one
   informational `Pass` per configured model naming WHERE its cost rates come
   from -- an operator `[registry]` row, the baked catalog (the auto-fill), a
-  managed subscription (checked FIRST, before any rate lookup), or unpriced --
+  managed subscription (classified before the rates decide anything), or unpriced --
   each detail naming the resolved selector (provider, kind, upstream) and, for
   the two priced states, the per-Mtok rates at two decimals like every other
   money surface, with an unset dimension rendered `unset` rather than `$0` and
   a winning row that sets NEITHER rate saying it prices nothing (reachable only
-  from an empty operator `[registry]` row). A `pricing: None` context (overlay
+  from an empty operator `[registry]` row). A subscription row appends the
+  API-equivalence clause via `render_equivalence_basis`/`basis_layer` -- complete
+  via a layer, incomplete NAMING the rateless dimensions, or nothing resolved --
+  which is the only surface that explains an absent `equivalent_cost_usd`; the
+  catalog leaves cache rates unset by construction, so a catalog basis always
+  reads incomplete. A `pricing: None` context (overlay
   unreadable) collapses the section to the single `pricing_unavailable` Warn
   instead. NEVER `Fail`, so it can never move the exit code.
   `section_knobs`/`knob_finding` are the ceiling sibling of that pair: one

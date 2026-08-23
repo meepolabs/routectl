@@ -49,6 +49,14 @@ list with more narrative.
   equivalence basis -- an operator's declared API price is what their
   subscription usage is valued at.
 
+  `routectl doctor`'s **Cost pricing** section answers the question that
+  rule creates. A subscription row still leads with "billed by
+  subscription", and now adds what the equivalent is based on: complete via
+  your `[registry]` table, or absent with the rateless dimensions NAMED
+  (`cache read, cache write 5m, cache write 1h` for a model running on
+  catalog base rates), or absent because neither layer prices the upstream
+  at all. Doctor report schema 10 -> 11.
+
 - **Output ceilings fill themselves from the catalog** -- a model whose
   config sets no `[models.X] max_output_tokens` now takes the ceiling its
   resolved catalog row confirms, so a common Claude upstream gets its real

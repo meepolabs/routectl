@@ -28,8 +28,8 @@ use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry, Status,
-    WouldTrimPanel, overall_exit,
+    CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
+    PricingSource, Status, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -87,7 +87,13 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// configured model naming where its outbound `max_output_tokens` ceiling comes
 /// from (the operator's own `[models.X]` value, the catalog fill, or the
 /// egress's hardcoded baseline).
-const SCHEMA_VERSION: u32 = 10;
+///
+/// v10 -> v11: a `pricing` row for a SUBSCRIPTION model gains a second clause
+/// naming its API-equivalence basis -- which layer supplies the rates the usage
+/// report values that seat's traffic at, or which dimensions are unpriced and
+/// therefore keep the equivalent absent. The billed-by-seat statement is
+/// unchanged; the row's detail text is not.
+const SCHEMA_VERSION: u32 = 11;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -265,8 +271,11 @@ struct PricingRow {
 /// usage report's cost column uses.
 enum PricingRowSource {
     /// A managed-OAuth (`oauth://`) provider: billed by subscription, so no
-    /// per-token rate applies and none is looked up.
-    Subscription,
+    /// per-token rate applies to the bill. The basis carried alongside is what
+    /// the usage report's API-EQUIVALENT value for that seat's traffic resolves
+    /// from -- a separate question from the bill, and the only one that explains
+    /// why an equivalent reads absent.
+    Subscription(EquivalenceBasis),
     /// An operator `[registry]` pricing row, taken verbatim.
     Registry {
         input_per_mtok: Option<f64>,
@@ -280,6 +289,34 @@ enum PricingRowSource {
     /// Neither layer prices this model: its usage reports as unpriced rather
     /// than as a fabricated zero.
     Unpriced,
+}
+
+/// Whether a subscription model's usage can carry an API-equivalent value, and
+/// on which layer's rates.
+///
+/// The usage report's equivalent is complete-or-absent: it appears only when
+/// every dimension the traffic used resolved a positive rate. A diagnostic has
+/// no token counts, so it reports which rate DIMENSIONS resolve for the
+/// selector -- the same positivity rule, one step earlier.
+enum EquivalenceBasis {
+    /// Every dimension resolves a positive rate, so any traffic on this
+    /// selector carries an equivalent.
+    ///
+    /// Reachable from `PricingSource::Catalog` only if the catalog ever starts
+    /// supplying cache rates; it deliberately does not today (an unconfirmed
+    /// multiplier would fabricate a figure), so a catalog basis is always
+    /// `Incomplete`. The arm is kept general rather than pinned to the registry
+    /// so a catalog that gains cache rates needs no change here.
+    Complete { source: PricingSource },
+    /// The winning layer leaves at least one dimension unpriced, so traffic
+    /// touching it carries no equivalent. `missing` names those dimensions.
+    Incomplete {
+        source: PricingSource,
+        missing: Vec<&'static str>,
+    },
+    /// Neither layer prices the selector at all: no equivalent can be based on
+    /// anything.
+    Unresolved,
 }
 
 /// Per-layer inputs the capability section maps to findings. The config
