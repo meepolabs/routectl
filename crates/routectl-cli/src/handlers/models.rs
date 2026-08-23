@@ -6,6 +6,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
+use routectl_router::ActivationState;
 use serde_json::{Value, json};
 
 use crate::proxy::forward::{
@@ -49,9 +50,12 @@ use crate::server::AppState;
 /// (a direct call to the main listener, never routed through the MITM
 /// seam) -- falls through to the local list below unchanged.
 pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    // Snapshot the live Router once so a hot-swap mid-request does
-    // not mix old + new alias state in the response payload.
+    // Snapshot Router and ActivationState together, before any await, so
+    // a hot-swap mid-request (or the forwarded-lane network round trip
+    // below) cannot widen the gap between the two beyond what a single
+    // request already tolerates.
     let router = state.router.load_full();
+    let activation = state.activation.load_full();
 
     if let Some((outbound_headers, base_url)) =
         forwarded_proxy_target(&headers, &router, &state.mitm_seam_nonce)
@@ -60,7 +64,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
         return resp;
     }
 
-    Json(local_models_list(&router)).into_response()
+    Json(local_models_list(&router, &activation)).into_response()
 }
 
 /// One entry of the local `/v1/models` payload. `context_length` is an
@@ -82,7 +86,16 @@ struct ModelListEntry {
 /// `Router::context_window_for`, never `dispatch_chain`: the
 /// forwarded-lane fallback path in [`list_models`] and every existing
 /// local-discovery caller share this one implementation.
-fn local_models_list(router: &routectl_router::Router) -> Value {
+///
+/// `activation` is the live credential inventory snapshot taken alongside
+/// `router` (both `AppState` ArcSwaps). When the first chain target's
+/// `api_key_ref` names an oauth provider id that `activation` does not
+/// report as `Activated`, `context_length` is suppressed even though the
+/// router itself built a clean dispatch target for it: the provider's
+/// lazy oauth-ref resolution never touches the credential store at build
+/// time (deliberate, for live token rotation), so a missing credential
+/// would otherwise be invisible until dispatch actually 503s.
+fn local_models_list(router: &routectl_router::Router, activation: &ActivationState) -> Value {
     let config = &router.config;
     let now = Utc::now().timestamp();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -91,12 +104,17 @@ fn local_models_list(router: &routectl_router::Router) -> Value {
         if !seen.insert(id.to_string()) {
             return;
         }
+        let context_length = if is_oauth_credential_unresolved(router, activation, id) {
+            None
+        } else {
+            router.context_window_for(id)
+        };
         entries.push(ModelListEntry {
             id: id.to_string(),
             object: "model",
             created: now,
             owned_by: "routectl",
-            context_length: router.context_window_for(id),
+            context_length,
         });
     };
 
@@ -131,6 +149,25 @@ fn local_models_list(router: &routectl_router::Router) -> Value {
         "object": "list",
         "data": entries,
     })
+}
+
+/// True when `id`'s first chain target names an oauth provider id that
+/// `activation` does not report as `Activated`. An api-key/env-ref target
+/// (no oauth id at all) is never suppressed. An oauth id with NO
+/// `activation` record -- a typo, or an id outside the tracked universe --
+/// IS suppressed: routectl cannot confirm the credential, and suppressing
+/// is the conservative default for an unconfirmed one.
+fn is_oauth_credential_unresolved(
+    router: &routectl_router::Router,
+    activation: &ActivationState,
+    id: &str,
+) -> bool {
+    let Some(oauth_id) = router.first_target_oauth_id(id) else {
+        return false;
+    };
+    !activation
+        .get(&oauth_id)
+        .is_some_and(|entry| entry.status.is_activated())
 }
 
 /// Decide, without touching the network, whether `/v1/models` should
@@ -290,8 +327,10 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::http::header::AUTHORIZATION;
     use http_body_util::BodyExt;
+    use routectl_auth::LocalProbe;
     use routectl_router::{
-        AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, Router, ServerConfig,
+        AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy, Router,
+        ServerConfig, compute_activation,
     };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -301,6 +340,136 @@ mod tests {
     async fn json_body_of(resp: Response) -> Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A router with one installed model `claude` on a provider whose
+    /// `api_key_ref` is `api_key_ref`, plus an activation snapshot computed
+    /// from a single `anthropic` probe outcome. Mirrors
+    /// `compute_activation`'s real caller shape (one probe per known oauth
+    /// id) rather than hand-building an `ActivationState`, which has no
+    /// public constructor outside that path. The model carries a confirmed
+    /// context window so a suppressed `context_length` is distinguishable
+    /// from a fixture that never had one to report.
+    fn router_and_activation(
+        api_key_ref: &str,
+        probe: LocalProbe,
+    ) -> (Router, routectl_router::ActivationState) {
+        use routectl_router::{CatalogRow, EffectiveRow, Source};
+
+        let mut providers = BTreeMap::new();
+        providers.insert("p".into(), ProviderEntry::anthropic_api(api_key_ref));
+        let mut models = BTreeMap::new();
+        models.insert("claude".into(), ModelEntry::new("p", "claude-upstream"));
+        let config = Arc::new(Config {
+            providers,
+            models,
+            ..Default::default()
+        });
+
+        let mut row = CatalogRow::sentinel();
+        row.max_context_tokens = Some(128_000);
+        let effective_row = EffectiveRow::Present {
+            row,
+            source: Source::Baked,
+            verified_at: "seed".to_string(),
+        };
+
+        let mut router = Router::new(config.clone());
+        let mut resolved = BTreeMap::new();
+        resolved.insert(
+            "claude".to_string(),
+            Arc::new(
+                ResolvedModel::new("claude", "p", Arc::new(TestProvider), "claude-upstream")
+                    .with_effective_row(effective_row),
+            ),
+        );
+        router.install_resolved_models(resolved);
+
+        let activation = compute_activation(&[("anthropic", probe)], &config);
+        (router, activation)
+    }
+
+    /// Bare no-op provider, only ever used to satisfy `ResolvedModel::new`'s
+    /// provider-handle slot in these discovery-payload tests -- none of
+    /// them dispatch a request.
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl routectl_core::Provider for TestProvider {
+        fn id(&self) -> &'static str {
+            "test"
+        }
+        fn normalize_request(
+            &self,
+            _req: &routectl_core::ChatRequest,
+        ) -> routectl_core::Result<Value> {
+            unimplemented!("discovery-payload tests never dispatch")
+        }
+        fn normalize_response(
+            &self,
+            _raw: Value,
+        ) -> routectl_core::Result<routectl_core::ChatResponse> {
+            unimplemented!("discovery-payload tests never dispatch")
+        }
+        async fn complete(
+            &self,
+            _req: routectl_core::ChatRequest,
+        ) -> routectl_core::Result<routectl_core::ChatResponse> {
+            unimplemented!("discovery-payload tests never dispatch")
+        }
+        async fn stream(
+            &self,
+            _req: routectl_core::ChatRequest,
+        ) -> routectl_core::Result<
+            futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+        > {
+            unimplemented!("discovery-payload tests never dispatch")
+        }
+    }
+
+    #[test]
+    fn local_models_list_omits_context_length_when_the_oauth_credential_is_missing() {
+        let (router, activation) = router_and_activation("oauth://anthropic", LocalProbe::Missing);
+
+        let body = local_models_list(&router, &activation);
+        let entry = &body["data"][0];
+        assert_eq!(entry["id"], "claude");
+        assert!(
+            entry.get("context_length").is_none(),
+            "an absent oauth credential must suppress context_length: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn local_models_list_reports_context_length_when_the_oauth_credential_is_present() {
+        // Positive control for the test above: same fixture shape, only the
+        // probe outcome differs, and the enrichment comes back.
+        let (router, activation) = router_and_activation("oauth://anthropic", LocalProbe::Present);
+
+        let body = local_models_list(&router, &activation);
+        let entry = &body["data"][0];
+        assert_eq!(entry["id"], "claude");
+        assert!(
+            entry.get("context_length").is_some(),
+            "a present oauth credential must not suppress context_length: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn local_models_list_is_unaffected_by_activation_for_an_api_key_ref() {
+        // An api-key/env-ref model names no oauth id at all, so the
+        // suppression check is a no-op regardless of the activation
+        // snapshot's contents -- even one where the matching oauth id is
+        // Missing.
+        let (router, activation) = router_and_activation("literal:sk-test", LocalProbe::Missing);
+
+        let body = local_models_list(&router, &activation);
+        let entry = &body["data"][0];
+        assert_eq!(entry["id"], "claude");
+        assert!(
+            entry.get("context_length").is_some(),
+            "a non-oauth ref must report its confirmed window unconditionally: {entry:?}"
+        );
     }
 
     #[tokio::test]
