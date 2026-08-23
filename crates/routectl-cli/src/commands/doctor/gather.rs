@@ -18,14 +18,14 @@ use routectl_router::{
 use crate::commands::capability_legacy::present_legacy_capability_keys;
 use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
-use crate::commands::pricing::is_subscription;
+use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{BoundaryOutcome, LedgerCapabilityReader, classify_boundary};
 
 use super::{
-    CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, FreshnessInputs,
-    KnobRow, OutputCeilingSource, PricingRow, PricingRowSource, PriorCell,
+    CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis,
+    FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow, PricingRowSource, PriorCell,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -184,10 +184,12 @@ pub(super) fn derive_knob_rows(config: &Config, overlay: &CatalogOverlay) -> Vec
 /// identifies no catalog cell, so a bare provider-table lookup would report
 /// every pooled model as unpriced.
 ///
-/// A managed-OAuth provider short-circuits to `Subscription` BEFORE any rate
-/// lookup, matching the order the usage report classifies a row in -- a
-/// subscription is billed by seat, so what its per-token rates would have been
-/// is not a fact about the bill.
+/// A managed-OAuth provider is classified as `Subscription` BEFORE the rate
+/// lookup decides anything, matching the order the usage report classifies a row
+/// in -- a subscription is billed by seat, so what its per-token rates would
+/// have been is not a fact about the bill. The rates ARE still resolved for such
+/// a row, but only to report the API-EQUIVALENCE basis (see
+/// [`equivalence_basis`]), never as the row's price.
 pub(super) fn derive_pricing_rows(config: &Config, overlay: &CatalogOverlay) -> Vec<PricingRow> {
     config
         .models
@@ -213,16 +215,17 @@ fn pricing_row_source(
     provider_kind: &str,
     entry: &routectl_router::ModelEntry,
 ) -> PricingRowSource {
-    if is_subscription(config, &entry.provider) {
-        return PricingRowSource::Subscription;
-    }
-    match effective_pricing(
+    let resolved = effective_pricing(
         config,
         overlay,
         provider_kind,
         &entry.upstream,
         &entry.provider,
-    ) {
+    );
+    if is_subscription(config, &entry.provider) {
+        return PricingRowSource::Subscription(equivalence_basis(resolved.as_ref()));
+    }
+    match resolved {
         Some((pricing, PricingSource::Registry)) => PricingRowSource::Registry {
             input_per_mtok: pricing.input_per_mtok,
             output_per_mtok: pricing.output_per_mtok,
@@ -232,6 +235,30 @@ fn pricing_row_source(
             output_per_mtok: pricing.output_per_mtok,
         },
         None => PricingRowSource::Unpriced,
+    }
+}
+
+/// Classify what a subscription model's API-equivalent value can be based on,
+/// from the SAME `effective_pricing` result a priced row would have used.
+///
+/// The completeness test is the shared
+/// [`missing_equivalence_dimensions`] rule -- the diagnostic half of the usage
+/// report's complete-or-absent gate -- so doctor cannot claim an equivalent will
+/// appear where the report would withhold it.
+fn equivalence_basis(
+    resolved: Option<&(routectl_router::PricingConfig, PricingSource)>,
+) -> EquivalenceBasis {
+    let Some((pricing, source)) = resolved else {
+        return EquivalenceBasis::Unresolved;
+    };
+    let missing = missing_equivalence_dimensions(pricing);
+    if missing.is_empty() {
+        EquivalenceBasis::Complete { source: *source }
+    } else {
+        EquivalenceBasis::Incomplete {
+            source: *source,
+            missing,
+        }
     }
 }
 

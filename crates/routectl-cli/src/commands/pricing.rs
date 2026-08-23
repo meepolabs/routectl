@@ -1,6 +1,7 @@
 //! The CLI's shared cost-pricing seams: the one conversion from router
-//! pricing to the usage leaf's `Rates`, and the one managed-subscription
-//! predicate every cost surface consults before looking a rate up.
+//! pricing to the usage leaf's `Rates`, the one managed-subscription
+//! predicate every cost surface consults before looking a rate up, and the
+//! dimension-completeness rule an API-equivalent value is gated on.
 //!
 //! Lives CLI-side because `Rates` belongs to `routectl-usage`, a zero-dep
 //! leaf the router must not depend on: the router owns the per-token ->
@@ -49,6 +50,36 @@ pub(super) fn is_subscription(config: &Config, target: &str) -> bool {
                     .is_some_and(|r| r.starts_with("oauth://"))
             })
     })
+}
+
+/// The rate dimensions an API-equivalent value needs priced, in the order a
+/// diagnostic names them: `(label, resolved rate)` pairs of the ones that do
+/// NOT price.
+///
+/// Same positivity rule the usage report's complete-or-absent equivalent
+/// applies -- a dimension counts as priced only at a strictly positive rate --
+/// minus the token counts. A diagnostic has no usage to weigh, so it asks which
+/// dimensions RESOLVE at all rather than which of the used ones did.
+///
+/// Reasoning is not its own dimension: a disjoint-reasoning row bills thinking
+/// tokens at the OUTPUT rate, so the output entry already covers it.
+///
+/// The three cache dimensions are `[registry]`-only by construction -- the
+/// catalog conversion leaves them unset rather than deriving them from
+/// unconfirmed multipliers -- so a catalog-basis subject always reports them
+/// missing.
+pub(super) fn missing_equivalence_dimensions(pricing: &PricingConfig) -> Vec<&'static str> {
+    [
+        ("input", pricing.input_per_mtok),
+        ("output", pricing.output_per_mtok),
+        ("cache read", pricing.cache_read_per_mtok),
+        ("cache write 5m", pricing.cache_write_5m_per_mtok),
+        ("cache write 1h", pricing.cache_write_1h_per_mtok),
+    ]
+    .into_iter()
+    .filter(|(_, rate)| !rate.is_some_and(|r| r > 0.0))
+    .map(|(label, _)| label)
+    .collect()
 }
 
 /// Convert the router's per-million-token pricing into the usage crate's
