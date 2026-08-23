@@ -1455,7 +1455,12 @@ struct DispatchTarget {
     /// Operator-declared maximum thinking-token budget for this model.
     /// Threaded from `ResolvedModel.max_thinking_budget`. Zero means no
     /// operator cap; `apply_layered_overlays` writes this to
-    /// `RoutectlInternal.max_thinking_budget` for the egress to read.
+    /// `RoutectlInternal.max_thinking_budget` unconditionally, but only
+    /// the Anthropic-shape thinking builder reads it there (`anthropic-api`
+    /// plus both Bedrock shapes -- see
+    /// `routectl_providers::anthropic_api::MAX_THINKING_BUDGET_READER_KINDS`).
+    /// On any other kind the value reaches dispatch and is discarded,
+    /// which `unread_thinking_budget_warnings` reports at load time.
     max_thinking_budget: u32,
     /// Operator-declared per-model `max_tokens` ceiling for the
     /// anthropic-api egress. Threaded from

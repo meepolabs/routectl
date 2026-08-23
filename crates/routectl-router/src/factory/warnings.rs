@@ -182,6 +182,71 @@ fn inert_per_block_surface(entry: &ProviderEntry) -> String {
     format!("kind = \"{}\"", entry.kind_str())
 }
 
+/// Advisory (never fatal) load-time check on the per-model thinking-budget
+/// surface: warn when `[models.X] max_thinking_budget` is set on a model
+/// whose EGRESS never reads it. The key parses, the router projects it onto
+/// the resolved model, and it travels all the way to the dispatched request
+/// -- but only the Anthropic-shape thinking builder consults it, so on any
+/// other kind the value is a silent no-op rather than a cap.
+///
+/// The reading kinds are NOT enumerated here. The predicate is
+/// [`routectl_providers::anthropic_api::egress_reads_max_thinking_budget`],
+/// which sits beside the single site that reads the field and is welded to
+/// the egress lanes reaching it by a test in that crate -- so a lane that
+/// gains or loses the read moves this diagnostic with it.
+///
+/// A model whose `provider` names a `[pools]` block is resolved through the
+/// pool's members: validation already requires every member to be one
+/// provider kind, so the first resolvable member answers for the pool. A
+/// model naming neither a provider entry nor a pool is skipped -- the
+/// unknown-reference error is the validator's finding, not this one.
+pub fn unread_thinking_budget_warnings(config: &crate::config::Config) -> Vec<String> {
+    use routectl_providers::anthropic_api::{
+        MAX_THINKING_BUDGET_READER_KINDS, egress_reads_max_thinking_budget,
+    };
+
+    config
+        .models
+        .iter()
+        .filter(|(_, model)| model.max_thinking_budget > 0)
+        .filter_map(|(nickname, model)| {
+            let kind = model_egress_kind(config, &model.provider)?;
+            (!egress_reads_max_thinking_budget(kind)).then(|| {
+                format!(
+                    "[models.{nickname}] max_thinking_budget = {budget} has no effect on kind \
+                     = \"{kind}\": that egress never reads the operator budget cap, so the \
+                     value is inert. The cap is consumed by the Anthropic-shape thinking \
+                     builder only ({readers}). Steer this model with effort_levels and the \
+                     caller's own reasoning budget instead, and remove the key.",
+                    budget = model.max_thinking_budget,
+                    readers = MAX_THINKING_BUDGET_READER_KINDS.join(", "),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The provider-kind token that answers for a `[models.X] provider` value,
+/// which names either a `[providers]` entry or a `[pools]` block. `None`
+/// when the value resolves to neither, or to a pool whose members are all
+/// unknown -- in both cases the dangling reference is a hard validation
+/// error reported elsewhere, so there is no kind to reason about here.
+fn model_egress_kind<'c>(
+    config: &'c crate::config::Config,
+    provider_or_pool: &str,
+) -> Option<&'c str> {
+    if let Some(entry) = config.providers.get(provider_or_pool) {
+        return Some(entry.kind_str());
+    }
+    config
+        .pools
+        .get(provider_or_pool)?
+        .members
+        .iter()
+        .find_map(|member| config.providers.get(member))
+        .map(ProviderEntry::kind_str)
+}
+
 /// Advisory (never fatal) load-time check on the Cloud Code host surface:
 /// warn when a `cloud-code` Gemini entry pins `base_url` at the PRODUCTION
 /// Cloud Code host. The pin is honored verbatim -- routectl never rewrites
@@ -363,3 +428,10 @@ pub fn codex_identity_warnings(config: &crate::config::Config) -> Vec<String> {
 #[cfg(test)]
 #[path = "warnings_tests.rs"]
 mod warnings_tests;
+
+// The inert-`max_thinking_budget` advisory. A separate file because
+// `warnings_tests.rs` is whole-file gated on the `gemini` feature and this
+// check is kind-agnostic.
+#[cfg(test)]
+#[path = "warnings_thinking_budget_tests.rs"]
+mod warnings_thinking_budget_tests;

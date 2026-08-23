@@ -636,7 +636,13 @@ license.
   `apply_structured_outputs_beta_to_body` for the body carrier, applied by
   the Bedrock-Invoke egress after its own allowlist filters) keyed on
   `output_config.format`, and effort (`body_has_output_config_effort` +
-  `union_effort_beta`, own-OAuth lane only) keyed on `output_config.effort`
+  `union_effort_beta`, own-OAuth lane only) keyed on `output_config.effort`;
+  also `MAX_THINKING_BUDGET_READER_KINDS` +
+  `egress_reads_max_thinking_budget` -- the single source for which provider
+  kinds read the operator budget cap, sited beside the one place that reads
+  it and welded to the reaching lanes by
+  `extras_budget_reader_kinds_tests.rs`, so the router's inert-knob config
+  diagnostic keeps no second list of kinds
 - `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
   Anthropic requires on every object in `output_config.format.schema`:
   `inject_additional_properties_false` walks the ASSEMBLED body (after the
@@ -1603,8 +1609,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[providers.X]` row and flags a cloud-code-lane entry whose `upstream` hits
   `routectl_providers::gemini::deprecated_alias_replacement`, naming the
   verified replacement -- the auth-mode gate is load-bearing, since the same
-  ids stay current on the api-key lane (advisory only). Units live in the
-  `#[path]`-included `warnings_tests.rs`
+  ids stay current on the api-key lane (advisory only);
+  `unread_thinking_budget_warnings` flags a `[models.X] max_thinking_budget`
+  set on a model whose egress never reads the cap, resolving the model's kind
+  through `model_egress_kind` (a `provider` value naming a `[pools]` block
+  answers by its first resolvable member) and asking
+  `routectl_providers::anthropic_api::egress_reads_max_thinking_budget` rather
+  than listing kinds locally (advisory only). Units live in the
+  `#[path]`-included `warnings_tests.rs` (gemini-gated) and
+  `warnings_thinking_budget_tests.rs` (kind-agnostic)
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file

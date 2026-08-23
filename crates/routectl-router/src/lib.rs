@@ -161,10 +161,10 @@ pub use factory::{
     build_provider, build_provider_with_options, build_resolved_models,
     build_resolved_models_reported, class_policy_warnings, cloudcode_host_warnings,
     cloudcode_model_warnings, codex_identity_warnings, collect_config_validation,
-    per_block_breakpoint_warnings, resolved_codex_version, validate_alias_chain_targets,
-    validate_alias_patterns, validate_class_policy, validate_codex_version, validate_mitm_config,
-    validate_pools, validate_provider_credential_sources, validate_reasoning_defaults,
-    validate_registry_patterns,
+    per_block_breakpoint_warnings, resolved_codex_version, unread_thinking_budget_warnings,
+    validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
+    validate_codex_version, validate_mitm_config, validate_pools,
+    validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

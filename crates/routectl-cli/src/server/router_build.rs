@@ -82,12 +82,16 @@ pub async fn build_router_from_config_with_overlay(
     for warning in routectl_router::per_block_breakpoint_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "per-block breakpoint warning");
     }
+    // `max_thinking_budget` on a model whose egress never reads the operator
+    // budget cap is inert -- the value travels to dispatch and is discarded.
+    for warning in routectl_router::unread_thinking_budget_warnings(&config) {
+        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "thinking budget warning");
+    }
     // A cloud-code Gemini entry pinned to the production Cloud Code host
     // keeps that pin, but the lane default is the daily host.
     for warning in routectl_router::cloudcode_host_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code host warning");
-    }
-    // A cloud-code Gemini model entry pinning an upstream id Google has
+    } // A cloud-code Gemini model entry pinning an upstream id Google has
     // deprecated server-side still serves, but not what the id names.
     for warning in routectl_router::cloudcode_model_warnings(&config) {
         tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code model warning");

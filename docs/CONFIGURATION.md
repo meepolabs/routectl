@@ -1836,8 +1836,10 @@ Only consumed by the Anthropic-shape thinking builder: `anthropic-api`,
 normalizer), and `bedrock-converse` (which reuses the same thinking
 builder). The other egresses (`gemini`, `openai-compat`,
 `openai-responses`) never read it -- setting it on a model of those
-kinds has no effect and emits no diagnostic; steer those with
-`effort_levels` and the caller's own budget instead.
+kinds has no effect, and config validation says so: an advisory warning
+naming the model and its kind is emitted at load time (`routectl config
+check` and every serve boot). Steer those models with `effort_levels`
+and the caller's own budget instead.
 
 Only relevant on the legacy `supports_adaptive_thinking = false` path;
 the adaptive path uses effort strings and has no budget field.
