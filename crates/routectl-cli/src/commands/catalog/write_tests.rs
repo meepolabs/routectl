@@ -1,6 +1,8 @@
 use super::*;
 
-use routectl_router::{CatalogRow, EffectiveRow, merge, save_catalog_overlay};
+use routectl_router::{CatalogRow, EffectiveRow, lookup_overlay_cell, merge, save_catalog_overlay};
+
+use crate::commands::catalog::render::build_list_data;
 
 // -----------------------------------------------------------------------
 // verify_at: stamps an EXISTING overlay cell -- verifying is a user
@@ -196,6 +198,7 @@ fn set_at_writes_a_user_cell_for_a_baked_selector_with_the_field_landing() {
         "openai-compat:grok-*",
         &["min_prefix_tokens=777".to_string()],
         false,
+        false,
         &path,
     )
     .expect("set must succeed for a known baked selector");
@@ -241,6 +244,7 @@ fn set_at_on_an_import_cell_flips_source_to_user_and_keeps_unset_fields() {
     set_at(
         "openai-compat:grok-*",
         &["rm=0.2".to_string()],
+        false,
         false,
         &path,
     )
@@ -298,6 +302,7 @@ fn set_at_rejects_an_unknown_selector() {
         "openai-compat:totally-unknown-model-xyz",
         &["min_prefix_tokens=1".to_string()],
         false,
+        false,
         &path,
     )
     .expect_err("an unknown selector must be rejected");
@@ -321,6 +326,7 @@ fn set_at_reports_unknown_selector_even_when_the_value_would_also_fail_validatio
     let err = set_at(
         "openai-compat:totally-unknown-model-xyz",
         &["wm=1.0".to_string()],
+        false,
         false,
         &path,
     )
@@ -348,6 +354,242 @@ fn disable_at_rejects_an_unknown_selector() {
     assert!(!path.exists(), "nothing should have been written");
 }
 
+// -----------------------------------------------------------------------
+// set_at --create: the explicit create path for a selector NEITHER layer
+// covers. Fail-closed in both directions -- without the flag a new
+// selector is refused, with it a known one is.
+// -----------------------------------------------------------------------
+
+/// A cataloged provider kind paired with a model no baked row and no
+/// overlay cell covers: the shape `--create` exists for.
+const UNCOVERED_SELECTOR: &str = "openai-compat:some-uncovered-upstream-v9";
+
+#[test]
+fn set_at_create_writes_a_narrow_cell_that_resolves_for_that_model_only() {
+    // Arrange: an empty overlay; the sibling model already has a baked row.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    // Act
+    set_at(
+        UNCOVERED_SELECTOR,
+        &["max_context_tokens=262144".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect("--create must admit a selector neither layer covers");
+
+    // Assert: the cell is written, narrow, and resolves through the real
+    // overlay lookup for its own model.
+    let overlay = load_catalog_overlay(&path).expect("load");
+    let cell = overlay
+        .cells
+        .get(UNCOVERED_SELECTOR)
+        .and_then(Option::as_ref)
+        .expect("the created cell must be present");
+    assert_eq!(cell.source, OverlaySource::User);
+    assert_eq!(cell.max_context_tokens, Some(262_144));
+    assert_eq!(cell.verified_at, today_verified_at());
+
+    let resolved = lookup_overlay_cell("openai-compat", "some-uncovered-upstream-v9", &overlay)
+        .and_then(Option::as_ref)
+        .expect("the created cell must resolve for its own model");
+    assert_eq!(resolved.max_context_tokens, Some(262_144));
+
+    // Assert: a sibling model on the same provider kind is untouched -- the
+    // failure mode a provider catch-all would have caused.
+    assert!(
+        lookup_overlay_cell("openai-compat", "grok-4.5", &overlay).is_none(),
+        "a sibling model must not pick up the created cell",
+    );
+}
+
+#[test]
+fn set_at_create_round_trips_into_the_catalog_listing() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    // Act
+    set_at(
+        UNCOVERED_SELECTOR,
+        &["max_context_tokens=262144".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect("create must succeed");
+
+    // Assert: `catalog list`'s own row builder enumerates the new selector
+    // as a priced row, and never punch-lists it as window-unknown.
+    let overlay = load_catalog_overlay(&path).expect("load");
+    let (rows, punch_list) = build_list_data(&overlay);
+    assert!(
+        rows.iter()
+            .any(|row| row.first().is_some_and(|c| c == "openai-compat")
+                && row
+                    .get(1)
+                    .is_some_and(|c| c == "some-uncovered-upstream-v9")),
+        "the created selector must appear as a listing row: {rows:?}",
+    );
+    assert!(
+        !punch_list.contains(&UNCOVERED_SELECTOR.to_string()),
+        "a created cell carrying a window must not be punch-listed: {punch_list:?}",
+    );
+}
+
+#[test]
+fn set_at_create_rejects_a_selector_already_known_to_either_layer() {
+    // Arrange: a baked-known selector, and an overlay-only one.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+    let mut cells = BTreeMap::new();
+    cells.insert(UNCOVERED_SELECTOR.to_string(), Some(blank_user_cell()));
+    save_catalog_overlay(&path, 0, cells).expect("seed");
+
+    for selector in ["openai-compat:grok-*", UNCOVERED_SELECTOR] {
+        // Act
+        let err = set_at(
+            selector,
+            &["max_context_tokens=1000".to_string()],
+            false,
+            true,
+            &path,
+        )
+        .expect_err("--create on a known selector must be rejected");
+
+        // Assert
+        assert!(
+            matches!(err, CatalogWriteError::SelectorAlreadyKnown(_)),
+            "selector={selector} err={err}"
+        );
+        assert!(
+            err.to_string().contains("without `--create`"),
+            "the error must point at plain `set`: {err}"
+        );
+    }
+}
+
+#[test]
+fn set_at_create_rejects_an_uncataloged_provider_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    let err = set_at(
+        "not-a-real-kind:some-model",
+        &["max_context_tokens=1000".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect_err("an uncataloged provider kind must be rejected");
+
+    match &err {
+        CatalogWriteError::UncreatableSelector { reason, .. } => {
+            assert!(reason.contains("not-a-real-kind"), "reason: {reason}");
+        }
+        other => panic!("expected UncreatableSelector, got {other:?}"),
+    }
+    assert!(!path.exists(), "nothing should have been written");
+}
+
+#[test]
+fn set_at_create_rejects_the_catch_all_shapes_the_narrow_cell_exists_to_avoid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    // A cross-kind catch-all, a provider catch-all, and a multi-asterisk
+    // glob the overlay lookup could never serve.
+    for selector in [
+        "*:some-model",
+        "openai-compat:*",
+        "openai-compat:some-*-model*",
+    ] {
+        let err = set_at(
+            selector,
+            &["max_context_tokens=1000".to_string()],
+            false,
+            true,
+            &path,
+        )
+        .expect_err("a non-narrow selector must be rejected");
+        assert!(
+            matches!(err, CatalogWriteError::UncreatableSelector { .. }),
+            "selector={selector} err={err}"
+        );
+    }
+    assert!(!path.exists(), "nothing should have been written");
+}
+
+#[test]
+fn set_at_create_applies_the_same_field_validation_as_an_existing_cell() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    // A zero window and a below-sentinel wm are rejected on a created cell
+    // exactly as on an existing one.
+    let err = set_at(
+        UNCOVERED_SELECTOR,
+        &["max_context_tokens=0".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect_err("a zero window must be rejected on a created cell too");
+    assert!(matches!(err, CatalogWriteError::Validation(_)), "{err}");
+
+    let err = set_at(
+        UNCOVERED_SELECTOR,
+        &["wm=1.0".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect_err("a below-sentinel wm without the ack flag must be rejected");
+    assert!(matches!(err, CatalogWriteError::Validation(_)), "{err}");
+
+    let err = set_at(
+        UNCOVERED_SELECTOR,
+        &["auto_cacher=true".to_string()],
+        false,
+        true,
+        &path,
+    )
+    .expect_err("a baked-only field must be rejected on a created cell too");
+    assert!(
+        matches!(err, CatalogWriteError::UnsupportedField { .. }),
+        "{err}"
+    );
+
+    assert!(!path.exists(), "nothing should have been written");
+}
+
+#[test]
+fn set_at_without_create_still_refuses_a_new_selector_and_suggests_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog_overlay.json");
+
+    let err = set_at(
+        UNCOVERED_SELECTOR,
+        &["max_context_tokens=1000".to_string()],
+        false,
+        false,
+        &path,
+    )
+    .expect_err("without the flag a new selector stays refused");
+
+    assert!(
+        matches!(err, CatalogWriteError::UnknownSelector(_)),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("--create"),
+        "the unknown-selector error must suggest the create path: {err}"
+    );
+    assert!(!path.exists(), "nothing should have been written");
+}
+
 #[test]
 fn set_at_and_disable_at_surface_a_corrupt_overlay_as_a_transparent_overlay_error() {
     // Arrange: a corrupt overlay file -- `with_overlay_write_lock`'s own
@@ -361,6 +603,7 @@ fn set_at_and_disable_at_surface_a_corrupt_overlay_as_a_transparent_overlay_erro
     let err = set_at(
         "openai-compat:grok-*",
         &["min_prefix_tokens=1".to_string()],
+        false,
         false,
         &path,
     )
@@ -379,6 +622,7 @@ fn set_at_rejects_auto_cacher_naming_the_limitation() {
     let err = set_at(
         "openai-compat:grok-*",
         &["auto_cacher=true".to_string()],
+        false,
         false,
         &path,
     )
@@ -404,8 +648,14 @@ fn set_at_rejects_storage_rent_fields_and_verified_at() {
         "storage_rent=1.0",
         "verified_at=2020-01-01",
     ] {
-        let err = set_at("openai-compat:grok-*", &[raw.to_string()], false, &path)
-            .expect_err("field must be hard-rejected");
+        let err = set_at(
+            "openai-compat:grok-*",
+            &[raw.to_string()],
+            false,
+            false,
+            &path,
+        )
+        .expect_err("field must be hard-rejected");
         assert!(
             matches!(err, CatalogWriteError::UnsupportedField { .. }),
             "raw={raw} err={err}"
@@ -424,6 +674,7 @@ fn set_at_rejects_below_sentinel_wm_without_ack_and_accepts_with_ack() {
         "openai-compat:grok-*",
         &["wm=1.0".to_string()],
         false,
+        false,
         &path,
     )
     .expect_err("a below-sentinel wm without ack must be rejected");
@@ -431,8 +682,14 @@ fn set_at_rejects_below_sentinel_wm_without_ack_and_accepts_with_ack() {
     assert!(!path.exists(), "nothing should have been written");
 
     // Act / Assert: the SAME wm, with the ack flag, is accepted.
-    set_at("openai-compat:grok-*", &["wm=1.0".to_string()], true, &path)
-        .expect("the same wm with the ack flag must be accepted");
+    set_at(
+        "openai-compat:grok-*",
+        &["wm=1.0".to_string()],
+        true,
+        false,
+        &path,
+    )
+    .expect("the same wm with the ack flag must be accepted");
     let overlay = load_catalog_overlay(&path).expect("load");
     let cell = overlay
         .cells
@@ -477,6 +734,7 @@ fn set_at_round_trips_max_output_tokens_through_the_overlay() {
         "openai-compat:grok-*",
         &["max_output_tokens=32000".to_string()],
         false,
+        false,
         &path,
     )
     .expect("set must accept max_output_tokens");
@@ -502,6 +760,7 @@ fn set_at_rejects_a_zero_max_output_tokens_before_writing() {
     let err = set_at(
         "openai-compat:grok-*",
         &["max_output_tokens=0".to_string()],
+        false,
         false,
         &path,
     )

@@ -16,6 +16,20 @@ list with more narrative.
 
 ### Added
 
+- **`catalog set --create` publishes a narrow cell for an uncovered
+  upstream** -- correcting a catalog fact (a context window, a rate, a
+  capability prior) for a model the baked table and the overlay both miss
+  previously left two options: a provider catch-all selector, which applies
+  the value to every sibling model on that provider kind, or hand-editing
+  `catalog_overlay.json`. The flag writes ONE cell for ONE model instead.
+  It inverts `set`'s admission rule rather than relaxing it: a selector
+  that IS already known is refused (plain `set` edits that one), so a typo
+  cannot fork an existing cell into a competing second one, and the created
+  selector must name a cataloged provider kind plus a single model -- an
+  exact id or one trailing-asterisk prefix, never a `*` catch-all.
+  Everything past admission is the code plain `set` already runs: same
+  field vocabulary, same value validation, same `source: user` stamping.
+
 - **Subscription usage carries an API-equivalent value** -- rows served by a
   managed-OAuth seat have no per-token dollar cost, so they used to report a
   bare `n/a (subscription)`. They now also report what that usage would have

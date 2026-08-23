@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use routectl_router::{
-    CachePricingOverride, CachePricingSelector, CatalogOverlay, OverlayCell, OverlayError,
-    OverlaySource, baked_table_rows, catalog_state_selector_key, load_catalog_overlay,
-    overlay_default_path, with_overlay_write_lock,
+    AliasPattern, CachePricingOverride, CachePricingSelector, CatalogOverlay, OverlayCell,
+    OverlayError, OverlaySource, baked_table_rows, catalog_state_selector_key,
+    is_cataloged_provider_kind, load_catalog_overlay, overlay_default_path,
+    with_overlay_write_lock,
 };
 
 use super::today_verified_at;
@@ -133,9 +134,21 @@ pub enum CatalogWriteError {
 
     #[error(
         "selector `{0}` is unknown to the catalog (no baked row, no existing overlay cell); \
-         creating a brand-new selector is not supported by `set` / `disable`"
+         creating a brand-new selector is not supported by `set` / `disable`\n\
+         hint: to publish a narrow cell for an upstream the catalog does not cover, run \
+         `catalog set --create <provider_kind>:<model> <field>=<value>...`"
     )]
     UnknownSelector(String),
+
+    #[error(
+        "selector `{0}` is already known to the catalog (a baked row or an existing overlay \
+         cell); `--create` writes only brand-new selectors -- use `set` without `--create` to \
+         edit this one"
+    )]
+    SelectorAlreadyKnown(String),
+
+    #[error("cannot create selector `{selector}`: {reason}")]
+    UncreatableSelector { selector: String, reason: String },
 
     #[error("field `{field}` is not supported by `catalog set`: {reason}")]
     UnsupportedField { field: String, reason: String },
@@ -150,13 +163,64 @@ pub enum CatalogWriteError {
     Overlay(#[from] OverlayError),
 }
 
-fn parse_selector(selector_raw: &str) -> Result<(), CatalogWriteError> {
-    CachePricingSelector::parse(selector_raw)
-        .map(|_| ())
-        .map_err(|reason| CatalogWriteError::InvalidSelector {
-            selector: selector_raw.to_string(),
-            reason,
-        })
+fn parse_selector(selector_raw: &str) -> Result<CachePricingSelector, CatalogWriteError> {
+    CachePricingSelector::parse(selector_raw).map_err(|reason| CatalogWriteError::InvalidSelector {
+        selector: selector_raw.to_string(),
+        reason,
+    })
+}
+
+/// Admission shape for a selector `--create` is about to introduce. Two
+/// independent bounds, both narrower than [`CachePricingSelector::parse`]:
+///
+/// - The provider kind must be a kind the baked catalog knows
+///   ([`is_cataloged_provider_kind`]) -- a typo'd kind would write a cell
+///   that can never match a lookup, and the `"*"` cross-kind catch-all is
+///   not a narrow cell.
+/// - The model segment must be a shape [`routectl_router::lookup_overlay_cell`]
+///   can actually serve, minus the bare `"*"` provider catch-all: an exact
+///   model, or a trailing-asterisk prefix over a non-empty stem. The
+///   catch-all is excluded on purpose -- it applies the value to every
+///   sibling model on the kind, which is the failure mode an explicit
+///   create path exists to avoid.
+fn validate_creatable_selector(
+    selector_raw: &str,
+    selector: &CachePricingSelector,
+) -> Result<(), CatalogWriteError> {
+    let uncreatable = |reason: String| CatalogWriteError::UncreatableSelector {
+        selector: selector_raw.to_string(),
+        reason,
+    };
+
+    if selector.provider_kind == "*" {
+        return Err(uncreatable(
+            "provider_kind `*` spans every provider kind; name one cataloged kind (e.g. \
+             `openai-compat`)"
+                .to_string(),
+        ));
+    }
+    if !is_cataloged_provider_kind(&selector.provider_kind) {
+        return Err(uncreatable(format!(
+            "provider_kind `{}` is not a kind the catalog knows; a cell under it could never \
+             match a lookup",
+            selector.provider_kind
+        )));
+    }
+    if selector.model_glob == "*" {
+        return Err(uncreatable(format!(
+            "model `*` is the provider catch-all -- it would apply to every model on \
+             `{}`; name the model, or a trailing-asterisk prefix of it",
+            selector.provider_kind
+        )));
+    }
+    AliasPattern::parse(&selector.model_glob).map_err(|_| {
+        uncreatable(format!(
+            "model `{}` is not a shape the overlay can match; expected an exact model or a \
+             single trailing-asterisk prefix (e.g. `grok-4.5` or `grok-*`)",
+            selector.model_glob
+        ))
+    })?;
+    Ok(())
 }
 
 /// One parsed `field=value` pair from `catalog set`'s variadic field list.
@@ -370,11 +434,13 @@ pub fn set(
     selector_raw: &str,
     fields: &[String],
     acknowledge_cost_risk: bool,
+    create: bool,
 ) -> Result<(), CatalogWriteError> {
     set_at(
         selector_raw,
         fields,
         acknowledge_cost_risk,
+        create,
         &overlay_default_path(),
     )
 }
@@ -388,26 +454,38 @@ pub fn set(
 /// both run INSIDE the write lock, admission first: a selector typo'd
 /// alongside a bad value reads as "unknown selector", not a value error,
 /// and neither check needs the loaded overlay for validation, but keeping
-/// both under the same lock hold keeps the ordering simple. A brand-new
-/// selector is rejected: creating one is a future explicit create path,
-/// not this verb.
+/// both under the same lock hold keeps the ordering simple.
+///
+/// `create` INVERTS the admission rule instead of relaxing it: with the
+/// flag, a selector already known to either layer is REJECTED
+/// ([`CatalogWriteError::SelectorAlreadyKnown`]) and a brand-new one is
+/// admitted, subject to [`validate_creatable_selector`]'s narrower shape
+/// bound. The inversion is what makes a typo'd variant of an existing
+/// selector a hard error rather than a silent second cell competing with
+/// the real one. Everything downstream of admission -- field parsing,
+/// value validation, provenance stamping -- is the same code either way.
 ///
 /// `set` on a selector that already carries a present overlay cell (either
 /// provenance) starts from that cell's own fields, so an unset field in
 /// `fields` still inherits whatever the prior cell -- import or user --
 /// already had; naming a field overwrites it. `set` on a baked-only
-/// selector, or on a currently-DISABLED one, starts from an all-`None`
-/// sparse cell instead: a disabled cell carries no fields to inherit, and
-/// re-enabling via `set` is exactly that -- a fresh cell. Every call always
-/// stamps `source: user` and `verified_at` to today (UTC) -- editing a
-/// cell is itself a ratification, even of one an import last wrote.
+/// selector, on a currently-DISABLED one, or on a `--create` selector,
+/// starts from an all-`None` sparse cell instead: a disabled cell carries
+/// no fields to inherit, and re-enabling via `set` is exactly that -- a
+/// fresh cell. Every call always stamps `source: user` and `verified_at`
+/// to today (UTC) -- editing a cell is itself a ratification, even of one
+/// an import last wrote.
 pub(crate) fn set_at(
     selector_raw: &str,
     fields: &[String],
     acknowledge_cost_risk: bool,
+    create: bool,
     path: &Path,
 ) -> Result<(), CatalogWriteError> {
-    parse_selector(selector_raw)?;
+    let parsed = parse_selector(selector_raw)?;
+    if create {
+        validate_creatable_selector(selector_raw, &parsed)?;
+    }
     let updates: Vec<FieldUpdate> = fields
         .iter()
         .map(|f| parse_field(f))
@@ -417,8 +495,12 @@ pub(crate) fn set_at(
     let selector = selector_raw.to_string();
 
     with_overlay_write_lock::<CatalogWriteError, _>(path, |overlay| {
-        if !selector_known(&selector, &overlay) {
-            return Err(CatalogWriteError::UnknownSelector(selector.clone()));
+        match (create, selector_known(&selector, &overlay)) {
+            (false, false) => return Err(CatalogWriteError::UnknownSelector(selector.clone())),
+            (true, true) => {
+                return Err(CatalogWriteError::SelectorAlreadyKnown(selector.clone()));
+            }
+            _ => {}
         }
         validate_updates(&updates, acknowledge_cost_risk)?;
 
@@ -449,8 +531,9 @@ pub(crate) fn set_at(
         Ok(next)
     })?;
 
+    let verb = if create { "created" } else { "set" };
     println!(
-        "set: selector={selector_raw}  source=user  verified_at={today}  written to {}",
+        "{verb}: selector={selector_raw}  source=user  verified_at={today}  written to {}",
         path.display()
     );
     print_pickup_note();

@@ -27,8 +27,10 @@
 //!              see `commands::catalog_import`.
 //!   set     -- write a `source: user` cell for a KNOWN selector (an
 //!              existing baked row, or an existing overlay cell of either
-//!              provenance), field by field. See `write::set_at` for the
-//!              admission rule, the field syntax, and the value-validation
+//!              provenance), field by field. `--create` inverts the
+//!              admission rule to write a narrow cell for a selector
+//!              NEITHER layer covers. See `write::set_at` for both
+//!              admission rules, the field syntax, and the value-validation
 //!              contract it reuses.
 //!   disable -- write a JSON-null overlay cell for a KNOWN selector,
 //!              disabling it regardless of what it previously carried. See
