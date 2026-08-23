@@ -1615,6 +1615,58 @@ fn a_zero_window_degrades_to_unknown_on_discovery_and_keeps_the_gate_target() {
 }
 
 #[test]
+fn context_window_for_is_none_for_a_configured_model_missing_from_the_installed_table() {
+    // SERVABILITY-SHAPED READ: `[models]` is config, the installed table is
+    // what the build actually produced. A model whose provider failed to
+    // build is absent from the table, so discovery has no dispatch target to
+    // report a window off and must omit the figure -- even though the config
+    // entry (and its catalog cell) still exists. The /v1/models entry itself
+    // stays listed; only the enrichment is suppressed.
+    let mut config = Config::default();
+    config
+        .providers
+        .insert("p".into(), ProviderEntry::anthropic_api("literal:k"));
+    for nickname in ["installed", "failed-to-build"] {
+        config.models.insert(
+            nickname.into(),
+            crate::config::ModelEntry::new("p", nickname),
+        );
+    }
+    config.aliases.insert(
+        "alias-to-failed".into(),
+        AliasValue::Single("failed-to-build".into()),
+    );
+
+    // Only the healthy model reaches the table -- exactly the shape
+    // `build_resolved_models` leaves behind when a provider build fails.
+    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    resolved.insert(
+        "installed".into(),
+        Arc::new(
+            ResolvedModel::new("installed", "p", make_provider("p"), "installed")
+                .with_effective_row(window_row(Some(128_000))),
+        ),
+    );
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(resolved);
+
+    assert_eq!(
+        router.context_window_for("failed-to-build"),
+        None,
+        "a config-only nickname has no dispatch target, so its window is unknown",
+    );
+    assert_eq!(
+        router.context_window_for("alias-to-failed"),
+        None,
+        "an alias whose whole chain failed to build reports no window either",
+    );
+    // Positive control: the read DOES answer for a model that is installed,
+    // so the two Nones above are about the missing table entry rather than a
+    // fixture that reports nothing at all.
+    assert_eq!(router.context_window_for("installed"), Some(128_000));
+}
+
+#[test]
 fn the_gate_and_discovery_read_the_same_overlay_corrected_window() {
     // The weld, against the REAL overlay merge
     // (`factory::apply_catalog_overlay`) rather than a hand-stamped row: an

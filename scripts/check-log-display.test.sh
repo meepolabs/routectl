@@ -148,6 +148,26 @@ assert_config_clean() {
     fi
 }
 
+# Same again, but landing on `commands/`. That directory is in BOTH tiers,
+# so it needs its own assertions: the config-key cases above run on
+# `routectl-router/src`, which is also in both, and would keep passing if
+# `commands/` were dropped from either path set.
+run_commands_source() {
+    local source="$1"
+    run_source "fn unrelated() {}" "" \
+        "printf '%s\\n' ${source@Q} >crates/routectl-cli/src/commands/probe.rs"
+}
+
+assert_commands_caught() {
+    local desc="$1" source="$2"
+    if run_commands_source "$source"; then
+        echo "FAIL: expected CAUGHT but passed -- $desc"
+        fails=$((fails + 1))
+    else
+        echo "PASS: caught -- $desc"
+    fi
+}
+
 assert_caught "raw % on a wire field" "type_tag" "v"
 assert_caught "raw % on a second wire field name" "block_type" "v"
 assert_clean "sanitized % on a wire field" "type_tag" "sanitize_for_log(v)"
@@ -329,6 +349,19 @@ assert_source_clean "a non-field capture in the message body is out of scope" \
 assert_source_clean "a commented-out call is prose, not a call site" \
     'fn probe(_v: &str) {
     // historical shape: tracing::warn!(type_tag = %v, "probe");
+}'
+
+# `commands/` sits in both tiers: it renders operator config keys AND it is
+# an upstream-bytes boundary (`probe` classifies a response body, `catalog
+# import` fetches vendor JSON).
+assert_commands_caught "commands/ is in the config-key tier" \
+    'fn probe(v: &str) {
+    tracing::warn!(warning = %v, "config check");
+}'
+
+assert_commands_caught "commands/ is in the wire tier too" \
+    'fn probe(v: &str) {
+    tracing::warn!(type_tag = %v, "probe capture");
 }'
 
 assert_fail_closed "a missing search path is a gate failure, not a vacuous PASS" \
