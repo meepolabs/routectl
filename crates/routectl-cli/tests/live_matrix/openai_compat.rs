@@ -88,14 +88,14 @@ async fn build_test_router(
             .with_header_extras(extra_headers),
     );
 
-    // v0.6.0: each target becomes one [models.X] entry (nickname == wire
-    // model id) and one [aliases] entry pointing the wire model at its
-    // own nickname. This mirrors how the matrix tests dispatch against
-    // exactly the wire id the client sent.
+    // v0.6.0: each target becomes one [models.X] entry (nickname derived
+    // from the wire model id) and one [aliases] entry pointing the wire
+    // model at its own nickname. `alias_nickname` prefixes the derived
+    // name so a dot-free wire id can never collide with its own nickname.
     let mut models = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     for t in targets {
-        let nickname = sanitize_provider_name(t);
+        let nickname = alias_nickname(t);
         models.insert(
             nickname.clone(),
             ModelEntry::new(provider_name.to_string(), (*t).to_string())

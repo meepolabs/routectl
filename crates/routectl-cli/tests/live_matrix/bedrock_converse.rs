@@ -97,7 +97,7 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
             provider_name.clone(),
             ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:placeholder"),
         );
-        let nickname = sanitize_provider_name(model_id);
+        let nickname = alias_nickname(model_id);
         models.insert(
             nickname.clone(),
             ModelEntry::new(provider_name.clone(), (*model_id).to_string()),

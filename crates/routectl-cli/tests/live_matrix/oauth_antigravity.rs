@@ -184,9 +184,11 @@ async fn build_router_for_oauth_antigravity(
         // The nickname must differ from the alias key: an alias whose
         // value equals its own key is a self-referential chain and
         // resolution fails with "alias chain recursion exceeded depth".
-        // `sanitize_provider_name` is a no-op on ids that carry no dot
-        // (every claude id), so the prefix is what keeps them distinct.
-        let nickname = format!("cc-{}", sanitize_provider_name(t));
+        // `alias_nickname` (shared across every live_matrix submodule)
+        // prefixes the sanitized id for exactly this reason --
+        // `sanitize_provider_name` alone is a no-op on ids that carry no
+        // dot (every claude id).
+        let nickname = alias_nickname(t);
         models.insert(
             nickname.clone(),
             ModelEntry::new(provider_name.to_string(), (*t).to_string()),

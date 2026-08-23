@@ -57,7 +57,7 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
                 .with_openai_responses_base_url(OPENAI_RESPONSES_BASE)
                 .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::ChatgptOauth),
         );
-        let nickname = sanitize_provider_name(model_id);
+        let nickname = alias_nickname(model_id);
         models.insert(
             nickname.clone(),
             ModelEntry::new(provider_name, (*model_id).to_string()),

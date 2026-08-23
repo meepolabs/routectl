@@ -253,6 +253,28 @@ fn sanitize_provider_name(model_id: &str) -> String {
         .collect()
 }
 
+/// Prefix on every derived alias nickname. `sanitize_provider_name` is a
+/// no-op on a dot-free model id, so without a prefix the nickname would
+/// equal the alias key itself: `aliases.insert(model_id,
+/// AliasValue::Single(nickname))` would then point an alias at itself and
+/// resolution would fail with "alias chain recursion exceeded depth". The
+/// prefix carries no meaning beyond breaking that self-reference, so every
+/// live_matrix submodule uses this same constant rather than inventing a
+/// per-module one.
+const ALIAS_NICKNAME_PREFIX: &str = "nick-";
+
+/// Alias nickname derived from a raw model id. Every live_matrix
+/// submodule that maps a target model id to a `[models.X]` key and points
+/// an `[aliases]` entry at it MUST derive that key through this helper
+/// (never by calling `sanitize_provider_name` directly) -- see
+/// `ALIAS_NICKNAME_PREFIX` for why.
+fn alias_nickname(model_id: &str) -> String {
+    format!(
+        "{ALIAS_NICKNAME_PREFIX}{}",
+        sanitize_provider_name(model_id)
+    )
+}
+
 #[path = "live_matrix/bedrock_converse.rs"]
 mod bedrock_converse;
 #[path = "live_matrix/bedrock_invoke.rs"]
@@ -275,3 +297,35 @@ mod openai_compat;
 mod openai_responses;
 #[path = "live_matrix/responses_ingress_live.rs"]
 mod responses_ingress_live;
+
+#[cfg(test)]
+mod alias_nickname_tests {
+    use super::alias_nickname;
+
+    #[test]
+    fn dot_free_model_id_yields_nickname_distinct_from_alias_key() {
+        let model_id = "claude-sonnet-4-6";
+        let nickname = alias_nickname(model_id);
+        assert_ne!(
+            nickname, model_id,
+            "a dot-free id must not produce a nickname equal to the alias \
+             key it would be paired with -- that shape is a self-referential \
+             alias chain",
+        );
+    }
+
+    #[test]
+    fn dotted_model_id_still_sanitizes_as_before() {
+        // Positive control paired with the negative assertion above: a
+        // dotted id already produced a distinct nickname before the
+        // prefix existed (`sanitize_provider_name` maps '.' to '-'), so
+        // the prefix must not be the only thing keeping it distinct.
+        let model_id = "gemini-3.1-flash-lite";
+        let nickname = alias_nickname(model_id);
+        assert_ne!(nickname, model_id);
+        assert!(
+            nickname.ends_with("gemini-3-1-flash-lite"),
+            "expected the sanitized dotted id ('.' -> '-') under the prefix, got {nickname:?}",
+        );
+    }
+}

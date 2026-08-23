@@ -5505,8 +5505,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   / vLLM / Anthropic dialects
 - `tests/live_matrix.rs` -- shared harness for the live provider matrix
   (request builders, `run_complete` / `run_stream` / `run_matrix`,
-  `sanitize_provider_name`) plus `#[path]` wiring of the per-scenario
-  submodules; one test binary, gated by the `live-integration` feature
+  `sanitize_provider_name`, `alias_nickname` -- the prefixed nickname every
+  submodule must derive its alias target through, so a dot-free model id
+  can never collide with its own alias key) plus `#[path]` wiring of the
+  per-scenario submodules; one test binary, gated by the `live-integration`
+  feature
 - `tests/live_matrix/openai_compat.rs` -- openai-compat matrices (OpenRouter /
   opencode-go / NIM)
 - `tests/live_matrix/bedrock_invoke.rs` -- Anthropic-on-Bedrock via
