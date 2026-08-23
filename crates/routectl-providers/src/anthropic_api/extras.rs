@@ -285,6 +285,35 @@ enum BudgetSource {
     Derived,
 }
 
+/// The `kind = "..."` provider tokens whose egress reads
+/// `req.routectl_internal.max_thinking_budget`. THE single source for
+/// that question: the field is read in exactly one place (the
+/// `operator_cap` binding in `build_thinking` above), and every lane
+/// that reaches it does so through this module -- `anthropic-api`
+/// directly, Bedrock on both shapes (Invoke delegates body construction
+/// to `anthropic_api::request::normalize`; Converse calls
+/// `build_thinking` itself). Config validation reads this list so an
+/// operator setting the knob on a kind that never consults it gets a
+/// diagnostic instead of silence.
+///
+/// A curated const rather than a derivation, because the consumption is
+/// per-lane: the reading code is one function shared by three egresses,
+/// so nothing in it names a provider kind to project from. The
+/// `extras_budget_reader_kinds_tests` sibling welds the list back to the
+/// tree -- it re-derives the reader set from the call sites on disk and
+/// fails when a lane starts or stops reading the knob without this list
+/// moving with it.
+pub const MAX_THINKING_BUDGET_READER_KINDS: &[&str] = &["anthropic-api", "bedrock"];
+
+/// Whether an egress of `provider_kind` reads the operator-declared
+/// `max_thinking_budget`, per [`MAX_THINKING_BUDGET_READER_KINDS`]. An
+/// unknown token answers `false`: a kind this crate has no egress for
+/// cannot be reading the field.
+#[must_use]
+pub fn egress_reads_max_thinking_budget(provider_kind: &str) -> bool {
+    MAX_THINKING_BUDGET_READER_KINDS.contains(&provider_kind)
+}
+
 /// Apply the operator-declared per-model thinking-budget cap. When
 /// `operator_cap` is non-zero, the budget is clamped DOWN to that
 /// ceiling before Anthropic's own `[1024, max_tokens-1]` window clamp
@@ -1025,3 +1054,9 @@ mod thinking_display_tests;
 #[cfg(test)]
 #[path = "extras_ceiling_budget_coupling_tests.rs"]
 mod ceiling_budget_coupling_tests;
+
+// Weld: `MAX_THINKING_BUDGET_READER_KINDS` vs the egress lanes that
+// actually reach the budget read.
+#[cfg(test)]
+#[path = "extras_budget_reader_kinds_tests.rs"]
+mod budget_reader_kinds_tests;

@@ -30,5 +30,5 @@ pub use validate::{
 };
 pub use warnings::{
     class_policy_warnings, cloudcode_host_warnings, cloudcode_model_warnings,
-    codex_identity_warnings, per_block_breakpoint_warnings,
+    codex_identity_warnings, per_block_breakpoint_warnings, unread_thinking_budget_warnings,
 };

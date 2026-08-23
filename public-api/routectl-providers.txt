@@ -592,6 +592,8 @@ impl<T> typenum::type_operators::Same for routectl_providers::anthropic_api::Too
 pub type routectl_providers::anthropic_api::ToolRename::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::ToolRename where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::anthropic_api::ToolRename::into_shared(self) -> Shared
+pub const routectl_providers::anthropic_api::MAX_THINKING_BUDGET_READER_KINDS: &[&str]
+pub fn routectl_providers::anthropic_api::egress_reads_max_thinking_budget(&str) -> bool
 pub mod routectl_providers::bedrock
 pub mod routectl_providers::bedrock::auth
 pub enum routectl_providers::bedrock::auth::ResolvedCreds

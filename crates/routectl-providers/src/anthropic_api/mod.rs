@@ -58,6 +58,11 @@ use sse::SseState;
 pub use crate::mantle::MantleAuth;
 pub use client::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
 pub use cloak::{CloakConfig, CloakMode, ToolRename};
+/// Which provider kinds read the operator-declared thinking-budget cap.
+/// Re-exported from the module that consumes the field so config
+/// validation can answer "does this model's egress read the knob" without
+/// keeping a second list of kinds.
+pub use extras::{MAX_THINKING_BUDGET_READER_KINDS, egress_reads_max_thinking_budget};
 
 #[async_trait]
 impl Provider for AnthropicApiProvider {
