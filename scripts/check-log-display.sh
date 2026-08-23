@@ -10,8 +10,8 @@
 # `%` field must route through it.
 #
 # Scope: provider egress/response code, ingress request/stream code, the
-# per-request handlers and MITM proxy, and the router + server-startup +
-# config-command surfaces -- the code that touches caller and upstream bytes
+# per-request handlers and MITM proxy, the router + server-startup surfaces,
+# and the CLI commands -- the code that touches caller and upstream bytes
 # plus the code that renders operator-written config table keys
 # (`[providers.X]`, `[models.X]`, `[aliases]` and friends). A config key is
 # not "trusted input": a TOML file is an attacker-reachable artifact on a
@@ -79,6 +79,17 @@ WIRE_FIELDS='type_tag|block_type|part_type|media_type|source_type|event_type|eve
 # surfaces below).
 CONFIG_KEY_FIELDS='warning|pattern|provider|model|nickname|selector|changed_selectors'
 
+# `commands/` is in BOTH tiers, not just the config-key one. It renders
+# operator config keys (`config check` validator messages, `doctor` section
+# details) AND it is a live upstream-bytes boundary in its own right:
+# `probe/capture.rs` classifies a Bedrock response body's `__type` /
+# `message`, and `catalog_import.rs` is where `reqwest` fetches the vendor
+# economics JSON. Neither reads a caller request, so no wire FIELD name is
+# rendered there today -- which is exactly why the wire tier is cheap to
+# apply here and why leaving it off would be a hole rather than a saving:
+# the next `%`-rendered upstream string on a probe or import path would go
+# unscanned.
+
 # The four sanitizer entry points, enumerated rather than matched as a
 # family: an open `sanitize_.*_for_log` pattern would accept any future
 # name shaped like one, including a helper that only LOOKS like it
@@ -92,6 +103,7 @@ SAFE_LOCAL='[a-z0-9_]*_safe\b'
 
 SEARCH_PATHS=(
     crates/routectl-providers/src
+    crates/routectl-cli/src/commands
     crates/routectl-cli/src/ingress
     crates/routectl-cli/src/handlers
     crates/routectl-cli/src/proxy

@@ -169,6 +169,10 @@ const KNOWN_WINDOW_UPSTREAM: &str = "claude-sonnet-4-6";
 /// An upstream id no catalog cell matches, so its window is unconfirmed.
 const BOGUS_UPSTREAM: &str = "no-such-model-in-any-catalog-cell";
 
+/// An environment variable no test process sets, used to make a provider's
+/// credential resolution fail so its models never reach the resolved table.
+const UNSET_SECRET_VAR: &str = "ROUTECTL_TEST_DELIBERATELY_UNSET_SECRET";
+
 #[tokio::test]
 async fn models_lists_configured_aliases() {
     let config = openai_compat_config("http://127.0.0.1:1", "provider1", "my-alias");
@@ -355,6 +359,83 @@ async fn models_reports_the_catalog_context_window_and_omits_an_unknown_one() {
         context_length_of(&body, "unknown-window"),
         None,
         "an unconfirmed window must OMIT the key -- never null, never 0: {body}"
+    );
+}
+
+/// A model whose provider failed to build stays LISTED (discovery is
+/// config-shaped: the operator wrote the entry and wants to see it) but
+/// carries NO `context_length` (enrichment is servability-shaped: routectl
+/// has no dispatch target to report a window off).
+///
+/// The healthy sibling on the same upstream id is the positive control: it
+/// proves the catalog cell does confirm a window, so the omission on the
+/// unservable entry is caused by the failed build and not by a missing
+/// catalog row.
+///
+/// The unservable model is deliberately NOT referenced by any alias --
+/// `build_router_from_config_with_overlay` refuses to start when a failed
+/// model is reachable through `[aliases]`, so an aliased fixture could not
+/// reach a serving `/v1/models` at all.
+///
+/// `serial_test::serial` + the `XDG_CONFIG_HOME` pin for the same reason as
+/// the sibling window test: both mutate process-global env.
+#[tokio::test]
+#[serial_test::serial]
+async fn models_lists_an_unservable_entry_without_a_context_length() {
+    let xdg = tempfile::tempdir().unwrap();
+    let _guard = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "healthy".to_string(),
+        ProviderEntry::anthropic_api(common::file_ref("test-key")),
+    );
+    // Names a variable no test process sets, so credential resolution fails
+    // and the provider never builds -- the cheapest reproduction of an
+    // operator whose credential is absent in this environment.
+    providers.insert(
+        "unresolvable".to_string(),
+        ProviderEntry::anthropic_api(format!("env://{UNSET_SECRET_VAR}")),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "servable".to_string(),
+        ModelEntry::new("healthy", KNOWN_WINDOW_UPSTREAM),
+    );
+    models.insert(
+        "unservable".to_string(),
+        ModelEntry::new("unresolvable", KNOWN_WINDOW_UPSTREAM),
+    );
+
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+    let base = helpers::spawn_test_server(config).await;
+    let body: Value = reqwest::get(format!("{base}/v1/models"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let expected = routectl_router::lookup("anthropic-api", KNOWN_WINDOW_UPSTREAM, None)
+        .max_context_tokens
+        .expect("the baked catalog must confirm a window for the shared upstream fixture");
+    assert_eq!(
+        context_length_of(&body, "servable"),
+        Some(expected),
+        "positive control: the healthy sibling on this upstream must report the window: {body}"
+    );
+    // `context_length_of` panics when the id is absent, so this assertion
+    // covers BOTH halves of the contract: still listed, no enrichment.
+    assert_eq!(
+        context_length_of(&body, "unservable"),
+        None,
+        "an entry whose provider failed to build must be listed with NO context_length: {body}"
     );
 }
 

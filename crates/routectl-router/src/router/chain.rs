@@ -82,6 +82,16 @@ impl Router {
     /// a catch-all branch would only give arbitrary unrouted input a
     /// dispatch-like answer no caller wants.
     ///
+    /// SERVABILITY-SHAPED, unlike the discovery LIST that calls it: both
+    /// resolution steps read the INSTALLED resolved-model table, never
+    /// `[models]` directly, so a configured model whose provider failed to
+    /// build is absent and its window is `None`. The entry stays listed
+    /// (discovery is config-shaped: the operator wrote it and wants to see
+    /// it); only this enrichment is suppressed, because routectl has no
+    /// dispatch target whose window it could honestly report. Any future
+    /// rewrite that reaches `self.config.models` for the window instead of
+    /// `resolve_nickname` reintroduces that leak.
+    ///
     /// Never goes through `dispatch_chain`: that increments pool-dispatch
     /// metrics and rotates round-robin state, and a discovery read must not
     /// perturb routing.

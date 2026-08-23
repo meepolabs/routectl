@@ -18,6 +18,12 @@ cargo test --workspace --features bedrock --release
 # clean. To include them:
 cargo test --workspace --features bedrock,test-utils --release
 
+# The two catalog-codegen tests -- the selectors/snapshot flag weld and
+# the `catalog_baked.rs` drift guard -- are `#[cfg(feature =
+# "gen-catalog")]`, so they compile out of every command above. This leg
+# is what runs them; it is in both the pre-commit hook and CI.
+cargo test -p routectl-router --features gen-catalog --lib
+
 # Live matrix against real providers. Each provider's tests skip
 # cleanly when their env key is absent, so set keys for whatever you
 # want to exercise:
@@ -80,7 +86,8 @@ accidental non-public identifiers (`scripts/check-internal-ids.sh
 rustdoc / workspace-test gate -- the same workspace tests CI runs EXCEPT
 the two replay suites (`egress_replay_all` / `ingress_replay_all`), which
 only run against a contributor's local fixture corpus (CI runs them
-unfiltered). The public-api-baseline leg (`scripts/public-api.sh --check
+unfiltered). A final leg runs the `gen-catalog`-gated router tests, which
+no other leg compiles in. The public-api-baseline leg (`scripts/public-api.sh --check
 all`) is local-only -- CI does not run it -- and only blocks when
 `cargo-public-api` and its pinned nightly toolchain are installed;
 otherwise it prints a skip warning and continues. The `commit-msg` hook

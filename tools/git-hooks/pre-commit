@@ -105,4 +105,15 @@ echo "pre-commit: cargo test --workspace --release"
 # malformed fixtures rather than panicking.
 cargo test --workspace --release -- --skip egress_replay_all --skip ingress_replay_all
 
+echo "pre-commit: cargo test (router, gen-catalog feature)"
+# The workspace leg above builds routectl-router without gen-catalog, so the
+# two tests behind that feature -- the selectors/snapshot flag weld and the
+# catalog_baked.rs drift guard -- compile out of it entirely. Debug profile,
+# unlike every other test leg here: the debug artifacts for this feature set
+# are already warm from the all-features clippy leg (~5s incremental), whereas
+# release would pay a fresh ~50s codegen pass for a feature set nothing else
+# builds in that profile. CI runs the same leg in release, where its own
+# workspace test step has warmed that profile.
+cargo test -p routectl-router --features gen-catalog --lib
+
 echo "pre-commit: all checks passed"

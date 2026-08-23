@@ -107,6 +107,14 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace --release
 
+      # The workspace leg above builds routectl-router without gen-catalog, so
+      # the two tests behind that feature -- the selectors/snapshot flag weld
+      # and the catalog_baked.rs drift guard -- compile out of every other job
+      # and would otherwise run only by hand. --release to reuse the profile
+      # the step above already warmed.
+      - name: cargo test (router, gen-catalog feature)
+        run: cargo test -p routectl-router --features gen-catalog --release --lib
+
   audit:
     name: cargo audit
     runs-on: ubuntu-22.04
