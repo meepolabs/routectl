@@ -1713,6 +1713,109 @@ mod collect_config_validation_tests {
         );
     }
 
+    /// A trailing space is invisible in prose, so the rejection has to show
+    /// the key's bounds AND say which accepted key it is a variant of --
+    /// otherwise the operator reads an error naming what looks like the key
+    /// they wrote.
+    #[test]
+    fn trailing_space_essential_entry_is_quoted_and_suggests_the_trimmed_key() {
+        let validation = collect_config_validation(&essential_config("\"advisor \""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("`advisor `"),
+            "error should quote the raw key so the trailing space is visible: {}",
+            validation.errors[0]
+        );
+        assert!(
+            validation.errors[0].contains("did you mean `advisor`?")
+                && validation.errors[0].contains("whitespace"),
+            "error should suggest the trimmed key and name the difference: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn case_folded_essential_entry_suggests_the_canonical_key() {
+        let validation = collect_config_validation(&essential_config("\"Advisor\""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("did you mean `advisor`?")
+                && validation.errors[0].contains("letter case"),
+            "error should suggest the canonical key and name the difference: {}",
+            validation.errors[0]
+        );
+    }
+
+    /// The suggestion covers well-known keys too, not just the droppables --
+    /// and both defects at once are named as one difference.
+    #[test]
+    fn whitespace_and_case_essential_entry_suggests_a_well_known_key() {
+        let validation = collect_config_validation(&essential_config("\" Web_Search \""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("` Web_Search `")
+                && validation.errors[0].contains("did you mean `web_search`?"),
+            "error should quote the raw key and suggest the canonical one: {}",
+            validation.errors[0]
+        );
+    }
+
+    /// A misspelling is already visible in the quoted key, so it earns no
+    /// guess -- the hint is reserved for defects the operator cannot see.
+    #[test]
+    fn misspelled_essential_entry_gets_no_suggestion() {
+        let validation = collect_config_validation(&essential_config("\"advisorr\""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            !validation.errors[0].contains("did you mean"),
+            "a visible misspelling must not gain a suggestion: {}",
+            validation.errors[0]
+        );
+    }
+
+    /// `reasoning_replay` is deliberately outside the accept set, so no
+    /// near-miss of it may ever be offered as a fix.
+    #[test]
+    fn reasoning_replay_variant_is_never_suggested() {
+        let validation = collect_config_validation(&essential_config("\"Reasoning_Replay\""));
+
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            !validation.errors[0].contains("did you mean"),
+            "a rejected-by-design key must never be suggested: {}",
+            validation.errors[0]
+        );
+    }
+
     #[test]
     fn collects_the_reasoning_replay_essential_carve_out_error() {
         let validation = collect_config_validation(&essential_config("\"reasoning_replay\""));

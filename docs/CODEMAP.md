@@ -1528,8 +1528,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   silently present on one path and missing from another; the suite also runs
   `validate_capability_essential` (rejects a `[capability] essential` entry
   that is neither a well-known capability key nor a `capability_strip`
-  `STRIP_ACTIONS` member per `is_strippable`, naming the key, and rejects
-  `reasoning_replay` naming the lane-managed replay carve-out) and
+  `STRIP_ACTIONS` member per `is_strippable`, quoting the raw key in
+  backticks so an invisible defect shows its bounds and appending a
+  `did you mean `Y`?` hint via `essential_key_near_miss` when the entry is an
+  exact whitespace/case variant of an `essential_accept_set` member, and
+  rejects `reasoning_replay` naming the lane-managed replay carve-out) and
   `validate_float_fields` (rejects a non-finite float leaf -- NaN/inf in a
   `[registry]`/`[cache_pricing]` price or a non-positive/non-finite
   `retry.backoff_multiplier`) and `validate_base_urls` (rejects an

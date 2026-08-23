@@ -1513,7 +1513,10 @@ pub fn resolved_codex_version(config: &Config) -> Option<String> {
 /// meaningful-looking no-op into an operator-facing vocabulary. Listing a
 /// key that already routes away is accepted as an idempotent declaration.
 ///
-/// Returns the first offending entry in config order, naming the key.
+/// Returns the first offending entry in config order, naming the key inside
+/// backticks so an entry whose only defect is invisible in plain prose (a
+/// stray space) still shows its exact bounds, plus a did-you-mean hint when
+/// the entry is an exact whitespace/case variant of an accepted key.
 fn validate_capability_essential(config: &Config) -> Result<(), String> {
     for key in &config.capability.essential {
         if key == REASONING_REPLAY {
@@ -1527,12 +1530,58 @@ fn validate_capability_essential(config: &Config) -> Result<(), String> {
         let known = WELL_KNOWN_CAPABILITY_KEYS.contains(&key.as_str())
             || crate::capability_strip::is_strippable(key);
         if !known {
+            let hint = match essential_key_near_miss(key) {
+                Some((candidate, difference)) => {
+                    format!("; did you mean `{candidate}`? the entry differs only by {difference}")
+                }
+                None => String::new(),
+            };
             return Err(format!(
-                "[capability] essential names unknown capability `{key}`"
+                "[capability] essential names unknown capability `{key}`{hint}"
             ));
         }
     }
     Ok(())
+}
+
+/// The `[capability] essential` accept set as one iterator: every well-known
+/// capability key plus every baked-strippable key, minus the
+/// [`REASONING_REPLAY`] carve-out. Mirrors the membership test in
+/// [`validate_capability_essential`] so a suggestion can never name a key
+/// that validator would itself reject.
+fn essential_accept_set() -> impl Iterator<Item = &'static str> {
+    WELL_KNOWN_CAPABILITY_KEYS
+        .iter()
+        .copied()
+        .chain(crate::capability_strip::strippable_keys())
+        .filter(|key| *key != REASONING_REPLAY)
+}
+
+/// The accepted key a rejected entry is an invisible variant of, paired with
+/// the phrase naming the difference -- or `None` when the entry is a genuine
+/// unknown.
+///
+/// The match is exact-after-normalization rather than fuzzy on purpose: the
+/// defects worth a hint here are precisely the ones an operator cannot see
+/// in the rendered key (surrounding whitespace, letter case), and for those
+/// the suggestion is certain. A misspelling is visible in the quoted key
+/// already, so it gets no guess instead of a possibly-wrong one.
+fn essential_key_near_miss(key: &str) -> Option<(&'static str, &'static str)> {
+    let trimmed = key.trim();
+    let whitespace_differs = trimmed.len() != key.len();
+    essential_accept_set().find_map(|candidate| {
+        let difference = match (
+            whitespace_differs,
+            trimmed == candidate,
+            trimmed.eq_ignore_ascii_case(candidate),
+        ) {
+            (true, true, _) => "surrounding whitespace",
+            (true, false, true) => "surrounding whitespace and letter case",
+            (false, false, true) => "letter case",
+            _ => return None,
+        };
+        Some((candidate, difference))
+    })
 }
 
 /// Collected outcome of the shared config-validation suite:
