@@ -383,7 +383,7 @@ fn all_subscription_group_reports_subscription_without_cost() {
     let result = query(
         &db,
         &spec(GroupDim::Model),
-        |_row| RowCost::Subscription,
+        |_row| RowCost::Subscription(None),
         no_deadline(),
     )
     .expect("query");
@@ -392,6 +392,166 @@ fn all_subscription_group_reports_subscription_without_cost() {
     let m = &group(&result, "m1").metrics;
     assert_eq!(m.cost_status, CostStatus::Subscription);
     assert_eq!(m.cost_usd, None);
+    assert_eq!(m.equivalent_cost_usd, None);
+}
+
+#[test]
+fn a_resolved_subscription_equivalent_never_reaches_the_priced_channel() {
+    // Arrange
+    let (_dir, db) = open_db();
+    insert(&db, &Fixture::default());
+
+    // Act
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |_row| RowCost::Subscription(Some(12.34)),
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert: the equivalent lands in its own field; real spend stays absent
+    // and the status vocabulary is untouched by the payload.
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.cost_status, CostStatus::Subscription);
+    assert_eq!(m.cost_usd, None);
+    assert_close(m.equivalent_cost_usd, 12.34);
+    assert_eq!(result.totals.cost_usd, None);
+    assert_close(result.totals.equivalent_cost_usd, 12.34);
+}
+
+#[test]
+fn an_overflowed_equivalent_degrades_without_touching_the_priced_channel() {
+    // Arrange: one priced row plus two subscription rows whose per-row
+    // equivalents are each finite but whose SUM overflows -- only an
+    // extreme-magnitude configured rate produces figures this large.
+    let (_dir, db) = open_db();
+    for (id, upstream) in [("a", "u-priced"), ("b", "u-sub-1"), ("c", "u-sub-2")] {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                upstream: Some(upstream),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |row| match row.key.upstream.as_deref() {
+            Some("u-priced") => RowCost::Priced(3.5),
+            _ => RowCost::Subscription(Some(f64::MAX)),
+        },
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert: the equivalent channel degrades to absent; the priced subtotal
+    // and the status token are unaffected.
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.equivalent_cost_usd, None);
+    assert_close(m.cost_usd, 3.5);
+    assert_eq!(m.cost_status, CostStatus::Partial);
+}
+
+#[test]
+fn a_non_finite_per_row_equivalent_degrades_instead_of_panicking() {
+    // Arrange: a pricing closure that hands the fold an already-infinite
+    // per-row equivalent. This fold runs in debug builds under test and in a
+    // network-reachable release build that aborts on panic, so the only
+    // acceptable outcome in either profile is the channel's own degrade.
+    let (_dir, db) = open_db();
+    insert(&db, &Fixture::default());
+
+    // Act
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |_row| RowCost::Subscription(Some(f64::INFINITY)),
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.equivalent_cost_usd, None);
+    assert_eq!(m.cost_status, CostStatus::Subscription);
+    assert_eq!(result.totals.equivalent_cost_usd, None);
+}
+
+#[test]
+fn an_overflowed_priced_sum_degrades_without_touching_the_equivalent_channel() {
+    // Arrange: the mirror of the test above -- the priced channel overflows
+    // while the equivalent resolves cleanly.
+    let (_dir, db) = open_db();
+    for (id, upstream) in [("a", "u-priced-1"), ("b", "u-priced-2"), ("c", "u-sub")] {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                upstream: Some(upstream),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |row| match row.key.upstream.as_deref() {
+            Some("u-sub") => RowCost::Subscription(Some(9.0)),
+            _ => RowCost::Priced(f64::MAX),
+        },
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.cost_usd, None);
+    assert_close(m.equivalent_cost_usd, 9.0);
+}
+
+#[test]
+fn a_mixed_group_keeps_real_spend_and_notional_value_in_separate_fields() {
+    // Arrange: one priced API row, one subscription row whose equivalent
+    // resolved, one subscription row whose equivalent did not.
+    let (_dir, db) = open_db();
+    for (id, upstream) in [("a", "u-priced"), ("b", "u-sub-ok"), ("c", "u-sub-dark")] {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                upstream: Some(upstream),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |row| match row.key.upstream.as_deref() {
+            Some("u-priced") => RowCost::Priced(4.0),
+            Some("u-sub-ok") => RowCost::Subscription(Some(7.5)),
+            _ => RowCost::Subscription(None),
+        },
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert: cost_usd is the priced subtotal ALONE -- 4.0, never 11.5 -- and
+    // the equivalent counts only the subscription row that resolved.
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.requests, 3);
+    assert_eq!(m.cost_status, CostStatus::Partial);
+    assert_close(m.cost_usd, 4.0);
+    assert_close(m.equivalent_cost_usd, 7.5);
 }
 
 #[test]
@@ -416,7 +576,7 @@ fn mixed_pricing_group_reports_partial_with_priced_subtotal() {
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(2.25),
-            Some("u-sub") => RowCost::Subscription,
+            Some("u-sub") => RowCost::Subscription(None),
             _ => RowCost::Unpriced,
         },
         no_deadline(),

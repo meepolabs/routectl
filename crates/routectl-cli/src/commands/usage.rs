@@ -22,7 +22,7 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 use routectl_router::{CatalogOverlay, Config, effective_pricing};
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
-    NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, ReductionSummary,
+    NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, Rates, ReductionSummary,
     RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions, UsageDb,
     WouldTrimSummary, aggregate, cache_decision_summary, estimate_cost_tokens,
     k_calibration_summary, latest_quota_by_seat, near_lossless_attribution_summary, open_readonly,
@@ -403,7 +403,8 @@ fn parse_local_date_end(s: &str) -> Result<i64, UsageError> {
 /// is the summed dollar cost of API-key rows that had a price;
 /// `any_subscription` flags that managed-OAuth rows contributed (no $);
 /// `any_unpriced` flags API-key rows that NEITHER the `[registry]` table nor
-/// the baked catalog prices.
+/// the baked catalog prices. `equivalent_total_usd` is a FOURTH, separate
+/// channel: what the subscription rows would have cost at API rates.
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
     pub label: String,
@@ -435,6 +436,11 @@ pub struct DisplayRow {
     pub cache_write_1h: i64,
     pub server_tool_calls: i64,
     pub priced_total_usd: Option<f64>,
+    /// Summed API-equivalent value of this row's subscription usage, absent
+    /// when no subscription row resolved a complete rate set. Notional
+    /// replacement value -- rendered beside `priced_total_usd`, never added to
+    /// it.
+    pub equivalent_total_usd: Option<f64>,
     pub any_subscription: bool,
     pub any_unpriced: bool,
     pub ttft_p50_ms: Option<i64>,
@@ -552,12 +558,21 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// first (it overrides pricing); then a priced API-key row prices its
 /// summed tokens; everything else is unpriced.
 ///
+/// A subscription row carries no dollar cost, but it does carry the
+/// API-EQUIVALENT value of its usage when every dimension it used resolved a
+/// rate -- computed through the SAME rate resolution and token math a priced
+/// row goes through, so the two can never disagree on reasoning structure,
+/// cache-read basis, or persisted-kind keying. That equivalent is
+/// complete-or-absent (see [`rates_cover_used_dimensions`]); the priced arm's
+/// semantics are unchanged by it.
+///
 /// Rates resolve through `routectl_router::effective_pricing`: an operator
 /// `[registry]` row wins whole, and only in its absence do the row's baked
 /// catalog rates fill in. The catalog side is keyed by the kind PERSISTED with
 /// the row, never by what the provider is configured as now -- re-kinding a
 /// provider must not reprice history -- so a row with no persisted kind fills
-/// from no catalog cell and stays `Unpriced`.
+/// from no catalog cell and stays `Unpriced` (or, on the subscription arm,
+/// carries no equivalent).
 ///
 /// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
 /// whose kind an operator later changed keeps each era priced by what it was.
@@ -575,46 +590,146 @@ pub(crate) fn cost_for_row(config: &Config, overlay: &CatalogOverlay, row: &AggR
         return RowCost::Unpriced;
     };
     if is_subscription(config, provider) {
-        return RowCost::Subscription;
+        return RowCost::Subscription(equivalent_usd(config, overlay, row, provider));
     }
-    let Some(upstream) = row.key.upstream.as_deref() else {
-        return RowCost::Unpriced;
-    };
-    let Some((pricing, _)) = effective_pricing(
+    match priced_usd(config, overlay, row, provider) {
+        Some(usd) => RowCost::Priced(usd),
+        None => RowCost::Unpriced,
+    }
+}
+
+/// The real dollar cost of one non-subscription row, or `None` when no usable
+/// price exists. A dimension whose rate is absent contributes `0` here, which
+/// is `cost_usd`'s long-standing semantics.
+fn priced_usd(
+    config: &Config,
+    overlay: &CatalogOverlay,
+    row: &AggRow,
+    provider: &str,
+) -> Option<f64> {
+    let resolved = resolve_row_rates(config, overlay, row, provider)?;
+    price_row(&resolved.rates, row)
+}
+
+/// The API-equivalent dollar value of one SUBSCRIPTION row: the same rate
+/// resolution and token math a priced row uses, wrapped in the
+/// complete-or-absent rule.
+///
+/// The completeness wrapper exists only on this arm. A subscription operator's
+/// workload runs at a high cache-hit rate, and the baked catalog deliberately
+/// never fills cache rates, so a base-token-only figure would understate the
+/// value by most of its magnitude -- worse than absent for exactly the workload
+/// this number serves.
+fn equivalent_usd(
+    config: &Config,
+    overlay: &CatalogOverlay,
+    row: &AggRow,
+    provider: &str,
+) -> Option<f64> {
+    let resolved = resolve_row_rates(config, overlay, row, provider)?;
+    if !rates_cover_used_dimensions(&resolved, row) {
+        return None;
+    }
+    // A non-finite product reads as absent rather than propagating into the
+    // equivalent channel's sum, where it would poison every other row's value.
+    price_row(&resolved.rates, row).filter(|usd| usd.is_finite())
+}
+
+/// A row's resolved rate table plus whether its reasoning tokens bill as their
+/// own dimension.
+struct RowRates {
+    rates: Rates,
+    /// True when the row's reasoning tokens are DISJOINT from its output count
+    /// and therefore a separately billed dimension. False when they are already
+    /// inside output, where a reasoning rate would double-charge.
+    reasoning_billed: bool,
+}
+
+/// Resolve the rate table for one row and settle its reasoning structure.
+/// `None` means no price can be justified for the row at all: no upstream, no
+/// effective pricing, or an unknown persisted kind on a row that reported
+/// reasoning tokens.
+fn resolve_row_rates(
+    config: &Config,
+    overlay: &CatalogOverlay,
+    row: &AggRow,
+    provider: &str,
+) -> Option<RowRates> {
+    let upstream = row.key.upstream.as_deref()?;
+    let (pricing, _) = effective_pricing(
         config,
         overlay,
         row.key.provider_kind.as_deref().unwrap_or_default(),
         upstream,
         provider,
-    ) else {
-        return RowCost::Unpriced;
-    };
+    )?;
     let mut rates = rates_from_pricing(&pricing);
+    let mut reasoning_billed = false;
     match reasoning_structure(row.key.provider_kind.as_deref()) {
         // A disjoint-reasoning row bills its thinking tokens at the output
         // rate; a subsumed one already counted them inside output, so pricing
         // them again would double-charge.
-        ReasoningStructure::Disjoint => rates.reasoning_per_mtok = rates.output_per_mtok,
+        ReasoningStructure::Disjoint => {
+            rates.reasoning_per_mtok = rates.output_per_mtok;
+            reasoning_billed = true;
+        }
         ReasoningStructure::Subsumed => {}
-        ReasoningStructure::Unknown if row.reasoning_tokens != 0 => return RowCost::Unpriced,
+        ReasoningStructure::Unknown if row.reasoning_tokens != 0 => return None,
         ReasoningStructure::Unknown => {}
     }
-    // cache_read is billed PER TURN, so the cost basis is the summed cache-read
-    // volume (`cache_read_billed`), not the peak. The peak / avg are
-    // display-only context SIZE and must NOT drive cost; input / output /
-    // cache_write_* are real summed flows.
-    match estimate_cost_tokens(
+    Some(RowRates {
+        rates,
+        reasoning_billed,
+    })
+}
+
+/// The token math shared by the real price and the API-equivalent value.
+///
+/// cache_read is billed PER TURN, so the cost basis is the summed cache-read
+/// volume (`cache_read_billed`), not the peak. The peak / avg are display-only
+/// context SIZE and must NOT drive cost; input / output / cache_write_* are real
+/// summed flows.
+fn price_row(rates: &Rates, row: &AggRow) -> Option<f64> {
+    estimate_cost_tokens(
         row.input_tokens,
         row.output_tokens,
         row.reasoning_tokens,
         row.cache_read_billed,
         row.cache_write_5m,
         row.cache_write_1h,
-        &rates,
-    ) {
-        Some(b) => RowCost::Priced(b.total_usd),
-        None => RowCost::Unpriced,
-    }
+        rates,
+    )
+    .map(|b| b.total_usd)
+}
+
+/// Whether every dimension this row actually USED resolved a strictly positive
+/// rate -- the complete-or-absent test for an API-equivalent value.
+///
+/// A dimension with a zero count is irrelevant (it contributes nothing either
+/// way). A dimension with a nonzero count and no positive rate makes the whole
+/// figure a partial one, and a partial equivalent misstates value rather than
+/// approximating it. Reasoning counts as a dimension only when it bills
+/// separately; cache reads are weighed as the BILLED volume, never the peak.
+fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
+    let rates = &resolved.rates;
+    // A subsumed-reasoning row's thinking tokens are inside its output count, so
+    // the output pair below already covers them; only a disjoint row weighs
+    // reasoning as its own dimension.
+    let reasoning_tokens = if resolved.reasoning_billed {
+        row.reasoning_tokens
+    } else {
+        0
+    };
+    [
+        (row.input_tokens, rates.input_per_mtok),
+        (row.output_tokens, rates.output_per_mtok),
+        (reasoning_tokens, rates.reasoning_per_mtok),
+        (row.cache_read_billed, rates.cache_read_per_mtok),
+        (row.cache_write_5m, rates.cache_write_5m_per_mtok),
+        (row.cache_write_1h, rates.cache_write_1h_per_mtok),
+    ]
+    .into_iter()
+    .all(|(tokens, rate)| tokens == 0 || rate.is_some_and(|r| r > 0.0))
 }
 
 /// Per-group time-to-first-token percentiles: label -> (p50, p95) in ms,
@@ -673,6 +788,11 @@ struct Acc {
     server_tool_present: i64,
     priced_usd: f64,
     any_priced: bool,
+    /// Summed API-equivalent value of the subscription rows that resolved one.
+    /// Never folded into `priced_usd`: notional value and real spend stay in
+    /// separate channels all the way to the rendered cell.
+    equivalent_usd: f64,
+    any_equivalent: bool,
     any_subscription: bool,
     any_unpriced: bool,
 }
@@ -704,7 +824,13 @@ impl Acc {
         self.cache_write_1h_present += row.cache_write_1h_present;
         self.server_tool_present += row.server_tool_present;
         match cost {
-            RowCost::Subscription => self.any_subscription = true,
+            RowCost::Subscription(equivalent) => {
+                self.any_subscription = true;
+                if let Some(usd) = equivalent {
+                    self.equivalent_usd += usd;
+                    self.any_equivalent = true;
+                }
+            }
             RowCost::Priced(usd) => {
                 self.priced_usd += usd;
                 self.any_priced = true;
@@ -837,6 +963,11 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
         ttft_p95_ms,
         priced_total_usd: if acc.any_priced {
             Some(acc.priced_usd)
+        } else {
+            None
+        },
+        equivalent_total_usd: if acc.any_equivalent {
+            Some(acc.equivalent_usd).filter(|usd| usd.is_finite())
         } else {
             None
         },
@@ -986,12 +1117,24 @@ fn tok_per_s(gen_output_tokens: i64, gen_window_ms: i64) -> Option<i64> {
 
 /// Render the cost cell for a display row given its tri-state. A display
 /// group can aggregate BOTH priced API-key rows and subscription rows; the
-/// `+sub` suffix flags that the dollar figure omits a subscription portion.
+/// `+sub` marker flags that the dollar figure omits a subscription portion.
+///
+/// When the subscription portion resolved an API-equivalent value, that value
+/// is shown as an explicit `~$` approximation ALONGSIDE the real figure, never
+/// summed into it: one cell, two clearly-labelled channels. An unresolvable
+/// subscription portion renders exactly as it did before the equivalent
+/// existed.
 fn cost_cell(row: &DisplayRow) -> String {
     match (row.priced_total_usd, row.any_subscription) {
-        (Some(usd), true) => format!("${usd:.2}+sub"),
+        (Some(usd), true) => match row.equivalent_total_usd {
+            Some(sub) => format!("${usd:.2} (+sub ~${sub:.2})"),
+            None => format!("${usd:.2}+sub"),
+        },
         (Some(usd), false) => format!("${usd:.2}"),
-        (None, true) => "n/a (subscription)".to_string(),
+        (None, true) => match row.equivalent_total_usd {
+            Some(sub) => format!("n/a (sub ~${sub:.2})"),
+            None => "n/a (subscription)".to_string(),
+        },
         (None, false) => "n/a".to_string(),
     }
 }
@@ -1458,6 +1601,8 @@ const LEGEND: &str = concat!(
     "  hit%        = token-weighted cache-hit rate: cache_read / cache-inclusive prompt tokens\n",
     "  \"-\"         = metric not reported by that provider\n",
     "  \"n/a (sub)\" = managed subscription (see quota)\n",
+    "  \"~$\"        = notional API-equivalent value of subscription usage; never added to the dollar figure,\n",
+    "                and absent when the subscription rows' rates are incomplete\n",
     "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
     "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools,\n",
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",

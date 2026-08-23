@@ -10,7 +10,12 @@
 /// envelope shape are pinned: renaming or dropping any of them fails here.
 #[test]
 fn wire_shape_pins_every_metric_token() {
-    fn metrics(offset: i64, status: CostStatus, cost: Option<f64>) -> QueryMetrics {
+    fn metrics(
+        offset: i64,
+        status: CostStatus,
+        cost: Option<f64>,
+        equivalent: Option<f64>,
+    ) -> QueryMetrics {
         QueryMetrics {
             requests: 100 + offset,
             ok: 90 + offset,
@@ -34,6 +39,7 @@ fn wire_shape_pins_every_metric_token() {
             ctx_peak: Some(8_400 + offset),
             cache_hit_pct: Some(63.25),
             cost_usd: cost,
+            equivalent_cost_usd: equivalent,
             cost_status: status,
         }
     }
@@ -41,9 +47,9 @@ fn wire_shape_pins_every_metric_token() {
     let result = QueryResult {
         groups: vec![QueryGroup {
             label: "sonnet".to_string(),
-            metrics: metrics(0, CostStatus::Priced, Some(1.25)),
+            metrics: metrics(0, CostStatus::Priced, Some(1.25), None),
         }],
-        totals: metrics(1, CostStatus::Partial, Some(1.25)),
+        totals: metrics(1, CostStatus::Partial, Some(1.25), Some(3.5)),
         series: None,
     };
     let panel = Panel::available(SCHEMA_VERSION, "2026-08-02T00:00:00Z".to_string(), result);
@@ -78,6 +84,7 @@ fn wire_shape_pins_every_metric_token() {
                     "ctx_peak": 8400,
                     "cache_hit_pct": 63.25,
                     "cost_usd": 1.25,
+                    "equivalent_cost_usd": null,
                     "cost_status": "priced",
                 }
             }],
@@ -104,6 +111,7 @@ fn wire_shape_pins_every_metric_token() {
                 "ctx_peak": 8401,
                 "cache_hit_pct": 63.25,
                 "cost_usd": 1.25,
+                "equivalent_cost_usd": 3.5,
                 "cost_status": "partial",
             },
             "series": null,
@@ -121,7 +129,12 @@ fn wire_shape_pins_every_metric_token() {
 /// nulls rather than being skipped or fabricated.
 #[test]
 fn bucketed_wire_shape_pins_the_series_tokens() {
-    fn metrics(offset: i64, status: CostStatus, cost: Option<f64>) -> QueryMetrics {
+    fn metrics(
+        offset: i64,
+        status: CostStatus,
+        cost: Option<f64>,
+        equivalent: Option<f64>,
+    ) -> QueryMetrics {
         QueryMetrics {
             requests: 40 + offset,
             ok: 31 + offset,
@@ -145,6 +158,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
             ctx_peak: Some(9_600 + offset),
             cache_hit_pct: Some(17.75),
             cost_usd: cost,
+            equivalent_cost_usd: equivalent,
             cost_status: status,
         }
     }
@@ -152,15 +166,15 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
     let result = QueryResult {
         groups: vec![QueryGroup {
             label: "sonnet".to_string(),
-            metrics: metrics(0, CostStatus::Priced, Some(2.5)),
+            metrics: metrics(0, CostStatus::Priced, Some(2.5), None),
         }],
-        totals: metrics(1, CostStatus::Partial, Some(2.5)),
+        totals: metrics(1, CostStatus::Partial, Some(2.5), Some(4.25)),
         series: Some(QuerySeries {
             bucket_ms: 3_600_000,
             buckets: vec![
                 SeriesBucket {
                     start_ms: 1_000_000,
-                    metrics: metrics(2, CostStatus::Priced, Some(0.75)),
+                    metrics: metrics(2, CostStatus::Priced, Some(0.75), None),
                 },
                 SeriesBucket {
                     start_ms: 4_600_000,
@@ -201,6 +215,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
                     "ctx_peak": 9600,
                     "cache_hit_pct": 17.75,
                     "cost_usd": 2.5,
+                    "equivalent_cost_usd": null,
                     "cost_status": "priced",
                 }
             }],
@@ -227,6 +242,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
                 "ctx_peak": 9601,
                 "cache_hit_pct": 17.75,
                 "cost_usd": 2.5,
+                "equivalent_cost_usd": 4.25,
                 "cost_status": "partial",
             },
             "series": {
@@ -257,6 +273,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
                             "ctx_peak": 9602,
                             "cache_hit_pct": 17.75,
                             "cost_usd": 0.75,
+                            "equivalent_cost_usd": null,
                             "cost_status": "priced",
                         }
                     },
@@ -285,6 +302,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
                             "ctx_peak": null,
                             "cache_hit_pct": null,
                             "cost_usd": null,
+                            "equivalent_cost_usd": null,
                             "cost_status": "unpriced",
                         }
                     }
@@ -320,6 +338,7 @@ fn absent_metrics_serialize_as_null_and_the_cost_tokens_are_stable() {
             "ctx_peak",
             "cache_hit_pct",
             "cost_usd",
+            "equivalent_cost_usd",
         ] {
             assert_eq!(
                 json[name],

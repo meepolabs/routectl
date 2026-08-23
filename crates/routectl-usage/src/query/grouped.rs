@@ -110,8 +110,12 @@ pub enum GroupDim {
 /// pricing closure. The three states are exclusive and drive [`CostStatus`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RowCost {
-    /// A managed-subscription row: real usage, no per-token dollar cost.
-    Subscription,
+    /// A managed-subscription row: real usage, no per-token dollar cost, plus
+    /// the API-equivalent value of that usage when the caller could resolve
+    /// EVERY dimension the row used. The payload feeds
+    /// [`QueryMetrics::equivalent_cost_usd`] only -- never `cost_usd`, which
+    /// stays real spend.
+    Subscription(Option<f64>),
     /// A priced row and its dollar cost.
     Priced(f64),
     /// A row with no usable price: counts toward usage, contributes no cost.
@@ -212,6 +216,11 @@ pub struct QueryMetrics {
     /// Dollar cost, per [`CostStatus`]. Absent whenever no priced row
     /// contributed.
     pub cost_usd: Option<f64>,
+    /// API-equivalent USD value of this metric set's SUBSCRIPTION rows, at the
+    /// rates a priced row would have used. Absent when no subscription row
+    /// resolved a complete rate set -- never `0`, and never summed with
+    /// `cost_usd`: this is notional replacement value, not spend.
+    pub equivalent_cost_usd: Option<f64>,
     /// How completely the cost could be resolved.
     pub cost_status: CostStatus,
 }
@@ -490,6 +499,11 @@ struct GroupAcc {
     cache_hit_count: i64,
     priced_usd: f64,
     any_priced: bool,
+    /// Summed API-equivalent value of the subscription rows that resolved one.
+    /// Kept strictly apart from `priced_usd` so a notional dollar can never
+    /// reach the real-spend channel.
+    equivalent_usd: f64,
+    any_equivalent: bool,
     any_subscription: bool,
     any_unpriced: bool,
 }
@@ -523,7 +537,17 @@ impl GroupAcc {
         self.cache_hit_sum += fine.cache_hit_sum;
         self.cache_hit_count += fine.cache_hit_count;
         match cost {
-            RowCost::Subscription => self.any_subscription = true,
+            RowCost::Subscription(equivalent) => {
+                self.any_subscription = true;
+                if let Some(usd) = equivalent {
+                    // No finiteness assertion here: the equivalent channel
+                    // degrades a non-finite sum to absent in
+                    // `equivalent_cost`, and a debug panic on the way in would
+                    // fire before that degrade could run.
+                    self.equivalent_usd += usd;
+                    self.any_equivalent = true;
+                }
+            }
             RowCost::Priced(usd) => {
                 // A per-row price is finite by construction (rate validation
                 // rejects non-finite rates), so a non-finite one is a pricer
@@ -566,6 +590,8 @@ impl GroupAcc {
         self.cache_hit_count += other.cache_hit_count;
         self.priced_usd += other.priced_usd;
         self.any_priced |= other.any_priced;
+        self.equivalent_usd += other.equivalent_usd;
+        self.any_equivalent |= other.any_equivalent;
         self.any_subscription |= other.any_subscription;
         self.any_unpriced |= other.any_unpriced;
     }
@@ -598,8 +624,22 @@ impl GroupAcc {
             ctx_peak: self.input_tokens_max,
             cache_hit_pct: mean_f64(self.cache_hit_sum, self.cache_hit_count).map(|r| r * 100.0),
             cost_usd,
+            equivalent_cost_usd: self.equivalent_cost(),
             cost_status,
         }
+    }
+
+    /// The group's API-equivalent subscription value, absent when no
+    /// subscription row resolved one.
+    ///
+    /// A non-finite sum degrades to absent for the same reason the priced sum
+    /// does: this fold is network-reachable and the release profile aborts on
+    /// panic. The degrade is scoped to THIS channel -- an overflowed equivalent
+    /// leaves `cost_usd` and `cost_status` untouched.
+    fn equivalent_cost(&self) -> Option<f64> {
+        self.any_equivalent
+            .then_some(self.equivalent_usd)
+            .filter(|usd| usd.is_finite())
     }
 
     /// The group's cost and its status. A group with no cost signal at all
