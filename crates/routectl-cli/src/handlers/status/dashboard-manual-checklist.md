@@ -31,6 +31,14 @@ gap here is the honest alternative.
    Pane transitions, the age ticker, sparkline and segment drawing, and
    reduced-motion behavior. Motion is CSS; the JS only decides what is drawn.
 
+One hazard of the multi-part split IS covered mechanically, and belongs here so
+nobody re-files it as manual work: two parts declaring the same top-level name.
+The parts share one function scope, so the later declaration silently replaces
+the earlier one for every caller of both, and the symptom is a tab stuck on its
+`invalid_payload` card with a healthy transport and a well-formed payload.
+`page.rs`'s `dashboard_script_parts_declare_no_colliding_top_level_names` scans
+the concatenation for it.
+
 ## 1. Initial load
 
 - Load the page with the browser devtools network panel open. Every request
@@ -40,6 +48,13 @@ gap here is the honest alternative.
 - Watch **two full healthy poll rounds**. The poll indicator advances, the
   as_of age resets each round, and no tab enters a stale or error state.
 - Click through all six tabs. Each renders content, not an error card.
+- Load straight to `#overview` AND straight to `#usage`, then switch between
+  the two in **both orders**. Both tabs must render content on every visit.
+  The two tabs issue DIFFERENT `/status/query` shapes -- Overview bucketed,
+  Usage series-less -- into their own source records, and a payload of one
+  shape cannot render the other tab. A tab that shows the
+  `invalid_payload` card here while its transport reads live means the two
+  reads have been collapsed back onto one record.
 
 ## 2. Selection supersession (the WORST uncovered failure)
 

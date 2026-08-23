@@ -3971,7 +3971,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   deliberately OFF the JSON `apply_overload_layers` shed budget: a zero-I/O
   `&'static str` response cannot stall/hold a permit, so an overload sheds
   status DATA while the operator's incident window (the shell) still loads.
-  Four guard tests, all reading the sources with comments stripped so prose
+  Guard tests, all reading the sources with comments stripped so prose
   cannot read as code: (1) the mutation scan -- a deny-list of mutating verbs
   in every spelling (quoted/unquoted/computed/form-attribute) plus form
   affordances and a `/status`-only path allowlist, AND a positive scan
@@ -3988,7 +3988,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `query::spec_from_body`; (4) self-containment of the ASSEMBLED page -- every
   `src`/`href` attribute (case-insensitive, whitespace tolerated around `=`)
   must be an inline `data:` URI and no CSS
-  `url(...)`/`@import` may appear, so the artifact still renders offline
+  `url(...)`/`@import` may appear, so the artifact still renders offline;
+  (5) no two script parts declare the same top-level name -- the parts share ONE
+  function scope, so a collision silently makes the later declaration win for
+  every caller of both, which strands one tab on its `invalid_payload` card with
+  a healthy transport; the brace-depth scan behind it recognizes every top-level
+  declaration form (`function`, `async`, generator, and `var`/`let`/`const` with
+  any number of declarators) and PANICS on one it cannot classify, with (6) a
+  per-form recognition test that feeds each form in twice and asserts the
+  collision is reported; (7) the two `/status/query` read shapes own SEPARATE
+  source records, each `SOURCE_PANEL`-mapped to the query wire version, with
+  Overview and Usage naming different primaries in `TAB_SOURCES` and the
+  transport wiring (`querySourceFor` arms, `queryRound` resolution,
+  `applyQueryOutcome` writing only its `source` parameter) asserted from the
+  extracted function bodies
 - `src/handlers/status/dashboard.html` -- dashboard MARKUP only: the verdict
   strip (state dot + one plain-language sentence + req/span + window picker +
   poll indicator, which reports the as_of AGE of the active tab's data; carries
@@ -4019,17 +4032,23 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   declaration order, so these rules land last and may lean on the component
   vocabulary above
 - `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 13: the
-  client's shared state. `EXPECTED` (per-source wire versions), the six DATA
+  client's shared state. `EXPECTED` (per-source wire versions), the seven DATA
   SOURCES -- `usage`/`health`/`config`/`doctor` off the GET `/status`
-  aggregate, plus `query` and `usage_all` -- each with an independent state
-  record
+  aggregate, plus `query`, `query_series`, and `usage_all` -- each with an
+  independent state record
   (`loading|live|empty|unavailable|incompatible|invalid_payload|stale|dead`),
   and `TAB_SOURCES` mapping them to the six tabs, so a dead QUERY degrades only
-  Overview and Usage while the four GET-backed tabs keep rendering. `usage_all`
+  Overview and Usage while the four GET-backed tabs keep rendering. `query` and
+  `query_series` are the two `/status/query` READ SHAPES -- Usage's series-less
+  roll-up and Overview's bucketed one -- as separate records, because the two
+  payloads are not interchangeable (Overview's sparklines need the series Usage
+  does not request) and one shared record would let whichever tab polled last
+  define what the other rendered from. `usage_all`
   is a SEPARATE GET of `/status/usage?window=all` on its own controller,
   backoff index, timer, and `as_of`, validated against the usage panel's wire
   version through `SOURCE_PANEL` (`expectedVersion` resolves a source name to
-  its panel); it exists because Routing attributes over ALL HISTORY while the
+  its panel; `query_series` resolves to the query panel the same way); it
+  exists because Routing attributes over ALL HISTORY while the
   aggregate's usage panel stays today-scoped for the readers that want today
   (the Health quota tiles, the Overview seat surface, the verdict strip). Also
   holds the cadence and budget constants (`BASE_MS`, the shared
@@ -4049,7 +4068,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (numeric) + `QUERY_TOKENS` (pass-through, e.g. `cost_status`) are the ONLY
   home of raw query field names, consumed solely by the thin `QueryAdapter`
   flat-extraction layer (num0 coercion on the numeric half, no rename, no
-  computed model); render code reads adapter properties. `QUERY_SHAPES` is the
+  computed model); render code reads adapter properties. `queryViewOf(name)`
+  adapts ONE query source's payload (`queryView` for Usage's series-less read,
+  `querySeriesView` for Overview's bucketed one), so neither tab can render from
+  the other's shape. `QUERY_SHAPES` is the
   COMPLETE request vocabulary -- every selectable window x every group_by x
   each series mode -- written as strict JSON so the Rust guard can feed each
   shape to the server's own parser verbatim
@@ -4067,7 +4089,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   503/network/timeout plus the 200-borne `QUERY_RETRY_CODES`
   (`db_busy`/`db_unavailable`/`query_timeout`) -> QUERY-only 10/20/30s backoff
   off the shared `BACKOFF_STEPS_MS` ladder, over which QUERY and GET keep
-  separate indexes. Also the aggregate round (`runRound`/`tick`/
+  separate indexes. `shapeFor(tab)` picks the request shape and
+  `querySourceFor(tab)` the record its response lands in, so each round writes
+  the source belonging to the shape it asked for. Also the aggregate round
+  (`runRound`/`tick`/
   `scheduleNext`), the visibility-aware refresh, and the independent
   `usage_all` round with its own controller, generation, and schedule
 - `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 5 of 13: the
@@ -4097,7 +4122,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   computed against the as_of of the record it came from (`panelNowMs(rec)`,
   `ageSince`); there is no page-global render clock
 - `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 7 of
-  13: the Overview tab, MULTI-SOURCE (`query` primary, plus `usage` for the
+  13: the Overview tab, MULTI-SOURCE (`query_series` primary -- the bucketed
+  read whose series feeds the sparklines -- plus `usage` for the
   seat surface). The provider row leads with an all-providers AGGREGATE card
   built from the query `totals` (the scope reset), then the busiest
   `PROVIDER_CARD_CAP` provider cards from `groups`, then -- only when more
@@ -4116,7 +4142,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   synthesized tile, and no cross-seat rollup. Eight KPI tiles come from
   `totals`, each carrying a sparkline over `series.buckets[].metrics`; the seat
   read is guarded on the usage record alone, so a usage fault costs the seat
-  surface and leaves the KPI and provider blocks live
+  surface and leaves the KPI and provider blocks live. The provider row builder
+  is `providerRowSection`, named for the row rather than its subject because the
+  script parts share one function scope with Config's provider TABLE builder
 - `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 8 of 13:
   the Usage tab, single-source (`query`). Renders the group-by picker
   (model/alias/provider, re-issuing the non-series query through

@@ -12,7 +12,15 @@
   // freshness. NOT the same list as TABS: a tab is a view, a source is a
   // fetch.
   var GET_SOURCES = ['usage', 'health', 'config', 'doctor'];
+  // The two QUERY reads, each its OWN source. Both speak `/status/query`, but
+  // Usage asks for a series-less roll-up and Overview asks for a bucketed one,
+  // and the two payloads are not interchangeable: Overview cannot draw a
+  // sparkline from a payload whose `series` is null. Sharing one record made
+  // whichever tab polled last define what the other tab rendered from, so a tab
+  // switch painted one tab out of the other's payload. Two shapes are two
+  // sources -- the same rule that splits usage from usage_all below.
   var QUERY_SOURCE = 'query';
+  var QUERY_SERIES_SOURCE = 'query_series';
   // The all-history usage read: its OWN fetch, its OWN backoff, its OWN
   // as_of. Routing attributes over ALL HISTORY, so it must never read the
   // aggregate's today-scoped usage panel -- and the aggregate panel must stay
@@ -20,16 +28,25 @@
   // verdict strip). Two windows of one panel are two sources.
   var USAGE_ALL_SOURCE = 'usage_all';
   var USAGE_ALL_URL = '/status/usage?window=all';
-  var ALL_SOURCES = GET_SOURCES.concat([QUERY_SOURCE, USAGE_ALL_SOURCE]);
+  var ALL_SOURCES = GET_SOURCES.concat([
+    QUERY_SOURCE,
+    QUERY_SERIES_SOURCE,
+    USAGE_ALL_SOURCE
+  ]);
 
   // The panel a source's envelope belongs to, where the two differ. The
   // all-history read is the usage PANEL at another window, so it validates
-  // against the usage wire version rather than one of its own.
-  var SOURCE_PANEL = { usage_all: 'usage' };
+  // against the usage wire version rather than one of its own; the bucketed
+  // QUERY is the query PANEL at another request shape, so it validates against
+  // the query wire version.
+  var SOURCE_PANEL = { usage_all: 'usage', query_series: 'query' };
 
   // What a degraded source is called in the verdict strip. A source name is
   // an internal key; only the ones that do not read as English need a word.
-  var SOURCE_LABELS = { usage_all: 'all-history usage' };
+  var SOURCE_LABELS = {
+    usage_all: 'all-history usage',
+    query_series: 'bucketed usage'
+  };
 
   function expectedVersion(name) {
     return EXPECTED[SOURCE_PANEL[name] || name];
@@ -57,7 +74,7 @@
   // subject first (Routing is about the CONFIGURED chains; the ledger and
   // health only describe them).
   var TAB_SOURCES = {
-    overview: [QUERY_SOURCE, 'usage'],
+    overview: [QUERY_SERIES_SOURCE, 'usage'],
     usage: [QUERY_SOURCE],
     routing: ['config', USAGE_ALL_SOURCE, 'health'],
     health: ['health', 'usage'],

@@ -122,18 +122,30 @@
       (!!series && typeof series === 'object' && !Array.isArray(series));
   }
 
-  // The adapted QUERY payload for the current selection, or null when the
-  // query source carries no usable payload. `stale` counts as usable: a 503
-  // RETAINS the last-good data by design, and the degradation is the section
-  // status line's job to report -- discarding it here would turn a recoverable
-  // overload into an invalid-payload card and lose the stale-values reading.
+  // The adapted QUERY payload of ONE query source, or null when that source
+  // carries no usable payload. `stale` counts as usable: a 503 RETAINS the
+  // last-good data by design, and the degradation is the section status line's
+  // job to report -- discarding it here would turn a recoverable overload into
+  // an invalid-payload card and lose the stale-values reading.
   //
   // A payload that does not match its declared shape returns null, so both
   // query-backed builders throw inside `safeSection` and the source records
   // `invalid_payload` -- corruption is never adapted into an empty ledger.
-  function queryView() {
-    var rec = SOURCES[QUERY_SOURCE];
+  function queryViewOf(name) {
+    var rec = SOURCES[name];
     var usable = rec.state === 'live' || rec.state === 'stale';
     return (usable && isQueryShape(rec.data)) ? QueryAdapter(rec.data) : null;
+  }
+
+  // Usage's series-less read.
+  function queryView() {
+    return queryViewOf(QUERY_SOURCE);
+  }
+
+  // Overview's bucketed read. A separate source rather than the same one at
+  // another shape, so a series-less Usage payload can never become what Overview
+  // renders from (see the QUERY source split in the state part).
+  function querySeriesView() {
+    return queryViewOf(QUERY_SERIES_SOURCE);
   }
 
