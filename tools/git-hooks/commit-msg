@@ -28,5 +28,26 @@ if [[ -f "$ROOT/tools/git-hooks/check-drift.sh" ]]; then
     fi
 fi
 
-bash "$ROOT/scripts/check-internal-ids.sh" --commit-msg "$1"
-bash "$ROOT/tools/git-hooks/check-subject-length.sh" "$1"
+# Both checks below are real gates: when their script is PRESENT, a
+# finding blocks the commit (`set -e` propagates their non-zero exit).
+# But `.git/hooks/commit-msg` is a symlink shared by every worktree of
+# this repo, so ROOT here is the CHECKED-OUT tree, not the tree that
+# owns the hook. A tree cut before a given check script existed (an
+# older worktree, a bisect step, a pre-check branch) would otherwise hit
+# a bare "No such file or directory" and block every commit under
+# `set -e`, with no way to satisfy a rule the tree predates. Treat a
+# missing checker as "this tree predates the rule": warn loudly and
+# allow, rather than refuse. A checker that IS present still enforces
+# fail-closed with no change in behavior.
+run_gate() {
+    local script="$1"
+    shift
+    if [[ ! -f "$script" ]]; then
+        echo "commit-msg: WARNING: $script not found in this checkout -- this tree predates the check, so it is SKIPPED and the commit is ALLOWED without it" >&2
+        return 0
+    fi
+    bash "$script" "$@"
+}
+
+run_gate "$ROOT/scripts/check-internal-ids.sh" --commit-msg "$1"
+run_gate "$ROOT/tools/git-hooks/check-subject-length.sh" "$1"
