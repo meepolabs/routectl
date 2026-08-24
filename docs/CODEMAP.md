@@ -1761,11 +1761,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   missing-key / absent-data `Err` when tagging a skipped selector's
   `SkipKind`.
   `ttl_seconds`/`min_prefix_tokens`/`auto_cacher`/provider-catch-all rows are
-  curated constants (neither vendor feed publishes them). Base per-token rates
-  (`input_cost_per_token`/`output_cost_per_token`) go through the same
-  cross-check, normalizing models.dev's per-million-token unit to per-token;
-  a `price_ambiguous` selector stays priced-`None` rather than baking one
-  representative model's rate, and `narrow_rate` drops any rate that is
+  curated constants (neither vendor feed publishes them). `max_context_tokens`
+  (`context_window_for`) and the base per-token rates
+  (`input_cost_per_token`/`output_cost_per_token`, `base_rates_for`) for an
+  `AutoCacherSelector` require EVERY litellm entry the selector's glob spans
+  to agree (`litellm_unanimous_context_window` / `litellm_unanimous_rate`)
+  before cross-checking against models.dev, normalizing models.dev's
+  per-million-token unit to per-token for the rates; a `context_ambiguous` /
+  `price_ambiguous` selector stays `None` rather than baking one
+  representative model's figure. A `TieredSelector`'s pinned glob uses the
+  plain representative-entry cross-check instead (`pinned_base_rates_for`),
+  since it carries no such flag. `narrow_rate` drops any rate that is
   negative/non-finite at source OR that overflows to infinity / underflows a
   positive value to zero on the `f64 -> f32` cast (a source zero passes
   through as a real free tier). `max_output_tokens` (`output_ceiling_for`)
@@ -1785,9 +1791,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `economics_unconfirmed`/`context_ambiguous`/`price_ambiguous`/`output_ambiguous`
   escape hatches -- `output_ambiguous` sits on BOTH selector types, since a
   version-pinned Claude glob can span gateway re-listings that cap output
-  lower than the direct API does, and is a pure SUPPRESSOR asserted against
-  the snapshots by
-  `every_selectors_output_ambiguous_flag_matches_the_snapshots`, never the
+  lower than the direct API does; `context_ambiguous`/`price_ambiguous` sit
+  only on `AutoCacherSelector`. All three are pure SUPPRESSORS, asserted
+  against the snapshots by `every_selectors_output_ambiguous_flag_matches_the_snapshots`
+  / `every_selectors_context_ambiguous_flag_matches_the_snapshots` /
+  `every_selectors_price_ambiguous_flag_matches_the_snapshots`, never the
   derivation's source of truth)
 - `src/bin/gen_catalog.rs` -- `cargo run --bin gen_catalog` regenerates
   `src/catalog_baked.rs` from `catalog_data/` via

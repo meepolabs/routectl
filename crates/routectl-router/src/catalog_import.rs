@@ -1061,7 +1061,11 @@ mod tests {
         assert!(cell.rm.is_some());
         assert!(cell.ttl_seconds.is_some());
         assert!(cell.min_prefix_tokens.is_some());
-        assert!(cell.max_context_tokens.is_some());
+        // `context_ambiguous` is set on this selector (the bare `*` glob
+        // spans the whole OpenAI lineup), so the window stays suppressed
+        // even though the fixture publishes one for the representative
+        // model.
+        assert!(cell.max_context_tokens.is_none());
     }
 
     // -----------------------------------------------------------------------

@@ -96,7 +96,7 @@ use crate::glob::AliasPattern;
 /// NOT on a vendor-snapshot refresh that leaves the generated shape
 /// unchanged. Rendered into `catalog_baked.rs` as `CATALOG_VERSION: u32`.
 #[cfg(feature = "gen-catalog")]
-const CATALOG_VERSION: u32 = 3;
+const CATALOG_VERSION: u32 = 4;
 
 /// Display-only date the vendored snapshots under `catalog_data/` were
 /// fetched, hand-maintained here (never the wall clock -- see the module
@@ -474,12 +474,13 @@ fn anthropic_like_cells(
         md_entry,
         allowlist,
     )?;
-    // Every tiered selector's glob is pinned to one model generation, whose
-    // dated ids all price identically in both snapshots -- so unlike the
-    // vendor-wide openai-compat prefixes, one rate is right for the whole
-    // glob.
+    // Every tiered selector's glob is pinned to one model generation, so
+    // (unlike the vendor-wide openai-compat prefixes) it uses the plain
+    // representative-entry cross-check rather than the glob-wide unanimity
+    // gate `base_rates_for` applies for an [`AutoCacherSelector`] -- see
+    // `pinned_base_rates_for`.
     let (input_cost_per_token, output_cost_per_token) =
-        base_rates_for(&selector_id, false, entry, md_entry, allowlist)?;
+        pinned_base_rates_for(&selector_id, entry, md_entry, allowlist)?;
 
     let mut out = vec![GeneratedCell {
         provider_kind,
@@ -536,17 +537,14 @@ fn auto_cacher_cell(
         .and_then(|p| p.get("models"))
         .and_then(|m| m.get(sel.models_dev_model));
 
-    let ctx = if sel.context_ambiguous {
-        None
-    } else {
-        resolve_u32(
-            &selector_id,
-            "max_context_tokens",
-            md_entry.and_then(models_dev_context),
-            litellm_context(entry),
-            allowlist,
-        )?
-    };
+    let ctx = context_window_for(
+        &selector_id,
+        sel.model_glob,
+        sel.context_ambiguous,
+        litellm,
+        md_entry,
+        allowlist,
+    )?;
     let capabilities = capabilities_for(&selector_id, entry, md_entry, allowlist)?;
     let output_ceiling = output_ceiling_for(
         &selector_id,
@@ -560,7 +558,8 @@ fn auto_cacher_cell(
     let (input_cost_per_token, output_cost_per_token) = base_rates_for(
         &selector_id,
         sel.price_ambiguous,
-        entry,
+        sel.model_glob,
+        litellm,
         md_entry,
         allowlist,
     )?;
@@ -622,28 +621,25 @@ fn auto_cacher_cell(
     })
 }
 
-/// Derive the base per-token input/output rates for one selector through
-/// the SAME two-source cross-check the multipliers use: agreement or
+/// Derive a tiered (Anthropic-shaped) selector's base per-token rates from
+/// its single representative litellm entry, cross-checked against
+/// models.dev through the ordinary [`resolve_f64`] path: agreement or
 /// single-source data passes through, a disagreement fails generation
 /// unless the allowlist resolves it.
 ///
-/// `price_ambiguous` forces both rates to `None`: the selector's glob
-/// matches models the snapshots price very differently (a bare `"*"`
-/// catch-all, or a vendor-wide prefix spanning an embedding model and a
-/// flagship), so the representative model's rate would be confidently wrong
-/// for most of what the glob serves. That mirrors
-/// [`AutoCacherSelector::context_ambiguous`]'s posture for the window:
-/// ABSENT beats a guess.
-fn base_rates_for(
+/// Unlike [`base_rates_for`] (which an [`AutoCacherSelector`]'s vendor-wide
+/// glob needs the glob-scan unanimity gate for), a [`TieredSelector`]'s glob
+/// is pinned to one model generation with no curated `price_ambiguous`
+/// escape hatch of its own: `output_ceiling_for` derives its ceiling
+/// mechanically for both selector types, but the base rates here still
+/// cross-check only the one representative entry, with no glob-span
+/// unanimity gate backing that cross-check.
+fn pinned_base_rates_for(
     selector_id: &str,
-    price_ambiguous: bool,
     litellm_entry: &Value,
     models_dev_entry: Option<&Value>,
     allowlist: &Allowlist,
 ) -> Result<(Option<f32>, Option<f32>), String> {
-    if price_ambiguous {
-        return Ok((None, None));
-    }
     let rate = |field: &str, models_dev_field: &str| -> Result<Option<f32>, String> {
         Ok(resolve_f64(
             selector_id,
@@ -658,6 +654,83 @@ fn base_rates_for(
         rate("input_cost_per_token", "input")?,
         rate("output_cost_per_token", "output")?,
     ))
+}
+
+/// Derive the base per-token input/output rates for one auto-cacher
+/// selector through the SAME two-source cross-check the multipliers use:
+/// agreement or single-source data passes through, a disagreement fails
+/// generation unless the allowlist resolves it.
+///
+/// `price_ambiguous` forces both rates to `None`: the selector's glob
+/// matches models the snapshots price very differently (a bare `"*"`
+/// catch-all, or a vendor-wide prefix spanning an embedding model and a
+/// flagship), so the representative model's rate would be confidently wrong
+/// for most of what the glob serves. That mirrors
+/// [`AutoCacherSelector::context_ambiguous`]'s posture for the window:
+/// ABSENT beats a guess.
+///
+/// `price_ambiguous` is a curated SUPPRESSOR, never a source of truth: the
+/// litellm side of each rate is derived from EVERY litellm entry the
+/// selector's glob spans agreeing (see [`litellm_unanimous_rate`]), the same
+/// mechanical unanimity [`output_ceiling_for`] applies to the output
+/// ceiling. A non-unanimous glob span bakes nothing regardless of the flag;
+/// the flag can only withhold a rate the snapshots would otherwise support,
+/// so a stale flag can never bake an incoherently-priced rate.
+/// `price_ambiguous` disagreeing with the mechanical verdict is caught by
+/// `every_selectors_price_ambiguous_flag_matches_the_snapshots`.
+fn base_rates_for(
+    selector_id: &str,
+    price_ambiguous: bool,
+    model_glob: &str,
+    litellm: &Value,
+    models_dev_entry: Option<&Value>,
+    allowlist: &Allowlist,
+) -> Result<(Option<f32>, Option<f32>), String> {
+    if price_ambiguous {
+        return Ok((None, None));
+    }
+    let rate = |field: &str, models_dev_field: &str| -> Result<Option<f32>, String> {
+        let Some(litellm_rate) = litellm_unanimous_rate(litellm, model_glob, field) else {
+            return Ok(None);
+        };
+        Ok(resolve_f64(
+            selector_id,
+            field,
+            models_dev_entry.and_then(|e| models_dev_rate(e, models_dev_field)),
+            Some(litellm_rate),
+            allowlist,
+        )?
+        .and_then(narrow_rate))
+    };
+    Ok((
+        rate("input_cost_per_token", "input")?,
+        rate("output_cost_per_token", "output")?,
+    ))
+}
+
+/// The single per-token rate (`field`, one of `input_cost_per_token` /
+/// `output_cost_per_token`) that EVERY litellm entry the selector's glob
+/// spans publishes: `None` when two spanned entries disagree, or when no
+/// spanned entry publishes a usable figure. Mirrors
+/// [`litellm_unanimous_output_ceiling`] for the price fields, using
+/// [`approx_eq`] rather than exact equality since these are floating-point
+/// dollar rates independently rounded by the source.
+fn litellm_unanimous_rate(litellm: &Value, model_glob: &str, field: &str) -> Option<f64> {
+    let mut agreed: Option<f64> = None;
+    for (key, entry) in litellm.as_object()? {
+        if !glob_spans_litellm_key(model_glob, key) {
+            continue;
+        }
+        let Some(rate) = f64_field(entry, field) else {
+            continue;
+        };
+        match agreed {
+            None => agreed = Some(rate),
+            Some(previous) if approx_eq(previous, rate) => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
 }
 
 /// Narrow a source `f64` per-token rate to the baked `f32`, or drop it
@@ -855,6 +928,64 @@ fn litellm_unanimous_output_ceiling(litellm: &Value, model_glob: &str) -> Option
         }
     }
     agreed
+}
+
+/// The single confirmed context window that EVERY litellm entry the
+/// selector's glob spans publishes: `None` when two spanned entries
+/// disagree, or when no spanned entry publishes a usable figure. Mirrors
+/// [`litellm_unanimous_output_ceiling`] for `max_input_tokens`.
+fn litellm_unanimous_context_window(litellm: &Value, model_glob: &str) -> Option<u32> {
+    let mut agreed: Option<u32> = None;
+    for (key, entry) in litellm.as_object()? {
+        if !glob_spans_litellm_key(model_glob, key) {
+            continue;
+        }
+        let Some(window) = litellm_context(entry) else {
+            continue;
+        };
+        match agreed {
+            None => agreed = Some(window),
+            Some(previous) if previous == window => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// Derive one auto-cacher selector's baked confirmed context window.
+/// `context_ambiguous` short-circuits to `None`, but the mechanical
+/// derivation runs regardless of the flag's value: every litellm entry the
+/// glob spans has to agree on a figure ([`litellm_unanimous_context_window`])
+/// before it is cross-checked against models.dev's single representative
+/// figure through the ordinary [`resolve_f64`] path (single-source data is
+/// still enough here, unlike the output ceiling -- see the module doc).
+///
+/// `context_ambiguous` is a curated SUPPRESSOR, never a source of truth: it
+/// can only withhold a window the snapshots would otherwise support, so a
+/// stale flag can never bake an incoherent window.
+/// `context_ambiguous` disagreeing with the mechanical verdict is caught by
+/// `every_selectors_context_ambiguous_flag_matches_the_snapshots`.
+fn context_window_for(
+    selector_id: &str,
+    model_glob: &str,
+    context_ambiguous: bool,
+    litellm: &Value,
+    models_dev_entry: Option<&Value>,
+    allowlist: &Allowlist,
+) -> Result<Option<u32>, String> {
+    if context_ambiguous {
+        return Ok(None);
+    }
+    let Some(litellm_window) = litellm_unanimous_context_window(litellm, model_glob) else {
+        return Ok(None);
+    };
+    resolve_u32(
+        selector_id,
+        "max_context_tokens",
+        models_dev_entry.and_then(models_dev_context),
+        Some(litellm_window),
+        allowlist,
+    )
 }
 
 /// Derive one selector's baked output ceiling under STRICT coherence (see
@@ -1308,7 +1439,10 @@ mod tests {
             .expect("the auto-cacher selector derives");
         assert_eq!(auto_cacher_cells.len(), 1, "single tier-agnostic row");
         assert!(auto_cacher_cells[0].tier.is_none());
-        assert_eq!(auto_cacher_cells[0].max_context_tokens, Some(400_000));
+        // The openai-responses `*` glob is `context_ambiguous`: it serves
+        // every OpenAI model, so it stays window-ABSENT even though both
+        // fixtures publish a window for the representative model.
+        assert_eq!(auto_cacher_cells[0].max_context_tokens, None);
         // The openai-responses `*` glob is `price_ambiguous`: it serves every
         // OpenAI model, so it stays priced-ABSENT even though both fixtures
         // publish a rate for the representative model.
@@ -1322,14 +1456,16 @@ mod tests {
         // models.dev per million tokens, litellm per token. Agreement here
         // is only reachable through the conversion.
         let litellm = serde_json::json!({
-            "input_cost_per_token": 3.0e-6,
-            "output_cost_per_token": 1.5e-5,
+            "m": {
+                "input_cost_per_token": 3.0e-6,
+                "output_cost_per_token": 1.5e-5,
+            },
         });
         let models_dev = serde_json::json!({"cost": {"input": 3.0, "output": 15.0}});
         let allowlist = Allowlist::parse("{}").expect("parse");
 
         // Act
-        let rates = base_rates_for("k:m", false, &litellm, Some(&models_dev), &allowlist)
+        let rates = base_rates_for("k:m", false, "m", &litellm, Some(&models_dev), &allowlist)
             .expect("agreeing rates must not trip the cross-check");
 
         // Assert
@@ -1340,12 +1476,12 @@ mod tests {
     fn base_rates_fail_closed_on_an_unallowlisted_price_disagreement() {
         // Arrange: models.dev says $3/M, litellm says $4/M -- a real gap,
         // not a unit artifact.
-        let litellm = serde_json::json!({"input_cost_per_token": 4.0e-6});
+        let litellm = serde_json::json!({"m": {"input_cost_per_token": 4.0e-6}});
         let models_dev = serde_json::json!({"cost": {"input": 3.0}});
         let allowlist = Allowlist::parse("{}").expect("parse");
 
         // Act
-        let err = base_rates_for("k:m", false, &litellm, Some(&models_dev), &allowlist)
+        let err = base_rates_for("k:m", false, "m", &litellm, Some(&models_dev), &allowlist)
             .expect_err("a genuine price disagreement must fail generation");
 
         // Assert
@@ -1357,11 +1493,11 @@ mod tests {
     fn base_rates_drop_a_negative_published_rate_rather_than_baking_it() {
         // Arrange: a single source publishing a nonsense negative price (no
         // cross-check to run, so the filter is the only guard).
-        let litellm = serde_json::json!({"input_cost_per_token": -1.0e-6});
+        let litellm = serde_json::json!({"m": {"input_cost_per_token": -1.0e-6}});
         let allowlist = Allowlist::parse("{}").expect("parse");
 
         // Act
-        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+        let rates = base_rates_for("k:m", false, "m", &litellm, None, &allowlist).expect("derives");
 
         // Assert: priced-ABSENT, not a negative rate.
         assert_eq!(rates, (None, None));
@@ -1370,11 +1506,11 @@ mod tests {
     #[test]
     fn base_rates_keep_a_zero_rate_since_a_free_tier_is_real() {
         // Arrange
-        let litellm = serde_json::json!({"input_cost_per_token": 0.0});
+        let litellm = serde_json::json!({"m": {"input_cost_per_token": 0.0}});
         let allowlist = Allowlist::parse("{}").expect("parse");
 
         // Act
-        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+        let rates = base_rates_for("k:m", false, "m", &litellm, None, &allowlist).expect("derives");
 
         // Assert
         assert_eq!(rates, (Some(0.0), None));
@@ -1390,11 +1526,11 @@ mod tests {
         // Arrange: finite as f64, but past f32::MAX (~3.4e38), so the cast
         // yields f32::INFINITY -- a source-value finiteness check alone
         // would wave this through.
-        let litellm = serde_json::json!({"input_cost_per_token": 1.0e300});
+        let litellm = serde_json::json!({"m": {"input_cost_per_token": 1.0e300}});
         let allowlist = Allowlist::parse("{}").expect("parse");
 
         // Act
-        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+        let rates = base_rates_for("k:m", false, "m", &litellm, None, &allowlist).expect("derives");
 
         // Assert: priced-ABSENT, never an infinite baked rate.
         assert_eq!(rates, (None, None));
@@ -1405,11 +1541,11 @@ mod tests {
         // Arrange: a positive f64 far below f32's smallest subnormal
         // (~1e-45), so the cast collapses it to 0.0 -- which would
         // otherwise read as a free tier rather than a lost value.
-        let litellm = serde_json::json!({"input_cost_per_token": 1.0e-300});
+        let litellm = serde_json::json!({"m": {"input_cost_per_token": 1.0e-300}});
         let allowlist = Allowlist::parse("{}").expect("parse");
 
         // Act
-        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+        let rates = base_rates_for("k:m", false, "m", &litellm, None, &allowlist).expect("derives");
 
         // Assert: priced-ABSENT, never a spurious zero.
         assert_eq!(rates, (None, None));
@@ -1794,6 +1930,84 @@ mod tests {
         assert!(
             disagreeing.is_empty(),
             "each selector's output_ambiguous flag disagrees with the vendored snapshots: \
+             {disagreeing:?}"
+        );
+    }
+
+    #[cfg(feature = "gen-catalog")]
+    #[test]
+    fn every_selectors_context_ambiguous_flag_matches_the_snapshots() {
+        // Same weld as `every_selectors_output_ambiguous_flag_matches_the_snapshots`,
+        // applied to `context_ambiguous`: only the auto-cacher-shaped
+        // selectors carry the flag (a tiered selector's glob is pinned to
+        // one model generation, never ambiguous by design).
+        let litellm: Value = serde_json::from_str(LITELLM_JSON).expect("parse litellm snapshot");
+
+        let flagged: Vec<(String, bool)> = OPENAI_RESPONSES_SELECTORS
+            .iter()
+            .map(|sel| ("openai-responses", sel.model_glob, sel.context_ambiguous))
+            .chain(
+                OPENAI_COMPAT_SELECTORS
+                    .iter()
+                    .map(|sel| ("openai-compat", sel.model_glob, sel.context_ambiguous)),
+            )
+            .map(|(kind, glob, flag)| {
+                let derived_ambiguous = litellm_unanimous_context_window(&litellm, glob).is_none();
+                (
+                    crate::catalog_state::selector_key(kind, glob),
+                    flag == derived_ambiguous,
+                )
+            })
+            .collect();
+
+        let disagreeing: Vec<&String> = flagged
+            .iter()
+            .filter_map(|(selector, agrees)| (!agrees).then_some(selector))
+            .collect();
+        assert!(
+            disagreeing.is_empty(),
+            "each selector's context_ambiguous flag disagrees with the vendored snapshots: \
+             {disagreeing:?}"
+        );
+    }
+
+    #[cfg(feature = "gen-catalog")]
+    #[test]
+    fn every_selectors_price_ambiguous_flag_matches_the_snapshots() {
+        // Same weld, applied to `price_ambiguous`: a selector is coherent
+        // only when EVERY litellm entry its glob spans agrees on both base
+        // rates. Only `AutoCacherSelector` carries this flag (a
+        // `TieredSelector`'s glob uses `pinned_base_rates_for`'s plain
+        // representative-entry cross-check instead -- see its doc).
+        let litellm: Value = serde_json::from_str(LITELLM_JSON).expect("parse litellm snapshot");
+
+        let flagged: Vec<(String, bool)> = OPENAI_RESPONSES_SELECTORS
+            .iter()
+            .map(|sel| ("openai-responses", sel.model_glob, sel.price_ambiguous))
+            .chain(
+                OPENAI_COMPAT_SELECTORS
+                    .iter()
+                    .map(|sel| ("openai-compat", sel.model_glob, sel.price_ambiguous)),
+            )
+            .map(|(kind, glob, flag)| {
+                let derived_ambiguous =
+                    litellm_unanimous_rate(&litellm, glob, "input_cost_per_token").is_none()
+                        || litellm_unanimous_rate(&litellm, glob, "output_cost_per_token")
+                            .is_none();
+                (
+                    crate::catalog_state::selector_key(kind, glob),
+                    flag == derived_ambiguous,
+                )
+            })
+            .collect();
+
+        let disagreeing: Vec<&String> = flagged
+            .iter()
+            .filter_map(|(selector, agrees)| (!agrees).then_some(selector))
+            .collect();
+        assert!(
+            disagreeing.is_empty(),
+            "each selector's price_ambiguous flag disagrees with the vendored snapshots: \
              {disagreeing:?}"
         );
     }
