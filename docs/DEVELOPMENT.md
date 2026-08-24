@@ -79,18 +79,22 @@ bash tools/git-hooks/install.sh
 ```
 
 This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
-`pre-commit` hook first runs `scripts/assert-toolchain.sh`, then the
-gitleaks staged secret scan, a scan for
-accidental non-public identifiers (`scripts/check-internal-ids.sh
---staged`), and the fmt / clippy / lean-check / public-api-baseline /
-rustdoc / workspace-test gate -- the same workspace tests CI runs EXCEPT
-the two replay suites (`egress_replay_all` / `ingress_replay_all`), which
-only run against a contributor's local fixture corpus (CI runs them
-unfiltered). A final leg runs the `gen-catalog`-gated router tests, which
-no other leg compiles in. The public-api-baseline leg (`scripts/public-api.sh --check
-all`) is local-only -- CI does not run it -- and only blocks when
-`cargo-public-api` and its pinned nightly toolchain are installed;
-otherwise it prints a skip warning and continues. The `commit-msg` hook
+full detail of every pre-commit leg -- exact commands, flags, and
+skip/fail conditions -- lives in
+[`tools/git-hooks/pre-commit`](../tools/git-hooks/pre-commit) itself,
+each one named by its own `echo` as the hook runs; treat the list below
+as a same-order summary, not a substitute for reading the script. In
+order: a toolchain preflight, the gitleaks staged-secret scan, an
+internal-identifier scan, a log-display scan (flags `%`-rendered wire
+data in tracing fields), `cargo fmt --check`, a separate leg that runs
+rustfmt on `include!`d fragments `cargo fmt` never opens, `cargo
+clippy`, a lean providers-only `cargo check`, a local-only
+public-api-baseline check that skips with a warning instead of blocking
+when `cargo-public-api` or its pinned nightly isn't installed, `cargo
+doc` with rustdoc lints denied, the `--workspace` test suite CI also
+runs (except the two replay suites, which need a contributor's local
+fixture corpus and so only run unfiltered in CI), and a `gen-catalog`-
+gated router-test leg no other leg compiles. The `commit-msg` hook
 applies the same identifier scan to the commit message. Set
 `ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate while
 iterating; CI enforces the same rules fail-closed regardless.

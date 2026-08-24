@@ -19,6 +19,26 @@ fi
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# Warn (never fail) if this hook is a stale copy rather than install.sh's
+# symlink. Sourced from the tracked path so the check itself can't be the
+# stale part. A tree checked out before check-drift.sh existed (an older
+# worktree, a bisect step) legitimately lacks the file -- $ROOT is the
+# checked-out tree, not the tree that owns the running hook -- so the
+# source is itself conditional on the file being present, not just the
+# call. The source is ALSO wrapped in `|| true`: a present-but-broken
+# helper (syntax error mid-edit, unreadable permissions, stray merge
+# markers) fails `source` the same way a missing one fails `-f`, and
+# under `set -e` either would abort the hook the nag must never touch.
+# Gating the call on `declare -f` (rather than trusting the source's own
+# exit code) is what stops a partial source from leaving
+# "check_hook_drift: command not found" as the next statement.
+if [[ -f "$ROOT/tools/git-hooks/check-drift.sh" ]]; then
+    source "$ROOT/tools/git-hooks/check-drift.sh" 2>/dev/null || true
+    if declare -f check_hook_drift >/dev/null 2>&1; then
+        check_hook_drift "pre-commit" "$0" "$ROOT/tools/git-hooks/pre-commit" || true
+    fi
+fi
+
 # FIRST leg, before any cargo or rustfmt invocation: every leg below calls
 # them bare and trusts the rustup shim to honor rust-toolchain.toml. This
 # proves that trust held, so a green hook cannot mean "green against some
