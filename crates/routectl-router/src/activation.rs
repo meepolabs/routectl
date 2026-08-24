@@ -15,8 +15,7 @@ use std::fmt;
 
 use routectl_auth::LocalProbe;
 
-use crate::catalog::is_cataloged_provider_kind;
-use crate::config::{AliasValue, Config};
+use crate::config::{AliasValue, Config, is_config_provider_kind};
 
 /// Local depth cap for the alias-reachability walk. Kept independent of
 /// the router's `ALIAS_MAX_RECURSION_DEPTH` on purpose: this module does
@@ -42,8 +41,9 @@ pub enum UnresolvedReason {
     OauthExpired,
     /// No OAuth store exists to probe (HOME/XDG absent).
     OauthStoreUnavailable,
-    /// The provider's own-credential config kind carries no baked catalog
-    /// rows, so it cannot be meaningfully routed yet.
+    /// No `[providers.X]` block in this build can declare the provider's
+    /// own-credential config kind -- either the id maps to no kind at all,
+    /// or the kind's cargo feature is off in this binary.
     NotCataloged,
     /// A local probe reported an outcome this module does not yet map --
     /// treated conservatively as unresolved rather than assumed usable.
@@ -207,9 +207,12 @@ impl ActivationDelta {
 ///   - `xai`          -> `openai-compat`   (Grok, api.x.ai/v1)
 ///   - `antigravity`  -> `gemini`          (Gemini Cloud Code egress)
 ///
-/// `gemini` carries no baked catalog rows today, so `antigravity` gates
-/// through to `Unresolved(NotCataloged)` until a gemini catalog lands --
-/// intentional, not a bug (see `is_cataloged_provider_kind`).
+/// `gemini` is configurable (and, through the `antigravity` OAuth id, serves
+/// live Gemini/Cloud-Code traffic through the overlay lane) despite carrying
+/// no baked catalog rows -- see `config::schema::is_config_provider_kind`.
+/// Gating this table on baked-catalog membership would therefore be wrong;
+/// gating on the config-kind vocabulary is what makes `antigravity` resolve
+/// to `Activated` on a present token.
 ///
 /// Public so surfaces outside the activation path (the CLI's login
 /// success output) read the id->kind mapping from this one table instead
@@ -254,14 +257,17 @@ const fn status_from_probe(probe: LocalProbe) -> ActivationStatus {
 /// `probes` is the candidate universe -- the caller pairs each
 /// `routectl_auth::oauth::known_provider_ids()` entry with its local
 /// probe. Each id maps through the hardcoded id->kind table and is gated
-/// by [`is_cataloged_provider_kind`]; only a cataloged kind with a
-/// `Present` probe yields `Activated`.
+/// by [`is_config_provider_kind`]: only an id whose kind a `[providers.X]`
+/// block can name in this build, with a `Present` probe, yields
+/// `Activated`. This is the config-kind vocabulary, not baked-catalog
+/// membership -- a kind can be configurable with zero baked rows (today
+/// `gemini`) and still serve real traffic through the overlay lane.
 #[must_use]
 pub fn compute_activation(probes: &[(&str, LocalProbe)], config: &Config) -> ActivationState {
     let mut entries = BTreeMap::new();
     for (oauth_id, probe) in probes {
         let kind = provider_kind_for_oauth_id(oauth_id);
-        let status = if kind.is_some_and(is_cataloged_provider_kind) {
+        let status = if kind.is_some_and(is_config_provider_kind) {
             status_from_probe(*probe)
         } else {
             ActivationStatus::Unresolved {
@@ -429,10 +435,21 @@ mod tests {
             state.get("anthropic").unwrap().status,
             ActivationStatus::Activated
         );
+        // codex -> openai-responses is config-named only when the
+        // `openai-responses` feature is on; the probe outcome flows
+        // through in that case, otherwise the NotCataloged gate wins.
+        #[cfg(feature = "openai-responses")]
         assert_eq!(
             state.get("codex").unwrap().status,
             ActivationStatus::Unresolved {
                 reason: UnresolvedReason::OauthMissing
+            }
+        );
+        #[cfg(not(feature = "openai-responses"))]
+        assert_eq!(
+            state.get("codex").unwrap().status,
+            ActivationStatus::Unresolved {
+                reason: UnresolvedReason::NotCataloged
             }
         );
         assert_eq!(
@@ -441,8 +458,17 @@ mod tests {
                 reason: UnresolvedReason::OauthExpired
             }
         );
-        // antigravity -> gemini is not cataloged, so the NotCataloged gate
-        // wins over the store-unavailable probe outcome.
+        // antigravity -> gemini is config-named only when the `gemini`
+        // feature is on; the probe outcome flows through in that case,
+        // otherwise the NotCataloged gate wins regardless of probe.
+        #[cfg(feature = "gemini")]
+        assert_eq!(
+            state.get("antigravity").unwrap().status,
+            ActivationStatus::Unresolved {
+                reason: UnresolvedReason::OauthStoreUnavailable
+            }
+        );
+        #[cfg(not(feature = "gemini"))]
         assert_eq!(
             state.get("antigravity").unwrap().status,
             ActivationStatus::Unresolved {
@@ -464,8 +490,23 @@ mod tests {
     }
 
     #[test]
-    fn uncataloged_kind_gates_before_probe() {
-        // A present token on an uncataloged kind is still Unresolved.
+    #[cfg(feature = "gemini")]
+    fn gemini_kind_seat_activates_on_present_token() {
+        // A live antigravity/gemini seat must not report as a false
+        // negative: gemini is config-nameable in this build, and the
+        // overlay lane serves it, so a present token activates.
+        let cfg = Config::default();
+        let state = compute_activation(&[("antigravity", LocalProbe::Present)], &cfg);
+        let e = state.get("antigravity").unwrap();
+        assert_eq!(e.provider_kind, "gemini");
+        assert_eq!(e.status, ActivationStatus::Activated);
+    }
+
+    #[test]
+    #[cfg(not(feature = "gemini"))]
+    fn gemini_kind_gates_before_probe_when_feature_off() {
+        // With the `gemini` feature off, no config can name the kind, so a
+        // present token is still Unresolved.
         let cfg = Config::default();
         let state = compute_activation(&[("antigravity", LocalProbe::Present)], &cfg);
         let e = state.get("antigravity").unwrap();
@@ -727,20 +768,27 @@ mod tests {
     }
 
     #[test]
-    fn mapped_kind_catalog_membership_is_pinned() {
-        // Pins which oauth providers' own-credential kinds carry baked
-        // catalog rows. anthropic/codex/xai are cataloged (-> Activated on
-        // a present token); antigravity maps to `gemini`, which has no
-        // baked rows yet and is intentionally NOT cataloged (-> always
-        // Unresolved(NotCataloged) until a gemini catalog lands). If this
-        // set drifts, the reason-code expectations above must be
-        // re-reviewed.
-        let cataloged: Vec<&str> = routectl_auth::oauth::known_provider_ids()
+    fn mapped_kind_gating_is_pinned() {
+        // Pins which oauth providers' own-credential kinds a `[providers.X]`
+        // block can name in this build. anthropic (anthropic-api) and xai
+        // (openai-compat) are always configurable; codex (openai-responses)
+        // depends on the `openai-responses` cargo feature and antigravity
+        // (gemini) depends on the `gemini` cargo feature. An id whose kind's
+        // feature is off gates through to Unresolved(NotCataloged)
+        // regardless of probe outcome. If this set drifts, the reason-code
+        // expectations above must be re-reviewed.
+        let gated_through: Vec<&str> = routectl_auth::oauth::known_provider_ids()
             .iter()
             .copied()
-            .filter(|id| provider_kind_for_oauth_id(id).is_some_and(is_cataloged_provider_kind))
+            .filter(|id| provider_kind_for_oauth_id(id).is_some_and(is_config_provider_kind))
             .collect();
-        assert_eq!(cataloged, ["anthropic", "codex", "xai"]);
+        let mut expected = vec!["anthropic"];
+        #[cfg(feature = "openai-responses")]
+        expected.push("codex");
+        expected.push("xai");
+        #[cfg(feature = "gemini")]
+        expected.push("antigravity");
+        assert_eq!(gated_through, expected);
     }
 
     #[test]

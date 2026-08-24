@@ -84,7 +84,9 @@ fn inventory_finding(id: &str, entry: &ActivationEntry) -> Finding {
 fn inventory_remediation(id: &str, reason: UnresolvedReason) -> String {
     match reason {
         UnresolvedReason::NotCataloged => {
-            "this provider has no built-in catalog entries yet and cannot be routed".to_string()
+            "no `[providers.X]` block in this build can declare this provider's kind; \
+             rebuild routectl with the owning cargo feature enabled"
+                .to_string()
         }
         _ => format!("run `routectl login {id}` to activate this provider"),
     }

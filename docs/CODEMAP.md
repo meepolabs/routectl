@@ -1112,7 +1112,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   types (`Status`, `Finding`, `WouldTrimPanel`, `DoctorPanels`,
   `DoctorReport`, `ProbeOutcome`, `overall_exit`)
 - `src/activation.rs` -- PURE auto-activation inventory (leaf module; imports
-  ONLY `config` types, `catalog::is_cataloged_provider_kind`, and
+  ONLY `config` types, `config::is_config_provider_kind`, and
   `routectl_auth::LocalProbe` -- no `router`/`factory` dep, so activation
   state is "never traffic" by construction). `compute_activation(probes:
   &[(&str, LocalProbe)], config) -> ActivationState` is pure + infallible: the
@@ -1122,8 +1122,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (public, so the CLI's login output reads the same map)
   (`anthropic`->`anthropic-api`, `codex`->`openai-responses`,
   `xai`->`openai-compat`, `antigravity`->`gemini`) gated by
-  `is_cataloged_provider_kind` -- an uncataloged kind (today `gemini`) yields
-  `Unresolved{NotCataloged}` regardless of probe outcome, otherwise
+  `is_config_provider_kind` -- a kind no `[providers.X]` block can declare in
+  this build yields `Unresolved{NotCataloged}` regardless of probe outcome
+  (today only when the owning cargo feature is off), otherwise
   `Present`->`Activated`, `Missing`/`Expired`/`StoreUnavailable`->the matching
   `UnresolvedReason` (snake_case reason codes; a future `#[non_exhaustive]`
   `LocalProbe` variant maps conservatively to `Unknown`).
@@ -4612,14 +4613,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   stale/legacy files, re-validates candidates, and prompts on egress-defining
   edits identically
 - `src/commands/provider_env.rs` -- conventional per-provider-kind credential
-  env-var table (`anthropic-api`->`ANTHROPIC_API_KEY`,
-  `openai-compat`/`openai-responses`->`OPENAI_API_KEY`), gated on
-  `routectl_router::is_cataloged_provider_kind`. `env_var_for_kind(kind)`
-  returns the single var an onboarding flow may OFFER as `env://VAR`; an
-  explicit `EXCLUDED_KINDS` list documents cataloged kinds with no single
-  conventional var (bedrock: multi-var), and a drift test forces every
-  cataloged kind into exactly one of the table/exclusion set. Suggest-only:
-  never reads the environment, never auto-routes
+  env-var table (`env_var_for_kind`), gated on
+  `routectl_router::is_config_provider_kind`; a drift test forces every
+  config-nameable kind into the table or the `EXCLUDED_KINDS` list.
+  Suggest-only: never reads the environment, never auto-routes
 - `src/commands/provider_add/mod.rs` -- `routectl provider add` entry +
   orchestration: the `ProviderAddArgs` flag surface, the injectable `AddIo`
   seam (stdin / hidden prompt / env offer / oauth login) with production

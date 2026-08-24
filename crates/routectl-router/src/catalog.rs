@@ -649,9 +649,13 @@ pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CatalogRo
 /// (`anthropic-api`, `openai-compat`, ...). Derived from `TABLE`
 /// itself, so it cannot drift from the cataloged kind set.
 ///
-/// The coupling guard for callers (e.g. activation gating) that need to
-/// ask "is this provider kind cataloged?" without reaching into the
-/// baked-table internals (`BakedCell` / `TABLE` stay private).
+/// The coupling guard for callers (e.g. `cache_pricing` override validation)
+/// that need to ask "is this provider kind cataloged?" without reaching
+/// into the baked-table internals (`BakedCell` / `TABLE` stay private).
+/// Distinct from `config::schema::is_config_provider_kind` -- a kind can be
+/// configurable with zero baked rows (today `gemini`); a caller asking
+/// whether an overlay cell can be SERVED wants that predicate instead, not
+/// this one.
 #[must_use]
 pub fn is_cataloged_provider_kind(kind: &str) -> bool {
     TABLE.iter().any(|cell| cell.provider_kind == kind)
