@@ -1125,6 +1125,78 @@ mod tests {
         }
     }
 
+    /// The deterministic-refusal marker (`queryRejectedKeyBySource`) must be
+    /// keyed per query source, mirroring the source-record split above: a
+    /// 400/405 on Overview's shape and a 400/405 on Usage's shape are
+    /// unrelated deterministic refusals, so recording one must never
+    /// suppress retries of the other.
+    #[test]
+    fn dashboard_query_rejection_marker_is_keyed_per_source() {
+        let script = script();
+        assert!(
+            !script.contains("var queryRejectedKey ="),
+            "a page-wide `queryRejectedKey` scalar must not return; a refusal \
+             of one query shape would silently suppress the other shape's \
+             retries while the selection stands"
+        );
+        assert!(
+            script.contains("var queryRejectedKeyBySource ="),
+            "the deterministic-refusal marker must be declared as a per-source \
+             map, not a single page-wide value"
+        );
+
+        // POSITIVE CONTROL: a round must still gate on ITS OWN source's
+        // rejection key, or the marker's entire purpose -- never repeating a
+        // request the server has already deterministically refused -- is lost.
+        let round = function_body("queryRound");
+        assert!(
+            round.contains("queryRejectedKeyBySource[source] === key"),
+            "queryRound must skip a round whose OWN source already holds this \
+             exact key rejected, or a refused shape retries forever"
+        );
+
+        // NEGATIVE ASSERTION: the outcome handler must record a refusal
+        // against the `source` parameter it was passed, never a hardcoded
+        // constant -- a fixed key would tie both query shapes back to one
+        // marker, recreating the page-wide bug the split source records fixed.
+        let outcome = function_body("applyQueryOutcome");
+        assert!(
+            outcome.contains("queryRejectedKeyBySource[source] = key"),
+            "applyQueryOutcome must record a refusal against its own `source` \
+             parameter; a rejection on one query shape must never key onto the \
+             other shape's marker"
+        );
+        for constant in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE"] {
+            let hardcoded = format!("queryRejectedKeyBySource[{constant}]");
+            assert!(
+                !outcome.contains(&hardcoded),
+                "applyQueryOutcome must not hardcode `{constant}` when recording \
+                 a refusal; that reintroduces a marker shared across both shapes"
+            );
+        }
+
+        // DRIFT GUARD: the reset path that clears a stale marker must derive
+        // the tab set from `TABS`, not from a literal pair of query-backed
+        // tab names. A hardcoded pair silently drops a future third
+        // query-backed tab from the reset, leaving its source suppressed
+        // under a key its own next round will never produce again -- the
+        // same class of bug this whole marker split exists to fix, one tab
+        // wider.
+        let reset = function_body("queryInputChanged");
+        assert!(
+            !reset.contains("['overview', 'usage']")
+                && !reset.contains("[\"overview\", \"usage\"]"),
+            "queryInputChanged must not hardcode the query-backed tab pair; \
+             iterate `TABS` and let queryBodyFor/querySourceFor filter out \
+             non-query tabs, so a new query-backed tab is covered automatically"
+        );
+        assert!(
+            reset.contains("TABS.forEach"),
+            "queryInputChanged's marker reset must iterate `TABS` (the \
+             canonical, self-maintaining tab list), not a locally hardcoded set"
+        );
+    }
+
     /// The value of `key` in an object-literal body, unquoted, or `None` when
     /// the key is absent.
     fn object_entry(body: &str, key: &str) -> Option<String> {

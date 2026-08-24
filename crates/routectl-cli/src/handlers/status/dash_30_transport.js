@@ -48,11 +48,14 @@
   var queryTimer = null;
   var queryCtrl = null;            // in-flight controller, for single-flight
   var queryGeneration = 0;         // bumped on every selection change
-  // The body key a 400/405 refused. While the selection still produces this
-  // key there is nothing to retry -- a deterministic refusal repeated every
-  // 10s is noise, not recovery -- so the loop stops until the input changes
-  // or the page reloads.
-  var queryRejectedKey = null;
+  // The body key a 400/405 refused, PER QUERY SOURCE. Overview and Usage
+  // request different shapes against the same endpoint, so a refusal of one
+  // shape says nothing about the other; keying by source keeps a rejected
+  // Overview bucket from silencing Usage's retries (and vice versa) while
+  // each shape's own key still stops repeating a refusal that will never
+  // succeed -- a deterministic refusal repeated every 10s is noise, not
+  // recovery -- until the input changes or the page reloads.
+  var queryRejectedKeyBySource = {};
   // The body key of the last QUERY ATTEMPT and when it was issued. The 5s
   // aggregate nudge reads these so a selection that already fetched during
   // this interval is not fetched again the instant its round lands.
@@ -159,7 +162,7 @@
     var source = querySourceFor(activeTab);
     if (terminal || !body || !source) { return Promise.resolve(); }
     var key = queryBodyKey(body);
-    if (queryRejectedKey === key) { return Promise.resolve(); }
+    if (queryRejectedKeyBySource[source] === key) { return Promise.resolve(); }
     queryLastAttemptKey = key;
     queryLastAttemptAtMs = Date.now();
     return queryStatus(body).then(function (out) {
@@ -196,8 +199,9 @@
     if (out.kind === 'rejected') {
       // A deterministic refusal of THIS body: stop retrying it, and say so
       // rather than showing a transport failure the operator cannot fix by
-      // waiting.
-      queryRejectedKey = key;
+      // waiting. Recorded against `source`, not page-wide, so the OTHER
+      // query shape keeps retrying on its own schedule.
+      queryRejectedKeyBySource[source] = key;
       setSource(source, {
         state: 'incompatible',
         code: 'query_rejected',
@@ -232,8 +236,9 @@
 
   // Every input that changes what the QUERY asks for funnels through here:
   // it aborts the in-flight request (via the generation bump inside
-  // queryStatus), clears a stale deterministic-refusal marker, and refreshes
-  // immediately so an active tab never shows another selection's numbers.
+  // queryStatus), clears any stale deterministic-refusal marker, and
+  // refreshes immediately so an active tab never shows another selection's
+  // numbers.
   //
   // BOTH query sources are reset, not just the active tab's. Window, group-by,
   // and provider scope are page-wide, so a change to any of them invalidates the
@@ -248,9 +253,21 @@
       if (queryCtrl) { queryCtrl.abort(); queryCtrl = null; queryGeneration += 1; }
       return;
     }
-    if (queryRejectedKey !== null && queryRejectedKey !== queryBodyKey(body)) {
-      queryRejectedKey = null;
-    }
+    // Each source's refusal marker is checked against ITS OWN shape, not the
+    // active tab's: the two shapes can go stale on different tab switches,
+    // and clearing only the active one would leave the inactive source
+    // suppressed under a key its own next round will never produce again.
+    // Iterates ALL tabs (not just the two current query-backed ones) so a
+    // future query-backed tab is covered automatically -- queryBodyFor
+    // returns null for a non-query tab, which the guard below filters out.
+    TABS.forEach(function (tab) {
+      var tabBody = queryBodyFor(tab);
+      var tabSource = querySourceFor(tab);
+      if (!tabBody || !tabSource) { return; }
+      if (queryRejectedKeyBySource[tabSource] !== queryBodyKey(tabBody)) {
+        delete queryRejectedKeyBySource[tabSource];
+      }
+    });
     [QUERY_SOURCE, QUERY_SERIES_SOURCE].forEach(function (name) {
       setSource(name, { state: 'loading', code: null, data: null });
     });
