@@ -93,7 +93,12 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// report values that seat's traffic at, or which dimensions are unpriced and
 /// therefore keep the equivalent absent. The billed-by-seat statement is
 /// unchanged; the row's detail text is not.
-const SCHEMA_VERSION: u32 = 11;
+///
+/// v11 -> v12: the capability matrix panel's `Unavailable` code now names a
+/// too-old ledger schema as `version_too_old` instead of folding it into the
+/// same `expected` code a cold ledger renders -- the two states have
+/// different remedies and were previously indistinguishable in the report.
+const SCHEMA_VERSION: u32 = 12;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

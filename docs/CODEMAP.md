@@ -3422,9 +3422,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   router before the `ArcSwap`, boot runs the K-store warm (`k_rebuild`), the
   calibration-lane warm (`calibration_rebuild`), and -- after
   `build_usage_writer`, so the fail-closed boot tombstone has a `UsageHandle` to
-  enqueue through -- the learned-capability warm (`capability_rebuild`). Both
-  ledger-reading warms perform their own migrating open via `warm_open` and so
-  sit ahead of the writer. Router construction is
+  enqueue through -- the learned-capability warm (`capability_rebuild` -- see
+  its module doc for the writer-ordering exception). Router construction is
   delegated to `router_build`. Boot seeds the initial activation inventory and
   spawns the reload pipeline (both owned by the `reload` submodule).
   `log_catalog_filled_output_ceilings` emits ONE aggregate startup line naming
@@ -3488,7 +3487,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   logging, no writes -- into `Replay | Cold | NoTombstone | RevisionMismatch |
   Unreadable(class)` so each caller applies its own reaction.
   `open_error_class` maps a usage-DB `OpenError` to a fixed path-free class
-  token (a new variant is a compile error; reused by `doctor_panels.rs`).
+  token (a new variant is a compile error; reused by `doctor_panels.rs`; see
+  the function's own doc comment for the `version_too_old` / `expected` split).
   Lane-key contract: the persisted `lane_key` IS the registry `state_key` and
   the persisted `capability` is already normalized, so `provider_kind` is
   inert on replay. Tests in the `#[path]`-included `ledger_reader_tests.rs`
