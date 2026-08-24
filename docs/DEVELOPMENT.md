@@ -95,9 +95,10 @@ doc` with rustdoc lints denied, the `--workspace` test suite CI also
 runs (except the two replay suites, which need a contributor's local
 fixture corpus and so only run unfiltered in CI), and a `gen-catalog`-
 gated router-test leg no other leg compiles. The `commit-msg` hook
-applies the same identifier scan to the commit message. Set
-`ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate while
-iterating; CI enforces the same rules fail-closed regardless.
+applies the same identifier scan to the commit message, plus a
+subject-line length check. Set `ROUTECTL_SKIP_PRECOMMIT=1` to bypass
+the pre-commit gate while iterating; CI enforces the same rules
+fail-closed regardless.
 
 Every gate leg invokes `cargo` and `rustfmt` bare and relies on the
 rustup shim to honor the exact-patch pin in `rust-toolchain.toml`.
