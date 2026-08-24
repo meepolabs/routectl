@@ -161,11 +161,13 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn oauth_missing_expired_or_uncataloged_yields_no_offer() {
+    fn oauth_missing_expired_or_non_offerable_yields_no_offer() {
         let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
-        // `codex` missing / `xai` expired -> Unresolved; `antigravity`
-        // (gemini) is present but not cataloged -> Unresolved.
+        // `codex` missing / `xai` expired -> Unresolved. `antigravity`
+        // (gemini) activates on the present probe, but it is outside
+        // `OAUTH_OFFERABLE_IDS` (no oauth constructor for it), so it still
+        // yields no offer.
         let offers = detect_offers(
             &cfg,
             &[

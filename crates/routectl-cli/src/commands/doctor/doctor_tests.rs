@@ -185,6 +185,43 @@ fn referenced_unresolved_provider_warns_with_login_remediation() {
 }
 
 #[test]
+fn not_cataloged_reason_gets_a_feature_off_remediation() {
+    // `NotCataloged` fires when no config in this build can name the
+    // oauth id's kind at all -- pinned here with a fabricated id that
+    // `provider_kind_for_oauth_id` maps to nothing, the same condition a
+    // real build hits when the owning cargo feature is compiled out.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "ghost".to_string(),
+        ProviderEntry::anthropic_api("oauth://not-a-real-provider"),
+    );
+    cfg.models.insert(
+        "ghost-model".to_string(),
+        ModelEntry::new("ghost", "claude-sonnet-4-5"),
+    );
+    cfg.aliases.insert(
+        "default".to_string(),
+        AliasValue::Single("ghost-model".to_string()),
+    );
+    let context = ctx(
+        cfg,
+        Some(&current_version_stamp()),
+        vec![("not-a-real-provider", LocalProbe::Present)],
+        Vec::new(),
+    );
+    let report = build_report(&context);
+    let f = find(&report.findings, "inventory", "not-a-real-provider");
+    assert_eq!(f.status, Status::Warn);
+    assert_eq!(
+        f.remediation.as_deref(),
+        Some(
+            "no `[providers.X]` block in this build can declare this provider's kind; \
+             rebuild routectl with the owning cargo feature enabled"
+        )
+    );
+}
+
+#[test]
 fn unreferenced_unresolved_provider_is_pass_without_remediation() {
     let context = ctx(
         Config::default(),
