@@ -11,6 +11,10 @@
     "reason": "models.dev states limit.context = 196608 for minimax/MiniMax-M2, litellm states max_input_tokens = 200000. 196608 (192Ki) is the precise power-of-two figure typical of an exact vendor-enforced limit; 200000 reads as a rounded marketing figure. Resolving to the smaller (models.dev) figure, which is also the conservative choice.",
     "resolved": 196608
   },
+  "openai-compat:minimax-m3*:max_context_tokens": {
+    "reason": "models.dev states limit.context = 1000000 for MiniMax-M3, matching litellm's own direct minimax/MiniMax-M3 listing; every gateway re-listing this glob mechanically spans (fireworks_ai, lowercase model id) instead states 512000, the same fireworks-specific ceiling this generation's max_output_tokens also carries under that host. Resolving to the smaller (litellm-gateway) figure, the conservative choice: an operator dispatching through the fireworks_ai route gets the tighter window, and the direct route's larger window still passes as it never truncates on this bound.",
+    "resolved": 512000
+  },
   "openai-compat:grok-*:rm": {
     "reason": "models.dev states cost.cache_read = 0.3 against cost.input = 2 for xai/grok-4.5 (rm = 0.15), while litellm still states cache_read_input_token_cost = 5e-7 against input_cost_per_token = 2e-6 (rm = 0.25). models.dev cut its base and over-200k cache-read tiers together (0.5 -> 0.3 and 1.0 -> 0.6, the same factor), so this reads as a real vendor price cut models.dev tracked first rather than a data error. Resolving to the models.dev figure, which is also the conservative choice: grok-* is an auto-cacher, so a smaller rm raises the break-even reuse count K* = c_after * (1 - rm) / (d * rm) and biases the cost gate toward KEEP.",
     "resolved": 0.15

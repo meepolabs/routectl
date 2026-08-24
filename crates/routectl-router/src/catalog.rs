@@ -2180,7 +2180,7 @@ mod tests {
             ("anthropic-api", "claude-opus-4-8", Some(1_000_000)),
             ("anthropic-api", "claude-haiku-4-5", Some(200_000)),
             ("bedrock", "anthropic.claude-sonnet-4-5", Some(200_000)),
-            ("openai-compat", "deepseek-v4-pro", Some(1_000_000)),
+            ("openai-compat", "minimax-m3", Some(512_000)),
             // A model with no dedicated baked cell falls through to the
             // provider `"*"` catch-all, which carries no confirmed window.
             ("anthropic-api", "claude-haiku-3-5", None),
@@ -2188,6 +2188,10 @@ mod tests {
             // different confirmed windows -- see `catalog_codegen`'s
             // `context_ambiguous` selectors), not a bare "*".
             ("openai-compat", "mistral-large", None),
+            // Pinned to one model generation, but that generation's own
+            // gateway re-listings disagree on the window under mechanical
+            // unanimity (see `catalog_codegen::litellm_unanimous_context_window`).
+            ("openai-compat", "deepseek-v4-pro", None),
             // Bare "*" provider catch-alls.
             ("bedrock", "anthropic.claude-nonexistent-9", None),
             ("openai-compat", "some-unrecognized-vendor-model", None),
@@ -2644,11 +2648,15 @@ mod tests {
         // openai-responses has exactly one row by design (a single glob
         // catch-all covers the whole adapter kind -- see the module doc),
         // so the breadth floor here is that the row itself carries REAL
-        // derived data for the current flagship, not a placeholder.
+        // derived data for the current flagship, not a placeholder. The
+        // window/price/output-ceiling fields all suppress for this glob
+        // (every one is `_ambiguous` under mechanical derivation -- the
+        // glob spans the whole OpenAI lineup), so capabilities is the
+        // field this floor can still pin.
         let r = lookup("openai-responses", "gpt-5.6", None);
         assert!(
-            r.max_context_tokens.is_some(),
-            "openai-responses catch-all must carry a real (derived) context window",
+            !r.capabilities.is_empty(),
+            "openai-responses catch-all must carry real (derived) capabilities",
         );
     }
 }

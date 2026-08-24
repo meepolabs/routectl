@@ -169,6 +169,12 @@ pub struct AutoCacherSelector {
     /// still derived normally, matching
     /// [`crate::catalog::CatalogRow::max_context_tokens`]'s own
     /// fail-closed documented behavior for a broad, ambiguous glob.
+    ///
+    /// A DOCUMENTED ASSERTION, never the derivation's source of truth:
+    /// `catalog_codegen::context_window_for` re-derives the verdict from
+    /// every spanned snapshot entry itself, and
+    /// `every_selectors_context_ambiguous_flag_matches_the_snapshots` fails
+    /// when this flag and the snapshots disagree.
     pub context_ambiguous: bool,
     /// When `true`, `model_glob` matches models the snapshots price very
     /// differently, so no single base per-token rate is right for the glob
@@ -182,6 +188,12 @@ pub struct AutoCacherSelector {
     /// Independent of `context_ambiguous` -- a glob can be coherent in one
     /// dimension and not the other (`grok-*` prices within 2x but spans a
     /// 131K-to-2M window range).
+    ///
+    /// A DOCUMENTED ASSERTION, never the derivation's source of truth:
+    /// `catalog_codegen::base_rates_for` re-derives the verdict from every
+    /// spanned snapshot entry itself, and
+    /// `every_selectors_price_ambiguous_flag_matches_the_snapshots` fails
+    /// when this flag and the snapshots disagree.
     pub price_ambiguous: bool,
     /// When `true`, `model_glob` matches litellm entries whose
     /// `max_output_tokens` genuinely differ, so no single output ceiling is
@@ -210,7 +222,9 @@ pub const OPENAI_RESPONSES_SELECTORS: &[AutoCacherSelector] = &[AutoCacherSelect
     min_prefix_tokens: 1024,
     auto_cacher: true,
     economics_unconfirmed: false,
-    context_ambiguous: false,
+    // The bare `*` glob spans the whole OpenAI lineup, which the litellm
+    // snapshot lists at dozens of distinct confirmed windows.
+    context_ambiguous: true,
     // The openai-responses `*` glob serves every OpenAI model, which the
     // snapshots price from $0.02/M (embeddings) to $150/M (o1-pro) -- no
     // single rate is defensible for the glob.
@@ -230,10 +244,14 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         min_prefix_tokens: 1,
         auto_cacher: true,
         economics_unconfirmed: false,
-        context_ambiguous: false,
-        // Pinned to one model (unlike the `deepseek-*` catch-all below):
-        // every id this glob matches prices identically in both snapshots.
-        price_ambiguous: false,
+        // The direct deepseek listings confirm 1000000, but the
+        // azure_ai/fireworks re-listings this glob also spans state
+        // 1048576 -- not the same figure.
+        context_ambiguous: true,
+        // The direct deepseek listings price at $0.435/M in, $0.87/M out;
+        // the azure_ai/fireworks re-listings this glob also spans price at
+        // roughly 4x that -- no single rate holds for the glob.
+        price_ambiguous: true,
         // The two sources disagree on the DIRECT deepseek ceiling (litellm
         // 8192, models.dev 384000) and the glob also spans third-party
         // re-listings at 384000. Neither source is corroborated by the
@@ -249,7 +267,9 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         min_prefix_tokens: 1,
         auto_cacher: true,
         economics_unconfirmed: false,
-        context_ambiguous: false,
+        // The catch-all `deepseek-*` also spans deepseek-v4-pro and other
+        // gateway re-listings at genuinely different confirmed windows.
+        context_ambiguous: true,
         price_ambiguous: true,
         output_ambiguous: true,
     },
@@ -262,7 +282,9 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         min_prefix_tokens: 4096,
         auto_cacher: true,
         economics_unconfirmed: false,
-        context_ambiguous: false,
+        // gemini-* spans Gemini SKUs at genuinely different confirmed
+        // windows in the vendored snapshot.
+        context_ambiguous: true,
         price_ambiguous: true,
         output_ambiguous: true,
     },
@@ -292,7 +314,9 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         min_prefix_tokens: 4096,
         auto_cacher: true,
         economics_unconfirmed: false,
-        context_ambiguous: false,
+        // kimi-* spans Kimi SKUs at genuinely different confirmed windows in
+        // the vendored snapshot.
+        context_ambiguous: true,
         price_ambiguous: true,
         output_ambiguous: true,
     },
@@ -305,7 +329,9 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         min_prefix_tokens: 4096,
         auto_cacher: true,
         economics_unconfirmed: false,
-        context_ambiguous: false,
+        // moonshot-* spans the same Kimi SKUs at genuinely different
+        // confirmed windows.
+        context_ambiguous: true,
         price_ambiguous: true,
         output_ambiguous: true,
     },

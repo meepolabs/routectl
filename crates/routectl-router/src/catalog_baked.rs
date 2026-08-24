@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use crate::catalog::CatalogRow;
 
 /// See `crate::catalog_codegen` for how this is derived.
-pub const CATALOG_VERSION: u32 = 3;
+pub const CATALOG_VERSION: u32 = 4;
 
 /// Display-only; never used in economics. See `crate::catalog_codegen`.
 pub const CATALOG_SNAPSHOT_DATE: &str = "2026-08-04";
@@ -582,7 +582,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(1000000),
+                max_context_tokens: None,
                 max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
@@ -601,10 +601,10 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(1000000),
+                max_context_tokens: None,
                 max_output_tokens: None,
-                input_cost_per_token: Some(4.35e-7_f32),
-                output_cost_per_token: Some(8.7e-7_f32),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[("structured_output", true)]),
             },
         },
@@ -620,7 +620,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(1048576),
+                max_context_tokens: None,
                 max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
@@ -664,7 +664,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(262144),
+                max_context_tokens: None,
                 max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
@@ -702,7 +702,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(1000000),
+                max_context_tokens: Some(512000),
                 max_output_tokens: None,
                 input_cost_per_token: Some(3e-7_f32),
                 output_cost_per_token: Some(1.2e-6_f32),
@@ -740,7 +740,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(262144),
+                max_context_tokens: None,
                 max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
@@ -778,7 +778,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 storage_rent: 0.0,
                 auto_cacher: true,
                 tier: None,
-                max_context_tokens: Some(1050000),
+                max_context_tokens: None,
                 max_output_tokens: None,
                 input_cost_per_token: None,
                 output_cost_per_token: None,
