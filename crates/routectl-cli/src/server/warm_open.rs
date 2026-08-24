@@ -10,11 +10,22 @@
 //! its own spawned thread, so a warm sequenced after the writer starts would
 //! only trade a certain silent miss for a race.
 //!
-//! Every warm that reads the ledger therefore runs the migrating open ITSELF,
-//! synchronously, before its first query, and is wired at bootstrap BEFORE the
-//! writer starts. The migration ladder is guarded and idempotent, so the
-//! writer's own later open finds nothing left to do; and because nothing else
-//! holds the DB at that point in bootstrap, the migration contends with no one.
+//! Most warms that read the ledger therefore run the migrating open
+//! THEMSELVES, synchronously, before their first query, and are wired at
+//! bootstrap BEFORE the writer starts. The migration ladder is guarded and
+//! idempotent, so the writer's own later open finds nothing left to do; and
+//! because nothing else holds the DB at that point in bootstrap, the
+//! migration contends with no one.
+//!
+//! The capability warm is the one exception: it must run AFTER
+//! `build_usage_writer` (it needs the writer's `UsageHandle` to enqueue its
+//! fail-closed tombstone), and by then the writer may still be migrating the
+//! same file on its own spawned thread -- opening a second read-write
+//! connection here would race that open rather than avoid it. That warm
+//! therefore stays purely read-only and leaves a too-old schema to its
+//! ordinary fail-closed path (see `capability_rebuild`'s module doc), which
+//! is made diagnosable by a dedicated class token instead of a migrating
+//! open.
 //!
 //! The failure mode this closes is silent by construction: a warm reading a
 //! stale schema loads no rows, and zero rows is indistinguishable from a

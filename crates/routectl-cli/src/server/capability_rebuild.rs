@@ -45,6 +45,18 @@ use super::ledger_reader::{
 /// post-boundary slice through [`Router::rebuild_learned_from_ledger`] (on a
 /// matching tombstone) or logs the case and enqueues one fresh tombstone
 /// through `usage` (every fail-closed case). Never fails bootstrap.
+///
+/// Unlike its sibling warms this one does NOT run its own migrating open:
+/// doing so would open a second read-write connection against the SAME file
+/// the writer this warm's caller starts just ahead of it may still be
+/// migrating on its own spawned thread, racing that open rather than
+/// avoiding it -- and that risk is not worth taking for a case the
+/// classification split below already makes diagnosable without it. A
+/// too-old-schema read here therefore stays on the ordinary fail-closed path
+/// below; [`super::ledger_reader::open_error_class`] gives that case its own
+/// `version_too_old` token so it renders distinctly from a cold ledger
+/// wherever this classification is surfaced (the doctor gather, which never
+/// migrates either).
 pub(crate) fn warm_capability_registry_from_ledger(
     db_path: &Path,
     router: &Router,

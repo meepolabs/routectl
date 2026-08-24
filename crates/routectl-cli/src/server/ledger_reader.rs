@@ -82,6 +82,12 @@ pub(crate) enum BoundaryOutcome {
 /// site must emit this fixed class rather than the Display. A new variant is a
 /// compile error here, forcing a deliberate log-hygiene decision for any new
 /// failure mode.
+///
+/// `VersionTooOld` gets its own token rather than folding into `NoData`'s
+/// `"expected"`: a too-old schema and a genuinely cold ledger are different
+/// states with different remedies (wait for the writer to migrate vs. wait for
+/// traffic), and a diagnostic surface that cannot tell them apart from this
+/// token would hide the real cause behind a benign-sounding label.
 pub(crate) const fn open_error_class(err: &OpenError) -> &'static str {
     match err {
         OpenError::CreateDir { .. } => "create_dir",
@@ -90,8 +96,9 @@ pub(crate) const fn open_error_class(err: &OpenError) -> &'static str {
         OpenError::Permissions { .. } => "permissions",
         OpenError::Migrate(_) => "migrate",
         OpenError::VersionTooNew { .. } => "version_too_new",
+        OpenError::VersionTooOld { .. } => "version_too_old",
         OpenError::NotWal { .. } => "not_wal",
-        OpenError::NoData { .. } | OpenError::VersionTooOld { .. } => "expected",
+        OpenError::NoData { .. } => "expected",
     }
 }
 

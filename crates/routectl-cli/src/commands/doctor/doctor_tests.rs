@@ -693,8 +693,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_eleven() {
-    assert_eq!(SCHEMA_VERSION, 11);
+fn schema_version_is_twelve() {
+    assert_eq!(SCHEMA_VERSION, 12);
 
     let context = ctx(
         config_with_overrides(),
@@ -703,7 +703,7 @@ fn schema_version_is_eleven() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 11);
+    assert_eq!(report.schema_version, 12);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2569,7 +2569,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 11);
+    assert_eq!(no_net.schema_version, 12);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2705,6 +2705,36 @@ mod capability_matrix {
         assert!(
             !code.contains('/') && !code.contains("usage.db"),
             "the class token must be path-free: {code}"
+        );
+    }
+
+    #[test]
+    fn a_too_old_schema_is_distinguishable_from_a_cold_ledger() {
+        // Doctor never migrates the ledger (it may be a live daemon's file),
+        // so a never-migrated file reaches this gather path exactly as a
+        // too-old-schema ledger would in the field.
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        rusqlite::Connection::open(&ledger).expect("create never-migrated sqlite file");
+        let config = config_at(&ledger);
+
+        let source = gather_capability_matrix(&config, false, 0);
+        assert!(
+            matches!(
+                source,
+                CapabilityMatrixSource::Unavailable("version_too_old")
+            ),
+            "a too-old schema must render its own code, not the cold-ledger one"
+        );
+
+        // Positive control: the absent-ledger sibling case renders a
+        // DIFFERENT code from the same function -- proving the two states
+        // were, and without the split would remain, distinguishable only by
+        // accident rather than by design.
+        let cold = gather_capability_matrix(&config_at(&tmp.path().join("absent.db")), false, 0);
+        assert!(
+            matches!(cold, CapabilityMatrixSource::Unavailable("no_data")),
+            "the cold-ledger sibling case renders its own distinct code"
         );
     }
 

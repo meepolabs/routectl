@@ -142,6 +142,56 @@ async fn absent_ledger_read_is_silent_and_enqueues_one_boot_tombstone() {
     );
 }
 
+/// A never-migrated ledger (a raw sqlite file, `PRAGMA user_version` still at
+/// its default 0) fails closed exactly like any other unreadable ledger --
+/// this warm does not attempt its own migrating open (see the module doc for
+/// why: it would race the writer's own open on the same file). The
+/// distinction from a cold ledger is made legible on the read side instead
+/// (`ledger_reader::open_error_class`'s `version_too_old` token), not by
+/// changing what this warm does with it.
+#[tokio::test]
+async fn a_never_migrated_ledger_fails_closed_like_any_unreadable_ledger() {
+    let tmp = TempDir::new().expect("tempdir");
+    let router = default_router(&tmp).await;
+    let ledger = tmp.path().join("usage.db");
+    rusqlite::Connection::open(&ledger).expect("create never-migrated sqlite file");
+
+    // Positive control: a bare read against this fixture classifies as the
+    // too-old-schema case, not cold and not the ordinary junk-file case.
+    assert!(
+        matches!(
+            classify_boundary(&ledger, router.catalog_version(), router.overlay_revision()),
+            BoundaryOutcome::Unreadable("version_too_old")
+        ),
+        "positive control: the fixture reads as a too-old schema"
+    );
+
+    let scratch = tmp.path().join("scratch.db");
+    let (handle, writer) = writer_at(&scratch);
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        warm_capability_registry_from_ledger(&ledger, &router, &handle);
+    });
+
+    // Assert: the unreadable-ledger WARN fired (this warm never migrates the
+    // file out from under a possibly-racing writer), the registry stayed
+    // empty, and a fresh tombstone still reached the writer.
+    assert!(
+        events.iter().any(|e| e.level == tracing::Level::WARN),
+        "a too-old-schema ledger must emit the unreadable-ledger WARN"
+    );
+    assert!(router.learned_capability_snapshot().is_empty());
+
+    drop(handle);
+    writer.shutdown();
+    assert_eq!(
+        tombstone_count(&scratch),
+        1,
+        "the fail-closed path still enqueues exactly one fresh boot tombstone"
+    );
+}
+
 #[tokio::test]
 async fn boot_tombstone_reaches_writer_through_the_production_seam() {
     // Arrange: the production shape -- the writer is started at the SAME path

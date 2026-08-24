@@ -1154,3 +1154,24 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         prefix_epoch_event: None,
     }
 }
+
+/// The capability warm needs the writer's `UsageHandle` to enqueue its
+/// fail-closed boot tombstone, so `build_usage_writer` must run strictly
+/// before `warm_capability_registry_from_ledger` in the boot sequence. This
+/// pins that ordering structurally against the source text -- a reorder that
+/// moved the warm ahead of the writer would compile (the warm only borrows
+/// the handle) but break the tombstone enqueue silently.
+#[test]
+fn the_usage_writer_starts_before_the_capability_warm() {
+    let src = include_str!("serve.rs");
+    let writer_at = src
+        .find("build_usage_writer(&config)")
+        .expect("build_usage_writer call present");
+    let warm_at = src
+        .find("warm_capability_registry_from_ledger(")
+        .expect("warm_capability_registry_from_ledger call present");
+    assert!(
+        writer_at < warm_at,
+        "build_usage_writer must run before warm_capability_registry_from_ledger"
+    );
+}

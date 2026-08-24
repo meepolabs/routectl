@@ -113,6 +113,47 @@ fn classify_boundary_unreadable_on_junk_file() {
     );
 }
 
+/// A never-migrated ledger (a raw sqlite file, `PRAGMA user_version` still at
+/// its default 0) is a too-old schema, not a cold ledger -- the read-only
+/// open rejects it before it ever checks for a `requests`/`capability_events`
+/// table. Positive control for the split below: this is the exact shape a
+/// stale-schema ledger takes on disk, and it must classify as `Unreadable`,
+/// never as `Cold`.
+#[test]
+fn classify_boundary_unreadable_on_never_migrated_file() {
+    let tmp = TempDir::new().expect("tempdir");
+    let ledger = tmp.path().join("usage.db");
+    rusqlite::Connection::open(&ledger).expect("create empty sqlite file");
+
+    let outcome = classify_boundary(&ledger, CAT, OV);
+    assert!(
+        matches!(outcome, BoundaryOutcome::Unreadable("version_too_old")),
+        "a too-old schema must classify as Unreadable(\"version_too_old\"), not Cold"
+    );
+}
+
+/// The class token a too-old schema renders must differ from the one a
+/// genuinely absent ledger renders, so a diagnostic reading the code alone
+/// can tell the two states apart. Without this split both variants folded
+/// into the same `"expected"` token.
+#[test]
+fn open_error_class_distinguishes_version_too_old_from_no_data() {
+    let too_old = open_error_class(&OpenError::VersionTooOld {
+        found: 3,
+        supported: 11,
+    });
+    let no_data = open_error_class(&OpenError::NoData {
+        path: "/irrelevant".into(),
+    });
+
+    assert_eq!(too_old, "version_too_old");
+    assert_eq!(no_data, "expected");
+    assert_ne!(
+        too_old, no_data,
+        "a too-old schema and a cold ledger must render distinct class tokens"
+    );
+}
+
 #[test]
 fn classify_boundary_no_tombstone_on_empty_ledger() {
     let tmp = TempDir::new().expect("tempdir");
