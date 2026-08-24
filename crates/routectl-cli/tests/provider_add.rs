@@ -468,6 +468,139 @@ fn silent_stdin_declines_the_confirmation_within_bounded_time() {
     );
 }
 
+/// The post-add capability-probe offer's confirmation under an OPEN-but-silent
+/// stdin: a pipe carrying neither a line nor an EOF. Only a real subprocess
+/// can hold that shape. Neither `--probe` nor `--no-probe` is passed, so the
+/// interactive default reaches `confirm_probe` after the add commits and the
+/// estimate prints; the gate must fire before any `read_line`, so the run
+/// declines and exits cleanly instead of blocking at the prompt.
+#[test]
+fn silent_stdin_declines_the_probe_confirmation_within_bounded_time() {
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    // A pre-declared model for the not-yet-added provider so the offer has a
+    // single selectable lane to resolve once `provider add` commits it.
+    let body = format!("version = {CURRENT}\n{BASE_BODY}")
+        + "\n[models.grokm]\nprovider = \"grok\"\nupstream = \"grok-2\"\n";
+    let path = write_config(dir.path(), &body);
+    let xdg = tempfile::tempdir().unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args([
+            "--config",
+            path.to_str().unwrap(),
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "grok",
+            "--base-url",
+            "https://api.x.example/v1",
+            "--secret-ref",
+            "file:///abs/key",
+            "--yes",
+        ])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl binary");
+    // Held open deliberately: dropping it would deliver an EOF, which is the
+    // case that already declined before the terminal gate existed.
+    let stdin = child.stdin.take().expect("piped stdin");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("poll the child") {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("provider add hung on an open-but-silent stdin at the probe offer");
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    drop(stdin);
+
+    let out = child.wait_with_output().expect("collect child output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a decline is not an error: {stdout}"
+    );
+    assert!(
+        stdout.contains("added provider `grok`"),
+        "the add itself must still commit before the offer declines:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("estimate:"),
+        "the estimate prints either way, so a scripted caller sees the cost:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("stdin is not a terminal") && stdout.contains("--probe"),
+        "the decline must name the non-interactive contract:\n{stdout}"
+    );
+}
+
+/// A closed stdin (`/dev/null`, immediate EOF) is not a terminal either, so
+/// it now takes the same early-decline path as the silent pipe above rather
+/// than falling through to a `read_line` EOF -- but the OUTCOME the previous
+/// EOF path already gave (decline, exit 0, no hang) is unchanged.
+#[test]
+fn closed_stdin_declines_the_probe_confirmation() {
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let body = format!("version = {CURRENT}\n{BASE_BODY}")
+        + "\n[models.grokm]\nprovider = \"grok\"\nupstream = \"grok-2\"\n";
+    let path = write_config(dir.path(), &body);
+    let xdg = tempfile::tempdir().unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args([
+            "--config",
+            path.to_str().unwrap(),
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "grok",
+            "--base-url",
+            "https://api.x.example/v1",
+            "--secret-ref",
+            "file:///abs/key",
+            "--yes",
+        ])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run routectl binary to completion");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a decline is not an error: {stdout}"
+    );
+    assert!(
+        stdout.contains("added provider `grok`"),
+        "the add itself must still commit before the offer declines:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("run a capability probe against this provider now?"),
+        "a closed stdin is not a terminal, so the guard declines before the \
+         interactive prompt line ever prints:\n{stdout}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Format preservation: a round-trip add keeps pre-existing comments and
 // section ordering intact.

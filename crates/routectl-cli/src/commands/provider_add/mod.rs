@@ -153,6 +153,16 @@ impl AddIo for RealAddIo {
 
     fn confirm_probe(&self) -> bool {
         use std::io::Write as _;
+        // An open-but-silent pipe (a caller that never sends a line or an
+        // EOF) would otherwise block `read_line` forever. The estimate has
+        // already printed, so a scripted caller sees what was declined.
+        if !std::io::stdin().is_terminal() {
+            println!(
+                "stdin is not a terminal; declining without prompting. \
+                 Pass `--probe`/`--no-probe` to run provider add non-interactively."
+            );
+            return false;
+        }
         print!("run a capability probe against this provider now? [y/N] ");
         let _ = std::io::stdout().flush();
         let mut input = String::new();
