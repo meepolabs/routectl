@@ -10,6 +10,12 @@
 #
 # Run from anywhere in the working tree:
 #   bash tools/git-hooks/install.sh [--force]
+#
+# A hook installed some other way (e.g. `cp`'d instead of run through here)
+# is invisible to this script -- it never runs again to notice drift. That
+# case is covered at commit time instead: each hook sources
+# check-drift.sh and warns (never fails) if it finds itself running as a
+# copy that no longer matches the tracked source.
 
 set -e
 

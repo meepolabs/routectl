@@ -10,4 +10,20 @@
 set -e
 
 ROOT="$(git rev-parse --show-toplevel)"
+
+# Warn (never fail) if this hook is a stale copy rather than install.sh's
+# symlink. See tools/git-hooks/check-drift.sh. The source is guarded on
+# the file's presence AND wrapped in `|| true`: a missing helper, an
+# unreadable one, or one that's syntactically broken mid-edit must all
+# leave the commit path alone under `set -e`. Gating the call on
+# `declare -f` (not the source's own exit code) stops a partial source
+# from leaving "check_hook_drift: command not found" as the next
+# statement.
+if [[ -f "$ROOT/tools/git-hooks/check-drift.sh" ]]; then
+    source "$ROOT/tools/git-hooks/check-drift.sh" 2>/dev/null || true
+    if declare -f check_hook_drift >/dev/null 2>&1; then
+        check_hook_drift "commit-msg" "$0" "$ROOT/tools/git-hooks/commit-msg" || true
+    fi
+fi
+
 bash "$ROOT/scripts/check-internal-ids.sh" --commit-msg "$1"
