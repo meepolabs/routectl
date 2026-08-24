@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Commit-msg gate: rejects commit messages that embed high-signal
-# internal planning / review IDs. Patterns live in
-# scripts/check-internal-ids.sh (single source of truth).
+# internal planning / review IDs, or whose subject line exceeds the
+# project's length rule. Patterns live in scripts/check-internal-ids.sh;
+# the length bound lives in tools/git-hooks/check-subject-length.sh
+# (each check's single source of truth).
 #
 # Git passes the path to the prepared commit-message file as $1.
 #
@@ -27,3 +29,4 @@ if [[ -f "$ROOT/tools/git-hooks/check-drift.sh" ]]; then
 fi
 
 bash "$ROOT/scripts/check-internal-ids.sh" --commit-msg "$1"
+bash "$ROOT/tools/git-hooks/check-subject-length.sh" "$1"
