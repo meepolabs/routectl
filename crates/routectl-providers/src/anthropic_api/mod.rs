@@ -88,6 +88,14 @@ impl Provider for AnthropicApiProvider {
             // any Anthropic-compatible host (another routectl hop
             // included), and only the genuine host is terminal.
             is_anthropic_api_host(&self.cfg.base_url),
+            // This lane targets the Anthropic Messages API, which accepts a
+            // mid-conversation `role: "system"` turn, so a system turn the
+            // client sent alongside a canonical top-level system rides
+            // through in place instead of being discarded. Stated EXPLICITLY
+            // here rather than inherited, so a default changing elsewhere
+            // cannot start shipping the shape on a lane whose target API has
+            // no such role.
+            true,
         )
     }
 
@@ -242,6 +250,14 @@ impl Provider for AnthropicApiProvider {
             if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
                 self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
             }
+            // Lane-independent: a mid-conversation system turn is
+            // position-gated and model-gated on every lane, so this fires
+            // wherever the outgoing body carried one.
+            self.log_system_role_turns_on_4xx(
+                status,
+                AnthropicApiProvider::count_system_role_turns(&body),
+                beta_decision.has_mid_conversation_system_beta,
+            );
             return Err(err);
         }
 
@@ -411,6 +427,14 @@ impl Provider for AnthropicApiProvider {
             if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
                 self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
             }
+            // Lane-independent: a mid-conversation system turn is
+            // position-gated and model-gated on every lane, so this fires
+            // wherever the outgoing body carried one.
+            self.log_system_role_turns_on_4xx(
+                status,
+                AnthropicApiProvider::count_system_role_turns(&body),
+                beta_decision.has_mid_conversation_system_beta,
+            );
             return Err(err);
         }
 
@@ -680,6 +704,14 @@ impl Provider for AnthropicApiProvider {
             if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
                 self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
             }
+            // Lane-independent: a mid-conversation system turn is
+            // position-gated and model-gated on every lane, so this fires
+            // wherever the outgoing body carried one.
+            self.log_system_role_turns_on_4xx(
+                status,
+                AnthropicApiProvider::count_system_role_turns(&body),
+                beta_decision.has_mid_conversation_system_beta,
+            );
             return Err(err);
         }
 

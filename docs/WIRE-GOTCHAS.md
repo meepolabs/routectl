@@ -70,6 +70,37 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 ## Anthropic API surface
 
+- **A canonical field that duplicates a wire field creates a both-present
+  case, and a translation arm written as "already handled elsewhere"
+  deletes content when the elsewhere did not run.** `messages[]` accepts a
+  mid-conversation `role: "system"` turn (position-gated: it must precede an
+  `assistant` turn or end the array; also model-gated; validation order is
+  shape -> position -> model support). The canonical request ALSO carries a
+  top-level `system`, and real clients send both at once. The egress
+  computed the wire `system` as `req.system` OR the lift of `Role::System`
+  messages, which encodes an exclusive choice, while the per-role walk
+  dropped those same turns on the premise the lift had consumed them --
+  so with both present neither branch owned them and they vanished with no
+  log line. Two general lessons: an `.or_else()` between a canonical field
+  and a wire-shape fallback asserts XOR, so state whether the inputs are
+  actually exclusive; and a drop arm justified by another pass must name
+  the condition under which that pass runs, because the justification is
+  a premise, not a fact. The discriminator now lives in ONE place
+  (`SystemTurnPolicy`, resolved from canonical-`system` presence in
+  `crates/routectl-providers/src/anthropic_api/request.rs::normalize` and
+  threaded into the walk), and the walk carries an accounted-identity
+  ledger so any future unaccounted drop is a hard error.
+
+- **The directive-only system form cannot round-trip canonical.**
+  Anthropic accepts a system turn of `content: []` plus `output_config` at
+  ANY position (the position gate does not apply to it). Canonical
+  `Message` (`crates/routectl-core/src/schema.rs`) has no
+  `#[serde(flatten)]` catchall, so a sibling key like `output_config` on a
+  message is dropped at parse time and the form cannot survive an ingress
+  round-trip. Nothing is built for it -- the shape is unconfirmed beyond
+  the probed error text -- but a request that needs it will silently lose
+  the directive rather than fail, so this is where to start.
+
 - **Seven canonical sampling knobs have no counterpart here.** `n`,
   `seed`, `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`
   and `frequency_penalty` do not appear in the Anthropic Messages API

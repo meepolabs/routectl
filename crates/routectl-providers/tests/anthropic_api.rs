@@ -74,6 +74,19 @@ fn system_msg(text: &str) -> Message {
     }
 }
 
+fn assistant_msg(text: &str) -> Message {
+    Message {
+        refusal: None,
+        role: Role::Assistant,
+        content: MessageContent::Text(text.into()),
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
 fn base_req(model: &str, msgs: Vec<Message>) -> ChatRequest {
     ChatRequest {
         model: model.into(),
@@ -123,5 +136,7 @@ mod request_normalization;
 mod response_normalization;
 #[path = "anthropic_api/sse.rs"]
 mod sse;
+#[path = "anthropic_api/system_turns.rs"]
+mod system_turns;
 #[path = "anthropic_api/unified_quota.rs"]
 mod unified_quota;

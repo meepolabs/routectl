@@ -54,6 +54,12 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // the passthrough cannot be flipped by a default changing
         // elsewhere.
         false,
+        // Bedrock InvokeModel is not the Anthropic Messages API: support for
+        // a mid-conversation `role: "system"` turn is not established on this
+        // lane, so system turns stay lift-consumed here. Stated EXPLICITLY
+        // for the same reason as the flag above -- a default changing
+        // elsewhere must not start shipping the shape to Bedrock.
+        false,
     )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(
@@ -662,6 +668,65 @@ mod tests {
         assert!(
             body.get("model").is_none(),
             "model must be stripped: Bedrock takes it in the URL, not the body"
+        );
+    }
+
+    /// Lane pin: Bedrock InvokeModel never ships a mid-conversation
+    /// `role: "system"` turn. This lane passes `forward_system_turns:
+    /// false`, so a canonical system present ALONGSIDE `Role::System`
+    /// messages still leaves the messages array free of the wire role --
+    /// a default flip on the anthropic-api side cannot leak the shape
+    /// here.
+    #[test]
+    fn system_role_turns_stay_absent_from_the_invoke_body() {
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.system = Some(routectl_core::SystemContent::Text("be brief".into()));
+        req.messages = vec![
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Text("mid-conversation note".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("ok".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ]
+        .into();
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert_eq!(body["system"], json!("be brief"));
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(msgs.len(), 2, "got: {body}");
+        assert!(
+            msgs.iter().all(|m| m["role"] != json!("system")),
+            "the Invoke lane must not ship a system-role turn: {body}"
         );
     }
 

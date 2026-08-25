@@ -3039,6 +3039,66 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
     }
 }
 
+/// The system-role-turn 4xx WARN is lane-INDEPENDENT: an api-key provider
+/// (which `log_beta_decision_on_4xx` never covers) still gets the line,
+/// carrying the count, the resolved mid-conversation-system beta decision,
+/// and nothing from the body.
+#[traced_test]
+#[test]
+fn log_system_role_turns_on_4xx_fires_on_the_api_key_lane() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+
+    provider.log_system_role_turns_on_4xx(400, 3, true);
+
+    assert!(logs_contain("system_role_turn_count=3"));
+    assert!(logs_contain("status=400"));
+    assert!(logs_contain("has_mid_conversation_system_beta=true"));
+}
+
+/// Positive control for the field above: the beta boolean tracks the
+/// resolved decision rather than being hardcoded.
+#[traced_test]
+#[test]
+fn log_system_role_turns_on_4xx_reports_an_absent_beta_as_false() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+
+    provider.log_system_role_turns_on_4xx(400, 1, false);
+
+    assert!(logs_contain("has_mid_conversation_system_beta=false"));
+}
+
+/// Two gates, both required: a 4xx with no system turns and a success with
+/// system turns are each silent.
+#[traced_test]
+#[test]
+fn log_system_role_turns_on_4xx_is_silent_without_both_conditions() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+
+    provider.log_system_role_turns_on_4xx(400, 0, true);
+    provider.log_system_role_turns_on_4xx(200, 3, true);
+    provider.log_system_role_turns_on_4xx(500, 3, true);
+
+    assert!(!logs_contain("system_role_turn_count"));
+}
+
+/// The count reads the assembled wire body's `messages[]`, so it reflects
+/// what actually shipped rather than what the canonical request carried.
+#[test]
+fn count_system_role_turns_counts_wire_system_messages() {
+    let body = serde_json::json!({"messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "note"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "system", "content": "another"},
+    ]});
+
+    assert_eq!(AnthropicApiProvider::count_system_role_turns(&body), 2);
+    assert_eq!(
+        AnthropicApiProvider::count_system_role_turns(&serde_json::json!({})),
+        0
+    );
+}
+
 /// The bounded-boolean design, proven against an excerpt that DOES carry a
 /// beta literal.
 ///

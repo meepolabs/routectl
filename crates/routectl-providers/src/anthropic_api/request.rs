@@ -9,9 +9,12 @@
 //!
 //! Translation rules:
 //! - `req.system` is read directly into the wire `system` field (Text or
-//!   Blocks). Backwards-compatible fallback: when `req.system` is None,
-//!   any Role::System messages in `req.messages` get lifted (today's
-//!   behavior) so direct callers without an ingress aren't broken.
+//!   Blocks). The `Role::System` lift is the `req.system`-ABSENT path
+//!   only: when no canonical system is supplied, any Role::System
+//!   messages in `req.messages` get lifted so direct callers without an
+//!   ingress aren't broken. When a canonical system IS supplied, the lift
+//!   does not run and those turns instead ride the wire in place as
+//!   `role: "system"` messages (see `messages::SystemTurnPolicy`).
 //! - User content is translated typed-block-by-typed-block. Unknown
 //!   blocks pass through via ContentPart::Other -> ContentBlock::Other.
 //! - Assistant content with reasoning_details (multi-turn tool-use)
@@ -56,7 +59,7 @@ use super::extras::{
     build_output_config, merge_provider_extras, reconcile_output_config_effort,
     reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
 };
-use super::messages::{normalize_replay_invariants, translate_messages};
+use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
 use super::tools::{apply_parallel_tool_use, parallel_tool_calls_extra, translate_tool_choice};
 
 // Re-exports for callers outside this module. The Bedrock egress reuses
@@ -373,14 +376,17 @@ pub(crate) fn drop_unrepresentable_output_format_keys(
 /// This deliberately validates the POST-assembly wire body, NOT the canonical
 /// `ChatRequest`. Assembly is lossy -- `tool_choice="none"` suppresses tools,
 /// the billing-attribution strip drops a block, a legacy `Role::System` lift
-/// flattens its cache_control away, and consecutive `Role::Tool` turns
+/// flattens its cache_control away (that lift runs only when NO canonical
+/// `req.system` is present; with one present the system turns ride the wire in
+/// place and keep their per-block markers), and consecutive `Role::Tool` turns
 /// collapse into one message of unmarked `ToolResult` blocks -- so this walk
 /// counts what ACTUALLY ships. It is load-bearing and is NOT replaceable with
 /// `validate_source(req)` on the
 /// canonical request: that would change the cap/ordering outcome for every
 /// suppressed / stripped / lifted / collapsed request. The canonical
 /// pre-assembly walk lives in routectl-core cache_control.rs
-/// (`CacheBreakpointSource for ChatRequest`).
+/// (`CacheBreakpointSource for ChatRequest`), whose doc comment points back
+/// here for this list rather than restating it.
 fn validate_breakpoints(ar: &AnthropicRequest) -> Result<()> {
     cache_control::validate_source(ar)
 }
@@ -503,7 +509,16 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// per diagnostic covering both sources. Emitting here as well would
 /// double-warn for a single request.
 ///
+/// `forward_system_turns` states whether this lane targets the Anthropic
+/// Messages API, which accepts a mid-conversation `role: "system"` turn in
+/// `messages[]`. When true and a canonical `req.system` is shipping, the
+/// legacy lift does not run and each `Role::System` turn rides the wire in
+/// place. When false the turns are treated as lift-consumed, so a lane whose
+/// target API has no such role never ships one. Stated at each call site, not
+/// defaulted.
+///
 /// Every other caller wants [`normalize`], which emits before returning.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) fn normalize_deferring_format_key_warn(
     id: &str,
     req: &ChatRequest,
@@ -514,39 +529,13 @@ pub(crate) fn normalize_deferring_format_key_warn(
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
     terminal_anthropic_host: bool,
+    forward_system_turns: bool,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
     // the loss isn't silent. Bedrock-Invoke delegates body construction here,
     // so this single call also covers that lane (with its own provider id).
     crate::sampling_drop_guard::warn_dropped_sampling_fields(id, req, &[]);
-
-    // Anthropic's wire requires every tool_result carry the
-    // `tool_use_id` of the tool_use it answers; missing ids are
-    // rejected upfront (always, independent of history_reasoning).
-    //
-    // Thinking blocks must carry a `signature` for multi-turn replay on
-    // real Anthropic. Cross-provider fallback (e.g. deepseek ->
-    // Anthropic) and SDKs that don't round-trip the signature field can
-    // produce unsigned blocks, so by default routectl STRIPS them and
-    // forwards a body Anthropic accepts rather than 400ing the request.
-    //
-    // The strip is gated on `history_reasoning`: `Preserve` keeps
-    // unsigned thinking on the wire because deepseek v4's `/anthropic`
-    // endpoint emits unsigned thinking AND 400s the next turn unless it
-    // is echoed back verbatim. `Auto` (the unset/None default) and
-    // `Strip` both strip -- real-Anthropic-safe. The dispatch layer
-    // resolves the per-model policy onto `routectl_internal`; library
-    // callers that never set it get `Auto` = strip.
-    let hr = req
-        .routectl_internal
-        .history_reasoning
-        .unwrap_or(CoreHistoryReasoning::Auto);
-    let messages = normalize_replay_invariants(id, req, hr)?;
-
-    let max_tokens = resolve_max_tokens(req);
-    let thinking = build_thinking(req, adaptive);
-    let output_config = build_output_config(req, &thinking);
 
     // Prefer canonical req.system; fall back to lifting Role::System
     // messages for direct callers that bypass an ingress.
@@ -576,6 +565,48 @@ pub(crate) fn normalize_deferring_format_key_warn(
             "anthropic-api egress: Claude Code billing/attribution system block dropped",
         );
     }
+
+    // The wire system field and the messages array are two halves of one
+    // decision, so the discriminator is resolved ONCE here from the same
+    // filtered canonical system the system-field branch below consumes.
+    // With a canonical system present the lift never ran, so nothing else
+    // owns the Role::System turns and they ride the wire in place; with it
+    // absent the lift consumed them. Resolved BEFORE the replay-invariant
+    // walk because that walk's whole-turn drop is positional: it must only
+    // refuse a drop after a system turn that actually reaches the wire.
+    let system_turns = if forward_system_turns && filtered_system.is_some() {
+        SystemTurnPolicy::Forward
+    } else {
+        SystemTurnPolicy::Lift
+    };
+
+    // Anthropic's wire requires every tool_result carry the
+    // `tool_use_id` of the tool_use it answers; missing ids are
+    // rejected upfront (always, independent of history_reasoning).
+    //
+    // Thinking blocks must carry a `signature` for multi-turn replay on
+    // real Anthropic. Cross-provider fallback (e.g. deepseek ->
+    // Anthropic) and SDKs that don't round-trip the signature field can
+    // produce unsigned blocks, so by default routectl STRIPS them and
+    // forwards a body Anthropic accepts rather than 400ing the request.
+    //
+    // The strip is gated on `history_reasoning`: `Preserve` keeps
+    // unsigned thinking on the wire because deepseek v4's `/anthropic`
+    // endpoint emits unsigned thinking AND 400s the next turn unless it
+    // is echoed back verbatim. `Auto` (the unset/None default) and
+    // `Strip` both strip -- real-Anthropic-safe. The dispatch layer
+    // resolves the per-model policy onto `routectl_internal`; library
+    // callers that never set it get `Auto` = strip.
+    let hr = req
+        .routectl_internal
+        .history_reasoning
+        .unwrap_or(CoreHistoryReasoning::Auto);
+    let messages = normalize_replay_invariants(id, req, hr, system_turns)?;
+
+    let max_tokens = resolve_max_tokens(req);
+    let thinking = build_thinking(req, adaptive);
+    let output_config = build_output_config(req, &thinking);
+
     let system = filtered_system.as_ref().map(translate_system).or_else(|| {
         // Legacy lift: strip the billing block from the lifted text too.
         // lift_legacy_system joins Role::System messages into a single
@@ -601,7 +632,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         id,
         terminal_anthropic_host,
     );
-    let mut anthropic_messages = translate_messages(id, &messages, &mut envelopes)?;
+    let mut anthropic_messages = translate_messages(id, &messages, system_turns, &mut envelopes)?;
 
     // When context_management emulation is active, re-inject cached
     // thinking blocks before ToolUse blocks per the clear_thinking_20251015
@@ -790,6 +821,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
 /// the ONE `output_config` warning per diagnostic for the request. Callers
 /// that keep writing to `output_config` after assembly must use the deferring
 /// variant and emit once themselves, or the request warns twice.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) fn normalize(
     id: &str,
     req: &ChatRequest,
@@ -800,6 +832,7 @@ pub(crate) fn normalize(
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
     terminal_anthropic_host: bool,
+    forward_system_turns: bool,
 ) -> Result<Value> {
     let (body, deferred) = normalize_deferring_format_key_warn(
         id,
@@ -809,6 +842,7 @@ pub(crate) fn normalize(
         context_management,
         thinking_cache,
         terminal_anthropic_host,
+        forward_system_turns,
     )?;
     deferred.warn(id);
     Ok(body)
@@ -881,7 +915,7 @@ mod reasoning_leak_guard_tests {
         let mut req = user_req();
         req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
 
         assert!(body.get("reasoning").is_none());
         assert!(body.get("context").is_none());
@@ -926,7 +960,7 @@ mod sampling_leak_guard_tests {
         req.presence_penalty = Some(0.5);
         req.frequency_penalty = Some(0.25);
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
 
         assert!(body.get("n").is_none());
         assert!(body.get("logprobs").is_none());
@@ -951,7 +985,7 @@ mod sampling_leak_guard_tests {
     fn no_sampling_warn_when_no_sampling_field_set() {
         let req = user_req();
 
-        let _ = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let _ = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
 
         assert!(!logs_contain("sampling fields dropped"));
     }
@@ -1021,7 +1055,7 @@ mod response_format_tests {
                 "strict": true
             }
         })));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         let fmt = &body["output_config"]["format"];
         assert_eq!(fmt["type"], "json_schema", "got: {body}");
         assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
@@ -1047,7 +1081,7 @@ mod response_format_tests {
             "type": "json_schema",
             "json_schema": {"name": "widget", "schema": schema.clone(), "strict": true}
         })));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         let mut expected = schema;
         expected["additionalProperties"] = json!(false);
         assert_eq!(
@@ -1074,7 +1108,7 @@ mod response_format_tests {
                 }
             }
         }));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         let fmt = &body["output_config"]["format"];
         assert_json_schema_format_members(fmt);
         assert!(
@@ -1095,7 +1129,7 @@ mod response_format_tests {
             }
         })));
 
-        let _ = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let _ = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
 
         logs_assert(|lines: &[&str]| {
             let matches: Vec<&&str> = lines
@@ -1130,7 +1164,7 @@ mod response_format_tests {
             "json_schema": {"schema": {"type": "object"}}
         })));
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
 
         assert_json_schema_format_members(&body["output_config"]["format"]);
         assert!(!logs_contain(super::OUTPUT_FORMAT_KEY_DROP_EVENT));
@@ -1139,7 +1173,7 @@ mod response_format_tests {
     #[test]
     fn json_object_response_format_maps_to_output_config_format() {
         let req = user_req(Some(json!({"type": "json_object"})));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "got: {body}"
@@ -1150,14 +1184,14 @@ mod response_format_tests {
     fn text_response_format_emits_no_output_config() {
         // A plain-text directive is not structured output; nothing maps.
         let req = user_req(Some(json!({"type": "text"})));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert!(body.get("output_config").is_none(), "got: {body}");
     }
 
     #[test]
     fn absent_response_format_emits_no_output_config() {
         let req = user_req(None);
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert!(body.get("output_config").is_none(), "got: {body}");
     }
 
@@ -1169,7 +1203,7 @@ mod response_format_tests {
         req.provider_extras = Some(json!({
             "output_config": {"format": {"type": "json_schema", "schema": {"type": "string"}}}
         }));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_schema",
             "provider_extras format must win: {body}"
@@ -1184,7 +1218,7 @@ mod response_format_tests {
         // replacing the non-object value, not silently no-op.
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": null}));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive a null provider_extras output_config: {body}"
@@ -1195,7 +1229,7 @@ mod response_format_tests {
     fn scalar_provider_extras_output_config_does_not_drop_response_format() {
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": 7}));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive a scalar provider_extras output_config: {body}"
@@ -1206,7 +1240,7 @@ mod response_format_tests {
     fn array_provider_extras_output_config_does_not_drop_response_format() {
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": [1, 2, 3]}));
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive an array provider_extras output_config: {body}"
@@ -1320,7 +1354,7 @@ mod parallel_tool_calls_tests {
     }
 
     fn run(req: &ChatRequest) -> Value {
-        normalize("anthropic:test", req, false, &[], false, None, false).unwrap()
+        normalize("anthropic:test", req, false, &[], false, None, false, true).unwrap()
     }
 
     #[test]

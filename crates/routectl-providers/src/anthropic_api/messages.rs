@@ -4,11 +4,13 @@
 //! `translate_simple_content`; Assistant turns route through
 //! `build_assistant_content` (which threads `reasoning_details` back as
 //! Thinking / RedactedThinking blocks and re-emits OpenAI-shape
-//! `tool_calls` as ToolUse blocks for multi-turn replay); Role::System
-//! is dropped here (already lifted into `req.system` by `system.rs`);
-//! Role::Tool becomes a synthesized user-role message carrying a
-//! tool_result block, and a run of consecutive Role::Tool turns folds
-//! into ONE such message with one block per turn.
+//! `tool_calls` as ToolUse blocks for multi-turn replay); `Role::System`
+//! is either FORWARDED in place as a wire `role: "system"` turn or
+//! dropped, per the [`SystemTurnPolicy`] the caller resolves from
+//! canonical-`system` presence; Role::Tool becomes a synthesized
+//! user-role message carrying a tool_result block, and a run of
+//! consecutive Role::Tool turns folds into ONE such message with one
+//! block per turn.
 //!
 //! `normalize_replay_invariants` applies two outgoing invariants before
 //! translation: a hard reject for tool_result messages missing a
@@ -20,7 +22,8 @@
 //! `ContentBlock::Other`.
 //!
 //! Diagnostics for the whole egress attempt are aggregated, never
-//! per-item: `ReasoningSkipTally` pools the reasoning-skip categories and
+//! per-item: `ReasoningSkipTally` pools the reasoning-skip categories,
+//! `SystemTurnTally` pools the forwarded-system-turn counts, and
 //! `EnvelopeUnwrapTally` (owned upstream in `request::normalize`, since
 //! cache reinjection also builds `redacted_thinking` blocks) pools the
 //! envelope events, so one request defect costs one WARN line rather than
@@ -113,7 +116,12 @@ fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
 ///   `build_assistant_content` path still fills the wire content array
 ///   from `reasoning_details` / `tool_calls` when those are present,
 ///   so we keep the message in that case. Preserve never strips, so
-///   this drop path does not run under Preserve.
+///   this drop path does not run under Preserve. One exception, and only
+///   under [`SystemTurnPolicy::Forward`]: a message immediately following
+///   a `Role::System` turn is KEPT, since a wire `system` turn must
+///   precede an `assistant` turn or end the array and the drop would
+///   strand it. Under `Lift` no system turn reaches the wire, so the
+///   positional rationale does not apply and the drop stands.
 ///
 /// One structured WARN fires per request when stripping occurs,
 /// carrying the provider id, the exact count of dropped blocks, the
@@ -130,6 +138,10 @@ fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
 /// here and the emit downstream cannot drift into keeping a turn that
 /// then emits nothing.
 ///
+/// `system_turns` is the same policy `translate_messages` receives: it
+/// gates ONLY the preceding-system drop-refusal above, so a lane that
+/// never ships a wire system turn keeps its previous drop behavior.
+///
 /// Returns `Cow::Borrowed(&req.messages)` on the no-strip path (Preserve,
 /// or Strip/Auto with nothing to strip) so unmodified requests don't pay
 /// a clone.
@@ -137,6 +149,7 @@ pub(super) fn normalize_replay_invariants<'a>(
     id: &str,
     req: &'a ChatRequest,
     history_reasoning: CoreHistoryReasoning,
+    system_turns: SystemTurnPolicy,
 ) -> Result<Cow<'a, [Message]>> {
     // Tool-result tool_call_id check stays a hard fail REGARDLESS of
     // history_reasoning -- it is a separate correctness invariant, not
@@ -207,7 +220,22 @@ pub(super) fn normalize_replay_invariants<'a>(
         }
         let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
         let has_emittable_reasoning = message_has_emittable_reasoning(msg);
-        if kept.is_empty() && !has_tool_calls && !has_emittable_reasoning {
+        // Positional legality: on the Anthropic wire a `system` turn must
+        // precede an `assistant` turn or end the array. Dropping the
+        // assistant turn that immediately follows one would leave the
+        // system turn followed by a user turn -- a shape the upstream
+        // rejects, minted by routectl rather than by the caller. Keeping
+        // the turn is safe: `build_assistant_content`'s empty-blocks
+        // backstop emits one empty text block (and warns), so nothing
+        // ships as `content: []`. Only the Forward policy puts a system
+        // turn on the wire, so only Forward earns the refusal.
+        let precedes_kept_system_turn = system_turns == SystemTurnPolicy::Forward
+            && out.last().is_some_and(|m| matches!(m.role, Role::System));
+        if kept.is_empty()
+            && !has_tool_calls
+            && !has_emittable_reasoning
+            && !precedes_kept_system_turn
+        {
             // Stripping emptied this message and there is no other content
             // the wire can serialize: no tool_calls, and every
             // reasoning_detail is non-emittable (unsigned or foreign
@@ -682,7 +710,8 @@ fn build_assistant_content(
         // tool_calls field to re-emit; fall through to the generic
         // content translation (Text or Parts), but strip trailing
         // text-after-tool_use first (see helper docstring).
-        return Ok(translate_assistant_simple_content(&msg.content, envelopes));
+        let content = translate_assistant_simple_content(&msg.content, envelopes);
+        return Ok(backstop_empty_blocks(content, skips));
     }
 
     let mut blocks =
@@ -691,25 +720,42 @@ fn build_assistant_content(
     if let Some(tool_calls) = msg.tool_calls.as_ref() {
         emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks, &emitted_tool_ids)?;
     }
-    if blocks.is_empty() {
-        // Last-resort backstop. `normalize_replay_invariants` drops a
-        // reasoning-only turn whose reasoning is non-emittable, but it
-        // returns early (Borrowed) on the Preserve and no-strip paths and
-        // never inspects those messages -- a Null-content turn carrying
-        // only unsigned reasoning_details reaches here with an empty
-        // block list. Anthropic 400s on content: [], so insert one empty
-        // text block. Should be rare: frequent firing means the
-        // emittability predicate drifted from the emit behavior. The WARN
-        // is aggregated per attempt via the tally rather than emitted
-        // per turn.
-        skips.record_backstop();
-        blocks.push(ContentBlock::Text {
-            text: String::new(),
-            citations: None,
-            cache_control: None,
-        });
+    Ok(backstop_empty_blocks(
+        AnthropicContent::Blocks(blocks),
+        skips,
+    ))
+}
+
+/// Last-resort backstop against an assistant turn assembling to
+/// `content: []`, which Anthropic rejects: substitute one empty text block
+/// and record the event on the aggregated tally.
+///
+/// Guards BOTH assembly paths of `build_assistant_content`. The
+/// reasoning/tool_call path can assemble empty when
+/// `normalize_replay_invariants` did not inspect the turn (it returns
+/// Borrowed early on the Preserve and no-strip paths, so a Null-content
+/// turn carrying only unsigned reasoning_details reaches here). The plain
+/// path can assemble empty when the unsigned-thinking strip emptied the
+/// turn's `Parts` and the whole-turn drop was refused to keep a preceding
+/// system turn in a legal position. Should be rare on the first path:
+/// frequent firing there means the emittability predicate drifted from the
+/// emit behavior. The WARN is aggregated per attempt via the tally rather
+/// than emitted per turn.
+fn backstop_empty_blocks(
+    content: AnthropicContent,
+    skips: &mut ReasoningSkipTally<'_>,
+) -> AnthropicContent {
+    match content {
+        AnthropicContent::Blocks(blocks) if blocks.is_empty() => {
+            skips.record_backstop();
+            AnthropicContent::Blocks(vec![ContentBlock::Text {
+                text: String::new(),
+                citations: None,
+                cache_control: None,
+            }])
+        }
+        other => other,
     }
-    Ok(AnthropicContent::Blocks(blocks))
 }
 
 /// Re-emit OpenAI-shape `tool_calls` (the canonical
@@ -1075,16 +1121,20 @@ fn ensure_min_tool_result_content(content: Value) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Iterate the canonical messages and produce the Anthropic-shaped
-/// per-role list. System messages are intentionally dropped here --
-/// they're already lifted into `req.system` (canonical) or by
-/// `lift_legacy_system` for direct callers without an ingress, so
-/// re-emitting them as messages would duplicate.
+/// per-role list.
+///
+/// `Role::System` turns are governed by `policy`: under
+/// [`SystemTurnPolicy::Forward`] each one is emitted IN PLACE at its
+/// original position as a wire `role: "system"` message; under
+/// [`SystemTurnPolicy::Lift`] the legacy lift has already consumed them
+/// into the wire `system` field, so re-emitting them here would
+/// duplicate.
 ///
 /// A run of CONSECUTIVE `Role::Tool` turns (the parallel-tool-call reply
 /// shape) folds into one user message carrying one `tool_result` block per
 /// turn -- see `build_tool_message`. Any non-tool turn ends the run, so
-/// tool results separated by an assistant turn stay in separate messages
-/// and nothing is reordered across the boundary.
+/// tool results separated by an assistant or system turn stay in separate
+/// messages and nothing is reordered across the boundary.
 ///
 /// `envelopes` carries the already-resolved reasoning-envelope policy for
 /// this request -- see [`EnvelopeUnwrapTally`]. It is owned by
@@ -1093,40 +1143,209 @@ fn ensure_min_tool_result_content(content: Value) -> Value {
 /// blocks too, after this returns, and both channels must share one tally
 /// so the aggregated WARN stays at one line per request.
 ///
-/// The reasoning-skip tally, by contrast, is owned HERE: this walk is its
-/// only feeder, so a wider owner would spread the flush over call sites
-/// that never fill it. Every fallible step lives in
-/// `translate_messages_threaded`, so no `?` can return past the flush --
-/// the single-emission guarantee is structural rather than a discipline
+/// The reasoning-skip and system-turn tallies, by contrast, are owned
+/// HERE: this walk is their only feeder, so a wider owner would spread
+/// the flush over call sites that never fill it. Every fallible step lives
+/// in `translate_messages_threaded`, so no `?` can return past the flush
+/// -- the single-emission guarantee is structural rather than a discipline
 /// each early return has to remember.
+///
+/// The accounted-identity ledger the threaded walk fills is verified here
+/// before the messages are returned: every position this walk consumes is
+/// either emitted or charged to one named lossy term, so an arm that
+/// forgets to account for what it dropped fails the request instead of
+/// deleting content silently.
 pub(super) fn translate_messages(
     id: &str,
     messages: &[Message],
+    policy: SystemTurnPolicy,
     envelopes: &mut EnvelopeUnwrapTally,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut skips = ReasoningSkipTally::new(id);
-    let out = translate_messages_threaded(id, messages, envelopes, &mut skips);
+    let mut system_turns = SystemTurnTally::new(id);
+    let out = translate_messages_threaded(
+        id,
+        messages,
+        policy,
+        envelopes,
+        &mut skips,
+        &mut system_turns,
+    );
     skips.flush();
-    out
+    system_turns.flush();
+    let (out, ledger) = out?;
+    ledger.verify(id, out.len())?;
+    Ok(out)
+}
+
+/// Whether a canonical `Role::System` turn reaches the wire as a
+/// `role: "system"` message or is treated as already consumed.
+///
+/// Resolved by the caller from canonical-`system` presence and passed in,
+/// never derived here: the two branches are mutually exclusive by
+/// construction, and a walk that re-derived the discriminator could
+/// disagree with the branch that built the wire `system` field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SystemTurnPolicy {
+    /// A canonical top-level `system` is shipping, so the legacy lift did
+    /// not run and nothing else owns these turns: emit each in place.
+    Forward,
+    /// No canonical top-level `system`: the legacy lift consumed these
+    /// turns into the wire `system` field.
+    Lift,
+}
+
+/// Aggregated system-turn diagnostics for ONE outbound attempt: one DEBUG
+/// line naming how many turns were forwarded, and one WARN when the
+/// billing/attribution screen stripped anything. The WARN counts BLOCKS,
+/// so a turn that loses only its billing block is reported as loudly as a
+/// turn removed wholesale, and it fires at most once per request. No
+/// message content reaches either line.
+struct SystemTurnTally<'a> {
+    provider: &'a str,
+    forwarded: usize,
+    billing_blocks_stripped: usize,
+    billing_turns_dropped: usize,
+}
+
+impl<'a> SystemTurnTally<'a> {
+    const fn new(provider: &'a str) -> Self {
+        Self {
+            provider,
+            forwarded: 0,
+            billing_blocks_stripped: 0,
+            billing_turns_dropped: 0,
+        }
+    }
+
+    const fn record_forwarded(&mut self) {
+        self.forwarded = self.forwarded.saturating_add(1);
+    }
+
+    const fn record_billing_stripped(&mut self, blocks: usize) {
+        self.billing_blocks_stripped = self.billing_blocks_stripped.saturating_add(blocks);
+    }
+
+    const fn record_billing_dropped_turn(&mut self) {
+        self.billing_turns_dropped = self.billing_turns_dropped.saturating_add(1);
+    }
+
+    fn flush(&self) {
+        if self.forwarded > 0 {
+            tracing::debug!(
+                provider = self.provider,
+                system_turns_forwarded = self.forwarded,
+                "forwarding mid-conversation system turns in place: a canonical \
+                 top-level system is shipping, so the legacy lift did not consume them"
+            );
+        }
+        if self.billing_blocks_stripped > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                system_blocks_stripped = self.billing_blocks_stripped,
+                system_turns_dropped = self.billing_turns_dropped,
+                "anthropic-api egress: Claude Code billing/attribution block(s) dropped \
+                 from forwarded Role::System turns; a turn left with no other content \
+                 is omitted entirely",
+            );
+        }
+    }
+}
+
+/// Accounted-identity ledger over ONE `messages[]` walk. The invariant is
+/// NOT "in == out": the tool-run fold legitimately collapses N turns into
+/// one message, and the two system-turn terms below are deliberate losses.
+/// Each is counted explicitly, so the identity holds exactly and an
+/// unaccounted drop is a hard error rather than silent deletion.
+#[derive(Default)]
+struct MessageLedger {
+    consumed: usize,
+    tool_turns_consumed: usize,
+    tool_runs_emitted: usize,
+    system_turns_consumed_by_lift: usize,
+    system_turns_dropped_by_billing_strip: usize,
+}
+
+impl MessageLedger {
+    /// How many wire messages the accounted terms say this walk must have
+    /// emitted. Saturating because every term counts positions the walk
+    /// itself visited, so none can exceed `consumed`.
+    const fn expected_emitted(&self) -> usize {
+        let folded = self
+            .tool_turns_consumed
+            .saturating_sub(self.tool_runs_emitted);
+        self.consumed
+            .saturating_sub(folded)
+            .saturating_sub(self.system_turns_consumed_by_lift)
+            .saturating_sub(self.system_turns_dropped_by_billing_strip)
+    }
+
+    fn verify(&self, id: &str, emitted: usize) -> Result<()> {
+        let expected = self.expected_emitted();
+        if emitted == expected {
+            return Ok(());
+        }
+        Err(Error::normalize_request(
+            id,
+            format!(
+                "message translation lost content: emitted {emitted} wire messages, \
+                 accounted for {expected} (consumed {}, tool turns {} folded into {} \
+                 messages, system turns {} consumed by the legacy lift and {} dropped \
+                 by the billing/attribution screen)",
+                self.consumed,
+                self.tool_turns_consumed,
+                self.tool_runs_emitted,
+                self.system_turns_consumed_by_lift,
+                self.system_turns_dropped_by_billing_strip,
+            ),
+        ))
+    }
 }
 
 /// The per-role walk itself, threading the reasoning-skip tally through
-/// every assistant turn. Holds every `?` in the translation so its caller
-/// can flush the tally unconditionally.
+/// every assistant turn and filling the accounted-identity ledger. Holds
+/// every `?` in the translation so its caller can flush the tallies
+/// unconditionally.
 fn translate_messages_threaded(
     id: &str,
     messages: &[Message],
+    policy: SystemTurnPolicy,
     envelopes: &mut EnvelopeUnwrapTally,
     skips: &mut ReasoningSkipTally<'_>,
-) -> Result<Vec<AnthropicMessage>> {
+    system_turns: &mut SystemTurnTally<'_>,
+) -> Result<(Vec<AnthropicMessage>, MessageLedger)> {
     let mut out: Vec<AnthropicMessage> = Vec::with_capacity(messages.len());
+    let mut ledger = MessageLedger {
+        consumed: messages.len(),
+        ..MessageLedger::default()
+    };
     let mut i = 0usize;
     while i < messages.len() {
         let msg = &messages[i];
         match msg.role {
             Role::System => {
-                // Already handled via req.system / lift_legacy_system.
-                // Drop here (do not duplicate in the messages array).
+                match policy {
+                    SystemTurnPolicy::Lift => {
+                        ledger.system_turns_consumed_by_lift += 1;
+                    }
+                    SystemTurnPolicy::Forward => {
+                        let screened = screen_forwarded_system_content(id, i, &msg.content)?;
+                        system_turns.record_billing_stripped(screened.blocks_stripped);
+                        match screened.content {
+                            Some(content) => {
+                                out.push(AnthropicMessage {
+                                    role: AnthropicRole::System,
+                                    content: translate_simple_content(&content, envelopes),
+                                });
+                                system_turns.record_forwarded();
+                            }
+                            None => {
+                                system_turns.record_billing_dropped_turn();
+                                ledger.system_turns_dropped_by_billing_strip += 1;
+                            }
+                        }
+                    }
+                }
                 i += 1;
             }
             Role::User => {
@@ -1145,28 +1364,162 @@ fn translate_messages_threaded(
             }
             Role::Tool => {
                 let (run, run_end) = collect_tool_run(messages, i);
+                ledger.tool_turns_consumed += run.len();
+                ledger.tool_runs_emitted += 1;
                 out.push(build_tool_message(&run, envelopes));
                 i = run_end;
             }
         }
     }
-    Ok(out)
+    Ok((out, ledger))
+}
+
+/// Screen one forwarded `Role::System` turn's content before it reaches
+/// the wire.
+///
+/// Two rules, in order:
+/// - Content that would translate to an empty system turn (`Null`, `Parts`
+///   carrying no blocks, or a kept set whose every block is blank text) is
+///   a local `Err`: Anthropic rejects a system turn with no content and its
+///   error does not name the message, so the index is surfaced here
+///   instead. The blank test mirrors `SystemContent::is_blank` on the
+///   canonical path.
+/// - Every block that can carry text runs through the shared Claude Code
+///   billing/attribution predicate -- a typed text block, an unrecognized
+///   block carrying a `text` field, and a document source alike. Forwarding
+///   verbatim would otherwise open a third bypass of the strip that already
+///   covers the canonical `system` and the legacy lift, leaking the client
+///   fingerprint to a non-Anthropic host. Matching blocks are dropped;
+///   `content: None` means nothing survived and the caller skips the turn.
+///
+/// `blocks_stripped` counts the dropped BLOCKS, so a turn that loses only
+/// part of its content is reported as loudly as one removed wholesale.
+fn screen_forwarded_system_content(
+    id: &str,
+    message_index: usize,
+    content: &MessageContent,
+) -> Result<ScreenedSystemContent> {
+    match content {
+        MessageContent::Null => Err(empty_system_turn_error(id, message_index)),
+        MessageContent::Text(text) => {
+            if crate::system_filter::is_billing_attribution_block(text) {
+                Ok(ScreenedSystemContent {
+                    content: None,
+                    blocks_stripped: 1,
+                })
+            } else if text.trim().is_empty() {
+                Err(empty_system_turn_error(id, message_index))
+            } else {
+                Ok(ScreenedSystemContent {
+                    content: Some(MessageContent::Text(text.clone())),
+                    blocks_stripped: 0,
+                })
+            }
+        }
+        MessageContent::Parts(parts) => {
+            if parts.is_empty() {
+                return Err(empty_system_turn_error(id, message_index));
+            }
+            let kept: Vec<ContentPart> = parts
+                .iter()
+                .filter(|p| !is_billing_attribution_part(p))
+                .cloned()
+                .collect();
+            let blocks_stripped = parts.len().saturating_sub(kept.len());
+            if kept.is_empty() {
+                return Ok(ScreenedSystemContent {
+                    content: None,
+                    blocks_stripped,
+                });
+            }
+            if kept.iter().all(is_blank_text_part) {
+                return Err(empty_system_turn_error(id, message_index));
+            }
+            Ok(ScreenedSystemContent {
+                content: Some(MessageContent::Parts(kept)),
+                blocks_stripped,
+            })
+        }
+    }
+}
+
+/// Outcome of the forwarded-system screen: the content that survived
+/// (`None` when the whole turn is dropped) and how many blocks the screen
+/// removed, so the aggregated WARN counts partial strips too.
+struct ScreenedSystemContent {
+    content: Option<MessageContent>,
+    blocks_stripped: usize,
+}
+
+/// True iff `p` is a typed text block whose text is whitespace-only. Any
+/// other block shape carries content the wire can serialize, so it is not
+/// blank for the empty-turn test.
+fn is_blank_text_part(p: &ContentPart) -> bool {
+    matches!(
+        p,
+        ContentPart::Known(KnownContentPart::Text { text, .. }) if text.trim().is_empty()
+    )
+}
+
+fn empty_system_turn_error(id: &str, message_index: usize) -> Error {
+    Error::normalize_request(
+        id,
+        format!(
+            "messages[{message_index}] is a Role::System turn with no content; \
+             Anthropic requires a forwarded system turn to carry at least one block"
+        ),
+    )
+}
+
+/// True iff `p` carries a Claude Code billing/attribution block, in any
+/// shape that can hold the fingerprint text: a typed text block, an
+/// unrecognized block with a `text` field (a capitalized or otherwise
+/// unmodeled `type` tag still reaches the wire verbatim), or a document
+/// whose source carries the text inline. Blocks with no text at all (image
+/// bytes, tool blocks, base64 document payloads) can never match.
+fn is_billing_attribution_part(p: &ContentPart) -> bool {
+    match p {
+        ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+            crate::system_filter::is_billing_attribution_block(text)
+        }
+        ContentPart::Known(KnownContentPart::Document { source, .. }) => {
+            value_carries_billing_text(source)
+        }
+        ContentPart::Other { extras, .. } => extras
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(crate::system_filter::is_billing_attribution_block),
+        _ => false,
+    }
+}
+
+/// True iff `source` carries the billing/attribution text: either as the
+/// bare string form or in any string field of the source object (`data` for
+/// a `text` source, and every sibling, so an unmodeled source field cannot
+/// smuggle the fingerprint past the screen).
+fn value_carries_billing_text(source: &Value) -> bool {
+    match source {
+        Value::String(s) => crate::system_filter::is_billing_attribution_block(s),
+        Value::Object(fields) => fields
+            .values()
+            .filter_map(Value::as_str)
+            .any(crate::system_filter::is_billing_attribution_block),
+        _ => false,
+    }
 }
 
 /// Gather the run of tool turns starting at `start`, returning the turns
-/// and the index of the first message that ends the run. `Role::System`
-/// emits nothing (it was lifted into `req.system`), so it is transparent
-/// here rather than a run boundary -- the Converse egress, which drops
-/// System before its coalescing step, behaves the same way. Only a User
-/// or Assistant turn ends the run.
+/// and the index of the first message that ends the run. A User,
+/// Assistant, or System turn ends the run: a system turn can now reach the
+/// wire in place, so folding tool results across one would either delete
+/// it or reorder it behind the coalesced tool message.
 fn collect_tool_run(messages: &[Message], start: usize) -> (Vec<&Message>, usize) {
     let mut run: Vec<&Message> = Vec::new();
     let mut i = start;
     while let Some(msg) = messages.get(i) {
         match msg.role {
             Role::Tool => run.push(msg),
-            Role::System => {}
-            Role::User | Role::Assistant => break,
+            Role::User | Role::Assistant | Role::System => break,
         }
         i += 1;
     }
@@ -1329,7 +1682,7 @@ mod translate_file_part_tests {
 #[cfg(test)]
 mod thinking_signature_tests {
     use super::{
-        B64_STANDARD, is_claude_shaped_signature, is_unsigned_thinking_part,
+        B64_STANDARD, SystemTurnPolicy, is_claude_shaped_signature, is_unsigned_thinking_part,
         normalize_replay_invariants,
     };
     use base64::Engine;
@@ -1468,8 +1821,13 @@ mod thinking_signature_tests {
         };
 
         // Act
-        let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
-            .expect("strip should not error");
+        let out = normalize_replay_invariants(
+            "anthropic",
+            &req,
+            CoreHistoryReasoning::Auto,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("strip should not error");
 
         // Assert -- foreign thinking dropped; both Claude-signed kept.
         let MessageContent::Parts(parts) = &out[0].content else {
@@ -1506,8 +1864,13 @@ mod thinking_signature_tests {
         };
 
         // Act
-        let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
-            .expect("strip should not error");
+        let out = normalize_replay_invariants(
+            "anthropic",
+            &req,
+            CoreHistoryReasoning::Auto,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("strip should not error");
 
         // Assert -- only the text part remains.
         let MessageContent::Parts(parts) = &out[0].content else {
@@ -1523,7 +1886,7 @@ mod thinking_signature_tests {
 
 #[cfg(test)]
 mod tool_id_correlation_tests {
-    use super::{ContentBlock, passthrough_tally, translate_messages};
+    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
     use routectl_core::{Message, MessageContent, Role};
     use serde_json::json;
@@ -1608,8 +1971,13 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translation must not error");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation must not error");
 
         // Assert
         assert_eq!(tool_use_id(&out), "esc_call_2efoo_3a1");
@@ -1629,8 +1997,13 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translation must not error");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation must not error");
 
         // Assert
         assert_eq!(tool_use_id(&out), "call_abc-1_2");
@@ -1656,8 +2029,13 @@ mod tool_id_correlation_tests {
         let messages = vec![user_msg(), assistant];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translation must not error");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation must not error");
 
         // Assert
         let ids = tool_use_ids(&out);
@@ -1688,8 +2066,13 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translation must not error");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation must not error");
 
         // Assert -- the two result ids are distinct and are exactly the
         // two emitted tool_use ids, so neither result is orphaned nor
@@ -1719,8 +2102,13 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translation must not error");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation must not error");
 
         // Assert
         let expected = format!("esct_{}_8087e9a889f8a14c", "a".repeat(42));
@@ -1761,7 +2149,7 @@ mod tool_id_correlation_tests {
 #[cfg(test)]
 mod empty_content_backstop_tests {
     use super::{
-        ReasoningSkipTally, build_assistant_content, normalize_replay_invariants,
+        ReasoningSkipTally, SystemTurnPolicy, build_assistant_content, normalize_replay_invariants,
         passthrough_tally, translate_messages,
     };
     use crate::anthropic_api::ANTHROPIC_FORMAT;
@@ -1844,8 +2232,13 @@ mod empty_content_backstop_tests {
 
         // Act
         let events = routectl_testkit::capture_events(|| {
-            let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
-                .expect("normalize must not error");
+            let out = normalize_replay_invariants(
+                "anthropic",
+                &req,
+                CoreHistoryReasoning::Auto,
+                SystemTurnPolicy::Lift,
+            )
+            .expect("normalize must not error");
             // Assert -- the turn is gone.
             assert!(
                 out.is_empty(),
@@ -1881,8 +2274,13 @@ mod empty_content_backstop_tests {
         };
 
         // Act
-        let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
-            .expect("normalize must not error");
+        let out = normalize_replay_invariants(
+            "anthropic",
+            &req,
+            CoreHistoryReasoning::Auto,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("normalize must not error");
 
         // Assert
         assert!(
@@ -1908,15 +2306,25 @@ mod empty_content_backstop_tests {
         };
 
         // Act -- normalize keeps it, then translate to the wire shape.
-        let normalized = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
-            .expect("normalize must not error");
+        let normalized = normalize_replay_invariants(
+            "anthropic",
+            &req,
+            CoreHistoryReasoning::Auto,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("normalize must not error");
         assert_eq!(
             normalized.len(),
             1,
             "a turn with tool_calls is never dropped"
         );
-        let wire = translate_messages("anthropic", &normalized, &mut passthrough_tally())
-            .expect("translate must not error");
+        let wire = translate_messages(
+            "anthropic",
+            &normalized,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate must not error");
 
         // Assert -- wire content is a non-empty block array with a ToolUse.
         let AnthropicContent::Blocks(blocks) = &wire[0].content else {
@@ -1977,8 +2385,8 @@ mod empty_content_backstop_tests {
 #[cfg(test)]
 mod tool_use_dedup_tests {
     use super::{
-        AnthropicContent, ContentBlock, ReasoningSkipTally, build_assistant_content,
-        build_tool_message, passthrough_tally, translate_messages,
+        AnthropicContent, ContentBlock, ReasoningSkipTally, SystemTurnPolicy,
+        build_assistant_content, build_tool_message, passthrough_tally, translate_messages,
     };
     use crate::anthropic_api::types::AnthropicMessage;
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
@@ -2153,8 +2561,13 @@ mod tool_use_dedup_tests {
         );
 
         // Act -- thread it back through the egress.
-        let out = translate_messages("anthropic", &[assistant_msg], &mut passthrough_tally())
-            .expect("translate");
+        let out = translate_messages(
+            "anthropic",
+            &[assistant_msg],
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate");
 
         // Assert -- exactly one tool_use block, id preserved.
         let uses = tool_use_blocks(&out[0].content);
@@ -2257,7 +2670,7 @@ mod tool_use_dedup_tests {
 
 #[cfg(test)]
 mod tool_result_coalescing_tests {
-    use super::{ContentBlock, passthrough_tally, translate_messages};
+    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage, AnthropicRole};
     use routectl_core::{
         CacheControl, ContentPart, KnownContentPart, Message, MessageContent, Role,
@@ -2301,6 +2714,7 @@ mod tool_result_coalescing_tests {
             .map(|m| match m.role {
                 AnthropicRole::User => "user",
                 AnthropicRole::Assistant => "assistant",
+                AnthropicRole::System => "system",
             })
             .collect()
     }
@@ -2334,8 +2748,13 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translate");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate");
 
         // Assert
         assert_eq!(roles(&out), vec!["user", "assistant", "user"]);
@@ -2359,8 +2778,13 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translate");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate");
 
         // Assert
         assert_eq!(roles(&out), vec!["user", "assistant", "user"]);
@@ -2382,8 +2806,13 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translate");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate");
 
         // Assert
         assert_eq!(
@@ -2407,8 +2836,13 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translate");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate");
 
         // Assert
         assert_eq!(roles(&out), vec!["assistant", "user", "user", "user"]);
@@ -2434,8 +2868,13 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages("anthropic", &messages, &mut passthrough_tally())
-            .expect("translate");
+        let out = translate_messages(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translate");
 
         // Assert
         let AnthropicContent::Blocks(blocks) = &out[1].content else {

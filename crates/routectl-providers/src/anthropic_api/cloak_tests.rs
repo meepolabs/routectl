@@ -156,6 +156,89 @@ fn strict_mode_drops_client_system_and_leaves_user_message_unchanged() {
     assert_eq!(body["messages"][0]["content"], "hello");
 }
 
+/// A `role: "system"` turn in `messages[]` is a second carrier of client
+/// system directives, so the non-CC relocation captures it: the turn leaves
+/// the array and its text lands in the reminder block.
+#[test]
+fn relocate_captures_and_removes_a_messages_system_turn() {
+    // Arrange
+    let mut body = json!({
+        "system": "client system prompt",
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "mid-conversation directive"},
+            {"role": "assistant", "content": "ok"},
+        ]
+    });
+
+    // Act
+    relocate_client_system(&mut body, false);
+
+    // Assert
+    let msgs = body["messages"].as_array().expect("messages array");
+    assert_eq!(msgs.len(), 2, "the system turn is removed: {body}");
+    assert!(
+        msgs.iter().all(|m| m["role"] != "system"),
+        "no system turn may survive: {body}"
+    );
+    let content = msgs[0]["content"]
+        .as_array()
+        .expect("content promoted to array");
+    assert_eq!(
+        content[0]["text"],
+        reminder_text("client system prompt\n\nmid-conversation directive")
+    );
+    assert_eq!(content[1]["text"], "hello");
+}
+
+/// Strict mode keeps its contract for the new carrier: the turn is removed
+/// from `messages[]` and its content is dropped rather than relocated.
+#[test]
+fn strict_mode_drops_a_messages_system_turn_without_a_reminder() {
+    // Arrange
+    let mut body = json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "mid-conversation directive"},
+        ]
+    });
+
+    // Act
+    relocate_client_system(&mut body, true);
+
+    // Assert
+    let msgs = body["messages"].as_array().expect("messages array");
+    assert_eq!(msgs.len(), 1, "the system turn is removed: {body}");
+    assert_eq!(msgs[0]["content"], "hello", "no reminder is inserted");
+}
+
+/// A system turn carrying block-array content relocates block-by-block,
+/// through the same text-block rule the `system` field uses.
+#[test]
+fn relocate_captures_block_array_content_of_a_messages_system_turn() {
+    // Arrange
+    let mut body = json!({
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"role": "system", "content": [
+                {"type": "text", "text": "first directive"},
+                {"type": "text", "text": "second directive"},
+            ]},
+        ]
+    });
+
+    // Act
+    relocate_client_system(&mut body, false);
+
+    // Assert
+    let msgs = body["messages"].as_array().expect("messages array");
+    assert_eq!(msgs.len(), 1, "got: {body}");
+    assert_eq!(
+        msgs[0]["content"][0]["text"],
+        reminder_text("first directive\n\nsecond directive")
+    );
+}
+
 #[test]
 fn relocate_preserves_cache_control_on_reminder_block() {
     // Arrange: a client system block carrying a cache_control breakpoint.
@@ -610,6 +693,32 @@ fn cloak_genuine_cc_strips_billing_but_does_not_stamp() {
         !serialized.contains(SYSTEM_REMINDER_OPEN),
         "genuine CC must not gain a system-reminder block"
     );
+}
+
+/// The CC lane is untouched by the messages[] capture: with `is_non_cc`
+/// false no relocation runs, so a forwarded system turn reaches the wire
+/// exactly as assembled.
+#[test]
+fn cloak_genuine_cc_leaves_a_messages_system_turn_in_place() {
+    // Arrange
+    let id = identity();
+    let req = ChatRequest::default();
+    let mut body = json!({
+        "system": "you are helpful",
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "mid-conversation directive"},
+        ]
+    });
+
+    // Act
+    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
+
+    // Assert
+    let msgs = body["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "got: {body}");
+    assert_eq!(msgs[1]["role"], "system");
+    assert_eq!(msgs[1]["content"], "mid-conversation directive");
 }
 
 #[test]

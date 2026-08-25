@@ -5,7 +5,10 @@
 //! cache_control and citations; `lift_legacy_system` is the
 //! backwards-compat fallback that lifts `Role::System` messages into a
 //! flat `AnthropicSystem::Text` for direct callers that bypass an
-//! ingress. `lift_legacy_system_stripped` is the billing-aware variant
+//! ingress. Both lifts cover the `req.system`-ABSENT path only: with a
+//! canonical system present the anthropic-api egress forwards the
+//! `Role::System` turns in place (see `messages::SystemTurnPolicy`).
+//! `lift_legacy_system_stripped` is the billing-aware variant
 //! used by the anthropic-api egress: it drops the Claude Code
 //! billing/attribution block per-message before joining so the
 //! fingerprint never reaches a third-party host via the lift fallback.
@@ -97,6 +100,10 @@ fn collect_system_texts(messages: &[Message]) -> Vec<String> {
 /// (Parts without text blocks, Null) -- avoids emitting a meaningless
 /// `system: ""` upstream and the extra newlines from joining blanks.
 ///
+/// This covers the `req.system`-ABSENT path only. When a canonical system
+/// is present the anthropic-api egress forwards the Role::System turns in
+/// place instead, so nothing lifts them.
+///
 /// `pub(crate)` so the Bedrock Converse egress can reuse the same
 /// legacy-shape fallback (single source of truth). Gated on the
 /// `bedrock` feature because the anthropic-api egress uses the
@@ -119,6 +126,10 @@ pub fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
 /// leading-prefix predicate. Sets `dropped = true` when at least one block
 /// was removed so the caller can emit a single contents-free WARN. Returns
 /// None when nothing survives the strip (the system collapses to absent).
+///
+/// Like the unfiltered lift, this covers the `req.system`-ABSENT path only;
+/// the both-present case forwards the turns in place, and the forwarding
+/// walk runs the same billing predicate per block.
 pub fn lift_legacy_system_stripped(
     messages: &[Message],
     dropped: &mut bool,
