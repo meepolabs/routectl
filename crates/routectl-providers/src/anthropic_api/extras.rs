@@ -24,7 +24,7 @@ use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
 use super::tools::{PARALLEL_TOOL_CALLS_KEY, TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
-use super::types::{OutputConfig, ThinkingConfig, ThinkingDisplay};
+use super::types::{OutputConfig, ThinkingConfig};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
 /// Anthropic-shape requests when the caller omits the field AND the
@@ -142,6 +142,10 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// is applied as an operator-declared ceiling BEFORE Anthropic's own
 /// `[1024, max_tokens-1]` window clamp. Zero means no operator cap.
 ///
+/// `thinking.display` comes from
+/// `req.routectl_internal.anthropic_thinking_display` when the ingress
+/// captured one, and from `reasoning.exclude` otherwise.
+///
 /// Note on `max_tokens` + adaptive: Anthropic's adaptive thinking wire
 /// shape has no field for an explicit budget -- the model picks its
 /// own from the effort string. If a caller sets both
@@ -158,15 +162,24 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         return Some(ThinkingConfig::Disabled);
     }
 
-    // Absent means absent: `reasoning.exclude == None` must leave
-    // `thinking.display` off the wire entirely, because Anthropic's
-    // default is model-dependent and an explicit value would override
-    // whatever a newer model chooses for itself.
-    let display = match r.exclude {
-        Some(true) => Some(ThinkingDisplay::Omitted),
-        Some(false) => Some(ThinkingDisplay::Summarized),
-        None => None,
-    };
+    // Absent means absent: no carrier and `reasoning.exclude == None`
+    // must leave `thinking.display` off the wire entirely, because
+    // Anthropic's default is model-dependent and an explicit value would
+    // override whatever a newer model chooses for itself.
+    //
+    // The carrier wins over the derivation: it holds the string an
+    // Anthropic client actually sent, including values the canonical
+    // boolean cannot express. The derivation remains for library callers
+    // and non-Anthropic ingresses, which set only `exclude`.
+    let display = req
+        .routectl_internal
+        .anthropic_thinking_display
+        .clone()
+        .or_else(|| match r.exclude {
+            Some(true) => Some("omitted".to_string()),
+            Some(false) => Some("summarized".to_string()),
+            None => None,
+        });
 
     // Did the caller actually ask for thinking? Any of: explicit
     // enabled=true, a budget, an effort string (other than "none").
