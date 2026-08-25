@@ -97,9 +97,13 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
         metadata_session_id(&metadata),
     );
 
-    // Translate thinking config.
+    // Translate thinking config. The raw `display` string rides
+    // `routectl_internal` so the Anthropic-API egress can re-emit a
+    // vocabulary the canonical boolean does not model.
     if let Some(t) = thinking {
-        req.reasoning = Some(translate_thinking(&t)?);
+        let (reasoning, raw_display) = translate_thinking(&t)?;
+        req.reasoning = Some(reasoning);
+        req.routectl_internal.anthropic_thinking_display = raw_display;
     }
 
     // Lift output_config.effort into canonical req.reasoning.effort.
@@ -375,7 +379,7 @@ const fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
-fn translate_thinking(t: &Value) -> Result<ReasoningConfig> {
+fn translate_thinking(t: &Value) -> Result<(ReasoningConfig, Option<String>)> {
     let kind = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
     // Anthropic's `budget_tokens` is JSON-int (effectively u64) but
     // the canonical `ReasoningConfig.max_tokens` is u32. A naked cast
@@ -399,59 +403,72 @@ fn translate_thinking(t: &Value) -> Result<ReasoningConfig> {
                 n as u32
             }
         });
-    // `display` is validated for every thinking type, not only the ones
-    // that honor it: the field is a closed enum upstream, so an illegal
-    // value earns the local 400 even where the value is then ignored.
-    let display = translate_thinking_display(t)?;
-    match kind {
-        "enabled" => Ok(ReasoningConfig {
+    // `display` is read for every thinking type, not only the ones that
+    // honor it: the raw string rides the carrier upstream regardless of
+    // which arm below consumes the derived boolean.
+    let (display, raw_display) = translate_thinking_display(t)?;
+    let reasoning = match kind {
+        "enabled" => ReasoningConfig {
             enabled: Some(true),
             max_tokens: budget,
             exclude: display,
             ..Default::default()
-        }),
-        "disabled" => Ok(ReasoningConfig {
+        },
+        "disabled" => ReasoningConfig {
             enabled: Some(false),
             ..Default::default()
-        }),
-        "adaptive" => Ok(ReasoningConfig {
+        },
+        "adaptive" => ReasoningConfig {
             enabled: Some(true),
             exclude: display,
             ..Default::default()
-        }),
-        _ => Ok(ReasoningConfig::default()),
-    }
+        },
+        _ => ReasoningConfig::default(),
+    };
+    Ok((reasoning, raw_display))
 }
 
 /// Map Anthropic's `thinking.display` onto the canonical
-/// `ReasoningConfig.exclude`. `display` is a closed two-value enum
-/// upstream, so an unrecognized value is rejected locally with a 400
-/// rather than forwarded to earn a slower upstream 400.
+/// `ReasoningConfig.exclude`, and hand back the raw string so the caller
+/// can park it on `routectl_internal.anthropic_thinking_display`.
+///
+/// Any string forwards: the canonical boolean models only the values this
+/// hub understands, so a value it does not model gets `exclude = None`
+/// and travels on the carrier instead of earning a local 400. Known
+/// values also derive the boolean -- `"omitted"` and `"updates"` both
+/// suppress the thinking text (their response shape is empty text plus a
+/// signature), `"summarized"` keeps it.
+///
+/// A non-string `display` is still rejected locally: the carrier is a
+/// `String`, so there is no shape to forward.
 ///
 /// Absent stays absent (`None`): Anthropic's default is model-dependent,
 /// and materializing an explicit value here would override whatever a
 /// newer model chooses for itself.
-fn translate_thinking_display(t: &Value) -> Result<Option<bool>> {
+fn translate_thinking_display(t: &Value) -> Result<(Option<bool>, Option<String>)> {
     let Some(raw) = t.get("display") else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    let requested = raw.as_str();
+    let Some(requested) = raw.as_str() else {
+        return Err(Error::Validation(format!(
+            "anthropic ingress: thinking.display must be a string, got {}",
+            value_type_name(raw)
+        )));
+    };
     let exclude = match requested {
-        Some("omitted") => Some(true),
-        Some("summarized") => Some(false),
+        "omitted" | "updates" => Some(true),
+        "summarized" => Some(false),
         _ => {
-            // The rejected value stays out of the 400 body -- the client sent
-            // it and the field plus its two legal values is the whole
-            // remediation; the value itself goes to the debug log only.
+            // The unmodeled value goes to the debug log only, never into a
+            // response body -- it still reaches upstream verbatim on the
+            // carrier, so nothing is lost by keeping it out of the logs at
+            // INFO and above.
             tracing::debug!(
-                thinking_display = %sanitize_detail_for_log(&raw.to_string()),
-                "anthropic ingress: thinking.display rejected"
+                thinking_display = %sanitize_detail_for_log(requested),
+                "anthropic ingress: thinking.display not modeled by reasoning.exclude; \
+                 forwarding verbatim"
             );
-            return Err(Error::Validation(
-                "anthropic ingress: thinking.display must be one of \
-                 \"summarized\" or \"omitted\""
-                    .to_string(),
-            ));
+            return Ok((None, Some(requested.to_string())));
         }
     };
     tracing::debug!(
@@ -459,7 +476,7 @@ fn translate_thinking_display(t: &Value) -> Result<Option<bool>> {
         exclude = ?exclude,
         "anthropic ingress: thinking.display translated to reasoning.exclude"
     );
-    Ok(exclude)
+    Ok((exclude, Some(requested.to_string())))
 }
 
 fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
