@@ -140,7 +140,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     // remainder is merged into provider_extras after the sweep.
     let reasoning_remainder = match obj.remove("reasoning") {
         Some(reasoning) => {
-            let (cfg, remainder) = build_reasoning(reasoning)?;
+            let (cfg, remainder) = build_reasoning(reasoning);
             req.reasoning = cfg;
             remainder
         }
@@ -836,21 +836,14 @@ type ReasoningSplit = (Option<ReasoningConfig>, Option<Map<String, Value>>);
 /// field) is a Responses-dialect control with no canonical home; it is
 /// returned as a remainder map the caller stashes under
 /// `provider_extras["reasoning"]` so the Responses egress can re-emit it.
-/// The closed enums `summary` and `context` are validated here: an
-/// out-of-range value is a local 400 rather than a clamp/substitute or a
-/// forwarded guaranteed-upstream-400. `mode` is an OPEN enum -- its VALUE is
-/// unconstrained -- but its TYPE is checked: a non-string `mode` is a local
-/// 400 (it would otherwise forward to a guaranteed upstream 400). Returns
+/// Sub-key vocabulary is not policed here -- values and types ride verbatim
+/// onto the Responses wire, so upstream owns their validity. Returns
 /// `(None, None)` when the value is not an object.
-fn build_reasoning(reasoning: Value) -> Result<ReasoningSplit> {
+fn build_reasoning(reasoning: Value) -> ReasoningSplit {
     let mut obj = match reasoning {
         Value::Object(m) => m,
-        _ => return Ok((None, None)),
+        _ => return (None, None),
     };
-
-    validate_reasoning_enum(&obj, "summary", &["auto", "concise", "detailed"])?;
-    validate_reasoning_enum(&obj, "context", &["auto", "current_turn", "all_turns"])?;
-    validate_reasoning_string(&obj, "mode")?;
 
     let effort = obj
         .remove("effort")
@@ -864,36 +857,7 @@ fn build_reasoning(reasoning: Value) -> Result<ReasoningSplit> {
     // to the egress nor blocks the egress "auto" summary default.
     obj.retain(|_, v| !v.is_null());
     let remainder = if obj.is_empty() { None } else { Some(obj) };
-    Ok((cfg, remainder))
-}
-
-/// Validate a closed-enum reasoning sub-key. Absent / null passes (the
-/// field is optional). A present value MUST be one of `allowed`; anything
-/// else -- a wrong string or a non-string -- is a local 400 so routectl
-/// rejects deterministically instead of clamping or forwarding.
-fn validate_reasoning_enum(obj: &Map<String, Value>, key: &str, allowed: &[&str]) -> Result<()> {
-    match obj.get(key) {
-        None | Some(Value::Null) => Ok(()),
-        Some(Value::String(s)) if allowed.contains(&s.as_str()) => Ok(()),
-        Some(_) => Err(Error::Validation(format!(
-            "openai-responses ingress: reasoning.{key} must be one of [{}]",
-            allowed.join(", ")
-        ))),
-    }
-}
-
-/// Validate an OPEN-enum reasoning sub-key: its value is unconstrained, but
-/// its TYPE must be a string. Absent / null passes (the field is optional).
-/// A present non-string (bool, number, array, object) is a local 400 --
-/// forwarding it would only earn a guaranteed upstream 400, so reject
-/// deterministically here while leaving the string's value untouched.
-fn validate_reasoning_string(obj: &Map<String, Value>, key: &str) -> Result<()> {
-    match obj.get(key) {
-        None | Some(Value::Null | Value::String(_)) => Ok(()),
-        Some(_) => Err(Error::Validation(format!(
-            "openai-responses ingress: reasoning.{key} must be a string"
-        ))),
-    }
+    (cfg, remainder)
 }
 
 // ---------------------------------------------------------------------------

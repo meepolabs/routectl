@@ -721,8 +721,8 @@ fn reasoning_effort_lifts_and_summary_carries_together() {
 
 #[test]
 fn reasoning_context_and_mode_carry_to_provider_extras() {
-    // Arrange: context (closed enum) and mode (open string) both survive
-    // the ingress under the reasoning remainder.
+    // Arrange: context and mode both survive the ingress under the
+    // reasoning remainder.
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -764,9 +764,9 @@ fn reasoning_arbitrary_mode_string_passes_through_unvalidated() {
 }
 
 #[test]
-fn reasoning_non_string_mode_bool_is_rejected() {
-    // Arrange: mode's value is open, but its TYPE must be a string. A bool
-    // would forward to a guaranteed upstream 400, so reject it locally.
+fn reasoning_non_string_mode_bool_forwards_verbatim() {
+    // Arrange: mode's type is upstream's business -- a bool rides the
+    // remainder untouched rather than earning a local 400.
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -774,19 +774,19 @@ fn reasoning_non_string_mode_bool_is_rejected() {
     });
 
     // Act
-    let err = parse_err(body);
+    let req = parse(body);
 
     // Assert
-    assert!(
-        matches!(err, Error::Validation(_)),
-        "expected local 400 for a non-string mode, got {err:?}"
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"mode": false})
     );
 }
 
 #[test]
-fn reasoning_non_string_mode_number_is_rejected() {
-    // Arrange: a numeric mode is likewise a type error, not an open-enum
-    // value.
+fn reasoning_non_string_mode_number_forwards_verbatim() {
+    // Arrange: a numeric mode likewise forwards; routectl polices no
+    // reasoning sub-key vocabulary.
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -794,12 +794,12 @@ fn reasoning_non_string_mode_number_is_rejected() {
     });
 
     // Act
-    let err = parse_err(body);
+    let req = parse(body);
 
     // Assert
-    assert!(
-        matches!(err, Error::Validation(_)),
-        "expected local 400 for a numeric mode, got {err:?}"
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"mode": 123})
     );
 }
 
@@ -828,8 +828,9 @@ fn reasoning_null_summary_is_treated_as_unset() {
 }
 
 #[test]
-fn reasoning_invalid_summary_value_is_rejected() {
-    // Arrange
+fn reasoning_unknown_summary_value_forwards_verbatim() {
+    // Arrange: summary is not a routectl-owned enum -- an unrecognized value
+    // rides the remainder instead of drawing a local 400.
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -837,18 +838,18 @@ fn reasoning_invalid_summary_value_is_rejected() {
     });
 
     // Act
-    let err = parse_err(body);
+    let req = parse(body);
 
-    // Assert: local 400, not clamped or forwarded.
-    assert!(
-        matches!(err, Error::Validation(_)),
-        "expected 400, got {err:?}"
+    // Assert
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"summary": "verbose"})
     );
 }
 
 #[test]
-fn reasoning_invalid_context_value_is_rejected() {
-    // Arrange
+fn reasoning_unknown_context_value_forwards_verbatim() {
+    // Arrange: same for context -- upstream owns which values it accepts.
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -856,12 +857,12 @@ fn reasoning_invalid_context_value_is_rejected() {
     });
 
     // Act
-    let err = parse_err(body);
+    let req = parse(body);
 
     // Assert
-    assert!(
-        matches!(err, Error::Validation(_)),
-        "expected 400, got {err:?}"
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"context": "everything"})
     );
 }
 
@@ -1140,9 +1141,7 @@ fn previous_response_id_present_returns_400_validation_error() {
     });
 
     // Act
-    let err = ResponsesIngress
-        .parse_request_value(&HeaderMap::new(), body)
-        .unwrap_err();
+    let err = parse_err(body);
 
     // Assert: a stateless proxy must reject server-side state rather than
     // answer with the wrong context. Error::Validation maps to 400.
@@ -1472,6 +1471,45 @@ fn full_reasoning_request_round_trips_ingress_to_egress_byte_for_byte() {
             "mode": "pro"
         }),
         "the full reasoning request must round-trip byte-for-byte; got: {wire}"
+    );
+}
+
+#[test]
+fn unknown_summary_value_reaches_the_wire_from_ingress() {
+    // Act: a summary value routectl has never heard of.
+    let wire = ingress_to_egress_reasoning(json!({"effort": "high", "summary": "verbose"}));
+
+    // Assert: it reaches the wire verbatim -- upstream, not routectl, judges it.
+    assert_eq!(
+        wire,
+        json!({"effort": "high", "summary": "verbose"}),
+        "an unknown summary must reach the wire from ingress; got: {wire}"
+    );
+}
+
+#[test]
+fn unknown_context_value_reaches_the_wire_from_ingress() {
+    // Act
+    let wire = ingress_to_egress_reasoning(json!({"effort": "high", "context": "everything"}));
+
+    // Assert: the unknown context rides alongside the defaulted summary.
+    assert_eq!(
+        wire,
+        json!({"effort": "high", "summary": "auto", "context": "everything"}),
+        "an unknown context must reach the wire from ingress; got: {wire}"
+    );
+}
+
+#[test]
+fn non_string_mode_reaches_the_wire_from_ingress() {
+    // Act: a bool mode -- a type the Responses schema does not describe.
+    let wire = ingress_to_egress_reasoning(json!({"effort": "high", "mode": false}));
+
+    // Assert: the value's type is not policed; it forwards as given.
+    assert_eq!(
+        wire,
+        json!({"effort": "high", "summary": "auto", "mode": false}),
+        "a non-string mode must reach the wire from ingress; got: {wire}"
     );
 }
 

@@ -4345,8 +4345,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `text.format`->`response_format`; forward-compat sweep into
   `provider_extras`. `reasoning.effort` lifts to canonical `ReasoningConfig`;
   the reasoning remainder (`summary`/`context`/`mode`/future) is stashed under
-  `provider_extras["reasoning"]` (closed enums `summary`/`context` validated ->
-  local 400 on an out-of-range value, `mode` open passthrough). Statefulness
+  `provider_extras["reasoning"]` and forwarded verbatim (no sub-key vocabulary
+  or type validation -- upstream owns validity; a null sub-key means unset and
+  is dropped). Statefulness
   contract: `previous_response_id` -> 400; `store:true` (no prior id) accepted
   with WARN (persistence ignored). Captures the inbound per-conversation key
   into `routectl_internal.inbound_session_key` via `ingress::session_key`
