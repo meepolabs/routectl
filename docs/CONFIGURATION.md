@@ -334,16 +334,19 @@ the `max_body_bytes` cap):
 - `POST /v1/chat/completions` -- OpenAI Chat Completions requests.
 - `POST /v1/messages` (+ `POST /v1/messages/count_tokens`) -- Anthropic
   Messages requests.
-  - `thinking.display` -> validated against Anthropic's closed
-    two-value enum, `"summarized"` or `"omitted"`. Any other value
-    (including a non-string one) -> **local HTTP 400**
-    (`invalid_request_error`) naming the two legal values, so a caller
-    catches the mistake without a slower round trip to earn the same
-    400 upstream. An absent `display` key stays absent on the wire --
-    routectl never injects a default, since Anthropic's own default is
-    model-dependent. See
-    [WIRE-GOTCHAS.md](WIRE-GOTCHAS.md) for the wire-shape quirks under
-    `"omitted"` and [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for the
+  - `thinking.display` -> **forwarded verbatim**. The upstream vocabulary
+    is beta-extensible (`"summarized"` and `"omitted"` are long-standing;
+    the `thinking-display-updates-2026-08-18` beta added `"updates"`), so
+    routectl does not hold an allowlist that a newer client would trip:
+    any string value reaches the wire unchanged and upstream rules on it,
+    with one **DEBUG** line when the value is one routectl does not model
+    canonically. A NON-string `display` is still a **local HTTP 400**
+    (`invalid_request_error`), since the carrier that preserves the
+    literal is a string and there is no shape to forward. An absent
+    `display` key stays absent on the wire -- routectl never injects a
+    default, since Anthropic's own default is model-dependent. See
+    [WIRE-GOTCHAS.md](WIRE-GOTCHAS.md) for the wire-shape quirks under a
+    suppressing value and [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for the
     Bedrock Converse caveat (the field is stripped, not validated, on
     that lane).
 - `POST /v1/responses` -- OpenAI Responses API requests (the shape a
