@@ -30,7 +30,7 @@ fn empty_allowlist_passes_all_betas() {
         "context-1m-2025-08-07".into(),
         "prompt-caching-2024-07-31".into(),
     ]);
-    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false, true).unwrap();
     assert_eq!(
         body["anthropic_beta"],
         json!(["context-1m-2025-08-07", "prompt-caching-2024-07-31"])
@@ -49,7 +49,7 @@ fn non_empty_allowlist_drops_unknown() {
         "context-1m-2025-08-07".to_string(),
         "prompt-caching-2024-07-31".to_string(),
     ];
-    let body = normalize("p", &req, false, &allowed, false, None, false).unwrap();
+    let body = normalize("p", &req, false, &allowed, false, None, false, true).unwrap();
     // Order preserved, unknown flag dropped.
     assert_eq!(
         body["anthropic_beta"],
@@ -65,7 +65,7 @@ fn non_empty_allowlist_drops_unknown() {
 fn allowlist_can_drop_all_requested() {
     let req = req_with_betas(vec!["totally-unknown".into()]);
     let allowed = vec!["context-1m-2025-08-07".to_string()];
-    let body = normalize("p", &req, false, &allowed, false, None, false).unwrap();
+    let body = normalize("p", &req, false, &allowed, false, None, false, true).unwrap();
     let got = &body["anthropic_beta"];
     assert!(
         got.is_null() || got.as_array().is_some_and(std::vec::Vec::is_empty),
@@ -88,7 +88,7 @@ fn shared_normalizer_leaves_the_body_beta_carrier_to_the_egress() {
         "json_schema": {"name": "out", "schema": {"type": "object"}},
     }));
 
-    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false, true).unwrap();
     assert!(
         body["output_config"].get("format").is_some(),
         "precondition: the response_format lift must land output_config.format; got: {body}"
@@ -110,7 +110,7 @@ fn caller_requested_structured_outputs_beta_survives_the_body_carrier() {
     ]);
     req.response_format = Some(json!({"type": "json_object"}));
 
-    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false, true).unwrap();
     assert_eq!(
         body["anthropic_beta"],
         json!(["structured-outputs-2025-12-15", "context-1m-2025-08-07"]),
@@ -122,6 +122,6 @@ fn caller_requested_structured_outputs_beta_survives_the_body_carrier() {
 #[test]
 fn body_without_output_config_format_gains_no_structured_outputs_beta() {
     let req = req_with_betas(vec!["context-1m-2025-08-07".into()]);
-    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false, true).unwrap();
     assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]));
 }

@@ -64,8 +64,13 @@ fn system_turn() -> Message {
 /// turn's helper) is the point: the aggregation is per outbound attempt.
 fn warns_for(messages: &[Message]) -> Vec<CapturedEvent> {
     let events = capture_events(|| {
-        translate_messages("prov-test", messages, &mut passthrough_tally())
-            .expect("translation ok");
+        translate_messages(
+            "prov-test",
+            messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation ok");
     });
     events
         .into_iter()

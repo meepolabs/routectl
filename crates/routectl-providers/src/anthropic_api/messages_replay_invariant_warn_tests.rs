@@ -57,8 +57,13 @@ fn request_of(messages: Vec<Message>) -> ChatRequest {
 
 fn normalize_capturing(req: &ChatRequest) -> Vec<CapturedEvent> {
     capture_events(|| {
-        normalize_replay_invariants("prov-test", req, CoreHistoryReasoning::Strip)
-            .expect("normalize succeeds");
+        normalize_replay_invariants(
+            "prov-test",
+            req,
+            CoreHistoryReasoning::Strip,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("normalize succeeds");
     })
 }
 

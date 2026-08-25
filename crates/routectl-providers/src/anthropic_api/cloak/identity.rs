@@ -38,6 +38,14 @@ pub(super) const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
 /// `<system-reminder>` block at the front of the first user message so the
 /// client's intended behavior is preserved.
 ///
+/// `role: "system"` entries in `messages[]` are a second carrier of the
+/// same client directives (the anthropic-api egress forwards a
+/// mid-conversation system turn in place), so they are captured and REMOVED
+/// from the array by the same pass and folded into the same reminder block.
+/// Leaving them would let third-party system content reach the upstream
+/// verbatim, defeating the relocation for exactly the content it exists to
+/// relocate.
+///
 /// Recognized identity lines in the captured content are excluded (we
 /// re-add our own identity, so an existing identity line is never
 /// duplicated into the reminder). The transform is egress-only: the
@@ -49,7 +57,8 @@ pub(super) fn relocate_client_system(body: &mut Value, strict_mode: bool) {
     if body.as_object().is_none() {
         return;
     }
-    let captured = capture_client_system(body.get("system"));
+    let mut captured = capture_client_system(body.get("system"));
+    captured.extend(take_system_role_turns(body));
     set_identity_only_system(body);
 
     if strict_mode {
@@ -61,6 +70,29 @@ pub(super) fn relocate_client_system(body: &mut Value, strict_mode: bool) {
     insert_reminder_into_first_user(body, reminder);
 }
 
+/// Remove every `role: "system"` entry from `body["messages"]` and return
+/// its text content for relocation, in array order. Text blocks that are a
+/// recognized identity line are excluded from the capture (the turn is still
+/// removed) for the same reason as in `system`. A turn whose content carries
+/// no text at all is removed with nothing captured: the wire role accepts
+/// only text, so there is nothing to relocate.
+fn take_system_role_turns(body: &mut Value) -> Vec<CapturedSystemBlock> {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+    let mut captured: Vec<CapturedSystemBlock> = Vec::new();
+    let mut kept: Vec<Value> = Vec::with_capacity(messages.len());
+    for msg in messages.drain(..) {
+        if msg.get("role").and_then(Value::as_str) != Some("system") {
+            kept.push(msg);
+            continue;
+        }
+        captured.extend(capture_client_system(msg.get("content")));
+    }
+    *messages = kept;
+    captured
+}
+
 /// A captured client system text block: its text plus any `cache_control`
 /// it carried (so a cache breakpoint can be preserved on relocation).
 struct CapturedSystemBlock {
@@ -68,9 +100,11 @@ struct CapturedSystemBlock {
     cache_control: Option<Value>,
 }
 
-/// Capture the client's real system content, excluding any block whose
-/// trimmed text is a recognized identity line (we re-add our own identity).
-/// Handles the string form, the array-of-text-blocks form, and absence.
+/// Capture client system content, excluding any block whose trimmed text is
+/// a recognized identity line (we re-add our own identity). Handles the
+/// string form, the array-of-text-blocks form, and absence. Shared by the
+/// `system` field and the `role: "system"` message turns, whose content
+/// shapes are the same.
 fn capture_client_system(system: Option<&Value>) -> Vec<CapturedSystemBlock> {
     match system {
         Some(Value::String(s)) => {

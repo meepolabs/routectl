@@ -67,11 +67,19 @@ pub struct AnthropicMessage {
     pub(crate) content: AnthropicContent,
 }
 
+/// Wire role vocabulary of `messages[]`. `System` is a real Anthropic
+/// Messages API role: a mid-conversation system turn must precede an
+/// `assistant` turn or end the array, and support is model-gated.
+///
+/// Deliberately NOT `#[non_exhaustive]`: an exhaustive match on a wire
+/// vocabulary is the compile-time forcing function that makes a new role
+/// impossible to ignore at every site that dispatches on one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnthropicRole {
     User,
     Assistant,
+    System,
 }
 
 /// Content is either a plain string (outgoing user messages) or an array of

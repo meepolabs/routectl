@@ -180,11 +180,10 @@ pub trait CacheBreakpointSource {
 /// NOTE: this is deliberately NOT interchangeable with the anthropic-api
 /// egress's `CacheBreakpointSource for AnthropicRequest` walk (in
 /// routectl-providers anthropic_api/request.rs). That one runs on the
-/// ASSEMBLED wire body and counts a different set, because assembly is lossy:
-/// `tool_choice="none"` suppresses tools, the billing-attribution strip drops
-/// a block, a legacy `Role::System` lift flattens cache_control away, and
-/// `Role::Tool` Parts collapse into a single unmarked block. Validating this
-/// canonical pre-image where the wire post-image is required would change the
+/// ASSEMBLED wire body and counts a different set, because assembly is lossy;
+/// `validate_breakpoints` there enumerates the lossy points (single source of
+/// truth for that list -- do not restate it here). Validating this canonical
+/// pre-image where the wire post-image is required would change the
 /// 4-breakpoint-cap / TTL-ordering outcome for those cases. Both walks are
 /// load-bearing; do not "deduplicate" one into the other.
 impl CacheBreakpointSource for crate::ChatRequest {

@@ -52,7 +52,7 @@ fn req_with_caller_output_schema(schema: Value) -> ChatRequest {
 }
 
 fn assembled_schema(req: &ChatRequest) -> Value {
-    let body = normalize(PROVIDER, req, false, &[], false, None, false).unwrap();
+    let body = normalize(PROVIDER, req, false, &[], false, None, false, true).unwrap();
     body["output_config"]["format"]["schema"].clone()
 }
 
@@ -140,7 +140,7 @@ fn leaves_a_body_without_an_output_schema_untouched() {
     let req = user_req();
 
     // Act
-    let body = normalize(PROVIDER, &req, false, &[], false, None, false).unwrap();
+    let body = normalize(PROVIDER, &req, false, &[], false, None, false, true).unwrap();
 
     // Assert
     assert!(body.get("output_config").is_none());

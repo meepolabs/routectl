@@ -919,6 +919,51 @@ impl AnthropicApiProvider {
         );
     }
 
+    /// How many `role: "system"` turns the OUTGOING body carries in
+    /// `messages[]`. A mid-conversation system turn is position-gated and
+    /// model-gated upstream, so it is a candidate cause of a 4xx that no
+    /// other log field names.
+    pub(super) fn count_system_role_turns(body: &Value) -> usize {
+        body.get("messages")
+            .and_then(Value::as_array)
+            .map_or(0, |msgs| {
+                msgs.iter()
+                    .filter(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+                    .count()
+            })
+    }
+
+    /// Structured WARN emitted on a 4xx whose outgoing body carried
+    /// mid-conversation `role: "system"` turns. Gated on the status and the
+    /// count ONLY -- never on the auth kind or the host -- because the shape
+    /// is model-gated and position-gated upstream on every lane, api-key
+    /// included, and `log_beta_decision_on_4xx` covers the OAuth lane alone.
+    /// Deliberately separate from the shared `warn_upstream_failure`, which
+    /// spans every egress and must not grow an Anthropic-shape field.
+    /// Carries only the provider id, the status, a bounded count, and the
+    /// resolved mid-conversation-system beta boolean -- the one field that
+    /// distinguishes "the shape shipped ungated" from "the beta was on and
+    /// the upstream still refused" -- and no message content.
+    pub(super) fn log_system_role_turns_on_4xx(
+        &self,
+        status: u16,
+        system_role_turn_count: usize,
+        has_mid_conversation_system_beta: bool,
+    ) {
+        if !(400..500).contains(&status) || system_role_turn_count == 0 {
+            return;
+        }
+        tracing::warn!(
+            provider = %self.cfg.id,
+            status,
+            system_role_turn_count,
+            has_mid_conversation_system_beta,
+            "anthropic-api 4xx on a body carrying mid-conversation system turns: \
+             the wire role is position-gated (a system turn must precede an \
+             assistant turn or end the array) and model-gated upstream",
+        );
+    }
+
     /// Classify a request as non-CC (true) or genuine-CC (false) under the
     /// configured `CloakMode`: `Always` forces non-CC, `Never` forces
     /// genuine-CC, and `Auto` applies the heuristic (non-CC iff no captured

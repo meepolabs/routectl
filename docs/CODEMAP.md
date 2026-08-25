@@ -597,7 +597,10 @@ license.
   (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- orchestrator: builds the Anthropic wire
   body from `ChatRequest` via the system/messages/tools/extras submodules;
-  owns `normalize` (entry point), top-level body assembly, the per-request
+  owns `normalize` (entry point), top-level body assembly, the
+  forward-vs-lift decision for `Role::System` turns (resolved from
+  canonical-`system` presence, threaded into message translation as
+  `SystemTurnPolicy`), the per-request
   `EnvelopeUnwrapTally` (threaded into message translation and cache
   reinjection, flushed once after both), and cache_control
   breakpoint validation (`validate_breakpoints`); re-exports `build_thinking`,
@@ -611,7 +614,8 @@ license.
   design)
 - `src/anthropic_api/system.rs` -- system-prompt translation:
   `translate_system` (typed `SystemContent` -> wire) + `lift_legacy_system`
-  (Role::System fallback for direct callers) + `lift_legacy_system_stripped`
+  (Role::System fallback for direct callers, the `req.system`-absent path
+  only) + `lift_legacy_system_stripped`
   (billing-aware variant that drops the Claude Code fingerprint block
   per-message before joining); all `pub(crate)` for Bedrock Converse reuse
 - `src/anthropic_api/tools.rs` -- tool + tool_choice translation:
@@ -619,7 +623,12 @@ license.
   rewrite) + `translate_tool_choice` (OpenAI/Anthropic shape mapping)
 - `src/anthropic_api/messages.rs` -- per-role content-block translation:
   `translate_messages`, `build_assistant_content`, `emit_reasoning_blocks`,
-  `build_tool_message`, `normalize_replay_invariants`
+  `build_tool_message`, `normalize_replay_invariants`; owns
+  `SystemTurnPolicy` (forward a mid-conversation `role: "system"` turn in
+  place vs treat it as lift-consumed, resolved by `request.rs`), the
+  billing/attribution screen on the forwarded path, and the
+  accounted-identity ledger that turns an unaccounted message drop into a
+  normalize error
 - `src/anthropic_api/extras.rs` -- thinking-budget composition
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
   reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
@@ -694,7 +703,9 @@ license.
 - `src/anthropic_api/cloak/billing.rs` -- strips the Claude Code
   billing/attribution system block unconditionally (`strip_billing_block`)
 - `src/anthropic_api/cloak/identity.rs` -- non-CC client system relocation
-  into a `<system-reminder>` block plus identity-only system and minted
+  into a `<system-reminder>` block (from the `system` field AND from
+  `role: "system"` turns in `messages[]`, which are removed from the array)
+  plus identity-only system and minted
   `metadata.user_id` (`relocate_client_system`, `mint_metadata_user_id`)
 - `src/anthropic_api/cloak/tool_rename.rs` -- tool-name `mcp__` normalization
   and operator `tool_rename` over the same tool-name paths, recording the

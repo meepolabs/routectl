@@ -32,8 +32,13 @@ fn empty_thinking_text_with_a_claude_signature_survives_the_replay_strip() {
         ])]);
 
         // Act
-        let out = normalize_replay_invariants("prov-test", &req, CoreHistoryReasoning::Strip)
-            .expect("normalize succeeds");
+        let out = normalize_replay_invariants(
+            "prov-test",
+            &req,
+            CoreHistoryReasoning::Strip,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("normalize succeeds");
 
         // Assert
         let MessageContent::Parts(parts) = &out[0].content else {

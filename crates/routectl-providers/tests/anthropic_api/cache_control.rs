@@ -250,21 +250,30 @@ fn unknown_content_block_type_passes_through_verbatim() {
 }
 
 #[test]
-fn req_system_field_takes_precedence_over_role_system_messages() {
+fn req_system_field_wins_system_field_and_role_system_turn_is_forwarded() {
     let provider = make_provider("https://api.anthropic.com");
-    // Both: req.system set AND a Role::System message in the array.
-    // req.system wins; the role-system message gets dropped.
+    // Both present: a canonical req.system AND a Role::System message in the
+    // array. The canonical system owns the wire `system` field, and the
+    // system turn rides the messages array in place -- the legacy lift never
+    // ran, so nothing else carries it.
+    //
+    // Index 0 puts the system turn before a USER turn, which is an ILLEGAL
+    // upstream position (a wire system turn must precede an assistant turn or
+    // end the array). Forwarding it anyway is deliberate: routectl does not
+    // repair what the client sent, and a 400 naming the position is louder
+    // and more actionable than a silent deletion.
     let mut req = base_req(
         "claude-opus-4-7",
-        vec![system_msg("legacy lifted system"), user_msg("hi")],
+        vec![system_msg("mid-conversation system"), user_msg("hi")],
     );
     req.system = Some(SystemContent::Text("structured top-level system".into()));
     let body = provider.normalize_request(&req).unwrap();
     assert_eq!(body["system"], "structured top-level system");
-    // messages array contains only the user.
     let msgs = body["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs.len(), 2, "got: {body}");
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "mid-conversation system");
+    assert_eq!(msgs[1]["role"], "user");
 }
 
 #[test]

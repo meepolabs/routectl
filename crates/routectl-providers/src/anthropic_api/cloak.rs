@@ -213,9 +213,11 @@ impl ClaudeCodeIdentity {
 /// Apply the full cloak to the outgoing body on the OAuth anthropic-api
 /// surface. The billing block is stripped unconditionally (even for a
 /// genuine CC client). For a non-CC client the `system` field is reduced to
-/// the interactive identity line only, the client's real system content is
-/// relocated into the first user message as a `<system-reminder>` block
-/// (unless `strict_mode` drops it), and a metadata `user_id` is minted.
+/// the interactive identity line only, the client's real system content --
+/// from `system` AND from any `role: "system"` turn in `messages[]`, which
+/// is removed from the array -- is relocated into the first user message as
+/// a `<system-reminder>` block (unless `strict_mode` drops it), and a
+/// metadata `user_id` is minted.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
 /// first, then the always-on tool-name normalization (every non-`mcp__`
