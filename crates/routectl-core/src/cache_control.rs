@@ -79,22 +79,16 @@ pub enum BreakpointPosition {
     TopLevel,
 }
 
-/// Allowed `cache_control.type` values per Anthropic spec. Today only
-/// `ephemeral` is defined; the spec leaves room for future kinds, but
-/// shipping a non-allowlisted kind to upstream just produces a vague
-/// 400. Validating up front gives the operator a precise error.
-const ALLOWED_KINDS: &[&str] = &["ephemeral"];
-
-/// Allowed `cache_control.ttl` values. Anthropic accepts only "5m"
-/// and "1h" today.
-const ALLOWED_TTLS: &[&str] = &["5m", "1h"];
-
-/// Validate a sequence of breakpoints against Anthropic's invariants:
-/// (1) at most 4 breakpoints, (2) longer TTLs (1h) must appear before
-/// shorter ones (5m) in cache-prefix order, (3) every breakpoint's
-/// `type` must be in `ALLOWED_KINDS`, (4) every breakpoint's `ttl`
-/// (when present) must be in `ALLOWED_TTLS`. All four emit
+/// Validate the STRUCTURAL invariants routectl owns, because it injects its
+/// own markers and must do the same arithmetic upstream does:
+/// (1) at most `MAX_BREAKPOINTS` breakpoints, (2) longer TTLs (1h) must
+/// appear before shorter ones (5m) in cache-prefix order. Both emit
 /// `Error::Validation` with a position-aware message.
+///
+/// Marker VOCABULARY is upstream's to define: an unrecognized `type` or
+/// `ttl` forwards verbatim rather than being rejected here. An unknown ttl
+/// is not "5m", so it never opens the 1h-after-5m window in the ordering
+/// walk.
 pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
     if breakpoints.len() > MAX_BREAKPOINTS {
         return Err(Error::Validation(format!(
@@ -106,20 +100,6 @@ pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
 
     let mut last_ttl_was_5m = false;
     for bp in breakpoints {
-        if !ALLOWED_KINDS.contains(&bp.control.kind.as_str()) {
-            return Err(Error::Validation(format!(
-                "cache_control: unknown type `{}` at {:?}; allowed: {ALLOWED_KINDS:?}",
-                bp.control.kind, bp.position,
-            )));
-        }
-        if let Some(ttl) = bp.control.ttl.as_deref()
-            && !ALLOWED_TTLS.contains(&ttl)
-        {
-            return Err(Error::Validation(format!(
-                "cache_control: unknown ttl `{}` at {:?}; allowed: {ALLOWED_TTLS:?}",
-                ttl, bp.position,
-            )));
-        }
         let ttl = bp.control.effective_ttl();
         if last_ttl_was_5m && ttl == "1h" {
             return Err(Error::Validation(format!(
@@ -609,7 +589,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kind_rejected() {
+    fn unknown_kind_forwards_verbatim() {
+        // Arrange: a `type` routectl does not recognize. Vocabulary is
+        // upstream's to define; routectl only checks structure.
         let cc = CacheControl {
             kind: "banana".into(),
             ttl: Some("5m".into()),
@@ -618,15 +600,20 @@ mod tests {
             position: BreakpointPosition::Tools,
             control: &cc,
         }];
-        let err = validate(&bps).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown type `banana`"),
-            "msg: {err}"
-        );
+
+        // Act
+        let result = validate(&bps);
+
+        // Assert: accepted, and the kind reaches the wire unchanged.
+        result.unwrap();
+        let v = serde_json::to_value(&cc).unwrap();
+        assert_eq!(v["type"], "banana");
+        assert_eq!(v["ttl"], "5m");
     }
 
     #[test]
-    fn unknown_ttl_rejected() {
+    fn unknown_ttl_forwards_verbatim() {
+        // Arrange
         let cc = CacheControl {
             kind: "ephemeral".into(),
             ttl: Some("forever".into()),
@@ -635,11 +622,44 @@ mod tests {
             position: BreakpointPosition::Tools,
             control: &cc,
         }];
-        let err = validate(&bps).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown ttl `forever`"),
-            "msg: {err}"
-        );
+
+        // Act
+        let result = validate(&bps);
+
+        // Assert
+        result.unwrap();
+        let v = serde_json::to_value(&cc).unwrap();
+        assert_eq!(v["ttl"], "forever");
+    }
+
+    #[test]
+    fn unknown_ttl_does_not_open_the_one_hour_after_five_minute_window() {
+        // Arrange: an unrecognized ttl is not "5m", so a following 1h
+        // breakpoint is not an ordering violation -- the unknown marker
+        // degrades to the longest-TTL side of the walk. The 5m-first
+        // counterpart (`five_minute_then_one_hour_is_rejected`) is the
+        // positive control proving this walk can still fail.
+        let unknown = CacheControl {
+            kind: "ephemeral".into(),
+            ttl: Some("forever".into()),
+        };
+        let one = cc_1h();
+        let bps = vec![
+            Breakpoint {
+                position: BreakpointPosition::Tools,
+                control: &unknown,
+            },
+            Breakpoint {
+                position: BreakpointPosition::System,
+                control: &one,
+            },
+        ];
+
+        // Act
+        let result = validate(&bps);
+
+        // Assert
+        result.unwrap();
     }
 
     #[test]

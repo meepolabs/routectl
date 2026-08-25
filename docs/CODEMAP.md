@@ -55,8 +55,10 @@ license.
   shared egress screen that keeps a meaningless `system: ""` off every wire
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` +
   `ToolDef::Other(Value)` with `from_openai_function` interop
-- `src/cache_control.rs` -- Anthropic `CacheControl` type, breakpoint
-  validator (4-cap, 1h-before-5m TTL ordering); `CacheBreakpointSource` trait
+- `src/cache_control.rs` -- Anthropic `CacheControl` type, STRUCTURE-ONLY
+  breakpoint validator (4-cap, 1h-before-5m TTL ordering; unrecognized `type`
+  / `ttl` values forward verbatim -- marker vocabulary is upstream's to
+  define); `CacheBreakpointSource` trait
   (single source of truth for the tools->system->messages->top-level
   breakpoint walk) with the `ChatRequest` impl, `validate_source` (validate
   any source), `FrozenFloor` + `compute_frozen_floor` (count + positions of
