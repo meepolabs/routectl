@@ -4324,7 +4324,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   egress to re-emit, while `omitted` / `updates` / `summarized` also
   derive canonical `reasoning.exclude` and any other string leaves it
   unset plus one sanitized DEBUG; only a non-string `display` earns a
-  local 400 naming the type it got
+  local 400 naming the type it got. `translate_thinking`'s catch-all arm
+  accepts an unrecognized `thinking.type` (no local 400), collapses it to
+  the default `ReasoningConfig`, and emits one sanitized WARN naming the
+  token -- the detector for whether a raw-forward carrier is ever warranted
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic
   Messages response body shape
 - `src/ingress/anthropic/stream.rs` -- canonical `ChatChunk` -> Anthropic SSE
