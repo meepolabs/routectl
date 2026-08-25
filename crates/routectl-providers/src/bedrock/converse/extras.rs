@@ -11,7 +11,9 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
+use routectl_core::{
+    ChatRequest, is_canonical_request_key, sanitize_detail_for_log, sanitize_for_log,
+};
 
 use crate::anthropic_api::request::DroppedFormatKeys;
 use crate::anthropic_api::request::build_thinking;
@@ -244,8 +246,16 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
         // serialized value (not the enum) so nothing else in the bag can
         // pick the key up later.
         if let Some(stripped) = v.as_object_mut().and_then(|o| o.remove("display")) {
+            // `display` is caller-controlled and of any JSON shape, so it is
+            // rendered through the sanitizer: `?`-Debug escapes control
+            // characters but applies no length cap, letting a multi-kilobyte
+            // client string land in the log line at WARN.
+            let stripped_text = match stripped.as_str() {
+                Some(s) => s.to_string(),
+                None => stripped.to_string(),
+            };
             tracing::warn!(
-                stripped_display = ?stripped,
+                stripped_display = %sanitize_detail_for_log(&stripped_text),
                 "bedrock-converse: dropping thinking.display; the field's \
                  acceptance on Converse is unverified. Reasoning text will \
                  be returned per the model default."

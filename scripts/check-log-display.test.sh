@@ -181,6 +181,12 @@ assert_clean "sanitized % on the inbound thinking.display field" \
 assert_caught "raw % on the inbound thinking.type field" "thinking_type" "v"
 assert_clean "sanitized % on the inbound thinking.type field" \
     "thinking_type" "sanitize_detail_for_log(v)"
+assert_caught "raw % on the stripped thinking.display value" "stripped_display" "v"
+assert_clean "sanitized % on the stripped thinking.display value" \
+    "stripped_display" "sanitize_detail_for_log(v)"
+assert_caught "raw % on the cache_control ttl field" "ttl" "v"
+assert_clean "sanitized % on the cache_control ttl field" \
+    "ttl" "sanitize_for_log(v)"
 assert_clean "non-wire field name is out of scope" "status" "v"
 assert_clean "a config-key field is out of scope on a wire-only path" "provider" "v"
 assert_clean "allowlisted path+field" "type_tag" "v" \

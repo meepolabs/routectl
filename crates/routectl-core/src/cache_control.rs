@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Cache breakpoint marker. Currently only `type = "ephemeral"` is defined.
+/// Cache breakpoint marker. Currently only `type = "ephemeral"` is defined,
+/// though routectl does not police that vocabulary -- upstream owns it.
 /// `ttl` defaults to "5m" when absent on the wire; we serialize it
 /// explicitly when set so a parsed-and-re-emitted request is byte-stable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

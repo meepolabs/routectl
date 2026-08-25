@@ -3241,6 +3241,23 @@ const UPDATES_DISPLAY: &str = "updates";
 /// pass-through and reach the upstream `anthropic-beta` header.
 const THINKING_DISPLAY_BETA: &str = "thinking-display-updates-2026-08-18";
 
+/// Assert the upstream request carried `beta` in its `anthropic-beta`
+/// header. Membership, not substring: a comma-joined header must not let a
+/// prefix of another flag satisfy the pin.
+fn assert_upstream_has_beta(request: &wiremock::Request, beta: &str) {
+    let beta_header = request
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing on upstream request")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
+    assert!(
+        names.contains(&beta),
+        "{beta} missing from upstream anthropic-beta: {beta_header}"
+    );
+}
+
 fn thinking_updates_request_body() -> Value {
     json!({
         "model": "heavy",
@@ -3292,17 +3309,7 @@ async fn thinking_display_updates_reaches_upstream_body() {
         "thinking.type must stay `enabled`; got: {upstream_body}"
     );
 
-    let beta_header = received[0]
-        .headers
-        .get("anthropic-beta")
-        .expect("anthropic-beta header missing")
-        .to_str()
-        .unwrap();
-    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
-    assert!(
-        names.contains(&THINKING_DISPLAY_BETA),
-        "{THINKING_DISPLAY_BETA} missing from upstream anthropic-beta: {beta_header}"
-    );
+    assert_upstream_has_beta(&received[0], THINKING_DISPLAY_BETA);
 }
 
 /// Streaming pin: the same request with `stream: true` forwards
@@ -3374,17 +3381,7 @@ async fn thinking_display_updates_reaches_upstream_body_on_stream() {
          got: {upstream_body}"
     );
 
-    let beta_header = received[0]
-        .headers
-        .get("anthropic-beta")
-        .expect("anthropic-beta header missing")
-        .to_str()
-        .unwrap();
-    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
-    assert!(
-        names.contains(&THINKING_DISPLAY_BETA),
-        "{THINKING_DISPLAY_BETA} missing from upstream anthropic-beta: {beta_header}"
-    );
+    assert_upstream_has_beta(&received[0], THINKING_DISPLAY_BETA);
 }
 
 /// count_tokens parity: Claude Code sizes compaction off
@@ -3426,17 +3423,7 @@ async fn count_tokens_forwards_thinking_display_updates() {
         "count_tokens must keep thinking.type; got: {upstream_body}"
     );
 
-    let beta_header = received[0]
-        .headers
-        .get("anthropic-beta")
-        .expect("anthropic-beta header missing on count_tokens upstream request")
-        .to_str()
-        .unwrap();
-    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
-    assert!(
-        names.contains(&THINKING_DISPLAY_BETA),
-        "{THINKING_DISPLAY_BETA} missing from count_tokens anthropic-beta: {beta_header}"
-    );
+    assert_upstream_has_beta(&received[0], THINKING_DISPLAY_BETA);
 }
 
 // ---------------------------------------------------------------------------

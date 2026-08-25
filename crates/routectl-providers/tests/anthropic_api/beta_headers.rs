@@ -157,6 +157,7 @@ async fn client_requested_thinking_display_beta_passes_empty_allowlist() {
 #[tokio::test]
 async fn non_empty_allowlist_drops_the_thinking_display_beta() {
     const THINKING_DISPLAY_BETA: &str = "thinking-display-updates-2026-08-18";
+    const ALLOWED_BETA: &str = "context-1m-2025-08-07";
 
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -173,7 +174,7 @@ async fn non_empty_allowlist_drops_the_thinking_display_beta() {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: vec!["context-1m-2025-08-07".into()],
+        allowed_betas: vec![ALLOWED_BETA.into()],
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -186,7 +187,7 @@ async fn non_empty_allowlist_drops_the_thinking_display_beta() {
     };
     let provider = AnthropicApiProvider::new(cfg);
     let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
-    req.anthropic_beta = vec![THINKING_DISPLAY_BETA.into()];
+    req.anthropic_beta = vec![THINKING_DISPLAY_BETA.into(), ALLOWED_BETA.into()];
 
     let resp = provider.complete(req).await.unwrap();
     assert_eq!(resp.id, "msg_check");
@@ -201,6 +202,13 @@ async fn non_empty_allowlist_drops_the_thinking_display_beta() {
     assert!(
         !beta_header.contains(THINKING_DISPLAY_BETA),
         "a non-empty allowlist that omits the flag must drop it: {beta_header}"
+    );
+    assert!(
+        beta_header
+            .split(',')
+            .map(str::trim)
+            .any(|name| name == ALLOWED_BETA),
+        "positive control: an allowlisted client beta must survive the same filter: {beta_header}"
     );
 }
 
