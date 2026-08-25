@@ -239,8 +239,8 @@ pub struct ResponsesPassthroughItem {
 /// holds for the resolved-knob fields and equally for the inbound capture
 /// fields (`claude_code_headers`, `stainless_headers`,
 /// `responses_input_passthrough`, `inbound_session_key`,
-/// `forwarded_bearer`, `provenance`), which egresses read and re-emit
-/// deliberately rather than by serialization.
+/// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`), which
+/// egresses read and re-emit deliberately rather than by serialization.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RoutectlInternal {
@@ -430,6 +430,22 @@ pub struct RoutectlInternal {
     /// on `routectl_internal`, which is `#[serde(skip)]`), never logged
     /// raw -- read it only via [`ForwardedBearer::expose`].
     pub forwarded_bearer: Option<ForwardedBearer>,
+
+    /// INBOUND Anthropic `thinking.display` value captured verbatim as the
+    /// client sent it. Single writer: the Anthropic ingress. Single reader:
+    /// `build_thinking` in the Anthropic-API egress, which re-emits the
+    /// string unchanged instead of reconstructing it from the canonical
+    /// boolean [`ReasoningConfig::exclude`].
+    ///
+    /// The canonical boolean models only the two values this hub
+    /// understands, so any third value Anthropic adds would be lost in
+    /// translation. This carrier keeps the original string alongside the
+    /// boolean so an Anthropic-to-Anthropic request forwards a vocabulary
+    /// this hub does not model.
+    ///
+    /// `None` for every other ingress, for library consumers, and when the
+    /// inbound request carried no `thinking.display`.
+    pub anthropic_thinking_display: Option<String>,
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and

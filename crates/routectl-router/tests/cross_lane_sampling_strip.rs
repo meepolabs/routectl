@@ -428,9 +428,9 @@ async fn cross_lane_stream_fallback_strips_sampling_on_the_oauth_hop() {
     );
 
     let caller_req = sampling_req();
-    let (dispatched, events) = capture_under_request_span(
+    let (dispatched, events) = Box::pin(capture_under_request_span(
         router.stream_with_options(caller_req.clone(), RouterOptions::new()),
-    )
+    ))
     .await;
 
     dispatched

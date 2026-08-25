@@ -363,7 +363,7 @@ async fn stream_success_on_earlier_target_releases_unreached_admission() {
     assert_eq!(hits(&b).await, 1);
 
     // req 2: A re-probes and succeeds at the head; B's admission is unreached.
-    let (d2, events) = routectl_testkit::with_capture(stream(&router, "chain")).await;
+    let (d2, events) = Box::pin(routectl_testkit::with_capture(stream(&router, "chain"))).await;
     assert!(d2.result.is_ok(), "the head re-probe opens a stream");
     assert_eq!(d2.meta.served_provider.as_deref(), Some("prov_a"));
     assert_eq!(hits(&b).await, 1, "B (tail) was never reached");
@@ -411,7 +411,7 @@ async fn stream_terminal_error_releases_unreached_admission() {
     assert_eq!(hits(&b).await, 1);
 
     // chain req: A fails terminally; B (admitted, expired) is never reached.
-    let (d1, events) = routectl_testkit::with_capture(stream(&router, "chain")).await;
+    let (d1, events) = Box::pin(routectl_testkit::with_capture(stream(&router, "chain"))).await;
     assert!(
         matches!(d1.result, Err(Error::Upstream { status: 400, .. })),
         "a non-fallbackable terminal error must not fall back",
@@ -453,9 +453,9 @@ async fn stream_disable_fallbacks_break_releases_unreached_admission() {
     // req 2: A errors; disable_fallbacks breaks before the hop to admitted B.
     let mut opts = RouterOptions::new();
     opts.disable_fallbacks = true;
-    let (d2, events) = routectl_testkit::with_capture(
+    let (d2, events) = Box::pin(routectl_testkit::with_capture(
         router.stream_with_options(req_with_feature("chain", WEB_SEARCH), opts),
-    )
+    ))
     .await;
     assert!(
         d2.result.is_err(),
@@ -507,7 +507,7 @@ async fn stream_future_drop_releases_unreached_admission() {
     // req 2: drive the dispatch, then drop it before the first chunk arrives.
     // The drop runs the guard + set destructors on THIS current-thread runtime,
     // so the unreached tail admission settles under the capture subscriber.
-    let ((), events) = routectl_testkit::with_capture(async {
+    let ((), events) = Box::pin(routectl_testkit::with_capture(async {
         let fut = router.stream_with_options(
             req_with_feature("chain", WEB_SEARCH),
             RouterOptions::default(),
@@ -517,7 +517,7 @@ async fn stream_future_drop_releases_unreached_admission() {
             cancelled.is_err(),
             "the slow first chunk must keep the future pending until it is dropped",
         );
-    })
+    }))
     .await;
     assert_eq!(
         hits(&b).await,
@@ -552,7 +552,7 @@ async fn stream_reached_admission_settled_by_guard_not_by_set() {
     let d1 = stream(&router, "solo").await;
     assert!(d1.result.is_err());
 
-    let (d2, events) = routectl_testkit::with_capture(stream(&router, "solo")).await;
+    let (d2, events) = Box::pin(routectl_testkit::with_capture(stream(&router, "solo"))).await;
     assert!(
         d2.result.is_ok(),
         "the re-probe reaches A and opens a stream"

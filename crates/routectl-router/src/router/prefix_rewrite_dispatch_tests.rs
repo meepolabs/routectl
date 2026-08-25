@@ -270,15 +270,17 @@ async fn a_shortening_turn_reseeds_with_no_warn() {
 async fn the_streaming_path_stamps_the_event_too() {
     // Arrange
     let router = router_over(&["m1"], 1);
-    let (primed, _) =
-        with_capture(router.stream_with_options(keyed_req(&["a", "b", "c"]), RouterOptions::new()))
-            .await;
+    let (primed, _) = Box::pin(with_capture(
+        router.stream_with_options(keyed_req(&["a", "b", "c"]), RouterOptions::new()),
+    ))
+    .await;
     assert_eq!(primed.meta.prefix_epoch_event, None);
 
     // Act
-    let (dispatched, events) =
-        with_capture(router.stream_with_options(keyed_req(&["A", "b", "c"]), RouterOptions::new()))
-            .await;
+    let (dispatched, events) = Box::pin(with_capture(
+        router.stream_with_options(keyed_req(&["A", "b", "c"]), RouterOptions::new()),
+    ))
+    .await;
 
     // Assert
     assert_eq!(dispatched.meta.prefix_epoch_event, Some(1));
