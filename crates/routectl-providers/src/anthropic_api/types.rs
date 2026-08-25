@@ -356,28 +356,22 @@ fn take_str(obj: &mut Map<String, Value>, key: &str) -> Result<String, String> {
 // Thinking config
 // ---------------------------------------------------------------------------
 
-/// `thinking.display` -- whether Anthropic returns thinking text or an
-/// empty (but still signed) thinking block. A closed two-value enum
-/// upstream; anything else 400s at the API, so the ingress rejects
-/// unknown values rather than forwarding them.
-///
-/// The default is model-dependent, so an absent `display` must stay
-/// absent on the wire: serializing an explicit value the caller never
-/// sent would override a newer model's own default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThinkingDisplay {
-    Summarized,
-    Omitted,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
     Enabled {
         budget_tokens: u32,
+        /// `thinking.display` -- whether Anthropic returns thinking text
+        /// or an empty (but still signed) thinking block. An untyped
+        /// string so a value Anthropic adds beyond the two this hub
+        /// models still forwards verbatim from
+        /// `routectl_internal.anthropic_thinking_display`.
+        ///
+        /// The default is model-dependent, so an absent `display` must
+        /// stay absent on the wire: serializing an explicit value the
+        /// caller never sent would override a newer model's own default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        display: Option<ThinkingDisplay>,
+        display: Option<String>,
     },
     /// Opus 4.7+ wire shape. The model picks its own budget; the
     /// operator steers via top-level `output_config.effort` (a string
@@ -388,8 +382,9 @@ pub enum ThinkingConfig {
     /// -- the request normalizer in `request.rs` decides which variant
     /// to emit per-call.
     Adaptive {
+        /// See [`ThinkingConfig::Enabled`]'s `display`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        display: Option<ThinkingDisplay>,
+        display: Option<String>,
     },
     Disabled,
 }

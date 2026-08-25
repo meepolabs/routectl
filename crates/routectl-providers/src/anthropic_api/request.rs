@@ -873,6 +873,12 @@ mod multi_turn_tool_use_tests;
 #[path = "request_anthropic_effort_clamp_tests.rs"]
 mod anthropic_effort_clamp_tests;
 
+// The inbound `thinking.display` carrier survives body assembly and the
+// OAuth cloak.
+#[cfg(test)]
+#[path = "request_thinking_display_carrier_tests.rs"]
+mod thinking_display_carrier_tests;
+
 // effort_ratio parity: every token in VALID_EFFORT_TOKENS must have a
 // non-default arm in effort_ratio, guarding against a new token silently
 // falling through to the 0.50 default.
