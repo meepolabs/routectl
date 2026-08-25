@@ -64,7 +64,7 @@ ALLOWLIST="tools/log-display-allowlist.txt"
 # Tracing field names whose value is derived from a request or response
 # body, an SSE frame, an upstream response header, or a caller-supplied
 # config bag. Scanned on every path.
-WIRE_FIELDS='type_tag|block_type|part_type|media_type|source_type|event_type|event_kind|tool_choice|tool_choice_type|finish_reason|block_reason|tool_type|fn_name|tool|tool_id|flag|key|field|generated_id|correlation_id|terminal|representative_claim|overage_status|utilization|overage_utilization|reset|thinking_display|thinking_type'
+WIRE_FIELDS='type_tag|block_type|part_type|media_type|source_type|event_type|event_kind|tool_choice|tool_choice_type|finish_reason|block_reason|tool_type|fn_name|tool|tool_id|flag|key|field|generated_id|correlation_id|terminal|representative_claim|overage_status|utilization|overage_utilization|reset|thinking_display|thinking_type|stripped_display|ttl'
 
 # Field names that render an OPERATOR-WRITTEN config table key: a
 # `[providers.X]` name, a `[models.X]` nickname, an `[aliases]` / overlay

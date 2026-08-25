@@ -428,11 +428,11 @@ fn translate_thinking(t: &Value) -> Result<(ReasoningConfig, Option<String>)> {
             // `thinking` is stripped from the body during parse and is a
             // managed key in the egress extras merge, so nothing rides
             // through. Forwarding the object verbatim needs a carrier that
-            // no wire shape justifies yet -- only two `type` values exist
-            // upstream today. This WARN is the detector for that: an
-            // operator hit means a third value shipped and the carrier is
-            // now warranted. Accepting instead of rejecting keeps a newer
-            // vocabulary from earning a local 400.
+            // no wire shape justifies yet -- only the three `type` values
+            // matched above exist upstream today. This WARN is the detector
+            // for that: an operator hit means a fourth value shipped and the
+            // carrier is now warranted. Accepting instead of rejecting keeps
+            // a newer vocabulary from earning a local 400.
             tracing::warn!(
                 thinking_type = %sanitize_detail_for_log(kind),
                 "anthropic ingress: unrecognized thinking.type; thinking object not forwarded"
@@ -487,6 +487,8 @@ fn translate_thinking_display(t: &Value) -> Result<(Option<bool>, Option<String>
         }
     };
     tracing::debug!(
+        // Reached only from the arms above, so `requested` is one of three
+        // literals here -- never a caller-chosen string.
         thinking_display = ?requested,
         exclude = ?exclude,
         "anthropic ingress: thinking.display translated to reasoning.exclude"

@@ -400,17 +400,17 @@ fn lower_top_level_cache_control_to_per_block(
     match kind {
         InsertKind::NewTextBlock => tracing::debug!(
             provider = provider_id,
-            ttl = %ttl,
+            ttl = %sanitize_for_log(ttl),
             "bedrock-invoke egress: lowered top-level cache_control to a new trailing text block"
         ),
         InsertKind::ExistingBlock => tracing::debug!(
             provider = provider_id,
-            ttl = %ttl,
+            ttl = %sanitize_for_log(ttl),
             "bedrock-invoke egress: lowered top-level cache_control to the last eligible content block"
         ),
         InsertKind::AlreadyMarked => tracing::debug!(
             provider = provider_id,
-            ttl = %ttl,
+            ttl = %sanitize_for_log(ttl),
             "bedrock-invoke egress: top-level cache_control removed; last eligible block already marked"
         ),
     }

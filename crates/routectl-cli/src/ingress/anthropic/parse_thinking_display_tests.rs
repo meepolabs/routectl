@@ -157,8 +157,9 @@ fn disabled_thinking_ignores_valid_display() {
 
 #[test]
 fn disabled_thinking_still_carries_the_display_string() {
-    // The disabled arm drops the derived boolean, but the carrier is
-    // written for every thinking type so the egress re-emits what came in.
+    // The disabled arm drops the derived boolean, but the ingress still
+    // preserves the raw value on the carrier; the disabled egress shape
+    // intentionally omits `display` when it emits.
     let req = parse(json!({"type": "disabled", "display": "omitted"}))
         .expect("a legal display on the disabled shape is inert, not an error");
 
