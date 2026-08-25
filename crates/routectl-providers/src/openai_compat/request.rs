@@ -622,6 +622,46 @@ mod tests {
         );
     }
 
+    /// An Anthropic-ingress `thinking.display: "updates"` reaches this
+    /// egress as `exclude: Some(true)` plus an internal carrier string.
+    /// OpenRouter re-emits the whole canonical object, so the semantic
+    /// `exclude` must survive while no `display` key appears on its wire
+    /// -- this is the negative that catches a future canonical `display`
+    /// field leaking through `serde_json::to_value`.
+    #[test]
+    fn openrouter_updates_display_emits_exclude_without_display_key() {
+        // Arrange
+        let mut req = simple_req("anthropic/claude-sonnet-4-5");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            exclude: Some(true),
+            ..Default::default()
+        });
+        req.routectl_internal.anthropic_thinking_display = Some("updates".into());
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenRouter,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert
+        let reasoning = body
+            .get("reasoning")
+            .and_then(|v| v.as_object())
+            .expect("OpenRouter must re-emit the reasoning object");
+        assert_eq!(reasoning["exclude"], true);
+        assert!(
+            reasoning.get("display").is_none(),
+            "no display key may reach the OpenRouter wire; got: {body}"
+        );
+    }
+
     /// A non-OpenRouter openai-compat dialect (plain Chat Completions)
     /// still strips the canonical `reasoning` object -- these hosts 400
     /// on the unknown key.
