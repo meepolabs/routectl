@@ -994,6 +994,62 @@ mod tests {
         );
     }
 
+    /// Helper: the shape an Anthropic ingress produces for
+    /// `thinking.display: "updates"` -- the unmodeled string on the
+    /// carrier plus the semantic boolean it maps to.
+    fn req_with_updates_display_carrier() -> ChatRequest {
+        let mut req = req_with_thinking_display(true);
+        req.routectl_internal.anthropic_thinking_display = Some("updates".into());
+        req
+    }
+
+    /// The carrier holds a display string this hub does not model, so it
+    /// bypasses the canonical boolean entirely -- the Converse strip must
+    /// still catch it.
+    #[traced_test]
+    #[test]
+    fn converse_bag_thinking_strips_updates_display_carrier() {
+        // Arrange
+        let cfg = fake_cfg();
+        let req = req_with_updates_display_carrier();
+
+        // Act
+        let bag = build_additional_fields(&cfg, &req, None).expect("thinking fills the bag");
+
+        // Assert
+        let thinking = bag["thinking"]
+            .as_object()
+            .expect("thinking must be an object");
+        assert!(
+            thinking.get("display").is_none(),
+            "the carrier's display must be stripped from the Converse bag; got: {bag}"
+        );
+        assert!(
+            thinking.get("type").is_some(),
+            "positive control: the rest of the thinking shape survives"
+        );
+        assert!(
+            logs_contain("dropping thinking.display"),
+            "the strip must WARN so an operator can see the discard"
+        );
+    }
+
+    /// Positive control for the strip above: the SAME canonical input on
+    /// the direct-Anthropic path forwards the carrier string verbatim.
+    #[test]
+    fn direct_anthropic_path_keeps_updates_display_for_the_same_input() {
+        let req = req_with_updates_display_carrier();
+
+        let thinking =
+            crate::anthropic_api::request::build_thinking(&req, false).expect("thinking is active");
+        let body = serde_json::to_value(&thinking).expect("thinking serializes");
+
+        assert_eq!(
+            body["display"], "updates",
+            "direct Anthropic forwards the carrier string; only Converse strips it"
+        );
+    }
+
     /// No display requested -> nothing to strip and no WARN.
     #[traced_test]
     #[test]

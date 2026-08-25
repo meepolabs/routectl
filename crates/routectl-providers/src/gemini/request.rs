@@ -2274,6 +2274,32 @@ mod tests {
         assert_eq!(tc.include_thoughts, Some(false));
     }
 
+    /// An Anthropic-ingress `thinking.display: "updates"` reaches this
+    /// egress as the carrier string PLUS `exclude: Some(true)`. Gemini
+    /// reads only the semantic channel, so the unmodeled display string
+    /// must not change what lands on the wire.
+    #[test]
+    fn anthropic_updates_display_carrier_still_excludes_thoughts() {
+        // Arrange
+        let mut req = req_with_reasoning(routectl_core::ReasoningConfig {
+            max_tokens: Some(100),
+            exclude: Some(true),
+            ..Default::default()
+        });
+        req.routectl_internal.anthropic_thinking_display = Some("updates".into());
+
+        // Act
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+
+        // Assert
+        assert_eq!(tc.include_thoughts, Some(false));
+    }
+
     // ---------------------------------------------------------------------------
     // thinkingLevel vs thinkingBudget by model generation (Gemini-3 oneof)
     // ---------------------------------------------------------------------------
