@@ -178,6 +178,9 @@ assert_clean "sanitize_detail_for_log counts as sanitized" \
 assert_caught "raw % on the inbound thinking.display field" "thinking_display" "v"
 assert_clean "sanitized % on the inbound thinking.display field" \
     "thinking_display" "sanitize_detail_for_log(v)"
+assert_caught "raw % on the inbound thinking.type field" "thinking_type" "v"
+assert_clean "sanitized % on the inbound thinking.type field" \
+    "thinking_type" "sanitize_detail_for_log(v)"
 assert_clean "non-wire field name is out of scope" "status" "v"
 assert_clean "a config-key field is out of scope on a wire-only path" "provider" "v"
 assert_clean "allowlisted path+field" "type_tag" "v" \
