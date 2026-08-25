@@ -2116,6 +2116,7 @@ pub fn routectl_core::schema::ResponsesPassthroughItem::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::schema::ResponsesPassthroughItem
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ResponsesPassthroughItem
 #[non_exhaustive] pub struct routectl_core::schema::RoutectlInternal
+pub routectl_core::schema::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::schema::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
@@ -4985,6 +4986,7 @@ pub fn routectl_core::schema::ResponsesPassthroughItem::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::schema::ResponsesPassthroughItem
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ResponsesPassthroughItem
 #[non_exhaustive] pub struct routectl_core::RoutectlInternal
+pub routectl_core::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>

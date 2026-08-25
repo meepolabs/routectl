@@ -93,6 +93,16 @@ pub(super) fn apply_layered_overlays(
     // attempt -- silently reintroducing the drop this field exists to fix.
     let captured_responses_input_passthrough =
         std::mem::take(&mut req.routectl_internal.responses_input_passthrough);
+    // Preserve the ingress-captured verbatim `thinking.display` string:
+    // like `responses_input_passthrough`, it is inbound-request data (the
+    // client's literal display vocabulary the Anthropic-API egress
+    // re-emits), not a per-model knob, so the per-attempt rebuild from
+    // `Default::default()` must carry it across or it resets to `None` on
+    // the 2nd chain attempt -- the egress would then fall back to the
+    // canonical boolean and rewrite an unmodeled value into one of the two
+    // it does model.
+    let captured_anthropic_thinking_display =
+        req.routectl_internal.anthropic_thinking_display.take();
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);
     internal.history_reasoning = target.history_reasoning.map(std::convert::Into::into);
@@ -103,6 +113,7 @@ pub(super) fn apply_layered_overlays(
     internal.forwarded_bearer = captured_forwarded_bearer;
     internal.stainless_headers = captured_stainless_headers;
     internal.responses_input_passthrough = captured_responses_input_passthrough;
+    internal.anthropic_thinking_display = captured_anthropic_thinking_display;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;

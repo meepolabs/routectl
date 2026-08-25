@@ -293,9 +293,9 @@ async fn eligible_self_identifying_captures_on_the_stream_arm_too() {
     // The stream error arm is wired identically to the complete arm.
     let router = router_with(OPENAI_P1, self_identifying_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.stream_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());

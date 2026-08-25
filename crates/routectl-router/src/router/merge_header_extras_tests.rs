@@ -396,3 +396,33 @@ fn apply_layered_overlays_preserves_stainless_headers() {
         );
     }
 }
+
+/// Regression guard for the same per-attempt overlay rebuild hazard: the
+/// ingress-captured verbatim `thinking.display` string must survive the
+/// rebuild rather than reset to `None`, so the Anthropic-API egress
+/// re-emits the client's original vocabulary on every chain attempt and
+/// not just the first.
+#[test]
+fn apply_layered_overlays_preserves_anthropic_thinking_display() {
+    let config = Config::default();
+    let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+        "nick",
+        "test-prov",
+        Arc::new(StubProvider),
+        "claude-x",
+    ));
+    let target = into_one_dispatch_target(model);
+
+    let mut req = req_with_betas(vec![]);
+    req.routectl_internal.anthropic_thinking_display = Some("updates".to_string());
+
+    for attempt in 1..=2 {
+        apply_layered_overlays(&config, &target, &mut req);
+        assert_eq!(
+            req.routectl_internal.anthropic_thinking_display.as_deref(),
+            Some("updates"),
+            "thinking.display capture must survive the per-attempt overlay \
+             rebuild (attempt {attempt})",
+        );
+    }
+}
