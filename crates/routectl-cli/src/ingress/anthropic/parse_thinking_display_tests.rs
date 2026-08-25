@@ -19,6 +19,30 @@ fn parse(thinking: serde_json::Value) -> Result<ChatRequest> {
     )
 }
 
+/// Assert exactly one DEBUG line reported the unmodeled value, and that
+/// its `thinking_display` field went through `sanitize_detail_for_log`
+/// (compared against the sanitizer's own output so the assertion holds
+/// under either setting of the prompt-redaction flag).
+fn assert_forward_debug(events: &[routectl_testkit::CapturedEvent], raw: &str) {
+    let forwarded: Vec<_> = events
+        .iter()
+        .filter(|e| e.message.contains("not modeled by reasoning.exclude"))
+        .collect();
+
+    assert_eq!(
+        forwarded.len(),
+        1,
+        "exactly one DEBUG line must report the unmodeled value: {events:?}"
+    );
+    let event = forwarded[0];
+    assert_eq!(event.level, tracing::Level::DEBUG);
+    assert_eq!(
+        event.field("thinking_display"),
+        Some(routectl_core::sanitize_detail_for_log(raw).as_str()),
+        "the value must be rendered through sanitize_detail_for_log"
+    );
+}
+
 #[test]
 fn thinking_display_omitted_maps_to_exclude_true() {
     // Arrange / Act
@@ -27,9 +51,32 @@ fn thinking_display_omitted_maps_to_exclude_true() {
 
     // Assert
     assert_eq!(
+        req.routectl_internal.anthropic_thinking_display.as_deref(),
+        Some("omitted"),
+        "a modeled value still rides the carrier verbatim"
+    );
+    assert_eq!(
         req.reasoning.and_then(|r| r.exclude),
         Some(true),
         "display=omitted must set exclude=true"
+    );
+}
+
+#[test]
+fn thinking_display_updates_maps_to_exclude_true() {
+    // `updates` returns empty thinking text plus a signature, the same
+    // response shape as `omitted`, so it derives the same boolean.
+    let req = parse(json!({"type": "enabled", "budget_tokens": 2048, "display": "updates"}))
+        .expect("updates is an accepted display value");
+
+    assert_eq!(
+        req.routectl_internal.anthropic_thinking_display.as_deref(),
+        Some("updates"),
+    );
+    assert_eq!(
+        req.reasoning.and_then(|r| r.exclude),
+        Some(true),
+        "display=updates must set exclude=true"
     );
 }
 
@@ -42,6 +89,10 @@ fn thinking_display_summarized_maps_to_exclude_false() {
     }))
     .expect("summarized is an accepted display value");
 
+    assert_eq!(
+        req.routectl_internal.anthropic_thinking_display.as_deref(),
+        Some("summarized"),
+    );
     assert_eq!(
         req.reasoning.and_then(|r| r.exclude),
         Some(false),
@@ -56,6 +107,10 @@ fn absent_thinking_display_leaves_exclude_none() {
     let req = parse(json!({"type": "enabled", "budget_tokens": 2048}))
         .expect("thinking without display is valid");
 
+    assert_eq!(
+        req.routectl_internal.anthropic_thinking_display, None,
+        "absent display must leave the carrier unset"
+    );
     let reasoning = req.reasoning.expect("thinking sets reasoning");
     assert_eq!(
         reasoning.enabled,
@@ -101,6 +156,19 @@ fn disabled_thinking_ignores_valid_display() {
 }
 
 #[test]
+fn disabled_thinking_still_carries_the_display_string() {
+    // The disabled arm drops the derived boolean, but the carrier is
+    // written for every thinking type so the egress re-emits what came in.
+    let req = parse(json!({"type": "disabled", "display": "omitted"}))
+        .expect("a legal display on the disabled shape is inert, not an error");
+
+    assert_eq!(
+        req.routectl_internal.anthropic_thinking_display.as_deref(),
+        Some("omitted"),
+    );
+}
+
+#[test]
 fn disabled_thinking_without_display_is_accepted() {
     let req = parse(json!({"type": "disabled"})).expect("disabled without display is valid");
 
@@ -110,57 +178,118 @@ fn disabled_thinking_without_display_is_accepted() {
 }
 
 #[test]
-fn unknown_thinking_display_value_is_rejected_on_disabled() {
-    let err = parse(json!({"type": "disabled", "display": "verbose"}))
-        .expect_err("an unrecognized display value must be rejected on every thinking type");
+fn unknown_thinking_display_value_is_forwarded_on_disabled() {
+    let events = routectl_testkit::capture_events(|| {
+        let req = parse(json!({"type": "disabled", "display": "verbose"}))
+            .expect("an unmodeled display value forwards on every thinking type");
 
-    assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("summarized") && msg.contains("omitted"),
-        "message must name the legal values: {msg}"
-    );
-    assert!(
-        !msg.contains("verbose"),
-        "message must not echo the rejected value: {msg}"
-    );
+        let reasoning = req.reasoning.expect("reasoning set");
+        assert_eq!(reasoning.enabled, Some(false));
+        assert_eq!(
+            reasoning.exclude, None,
+            "an unmodeled value must not derive a boolean"
+        );
+        assert_eq!(
+            req.routectl_internal.anthropic_thinking_display.as_deref(),
+            Some("verbose"),
+            "the carrier must hold the value verbatim on the disabled shape too"
+        );
+    });
+
+    assert_forward_debug(&events, "verbose");
 }
 
 #[test]
 fn non_string_thinking_display_is_rejected_on_disabled() {
-    for bad in [json!(true), json!(1), json!(null), json!(["omitted"])] {
+    for (bad, type_name) in [
+        (json!(true), "bool"),
+        (json!(1), "number"),
+        (json!(null), "null"),
+        (json!(["omitted"]), "array"),
+    ] {
         let err = parse(json!({"type": "disabled", "display": bad}))
             .expect_err("a non-string display must be rejected on the disabled shape too");
 
         assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains(&format!("got {type_name}")),
+            "message must name the type it got: {err}"
+        );
     }
 }
 
 #[test]
-fn unknown_thinking_display_value_is_rejected() {
-    let err = parse(json!({
-        "type": "enabled",
-        "budget_tokens": 2048,
-        "display": "verbose",
-    }))
-    .expect_err("an unrecognized display value must not reach upstream");
+fn unknown_thinking_display_value_is_forwarded_verbatim() {
+    let events = routectl_testkit::capture_events(|| {
+        let req = parse(json!({
+            "type": "enabled",
+            "budget_tokens": 2048,
+            "display": "verbose",
+        }))
+        .expect("an unmodeled display value must reach upstream, not earn a local 400");
 
-    assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-    let msg = err.to_string();
+        let reasoning = req.reasoning.expect("thinking sets reasoning");
+        assert_eq!(
+            reasoning.enabled,
+            Some(true),
+            "positive control: thinking on"
+        );
+        assert_eq!(
+            reasoning.exclude, None,
+            "a value the canonical boolean does not model leaves exclude unset"
+        );
+        assert_eq!(
+            req.routectl_internal.anthropic_thinking_display.as_deref(),
+            Some("verbose"),
+            "the carrier must hold the value verbatim"
+        );
+    });
+
+    assert_forward_debug(&events, "verbose");
+}
+
+#[test]
+fn forwarded_thinking_display_debug_carries_no_raw_control_characters() {
+    // Makes the sanitizer claim load-bearing: a `%`-rendered field passes
+    // bytes into the log line verbatim, so a display value carrying a
+    // newline plus an ANSI CSI sequence would forge a log record.
+    let events = routectl_testkit::capture_events(|| {
+        let req = parse(json!({
+            "type": "enabled",
+            "budget_tokens": 2048,
+            "display": "ver\nbose\u{1b}[2J",
+        }))
+        .expect("a hostile display string forwards like any other unmodeled value");
+
+        assert_eq!(
+            req.routectl_internal.anthropic_thinking_display.as_deref(),
+            Some("ver\nbose\u{1b}[2J"),
+            "the carrier keeps the wire bytes; only the log line is sanitized"
+        );
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.message.contains("not modeled by reasoning.exclude"))
+        .and_then(|e| e.field("thinking_display"))
+        .expect("the forward DEBUG line carries the value")
+        .to_string();
     assert!(
-        msg.contains("summarized"),
-        "message must name summarized: {msg}"
-    );
-    assert!(msg.contains("omitted"), "message must name omitted: {msg}");
-    assert!(
-        !msg.contains("verbose"),
-        "message must not echo the rejected value: {msg}"
+        !logged.contains('\n') && !logged.contains('\u{1b}'),
+        "control characters must not reach the log line: {logged:?}"
     );
 }
 
 #[test]
 fn non_string_thinking_display_is_rejected() {
-    for bad in [json!(true), json!(1), json!(null), json!(["omitted"])] {
+    // The surviving positive control: forwarding needs a string to put on
+    // the carrier, so a non-string shape still fails closed.
+    for (bad, type_name) in [
+        (json!(true), "bool"),
+        (json!(1), "number"),
+        (json!(null), "null"),
+        (json!(["omitted"]), "array"),
+    ] {
         let err = parse(json!({
             "type": "enabled",
             "budget_tokens": 2048,
@@ -169,12 +298,12 @@ fn non_string_thinking_display_is_rejected() {
         .expect_err("a non-string display must be rejected");
 
         assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        let msg = err.to_string();
         assert_eq!(
-            msg,
-            "validation: anthropic ingress: thinking.display must be one of \
-             \"summarized\" or \"omitted\"",
-            "message must name the field and its legal values only"
+            err.to_string(),
+            format!(
+                "validation: anthropic ingress: thinking.display must be a string, got {type_name}"
+            ),
+            "message must name the field and the type it got"
         );
     }
 }

@@ -4317,7 +4317,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (body `metadata.session_id`) feed the shared
   `ingress::session_key::resolve_session_key`, which owns precedence,
   trim, the bound and the conflict WARN; the `metadata` read is
-  non-destructive so `metadata` still round-trips into `provider_extras`
+  non-destructive so `metadata` still round-trips into `provider_extras`.
+  `translate_thinking_display` forwards ANY string `thinking.display`:
+  the raw value always lands on
+  `routectl_internal.anthropic_thinking_display` for the Anthropic-API
+  egress to re-emit, while `omitted` / `updates` / `summarized` also
+  derive canonical `reasoning.exclude` and any other string leaves it
+  unset plus one sanitized DEBUG; only a non-string `display` earns a
+  local 400 naming the type it got
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic
   Messages response body shape
 - `src/ingress/anthropic/stream.rs` -- canonical `ChatChunk` -> Anthropic SSE
