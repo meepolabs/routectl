@@ -249,15 +249,19 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   path and the streaming `messageStop` path, gated on
   `stop_reason == "stop_sequence"`.
 
-- **`thinking.display: "omitted"` returns an EMPTY thinking block, not
-  no block.** `thinking.display` is a closed two-value enum
-  (`"summarized"` | `"omitted"`); anything else 400s upstream, so the
-  Anthropic ingress rejects unknown values locally
-  (`ingress/anthropic/parse.rs::translate_thinking_display`). Under
-  `"omitted"` Anthropic still emits a `thinking` block -- with empty
-  `thinking` text and a FULL signature -- both non-streaming and
-  streaming. Billing is unchanged (thinking tokens are still charged).
-  Two consequences routectl depends on:
+- **A thinking-suppressing `thinking.display` returns an EMPTY thinking
+  block, not no block.** The `display` vocabulary is beta-extensible:
+  `"summarized"` and `"omitted"` are the long-standing values, and the
+  `thinking-display-updates-2026-08-18` beta added `"updates"`. routectl
+  therefore does NOT police the value -- any string forwards verbatim to
+  the wire and upstream rules on it
+  (`ingress/anthropic/parse.rs::translate_thinking_display`); only a
+  non-string `display` earns a local 400, because the carrier that
+  preserves the literal is a string. Under a suppressing value
+  (`"omitted"`, and `"updates"` alike) Anthropic still emits a `thinking`
+  block -- with empty `thinking` text and a FULL signature -- both
+  non-streaming and streaming. Billing is unchanged (thinking tokens are
+  still charged). Two consequences routectl depends on:
   - The empty-text-plus-signature block must survive normalization and
     replay. Every drop/skip decision on the thinking path keys on the
     SIGNATURE, never on the text
@@ -270,12 +274,18 @@ Surfaces: [openai-compat](#openai-compat-surface) -
     signature, so this shape still emits its aggregated detail
     (`anthropic_api/sse.rs`).
 
-  The canonical carrier is `reasoning.exclude` (`Some(true)` ->
-  `"omitted"`, `Some(false)` -> `"summarized"`). An ABSENT display
+  The value the Anthropic ingress captured rides a raw-string carrier
+  (`routectl_internal.anthropic_thinking_display`) and the `anthropic-api`
+  egress stamps it back verbatim, so a value the canonical model does not
+  know still reaches upstream intact. The canonical
+  `reasoning.exclude` boolean is the fallback derivation for library
+  callers and other ingresses, which set only the boolean (`Some(true)`
+  -> `"omitted"`, `Some(false)` -> `"summarized"`); the known suppressing
+  values map onto `exclude = Some(true)` on the way in. An ABSENT display
   stays absent on the wire: the upstream default is model-dependent, so
   emitting an explicit value would override a newer model's own choice.
   Bedrock Converse acceptance of the field is UNMEASURED, so the
-  Converse egress strips `display` from the
+  Converse egress strips `display` -- value-agnostically -- from the
   `additionalModelRequestFields` bag with a WARN
   (`bedrock/converse/extras.rs::insert_thinking`).
 

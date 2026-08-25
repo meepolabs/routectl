@@ -277,9 +277,10 @@ request knob:
   `additionalModelRequestFields` bag with a WARN. Whether Converse's
   validator accepts the field is unmeasured, so routectl does not risk a
   400 on every thinking request; reasoning text comes back per the model
-  default. The direct `anthropic-api` shape honors the field. Grep the
-  WARN `dropping thinking.display` when a caller reports the setting
-  being ignored on a Bedrock alias.
+  default. The direct `anthropic-api` shape honors the field and forwards
+  whatever string value the caller sent, so a value from a newer beta
+  vocabulary works there. Grep the WARN `dropping thinking.display` when a
+  caller reports the setting being ignored on a Bedrock alias.
 
 **Example provider + model:**
 
