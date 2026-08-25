@@ -3438,3 +3438,109 @@ async fn count_tokens_forwards_thinking_display_updates() {
         "{THINKING_DISPLAY_BETA} missing from count_tokens anthropic-beta: {beta_header}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Upstream-error opacity: the upstream's own words are the contract
+// ---------------------------------------------------------------------------
+
+/// The sentinel `error.message` an upstream 400 authors. Nothing in
+/// routectl may reword, translate, or summarize it.
+const UPSTREAM_SENTINEL_MESSAGE: &str =
+    "temperature must be less than or equal to 1.0 [opacity-message-marker]";
+
+/// A sentinel upstream 400 whose `error` object carries a non-contract
+/// sibling key alongside `message`, plus a sibling at the body's top
+/// level. Only `message` (and the classifier `type`) is contract; the rest
+/// must not reach the client, and the raw body must never be echoed.
+fn upstream_sentinel_400_body() -> String {
+    json!({
+        "error": {
+            "message": UPSTREAM_SENTINEL_MESSAGE,
+            "type": "invalid_request_error",
+            "opacity_sibling_key": "opacity-sibling-marker",
+        },
+        "opacity_toplevel_key": "opacity-toplevel-marker",
+    })
+    .to_string()
+}
+
+/// An upstream 400 travelling the normal `/v1/messages` handler path must
+/// hand the client the upstream's own `error.message` verbatim, inside
+/// routectl's envelope, at the upstream's own status -- and nothing else
+/// from the upstream body.
+///
+/// This is the invariant that makes forward-by-default safe: routectl no
+/// longer pins request vocabulary, so the upstream's message is the
+/// caller's only diagnostic. Rewording it, remapping the status, or
+/// dropping it in favour of a generic string blinds the caller.
+///
+/// The verbatim-message assertion doubles as the positive control for the
+/// absence assertions below it: the sentinel body demonstrably reaches the
+/// sink, so the missing sibling keys are suppression, not a mock that never
+/// fired.
+#[tokio::test]
+async fn upstream_400_message_survives_verbatim_without_leaking_the_body() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("content-type", "application/json")
+                .set_body_string(upstream_sentinel_400_body()),
+        )
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "temperature": 2.0,
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "the upstream status must reach the client unremapped"
+    );
+
+    let raw = resp.text().await.unwrap();
+    let envelope: Value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        panic!("client response was not JSON ({e}); body={raw}");
+    });
+
+    assert_eq!(envelope["type"], "error", "expected Anthropic envelope");
+    // routectl's envelope prefix is fixed; the upstream's words inside it
+    // are byte-identical to what the upstream authored.
+    assert_eq!(
+        envelope["error"]["message"].as_str(),
+        Some(format!("upstream error (HTTP 400): {UPSTREAM_SENTINEL_MESSAGE}").as_str()),
+        "upstream error.message must survive verbatim inside routectl's \
+         envelope; got: {raw}"
+    );
+
+    for leaked in [
+        "opacity_sibling_key",
+        "opacity-sibling-marker",
+        "opacity_toplevel_key",
+        "opacity-toplevel-marker",
+    ] {
+        assert!(
+            !raw.contains(leaked),
+            "non-contract upstream body content `{leaked}` leaked to the \
+             client; got: {raw}"
+        );
+    }
+    assert!(
+        !raw.contains(&upstream_sentinel_400_body()),
+        "the raw upstream body was echoed to the client; got: {raw}"
+    );
+}
