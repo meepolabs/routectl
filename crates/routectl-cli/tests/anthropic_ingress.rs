@@ -3226,3 +3226,215 @@ async fn per_model_max_output_tokens_lands_in_upstream_wire_body() {
          got: {upstream_body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// thinking.display forwarding (end-to-end)
+// ---------------------------------------------------------------------------
+
+/// The `display` value a current Claude Code session sends. The canonical
+/// `reasoning.exclude` boolean cannot distinguish it from `"omitted"`, so
+/// only the raw-string carrier keeps it intact to the wire.
+const UPDATES_DISPLAY: &str = "updates";
+
+/// The beta a Claude Code session pairs with `thinking.display:
+/// "updates"`. It must survive the default (empty) `allowed_betas`
+/// pass-through and reach the upstream `anthropic-beta` header.
+const THINKING_DISPLAY_BETA: &str = "thinking-display-updates-2026-08-18";
+
+fn thinking_updates_request_body() -> Value {
+    json!({
+        "model": "heavy",
+        // Above the Anthropic legacy-thinking floor (max_tokens > 1024),
+        // otherwise the egress drops `thinking` entirely.
+        "max_tokens": 4096,
+        "thinking": {
+            "type": "enabled",
+            "budget_tokens": 2048,
+            "display": UPDATES_DISPLAY
+        },
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+}
+
+/// Non-streaming pin: `thinking.display: "updates"` reaches the upstream
+/// wire body verbatim, and the beta that gates it survives the default
+/// empty `allowed_betas`.
+#[tokio::test]
+async fn thinking_display_updates_reaches_upstream_body() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .header("anthropic-beta", THINKING_DISPLAY_BETA)
+        .json(&thinking_updates_request_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream_body["thinking"]["display"], UPDATES_DISPLAY,
+        "thinking.display must reach upstream verbatim; got: {upstream_body}"
+    );
+    assert_eq!(
+        upstream_body["thinking"]["type"], "enabled",
+        "thinking.type must stay `enabled`; got: {upstream_body}"
+    );
+
+    let beta_header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
+    assert!(
+        names.contains(&THINKING_DISPLAY_BETA),
+        "{THINKING_DISPLAY_BETA} missing from upstream anthropic-beta: {beta_header}"
+    );
+}
+
+/// Streaming pin: the same request with `stream: true` forwards
+/// `thinking.display` verbatim. The streaming egress assembles its own
+/// wire body, so a carrier that only survives the non-streaming path
+/// would leave a live Claude Code session unpinned.
+#[tokio::test]
+async fn thinking_display_updates_reaches_upstream_body_on_stream() {
+    let sse_body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let mut body = thinking_updates_request_body();
+    body.as_object_mut()
+        .unwrap()
+        .insert("stream".to_string(), json!(true));
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .header("anthropic-beta", THINKING_DISPLAY_BETA)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // Drain the downstream SSE so the upstream leg completes before the
+    // received-request inspection below.
+    let downstream = resp.text().await.unwrap();
+    assert!(
+        downstream.contains("message_stop"),
+        "streamed response must reach message_stop; got: {downstream}"
+    );
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream_body["stream"], true,
+        "the upstream leg must stay streaming; got: {upstream_body}"
+    );
+    assert_eq!(
+        upstream_body["thinking"]["display"], UPDATES_DISPLAY,
+        "thinking.display must reach upstream verbatim on the streaming leg; \
+         got: {upstream_body}"
+    );
+
+    let beta_header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
+    assert!(
+        names.contains(&THINKING_DISPLAY_BETA),
+        "{THINKING_DISPLAY_BETA} missing from upstream anthropic-beta: {beta_header}"
+    );
+}
+
+/// count_tokens parity: Claude Code sizes compaction off
+/// `/v1/messages/count_tokens`, so the endpoint must see the same
+/// `thinking` object -- `display` included -- that `/v1/messages` sees.
+/// A divergence silently mis-sizes the context budget.
+#[tokio::test]
+async fn count_tokens_forwards_thinking_display_updates() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 11})))
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .header("anthropic-beta", THINKING_DISPLAY_BETA)
+        .json(&thinking_updates_request_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    assert_eq!(received[0].url.path(), "/v1/messages/count_tokens");
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream_body["thinking"]["display"], UPDATES_DISPLAY,
+        "count_tokens must forward the full thinking object incl. display; \
+         got: {upstream_body}"
+    );
+    assert_eq!(
+        upstream_body["thinking"]["type"], "enabled",
+        "count_tokens must keep thinking.type; got: {upstream_body}"
+    );
+
+    let beta_header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing on count_tokens upstream request")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
+    assert!(
+        names.contains(&THINKING_DISPLAY_BETA),
+        "{THINKING_DISPLAY_BETA} missing from count_tokens anthropic-beta: {beta_header}"
+    );
+}

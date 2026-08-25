@@ -107,6 +107,55 @@ async fn count_tokens_proxies_to_v1_messages_count_tokens_endpoint() {
     );
 }
 
+/// `thinking` is on the count_tokens allowlist as a whole object, so
+/// the raw `display` string an Anthropic client sent must ride along.
+/// Claude Code sizes compaction off this endpoint: a `thinking` object
+/// here that differs from the one `/v1/messages` receives mis-sizes the
+/// context budget.
+#[tokio::test]
+async fn count_tokens_forwards_full_thinking_object_including_display() {
+    // Arrange
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 42})))
+        .mount(&mock_server)
+        .await;
+
+    let provider = make_provider(&mock_server.uri());
+    let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);
+    req.reasoning = Some(ReasoningConfig {
+        enabled: Some(true),
+        max_tokens: Some(1024),
+        // `updates` suppresses the thinking text, same as `omitted`, so
+        // the canonical boolean cannot round-trip the distinction.
+        exclude: Some(true),
+        ..Default::default()
+    });
+    req.routectl_internal.anthropic_thinking_display = Some("updates".into());
+
+    // Act
+    let result = provider.count_tokens(req).await.unwrap();
+
+    // Assert
+    assert_eq!(result.input_tokens, 42);
+    let received = mock_server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let captured: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        captured["thinking"]["display"], "updates",
+        "count_tokens must forward thinking.display verbatim: {captured}"
+    );
+    assert_eq!(
+        captured["thinking"]["type"], "enabled",
+        "count_tokens must keep thinking.type: {captured}"
+    );
+    assert_eq!(
+        captured["thinking"]["budget_tokens"], 1024,
+        "count_tokens must keep thinking.budget_tokens: {captured}"
+    );
+}
+
 #[tokio::test]
 async fn count_tokens_4xx_surfaces_as_upstream_error() {
     // Arrange
