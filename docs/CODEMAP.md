@@ -5491,7 +5491,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   placeholder table missing its required keys) are skipped by design, and
   per-source non-zero floors keep the skip rule from going vacuous
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control
-  round-trip, forward-compat, listener auth)
+  round-trip, forward-compat, listener auth, `thinking.display` verbatim
+  forwarding on the non-streaming, streaming, and count_tokens legs)
 - `tests/responses_ingress.rs` -- `/v1/responses` end-to-end (Responses body
   -> openai-compat upstream -> Responses-shaped completion,
   `previous_response_id` -> 400, `store:true` accepted, listener auth)
