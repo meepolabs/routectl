@@ -54,8 +54,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
-    Fixture, FixtureOutcome, bounded_body_diff, captured_root, discover_fixtures,
-    enrichment_skip_reason, parse_enriched_canonical, unpinned_ingress_skip_reason,
+    Fixture, FixtureOutcome, bounded_body_diff, discover_fixtures, enrichment_skip_reason,
+    local_root, parse_enriched_canonical, unpinned_ingress_skip_reason,
 };
 
 /// Description of which path + content-type the egress provider hits
@@ -237,10 +237,12 @@ async fn run_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 
 #[tokio::test]
 async fn ingress_replay_all() {
-    let root = captured_root();
+    // The LIVE-BOX root, named explicitly: this driver is report-only
+    // and must never gate, because these bodies are real prompts.
+    let root = local_root();
     if !root.exists() {
         eprintln!(
-            "[replay_ingress] captured/ root `{}` not present; nothing to assert.",
+            "[replay_ingress] local captured/ root `{}` not present; nothing to assert.",
             root.display(),
         );
         return;

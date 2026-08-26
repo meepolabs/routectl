@@ -4,6 +4,10 @@
 //! listing -- `meta.json` carries no file-presence flags. The
 //! filesystem is the only record of which optional files exist, so
 //! there is no second copy of that fact to disagree with it.
+//!
+//! Every file read here is also refused if it ends with routectl's own
+//! trace truncation marker (see [`truncation_marker`]) -- a clipped body
+//! is a prefix of the wire body and would diff as drift.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,6 +44,12 @@ pub enum ReplayError {
         found: u32,
         supported: u32,
     },
+    #[error(
+        "{path} ends with routectl's own trace truncation marker `{marker}`: the capture was \
+         clipped by the trace body cap, so this file is a prefix of the wire body, not the \
+         wire body -- recapture with a larger ROUTECTL_TRACE_BODY_BYTES"
+    )]
+    TruncatedBody { path: String, marker: String },
 }
 
 /// Fixture-format major version this loader reads. The integer IS the
@@ -342,9 +352,13 @@ fn read_optional_response(
 }
 
 /// Read a file's bytes; map `NotFound` to `MissingFile` (which carries
-/// the path) and any other io error to `Io { path, source }`.
+/// the path) and any other io error to `Io { path, source }`. A file
+/// ending in routectl's own trace truncation marker is refused here, so
+/// every fixture file passes the check exactly once and the refusal
+/// names truncation rather than surfacing as a downstream JSON parse
+/// error.
 fn read_file_or_missing(path: &Path) -> Result<Vec<u8>, ReplayError> {
-    fs::read(path).map_err(|e| {
+    let bytes = fs::read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             ReplayError::MissingFile(path.display().to_string())
         } else {
@@ -353,7 +367,65 @@ fn read_file_or_missing(path: &Path) -> Result<Vec<u8>, ReplayError> {
                 source: e,
             }
         }
-    })
+    })?;
+    if let Some(marker) = truncation_marker(&bytes) {
+        return Err(ReplayError::TruncatedBody {
+            path: path.display().to_string(),
+            marker,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Leading and trailing literals of the marker `truncate_json_for_log`
+/// (`routectl-core/src/log_safe.rs`) appends to a clipped body:
+/// `... [truncated at <cap> bytes]`.
+const TRUNCATION_MARKER_HEAD: &str = "... [truncated at ";
+const TRUNCATION_MARKER_TAIL: &str = " bytes]";
+
+/// Widest byte window the marker can occupy: both literals plus a
+/// `usize` cap in decimal. The 20 is exactly `usize::MAX`'s decimal
+/// width (`18446744073709551615`), so the window is TIGHT -- it has no
+/// slack, and any change to either literal must be reflected here or a
+/// real marker will fall outside the window and go undetected.
+const TRUNCATION_MARKER_WINDOW: usize =
+    TRUNCATION_MARKER_HEAD.len() + 20 + TRUNCATION_MARKER_TAIL.len();
+
+/// The exact truncation marker this file ends with, if any.
+///
+/// ANCHORED TO THE TAIL AND MATCHED IN FULL -- head literal, decimal
+/// cap, tail literal -- deliberately, not the bare phrase `truncated
+/// at`.
+///
+/// End-anchoring makes a false positive STRUCTURALLY impossible, not
+/// merely unlikely: valid JSON always ends with `}` or `]`, so a
+/// well-formed fixture cannot end with the marker, and a body that
+/// merely discusses truncation always keeps the phrase inside a string
+/// value. Only a clipped body has the marker as its final bytes.
+///
+/// The empirical case for full-marker over bare-phrase matching, from
+/// the live-box corpus at 250 fixtures: the bare phrase matches 12
+/// files, every one of them legitimate prompt content (a captured
+/// system-reminder reading "...which was truncated at 27748 chars") and
+/// every one of them valid JSON; the full marker matches 0. A
+/// bare-phrase detector would therefore refuse healthy fixtures at a
+/// 100% false-positive rate.
+fn truncation_marker(bytes: &[u8]) -> Option<String> {
+    let end = bytes.iter().rposition(|b| !b.is_ascii_whitespace())? + 1;
+    let start = end.saturating_sub(TRUNCATION_MARKER_WINDOW);
+    let tail = String::from_utf8_lossy(&bytes[start..end]);
+    let rest = tail.strip_suffix(TRUNCATION_MARKER_TAIL)?;
+    let digits_len = rest.bytes().rev().take_while(u8::is_ascii_digit).count();
+    if digits_len == 0 {
+        return None;
+    }
+    let (head, digits) = rest.split_at(rest.len() - digits_len);
+    if !head.ends_with(TRUNCATION_MARKER_HEAD) {
+        return None;
+    }
+    Some(format!(
+        "{TRUNCATION_MARKER_HEAD}{digits}{TRUNCATION_MARKER_TAIL}"
+    ))
 }
 
 /// Decode a header file. Format: a JSON array of two-element
@@ -765,5 +837,251 @@ mod tests {
         assert_eq!(names, vec!["good_scenario"]);
         assert_eq!(loaded.fixtures.len(), 1);
         assert_eq!(loaded.skipped, 1);
+    }
+
+    /// A body the trace body cap clipped: a JSON prefix with
+    /// `truncate_json_for_log`'s marker appended. Written byte-for-byte
+    /// as that function emits it.
+    fn cap_clipped_body(cap: usize) -> Vec<u8> {
+        format!("{{\"model\":\"claude-sonnet-4-5\",\"messages\":[{{\"role\":\"user\",\"content\":\"hel... [truncated at {cap} bytes]")
+            .into_bytes()
+    }
+
+    /// A body whose PROMPT TEXT talks about truncation. The load-bearing
+    /// part is the phrase `which was truncated at 27748 chars`, the shape
+    /// carried by 12 of the 250 live-box fixtures -- all valid, complete
+    /// JSON. The surrounding sentence is SYNTHESIZED, not excerpted: a
+    /// verbatim excerpt of a captured body would commit the very content
+    /// this loader's two-root split exists to keep out of the repo.
+    fn body_mentioning_truncation_in_prompt_text() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{
+                "role": "user",
+                "content": "The upstream summary (which was truncated at 27748 chars) \
+                            is the one to use, not the full transcript.",
+            }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn loader_refuses_a_body_carrying_the_trace_truncation_marker() {
+        // Arrange
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+        fs::write(dir.join(OUTGOING_BODY), cap_clipped_body(16384)).unwrap();
+
+        // Act
+        let err = load_fixture(&dir).unwrap_err();
+
+        // Assert: refused AS TRUNCATION (not as a JSON parse error), and
+        // the error names the offending file plus the marker it found.
+        match &err {
+            ReplayError::TruncatedBody { path, marker } => {
+                assert!(
+                    path.contains(OUTGOING_BODY),
+                    "error did not name the file: {path}"
+                );
+                assert_eq!(marker, "... [truncated at 16384 bytes]");
+            }
+            other => panic!("expected TruncatedBody, got {other:?}"),
+        }
+    }
+
+    /// POSITIVE CONTROL for the test above, and the reason the detector
+    /// matches the full anchored marker rather than the bare phrase
+    /// `truncated at`. On the live-box corpus at 250 fixtures the bare
+    /// phrase matches 12 files -- all legitimate prompt content, all
+    /// valid JSON -- while the full marker matches 0. A bare-phrase
+    /// detector would refuse those 12 healthy fixtures.
+    #[test]
+    fn loader_accepts_a_body_whose_prompt_text_contains_the_phrase_truncated_at() {
+        // Arrange
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+        let body = body_mentioning_truncation_in_prompt_text();
+        assert!(
+            String::from_utf8_lossy(&body).contains("truncated at"),
+            "fixture does not carry the phrase the detector must NOT match",
+        );
+        fs::write(dir.join(OUTGOING_BODY), &body).unwrap();
+
+        // Act
+        let f = load_fixture(&dir).unwrap();
+
+        // Assert
+        assert_eq!(f.name, "scenario");
+        assert_eq!(f.outgoing_request["model"], json!("claude-sonnet-4-5"));
+    }
+
+    /// The marker is refused wherever it lands, including a response
+    /// half whose bytes are never JSON-parsed -- so an SSE capture
+    /// clipped by the cap cannot slip through unparsed.
+    #[test]
+    fn loader_refuses_a_truncated_optional_response_body() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+        fs::write(dir.join(UPSTREAM_BODY), cap_clipped_body(1048576)).unwrap();
+
+        let err = load_fixture(&dir).unwrap_err();
+
+        match &err {
+            ReplayError::TruncatedBody { path, marker } => {
+                assert!(
+                    path.contains(UPSTREAM_BODY),
+                    "error did not name the file: {path}"
+                );
+                assert_eq!(marker, "... [truncated at 1048576 bytes]");
+            }
+            other => panic!("expected TruncatedBody, got {other:?}"),
+        }
+    }
+
+    /// Refusal flows through the existing skip-and-count path, so one
+    /// clipped fixture never blinds the run to the rest of the corpus.
+    #[test]
+    fn discover_fixtures_counts_a_truncated_fixture_as_skipped() {
+        // Arrange
+        let tmp = tempdir().unwrap();
+        for name in ["good_a", "good_b"] {
+            let dir = tmp.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            write_fixture(&dir, NEITHER, NEITHER);
+        }
+        let clipped = tmp.path().join("clipped_scenario");
+        fs::create_dir(&clipped).unwrap();
+        write_fixture(&clipped, NEITHER, NEITHER);
+        fs::write(clipped.join(INGRESS_BODY), cap_clipped_body(16384)).unwrap();
+
+        // Act
+        let loaded = discover_fixtures(tmp.path()).unwrap();
+
+        // Assert
+        let names: Vec<_> = loaded.fixtures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["good_a", "good_b"]);
+        assert_eq!(loaded.skipped, 1);
+    }
+
+    /// The detector is anchored to the END of the file: the marker can
+    /// only be appended there, and a body quoting it mid-prompt is a
+    /// complete body.
+    #[test]
+    fn loader_accepts_a_body_quoting_the_marker_inside_prompt_content() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+        fs::write(
+            dir.join(OUTGOING_BODY),
+            serde_json::to_vec(&json!({
+                "model": "claude-sonnet-4-5",
+                "messages": [{
+                    "role": "user",
+                    "content": "the log line ended with ... [truncated at 16384 bytes] \
+                                so raise the cap",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.outgoing_request["model"], json!("claude-sonnet-4-5"));
+    }
+
+    /// Trailing whitespace / a trailing newline must not hide the
+    /// marker, since a shell redirect commonly appends one.
+    #[test]
+    fn loader_refuses_a_truncated_body_with_a_trailing_newline() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+        let mut body = cap_clipped_body(16384);
+        body.extend_from_slice(b"\n");
+        fs::write(dir.join(OUTGOING_BODY), &body).unwrap();
+
+        let err = load_fixture(&dir).unwrap_err();
+
+        assert!(
+            matches!(err, ReplayError::TruncatedBody { .. }),
+            "expected TruncatedBody, got {err:?}",
+        );
+    }
+
+    /// The cap must be DECIMAL DIGITS, not arbitrary text: a tail that
+    /// is marker-shaped but carries no number is not routectl's marker.
+    ///
+    /// The body is written RAW, ending in the digitless tail. Routing
+    /// this through `serde_json::to_vec` instead would put the tail
+    /// inside a string value, so the file would end `bytes]"}` and the
+    /// end-anchor alone would decide the outcome -- the digits branch
+    /// would never be reached and deleting its guard would not fail this
+    /// test. Asserted against `truncation_marker` directly so the
+    /// verdict is the detector's, not a downstream parse error's.
+    #[test]
+    fn detector_ignores_a_marker_shaped_tail_whose_cap_is_not_digits() {
+        // Arrange: three digitless caps, each ending the body exactly.
+        for cap in ["", "some", "16k"] {
+            let body = format!("{{\"model\":\"m\"}}... [truncated at {cap} bytes]");
+
+            // Act
+            let found = truncation_marker(body.as_bytes());
+
+            // Assert
+            assert!(
+                found.is_none(),
+                "cap `{cap}` is not decimal; expected no marker, got {found:?}",
+            );
+        }
+    }
+
+    /// Positive control for the test above: the same tail WITH a decimal
+    /// cap is the marker, so the digits rule cannot be tightened into
+    /// missing the real thing.
+    #[test]
+    fn detector_matches_a_marker_shaped_tail_whose_cap_is_digits() {
+        for cap in ["0", "16384", "1048576"] {
+            let body = format!("{{\"model\":\"m\"}}... [truncated at {cap} bytes]");
+
+            let found = truncation_marker(body.as_bytes());
+
+            assert_eq!(
+                found.as_deref(),
+                Some(&*format!("... [truncated at {cap} bytes]"))
+            );
+        }
+    }
+
+    /// A body that merely QUOTES a digitless marker-shaped tail inside a
+    /// string value still loads -- the loader-level counterpart of the
+    /// detector test above.
+    #[test]
+    fn loader_accepts_a_body_quoting_a_marker_shaped_tail_without_a_cap() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+        fs::write(
+            dir.join(OUTGOING_BODY),
+            serde_json::to_vec(&json!({
+                "model": "m",
+                "note": "... [truncated at some bytes]",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.outgoing_request["model"], json!("m"));
     }
 }
