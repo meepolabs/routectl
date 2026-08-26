@@ -1,6 +1,9 @@
 //! Fixture file format: `meta.json`, ingress / outgoing request
 //! bodies + headers (always required), and optional upstream / egress
-//! response bodies + headers gated by `meta.has_*_response`.
+//! response bodies + headers whose presence is read from the directory
+//! listing -- `meta.json` carries no file-presence flags. The
+//! filesystem is the only record of which optional files exist, so
+//! there is no second copy of that fact to disagree with it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,31 +32,116 @@ pub enum ReplayError {
     MissingFile(String),
     #[error("invalid header file format in {path}: expected array of [name, value] pairs")]
     InvalidHeaderFormat { path: String },
-    #[error("unexpected file present (meta declared it absent): {path}")]
-    UnexpectedFilePresent { path: String },
+    #[error(
+        "unsupported fixture schema_version {found} in {path}: this loader reads major {supported}"
+    )]
+    UnsupportedSchemaVersion {
+        path: String,
+        found: u32,
+        supported: u32,
+    },
+}
+
+/// Fixture-format major version this loader reads. The integer IS the
+/// major: a format change that an existing fixture cannot satisfy bumps
+/// it, and `read_meta` refuses any other value outright rather than
+/// half-loading a shape it does not understand.
+pub const FIXTURE_SCHEMA_VERSION: u32 = 1;
+
+/// Implicit major for a fixture captured before `schema_version` was
+/// written. Captures predating the key are major 1 by definition -- the
+/// key was introduced alongside purely ADDITIVE fields, so a
+/// pre-versioning directory is a valid major-1 fixture with those fields
+/// absent.
+const fn default_schema_version() -> u32 {
+    FIXTURE_SCHEMA_VERSION
+}
+
+/// Client identity that produced the captured ingress request. Pinned
+/// because a client's wire shape varies by version AND by how it reaches
+/// routectl: Claude Code sends `role:"system"` turns in `messages[]`
+/// through a MITM front proxy but inlines the same content as
+/// system-reminder text with zero system turns in base-url mode, so an
+/// unpinned mode makes a cross-mode comparison read as drift.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FixtureClient {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub connection_mode: String,
 }
 
 /// Mirror of the `meta.json` schema documented in
-/// `docs/REPLAY-FIXTURES.md`. `model` is the post-alias provider model
-/// id from the trace; the test drivers use it to skip fixtures whose
-/// model needs router-side enrichment that the bare ingress -> egress
-/// path does not yet replay.
+/// `docs/REPLAY-FIXTURES.md`. There is exactly ONE schema: every key the
+/// capture rig writes and this struct reads is that schema, and the
+/// struct carries no key the rig does not produce.
+///
+/// File presence is NOT part of it. Which optional response files exist
+/// is read from the directory listing (see [`read_optional_response`]);
+/// the rig's tmp-then-rename promotion already makes a fixture directory
+/// all-or-nothing, so a second copy of that fact in `meta.json` could
+/// only ever disagree with the filesystem.
+///
+/// BACKWARD COMPATIBILITY, decided deliberately: the loader TOLERATES a
+/// fixture captured before this schema settled. The fields added here
+/// (`lane`, `case_id`, `client`, `config_sha`, and `schema_version`
+/// itself) are additive, so `#[serde(default)]` lets the existing
+/// per-contributor corpus keep loading -- which is the point, since a
+/// clean break would zero out the only wire evidence anyone has on disk
+/// and there is no way to recapture a past session. Tolerance here is
+/// not permission to run an unpinned fixture through a GATED comparison:
+/// a consumer that needs a pinned lane, case, client or config refuses
+/// the individual fixture that lacks it. `schema_version` is the one
+/// hard gate, because a major bump means the directory shape itself
+/// changed and no per-field default can rescue it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixtureMeta {
+    /// Fixture-format major. Absent means major 1 (pre-versioning).
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// Egress provider kind in the `PROVIDER_KIND` vocabulary of
+    /// `routectl-providers` (`anthropic`, not `anthropic-api`). Kept
+    /// distinct from `lane`, which normalizes the same concept into the
+    /// config vocabulary.
     pub provider_kind: String,
-    pub stream: bool,
-    pub has_upstream_response: bool,
-    pub has_egress_response: bool,
+    /// Egress lane token in the `kind_str()` vocabulary of
+    /// `ProviderEntry` (`anthropic-api`, `openai-compat`,
+    /// `openai-responses`, `bedrock`, `gemini`) -- the vocabulary the
+    /// lane contract derives a lane's class from. Normalized at WRITE
+    /// time by the capture rig; empty on a pre-versioning fixture.
     #[serde(default)]
-    pub expected_unknown_block_count: Option<u32>,
+    pub lane: String,
+    /// Ingress dialect that parsed the inbound body, in the vocabulary
+    /// of `IngressAdapter::id()` (`anthropic`, `openai`,
+    /// `openai-responses`) -- so a consumer dispatches on this value
+    /// with no mapping table. EMPTY when the capture could not extract
+    /// the token, never a sentinel word outside that vocabulary.
+    #[serde(default)]
+    pub ingress_kind: String,
+    /// Stable identifier for the SCENARIO this fixture captures, as
+    /// opposed to the one-off request id. A rerun of the same case
+    /// re-lands on the same identity, so it either matches or diffs.
+    /// Empty on a request-id-keyed pre-versioning fixture.
+    #[serde(default)]
+    pub case_id: String,
+    /// Hash of the config in force at capture time. A rerun under a
+    /// drifted config would otherwise read as client drift. Empty when
+    /// the capture ran against an ad-hoc local config.
+    #[serde(default)]
+    pub config_sha: String,
+    #[serde(default)]
+    pub client: FixtureClient,
+    pub stream: bool,
     /// Post-alias provider model id; populated by the capture rig.
     /// Optional so older fixtures (and the loader's unit tests) load
     /// without a forced rewrite.
     #[serde(default)]
     pub model: Option<String>,
     /// Workspace package version stamped by `capture_fixtures.sh`.
-    /// Optional so older captures (and the loader's unit tests) load
-    /// without a forced rewrite.
+    /// Purely informational triage aid -- NOT a compatibility signal.
+    /// `schema_version` is the only field the loader gates on.
     #[serde(default)]
     pub routectl_version: Option<String>,
 }
@@ -68,13 +156,13 @@ pub struct Fixture {
     pub ingress_request_headers: Vec<(String, String)>,
     pub outgoing_request: Value,
     pub outgoing_request_headers: Vec<(String, String)>,
-    /// Empty when `meta.has_upstream_response` is false.
+    /// Empty when `upstream_response.json` is absent from the directory.
     pub upstream_response_bytes: Vec<u8>,
-    /// Empty when `meta.has_upstream_response` is false.
+    /// Empty when `upstream_response.headers.json` is absent.
     pub upstream_response_headers: Vec<(String, String)>,
-    /// Empty when `meta.has_egress_response` is false.
+    /// Empty when `egress_response.json` is absent from the directory.
     pub egress_response_bytes: Vec<u8>,
-    /// Empty when `meta.has_egress_response` is false.
+    /// Empty when `egress_response.headers.json` is absent.
     pub egress_response_headers: Vec<(String, String)>,
     pub meta: FixtureMeta,
 }
@@ -104,14 +192,10 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
     let ingress_request_headers = read_required_headers(dir, INGRESS_HEADERS)?;
     let outgoing_request = read_required_json(dir, OUTGOING_BODY)?;
     let outgoing_request_headers = read_required_headers(dir, OUTGOING_HEADERS)?;
-    let (upstream_response_bytes, upstream_response_headers) = read_optional_response(
-        dir,
-        meta.has_upstream_response,
-        UPSTREAM_BODY,
-        UPSTREAM_HEADERS,
-    )?;
+    let (upstream_response_bytes, upstream_response_headers) =
+        read_optional_response(dir, UPSTREAM_BODY, UPSTREAM_HEADERS)?;
     let (egress_response_bytes, egress_response_headers) =
-        read_optional_response(dir, meta.has_egress_response, EGRESS_BODY, EGRESS_HEADERS)?;
+        read_optional_response(dir, EGRESS_BODY, EGRESS_HEADERS)?;
 
     Ok(Fixture {
         name,
@@ -129,8 +213,8 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
 
 /// Result of walking a fixture corpus: the fixtures that loaded cleanly
 /// plus the count that were skipped (parse error, missing required file,
-/// stray optional file). A degraded corpus -- e.g. one truncated by a
-/// log line-length limit at capture time -- thins `fixtures` while
+/// unsupported schema major). A degraded corpus -- e.g. one truncated by
+/// a log line-length limit at capture time -- thins `fixtures` while
 /// `skipped` rises, so the run's coverage is visible rather than silent.
 #[derive(Debug, Default)]
 pub struct LoadedCorpus {
@@ -142,8 +226,8 @@ pub struct LoadedCorpus {
 /// name for deterministic test ordering. Skips dotfiles and any
 /// non-directory entry (e.g. `README.md`, `.gitkeep`). A subdirectory
 /// that fails to load (malformed `meta.json` or body JSON, missing
-/// required file, stray optional file) is logged to stderr (naming the
-/// directory and the error), counted in `LoadedCorpus.skipped`, and
+/// required file, unsupported schema major) is logged to stderr (naming
+/// the directory and the error), counted in `LoadedCorpus.skipped`, and
 /// skipped rather than aborting the whole corpus, so one bad fixture
 /// cannot blind the run to every other fixture's regression signal. A
 /// final summary line reports loaded vs skipped so a thin corpus is
@@ -199,10 +283,18 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError>
 fn read_meta(dir: &Path) -> Result<FixtureMeta, ReplayError> {
     let path = dir.join(META_JSON);
     let bytes = read_file_or_missing(&path)?;
-    serde_json::from_slice(&bytes).map_err(|e| ReplayError::Json {
+    let meta: FixtureMeta = serde_json::from_slice(&bytes).map_err(|e| ReplayError::Json {
         path: path.display().to_string(),
         source: e,
-    })
+    })?;
+    if meta.schema_version != FIXTURE_SCHEMA_VERSION {
+        return Err(ReplayError::UnsupportedSchemaVersion {
+            path: path.display().to_string(),
+            found: meta.schema_version,
+            supported: FIXTURE_SCHEMA_VERSION,
+        });
+    }
+    Ok(meta)
 }
 
 fn read_required_json(dir: &Path, name: &str) -> Result<Value, ReplayError> {
@@ -220,36 +312,32 @@ fn read_required_headers(dir: &Path, name: &str) -> Result<Vec<(String, String)>
     parse_headers_value(&value, &path)
 }
 
-/// Read body + headers for an optional response slot. When the meta
-/// flag is `false`, both files MUST be absent and the result is empty
-/// vectors. When `true`, both files MUST be present.
+/// Read body + headers for an optional response slot, taking presence
+/// from the directory itself: each of the two files is read when it
+/// exists and yields an empty vector when it does not. The four
+/// combinations (both, body only, headers only, neither) are all valid
+/// -- a stream capture legitimately has response HEADERS with no
+/// response BODY, since the body arrives as SSE frames rather than a
+/// single logged JSON value.
 #[allow(clippy::type_complexity)]
 fn read_optional_response(
     dir: &Path,
-    expected: bool,
     body_name: &str,
     headers_name: &str,
 ) -> Result<(Vec<u8>, Vec<(String, String)>), ReplayError> {
-    if !expected {
-        let body_path = dir.join(body_name);
-        if body_path.exists() {
-            return Err(ReplayError::UnexpectedFilePresent {
-                path: body_path.display().to_string(),
-            });
-        }
-        let headers_path = dir.join(headers_name);
-        if headers_path.exists() {
-            return Err(ReplayError::UnexpectedFilePresent {
-                path: headers_path.display().to_string(),
-            });
-        }
-        return Ok((Vec::new(), Vec::new()));
-    }
     let body_path = dir.join(body_name);
-    let body = read_file_or_missing(&body_path)?;
-    let headers_value = read_required_json(dir, headers_name)?;
+    let body = if body_path.exists() {
+        read_file_or_missing(&body_path)?
+    } else {
+        Vec::new()
+    };
     let headers_path = dir.join(headers_name);
-    let headers = parse_headers_value(&headers_value, &headers_path)?;
+    let headers = if headers_path.exists() {
+        let value = read_required_json(dir, headers_name)?;
+        parse_headers_value(&value, &headers_path)?
+    } else {
+        Vec::new()
+    };
     Ok((body, headers))
 }
 
@@ -309,16 +397,32 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    fn write_minimal_fixture(dir: &Path, has_upstream: bool, has_egress: bool) {
-        let meta = json!({
+    /// The full current-schema `meta.json` a rig-written fixture carries.
+    fn current_meta() -> Value {
+        json!({
+            "schema_version": FIXTURE_SCHEMA_VERSION,
             "provider_kind": "anthropic",
+            "lane": "anthropic-api",
+            "ingress_kind": "anthropic",
+            "case_id": "smoke",
+            "config_sha": "abc123",
+            "client": {
+                "name": "claude-code",
+                "version": "2.1.167",
+                "connection_mode": "base-url",
+            },
             "stream": false,
-            "has_upstream_response": has_upstream,
-            "has_egress_response": has_egress,
-        });
+            "model": "claude-sonnet-4-5",
+            "routectl_version": "0.8.0",
+        })
+    }
+
+    /// Write the four ALWAYS-required files plus the given `meta.json`.
+    /// Optional response files are the caller's business.
+    fn write_required_files(dir: &Path, meta: &Value) {
         fs::write(
             dir.join(META_JSON),
-            serde_json::to_vec_pretty(&meta).unwrap(),
+            serde_json::to_vec_pretty(meta).unwrap(),
         )
         .unwrap();
         fs::write(
@@ -341,21 +445,55 @@ mod tests {
             serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
         )
         .unwrap();
-        if has_upstream {
+    }
+
+    fn write_headers_file(path: PathBuf) {
+        fs::write(
+            path,
+            serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Which of the two files of one optional response slot exist on
+    /// disk. All four combinations are legal: a stream capture has
+    /// headers with no body.
+    #[derive(Clone, Copy)]
+    struct Present {
+        body: bool,
+        headers: bool,
+    }
+
+    const BOTH: Present = Present {
+        body: true,
+        headers: true,
+    };
+    const NEITHER: Present = Present {
+        body: false,
+        headers: false,
+    };
+    const HEADERS_ONLY: Present = Present {
+        body: false,
+        headers: true,
+    };
+    const BODY_ONLY: Present = Present {
+        body: true,
+        headers: false,
+    };
+
+    fn write_fixture(dir: &Path, upstream: Present, egress: Present) {
+        write_required_files(dir, &current_meta());
+        if upstream.body {
             fs::write(dir.join(UPSTREAM_BODY), b"{\"id\":\"u\"}").unwrap();
-            fs::write(
-                dir.join(UPSTREAM_HEADERS),
-                serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
-            )
-            .unwrap();
         }
-        if has_egress {
+        if upstream.headers {
+            write_headers_file(dir.join(UPSTREAM_HEADERS));
+        }
+        if egress.body {
             fs::write(dir.join(EGRESS_BODY), b"{\"id\":\"e\"}").unwrap();
-            fs::write(
-                dir.join(EGRESS_HEADERS),
-                serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
-            )
-            .unwrap();
+        }
+        if egress.headers {
+            write_headers_file(dir.join(EGRESS_HEADERS));
         }
     }
 
@@ -364,7 +502,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
-        write_minimal_fixture(&dir, true, true);
+        write_fixture(&dir, BOTH, BOTH);
 
         let f = load_fixture(&dir).unwrap();
         assert_eq!(f.name, "scenario");
@@ -380,13 +518,100 @@ mod tests {
     }
 
     #[test]
-    fn loader_skips_optional_files_when_meta_is_false() {
+    fn loader_reads_case_lane_client_and_config_sha_from_meta() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
-        write_minimal_fixture(&dir, false, false);
+        write_fixture(&dir, BOTH, BOTH);
 
         let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.lane, "anthropic-api");
+        assert_eq!(f.meta.case_id, "smoke");
+        assert_eq!(f.meta.config_sha, "abc123");
+        assert_eq!(f.meta.client.name, "claude-code");
+        assert_eq!(f.meta.client.version, "2.1.167");
+        assert_eq!(f.meta.client.connection_mode, "base-url");
+    }
+
+    /// `ingress_kind` is what a downstream consumer dispatches the
+    /// ingress adapter on, and the rig has written it since before the
+    /// loader could read it -- so the value the rig emits must survive
+    /// the load verbatim, in `IngressAdapter::id()` spelling.
+    #[test]
+    fn loader_round_trips_the_rig_written_ingress_kind() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        meta["ingress_kind"] = json!("openai-responses");
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.ingress_kind, "openai-responses");
+    }
+
+    #[test]
+    fn loader_accepts_upstream_and_egress_response_bodies_with_headers() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, BOTH, BOTH);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.upstream_response_bytes, b"{\"id\":\"u\"}");
+        assert_eq!(f.upstream_response_headers.len(), 1);
+        assert_eq!(f.egress_response_bytes, b"{\"id\":\"e\"}");
+        assert_eq!(f.egress_response_headers.len(), 1);
+    }
+
+    /// The shape of a STREAM capture: response headers were logged, the
+    /// body arrived as SSE frames and was never logged as one JSON value.
+    /// This combination is what the deleted `has_*` flags rejected, and
+    /// it accounted for the overwhelming majority of the corpus.
+    #[test]
+    fn loader_accepts_response_headers_without_a_response_body() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, HEADERS_ONLY, HEADERS_ONLY);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert!(f.upstream_response_bytes.is_empty());
+        assert_eq!(f.upstream_response_headers.len(), 1);
+        assert!(f.egress_response_bytes.is_empty());
+        assert_eq!(f.egress_response_headers.len(), 1);
+    }
+
+    /// A capture taken without `ROUTECTL_TRACE_HEADERS`: bodies logged,
+    /// no header lines to extract.
+    #[test]
+    fn loader_accepts_a_response_body_without_its_headers() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, BODY_ONLY, BODY_ONLY);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.upstream_response_bytes, b"{\"id\":\"u\"}");
+        assert!(f.upstream_response_headers.is_empty());
+        assert_eq!(f.egress_response_bytes, b"{\"id\":\"e\"}");
+        assert!(f.egress_response_headers.is_empty());
+    }
+
+    #[test]
+    fn loader_accepts_a_fixture_with_no_optional_response_files() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, NEITHER, NEITHER);
+
+        let f = load_fixture(&dir).unwrap();
+
         assert!(f.upstream_response_bytes.is_empty());
         assert!(f.upstream_response_headers.is_empty());
         assert!(f.egress_response_bytes.is_empty());
@@ -394,49 +619,64 @@ mod tests {
     }
 
     #[test]
-    fn loader_rejects_stray_optional_response_when_meta_is_false() {
+    fn loader_accepts_a_fixture_at_the_current_schema_major() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
-        write_minimal_fixture(&dir, false, false);
-        // Stray body file left behind by a partial sanitization.
-        fs::write(dir.join(UPSTREAM_BODY), b"{\"id\":\"u\"}").unwrap();
+        write_fixture(&dir, BOTH, BOTH);
 
-        let err = load_fixture(&dir).unwrap_err();
-        match &err {
-            ReplayError::UnexpectedFilePresent { path } => {
-                assert!(
-                    path.contains(UPSTREAM_BODY),
-                    "error did not name the stray file: {path}"
-                );
-            }
-            other => panic!("expected UnexpectedFilePresent, got {other:?}"),
-        }
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.schema_version, FIXTURE_SCHEMA_VERSION);
     }
 
     #[test]
-    fn loader_rejects_stray_optional_headers_when_meta_is_false() {
+    fn loader_rejects_a_fixture_at_an_unknown_schema_major() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
-        write_minimal_fixture(&dir, false, false);
-        // Stray headers file left behind by a partial sanitization.
-        fs::write(
-            dir.join(EGRESS_HEADERS),
-            serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
-        )
-        .unwrap();
+        let mut meta = current_meta();
+        meta["schema_version"] = json!(FIXTURE_SCHEMA_VERSION + 1);
+        write_required_files(&dir, &meta);
 
         let err = load_fixture(&dir).unwrap_err();
+
         match &err {
-            ReplayError::UnexpectedFilePresent { path } => {
-                assert!(
-                    path.contains(EGRESS_HEADERS),
-                    "error did not name the stray file: {path}"
-                );
+            ReplayError::UnsupportedSchemaVersion {
+                found, supported, ..
+            } => {
+                assert_eq!(*found, FIXTURE_SCHEMA_VERSION + 1);
+                assert_eq!(*supported, FIXTURE_SCHEMA_VERSION);
             }
-            other => panic!("expected UnexpectedFilePresent, got {other:?}"),
+            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
         }
+    }
+
+    /// The tolerance decision documented on `FixtureMeta`: a capture
+    /// taken before the schema settled still loads, with the added
+    /// fields empty, because the corpus cannot be recaptured.
+    #[test]
+    fn loader_accepts_a_pre_versioning_fixture_with_the_new_fields_empty() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let meta = json!({
+            "provider_kind": "anthropic",
+            "ingress_kind": "anthropic",
+            "stream": true,
+            "model": "claude-sonnet-4-5",
+        });
+        write_required_files(&dir, &meta);
+        write_headers_file(dir.join(UPSTREAM_HEADERS));
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.schema_version, FIXTURE_SCHEMA_VERSION);
+        assert_eq!(f.meta.lane, "");
+        assert_eq!(f.meta.case_id, "");
+        assert_eq!(f.meta.config_sha, "");
+        assert_eq!(f.meta.client.name, "");
+        assert_eq!(f.upstream_response_headers.len(), 1);
     }
 
     #[test]
@@ -444,7 +684,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
-        write_minimal_fixture(&dir, false, false);
+        write_fixture(&dir, NEITHER, NEITHER);
         fs::remove_file(dir.join(OUTGOING_BODY)).unwrap();
 
         let err = load_fixture(&dir).unwrap_err();
@@ -456,28 +696,12 @@ mod tests {
     }
 
     #[test]
-    fn loader_errors_when_optional_response_promised_but_missing() {
-        let tmp = tempdir().unwrap();
-        let dir = tmp.path().join("scenario");
-        fs::create_dir(&dir).unwrap();
-        write_minimal_fixture(&dir, true, false);
-        fs::remove_file(dir.join(UPSTREAM_BODY)).unwrap();
-
-        let err = load_fixture(&dir).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains(UPSTREAM_BODY),
-            "error did not name the missing file: {msg}"
-        );
-    }
-
-    #[test]
     fn discover_fixtures_sorts_by_directory_name() {
         let tmp = tempdir().unwrap();
         for name in ["zeta_scenario", "alpha_scenario", "mu_scenario"] {
             let dir = tmp.path().join(name);
             fs::create_dir(&dir).unwrap();
-            write_minimal_fixture(&dir, false, false);
+            write_fixture(&dir, NEITHER, NEITHER);
         }
         // Add a dotfile and a README that must be skipped.
         fs::write(tmp.path().join(".gitkeep"), b"").unwrap();
@@ -500,11 +724,11 @@ mod tests {
         for name in ["good_a", "good_b"] {
             let dir = tmp.path().join(name);
             fs::create_dir(&dir).unwrap();
-            write_minimal_fixture(&dir, false, false);
+            write_fixture(&dir, NEITHER, NEITHER);
         }
         let bad = tmp.path().join("bad_scenario");
         fs::create_dir(&bad).unwrap();
-        write_minimal_fixture(&bad, false, false);
+        write_fixture(&bad, NEITHER, NEITHER);
         fs::remove_file(bad.join(OUTGOING_BODY)).unwrap();
 
         let loaded = discover_fixtures(tmp.path()).unwrap();
@@ -523,11 +747,11 @@ mod tests {
         let tmp = tempdir().unwrap();
         let good = tmp.path().join("good_scenario");
         fs::create_dir(&good).unwrap();
-        write_minimal_fixture(&good, false, false);
+        write_fixture(&good, NEITHER, NEITHER);
 
         let bad = tmp.path().join("truncated_scenario");
         fs::create_dir(&bad).unwrap();
-        write_minimal_fixture(&bad, false, false);
+        write_fixture(&bad, NEITHER, NEITHER);
         // Overwrite the outgoing body with a truncated JSON string.
         fs::write(bad.join(OUTGOING_BODY), b"{\"model\": \"y\\").unwrap();
 

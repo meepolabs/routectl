@@ -172,12 +172,12 @@ fn parse_canonical(fixture: &Fixture) -> Result<ChatRequest, String> {
 /// Drive one non-stream fixture end-to-end and compare the rendered
 /// ingress response against the captured `egress_response.json`.
 async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
-    if !fixture.meta.has_upstream_response {
+    if fixture.upstream_response_bytes.is_empty() {
         return Ok(FixtureOutcome::Skipped(
             "no captured upstream_response; ingress side cannot be exercised".into(),
         ));
     }
-    if !fixture.meta.has_egress_response {
+    if fixture.egress_response_bytes.is_empty() {
         return Ok(FixtureOutcome::Skipped(
             "no captured egress_response; nothing to compare against".into(),
         ));
