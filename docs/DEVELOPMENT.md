@@ -374,6 +374,40 @@ The replay corpus is per-contributor and ephemeral. Recapture freely
 when routectl's wire output changes. The harness and the capture
 script are the shared contract; the corpus is yours.
 
+### Driver-mode capture
+
+The recipe above is the LIVE-BOX mode: a trace drained from your own real
+session, where the rig cannot observe which scenario produced the request,
+which config was in force, or how the client connected. That mode stays
+tolerant of all three being unset, because an empty pin is honest there.
+
+`scripts/capture_fixtures.sh --driver-mode` is the other mode, for a
+hermetic capture where a driver KNOWS all three. It changes four things:
+
+- **All three pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
+  `ROUTECTL_FIXTURE_CONFIG_SHA`, and `ROUTECTL_FIXTURE_CONNECTION_MODE`
+  must be set; an unset one aborts the run naming the variable. An empty
+  case id would collapse every case in the lane onto one landing
+  directory and the corpus would quietly overwrite itself.
+- **Landing keys on `(lane, case_id)`**, at `<out>/<lane>/<case_id>/`
+  rather than `<out>/<request_id>/`, so a rerun of the same case produces
+  a DIFF instead of a fresh sibling. The rerun replaces the previous
+  directory wholesale. Keep case ids neutral scenario names
+  (`tools-multiturn-01`) and never derive one from the environment: the
+  scrub check below reads `meta.json` too, so a hostname or a real path
+  in a case id refuses the fixture.
+- **A missing structural summary on either request-side direction fails
+  that fixture** rather than warning. A capture with half its structural
+  evidence is not a canonical fixture.
+- **`scrub-fixture.sh --check` runs after `--write`** and a non-zero exit
+  refuses the promotion, so a driver fixture is canonical by construction
+  or it is not landed.
+
+Any refusal exits non-zero, which is the signal a runner reads as "this
+case produced no fixture". The full policy split is in the script header
+(`scripts/capture_fixtures.sh --help`); the on-disk layout is in
+[REPLAY-FIXTURES.md](REPLAY-FIXTURES.md).
+
 ## Style notes
 
 - ASCII-only in code, comments, and commit messages. No em-dashes,
