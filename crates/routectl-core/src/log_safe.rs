@@ -1132,6 +1132,13 @@ pub fn headers_to_json<'a>(
 ///                                caller's identity claims.
 /// `x-goog-iap-jwt-assertion` -- Google IAP signed-JWT identity
 ///                                assertion: same replay/identity risk.
+///
+/// `scripts/scrub-fixture.sh` carries a REPLICA of these rules (it scans
+/// captured header JSON from shell, without linking this crate). Adding a
+/// name here without a covering substring there reopens a hole in the
+/// fixture scrub gate, so
+/// `scrub_gate_credential_substrings_cover_every_redacted_header_name`
+/// asserts the coverage mechanically.
 const REDACT_HEADER_NAMES: &[&str] = &[
     "authorization",
     "x-api-key",

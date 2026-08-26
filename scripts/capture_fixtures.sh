@@ -72,6 +72,16 @@ ROUTECTL_VERSION="$(grep -E '^version = ' "$ROOT/Cargo.toml" | head -1 | sed 's/
 # other major outright.
 SCHEMA_VERSION=1
 
+# The single owner of fixture scrubbing. Every fixture is passed through
+# `--write` before promotion; a driver landing a fixture runs `--check`
+# afterwards to refuse anything the write pass could not safely rewrite.
+# Absent script is a hard failure, never an unscrubbed capture.
+SCRUB="$ROOT/scripts/scrub-fixture.sh"
+if [ ! -r "$SCRUB" ]; then
+  echo "capture_fixtures: scrub script not found at $SCRUB; refusing to capture" >&2
+  exit 1
+fi
+
 # Escape a value for use inside a JSON string literal. The meta.json and
 # manifest lines below are emitted by hand (no jq dependency), so every
 # interpolated STRING value must come through here or a value carrying a
@@ -527,36 +537,22 @@ write_fixture() {
 }
 META
 
-  # Sanitize before promoting: captured bodies echo system-reminder text
-  # that embeds the contributor's own home path (both the literal
-  # `$HOME/...` form and the dash-encoded `.claude/projects/-home-...`
-  # dir-name form). Replace both with a neutral placeholder so a private
-  # filesystem path never lands in the corpus. Runs over every file the
-  # rig just wrote.
-  local _home="${HOME%/}"
-  if [ -n "$_home" ]; then
-    # A newline in HOME would split the sed script and silently corrupt
-    # or skip the scrub, promoting a fixture that still carries the
-    # private path -- refuse loudly instead.
-    case $_home in
-      *$'\n'*)
-        echo "capture_fixtures: HOME contains a newline; refusing to scrub" >&2
-        return 1
-        ;;
-    esac
-    local _home_enc="${_home//\//-}"
-    # Escape backslashes, BRE metacharacters, and the '#' delimiter so a
-    # home path carrying sed-special chars cannot break or misfire the
-    # substitution. The replacement sides below are fixed literals with
-    # no `&` or backslash, so only the match side needs escaping.
-    local _home_re _home_enc_re
-    _home_re=$(printf '%s' "$_home" | sed 's/[]\\.*^$[#]/\\&/g')
-    _home_enc_re=$(printf '%s' "$_home_enc" | sed 's/[]\\.*^$[#]/\\&/g')
-    local _f
-    for _f in "$tmp"/*; do
-      [ -f "$_f" ] || continue
-      sed -i -e "s#${_home_enc_re}#-home-user#g" -e "s#${_home_re}#/home/user#g" "$_f"
-    done
+  # Scrub before promoting. One owner for scrubbing:
+  # scripts/scrub-fixture.sh --write rewrites the contributor's own home
+  # path (captured bodies echo system-reminder text embedding it, in both
+  # the literal form and the dash-encoded `.claude/projects/-home-...`
+  # dir-name form) and redacts the value of every credential-shaped header
+  # while keeping its name. Auth redaction happens HERE, at write time,
+  # because a corpus that ever held a live bearer token is uncommittable in
+  # practice no matter what a later scan says.
+  #
+  # A scrub failure aborts the capture: the tmp directory is removed rather
+  # than promoted, so an unscrubbed fixture never reaches the corpus. It is
+  # `return 1` and not a bare failure so `set -e` cannot promote it.
+  if ! bash "$SCRUB" --write "$tmp"; then
+    echo "capture_fixtures: scrub failed for $id; discarding the fixture" >&2
+    rm -rf "$tmp"
+    return 1
   fi
 
   # Atomically promote the tmp directory into place. Until this

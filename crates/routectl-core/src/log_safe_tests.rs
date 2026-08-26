@@ -2215,3 +2215,79 @@ fn explicit_cap_still_truncates_past_its_own_ceiling() {
 
     assert_eq!(sanitize_for_log_with_cap(&long, 512).chars().count(), 512);
 }
+
+/// The fixture scrub gate (`scripts/scrub-fixture.sh`) carries a REPLICA of
+/// this module's header-name credential rules, because it inspects captured
+/// header JSON from shell without linking against this crate. A replica
+/// drifts silently: `set-cookie`, `cookie`, and `x-routectl-mitm-proxied`
+/// were in `REDACT_HEADER_NAMES` and absent from the shell set, so a
+/// captured session cookie passed the gate as clean while this module would
+/// have redacted it.
+///
+/// This test reads the shell set out of the script and asserts every name
+/// here is covered by it. Parsing the script rather than restating its
+/// contents is the point -- a hand-copied expectation would be a third
+/// replica free to drift from both.
+#[test]
+fn scrub_gate_credential_substrings_cover_every_redacted_header_name() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/scrub-fixture.sh")
+        .canonicalize()
+        .expect("scrub-fixture.sh must exist: it owns the captured-fixture auth redaction");
+    let source = std::fs::read_to_string(&script).expect("scrub-fixture.sh must be readable");
+
+    // The shell script embeds a python tuple literal. Take the region
+    // between the opening `CRED_SUBSTRINGS = (` and its closing `)`, then
+    // pull every double-quoted item out of it.
+    let body = source
+        .split_once("CRED_SUBSTRINGS = (")
+        .expect("scrub-fixture.sh must declare CRED_SUBSTRINGS")
+        .1
+        .split_once(')')
+        .expect("CRED_SUBSTRINGS must be a closed tuple literal")
+        .0;
+    let shell_substrings: Vec<&str> = body
+        .match_indices('"')
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>()
+        .chunks_exact(2)
+        .map(|pair| &body[pair[0] + 1..pair[1]])
+        .collect();
+
+    assert!(
+        shell_substrings.len() >= 10,
+        "extracted only {} substrings from CRED_SUBSTRINGS -- the parse broke, \
+         and a silently-empty set would make this test vacuous",
+        shell_substrings.len()
+    );
+
+    // Positive control for the extraction: a substring known to be present.
+    // Without it, a parse that yielded plausible-looking garbage would still
+    // satisfy the coverage loop below for the wrong reason.
+    assert!(
+        shell_substrings.contains(&"authorization"),
+        "extraction produced {shell_substrings:?}, which does not contain the \
+         `authorization` rule the shell set demonstrably has"
+    );
+
+    let uncovered: Vec<&&str> = super::REDACT_HEADER_NAMES
+        .iter()
+        .filter(|name| {
+            let lc = name.to_ascii_lowercase();
+            // Mirrors is_secret_name in the shell script: the `x-amz-`
+            // prefix rule and the `-key` suffix rule cover names no
+            // substring matches.
+            if lc.starts_with("x-amz-") || lc.ends_with("-key") {
+                return false;
+            }
+            !shell_substrings.iter().any(|s| lc.contains(s))
+        })
+        .collect();
+
+    assert!(
+        uncovered.is_empty(),
+        "scripts/scrub-fixture.sh would NOT redact {uncovered:?}, but this module \
+         does. A captured fixture holding one of those headers passes the scrub \
+         gate as clean. Add a covering substring to CRED_SUBSTRINGS in that script."
+    );
+}

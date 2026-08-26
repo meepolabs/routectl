@@ -204,3 +204,10 @@ jobs:
       # self-test drives the real rig over a synthetic trace instead.
       - name: fixture capture rig self-test
         run: bash scripts/capture_fixtures.test.sh
+
+      # Same reason as the rig self-test above: the corpus is gitignored,
+      # so CI has no fixture to scrub. The self-test drives the real scrub
+      # script over throwaway fixtures in a throwaway environment whose
+      # HOME, git identity, and hostname ARE the deny set.
+      - name: fixture scrub gate self-test
+        run: bash scripts/scrub-fixture.test.sh
