@@ -1,5 +1,5 @@
 //! Shared bits across the two replay test drivers (`replay_egress.rs`
-//! and `replay_ingress.rs`): the captured root locator, the
+//! and `replay_ingress.rs`): the two fixture-root locators, the
 //! loader-vector to `HeaderMap` bridge, the per-fixture outcome enum,
 //! the ingress-adapter lookup keyed on `meta.ingress_kind`, the
 //! model-enrichment reconstruction + residual skip-reason helper, and
@@ -28,13 +28,37 @@ use serde_json::Value;
 use super::json_diff::{Divergence, DivergenceKind, diff_all};
 use super::loader::Fixture;
 
-/// Default replay-fixture root. Per-contributor, local, gitignored at
-/// the repo policy level. Populated by `scripts/capture_fixtures.sh`.
+/// LIVE-BOX fixture root: bodies captured from a real routectl session
+/// by `scripts/capture_fixtures.sh`. Per-contributor, gitignored, and
+/// REPORT-ONLY -- these bodies carry the operator's real prompts and
+/// model outputs, so a comparison over this root may never become a
+/// commit gate, and the corpus may never be committed.
+///
 /// `discover_fixtures` returns an empty vector when the directory is
 /// empty, which keeps the replay tests passing on a fresh checkout
 /// before any fixtures have been captured.
-pub fn captured_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/captured")
+pub fn local_root() -> PathBuf {
+    fixtures_dir().join("captured")
+}
+
+/// DRIVER fixture root: bodies produced by the hermetic fixture
+/// drivers. Canonical, and the ONLY root eligible for gating -- a
+/// driver-generated body contains nothing personal by construction.
+///
+/// Gitignored in one line for now so the committability question stays
+/// open; removing that line is the whole change when it is answered.
+/// Which of its lanes a consumer may gate on comes from
+/// [`super::gated_lanes`], not from mere presence under this root.
+pub fn driver_root() -> PathBuf {
+    fixtures_dir().join("driver")
+}
+
+/// Parent of both fixture roots. The SEPARATION IS A DIRECTORY
+/// BOUNDARY, not a naming convention: with one root, "never gate the
+/// live-box corpus" is a discipline someone has to keep, and the first
+/// lapse turns the operator's private traffic into a commit gate.
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 /// Build a `HeaderMap` from the `(name, value)` pairs persisted in a
@@ -480,4 +504,33 @@ pub fn system_turn_lift_skip_reason(divergence_count: usize) -> String {
 /// rather than a recomputed guess.
 pub fn divergence_count(actual: &Value, expected: &Value, ignore_paths: &[&str]) -> usize {
     diff_all(actual, expected, ignore_paths).len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two policies must not be able to collapse onto one directory.
+    #[test]
+    fn local_and_driver_roots_resolve_to_different_paths() {
+        assert_ne!(local_root(), driver_root());
+    }
+
+    /// The live-box root keeps its pre-existing path, so no caller that
+    /// switched from the single root silently changed which corpus it
+    /// reads.
+    #[test]
+    fn local_root_is_the_pre_existing_captured_path() {
+        let expected = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/captured");
+
+        assert_eq!(local_root(), expected);
+    }
+
+    #[test]
+    fn both_roots_are_siblings_under_the_fixtures_dir() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+        assert_eq!(local_root().parent(), Some(fixtures.as_path()));
+        assert_eq!(driver_root().parent(), Some(fixtures.as_path()));
+    }
 }

@@ -1,0 +1,16 @@
+# Egress lanes of the DRIVER corpus that a consumer may GATE on.
+# One lane id per line, in the `kind_str()` vocabulary of `ProviderEntry`
+# (anthropic-api, openai-compat, openai-responses, bedrock, gemini).
+# Blank lines and `#` comments are ignored.
+#
+# Plain text on purpose: the whole content of this file is a set of
+# tokens, so a schema would add a parse surface and nothing else.
+#
+# Gating applies ONLY to the driver-generated corpus. Live-box captures
+# under tests/fixtures/captured/ are report-only and are never gated,
+# whatever this file says.
+#
+# Empty for now. The reader is FAIL-CLOSED: with no lane listed it
+# returns an error rather than an empty gated set, so a consumer cannot
+# mistake "not yet populated" for "gate passed". Populated once the
+# fixture drivers exist and it is known which lanes they actually cover.

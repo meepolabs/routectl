@@ -38,8 +38,8 @@ use routectl_providers::openai_compat::{
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 use common::replay::{
-    Fixture, FixtureOutcome, bounded_body_diff, captured_root, discover_fixtures, divergence_count,
-    diverges_only_in_messages, enrichment_skip_reason, parse_enriched_canonical,
+    Fixture, FixtureOutcome, bounded_body_diff, discover_fixtures, divergence_count,
+    diverges_only_in_messages, enrichment_skip_reason, local_root, parse_enriched_canonical,
     system_turn_lift_skip_reason, unpinned_ingress_skip_reason,
 };
 
@@ -190,10 +190,12 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 
 #[test]
 fn egress_replay_all() {
-    let root = captured_root();
+    // The LIVE-BOX root, named explicitly: this driver is report-only
+    // and must never gate, because these bodies are real prompts.
+    let root = local_root();
     if !root.exists() {
         eprintln!(
-            "[replay_egress] captured/ root `{}` not present; nothing to assert.",
+            "[replay_egress] local captured/ root `{}` not present; nothing to assert.",
             root.display(),
         );
         return;

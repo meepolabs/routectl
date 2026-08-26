@@ -18,6 +18,57 @@ the final regression gate. Replay catches wire-shape regressions
 cheaply between matrix runs against whatever corpus the contributor
 has on hand.
 
+## Two corpus roots, two policies, never mixed
+
+There are two fixture roots, siblings under
+`crates/routectl-cli/tests/fixtures/`, resolved by `local_root()` and
+`driver_root()` in `harness.rs`:
+
+- `captured/` -- LIVE-BOX captures, written by
+  `scripts/capture_fixtures.sh`. Per-contributor, gitignored,
+  **report-only**: the bodies carry the operator's real prompts and
+  model outputs, so this corpus may never be committed and a
+  comparison over it may never become a commit gate.
+- `driver/` -- fixtures produced by the hermetic fixture drivers.
+  Hermetic by construction (nothing personal in them), so this is the
+  only root eligible for gating. Gitignored for now while the
+  committability question is open; the ignore entry is a single line
+  precisely so that answer is a one-line change.
+
+The separation is a DIRECTORY boundary rather than a naming
+convention: with one root, "never gate the live-box corpus" is a
+discipline someone has to keep, and the first lapse turns private
+traffic into a commit gate.
+
+Which lanes of the driver corpus a consumer may gate on comes from
+`crates/routectl-cli/tests/fixtures/gated_lanes.txt` -- a plain text
+file of lane ids in the `kind_str()` vocabulary, one per line, with
+`#` comments and blank lines tolerated. Its reader
+(`common/replay/gated_lanes.rs`) is FAIL-CLOSED: an unreadable,
+malformed, or lane-less file errors rather than yielding an empty
+gated set, because an empty set is indistinguishable from a passing
+gate. Presence under `driver/` makes a fixture ELIGIBLE for gating;
+only this file makes its lane gated.
+
+## Truncated bodies are refused
+
+`truncate_json_for_log` in `routectl-core/src/log_safe.rs` appends
+`... [truncated at <cap> bytes]` when a traced body exceeds the trace
+body cap. The loader refuses any fixture file ending in that marker:
+such a file is a PREFIX of the wire body and would diff as drift.
+
+The detector matches the full marker anchored at end-of-file (head
+literal, decimal cap, tail literal), never the bare phrase `truncated
+at`. Derivation, measured against a 250-fixture live-box corpus: the
+bare phrase matches 12 files, all of them legitimate prompt content
+(a captured system-reminder reading "...which was truncated at 27748
+chars") and all valid JSON, while the full marker matches 0. A
+bare-phrase detector would therefore refuse healthy fixtures at a 100%
+false-positive rate. Refusal flows through the normal skip-and-count
+path, so one clipped fixture never blinds the run to the rest.
+
+Recapture a refused fixture with a larger `ROUTECTL_TRACE_BODY_BYTES`.
+
 ## Captured bodies that do NOT live in the corpus
 
 A captured upstream body that a shipping unit test must pin belongs in
@@ -44,11 +95,12 @@ Current inline captures:
 For the loader and structural comparators (`load_fixture`,
 `assert_json_equal_structural`, `assert_sse_equal`, ...) see
 `crates/routectl-cli/tests/common/replay/` -- the entry point is
-`mod.rs`, with `loader.rs`, `json_diff.rs`, `sse_diff.rs`, and
-`harness.rs` as sub-modules. `harness.rs` holds shared scaffolding
-(`captured_root`, `headers_from_pairs`, `enrichment_skip_reason`,
-`ENRICHMENT_DEPENDENT_MODELS`) used by the `replay_egress.rs` and
-`replay_ingress.rs` drivers. For the day-to-day capture + replay flow see
+`mod.rs`, with `loader.rs`, `json_diff.rs`, `sse_diff.rs`,
+`gated_lanes.rs`, and `harness.rs` as sub-modules. `harness.rs` holds
+shared scaffolding (`local_root`, `driver_root`, `headers_from_pairs`,
+`enrichment_skip_reason`, `ENRICHMENT_DEPENDENT_MODELS`) used by the
+`replay_egress.rs` and `replay_ingress.rs` drivers. For the day-to-day
+capture + replay flow see
 [DEVELOPMENT.md](DEVELOPMENT.md) "Adding a replay fixture".
 
 ## Per-fixture directory layout

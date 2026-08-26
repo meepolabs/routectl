@@ -36,6 +36,11 @@ issues.md
 # corpus is per-contributor and local-only by design; the repo ships
 # the harness and the capture script, not the data.
 crates/routectl-cli/tests/fixtures/captured/
+# Driver-generated replay fixtures. Hermetic by construction (no real
+# prompts), so unlike captured/ these are eligible for commit AND for
+# gating. Gitignored while that committability call is still open --
+# deleting THIS ONE LINE is the whole change when it is answered.
+crates/routectl-cli/tests/fixtures/driver/
 # Claude Code per-project session state (scheduled tasks, local
 # settings, transient scratch). Never commit -- machine-specific.
 .claude/

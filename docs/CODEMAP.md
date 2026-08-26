@@ -5454,6 +5454,23 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`await_health`, deadline + cadence consts) used by every integration
   binary that boots `serve_on_listener`; readiness is a served response,
   never a sleep
+- `tests/common/replay/mod.rs` -- replay-harness module root; re-exports the
+  loader, comparators, gated-lane reader, and shared scaffolding, plus
+  `DiffMessage`
+- `tests/common/replay/loader.rs` -- on-disk fixture format (`FixtureMeta`,
+  `Fixture`, `ReplayError`) and the `load_fixture` / `discover_fixtures` walk
+- `tests/common/replay/gated_lanes.rs` -- the `gated_lanes.txt` reader:
+  `read_gated_lanes`, `parse_gated_lanes`, `is_lane_gated`, `GatedLaneError`
+- `tests/common/replay/harness.rs` -- the two fixture roots (`local_root`,
+  `driver_root`), `headers_from_pairs`, `FixtureOutcome`, the
+  `meta.ingress_kind` adapter lookup (`ingress_for_kind`,
+  `parse_enriched_canonical`), the per-model enrichment rebuild
+  (`with_replay_enrichment`, `enrichment_skip_reason`), and the
+  value-bounded failure reporter (`bounded_body_diff`,
+  `diverges_only_in_messages`)
+- `tests/common/replay/lane.rs` -- derived lane class (`lane_class`,
+  `resolve_egress`) and the wire-conservation exception table
+  (`all_exceptions`, `unexplained`, `normalize_ingress_for_lane`)
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
 - `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +
