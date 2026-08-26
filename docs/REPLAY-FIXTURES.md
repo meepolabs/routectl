@@ -228,32 +228,120 @@ JSON that the rig promotes at exit 0 and the loader then skips forever.
 
 ## Corpus scope
 
-The replay drivers exercise the bare ingress -> egress path:
-`AnthropicIngress::parse_request` produces a canonical `ChatRequest`
-with default `routectl_internal` (`supports_adaptive_thinking=false`,
-`history_reasoning=None`, `reasoning_dialect=None`,
-`max_thinking_budget=0`). In production the router overlays these
-fields from `model_profile.rs` and the dispatch-time merge BEFORE the
-egress sees the canonical. The current replay does not yet thread that
-enrichment, so any fixture whose model relies on it would diverge on
-the outgoing body.
+### Ingress selection
 
-Practical effect:
+Both replay drivers select the ingress adapter from `meta.ingress_kind`,
+whose vocabulary IS `IngressAdapter::id()` (`anthropic`, `openai`,
+`openai-responses`) -- so the lookup needs no mapping table. A value
+outside that vocabulary fails the driver naming it, the same way an
+unknown `provider_kind` does. The EMPTY value means the capture could not
+observe the ingress token; that fixture is skipped with a reason rather
+than defaulted to any dialect, because a wrong dialect would replay the
+body through the wrong parser and read as wire drift.
 
-- `claude-haiku-*` and `claude-sonnet-*` captures are typically
-  in scope (their profile defaults match the bare canonical).
-- Captures from `claude-opus-4` and newer (adaptive thinking on)
-  are out of scope -- the egress applies adaptive-budget logic the
-  bare canonical does not carry.
-- Captures from DeepSeek (`history_reasoning=Preserve`) are out of
-  scope -- the egress preserves reasoning history that the bare
-  canonical drops.
+The ingress-side response render is still Anthropic-only, so a fixture
+captured on another dialect currently compares an Anthropic-shape render
+against its own dialect's captured response.
 
-The replay drivers enforce this by skipping any fixture whose
-`meta.model` contains a denylisted substring (`opus-4`, `deepseek`).
+### Per-model enrichment
+
+The replay drivers rebuild the per-model knobs the router would have
+overlaid onto `routectl_internal` before the egress saw the canonical
+request. The rebuild constructs a `ResolvedModel` through its existing
+`with_*` builders and projects the four egress-read knobs
+(`supports_adaptive_thinking`, `max_thinking_budget`, `effort_levels`,
+`reasoning_dialect` / `history_reasoning`) onto the parsed request. Without
+it, every fixture replayed at the library-consumer defaults
+(`supports_adaptive_thinking=false`, `max_thinking_budget=0`, both dialect
+knobs `None`) and any capture taken under a non-default knob diverged for a
+reason that was not a bug.
+
+Two knobs are reconstructed differently because their derivability
+differs:
+
+- `supports_adaptive_thinking` IS derivable per fixture. Production makes
+  it an explicit `[models.X]` opt-in (Anthropic's adaptive rollout has no
+  clean naming pattern), but the adaptive generation rejects the legacy
+  `thinking.type=enabled` shape with a 400, and the capture rig only emits
+  a fixture for a request whose trace shows a successful upstream
+  response. A fixture on an adaptive-generation model was therefore
+  necessarily captured with the flag on. The driver's
+  `ADAPTIVE_THINKING_MODELS` list carries those model substrings.
+- `history_reasoning` is NOT derivable. `Auto` strips outgoing reasoning
+  history and `Preserve` emits it; the captured body shows which was in
+  force but no `meta.json` field records the operator's choice, so
+  guessing would turn a config difference into a wire-shape failure.
+
+`ENRICHMENT_DEPENDENT_MODELS` is the residual skip list for exactly that
+undeterminable case -- today the DeepSeek reasoning family (`deepseek`).
 Skipped fixtures land in the `skipped` count of the test summary, not
-`failed`. Adaptive-thinking and DeepSeek replay will arrive in a
-later expansion that threads router enrichment through the test setup.
+`failed`. A model belongs on that list only when a knob it needs is a free
+operator choice `meta.json` does not pin; anything the rebuild can
+reconstruct is not grounds for a skip.
+
+### Failure reporting is value-bounded
+
+A replay failure reports the divergence PATH, the KIND, and a SHAPE
+summary of each side (type, length, object key names) -- never a whole
+value or subtree. Captured fixtures are real prompt traffic and a test log
+is not a confidential sink: it reaches CI output, terminal scrollback, and
+pasted bug reports.
+
+A string value prints verbatim only when its leaf field is on an
+ALLOWLIST of wire identifiers and enums (`model`, `role`, `type`,
+`effort`, ...) and is short. The allowlist direction is deliberate -- a
+denylist of prose fields fails OPEN on any key nobody enumerated, and the
+ingress's forward-compat sweep puts arbitrary client keys into a captured
+body. Over-cap and non-allowlisted values are reported as
+`string(len=N, elided)`; a truncated PREFIX is never emitted, since the
+opening bytes of a prompt are the system preamble. Path and kind are never
+abridged: they are the diagnostic and carry no payload.
+
+### Divergence classes on the current corpus
+
+Measured over the 250 loadable fixtures on the anthropic-ingress lane,
+the egress leg resolves to **2 asserted, 133 skipped, 115 failed**. The
+divergences behind those numbers fall into the classes below -- the first
+is a harness gap, the rest are findings about the code under test.
+
+Note that a fixture typically carries divergences from SEVERAL classes at
+once, so the classes do not partition the fixture count. What decides a
+fixture's outcome is whether anything outside `messages[]` diverges:
+
+- **`messages[]` positional shift** -- the system-turn lift. Positional
+  array pairing reports one divergence per element after a removed middle
+  turn, so this class dominates by divergence count. Its pre-diff
+  normalizer is not built yet, so the egress driver SKIPS a fixture whose
+  divergences are ALL inside `messages[]`, with a reason naming the missing
+  normalizer. That accounts for the 133 skips.
+- **`model`** -- the alias-to-upstream rewrite, which is router dispatch
+  rather than an egress concern and the bare replay path does not perform.
+- **`output_config`** -- captured bodies carrying
+  `output_config: {"effort": "xhigh"}` alongside
+  `thinking: {"type": "disabled"}`. Current code cannot emit that pairing
+  from any input: `reconcile_output_config_effort` is a late enforcer that
+  drops `output_config.effort` unless the assembled body carries
+  `thinking.type == "adaptive"`, and it reads the final body rather than
+  any flag. Verified by driving the captured ingress shape through
+  `normalize_request` directly under both `supports_adaptive_thinking`
+  values and with a populated `effort_levels`: `output_config` is dropped
+  in every combination (a sibling `output_config.format` does survive).
+  These fixtures therefore predate the effort invariant and are EVIDENCE
+  of an intentional behavior change, not a replay-path gap -- they must
+  not be normalized away, and the enrichment rebuild cannot fix them.
+  The invariant is authoritative and the captures are stale; reconciling
+  the corpus against it is a provenance question, tracked separately.
+
+The 115 failures are the fixtures that carry a `model` or `output_config`
+divergence ALONGSIDE their `messages[]` ones. The narrow skip scope is
+deliberate and load-bearing: a lift-affected fixture is not excused for
+being lift-affected when something else also diverged.
+
+Do not derive per-class counts by grepping the test log. Most failing
+lines hit the "first N shown" cap, so a class appearing only past the cap
+is absent from the log and counting there undercounts. Read the fixtures
+and call `diff_all` for a complete set; the cap bounds the log, not the
+comparison.
 
 Two further conventions hold for the current corpus. These are
 capture-rig conventions, NOT loader- or driver-enforced -- the
