@@ -319,15 +319,44 @@ day-to-day capture flow.
 
    Fixtures land under
    `crates/routectl-cli/tests/fixtures/captured/<request_id>/`. The
-   directory is gitignored: never commit it. Before writing each
-   fixture the script rewrites your own home path (both `$HOME/...`
-   and the dash-encoded `-home-...` form that appears in
-   `.claude/projects/` dir names) to a neutral `/home/user`
-   placeholder, so a captured system-reminder never embeds a private
-   filesystem path. Other personal tokens a body may echo (git author
-   name/email from a captured `git log`, `ls -l` owner columns) are
-   not auto-scrubbed -- eyeball a fresh capture and sanitize by hand if
-   your traffic carried any.
+   directory is gitignored: never commit it.
+
+   Before promoting each fixture the rig runs
+   `scripts/scrub-fixture.sh --write` over it, which rewrites your own
+   home path (both `$HOME/...` and the dash-encoded `-home-...` form
+   that appears in `.claude/projects/` dir names) to a neutral
+   `/home/user` placeholder, and replaces the VALUE of every
+   credential-shaped header with a redaction placeholder while keeping
+   the header NAME. Auth redaction happens at write time on purpose: a
+   capture against an OAuth lane records a live bearer token, and a
+   corpus that ever held one is unpublishable no matter what a later
+   scan says.
+
+   Everything the write pass cannot safely rewrite is REFUSED rather
+   than guessed at. Run the gate over a fresh capture:
+
+   ```
+   scripts/scrub-fixture.sh --check \
+     crates/routectl-cli/tests/fixtures/captured/<request_id>
+   ```
+
+   It exits non-zero and names the pattern class (never the matched
+   value) when a fixture still carries your git author name or email, a
+   third party's `/home/<name>` prefix (plain or dash-encoded), your
+   hostname, an `ls -l` / `ls -l@` / `ls -o` owner column naming a real
+   account, an unredacted credential header, a `bearer <token>` value,
+   or a raw vendor key (`sk-ant-api03-...`, `ghp_...`, `AKIA...`). The
+   last two scan raw bytes anywhere in the fixture, not just header
+   files: a body that captured a `cat .env` or a
+   `~/.claude/.credentials.json` transcript carries a live credential
+   with no header structure to key on.
+
+   There is no automatic rewrite for those: remove the content by hand,
+   or recapture the request without it. The deny set is derived at
+   runtime from `$HOME`, `git config user.name` / `user.email`, and the
+   hostname, so it works on any contributor's machine; a value the gate
+   cannot read prints a warning naming the dropped class rather than
+   silently narrowing.
 
 5. **Run the replay tests against the local corpus:**
 

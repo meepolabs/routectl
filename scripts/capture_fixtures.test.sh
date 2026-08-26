@@ -25,6 +25,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIG="$HERE/capture_fixtures.sh"
+SCRUB="$HERE/scrub-fixture.sh"
 
 fails=0
 
@@ -81,6 +82,9 @@ run_rig() {
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/repo/scripts" "$tmp/repo/crates/routectl-cli/tests/fixtures"
     cp "$RIG" "$tmp/repo/scripts/capture_fixtures.sh"
+    # The rig delegates scrubbing to scrub-fixture.sh and refuses to run
+    # without it, so the throwaway repo carries the real script too.
+    cp "$SCRUB" "$tmp/repo/scripts/scrub-fixture.sh"
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$tmp/repo/Cargo.toml"
     printf '%s\n' "$trace_text" >"$tmp/trace.log"
