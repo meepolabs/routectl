@@ -31,7 +31,8 @@ pub use harness::{
     headers_from_pairs,
 };
 pub use json_diff::{
-    DEFAULT_HEADER_ALLOW_SKIP, assert_headers_equal, assert_json_equal_structural,
+    DEFAULT_HEADER_ALLOW_SKIP, Divergence, DivergenceKind, assert_headers_equal,
+    assert_json_equal_structural, diff_all,
 };
 pub use loader::{
     Fixture, FixtureMeta, LoadedCorpus, ReplayError, discover_fixtures, load_fixture,
