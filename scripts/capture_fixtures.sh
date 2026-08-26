@@ -12,6 +12,13 @@
 # meta.json records both `ingress_kind` and `provider_kind` so a
 # downstream consumer can dispatch on either.
 #
+# meta.json carries NO file-presence flags: which optional files a
+# fixture directory holds is read from the directory listing by the
+# replay loader. The tmp-then-rename promotion below already makes a
+# fixture directory all-or-nothing, so a second copy of that fact in
+# meta.json could only ever disagree with the filesystem -- and did.
+# The one schema is documented in docs/REPLAY-FIXTURES.md.
+#
 # State: the script writes the timestamp of the last seen completion
 # to `crates/routectl-cli/tests/fixtures/captured/.last_capture_ts`
 # and resumes from there on the next run, so periodic invocations
@@ -30,6 +37,12 @@
 # because fixtures carry RAW headers -- auth included when the daemon
 # runs with ROUTECTL_TRACE_HEADERS. `--allow-unsafe-out` lifts that
 # guard for a deliberate out-of-tree capture.
+#
+# Environment pins recorded verbatim into meta.json when set, empty when
+# not (a live-box capture cannot observe them from the trace):
+#   ROUTECTL_FIXTURE_CASE_ID          scenario identity for rerun diffs
+#   ROUTECTL_FIXTURE_CONFIG_SHA       hash of the config in force
+#   ROUTECTL_FIXTURE_CONNECTION_MODE  how the client reached routectl
 
 # set -e so a partial-fixture mid-write failure aborts the script
 # instead of silently writing a half-poisoned directory. set -u
@@ -53,6 +66,57 @@ ALLOW_UNSAFE_OUT=0
 # capture batch.
 ROUTECTL_VERSION="$(grep -E '^version = ' "$ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 
+# Fixture-format major written into every meta.json. Must match
+# FIXTURE_SCHEMA_VERSION in
+# crates/routectl-cli/tests/common/replay/loader.rs, which refuses any
+# other major outright.
+SCHEMA_VERSION=1
+
+# Escape a value for use inside a JSON string literal. The meta.json and
+# manifest lines below are emitted by hand (no jq dependency), so every
+# interpolated STRING value must come through here or a value carrying a
+# quote silently produces invalid JSON -- the rig would exit 0, promote
+# the fixture, and the loader would skip it forever. Both reachable
+# sources are real: the environment pins are set programmatically by a
+# driver, and the client name / version are parsed out of a
+# CLIENT-CONTROLLED `user-agent` header.
+#
+# Backslash FIRST, then quote, so the backslash pass cannot double-escape
+# the backslash the quote pass just introduced. Control characters are
+# not handled: the values here come from single trace-log lines and from
+# environment variables, neither of which can carry a raw newline into a
+# field without breaking the extraction upstream of this point.
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Normalize a traced `provider_kind` into the LANE vocabulary --
+# `ProviderEntry::kind_str()` in
+# crates/routectl-router/src/config/schema.rs, the vocabulary a lane's
+# class is derived from. Three spellings exist for one concept: the
+# providers-crate PROVIDER_KIND consts (`anthropic`), the two Bedrock
+# api_shape kinds (`bedrock-invoke` / `bedrock-converse`, which
+# kind_str() does not split), and the config tokens. Normalizing HERE
+# means no consumer needs a mapping table.
+#
+# An unmapped token prints a warning and yields the EMPTY string rather
+# than passing an unknown spelling through: a lane-gated consumer
+# refuses a fixture with no lane, so the fixture is still captured but
+# cannot be mistaken for a lane it was not verified to be.
+normalize_lane() {
+  case "$1" in
+    anthropic)                        printf 'anthropic-api\n' ;;
+    openai-compat)                    printf 'openai-compat\n' ;;
+    openai-responses)                 printf 'openai-responses\n' ;;
+    gemini)                           printf 'gemini\n' ;;
+    bedrock-invoke|bedrock-converse)  printf 'bedrock\n' ;;
+    *)
+      echo "capture_fixtures: unmapped provider_kind '$1'; leaving lane empty" >&2
+      printf '\n'
+      ;;
+  esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --log) [ $# -ge 2 ] || { echo "--log requires a value" >&2; exit 2; }; LOG="$2"; shift 2 ;;
@@ -60,7 +124,7 @@ while [ $# -gt 0 ]; do
     --limit) [ $# -ge 2 ] || { echo "--limit requires a value" >&2; exit 2; }; LIMIT="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --allow-unsafe-out) ALLOW_UNSAFE_OUT=1; shift ;;
-    -h|--help) sed -n '1,36p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,45p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -254,9 +318,13 @@ in_scope_ids() {
     END {
       for (id in completed) {
         if (ingress_seen[id] && provider_kind[id]) {
-          ik = ingress_kind[id]
-          if (ik == "") ik = "unknown"
-          print completed[id] "\t" id "\t" provider_kind[id] "\t" ik
+          # An unextractable ingress token stays EMPTY rather than
+          # becoming a sentinel word: empty means unpinned everywhere
+          # else in the schema, and `unknown` would be a value in
+          # neither the IngressAdapter::id() vocabulary nor the match
+          # arms of any consumer. No apostrophes in this comment: the
+          # awk program is single-quoted.
+          print completed[id] "\t" id "\t" provider_kind[id] "\t" ingress_kind[id]
         }
       }
     }
@@ -275,7 +343,7 @@ in_scope_ids() {
 # can be trusted. The manifest append happens AFTER the mv so a
 # dangling manifest entry never points to a missing directory.
 write_fixture() {
-  local id="$1" ts="$2" pkind="$3" ikind="${4:-unknown}"
+  local id="$1" ts="$2" pkind="$3" ikind="${4:-}"
   local dst="$OUT/$id"
   local tmp
   tmp="$(mktemp -d "$OUT/.tmp.$id.XXXXXX")"
@@ -391,34 +459,71 @@ write_fixture() {
   [ -n "$h_uok" ] && echo "$h_uok" > "$tmp/upstream_response.headers.json"
   [ -n "$h_egr" ] && echo "$h_egr" > "$tmp/egress_response.headers.json"
 
+  # Client identity. Name + version come from the captured ingress
+  # `user-agent` (`claude-cli/2.1.167 (external, cli)` -> `claude-cli` +
+  # `2.1.167`), the only client self-report on the wire. A live-box
+  # capture cannot observe its own connection mode, case identity, or
+  # config hash, so those come from the environment and stay EMPTY when
+  # unset -- an empty pin is honest, a guessed one reads as drift later.
+  local client_name client_version
+  client_name="$(printf '%s' "$h_ing" | grep -oE '\["user-agent","[^"/]+' | head -1 | sed 's/.*,"//')"
+  client_version="$(printf '%s' "$h_ing" | grep -oE '\["user-agent","[^"/]+/[0-9][^ "]*' | head -1 | sed 's#.*/##')"
+  local lane
+  lane="$(normalize_lane "$pkind")"
+
   # Structural summary lines (two: ingress + outgoing direction).
   echo "$lines" | grep 'structural summary' | head -2 > "$tmp/structural.txt" || true
   # Stream summary lines (two: upstream + egress direction).
   echo "$lines" | grep 'stream summary' > "$tmp/stream.txt" || true
 
-  # meta.json -- emit by hand to avoid jq dependency.
+  # meta.json -- emit by hand to avoid jq dependency. ONE schema: every
+  # key here is a key the replay loader's FixtureMeta reads, apart from
+  # the triage-only fields noted in docs/REPLAY-FIXTURES.md. No
+  # file-presence flags (the directory listing is the only record).
+  #
+  # EVERY string value goes through json_escape. The three token counts,
+  # schema_version, and stream are numeric / boolean and must NOT be
+  # quoted or escaped.
+  local j_id j_ts j_version j_alias j_model j_case j_sha
+  local j_cname j_cversion j_cmode j_ikind j_pkind j_lane j_finish
+  j_id="$(json_escape "$id")"
+  j_ts="$(json_escape "$ts")"
+  j_version="$(json_escape "$ROUTECTL_VERSION")"
+  j_alias="$(json_escape "${alias:-}")"
+  j_model="$(json_escape "${model:-}")"
+  j_case="$(json_escape "${ROUTECTL_FIXTURE_CASE_ID:-}")"
+  j_sha="$(json_escape "${ROUTECTL_FIXTURE_CONFIG_SHA:-}")"
+  j_cname="$(json_escape "${client_name:-}")"
+  j_cversion="$(json_escape "${client_version:-}")"
+  j_cmode="$(json_escape "${ROUTECTL_FIXTURE_CONNECTION_MODE:-}")"
+  j_ikind="$(json_escape "$ikind")"
+  j_pkind="$(json_escape "$pkind")"
+  j_lane="$(json_escape "$lane")"
+  j_finish="$(json_escape "${finish:-}")"
+
   cat > "$tmp/meta.json" <<META
 {
-  "request_id": "$id",
-  "captured_at_ts": "$ts",
-  "routectl_version": "${ROUTECTL_VERSION}",
-  "alias": "${alias:-}",
-  "model": "${model:-}",
-  "ingress_kind": "${ikind}",
-  "provider_kind": "${pkind}",
+  "schema_version": $SCHEMA_VERSION,
+  "request_id": "$j_id",
+  "captured_at_ts": "$j_ts",
+  "routectl_version": "$j_version",
+  "alias": "$j_alias",
+  "model": "$j_model",
+  "case_id": "$j_case",
+  "config_sha": "$j_sha",
+  "client": {
+    "name": "$j_cname",
+    "version": "$j_cversion",
+    "connection_mode": "$j_cmode"
+  },
+  "ingress_kind": "$j_ikind",
+  "provider_kind": "$j_pkind",
+  "lane": "$j_lane",
   "stream": $stream_flag,
-  "finish_reason": "${finish:-}",
+  "finish_reason": "$j_finish",
   "input_tokens": ${input_tokens:-0},
   "output_tokens": ${output_tokens:-0},
-  "total_tokens": ${total_tokens:-0},
-  "has_ingress_body": $([ -n "$b_ing" ] && echo true || echo false),
-  "has_outgoing_body": $([ -n "$b_out" ] && echo true || echo false),
-  "has_upstream_response": $([ -n "$b_uok" ] && echo true || echo false),
-  "has_egress_response": $([ -n "$b_egr" ] && echo true || echo false),
-  "has_ingress_headers": $([ -n "$h_ing" ] && echo true || echo false),
-  "has_outgoing_headers": $([ -n "$h_out" ] && echo true || echo false),
-  "has_upstream_headers": $([ -n "$h_uok" ] && echo true || echo false),
-  "has_egress_headers": $([ -n "$h_egr" ] && echo true || echo false)
+  "total_tokens": ${total_tokens:-0}
 }
 META
 
@@ -462,9 +567,11 @@ META
 
   # Append to manifest.jsonl AFTER the rename so a dangling manifest
   # entry never points to a missing directory. One JSONL line per
-  # request, append-only.
+  # request, append-only. Same escaping contract as meta.json above --
+  # an unescaped quote here corrupts one line of an append-only file
+  # that has no rewrite path.
   cat >> "$OUT/manifest.jsonl" <<MANIFEST_LINE
-{"request_id":"$id","captured_at":"$ts","routectl_version":"${ROUTECTL_VERSION}","alias":"${alias:-}","model":"${model:-}","ingress_kind":"${ikind}","provider_kind":"${pkind}","stream":$stream_flag,"finish_reason":"${finish:-}","input_tokens":${input_tokens:-0},"output_tokens":${output_tokens:-0},"total_tokens":${total_tokens:-0}}
+{"request_id":"$j_id","captured_at":"$j_ts","routectl_version":"$j_version","alias":"$j_alias","model":"$j_model","case_id":"$j_case","ingress_kind":"$j_ikind","provider_kind":"$j_pkind","lane":"$j_lane","stream":$stream_flag,"finish_reason":"$j_finish","input_tokens":${input_tokens:-0},"output_tokens":${output_tokens:-0},"total_tokens":${total_tokens:-0}}
 MANIFEST_LINE
 
   echo "$id"

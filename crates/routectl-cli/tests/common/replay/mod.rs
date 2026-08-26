@@ -35,7 +35,8 @@ pub use json_diff::{
     assert_json_equal_structural, diff_all,
 };
 pub use loader::{
-    Fixture, FixtureMeta, LoadedCorpus, ReplayError, discover_fixtures, load_fixture,
+    FIXTURE_SCHEMA_VERSION, Fixture, FixtureClient, FixtureMeta, LoadedCorpus, ReplayError,
+    discover_fixtures, load_fixture,
 };
 pub use sse_diff::{ParseError, SseEventCmp, assert_sse_equal, parse_sse_events};
 

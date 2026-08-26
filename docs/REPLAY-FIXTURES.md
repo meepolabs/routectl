@@ -57,8 +57,9 @@ Each fixture lives at:
 
     crates/routectl-cli/tests/fixtures/captured/<request_id>/
 
-Inside the request directory, files are present only when
-`meta.json` declares them. The full set:
+Inside the request directory, `meta.json` and the two request halves are
+always present; the response halves are present when the capture
+observed them. The nine files the loader reads:
 
     meta.json
     ingress_request.json
@@ -70,111 +71,160 @@ Inside the request directory, files are present only when
     egress_response.json
     egress_response.headers.json
 
+The rig also writes two triage aids the loader does NOT read and does
+not require:
+
+    structural.txt    the captured `structural summary` trace lines
+    stream.txt        the captured `stream summary` trace lines
+
 `meta.json` is always present. The two request halves --
 `ingress_request.json` + `ingress_request.headers.json` and
 `outgoing_request.json` + `outgoing_request.headers.json` -- are
 ALWAYS required; the loader errors (naming the missing file) if any
-of the four is absent. Only the two response halves are optional:
-`upstream_response.*` is gated by `has_upstream_response` and
-`egress_response.*` by `has_egress_response`. For each optional
-half the loader cross-checks both files against its flag and errors
-on mismatch -- a promised-but-missing file, or a stray file present
-when the flag is `false`.
+of the four is absent.
+
+**`ROUTECTL_TRACE_HEADERS=1` on the daemon is therefore a hard
+prerequisite for capture.** With header tracing off the rig writes no
+header files at all -- including the two REQUIRED ones -- so every
+fixture in the batch is refused with
+`MissingFile: ingress_request.headers.json` and the whole capture is
+wasted.
+
+The four response files are optional and **their presence is read from
+the directory listing**. `meta.json` carries no file-presence flags:
+the filesystem is the only record, so there is no second copy of the
+fact to disagree with it. Each of the four combinations per response
+slot is valid, and the loader yields empty bytes / an empty header
+vector for whichever file is absent:
+
+| body | headers | what it means |
+|---|---|---|
+| present | present | that direction was fully observed |
+| absent | present | STREAM capture -- the body arrived as SSE frames and was never logged as one JSON value |
+| present | absent | that direction's response headers were not logged |
+| absent | absent | that direction was not observed |
+
+The rig's tmp-then-rename promotion (see the atomicity contract in
+`scripts/capture_fixtures.sh`) means a fixture directory is never
+half-populated, so the listing is trustworthy.
 
 ## meta.json schema
 
-There are two views of `meta.json`: the SUPERSET the capture rig
-writes, and the SUBSET the replay loader's `FixtureMeta` actually
-deserializes. They do not match field-for-field -- the rig records
-extra triage metadata the replay drivers never read, and one
-loader-known field (`expected_unknown_block_count`) is not produced by
-the current rig at all.
-
-### Rig-written superset (`scripts/capture_fixtures.sh`)
-
-The rig emits `meta.json` by hand (no jq dependency). Every key below
-is always present:
+ONE schema, in the direction that matters: `FixtureMeta` carries no key
+the rig does not produce. (The rig writes four triage-only fields the
+loader ignores -- `request_id`, `captured_at_ts`, `alias`,
+`finish_reason` -- plus the three token counts. That asymmetry is
+harmless; the reverse one, a loader field no producer wrote, is what
+broke the corpus.)
 
     {
+      "schema_version": u32,
       "request_id": String,
       "captured_at_ts": String,
       "routectl_version": String,
       "alias": String,
       "model": String,
-      "ingress_kind": "anthropic" | "openai" | ...,
+      "case_id": String,
+      "config_sha": String,
+      "client": {
+        "name": String,
+        "version": String,
+        "connection_mode": String
+      },
+      "ingress_kind": "anthropic" | "openai" | "openai-responses",
       "provider_kind": "anthropic" | "openai-compat" | "openai-responses" | ...,
+      "lane": "anthropic-api" | "openai-compat" | "openai-responses" | "bedrock" | "gemini",
       "stream": bool,
       "finish_reason": String,
       "input_tokens": u64,
       "output_tokens": u64,
-      "total_tokens": u64,
-      "has_ingress_body": bool,
-      "has_outgoing_body": bool,
-      "has_upstream_response": bool,
-      "has_egress_response": bool,
-      "has_ingress_headers": bool,
-      "has_outgoing_headers": bool,
-      "has_upstream_headers": bool,
-      "has_egress_headers": bool
-    }
-
-Note the rig does NOT write `expected_unknown_block_count`; see below.
-
-### Loader-deserialized subset (`FixtureMeta`)
-
-The replay loader only deserializes these fields (everything else in
-the rig's superset is ignored on load via serde's default
-unknown-field tolerance):
-
-    {
-      "provider_kind": String,
-      "stream": bool,
-      "has_upstream_response": bool,
-      "has_egress_response": bool,
-      "expected_unknown_block_count": Option<u32>,  // loader-known, NOT rig-written
-      "model": Option<String>,
-      "routectl_version": Option<String>
+      "total_tokens": u64
     }
 
 Fields:
 
-- `ingress_kind` -- which ingress dialect parsed the inbound body.
-  Recorded by the capture rig for forward use; the loader's
-  `FixtureMeta` does not deserialize it and neither replay driver
-  reads it. The current replay is anthropic-ingress-only: both drivers
-  hardcode `AnthropicIngress::parse_request` regardless of this
-  value. Common rig-written values: `"anthropic"` (`/v1/messages`),
-  `"openai-chat-completions"` (`/chat/completions`). Multi-dialect
-  ingress selection arrives in a later expansion.
-- `provider_kind` -- which egress provider produced the outgoing
-  body. The replay test selects the matching translator. The string
-  values match the in-code `PROVIDER_KIND` constants in
-  `routectl-providers` -- in particular `"anthropic"` (not
-  `"anthropic-api"`) for the api.anthropic.com client.
+- `schema_version` -- fixture-format MAJOR. The loader reads exactly
+  one major (`FIXTURE_SCHEMA_VERSION` in `loader.rs`) and refuses any
+  other with a named error rather than half-loading a shape it does not
+  understand. A fixture captured before the key existed is treated as
+  the current major: the key arrived alongside purely additive fields,
+  so a pre-versioning directory is a valid fixture with those fields
+  empty. This is the ONLY compatibility gate.
+- `ingress_kind` -- which ingress dialect parsed the inbound body, in
+  the vocabulary of `IngressAdapter::id()`
+  (`crates/routectl-cli/src/ingress/mod.rs`), so a consumer dispatches
+  on the value directly with no mapping table. EMPTY when the capture
+  could not extract the token -- never a sentinel word outside that
+  vocabulary, matching how `lane` reports its unmapped case and the
+  empty-means-unpinned convention the rest of the schema uses.
+- `provider_kind` -- which egress provider produced the outgoing body,
+  in the `PROVIDER_KIND` const vocabulary of `routectl-providers` --
+  in particular `"anthropic"` (not `"anthropic-api"`) for the
+  api.anthropic.com client. The replay drivers select the matching
+  translator from this.
+- `lane` -- the same egress concept in the `kind_str()` vocabulary of
+  `ProviderEntry` (`crates/routectl-router/src/config/schema.rs`),
+  which is the vocabulary a lane's class derives from. The rig
+  NORMALIZES at write time (`anthropic` -> `anthropic-api`; both
+  Bedrock api_shapes -> `bedrock`, which `kind_str()` does not split).
+  An unmapped provider kind leaves this EMPTY and warns, rather than
+  passing an unknown spelling through as if it were a lane token.
+- `case_id` -- stable identity of the SCENARIO, as opposed to the
+  one-off `request_id`. A rerun of the same case re-lands on the same
+  identity, so it either matches or diffs. Written from
+  `ROUTECTL_FIXTURE_CASE_ID`; empty for an unpinned live-box capture.
+- `config_sha` -- hash of the config in force at capture time, so a
+  rerun under a drifted config does not read as client drift. Written
+  from `ROUTECTL_FIXTURE_CONFIG_SHA`.
+- `client` -- which client produced the request. `name` / `version`
+  come from the captured ingress `user-agent`; `connection_mode` comes
+  from `ROUTECTL_FIXTURE_CONNECTION_MODE`, because the trace cannot
+  observe it. The mode matters: Claude Code sends `role:"system"` turns
+  in `messages[]` through a MITM front proxy but inlines the same
+  content as system-reminder text with zero system turns in base-url
+  mode, so an unpinned mode makes a cross-mode comparison read as
+  drift.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
   bodies. Stream fixtures are currently skipped by the replay
   drivers (stream-body replay is deferred -- the capture rig does
   not yet write stream bodies). `assert_sse_equal` exists as harness
   scaffolding for future stream replay and has no driver caller today;
   the exercised non-stream path uses `assert_json_equal_structural`.
-- `has_upstream_response` / `has_egress_response` -- which response
-  files are present. Useful for capture sets that did not record
-  the upstream side, or response-only fixtures.
-- `expected_unknown_block_count` -- loader-deserializable but NOT
-  produced by the current capture rig: `capture_fixtures.sh` never
-  writes this key, so it deserializes to `None` (via `#[serde(default)]`)
-  on every real fixture today. Reserved, not yet enforced -- no replay
-  driver reads it. Intended for a future forward-compat scenario that
-  pins the number of unknown content blocks the canonical pipeline
-  must opaquely pass through, written by a future rig pass or by hand.
-- `model` -- post-alias provider model id from the trace. Optional
-  in the schema (older captures load without it), but the capture
-  rig always writes it. Used by the replay drivers to apply the
-  corpus scope filter described below.
+- `model` -- post-alias provider model id from the trace. Used by the
+  replay drivers to apply the corpus scope filter described below.
 - `routectl_version` -- workspace package version stamped by
-  `scripts/capture_fixtures.sh` at capture time. Optional in the
-  schema for forward compat (older captures load without it). Lets
-  contributors recognize stale captures after a routectl bump.
+  `scripts/capture_fixtures.sh` at capture time. PURELY
+  INFORMATIONAL: it lets a contributor recognize a stale capture, and
+  nothing reads it as a compatibility signal. `schema_version` is the
+  only gate.
+
+### Backward compatibility
+
+The loader TOLERATES a fixture captured before this schema settled: the
+added fields carry serde defaults, so an existing per-contributor corpus
+keeps loading. That is deliberate -- a clean break would zero out the
+only wire evidence anyone has on disk, and a past session cannot be
+recaptured. Tolerance is not permission to run an unpinned fixture
+through a GATED comparison: a consumer that needs a pinned lane, case,
+client, or config refuses the individual fixture that lacks it. Only
+`schema_version` is a hard gate, because a major bump means the
+directory shape itself changed and no per-field default can rescue it.
+
+The rig's self-test (`scripts/capture_fixtures.test.sh`, run in CI)
+drives the real script over a synthetic trace and pins the emitted
+schema, the presence of every required file, and that `meta.json` stays
+valid JSON when a value carries a quote. It exists because the corpus is
+gitignored, so a rig regression would otherwise only surface on a
+contributor's next capture -- against evidence that cannot be
+recaptured.
+
+The rig emits `meta.json` and `manifest.jsonl` by hand (no jq
+dependency), so every interpolated string value passes through its
+`json_escape` helper. Two of those values are outside the rig's control:
+the environment pins are set programmatically by a driver, and
+`client.name` / `client.version` are parsed from a client-controlled
+`user-agent`. An unescaped quote in any of them would produce invalid
+JSON that the rig promotes at exit 0 and the loader then skips forever.
 
 ## Corpus scope
 

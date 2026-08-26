@@ -197,3 +197,10 @@ jobs:
       # depend on keeps working.
       - name: toolchain preflight self-test
         run: bash scripts/assert-toolchain.test.sh
+
+      # The fixture corpus is gitignored, so CI has no fixture to load and
+      # a rig regression would otherwise only surface on a contributor's
+      # next capture -- against a corpus that cannot be recaptured. The
+      # self-test drives the real rig over a synthetic trace instead.
+      - name: fixture capture rig self-test
+        run: bash scripts/capture_fixtures.test.sh
