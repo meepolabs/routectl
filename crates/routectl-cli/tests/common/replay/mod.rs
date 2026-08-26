@@ -14,6 +14,9 @@
 //! Sub-modules:
 //! - [`loader`] -- on-disk fixture format + `load_fixture` /
 //!   `discover_fixtures`.
+//! - [`conservation`] -- captured-ingress vs captured-outgoing
+//!   adjudication over the lane class and the exception table, plus the
+//!   translation-lane divergence baseline.
 //! - [`json_diff`] -- structural JSON comparator + header comparator.
 //! - [`lane`] -- derived lane class + the wire-conservation exception
 //!   table (which ingress-vs-outgoing divergences are explained
@@ -28,6 +31,7 @@
 
 #![allow(dead_code, unused_imports)]
 
+pub mod conservation;
 pub mod gated_lanes;
 pub mod harness;
 pub mod json_diff;
@@ -35,6 +39,12 @@ pub mod lane;
 pub mod loader;
 pub mod sse_diff;
 
+pub use conservation::{
+    BaselineEntry, BaselineError, ConservationRun, CorpusSlice, ExceptionHits, GatedLanes,
+    LaneSummary, TRANSLATION_BASELINE_FILE, UNPINNED_INGRESS_LABEL, Verdict, adjudicate,
+    parse_translation_baseline, read_translation_baseline, read_translation_baseline_at,
+    resolve_gated_lanes, resolve_gated_lanes_at, translation_baseline_path,
+};
 pub use gated_lanes::{
     GATED_LANES_FILE, GatedLaneError, gated_lanes_path, is_lane_gated, parse_gated_lanes,
     read_gated_lanes, read_gated_lanes_at,

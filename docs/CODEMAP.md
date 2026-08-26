@@ -5471,6 +5471,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/common/replay/lane.rs` -- derived lane class (`lane_class`,
   `resolve_egress`) and the wire-conservation exception table
   (`all_exceptions`, `unexplained`, `normalize_ingress_for_lane`)
+- `tests/common/replay/conservation.rs` -- the conservation adjudicator:
+  compares a fixture's captured `ingress_request.json` against its captured
+  `outgoing_request.json` through the lane class and exception table
+  (`adjudicate`, `ConservationRun`, `Verdict`, `LaneSummary`), the
+  gated-lane resolver that maps only the deliberately-empty list onto "no
+  lane gated" (`resolve_gated_lanes`, `GatedLanes`), and the
+  `translation_baseline.txt` reader (`read_translation_baseline`,
+  `BaselineEntry`)
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
 - `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +
@@ -5535,6 +5543,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   openai-responses). Failures report path + kind + value SHAPE only; a fixture
   whose divergences are all inside `messages[]` skips pending the system-turn
   lift normalizer
+- `tests/conservation.rs` -- wire-conservation driver over BOTH fixture
+  roots: adjudicates each fixture's captured ingress body against its
+  captured outgoing body (no code re-runs; both files came from one real
+  request), prints one bounded line per lane plus a `PASS|FAIL|DEGRADED`
+  verdict, and pins the measured live-box baseline (four explained classes,
+  zero unexplained) when that per-contributor corpus is present -- skipping
+  loudly when it is not
 - `tests/replay_ingress.rs` -- replay-driven ingress contract test; walks
   captured fixtures, mounts the upstream response in wiremock, drives egress
   `complete()`, renders the canonical `ChatResponse` via
