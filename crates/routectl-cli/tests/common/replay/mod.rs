@@ -19,8 +19,9 @@
 //!   routectl transforms).
 //! - [`sse_diff`] -- SSE event-sequence parser + comparator.
 //! - [`harness`] -- shared scaffolding (captured root locator,
-//!   header-vec to `HeaderMap` bridge, per-fixture outcome enum) used
-//!   by the `replay_egress.rs` / `replay_ingress.rs` test drivers.
+//!   header-vec to `HeaderMap` bridge, per-fixture outcome enum,
+//!   `meta.ingress_kind` adapter lookup, per-model enrichment rebuild)
+//!   used by the `replay_egress.rs` / `replay_ingress.rs` test drivers.
 
 #![allow(dead_code, unused_imports)]
 
@@ -31,8 +32,10 @@ pub mod loader;
 pub mod sse_diff;
 
 pub use harness::{
-    ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, captured_root, enrichment_skip_reason,
-    headers_from_pairs,
+    ADAPTIVE_THINKING_MODELS, ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, bounded_body_diff,
+    captured_root, divergence_count, diverges_only_in_messages, enrichment_skip_reason,
+    headers_from_pairs, ingress_for_kind, parse_enriched_canonical, replay_resolved_model,
+    system_turn_lift_skip_reason, unpinned_ingress_skip_reason, with_replay_enrichment,
 };
 pub use json_diff::{
     DEFAULT_HEADER_ALLOW_SKIP, Divergence, DivergenceKind, assert_headers_equal,

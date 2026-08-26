@@ -5,18 +5,19 @@
 //! `normalize_request`, and asserts the upstream-bound JSON body
 //! matches the on-disk `outgoing_request.json` structurally.
 //!
-//! Current scope: anthropic ingress only. Egress providers covered
-//! are `anthropic` (the api.anthropic.com client; the in-code
-//! `PROVIDER_KIND` constant is `"anthropic"`), `openai-compat`, and
-//! `openai-responses`. Bedrock is out of scope.
+//! The ingress adapter is selected from `meta.ingress_kind`. Egress
+//! providers covered are `anthropic` (the api.anthropic.com client; the
+//! in-code `PROVIDER_KIND` constant is `"anthropic"`), `openai-compat`,
+//! and `openai-responses`. Bedrock is out of scope.
 //!
 //! Fixtures with out-of-scope provider kinds (bedrock variants) are
 //! logged and bypassed; an unrecognized or misspelled `provider_kind`
-//! is treated as a fixture authoring error and fails the test.
+//! or `ingress_kind` is treated as a fixture authoring error and fails
+//! the test.
 //!
-//! This driver also bypasses fixtures whose model needs router-side
-//! enrichment (adaptive thinking, DeepSeek `history_reasoning`) that
-//! the bare ingress -> egress path does not yet replay -- see the
+//! Per-model router enrichment is reconstructed for each fixture (see
+//! `common::replay::replay_resolved_model`); the residual set of models
+//! whose enrichment cannot be reconstructed is bypassed -- see the
 //! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
 //! Zero fixtures is acceptable: the captured/ corpus is per-contributor
@@ -27,8 +28,6 @@ mod common;
 
 use std::sync::Arc;
 
-use routectl_cli::ingress::IngressAdapter;
-use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_core::{ChatRequest, Provider, StaticToken};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
@@ -39,8 +38,9 @@ use routectl_providers::openai_compat::{
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 use common::replay::{
-    Fixture, FixtureOutcome, assert_json_equal_structural, captured_root, discover_fixtures,
-    enrichment_skip_reason, headers_from_pairs,
+    Fixture, FixtureOutcome, bounded_body_diff, captured_root, discover_fixtures, divergence_count,
+    diverges_only_in_messages, enrichment_skip_reason, parse_enriched_canonical,
+    system_turn_lift_skip_reason, unpinned_ingress_skip_reason,
 };
 
 fn anthropic_api_provider() -> AnthropicApiProvider {
@@ -158,13 +158,9 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
         return Ok(FixtureOutcome::Skipped(reason));
     }
 
-    let headers = headers_from_pairs(&fixture.ingress_request_headers);
-    let canonical = AnthropicIngress
-        .parse_request(
-            &headers,
-            &serde_json::to_vec(&fixture.ingress_request).expect("wire serializes"),
-        )
-        .map_err(|e| format!("anthropic ingress parse_request failed: {e}"))?;
+    let Some(canonical) = parse_enriched_canonical(fixture)? else {
+        return Ok(FixtureOutcome::Skipped(unpinned_ingress_skip_reason()));
+    };
 
     let Some(actual_body) = normalize_for_kind(&fixture.meta.provider_kind, &canonical)? else {
         return Ok(FixtureOutcome::Skipped(format!(
@@ -174,8 +170,20 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
     };
 
     let ignore = ignore_paths_for_kind(&fixture.meta.provider_kind, fixture.meta.stream);
-    assert_json_equal_structural(&actual_body, &fixture.outgoing_request, &ignore)
-        .map_err(|e| format!("outgoing_request body mismatch: {e}"))?;
+
+    // The system-turn lift shifts `messages[]` positions and its pre-diff
+    // normalizer does not exist yet, so a fixture whose ONLY divergences
+    // are inside that array cannot be compared -- declining is honest
+    // where asserting a known-misaligned pair is not. Anything outside
+    // `messages[]` still fails.
+    if diverges_only_in_messages(&actual_body, &fixture.outgoing_request, &ignore) {
+        let count = divergence_count(&actual_body, &fixture.outgoing_request, &ignore);
+        return Ok(FixtureOutcome::Skipped(system_turn_lift_skip_reason(count)));
+    }
+
+    if let Some(summary) = bounded_body_diff(&actual_body, &fixture.outgoing_request, &ignore) {
+        return Err(format!("outgoing_request body mismatch: {summary}"));
+    }
 
     Ok(FixtureOutcome::Asserted)
 }

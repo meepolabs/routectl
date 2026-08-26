@@ -7,8 +7,13 @@
 //! render_response`, and asserts the rendered JSON body matches the
 //! captured `egress_response` structurally.
 //!
-//! Current scope: anthropic ingress only, non-stream fixtures only.
-//! Stream fixtures captured today have empty
+//! Current scope: the response render is anthropic-only, non-stream
+//! fixtures only. The REQUEST leg parses through the adapter named by
+//! `meta.ingress_kind`; the render leg still goes through
+//! `AnthropicIngress`, so a fixture captured on another ingress dialect
+//! compares an Anthropic-shape render against its own dialect's captured
+//! response and is expected to diverge until the render leg dispatches
+//! too. Stream fixtures captured today have empty
 //! `egress_response`/`upstream_response` slots (the capture rig does
 //! not write stream bodies yet); this test skips them with an info
 //! log so the rest of the corpus still runs. Bedrock egress is also
@@ -22,9 +27,9 @@
 //! variant (or the test driver wraps the JSON in a synthetic event
 //! stream).
 //!
-//! This driver also bypasses fixtures whose model needs router-side
-//! enrichment (adaptive thinking, DeepSeek `history_reasoning`) that
-//! the bare ingress -> egress path does not yet replay -- see the
+//! Per-model router enrichment is reconstructed for each fixture (see
+//! `common::replay::replay_resolved_model`); the residual set of models
+//! whose enrichment cannot be reconstructed is bypassed -- see the
 //! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
 //! Zero exercisable fixtures is acceptable: the captured/ corpus is
@@ -37,7 +42,7 @@ use std::sync::Arc;
 
 use routectl_cli::ingress::IngressAdapter;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
-use routectl_core::{ChatRequest, Provider, StaticToken};
+use routectl_core::{Provider, StaticToken};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
@@ -49,8 +54,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
-    Fixture, FixtureOutcome, assert_json_equal_structural, captured_root, discover_fixtures,
-    enrichment_skip_reason, headers_from_pairs,
+    Fixture, FixtureOutcome, bounded_body_diff, captured_root, discover_fixtures,
+    enrichment_skip_reason, parse_enriched_canonical, unpinned_ingress_skip_reason,
 };
 
 /// Description of which path + content-type the egress provider hits
@@ -157,18 +162,6 @@ async fn mount_upstream(mount: &EgressMount, body: Vec<u8>, content_type: &str) 
     server
 }
 
-/// Build the canonical `ChatRequest` from the fixture's captured
-/// ingress request + headers. Current replay ingress is anthropic-only.
-fn parse_canonical(fixture: &Fixture) -> Result<ChatRequest, String> {
-    let headers = headers_from_pairs(&fixture.ingress_request_headers);
-    AnthropicIngress
-        .parse_request(
-            &headers,
-            &serde_json::to_vec(&fixture.ingress_request).expect("wire serializes"),
-        )
-        .map_err(|e| format!("anthropic ingress parse_request failed: {e}"))
-}
-
 /// Drive one non-stream fixture end-to-end and compare the rendered
 /// ingress response against the captured `egress_response.json`.
 async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
@@ -182,6 +175,12 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
             "no captured egress_response; nothing to compare against".into(),
         ));
     }
+
+    // Parse before mounting: an unpinned or unknown ingress dialect
+    // decides the fixture's fate without a wiremock server ever starting.
+    let Some(canonical) = parse_enriched_canonical(fixture)? else {
+        return Ok(FixtureOutcome::Skipped(unpinned_ingress_skip_reason()));
+    };
 
     let Some(mount) = mount_for_kind(&fixture.meta.provider_kind)? else {
         return Ok(FixtureOutcome::Skipped(format!(
@@ -203,7 +202,6 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
         )));
     };
 
-    let canonical = parse_canonical(fixture)?;
     let response = provider
         .complete(canonical)
         .await
@@ -216,8 +214,9 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
 
     let expected: Value = serde_json::from_slice(&fixture.egress_response_bytes)
         .map_err(|e| format!("egress_response.json parse failed: {e}"))?;
-    assert_json_equal_structural(&rendered, &expected, &[])
-        .map_err(|e| format!("rendered ingress response mismatch: {e}"))?;
+    if let Some(summary) = bounded_body_diff(&rendered, &expected, &[]) {
+        return Err(format!("rendered ingress response mismatch: {summary}"));
+    }
     Ok(FixtureOutcome::Asserted)
 }
 

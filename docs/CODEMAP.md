@@ -5510,15 +5510,29 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic
   SSE events (asserts terminal-event ordering)
 - `tests/replay_egress.rs` -- replay-driven egress contract test; walks
-  `tests/fixtures/captured/`, drives each captured ingress request through the
-  matching egress provider's `normalize_request`, and structurally diffs the
-  upstream-bound body against the on-disk `outgoing_request.json` (anthropic /
-  openai-compat / openai-responses)
+  `tests/fixtures/captured/`, parses each captured ingress request through the
+  adapter named by `meta.ingress_kind`, reapplies the per-model router
+  enrichment, drives it through the matching egress provider's
+  `normalize_request`, and structurally diffs the upstream-bound body against
+  the on-disk `outgoing_request.json` (anthropic / openai-compat /
+  openai-responses). Failures report path + kind + value SHAPE only; a fixture
+  whose divergences are all inside `messages[]` skips pending the system-turn
+  lift normalizer
 - `tests/replay_ingress.rs` -- replay-driven ingress contract test; walks
   captured fixtures, mounts the upstream response in wiremock, drives egress
   `complete()`, renders the canonical `ChatResponse` via
   `AnthropicIngress::render_response`, and asserts it matches the captured
-  egress response structurally (anthropic ingress, non-stream scope)
+  egress response structurally (`meta.ingress_kind`-dispatched request leg,
+  Anthropic-only render leg, non-stream scope)
+- `tests/replay_harness.rs` -- unit coverage over hand-built fixtures for the
+  replay harness's three decisions: the `meta.ingress_kind` adapter lookup
+  (identity round-trip against `IngressAdapter::id()`, fail-closed on an
+  unknown token, unpinned-not-defaulted on the empty one), the per-model
+  enrichment rebuild (an adaptive-generation capture replays under the adaptive
+  wire shape, its bare-default control under the legacy one, and the residual
+  skip list still catches the models whose overlay no fixture field pins), and
+  the value-bounded failure reporter (no prompt text, no prefix of one, no
+  container contents, allowlist fails closed, path and kind preserved)
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor
