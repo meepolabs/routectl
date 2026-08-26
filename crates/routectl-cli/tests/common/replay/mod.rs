@@ -14,6 +14,9 @@
 //! - [`loader`] -- on-disk fixture format + `load_fixture` /
 //!   `discover_fixtures`.
 //! - [`json_diff`] -- structural JSON comparator + header comparator.
+//! - [`lane`] -- derived lane class + the wire-conservation exception
+//!   table (which ingress-vs-outgoing divergences are explained
+//!   routectl transforms).
 //! - [`sse_diff`] -- SSE event-sequence parser + comparator.
 //! - [`harness`] -- shared scaffolding (captured root locator,
 //!   header-vec to `HeaderMap` bridge, per-fixture outcome enum) used
@@ -23,6 +26,7 @@
 
 pub mod harness;
 pub mod json_diff;
+pub mod lane;
 pub mod loader;
 pub mod sse_diff;
 
@@ -33,6 +37,13 @@ pub use harness::{
 pub use json_diff::{
     DEFAULT_HEADER_ALLOW_SKIP, Divergence, DivergenceKind, assert_headers_equal,
     assert_json_equal_structural, diff_all,
+};
+pub use lane::{
+    ANTHROPIC_FIDELITY_LANE, BEDROCK_API_SHAPES, Dialect, EGRESS_KINDS, EgressLane, Exception,
+    ExceptionKind, INGRESS_IDS, LaneClass, LaneError, LaneKey, SymbolError, Transform,
+    all_exceptions, class_for_dialects, egress_lane_from_fixture_kind, egress_lane_from_token,
+    exceptions_for_lane, ingress_dialect, lane_class, normalize_ingress_for_lane, resolve_egress,
+    resolve_site_symbol, unexplained, workspace_root,
 };
 pub use loader::{
     FIXTURE_SCHEMA_VERSION, Fixture, FixtureClient, FixtureMeta, LoadedCorpus, ReplayError,
