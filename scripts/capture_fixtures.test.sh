@@ -72,12 +72,78 @@ trace_stream() {
 TRACE
 }
 
-# Build a throwaway repo, run the real rig in it against the given trace
-# text, and print the absolute path of the resulting captured tree. The
-# caller inspects it and removes it. Rig stderr/stdout land in
-# `<tree>/../rig.log` so a case can assert on a warning.
-run_rig() {
-    local trace_text="$1"
+# One REAL structural-summary line for one direction, in the layout
+# log_safe.rs emits: the event message is `structural summary` right after
+# the `routectl_core::log_safe: ` target, and `direction=` is a field of
+# the same line. `$3` is the sub-second part of the timestamp so a caller
+# can order the two directions.
+structural_line() {
+    local id="$1" direction="$2" frac="${3:-400000}"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    printf '%s TRACE %s: routectl_core::log_safe: structural summary direction="%s" kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false\n' \
+        "2026-08-25T10:00:00.${frac}Z" "$span" "$direction"
+}
+
+# A non-stream trace carrying BOTH request-side structural summaries --
+# the shape a driver capture must produce, since driver mode refuses a
+# fixture with half its structural evidence.
+trace_driver() {
+    local id="$1" kind="${2:-anthropic}"
+    trace_non_stream "$id" "$kind"
+    structural_line "$id" ingress 400000
+    structural_line "$id" outgoing 500000
+}
+
+# A stream trace carrying both structural summaries. Used as the RERUN of
+# a case first captured non-stream: the response-slot file set differs
+# between the two, which is what makes replace-vs-merge observable.
+trace_driver_stream() {
+    local id="$1" kind="${2:-anthropic}"
+    trace_stream "$id" "$kind"
+    structural_line "$id" ingress 400000
+    structural_line "$id" outgoing 500000
+}
+
+# A driver trace whose ingress body carries a SYNTHETIC third-party home
+# prefix. `scrub-fixture.sh --write` has no safe automatic rewrite for
+# another account's home path, so the residue survives into `--check`,
+# which is the split the driver-mode landing gate exists to catch. The
+# path is invented for this test and matches nothing on any real machine.
+trace_driver_dirty() {
+    local id="$1"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    cat <<TRACE
+2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"read /home/someoneelse/notes.txt"}]} redact_prompts_enabled=false
+TRACE
+    trace_non_stream "$id" anthropic | tail -n +2
+    structural_line "$id" ingress 400000
+    structural_line "$id" outgoing 500000
+}
+
+# The decoy: a driver trace whose ingress request BODY quotes a routectl
+# log line, phrase included. This is routine traffic -- a coding session
+# about routectl's own logging -- and it is what the unanchored
+# `grep 'structural summary' | head -2` selected instead of the real
+# outgoing summary, dropping the outgoing side entirely. The decoy line
+# comes FIRST in the trace, exactly as an ingress body does.
+trace_driver_decoy() {
+    local id="$1"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local decoy='routectl_core::log_safe: structural summary direction=\"outgoing\" messages_len=99'
+    cat <<TRACE
+2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"why does $decoy show up twice"}]} redact_prompts_enabled=false
+TRACE
+    trace_non_stream "$id" anthropic | tail -n +2
+    structural_line "$id" ingress 400000
+    structural_line "$id" outgoing 500000
+}
+
+# Build a throwaway repo and print its root. Split out of run_rig so a
+# case can invoke the rig TWICE against the same captured tree, which is
+# the only way to observe what a rerun does to an existing landing dir.
+make_repo() {
     local tmp
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/repo/scripts" "$tmp/repo/crates/routectl-cli/tests/fixtures"
@@ -87,11 +153,38 @@ run_rig() {
     cp "$SCRUB" "$tmp/repo/scripts/scrub-fixture.sh"
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$tmp/repo/Cargo.toml"
+    printf '%s\n' "$tmp"
+}
+
+# Run the real rig inside an existing throwaway repo against the given
+# trace text, with any extra rig flags appended. Returns the rig's exit
+# status; stdout+stderr land in `<tmp>/rig.log` (truncated per run) so a
+# case can assert on a refusal message.
+rig_run() {
+    local tmp="$1" trace_text="$2"
+    shift 2
     printf '%s\n' "$trace_text" >"$tmp/trace.log"
+    local rc=0
     (
         cd "$tmp/repo" || exit 2
-        bash scripts/capture_fixtures.sh --log "$tmp/trace.log"
-    ) >"$tmp/rig.log" 2>&1
+        bash scripts/capture_fixtures.sh --log "$tmp/trace.log" "$@"
+    ) >"$tmp/rig.log" 2>&1 || rc=$?
+    return "$rc"
+}
+
+# Path of the captured tree inside a throwaway repo.
+captured_of() {
+    printf '%s\n' "$1/repo/crates/routectl-cli/tests/fixtures/captured"
+}
+
+# Build a throwaway repo, run the real rig in it against the given trace
+# text, and print the absolute path of the resulting captured tree. The
+# caller inspects it and removes it. Rig stderr/stdout land in
+# `<tree>/../rig.log` so a case can assert on a warning.
+run_rig() {
+    local tmp
+    tmp="$(make_repo)"
+    rig_run "$tmp" "$1" || true
     printf '%s\n' "$tmp"
 }
 
@@ -160,6 +253,33 @@ check() {
         echo "FAIL: $label -- expected '$expected', got '$actual'"
         fails=$((fails + 1))
     fi
+}
+
+# Assert a file contains a substring. Used on the rig log, where the
+# MESSAGE is part of the contract: a driver-mode refusal that does not
+# name the missing pin sends the runner hunting through the rig.
+check_log() {
+    local label="$1" needle="$2" file="$3"
+    if grep -qF -- "$needle" "$file"; then
+        echo "PASS: $label"
+    else
+        echo "FAIL: $label -- '$needle' absent from $file"
+        sed -n '1,20p' "$file"
+        fails=$((fails + 1))
+    fi
+}
+
+# Set / clear the three driver pins in one call, so a case cannot leak a
+# pin into the next one (driver mode is fail-closed on all three, so a
+# leaked pin turns a refusal assertion into a silent pass).
+set_pins() {
+    export ROUTECTL_FIXTURE_CASE_ID="$1"
+    export ROUTECTL_FIXTURE_CONFIG_SHA="$2"
+    export ROUTECTL_FIXTURE_CONNECTION_MODE="$3"
+}
+clear_pins() {
+    unset ROUTECTL_FIXTURE_CASE_ID ROUTECTL_FIXTURE_CONFIG_SHA \
+        ROUTECTL_FIXTURE_CONNECTION_MODE
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -340,6 +460,375 @@ else
     fails=$((fails + 1))
 fi
 rm -rf "$work"
+
+# --- Case 7: driver mode refuses on each unset pin, naming it ---------
+# Three cases plus a paired control. Without the control a rig that
+# refused unconditionally -- or one that refused for an unrelated reason --
+# would pass all three refusal assertions.
+for missing in CASE_ID CONFIG_SHA CONNECTION_MODE; do
+    set_pins drift-01 abc123 base-url
+    unset "ROUTECTL_FIXTURE_$missing"
+    work="$(make_repo)"
+    rc=0
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000007)" --driver-mode || rc=$?
+    clear_pins
+    if [ "$rc" -eq 0 ]; then
+        echo "FAIL: driver mode ran with ROUTECTL_FIXTURE_$missing unset"
+        fails=$((fails + 1))
+    else
+        echo "PASS: driver mode refuses with ROUTECTL_FIXTURE_$missing unset"
+    fi
+    check_log "the refusal names ROUTECTL_FIXTURE_$missing" \
+        "ROUTECTL_FIXTURE_$missing" "$work/rig.log"
+    if [ -d "$(captured_of "$work")/anthropic-api" ]; then
+        echo "FAIL: driver mode landed a fixture with ROUTECTL_FIXTURE_$missing unset"
+        fails=$((fails + 1))
+    else
+        echo "PASS: nothing lands when ROUTECTL_FIXTURE_$missing is unset"
+    fi
+    rm -rf "$work"
+done
+
+# Paired control: the SAME trace with all three pins unset captures fine
+# on the unflagged live-box path, where an empty pin is honest.
+clear_pins
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000007)" || rc=$?
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-000000000007/meta.json"
+check "live-box mode tolerates all three pins unset" "0" "$rc"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "an unpinned live-box capture leaves case_id empty" \
+        "" "$(meta_get "$meta" case_id)"
+    check "an unpinned live-box capture leaves config_sha empty" \
+        "" "$(meta_get "$meta" config_sha)"
+    check "an unpinned live-box capture leaves connection_mode empty" \
+        "" "$(meta_get "$meta" client.connection_mode)"
+else
+    echo "FAIL: unpinned live-box capture produced no parseable meta.json"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 8: driver landing keys on (lane, case_id) -------------------
+# A UUID-keyed corpus grows a fresh sibling per rerun and has nothing to
+# diff against. The lane directory comes from the NORMALIZED lane
+# (`anthropic` -> `anthropic-api`), so this also pins that the landing
+# path uses the kind_str() vocabulary rather than the traced token.
+set_pins tools-multiturn-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000008)" --driver-mode || rc=$?
+captured="$(captured_of "$work")"
+clear_pins
+check "a driver capture exits 0" "0" "$rc"
+dir="$captured/anthropic-api/tools-multiturn-01"
+if [ -d "$dir" ]; then
+    echo "PASS: driver mode lands at <lane>/<case_id>"
+    assert_files_present "$dir" "a driver capture" "${REQUIRED_FILES[@]}"
+    check "request_id survives in meta.json for traceability" \
+        "019eab77-0000-4000-8000-000000000008" "$(meta_get "$dir/meta.json" request_id)"
+else
+    echo "FAIL: driver mode did not land at <lane>/<case_id> (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+if [ -d "$captured/019eab77-0000-4000-8000-000000000008" ]; then
+    echo "FAIL: driver mode also landed a request_id-keyed directory"
+    fails=$((fails + 1))
+else
+    echo "PASS: driver mode lands no request_id-keyed directory"
+fi
+rm -rf "$work"
+
+# --- Case 9: a driver rerun REPLACES the same case's directory --------
+# Second run, different request_id, same case id, and a trace shape whose
+# response-slot file set DIFFERS (stream: headers but no body). Replace
+# means the stale non-stream `upstream_response.json` is gone; a merge
+# would leave it behind and file presence IS the schema.
+work="$(make_repo)"
+set_pins tools-multiturn-01 abc123 base-url
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000009)" --driver-mode || true
+captured="$(captured_of "$work")"
+dir="$captured/anthropic-api/tools-multiturn-01"
+first_req="$(meta_get "$dir/meta.json" request_id)"
+first_has_body=absent
+[ -f "$dir/upstream_response.json" ] && first_has_body=present
+rc=0
+rig_run "$work" "$(trace_driver_stream 019eab77-0000-4000-8000-00000000000a)" --driver-mode --force || rc=$?
+clear_pins
+check "a rerun of the same case exits 0" "0" "$rc"
+check "the first run wrote an upstream response body" "present" "$first_has_body"
+check "the rerun re-lands on the same directory" \
+    "019eab77-0000-4000-8000-00000000000a" "$(meta_get "$dir/meta.json" request_id)"
+check "the first run was a different request" \
+    "019eab77-0000-4000-8000-000000000009" "$first_req"
+if [ -f "$dir/upstream_response.json" ]; then
+    echo "FAIL: the rerun merged into the previous fixture instead of replacing it"
+    fails=$((fails + 1))
+else
+    echo "PASS: the rerun replaces the previous fixture wholesale"
+fi
+lane_dirs="$(find "$captured/anthropic-api" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+check "the rerun adds no sibling directory" "1" "$lane_dirs"
+if find "$captured" -maxdepth 1 -name '.tmp.*' | grep -q .; then
+    echo "FAIL: the rerun left a tmp directory behind"
+    fails=$((fails + 1))
+else
+    echo "PASS: the rerun leaves no tmp directory behind"
+fi
+rm -rf "$work"
+
+# --- Case 10: two different cases land side by side -------------------
+# The negative control for case 9: the replace behavior must be keyed on
+# the case id, not on the lane.
+work="$(make_repo)"
+set_pins case-alpha abc123 base-url
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000000b)" --driver-mode || true
+set_pins case-beta abc123 base-url
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000000c)" --driver-mode --force || true
+clear_pins
+captured="$(captured_of "$work")"
+for case_name in case-alpha case-beta; do
+    if [ -f "$captured/anthropic-api/$case_name/meta.json" ]; then
+        echo "PASS: $case_name lands in its own directory"
+    else
+        echo "FAIL: $case_name did not land (rig log: $work/rig.log)"
+        cat "$work/rig.log"
+        fails=$((fails + 1))
+    fi
+done
+rm -rf "$work"
+
+# --- Case 11: a body line quoting the phrase cannot displace the -------
+# --- outgoing structural summary --------------------------------------
+# The bug: `grep 'structural summary' | head -2` matched the ingress
+# request BODY line whose JSON content carries the phrase, then kept it
+# plus the real ingress summary and discarded the outgoing one. Measured
+# on a real corpus at 15% of fixtures. Both directions are asserted, and
+# case 12's clean pair is the paired positive control proving the
+# selection is not simply dropping the phrase everywhere.
+set_pins decoy-01 abc123 base-url
+work="$(make_repo)"
+rig_run "$work" "$(trace_driver_decoy 019eab77-0000-4000-8000-00000000000d)" --driver-mode || true
+clear_pins
+structural="$(captured_of "$work")/anthropic-api/decoy-01/structural.txt"
+if [ -f "$structural" ]; then
+    check "the decoy trace still lands both structural summaries" \
+        "2" "$(wc -l <"$structural" | tr -d ' ')"
+    if grep -q 'direction="outgoing"' "$structural"; then
+        echo "PASS: the outgoing structural summary survives a decoy body line"
+    else
+        echo "FAIL: a decoy body line displaced the outgoing structural summary"
+        cat "$structural"
+        fails=$((fails + 1))
+    fi
+    if grep -q 'direction="ingress"' "$structural"; then
+        echo "PASS: the ingress structural summary survives a decoy body line"
+    else
+        echo "FAIL: the ingress structural summary is missing"
+        fails=$((fails + 1))
+    fi
+    if grep -q 'messages_len=99' "$structural"; then
+        echo "FAIL: structural.txt selected the request-body line"
+        fails=$((fails + 1))
+    else
+        echo "PASS: structural.txt selects no request-body line"
+    fi
+else
+    echo "FAIL: decoy capture wrote no structural.txt (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 12: a clean pair lands both directions, in order ------------
+set_pins clean-01 abc123 base-url
+work="$(make_repo)"
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000000e)" --driver-mode || true
+clear_pins
+structural="$(captured_of "$work")/anthropic-api/clean-01/structural.txt"
+if [ -f "$structural" ]; then
+    check "a clean pair lands two structural lines" \
+        "2" "$(wc -l <"$structural" | tr -d ' ')"
+    check "the ingress summary is the first line" \
+        "ingress" "$(sed -n '1s/.*direction="\([a-z]*\)".*/\1/p' "$structural")"
+    check "the outgoing summary is the second line" \
+        "outgoing" "$(sed -n '2s/.*direction="\([a-z]*\)".*/\1/p' "$structural")"
+else
+    echo "FAIL: clean-pair capture wrote no structural.txt (rig log: $work/rig.log)"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 13: an absent outgoing summary fails the fixture in driver --
+# --- mode, and only warns on the live-box path ------------------------
+# `trace_non_stream` carries NO structural summary at all, so it is the
+# ingress-and-outgoing-absent case. Half the structural evidence is not a
+# canonical fixture; a drained live-box log is whatever the daemon emitted.
+set_pins halfway-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_non_stream 019eab77-0000-4000-8000-00000000000f anthropic)" --driver-mode || rc=$?
+clear_pins
+if [ "$rc" -eq 0 ]; then
+    echo "FAIL: driver mode accepted a fixture with no structural summary"
+    fails=$((fails + 1))
+else
+    echo "PASS: driver mode fails a fixture with no structural summary"
+fi
+if [ -d "$(captured_of "$work")/anthropic-api/halfway-01" ]; then
+    echo "FAIL: driver mode landed a fixture with no structural summary"
+    fails=$((fails + 1))
+else
+    echo "PASS: no fixture lands when a structural summary is absent"
+fi
+rm -rf "$work"
+
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_non_stream 019eab77-0000-4000-8000-000000000010 anthropic)" || rc=$?
+check "live-box mode exits 0 with no structural summary" "0" "$rc"
+check_log "live-box mode warns about the absent summary" \
+    "WARN no ingress and outgoing structural summary" "$work/rig.log"
+if [ -d "$(captured_of "$work")/019eab77-0000-4000-8000-000000000010" ]; then
+    echo "PASS: live-box mode keeps a fixture with no structural summary"
+else
+    echo "FAIL: live-box mode dropped a fixture over an absent structural summary"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 14: driver mode refuses to promote what --check rejects ------
+# The scrub `--check` deny set is derived from the environment, so the
+# seeded value is a SYNTHETIC third-party home prefix -- never a real
+# path from this machine. `--write` cannot rewrite another account's home
+# (there is no safe automatic mapping), so the residue reaches `--check`,
+# which is exactly the split this gate exists to catch.
+set_pins dirty-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver_dirty 019eab77-0000-4000-8000-000000000011)" --driver-mode || rc=$?
+clear_pins
+if [ "$rc" -eq 0 ]; then
+    echo "FAIL: driver mode promoted a fixture the scrub check rejects"
+    fails=$((fails + 1))
+else
+    echo "PASS: driver mode refuses to promote a fixture the scrub check rejects"
+fi
+if [ -d "$(captured_of "$work")/anthropic-api/dirty-01" ]; then
+    echo "FAIL: a scrub-refused fixture reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a scrub-refused fixture does not reach the corpus"
+fi
+check_log "the scrub refusal is reported" "scrub check refused" "$work/rig.log"
+rm -rf "$work"
+
+# Paired positive control: the same driver path promotes a clean fixture,
+# so the refusal above is the check firing rather than driver mode being
+# unable to promote anything at all. (Case 8 asserts the same landing;
+# this one asserts it against the scrub gate specifically.)
+set_pins clean-scrub-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000012)" --driver-mode || rc=$?
+clear_pins
+check "driver mode promotes a fixture the scrub check accepts" "0" "$rc"
+if [ -f "$(captured_of "$work")/anthropic-api/clean-scrub-01/meta.json" ]; then
+    echo "PASS: a clean driver fixture is promoted"
+else
+    echo "FAIL: a clean driver fixture was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 15: json_escape still covers the driver-mode pins -----------
+# Driver mode makes the pins mandatory, so the hostile values go in the
+# pins themselves. A case id names a DIRECTORY now, so the quote rides in
+# config_sha and connection_mode while the case id stays path-safe -- the
+# escaping contract is per-value, and these are the two whose values a
+# driver sets programmatically without a path constraint.
+set_pins quote-case-01 'sha"with\quote' 'mode"x'
+work="$(make_repo)"
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000013)" --driver-mode || true
+clear_pins
+captured="$(captured_of "$work")"
+meta="$captured/anthropic-api/quote-case-01/meta.json"
+if [ -f "$meta" ]; then
+    if is_valid_json "$meta"; then
+        echo "PASS: a driver meta.json parses with a quote in a pin"
+        check "an embedded quote and backslash round-trip through config_sha" \
+            'sha"with\quote' "$(meta_get "$meta" config_sha)"
+        check "an embedded quote round-trips through connection_mode" \
+            'mode"x' "$(meta_get "$meta" client.connection_mode)"
+    else
+        echo "FAIL: a driver meta.json is invalid JSON when a pin carries a quote"
+        cat "$meta"
+        fails=$((fails + 1))
+    fi
+else
+    echo "FAIL: quoted-pin driver capture produced no meta.json (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 16: a case id that is not a single path segment is refused --
+# The case id names the landing directory, so a separator or a traversal
+# segment in it would write outside the lane dir -- past the --out
+# confinement check, which ran on OUT alone.
+for bad in ../escape 'nested/case'; do
+    set_pins "$bad" abc123 base-url
+    work="$(make_repo)"
+    rc=0
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000014)" --driver-mode || rc=$?
+    clear_pins
+    if [ "$rc" -eq 0 ]; then
+        echo "FAIL: driver mode accepted the case id '$bad'"
+        fails=$((fails + 1))
+    else
+        echo "PASS: driver mode refuses the case id '$bad'"
+    fi
+    rm -rf "$work"
+done
+
+# --- Case 17: two completed requests under one case id are refused ----
+# One case id pins ONE interaction. Two completions in a single driver
+# trace both key on the same landing path, so the second would silently
+# overwrite the first and the corpus entry would depend on completion
+# order. The refusal says the driver captured a case it did not isolate.
+set_pins shared-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000015)
+$(trace_driver 019eab77-0000-4000-8000-000000000016)" --driver-mode || rc=$?
+clear_pins
+if [ "$rc" -eq 0 ]; then
+    echo "FAIL: driver mode accepted two requests under one case id"
+    fails=$((fails + 1))
+else
+    echo "PASS: driver mode refuses two requests under one case id"
+fi
+check_log "the refusal names the already-landed case" "already landed this run" \
+    "$work/rig.log"
+rm -rf "$work"
+
+# --- Case 18: --help still renders the header ------------------------
+# The usage extraction is sentinel-delimited; a line-count range silently
+# starts cutting the moment the header grows, and the driver-mode policy
+# is exactly the part a caller needs to read.
+help_out="$(bash "$RIG" --help 2>&1 || true)"
+if printf '%s' "$help_out" | grep -q -- '--driver-mode' &&
+    ! printf '%s' "$help_out" | grep -q 'END USAGE'; then
+    echo "PASS: --help renders the header including driver mode"
+else
+    echo "FAIL: --help output is truncated or leaks the sentinel"
+    printf '%s\n' "$help_out" | tail -5
+    fails=$((fails + 1))
+fi
 
 if [ "$fails" -gt 0 ]; then
     echo "capture_fixtures self-test: $fails failure(s)"

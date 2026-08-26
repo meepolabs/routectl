@@ -105,11 +105,46 @@ capture + replay flow see
 
 ## Per-fixture directory layout
 
-Each fixture lives at:
+The landing path depends on which CAPTURE MODE produced the fixture, and
+the two modes never mix (`scripts/capture_fixtures.sh --help` states the
+full policy split).
+
+A live-box capture -- the default mode, drained from a real session --
+lands at:
 
     crates/routectl-cli/tests/fixtures/captured/<request_id>/
 
-Inside the request directory, `meta.json` and the two request halves are
+A DRIVER capture (`--driver-mode`) lands keyed on `(lane, case_id)`:
+
+    <out>/<lane>/<case_id>/
+
+Case keying is what makes a driver corpus diffable. A UUID-keyed corpus
+grows a fresh sibling on every rerun and has nothing to compare against;
+case-keyed, a rerun of the same scenario RE-LANDS on the same path, so it
+either matches or diffs. The lane component is the NORMALIZED lane
+(`kind_str()` vocabulary, as in `meta.lane`), and driver mode refuses to
+promote a fixture whose provider kind did not map to one -- an empty lane
+would collapse the path to `<out>/<case_id>` and put a fixture nothing can
+gate into the canonical corpus.
+
+A rerun REPLACES the previous directory rather than merging into it: the
+old directory is renamed aside, the new one moves into place, and only
+then is the old one removed, so a reader sees one whole fixture or the
+other. Merging would leave files the new capture never observed -- a
+non-stream run's `upstream_response.json` surviving into a stream rerun --
+and since file presence IS the schema (below), the drift signal would be
+read off a directory no single capture ever produced. `request_id` stays
+in `meta.json` for traceability; it just no longer names the directory.
+
+A `case_id` therefore has to be a single path-safe SCENARIO name
+(`tools-multiturn-01`), never a value derived from the environment: in
+driver mode the rig runs `scrub-fixture.sh --check` over the staged
+fixture -- `meta.json` included -- before promoting it, so a case id
+carrying a hostname or a real home path is refused by the landing gate
+itself. A case id holding a path separator or a traversal segment is
+refused outright, since it names a directory.
+
+Inside the fixture directory, `meta.json` and the two request halves are
 always present; the response halves are present when the capture
 observed them. The nine files the loader reads:
 
@@ -128,6 +163,15 @@ not require:
 
     structural.txt    the captured `structural summary` trace lines
     stream.txt        the captured `stream summary` trace lines
+
+`structural.txt` holds at most two lines -- the ingress one first, then
+the outgoing one. Each is selected by the emitter target plus the event
+name plus its own `direction=` field, so a request body quoting the phrase
+`structural summary` (routine traffic for a coding session about
+routectl's own logging) cannot be selected in place of a real summary. An
+absent direction FAILS the fixture in driver mode -- half the structural
+evidence is not a canonical fixture -- and only warns on the live-box
+path, where a drained log is whatever the daemon happened to emit.
 
 `meta.json` is always present. The two request halves --
 `ingress_request.json` + `ingress_request.headers.json` and
@@ -224,7 +268,9 @@ Fields:
 - `case_id` -- stable identity of the SCENARIO, as opposed to the
   one-off `request_id`. A rerun of the same case re-lands on the same
   identity, so it either matches or diffs. Written from
-  `ROUTECTL_FIXTURE_CASE_ID`; empty for an unpinned live-box capture.
+  `ROUTECTL_FIXTURE_CASE_ID`; empty for an unpinned live-box capture. In
+  driver mode it also NAMES the landing directory (see the layout above),
+  so it must be a single path-safe scenario name and it is mandatory.
 - `config_sha` -- hash of the config in force at capture time, so a
   rerun under a drifted config does not read as client drift. Written
   from `ROUTECTL_FIXTURE_CONFIG_SHA`.
@@ -236,6 +282,12 @@ Fields:
   content as system-reminder text with zero system turns in base-url
   mode, so an unpinned mode makes a cross-mode comparison read as
   drift.
+
+  All three environment-sourced pins (`case_id`, `config_sha`,
+  `client.connection_mode`) are EMPTY when unset on the live-box path,
+  where a trace genuinely cannot observe them, and MANDATORY in driver
+  mode, where an unset pin is a bug in the driver rather than a fact
+  about the capture. Driver mode aborts naming the missing variable.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
   bodies. Stream fixtures are currently skipped by the replay
   drivers (stream-body replay is deferred -- the capture rig does

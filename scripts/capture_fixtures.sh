@@ -27,7 +27,8 @@
 # Usage:
 #   scripts/capture_fixtures.sh [--log /tmp/routectl-trace.log] \
 #                               [--out crates/routectl-cli/tests/fixtures/captured] \
-#                               [--limit 4] [--force] [--allow-unsafe-out]
+#                               [--limit 4] [--force] [--allow-unsafe-out] \
+#                               [--driver-mode]
 #
 # `--limit N` caps the number of NEW requests captured this run
 # (periodic runs typically pass a small limit).
@@ -43,6 +44,47 @@
 #   ROUTECTL_FIXTURE_CASE_ID          scenario identity for rerun diffs
 #   ROUTECTL_FIXTURE_CONFIG_SHA       hash of the config in force
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  how the client reached routectl
+#
+# TWO CAPTURE MODES, TWO POLICIES.
+#
+# Default (live-box): a trace drained from a real session. It genuinely
+# cannot observe the three pins above, so an empty pin is honest; the
+# landing directory is keyed on `request_id`; a missing outgoing
+# structural summary warns; scrubbing is write-only.
+#
+# `--driver-mode`: a hermetic capture produced by a driver that KNOWS
+# every pin, so an empty pin is a bug rather than a fact:
+#
+#   * All three pins are MANDATORY. An unset one aborts the run naming
+#     the variable, because an empty case id collapses every case in a
+#     lane onto one landing directory and the corpus silently
+#     overwrites itself.
+#   * Landing directories key on `(lane, case_id)` --
+#     `<out>/<lane>/<case_id>/` -- so a rerun of the same case RE-LANDS
+#     on the same path and produces a DIFF instead of a fresh sibling.
+#     The rerun REPLACES the previous directory: the old one is renamed
+#     aside into a `.tmp.stale.*` name, the new one moves into place,
+#     then the old one is deleted, so a reader either sees the whole
+#     previous fixture or the whole new one. `request_id` stays in
+#     meta.json for traceability, it just no longer names the directory.
+#     A case id therefore has to be a path-safe SCENARIO name
+#     (`tools-multiturn-01`) and must never be derived from the
+#     environment -- a hostname or a real path in it is personal data
+#     that the scrub gate below refuses, since `--check` scans
+#     meta.json too.
+#   * A missing structural summary on either direction FAILS that
+#     fixture: half the structural evidence is not a canonical fixture.
+#   * `scrub-fixture.sh --check` runs after `--write` and a non-zero
+#     exit refuses the promotion. A driver fixture is canonical by
+#     construction or it is not landed.
+#
+# Exit codes:
+#   0  the run completed; `captured=<n>` on stdout
+#   1  a pin was unset (driver mode), the trace log was unreadable, or a
+#      fixture was refused -- a refusal aborts the RUN, so a driver
+#      runner reads any non-zero exit as "this case produced no fixture"
+#   2  usage error, or an --out outside the captured tree
+# --- END USAGE ---
 
 # set -e so a partial-fixture mid-write failure aborts the script
 # instead of silently writing a half-poisoned directory. set -u
@@ -59,6 +101,20 @@ OUT="$ROOT/crates/routectl-cli/tests/fixtures/captured"
 LIMIT=0
 FORCE=0
 ALLOW_UNSAFE_OUT=0
+DRIVER_MODE=0
+
+# Landing paths promoted by this run, space-delimited. Only driver mode
+# reads it: two requests in one driver trace share the run's single case
+# id, so without this the second would overwrite the first.
+DRIVER_LANDED=""
+
+# Print the header block as usage. Delimited by a sentinel rather than a
+# line count: a magic `1,NNp` range silently starts cutting content the
+# moment the header grows, and the driver-mode policy is exactly the part
+# a caller needs to read.
+usage() {
+  sed -n '2,/^# --- END USAGE ---$/p' "$0" | sed '$d'
+}
 
 # Workspace package version, stamped into every meta.json + manifest
 # entry for forward-compat. Pulled once at startup from the workspace
@@ -134,10 +190,35 @@ while [ $# -gt 0 ]; do
     --limit) [ $# -ge 2 ] || { echo "--limit requires a value" >&2; exit 2; }; LIMIT="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --allow-unsafe-out) ALLOW_UNSAFE_OUT=1; shift ;;
-    -h|--help) sed -n '1,45p' "$0"; exit 0 ;;
+    --driver-mode) DRIVER_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Driver mode fails closed on the three pins. `:?` aborts under `set -u`
+# naming the variable, which is the whole point: an unset pin in a driver
+# run is a bug in the driver, and an empty case_id would collapse every
+# case in the lane onto one landing directory before anyone noticed. The
+# live-box path below never reaches this block and keeps today's
+# tolerance.
+if [ "$DRIVER_MODE" = 1 ]; then
+  : "${ROUTECTL_FIXTURE_CASE_ID:?driver mode requires a case id (ROUTECTL_FIXTURE_CASE_ID)}"
+  : "${ROUTECTL_FIXTURE_CONFIG_SHA:?driver mode requires a config sha (ROUTECTL_FIXTURE_CONFIG_SHA)}"
+  : "${ROUTECTL_FIXTURE_CONNECTION_MODE:?driver mode requires a connection mode (ROUTECTL_FIXTURE_CONNECTION_MODE)}"
+
+  # The case id becomes two path components' worth of directory name, so
+  # a separator or a traversal segment in it would land the fixture
+  # outside the lane directory -- past the --out confinement check, which
+  # ran on OUT alone.
+  case "$ROUTECTL_FIXTURE_CASE_ID" in
+    */*|.|..)
+      echo "capture_fixtures: refusing case id '$ROUTECTL_FIXTURE_CASE_ID': it names the landing directory," >&2
+      echo "so it must be a single path-safe scenario name (e.g. tools-multiturn-01)." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # Lexically resolve a path to absolute, collapsing `.` and `..` without
 # touching the filesystem. Portable (no realpath / -m dependency) and
@@ -344,17 +425,21 @@ in_scope_ids() {
 # For one request_id, write its fixture directory.
 #
 # Atomicity contract: writes go to a per-request tmp directory
-# `$OUT/.tmp.<id>.XXXXXX` and are promoted to `$OUT/<id>` via a
+# `$OUT/.tmp.<id>.XXXXXX` and are promoted to the landing path via a
 # single mv(1) only after every file lands. A crash between the
 # first file write and the mv leaves a `.tmp.*` directory behind,
-# which the startup sweep prunes on the next run -- the final
-# `$OUT/<id>` directory is never half-populated, so the
+# which the startup sweep prunes on the next run -- the landing
+# directory is never half-populated, so the
 # `[ -d "$OUT/$id" ] && continue` idempotency guard in the caller
 # can be trusted. The manifest append happens AFTER the mv so a
 # dangling manifest entry never points to a missing directory.
+#
+# The landing path differs by mode: `$OUT/<request_id>` for a live-box
+# capture, `$OUT/<lane>/<case_id>` in driver mode (see the header). It is
+# resolved late, after the lane is normalized, because the lane is
+# derived from the trace rather than passed in.
 write_fixture() {
   local id="$1" ts="$2" pkind="$3" ikind="${4:-}"
-  local dst="$OUT/$id"
   local tmp
   tmp="$(mktemp -d "$OUT/.tmp.$id.XXXXXX")"
 
@@ -481,8 +566,65 @@ write_fixture() {
   local lane
   lane="$(normalize_lane "$pkind")"
 
-  # Structural summary lines (two: ingress + outgoing direction).
-  echo "$lines" | grep 'structural summary' | head -2 > "$tmp/structural.txt" || true
+  # Structural summary lines, ONE PER REQUEST-SIDE DIRECTION.
+  #
+  # Anchored the same way as extract_body: the needle must sit at the
+  # message position right after the first `routectl_core::log_safe: `,
+  # and the direction is matched in the FIELDS of that same line (the
+  # `direction=` precedent is the stream-summary selection below). An
+  # unanchored `grep 'structural summary' | head -2` selected an ingress
+  # request BODY line whose JSON content happened to carry the phrase and
+  # then dropped the real outgoing summary off the end of `head -2` --
+  # measurably, on 15% of an existing corpus. Body text rides a different
+  # event under `body=`, so anchoring on the emitter plus the event name
+  # makes content copies unselectable, and picking each direction
+  # explicitly makes the selection independent of line order and count.
+  extract_structural() {
+    local direction="$1"
+    echo "$lines" | awk -v direction="$direction" \
+                        -v needle="structural summary" \
+                        -v target="routectl_core::log_safe: " '
+      {
+        p = index($0, target)
+        if (p == 0) next
+        mstart = p + length(target)
+        if (substr($0, mstart, length(needle)) != needle) next
+        rest = substr($0, mstart + length(needle))
+        if (index(rest, "direction=\"" direction "\"") == 0) next
+        print
+        exit
+      }
+    '
+  }
+
+  local s_ing s_out missing
+  s_ing="$(extract_structural ingress)"
+  s_out="$(extract_structural outgoing)"
+  missing=""
+  [ -z "$s_ing" ] && missing="ingress"
+  [ -z "$s_out" ] && missing="${missing:+$missing and }outgoing"
+
+  # A fixture missing a direction's structural summary cannot have that
+  # direction's wire shape checked against anything. In driver mode that
+  # is a failed capture -- a canonical fixture carries both halves of its
+  # structural evidence or it is not landed. Live-box mode warns and
+  # keeps the fixture: a drained session's log is whatever the daemon
+  # happened to emit, and a partial trace is still evidence.
+  if [ -n "$missing" ]; then
+    if [ "$DRIVER_MODE" = 1 ]; then
+      echo "capture_fixtures: no $missing structural summary for $id; discarding the fixture" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    echo "capture_fixtures: WARN no $missing structural summary for $id" >&2
+  fi
+
+  {
+    [ -n "$s_ing" ] && printf '%s\n' "$s_ing"
+    [ -n "$s_out" ] && printf '%s\n' "$s_out"
+    :
+  } > "$tmp/structural.txt"
+
   # Stream summary lines (two: upstream + egress direction).
   echo "$lines" | grep 'stream summary' > "$tmp/stream.txt" || true
 
@@ -555,11 +697,76 @@ META
     return 1
   fi
 
-  # Atomically promote the tmp directory into place. Until this
-  # rename succeeds the final `$OUT/<id>` directory does not exist;
-  # an interrupted run leaves a `.tmp.*` dir that the next startup
-  # sweep removes.
-  mv "$tmp" "$dst"
+  # Driver mode additionally REFUSES to promote what the write pass could
+  # not fully clean. `--check` exits 1 on residual personal data and 2 on
+  # a usage / prerequisite problem; either way the fixture does not land,
+  # because a driver corpus is canonical by construction. The live-box
+  # path stays write-only: its corpus is local-only by policy, and a
+  # refusal there would throw away evidence that cannot be recaptured.
+  #
+  # `--check` scans EVERY file under the fixture, meta.json included, so a
+  # case id carrying a hostname or a real home path is refused by this
+  # gate. Case ids are scenario names for exactly that reason.
+  if [ "$DRIVER_MODE" = 1 ] && ! bash "$SCRUB" --check "$tmp"; then
+    echo "capture_fixtures: scrub check refused $id; not promoting the fixture" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  # Resolve the landing path. Driver mode keys on `(lane, case_id)` so a
+  # rerun of the same case re-lands on the same path and diffs; live-box
+  # mode keys on request_id. An empty lane means normalize_lane could not
+  # map the traced provider_kind, which in driver mode would collapse the
+  # path to `$OUT/<case_id>` and put a fixture nothing can gate into the
+  # canonical corpus.
+  local dst
+  if [ "$DRIVER_MODE" = 1 ]; then
+    if [ -z "$lane" ]; then
+      echo "capture_fixtures: no lane for $id (provider_kind '$pkind'); not promoting the fixture" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    dst="$OUT/$lane/$ROUTECTL_FIXTURE_CASE_ID"
+    # One case id pins ONE interaction, so two completed requests in one
+    # driver trace both key on this path and the second would silently
+    # overwrite the first. Refuse instead: the driver is capturing a case
+    # it did not isolate, and a corpus entry that depends on which request
+    # finished last is not evidence of anything.
+    case " $DRIVER_LANDED " in
+      *" $dst "*)
+        echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' on lane '$lane' already landed this run;" >&2
+        echo "refusing $id -- one driver run captures one case." >&2
+        rm -rf "$tmp"
+        return 1
+        ;;
+    esac
+    mkdir -p "$OUT/$lane"
+  else
+    dst="$OUT/$id"
+  fi
+
+  # Atomically promote the tmp directory into place. Until this rename
+  # succeeds the landing directory holds its previous contents (or does
+  # not exist); an interrupted run leaves a `.tmp.*` dir that the next
+  # startup sweep removes.
+  #
+  # A driver rerun REPLACES the previous fixture for that case rather than
+  # merging into it: the old directory is renamed aside under a `.tmp.`
+  # name, the new one moves into place, and only then is the old one
+  # deleted. A merge would leave files from the previous run that this
+  # capture never observed -- e.g. an `upstream_response.json` from a
+  # non-stream run surviving into a stream rerun -- and file presence IS
+  # the schema, so the drift signal would be read off a directory no
+  # single capture ever produced.
+  if [ -d "$dst" ]; then
+    local stale="$OUT/.tmp.stale.$id.$$"
+    mv "$dst" "$stale"
+    mv "$tmp" "$dst"
+    rm -rf "$stale"
+  else
+    mv "$tmp" "$dst"
+  fi
+  DRIVER_LANDED="$DRIVER_LANDED $dst"
 
   # Append to manifest.jsonl AFTER the rename so a dangling manifest
   # entry never points to a missing directory. One JSONL line per
