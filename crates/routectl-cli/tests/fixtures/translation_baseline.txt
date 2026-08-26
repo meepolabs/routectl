@@ -1,0 +1,33 @@
+# Divergence PATHS the conservation harness treats as report-only on a
+# TRANSLATION lane (one whose ingress and egress dialects differ).
+#
+# Format: one `<ingress> <egress> <divergence-path>` triple per line.
+#   ingress -- `IngressAdapter::id()` token (anthropic, openai,
+#              openai-responses)
+#   egress  -- egress lane token (anthropic-api, openai-compat,
+#              bedrock-invoke, bedrock-converse, openai-responses, gemini)
+#   path    -- the divergence path in the comparator's syntax
+#              (`max_tokens`, `generationConfig`, `messages[0].role`)
+# Blank lines and `#` comments are ignored.
+#
+# Keyed per LANE, not per path alone: a transform measured on one lane
+# proves nothing on another, so a path excused here for one lane pair is
+# still a finding on every other.
+#
+# THE SIGNAL IS CHANGE, NOT EMPTINESS. A translation lane never fails for
+# diverging -- crossing a dialect boundary is what it does. It fails when a
+# divergence appears on a path this file does not list, i.e. when the
+# translation shape moved.
+#
+# Empty is LEGAL here, unlike in gated_lanes.txt, and the difference is
+# deliberate: an empty gated set would downgrade every gated comparison to
+# report-only (fail-open), whereas an empty baseline makes every
+# translation divergence a failure (fail-closed). Emptiness is the strict
+# end of this file's range.
+#
+# A MISSING file, however, is an error: an unreadable baseline is unknown,
+# and an unknown baseline cannot adjudicate anything.
+#
+# Empty for now: the corpus carries no translation-lane fixture, so any
+# entry here would be an unmeasured guess. Populated from a measured run
+# the first time a translation-lane capture exists.

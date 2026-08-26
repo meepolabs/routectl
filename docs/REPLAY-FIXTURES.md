@@ -50,6 +50,14 @@ gated set, because an empty set is indistinguishable from a passing
 gate. Presence under `driver/` makes a fixture ELIGIBLE for gating;
 only this file makes its lane gated.
 
+The conservation harness reads that list through
+`conservation::resolve_gated_lanes`, which maps exactly ONE error variant
+-- the deliberately-empty `NoLanesListed` -- onto "no lane is gated", and
+propagates every other. That is not fail-open: "the list was read and
+parsed and names nothing yet" and "the list could not be read" are
+different facts, and only the first one is knowledge. An empty gated set
+stays unrepresentable from a parse failure.
+
 ## Truncated bodies are refused
 
 `truncate_json_for_log` in `routectl-core/src/log_safe.rs` appends
@@ -96,7 +104,8 @@ For the loader and structural comparators (`load_fixture`,
 `assert_json_equal_structural`, `assert_sse_equal`, ...) see
 `crates/routectl-cli/tests/common/replay/` -- the entry point is
 `mod.rs`, with `loader.rs`, `json_diff.rs`, `sse_diff.rs`,
-`gated_lanes.rs`, and `harness.rs` as sub-modules. `harness.rs` holds
+`gated_lanes.rs`, `lane.rs`, `conservation.rs`, and `harness.rs` as
+sub-modules. `harness.rs` holds
 shared scaffolding (`local_root`, `driver_root`, `headers_from_pairs`,
 `enrichment_skip_reason`, `ENRICHMENT_DEPENDENT_MODELS`) used by the
 `replay_egress.rs` and `replay_ingress.rs` drivers. For the day-to-day
@@ -446,6 +455,63 @@ lines hit the "first N shown" cap, so a class appearing only past the cap
 is absent from the log and counting there undercounts. Read the fixtures
 and call `diff_all` for a complete set; the cap bounds the log, not the
 comparison.
+
+### Conservation: captured ingress vs captured outgoing
+
+A second, independent axis, driven by `tests/conservation.rs` over
+`common/replay/conservation.rs`. It compares a fixture's
+`ingress_request.json` against its `outgoing_request.json` -- two files
+captured from the SAME real request -- so no routectl code re-runs and no
+enrichment is rebuilt. Every divergence is either an explained routectl
+transform (the exception table in `lane.rs`) or wire loss.
+
+The harness normalizes BEFORE it diffs: the lane's normalizer entries
+rewrite the ingress side first, then `diff_all(outgoing, normalized
+ingress, ..)`. That orientation is what the exception predicates are
+written against; swapping it inverts Added/Removed and un-matches every
+matcher.
+
+Measured over the 250 loadable live-box fixtures, all on the
+`anthropic` -> `anthropic-api` FIDELITY lane, the corpus reduces to
+exactly four explained classes with ZERO unexplained:
+
+| class | fixtures / divergences | exception |
+|---|---|---|
+| `messages[]` length shrink (system-turn lift) | 238 bodies rewritten | `system-turn-lift` (NORMALIZER) |
+| `.temperature` ADDED as `1.0` | 133 | `thinking-temperature-clamp` |
+| `.model` VALUE change (bracketed alias resolved) | 6 | `model-alias-suffix-resolved` |
+| whole `thinking` key REMOVED | 4 | `disabled-thinking-dropped` |
+
+Note the `output_config` stale fixtures do NOT diverge on this axis:
+`output_config` is present on BOTH captured sides, so conservation reads
+them clean. They remain a finding on the egress-replay axis above.
+
+Verdicts: a FIDELITY lane FAILS on any divergence no exception explains. A
+TRANSLATION lane is report-only against
+`crates/routectl-cli/tests/fixtures/translation_baseline.txt`, one
+`<ingress> <egress> <divergence-path>` triple per line -- the signal is
+CHANGE, so a path ABSENT from the baseline fails. An exception matching
+ZERO divergences on a POPULATED lane fails (an unexercised matcher is an
+untested claim). A gated lane with zero asserted fixtures, or with any
+skip, fails. DEGRADED prints loudly but exits 0: nothing asserted, or the
+corpus held entries that would not load.
+
+An EMPTY translation baseline is legal, in deliberate contrast to
+`gated_lanes.txt`: an empty gated set would make every gated comparison
+silently report-only (fail-open), whereas an empty baseline makes every
+translation divergence a failure (fail-closed). A MISSING baseline file is
+still an error -- an unknown baseline adjudicates nothing.
+
+**Stated limit.** `resign_cch_in_place`
+(`routectl-providers/src/claude_signing.rs`) rewrites five lowercase hex
+characters of one `cch=` token inside the `system` billing block AFTER the
+outgoing-body trace is emitted -- length-preserving, a silent no-op when
+the token is absent, and present in 133 of the 250 outgoing bodies. So the
+captured outgoing body differs from the true transmitted bytes by exactly
+those five characters, and conservation cannot see them. It gets no
+exception entry, because it produces no ingress-vs-outgoing divergence at
+all and the zero-match rule would correctly fail such an entry. A
+byte-identical deletion gate inherits this limit.
 
 Two further conventions hold for the current corpus. These are
 capture-rig conventions, NOT loader- or driver-enforced -- the
