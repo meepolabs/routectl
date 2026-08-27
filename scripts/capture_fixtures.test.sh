@@ -160,6 +160,40 @@ TRACE
     structural_line "$id" outgoing 500000
 }
 
+# A LARGE `tool_result`-shaped ingress body, with `$1` buried deep inside
+# the padded region -- past the first few thousand bytes, so an assertion
+# on it fails the moment the scrub gate reads a prefix instead of the whole
+# file. The padding imitates what the client actually puts on the wire for
+# a file read: line-numbered content, JSON-escaped, wrapped in a
+# `tool_result` block. That framing is the reason a size reduction may
+# never run before the gate, so the fixture the ordering cases drive has to
+# carry it.
+large_tool_result_body() {
+    local buried="$1"
+    local pad="" i=1
+    while [ "$i" -le 120 ]; do
+        pad+="   $i\\tconst answer = 42;\\n"
+        i=$((i + 1))
+    done
+    printf '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"%s%s%s"}]}]}' \
+        "$pad" "read $buried" "$pad"
+}
+
+# A driver trace whose ingress body is the large `tool_result` block above.
+# `$2` is the path buried in the middle of it.
+trace_driver_large() {
+    local id="$1" buried="$2"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local body
+    body="$(large_tool_result_body "$buried")"
+    printf '2026-08-25T10:00:00.000000Z TRACE %s:messages{ingress="anthropic"}: %s ingress request body ingress="anthropic" body=%s redact_prompts_enabled=false\n' \
+        "$span" "$target" "$body"
+    trace_non_stream "$id" anthropic | tail -n +2
+    structural_line "$id" ingress 400000
+    structural_line "$id" outgoing 500000
+}
+
 # Build a throwaway repo and print its root. Split out of run_rig so a
 # case can invoke the rig TWICE against the same captured tree, which is
 # the only way to observe what a rerun does to an existing landing dir.
@@ -1034,7 +1068,145 @@ check "a driver run that lands a fixture still exits 0" "0" "$rc"
 check_log "the landing run reports captured=1" "captured=1" "$work/rig.out"
 rm -rf "$work"
 
-# --- Case 19: --help still renders the header ------------------------
+# --- Case 19: scrub --write and --check COMPOSE over the full bytes ----
+# The ordering contract documented at the scrub block in write_fixture:
+# `--write`, then `--check` on the FULL bytes, then any size reduction,
+# then promote. No reduction exists yet, so what is pinned here is that the
+# two existing mechanisms compose -- a fixture is scrubbed AND checked
+# before it lands, and the check reads the whole file rather than a prefix
+# or a reduced form. That is the property a later reduction inserted in the
+# wrong place would break, and it is why the comment names the position.
+#
+# The offending content is a synthetic third-party home path buried in the
+# MIDDLE of a large `tool_result`-shaped block: `--write` has no safe
+# rewrite for another account's home, so the residue reaches `--check`, and
+# its depth in the body is what makes a prefix-only scan observable.
+BURIED_PATH="/home/someoneelse/notes.txt"
+
+# PREMISE ASSERTION. Without it the refusal below would hold for a body
+# where the path sits in the first bytes -- which a prefix scan also
+# catches -- so the case would pass while proving nothing about the full
+# bytes. Same vacuous-negative shape as the no-completion premise above.
+large_body="$(large_tool_result_body "$BURIED_PATH")"
+buried_offset="$(printf '%s' "${large_body%%"$BURIED_PATH"*}" | wc -c)"
+if [ "${#large_body}" -gt 4000 ] && [ "$buried_offset" -gt 2000 ]; then
+    echo "PASS: the offending path sits deep inside a large tool_result body"
+else
+    echo "FAIL: the large-body fixture is not the shape it is named for --"
+    echo "FAIL: body ${#large_body} bytes, path at offset $buried_offset"
+    fails=$((fails + 1))
+fi
+unset large_body buried_offset
+
+set_pins deep-residue-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver_large 019eab77-0000-4000-8000-00000000001f "$BURIED_PATH")" \
+    --driver-mode || rc=$?
+clear_pins
+check "a deep residue in a large body refuses with exit 1" "1" "$rc"
+# The class NAMES the mechanism that caught it: home-prefix is the class
+# whose whole purpose is the `file_path` shape a tool_result block carries,
+# so a refusal under any other class would mean the composition held by
+# accident.
+check_log "the deep-residue refusal names the home-prefix class" "home-prefix" \
+    "$work/rig.log"
+check_log "the deep-residue refusal is the scrub check" "scrub check refused" \
+    "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/deep-residue-01" ]; then
+    echo "FAIL: a fixture with a deep residue reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a fixture with a deep residue does not reach the corpus"
+fi
+# Nothing at all lands under the corpus root, staged or promoted: the
+# ordering contract ends in `promote`, and a refusal must not leave the
+# reduced-or-not bytes anywhere a later run could pick up.
+if [ -d "$(captured_of "$work")" ] &&
+    [ -n "$(find "$(captured_of "$work")" -mindepth 1 -print -quit)" ]; then
+    echo "FAIL: the deep-residue refusal left content under the corpus root"
+    find "$(captured_of "$work")" -mindepth 1 | sed -n '1,10p'
+    fails=$((fails + 1))
+else
+    echo "PASS: nothing lands under the corpus root on a deep-residue refusal"
+fi
+rm -rf "$work"
+
+# Positive control: the SAME large body without the offending path
+# promotes at exit 0, so the refusal above is the gate reading the whole
+# file and not the rig refusing a body for its size.
+set_pins large-clean-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver_large 019eab77-0000-4000-8000-000000000020 /tmp/notes.txt)" \
+    --driver-mode || rc=$?
+clear_pins
+check "the same large body without the residue promotes at exit 0" "0" "$rc"
+ingress="$(captured_of "$work")/anthropic-api/large-clean-01/ingress_request.json"
+if [ -f "$ingress" ]; then
+    echo "PASS: a large clean driver fixture is promoted"
+    # The promoted bytes are the FULL body: the contract's third step is
+    # "only then any size reduction", and nothing reduces today. A future
+    # reduction landing before the gate would show up here as a short file.
+    if [ "$(wc -c <"$ingress")" -gt 4000 ]; then
+        echo "PASS: the promoted fixture carries the full body, unreduced"
+    else
+        echo "FAIL: the promoted fixture is shorter than the body it captured"
+        fails=$((fails + 1))
+    fi
+else
+    echo "FAIL: a large clean driver fixture was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+unset ingress
+
+# The ORDER of the two steps, not just their presence. A body carrying the
+# CONTRIBUTOR'S OWN home path is clean only AFTER `--write` neutralizes it:
+# `--check` derives its deny set from the environment, so the same bytes
+# scanned first are a `home-path` finding and the fixture is refused. This
+# case therefore promotes under `--write` -> `--check` and refuses under the
+# reverse, which is the one assertion that distinguishes the two orders.
+# (Guarded: with $HOME unset or already the neutral placeholder there is no
+# rewrite to observe, and the case would assert nothing.)
+own_home="${HOME:-}"
+own_home="${own_home%/}"
+# The placeholder is the gate's own constant; reading it from there keeps
+# this guard from drifting the day the placeholder changes.
+placeholder_home="$(sed -n 's/^PLACEHOLDER_HOME="\(.*\)"$/\1/p' "$SCRUB")"
+if [ -z "$placeholder_home" ]; then
+    echo "FAIL: could not read PLACEHOLDER_HOME out of the scrub gate"
+    fails=$((fails + 1))
+fi
+if [ -n "$own_home" ] && [ "$own_home" != "$placeholder_home" ]; then
+    set_pins own-home-01 abc123 base-url
+    work="$(make_repo)"
+    rc=0
+    rig_run "$work" \
+        "$(trace_driver_large 019eab77-0000-4000-8000-000000000021 "$own_home/notes.txt")" \
+        --driver-mode || rc=$?
+    clear_pins
+    check "a body holding the contributor's own home promotes: --write ran before --check" \
+        "0" "$rc"
+    ingress="$(captured_of "$work")/anthropic-api/own-home-01/ingress_request.json"
+    if [ -f "$ingress" ] && ! grep -qF -- "$own_home" "$ingress"; then
+        echo "PASS: the promoted fixture carries the placeholder home, not the real one"
+    else
+        echo "FAIL: the contributor's own home survived into the promoted fixture"
+        fails=$((fails + 1))
+    fi
+    rm -rf "$work"
+    unset ingress
+else
+    echo "FAIL: \$HOME is unset or already the placeholder; the scrub ORDER is unasserted"
+    fails=$((fails + 1))
+fi
+unset own_home placeholder_home
+
+# --- Case 20: --help still renders the header ------------------------
 # The usage extraction is sentinel-delimited; a line-count range silently
 # starts cutting the moment the header grows, and the driver-mode policy
 # is exactly the part a caller needs to read.

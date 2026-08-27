@@ -726,6 +726,26 @@ META
     return 1
   fi
 
+  # ORDERING CONTRACT: `--write`, then `--check` on the FULL bytes, then
+  # any size reduction, then promote. Nothing reduces a fixture today. If a
+  # reduction is ever added -- a padding descriptor, an elision sentinel, a
+  # truncation of a large block -- it belongs HERE, after the `--check`
+  # above, and never before it.
+  #
+  # A reduction applied before the gate would hide a credential inside the
+  # region it replaced: the gate proves only what it read, so bytes dropped
+  # first are bytes nothing ever scanned. The regions a reduction would
+  # target are the large `tool_result` blocks, and those carry the client's
+  # own framing -- `file_path` values, line-numbered file content,
+  # directory listings -- so a third party's home path sits deep inside
+  # exactly the bytes a reduction would drop. That is what the
+  # `home-prefix` and `home-prefix-encoded` classes exist to catch, and
+  # they catch it only by scanning the whole file.
+  #
+  # The order is load-bearing in the other direction too: `--write`
+  # neutralizes the contributor's own home path, so `--check` verifies the
+  # rewritten bytes rather than the raw capture.
+
   # Resolve the landing path. Driver mode keys on `(lane, case_id)` so a
   # rerun of the same case re-lands on the same path and diffs; live-box
   # mode keys on request_id. An empty lane means normalize_lane could not
