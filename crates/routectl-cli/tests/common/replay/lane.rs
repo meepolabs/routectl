@@ -1459,6 +1459,9 @@ mod tests {
 
     #[test]
     fn a_normalizer_never_explains_a_divergence() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The rule the whole two-kind split exists to enforce: a
         // length-changing transform must not answer the post-diff
         // question, or it becomes a per-index whitelist over `.messages`.
@@ -1491,6 +1494,9 @@ mod tests {
 
     #[test]
     fn the_temperature_clamp_matches_a_forced_one_point_zero_and_nothing_else() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("thinking-temperature-clamp");
         let clamped = Divergence {
             path: "temperature".to_string(),
@@ -1527,6 +1533,9 @@ mod tests {
 
     #[test]
     fn the_model_matcher_matches_a_bracketed_alias_and_nothing_else() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("model-alias-suffix-resolved");
 
         assert!(entry.matches(&Divergence {
@@ -1568,6 +1577,9 @@ mod tests {
 
     #[test]
     fn the_thinking_matcher_matches_a_dropped_disabled_config_and_nothing_else() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("disabled-thinking-dropped");
 
         assert!(entry.matches(&Divergence {
