@@ -13,7 +13,10 @@
 //!
 //! Sub-modules:
 //! - [`loader`] -- on-disk fixture format + `load_fixture` /
-//!   `discover_fixtures`.
+//!   `discover_fixtures` (flat, live-box) / `discover_driver_fixtures`
+//!   (`<root>/<lane>/<case_id>`).
+//! - [`plant`] -- the one writer of a synthetic corpus in a tempdir,
+//!   shared by every test that needs one to walk.
 //! - [`conservation`] -- captured-ingress vs captured-outgoing
 //!   adjudication over the lane class and the exception table, plus the
 //!   translation-lane divergence baseline.
@@ -37,6 +40,7 @@ pub mod harness;
 pub mod json_diff;
 pub mod lane;
 pub mod loader;
+pub mod plant;
 pub mod sse_diff;
 
 pub use conservation::{
@@ -69,7 +73,11 @@ pub use lane::{
 };
 pub use loader::{
     FIXTURE_SCHEMA_VERSION, Fixture, FixtureClient, FixtureMeta, LoadedCorpus, ReplayError,
-    discover_fixtures, load_fixture,
+    discover_driver_fixtures, discover_fixtures, load_fixture,
+};
+pub use plant::{
+    current_meta, make_conserved, plant_driver_case, plant_fixture, plant_unloadable_driver_case,
+    write_required_files,
 };
 pub use sse_diff::{ParseError, SseEventCmp, assert_sse_equal, parse_sse_events};
 

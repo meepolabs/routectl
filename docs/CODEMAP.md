@@ -5458,7 +5458,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   loader, comparators, gated-lane reader, and shared scaffolding, plus
   `DiffMessage`
 - `tests/common/replay/loader.rs` -- on-disk fixture format (`FixtureMeta`,
-  `Fixture`, `ReplayError`) and the `load_fixture` / `discover_fixtures` walk
+  `Fixture`, `ReplayError`), `load_fixture`, and the two corpus walks:
+  `discover_fixtures` (flat live-box root) / `discover_driver_fixtures`
+  (`<root>/<lane>/<case_id>`)
+- `tests/common/replay/plant.rs` -- the one writer of a synthetic fixture
+  corpus in a tempdir (`plant_fixture`, `plant_driver_case`,
+  `plant_unloadable_driver_case`, `current_meta`, `write_required_files`)
 - `tests/common/replay/gated_lanes.rs` -- the `gated_lanes.txt` reader:
   `read_gated_lanes`, `parse_gated_lanes`, `is_lane_gated`, `GatedLaneError`
 - `tests/common/replay/harness.rs` -- the two fixture roots (`local_root`,
