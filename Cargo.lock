@@ -2859,6 +2859,7 @@ dependencies = [
  "parking_lot",
  "rand 0.10.2",
  "rcgen",
+ "regex",
  "reqwest",
  "routectl-auth",
  "routectl-core",

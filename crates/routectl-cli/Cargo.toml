@@ -134,6 +134,11 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util", "io-util"] }
 insta.workspace = true
 serial_test = "3"
+# `tests/gitleaks_allowlist_scope.rs` evaluates `.gitleaks.toml`'s path
+# patterns the way gitleaks itself does -- as regexes -- so a shared path
+# prefix cannot be mistaken for a match. Already in the graph via
+# routectl-providers; declared here so the test's use of it is explicit.
+regex = "1"
 routectl-testkit.workspace = true
 criterion = { workspace = true }
 # The config-migrate tests race config.toml through the SAME advisory
