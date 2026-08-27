@@ -117,13 +117,43 @@ echo "pre-commit: cargo doc (rustdoc lints denied)"
 RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
 
 echo "pre-commit: cargo test --workspace --release"
-# replay_egress and replay_ingress integration tests are temporarily
-# skipped because the local captured/ corpus has bodies cut by
-# systemd-journald LineMax (~48 KiB) leaving malformed JSON tails.
-# Loader needs a tolerance pass + capture path needs to bypass journal.
-# Re-enable by removing the --skip flags here once the loader skips
-# malformed fixtures rather than panicking.
+# egress_replay_all / ingress_replay_all stay skipped, and NOT for the
+# reason this comment used to give: the loader's per-fixture tolerance
+# pass shipped, and the live-box corpus now parses in full (250 loaded,
+# 0 skipped). What blocks them is a real gap in the replay PATH, measured
+# at 2 asserted / 133 skipped / 115 failed over that corpus:
+#   - the 133 skips wait on the system-turn lift's pre-diff realigning
+#     normalizer, which does not exist yet;
+#   - every one of the 115 failures carries, alongside its messages[]
+#     divergences, either a `model` divergence -- the router's
+#     alias-to-upstream resolution, which the bare replay path drives past
+#     by calling the egress provider directly -- or an
+#     `output_config`/`thinking` pairing current code cannot emit from any
+#     input, i.e. a stale capture predating that invariant and so evidence
+#     to reconcile rather than a regression to fix.
+# Neither is a routectl defect a commit should be blocked on, and a
+# permanently-red gate is worse than a named skip: it gets bypassed
+# wholesale, taking the legs that DO bite with it. Re-enable when the
+# replay path resolves aliases and the stale captures are reconciled;
+# both are tracked in the backlog. The per-class breakdown behind those
+# numbers is in docs/REPLAY-FIXTURES.md -- do not re-derive it by grepping
+# this leg's output, which caps divergences per failure.
+#
+# The conservation leg below is what actually adjudicates this corpus
+# today: it compares captured ingress against captured outgoing, so it
+# needs neither alias resolution nor a recapture, and it asserts all 250.
 cargo test --workspace --release -- --skip egress_replay_all --skip ingress_replay_all
+
+# The conservation leg, run with --nocapture so its per-lane lines and its
+# PASS|FAIL|DEGRADED verdict land in the hook output. A silent green here
+# would be unreadable: over an empty corpus the leg passes while proving
+# nothing, and the verdict line is what distinguishes the two.
+# --test-threads=1 because --nocapture lets parallel threads interleave
+# their stderr mid-line, which splices unit-test progress into the middle
+# of a report line and leaves the output unreadable. This leg is a few
+# hundred fast unit tests, so serializing costs nothing measurable.
+echo "pre-commit: cargo test (wire conservation, verdict shown)"
+cargo test -p routectl-cli --release --test conservation -- --nocapture --test-threads=1
 
 echo "pre-commit: cargo test (router, gen-catalog feature)"
 # The workspace leg above builds routectl-router without gen-catalog, so the

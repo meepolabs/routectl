@@ -115,6 +115,37 @@ jobs:
       - name: cargo test (router, gen-catalog feature)
         run: cargo test -p routectl-router --features gen-catalog --release --lib
 
+      # The wire-conservation leg, run for its OUTPUT. Both fixture roots are
+      # gitignored, so this checkout has no corpus and the leg adjudicates
+      # nothing -- which is exactly why it cannot be left to the workspace
+      # step above, where a bare green would read as a passing gate. The grep
+      # promotes the harness's own named-skip line to a step-level statement,
+      # and fails the step if the line is absent, so "no corpus" can never be
+      # reported by silence. When a driver corpus is committed the harness
+      # stops printing the line, the grep fails, and this step is rewritten to
+      # assert the verdict instead -- that flip is the review moment the first
+      # committed fixture deserves.
+      #
+      # --test-threads=1 is load-bearing here, not tidiness: under --nocapture
+      # parallel threads interleave their stderr mid-line, which can splice
+      # other output into the middle of the line the grep matches and fail this
+      # step over a formatting race.
+      - name: wire conservation (named skip on an empty corpus)
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/conservation.log"
+          cargo test -p routectl-cli --release --test conservation \
+            -- --nocapture --test-threads=1 2>&1 | tee "$log"
+          if grep -qF 'conservation: NOT RUN (no driver corpus in this checkout)' "$log"; then
+            echo "conservation: NOT RUN (no driver corpus in this checkout)"
+            echo "This job asserts NOTHING about wire conservation. The gate is wired;"
+            echo "it bites the moment a driver fixture is committed."
+            exit 0
+          fi
+          echo "conservation: the named-skip line is gone, so a driver corpus is present" >&2
+          echo "in this checkout -- rewrite this step to assert the run verdict." >&2
+          exit 1
+
   audit:
     name: cargo audit
     runs-on: ubuntu-22.04

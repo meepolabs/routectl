@@ -294,22 +294,28 @@ day-to-day capture flow.
    clients (claude-code, codex, custom scripts, etc.). The capture rig
    only sees completed requests, so let some real exchanges flow.
 
-3. **Point the capture script at a flat trace log.** The script reads
-   from a file path, so run the daemon in the foreground with stderr
-   redirected (`routectl serve 2>/tmp/routectl-trace.log`), or -- if
-   you run routectl as a systemd user service on Linux -- bridge the
-   journal to a file:
+3. **Point the capture script at a flat trace log written by a FILE
+   SINK.** The script reads from a file path, and that file must be one
+   the daemon's stderr was redirected into:
 
    ```
-   journalctl --user -u routectl --since "10 minutes ago" --no-pager -o cat \
-     | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
-     > /tmp/routectl-trace.log
+   routectl serve 2>/tmp/routectl-trace.log
    ```
 
-   The `sed` strips ANSI color codes that the tracing-subscriber
-   emits. Prefer the foreground redirect when capturing large bodies:
-   journald truncates long lines (~48 KiB default `LineMax`), which
-   corrupts captured JSON bodies mid-escape.
+   **The journal is not an option for capture.** Do not bridge
+   `journalctl` output into the log the rig reads. journald's default
+   `LineMax` (~48 KiB) silently truncates a long trace line wherever the
+   cut lands -- in practice mid JSON-string-escape -- and the daemon's own
+   `... [truncated at N bytes]` marker is never emitted, so the rig writes
+   a malformed body to disk with nothing signalling the damage. Draining a
+   multi-hour session through the journal also stalls on long streams.
+   A corpus captured that way is unrecoverable: the bytes are gone, not
+   reorderable.
+
+   This is why `scripts/capture_driver.sh` redirects
+   `routectl serve --port <port> 2> "$RUN/trace.log"` -- that redirect IS
+   the driver runner's capture sink, and the driven daemon is not a service
+   unit, so nothing truncates or journals it.
 
 4. **Run the capture script:**
 
@@ -369,6 +375,23 @@ day-to-day capture flow.
    skip reasons on stderr; without it cargo swallows them and you
    only see the asserted/skipped/failed counts when something blows
    up.
+
+   Both of these legs are `--skip`ped by the pre-commit hook, which
+   states why at the call site. They drive real routectl code, so a
+   fixture the replay path cannot yet reproduce (an unresolved model
+   alias, a stale capture predating an invariant) fails rather than
+   skips. The leg that adjudicates the whole corpus today is
+   conservation, which re-runs no routectl code at all:
+
+   ```
+   cargo test -p routectl-cli --release --test conservation -- --nocapture
+   ```
+
+   It compares each fixture's captured ingress body against its captured
+   outgoing body through the lane class and the exception table, and
+   prints one bounded line per lane plus a `PASS|FAIL|DEGRADED` verdict.
+   Run it with `--nocapture` always: over an empty corpus it passes while
+   proving nothing, and the verdict line is what tells the two apart.
 
 The replay corpus is per-contributor and ephemeral. Recapture freely
 when routectl's wire output changes. The harness and the capture

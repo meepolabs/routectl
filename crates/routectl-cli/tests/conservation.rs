@@ -15,7 +15,9 @@
 //!
 //! Absence of either root is not a failure. The live-box root is
 //! per-contributor and gitignored, so a fresh checkout has neither and
-//! reports DEGRADED with a loud note rather than red.
+//! reports DEGRADED with a loud note rather than red. An empty DRIVER
+//! root additionally emits [`NO_DRIVER_CORPUS`], the one greppable line
+//! that says the gating half of this leg walked nothing.
 //!
 //! Output is BOUNDED: fixture names, divergence paths, divergence kinds,
 //! and counts. No body value is printed, because a captured body is the
@@ -27,6 +29,17 @@ use common::replay::{
     ConservationRun, CorpusSlice, Fixture, Verdict, adjudicate, discover_fixtures, driver_root,
     local_root, read_translation_baseline, resolve_gated_lanes,
 };
+
+/// The one line a checkout with no driver fixtures must print.
+///
+/// CI has no driver corpus (the root is gitignored), so the gating half
+/// of this leg walks nothing there. A leg that proves nothing must SAY
+/// it proves nothing: a bare green test result over an empty corpus is
+/// indistinguishable from a real gate, and the whole point of this
+/// harness is that the distinction stays visible. Keyed on the fixture
+/// COUNT rather than on the root's existence, so a present-but-empty
+/// directory reports the same emptiness a missing one does.
+const NO_DRIVER_CORPUS: &str = "conservation: NOT RUN (no driver corpus in this checkout)";
 
 /// One root's loaded state.
 struct LoadedRoot {
@@ -90,6 +103,9 @@ fn run_conservation() -> ConservationRun {
             eprintln!("conservation: {note}");
         }
     }
+    if let Some(note) = driver_corpus_note(driver_fixture_count(&roots)) {
+        eprintln!("{note}");
+    }
     let slices: Vec<CorpusSlice<'_>> = roots
         .iter()
         .map(|root| CorpusSlice {
@@ -105,6 +121,35 @@ fn run_conservation() -> ConservationRun {
         eprintln!("{line}");
     }
     run
+}
+
+/// Fixtures loaded under the gateable (driver) roots.
+fn driver_fixture_count(roots: &[LoadedRoot]) -> usize {
+    roots
+        .iter()
+        .filter(|root| root.gateable)
+        .map(|root| root.fixtures.len())
+        .sum()
+}
+
+/// [`NO_DRIVER_CORPUS`] when no driver fixture was loaded, `None`
+/// otherwise. A separate function so the emptiness rule is asserted
+/// directly rather than through stderr scraping.
+const fn driver_corpus_note(driver_fixtures: usize) -> Option<&'static str> {
+    if driver_fixtures == 0 {
+        Some(NO_DRIVER_CORPUS)
+    } else {
+        None
+    }
+}
+
+/// The named-skip line is emitted on emptiness and withheld the moment a
+/// single driver fixture lands -- the paired positive control, without
+/// which "prints NOT RUN" could be satisfied by printing it always.
+#[test]
+fn the_not_run_line_is_emitted_only_while_the_driver_corpus_is_empty() {
+    assert_eq!(driver_corpus_note(0), Some(NO_DRIVER_CORPUS));
+    assert_eq!(driver_corpus_note(1), None);
 }
 
 #[test]

@@ -10,7 +10,19 @@
 # under tests/fixtures/captured/ are report-only and are never gated,
 # whatever this file says.
 #
-# Empty for now. The reader is FAIL-CLOSED: with no lane listed it
-# returns an error rather than an empty gated set, so a consumer cannot
-# mistake "not yet populated" for "gate passed". Populated once the
-# fixture drivers exist and it is known which lanes they actually cover.
+# NAMES ZERO LANES, deliberately, and that is the honest state rather
+# than an unfinished one: the driver corpus under tests/fixtures/driver/
+# is empty, so there is no lane any consumer could gate on. An entry
+# here that no committed fixture backs would be a decorative gate.
+#
+# The reader is FAIL-CLOSED: with no lane listed it returns
+# NoLanesListed rather than an empty gated set, so a consumer cannot
+# mistake "not yet populated" for "gate passed". Only the conservation
+# harness maps that one variant onto "no lane gated", and it announces
+# the emptiness on its own output line.
+#
+# POPULATED BY the first successful driver capture -- add the lane the
+# landed fixtures actually ride, read off the capture, never the lane
+# hoped for. The harness carries a self-invalidating test pinning this
+# file's current comment-only parse outcome; turning it red is the
+# review moment that first entry deserves.
