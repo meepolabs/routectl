@@ -49,6 +49,16 @@
 #   git-author-name    `git config user.name`
 #   git-author-email   `git config user.email`
 #   hostname           `hostname` (or $HOSTNAME, or /etc/hostname)
+#   seat-session-id    a `session_id` stored in the local seat store
+#                      (`credentials.json`). routectl resolves it per seat
+#                      and puts it on the wire as `x-claude-code-session-id`
+#                      on the OAuth-bearer surface, so a capture on that
+#                      surface records a stable per-credential identifier
+#                      that fingerprints the operator across every fixture.
+#                      The header rules classify that name as VISIBLE (it
+#                      carries no credential substring and does not end in
+#                      `-key`), so the value survives `--write` verbatim and
+#                      nothing else in this gate would ever look at it.
 #   home-prefix        any `/home/<name>` other than the placeholder
 #   home-prefix-encoded  the same, dash-encoded
 #   ls-owner-column    an `ls -l` / `ls -l@` / `ls -o` long listing whose
@@ -128,6 +138,11 @@ NEUTRAL_OWNERS=("user" "root")
 # Hostnames that are not personal identifiers. Deny-listing one of these
 # would match routectl's own loopback base URLs in every fixture body.
 NEUTRAL_HOSTNAMES=("localhost" "localhost.localdomain")
+
+# Session ids that identify nobody. The nil UUID is what a placeholder,
+# a doc example and a zeroed test record all carry, so deny-listing it
+# would refuse legitimate content instead of the operator's seat.
+NEUTRAL_SESSION_IDS=("00000000-0000-0000-0000-000000000000")
 
 # Shortest environment-derived literal worth matching. A one- or two-char
 # git name or hostname matches inside ordinary words and would turn the
@@ -288,6 +303,100 @@ derive_hostname() {
   add_deny "hostname" "$host" "wi"
 }
 
+is_neutral_session_id() {
+  local candidate s
+  candidate="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  for s in "${NEUTRAL_SESSION_IDS[@]}"; do
+    [ "$candidate" = "$s" ] && return 0
+  done
+  return 1
+}
+
+# The path the seat store itself reads, mirroring
+# crates/routectl-auth/src/oauth/file_io.rs `default_path`:
+# $XDG_CONFIG_HOME/routectl/credentials.json, falling back to
+# $HOME/.config/routectl/credentials.json. Deriving it the same way is
+# what makes the class track a hermetic XDG (where there is no seat and
+# the class must warn) as well as a real one.
+seat_store_path() {
+  local xdg="${XDG_CONFIG_HOME:-}" home="${HOME:-}"
+  if [ -n "$xdg" ]; then
+    printf '%s/routectl/credentials.json' "${xdg%/}"
+    return 0
+  fi
+  [ -n "$home" ] || return 1
+  printf '%s/.config/routectl/credentials.json' "${home%/}"
+}
+
+# Every `session_id` the local seat store holds, one per line.
+#
+# Read with python3 rather than a grep, for the same reason the header
+# layer is parsed rather than regexed: a malformed or unexpected document
+# must be distinguishable from one holding no session id, and a regex
+# cannot make that call. The VALUES never leave this function's caller --
+# they go into the deny set and are only ever reported by class name.
+seat_session_ids() {
+  python3 - "$1" <<'PY' 2>/dev/null || return 1
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    doc = json.load(fh)
+if not isinstance(doc, dict):
+    raise SystemExit(1)
+providers = doc.get("providers")
+if not isinstance(providers, dict):
+    raise SystemExit(0)
+for record in providers.values():
+    if not isinstance(record, dict):
+        continue
+    sid = record.get("session_id")
+    if isinstance(sid, str) and sid:
+        print(sid)
+PY
+}
+
+# routectl resolves a seat's `session_id` on the OAuth-bearer surface
+# (crates/routectl-router/src/factory/build.rs) and puts it on the wire as
+# `x-claude-code-session-id`. That header name is VISIBLE to the header
+# rules, so a capture on that surface lands the value verbatim in the
+# corpus -- a stable identifier that ties every fixture to one operator.
+#
+# One deny entry per stored seat, all under the one class name: which seat
+# a value came from does not change the remedy, and the class name is the
+# entire diagnostic a refusal gets. Derived from the store on disk exactly
+# as the daemon reads it, so every path out of here that adds nothing to
+# the deny set warns -- the class's absence must be loud.
+derive_seat_session_id() {
+  local path ids sid n=0
+  if ! path="$(seat_store_path)"; then
+    warn_skip "seat-session-id" "neither \$XDG_CONFIG_HOME nor \$HOME is set, so the seat store path is unknown"
+    return 0
+  fi
+  if [ ! -r "$path" ]; then
+    warn_skip "seat-session-id" "no readable seat store at the configured credentials path"
+    return 0
+  fi
+  if ! ids="$(seat_session_ids "$path")"; then
+    warn_skip "seat-session-id" "the seat store is not readable as the expected JSON document"
+    return 0
+  fi
+  while IFS= read -r sid; do
+    [ -n "$sid" ] || continue
+    if [ "${#sid}" -lt "$MIN_LITERAL_LEN" ]; then
+      warn_skip "seat-session-id" "a stored session id is shorter than $MIN_LITERAL_LEN chars"
+      continue
+    fi
+    if is_neutral_session_id "$sid"; then
+      warn_skip "seat-session-id" "a stored session id is in the neutral set and would match placeholder content"
+      continue
+    fi
+    n=$((n + 1))
+    add_deny "seat-session-id" "$sid" "i"
+  done <<<"$ids"
+  [ "$n" -gt 0 ] ||
+    warn_skip "seat-session-id" "the seat store holds no usable session id"
+}
+
 # The deny set and the file list belong to the two SCANNING modes only.
 # `--lane-known` answers from the table below and touches no fixture, so
 # deriving an environment deny set for it would emit WARN lines about
@@ -297,6 +406,7 @@ if [ "$MODE" != "lane-known" ]; then
   derive_home
   derive_git_identity
   derive_hostname
+  derive_seat_session_id
 fi
 
 # --- file collection -------------------------------------------------

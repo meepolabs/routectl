@@ -25,6 +25,16 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRUB="$HERE/scrub-fixture.sh"
 
+# The seat store the script derives its `seat-session-id` deny values from
+# lives at `$XDG_CONFIG_HOME/routectl/credentials.json`. Every invocation
+# below therefore runs under a throwaway XDG: without this the suite would
+# read whoever runs it, and a real session id would decide whether a case
+# passes. Cases that need a seat plant their own store under their own work
+# dir (see SEAT_STORE_JSON); this default is the "no seat at all" state.
+TEST_XDG="$(mktemp -d)"
+export XDG_CONFIG_HOME="$TEST_XDG"
+trap 'rm -rf "$TEST_XDG"' EXIT
+
 fails=0
 
 # The identities the throwaway environment reports, and which the deny set
@@ -61,33 +71,39 @@ expand_home_tokens() {
 # can inspect the result; the caller removes it.
 #
 # The environment is the point: HOME points at a fake home under the work
-# dir, the git identity is set in the repo's own config, and `hostname`
-# resolves to a stub. `PATH` keeps the real tools the script needs.
+# dir, the git identity is set in the repo's own config, `hostname`
+# resolves to a stub, and XDG_CONFIG_HOME points at a throwaway seat-store
+# root. `PATH` keeps the real tools the script needs.
+#
+# `$4` is the seat store to plant, as one of the SEAT_* spellings below.
+# Empty (the default) plants nothing, which is the un-interrogable state.
 run_scrub() {
-    local filename="$1" content="$2" mode="$3"
+    local filename="$1" content="$2" mode="$3" seat="${4:-}"
     local work
     work="$(mktemp -d)"
     local fake_home="$work/home/$FAKE_HOME_NAME"
-    mkdir -p "$fake_home" "$work/repo/fixture" "$work/stubbin"
+    mkdir -p "$fake_home" "$work/repo/fixture" "$work/stubbin" "$work/xdg/routectl"
     printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$FAKE_HOSTNAME" >"$work/stubbin/hostname"
     chmod +x "$work/stubbin/hostname"
+    [ -z "$seat" ] || printf '%s' "$seat" >"$work/xdg/routectl/credentials.json"
     expand_home_tokens "$content" "$fake_home" >"$work/repo/fixture/$filename"
     (
         cd "$work/repo" || exit 2
         git init -q .
         git config user.name "$FAKE_GIT_NAME"
         git config user.email "$FAKE_GIT_EMAIL"
-        HOME="$fake_home" PATH="$work/stubbin:$PATH" \
+        HOME="$fake_home" XDG_CONFIG_HOME="$work/xdg" PATH="$work/stubbin:$PATH" \
             bash "$SCRUB" "$mode" fixture
     ) >"$work/scrub.log" 2>&1
     printf '%s\t%s\n' "$?" "$work"
 }
 
-# `$1` description, `$2` fixture filename, `$3` content.
+# `$1` description, `$2` fixture filename, `$3` content, `$4` expected
+# class, `$5` a seat store to plant (see run_scrub).
 assert_caught() {
-    local desc="$1" filename="$2" content="$3" expect_class="${4:-}"
+    local desc="$1" filename="$2" content="$3" expect_class="${4:-}" seat="${5:-}"
     local out rc work
-    out="$(run_scrub "$filename" "$content" --check)"
+    out="$(run_scrub "$filename" "$content" --check "$seat")"
     rc="${out%%$'\t'*}"
     work="${out#*$'\t'}"
     if [ "$rc" = "0" ]; then
@@ -108,9 +124,9 @@ assert_caught() {
 }
 
 assert_clean() {
-    local desc="$1" filename="$2" content="$3"
+    local desc="$1" filename="$2" content="$3" seat="${4:-}"
     local out rc work
-    out="$(run_scrub "$filename" "$content" --check)"
+    out="$(run_scrub "$filename" "$content" --check "$seat")"
     rc="${out%%$'\t'*}"
     work="${out#*$'\t'}"
     if [ "$rc" = "0" ]; then
@@ -240,6 +256,80 @@ assert_caught "the machine hostname echoed into a captured body" \
 assert_clean "a loopback base URL is not a hostname hit" \
     ingress_request.json \
     "$(body_with "base_url = \\\"http://localhost:11435/v1\\\"")"
+
+# --- seat-session-id -------------------------------------------------
+# routectl resolves a seat's stored `session_id` on the OAuth-bearer
+# surface and puts it on the wire as `x-claude-code-session-id`, which the
+# header rules classify VISIBLE -- so `--write` keeps the value and every
+# fixture captured on that lane carries the same stable identifier. Both
+# gates passed it before this class existed.
+#
+# The seat store is planted per case under the case's own throwaway XDG.
+# Its shape mirrors crates/routectl-auth/src/oauth/types.rs
+# (`CredentialsFile` -> `providers` -> `TokenRecord.session_id`). The token
+# fields carry inert placeholders rather than key-shaped strings: the gate
+# reads `session_id` and nothing else out of this document, so a realistic
+# token here would buy no coverage while putting a credential-shaped
+# literal in a committed file.
+seat_store_with() {
+    printf '{"schema_version":1,"providers":{"anthropic":{'
+    printf '"access_token":"placeholder","refresh_token":"placeholder",'
+    printf '"token_type":"Bearer","expires_at_unix":4102444800,'
+    printf '"obtained_at_unix":1756252800,"session_id":"%s"}}}' "$1"
+}
+
+# A fresh uuid v4, generated per call. The reject fixture and the accept
+# control BOTH use freshly generated values, so neither can pass by
+# matching something this file hardcodes.
+fresh_uuid_v4() {
+    python3 -c 'import uuid; print(uuid.uuid4())'
+}
+
+# The value the planted seat stores, and therefore the one deny value the
+# class must derive. Generated, never written down: a committed literal
+# would be a fixture identifier the gate is welded to.
+SEAT_SESSION_ID="$(fresh_uuid_v4)"
+SEAT_STORE="$(seat_store_with "$SEAT_SESSION_ID")"
+
+# The wire position D3 identifies: the cloak's metadata `user_id`, which
+# carries the session id as its third key.
+user_id_body_with() {
+    body_with "{\\\"device_id\\\":\\\"abc\\\",\\\"account_uuid\\\":\\\"$(fresh_uuid_v4)\\\",\\\"session_id\\\":\\\"$1\\\"}"
+}
+
+assert_caught "the seat's session id in a captured metadata user_id" \
+    ingress_request.json \
+    "$(user_id_body_with "$SEAT_SESSION_ID")" \
+    seat-session-id \
+    "$SEAT_STORE"
+
+# The header the router actually emits. Its name carries no credential
+# substring and does not end in `-key`, so the header layer classifies it
+# VISIBLE and `--write` leaves the value verbatim -- this class is the only
+# thing that looks at it.
+assert_caught "the seat's session id in the x-claude-code-session-id header" \
+    ingress_request.headers.json \
+    "[[\"content-type\",\"application/json\"],[\"x-claude-code-session-id\",\"$SEAT_SESSION_ID\"]]" \
+    seat-session-id \
+    "$SEAT_STORE"
+
+# THE ACCEPT CONTROL, and the whole reason the class derives a value rather
+# than matching a shape. A uuid in the metadata `user_id` position is
+# ordinary traffic: `account_uuid` is minted fresh per provider instance
+# (crates/routectl-providers/src/anthropic_api/cloak.rs) and is
+# client-forwarded on this lane. Without this direction the rule degenerates
+# into "reject any uuid", which refuses every legitimate id in a body.
+assert_clean "a fresh uuid in the same metadata user_id position is accepted" \
+    ingress_request.json \
+    "$(user_id_body_with "$(fresh_uuid_v4)")" \
+    "$SEAT_STORE"
+
+# The same accept direction on the header layer, on the header D3 names as
+# the collateral damage a shape rule would cause.
+assert_clean "a fresh uuid as an x-client-request-id header value is accepted" \
+    ingress_request.headers.json \
+    "[[\"content-type\",\"application/json\"],[\"x-client-request-id\",\"$(fresh_uuid_v4)\"]]" \
+    "$SEAT_STORE"
 
 # --- ls-owner-column -------------------------------------------------
 # The second named gap: an `ls -l` listing whose owner/group columns name
@@ -909,7 +999,7 @@ assert_help_lists_new_classes() {
         fails=$((fails + 1))
         return
     fi
-    for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key; do
+    for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key seat-session-id; do
         printf '%s\n' "$out" | grep -qF -- "$class" || missing+=" $class"
     done
     if [ -n "$missing" ]; then
@@ -1053,6 +1143,78 @@ unconfigured_env_warns() {
     rm -rf "$work"
 }
 unconfigured_env_warns
+
+# The seat-session-id class derives its deny value from a file that is
+# ABSENT on any box that has not logged in, and absent by construction
+# under the hermetic XDG a capture run creates. Its absence must therefore
+# be loud: a silent narrowing here is the class not existing on exactly the
+# machines the capture happens on.
+#
+# `$1` a description, `$2` the credentials.json content to plant (empty
+# plants no file at all), `$3` the WARN reason fragment expected.
+assert_seat_warns() {
+    local desc="$1" store="$2" needle="$3"
+    local work log rc=0
+    work="$(mktemp -d)"
+    mkdir -p "$work/home" "$work/xdg/routectl" "$work/plain/fixture"
+    [ -z "$store" ] || printf '%s' "$store" >"$work/xdg/routectl/credentials.json"
+    printf '%s' "$(body_with "a clean body with no personal data in it")" \
+        >"$work/plain/fixture/ingress_request.json"
+    (
+        cd "$work/plain" || exit 2
+        HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" bash "$SCRUB" --check fixture
+    ) >"$work/scrub.log" 2>&1
+    rc=$?
+    log="$work/scrub.log"
+    if [ "$rc" != "0" ]; then
+        echo "FAIL: the surrounding scan was not clean (exit $rc) -- $desc"
+        cat "$log"
+        fails=$((fails + 1))
+    elif grep -F "WARN deny class 'seat-session-id' inactive" "$log" | grep -qF -- "$needle"; then
+        echo "PASS: seat-session-id warns rather than silently dropping -- $desc"
+    else
+        echo "FAIL: seat-session-id was dropped silently -- $desc"
+        cat "$log"
+        fails=$((fails + 1))
+    fi
+    rm -rf "$work"
+}
+
+assert_seat_warns "no seat store at all, the hermetic-XDG state a capture runs in" \
+    "" \
+    "no readable seat store"
+
+assert_seat_warns "a seat store holding a record with no session id" \
+    '{"schema_version":1,"providers":{"anthropic":{"access_token":"placeholder","refresh_token":"placeholder","token_type":"Bearer","expires_at_unix":4102444800,"obtained_at_unix":1756252800}}}' \
+    "holds no usable session id"
+
+assert_seat_warns "a seat store that is not the expected JSON document" \
+    'not json at all' \
+    "not readable as the expected JSON document"
+
+# The neutral / too-short discipline the other derived classes follow: a
+# degenerate value is skipped with a warning rather than deny-listed,
+# because deny-listing it would refuse legitimate placeholder content.
+assert_seat_warns "a stored session id shorter than the literal floor" \
+    "$(seat_store_with "ab")" \
+    "shorter than"
+
+assert_seat_warns "a stored session id in the neutral set" \
+    "$(seat_store_with "00000000-0000-0000-0000-000000000000")" \
+    "in the neutral set"
+
+# The paired positive control for the two skips above: the SAME degenerate
+# values must be accepted in a body. Without this the skip assertions prove
+# only that a WARN printed, not that the value stayed out of the deny set.
+assert_clean "a nil-uuid session id in a body is accepted when the seat stores it" \
+    ingress_request.json \
+    "$(user_id_body_with "00000000-0000-0000-0000-000000000000")" \
+    "$(seat_store_with "00000000-0000-0000-0000-000000000000")"
+
+assert_clean "a two-char stored session id does not deny-list that fragment" \
+    ingress_request.json \
+    "$(body_with "the abbreviation ab appears in ordinary prose")" \
+    "$(seat_store_with "ab")"
 
 if [ "$fails" -gt 0 ]; then
     echo "scrub-fixture self-test: $fails failure(s)" >&2
