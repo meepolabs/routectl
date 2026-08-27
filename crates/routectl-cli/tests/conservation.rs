@@ -26,8 +26,9 @@
 mod common;
 
 use common::replay::{
-    ConservationRun, CorpusSlice, Fixture, Verdict, adjudicate, discover_fixtures, driver_root,
-    local_root, read_translation_baseline, resolve_gated_lanes,
+    ConservationRun, CorpusSlice, Fixture, Verdict, adjudicate, discover_driver_fixtures,
+    discover_fixtures, driver_root, local_root, make_conserved, plant_driver_case,
+    plant_unloadable_driver_case, read_translation_baseline, resolve_gated_lanes,
 };
 
 /// The one line a checkout with no driver fixtures must print.
@@ -36,9 +37,13 @@ use common::replay::{
 /// of this leg walks nothing there. A leg that proves nothing must SAY
 /// it proves nothing: a bare green test result over an empty corpus is
 /// indistinguishable from a real gate, and the whole point of this
-/// harness is that the distinction stays visible. Keyed on the fixture
-/// COUNT rather than on the root's existence, so a present-but-empty
-/// directory reports the same emptiness a missing one does.
+/// harness is that the distinction stays visible.
+///
+/// Keyed on the ENTRIES WALKED rather than on the fixtures LOADED, and
+/// the difference is the whole point: a corpus of present-but-unloadable
+/// fixtures loads zero and is the opposite of absent. Reporting it as
+/// "no driver corpus in this checkout" would hand the loudest state on
+/// disk the quietest line, and CI greps for exactly this line.
 const NO_DRIVER_CORPUS: &str = "conservation: NOT RUN (no driver corpus in this checkout)";
 
 /// One root's loaded state.
@@ -52,7 +57,20 @@ struct LoadedRoot {
     absent: Option<String>,
 }
 
-fn load_root(label: &'static str, root: &std::path::Path, gateable: bool) -> LoadedRoot {
+/// The two roots' walks differ in DEPTH: the live-box corpus is flat and
+/// request-id-keyed, the driver corpus is `<lane>/<case_id>`.
+#[derive(Clone, Copy)]
+enum Walk {
+    LiveBox,
+    Driver,
+}
+
+fn load_root(
+    label: &'static str,
+    root: &std::path::Path,
+    walk: Walk,
+    gateable: bool,
+) -> LoadedRoot {
     if !root.exists() {
         return LoadedRoot {
             label,
@@ -62,7 +80,11 @@ fn load_root(label: &'static str, root: &std::path::Path, gateable: bool) -> Loa
             absent: Some(format!("{label} fixture root is not present")),
         };
     }
-    match discover_fixtures(root) {
+    let walked = match walk {
+        Walk::LiveBox => discover_fixtures(root),
+        Walk::Driver => discover_driver_fixtures(root),
+    };
+    match walked {
         Ok(corpus) => LoadedRoot {
             label,
             fixtures: corpus.fixtures,
@@ -95,15 +117,27 @@ fn run_conservation() -> ConservationRun {
     };
 
     let roots = [
-        load_root("live-box", &local_root(), false),
-        load_root("driver", &driver_root(), true),
+        load_root("live-box", &local_root(), Walk::LiveBox, false),
+        load_root("driver", &driver_root(), Walk::Driver, true),
     ];
-    for root in &roots {
+    adjudicate_roots(&roots, &gated, &baseline)
+}
+
+/// Adjudicate already-walked roots. Split out from [`run_conservation`]
+/// so a test can drive the whole path -- walk, note, adjudication --
+/// over a PLANTED corpus. Asserting `driver_corpus_note` alone proves
+/// only that a function returns what it was handed.
+fn adjudicate_roots(
+    roots: &[LoadedRoot],
+    gated: &common::replay::GatedLanes,
+    baseline: &[common::replay::BaselineEntry],
+) -> ConservationRun {
+    for root in roots {
         if let Some(note) = &root.absent {
             eprintln!("conservation: {note}");
         }
     }
-    if let Some(note) = driver_corpus_note(driver_fixture_count(&roots)) {
+    if let Some(note) = driver_corpus_note(driver_entries_walked(roots)) {
         eprintln!("{note}");
     }
     let slices: Vec<CorpusSlice<'_>> = roots
@@ -116,40 +150,94 @@ fn run_conservation() -> ConservationRun {
         })
         .collect();
 
-    let run = adjudicate(&slices, &gated, &baseline);
+    let run = adjudicate(&slices, gated, baseline);
     for line in run.report_lines() {
         eprintln!("{line}");
     }
     run
 }
 
-/// Fixtures loaded under the gateable (driver) roots.
-fn driver_fixture_count(roots: &[LoadedRoot]) -> usize {
+/// Entries WALKED under the gateable (driver) roots: loaded plus
+/// present-but-unloadable. Not `fixtures.len()` -- see
+/// [`NO_DRIVER_CORPUS`].
+fn driver_entries_walked(roots: &[LoadedRoot]) -> usize {
     roots
         .iter()
         .filter(|root| root.gateable)
-        .map(|root| root.fixtures.len())
+        .map(|root| root.fixtures.len() + root.unloadable)
         .sum()
 }
 
-/// [`NO_DRIVER_CORPUS`] when no driver fixture was loaded, `None`
-/// otherwise. A separate function so the emptiness rule is asserted
-/// directly rather than through stderr scraping.
-const fn driver_corpus_note(driver_fixtures: usize) -> Option<&'static str> {
-    if driver_fixtures == 0 {
+/// [`NO_DRIVER_CORPUS`] when the driver roots held no entry at all,
+/// `None` otherwise. A separate function so the emptiness rule is
+/// asserted directly rather than through stderr scraping.
+const fn driver_corpus_note(driver_entries: usize) -> Option<&'static str> {
+    if driver_entries == 0 {
         Some(NO_DRIVER_CORPUS)
     } else {
         None
     }
 }
 
-/// The named-skip line is emitted on emptiness and withheld the moment a
-/// single driver fixture lands -- the paired positive control, without
-/// which "prints NOT RUN" could be satisfied by printing it always.
+/// Walk a PLANTED driver root through the same `load_root` the real run
+/// uses, and adjudicate it. The live-box slice is deliberately absent so
+/// the assertions below are about the driver half alone.
+fn planted_driver_run(root: &std::path::Path) -> (ConservationRun, Option<&'static str>) {
+    let roots = [load_root("driver", root, Walk::Driver, true)];
+    let note = driver_corpus_note(driver_entries_walked(&roots));
+    let gated = resolve_gated_lanes().expect("the committed gated-lane list must resolve");
+    let baseline = read_translation_baseline().expect("the committed baseline must read");
+    (adjudicate_roots(&roots, &gated, &baseline), note)
+}
+
+/// The named-skip line tracks what the walk actually FOUND, over a real
+/// corpus rather than over `driver_corpus_note` in isolation.
+///
+/// Three states, and the middle one is the reason this test replaced a
+/// predecessor that only called the note function with 0 and 1: an
+/// EMPTY corpus is not run, a corpus of one PRESENT-BUT-UNLOADABLE
+/// fixture is a broken corpus that must not claim absence, and a
+/// populated corpus withholds the line and asserts.
 #[test]
-fn the_not_run_line_is_emitted_only_while_the_driver_corpus_is_empty() {
-    assert_eq!(driver_corpus_note(0), Some(NO_DRIVER_CORPUS));
-    assert_eq!(driver_corpus_note(1), None);
+fn the_not_run_line_tracks_what_the_driver_walk_found() {
+    // Arrange / Act / Assert: empty root.
+    let empty = tempfile::tempdir().unwrap();
+    let (empty_run, empty_note) = planted_driver_run(empty.path());
+    assert_eq!(empty_note, Some(NO_DRIVER_CORPUS));
+    assert_eq!(driver_asserted(&empty_run), 0);
+
+    // Present but unloadable: the line is WITHHELD -- a broken corpus is
+    // the opposite of an absent one -- and nothing is asserted either,
+    // so the withheld line is not standing in for a pass.
+    let broken = tempfile::tempdir().unwrap();
+    plant_unloadable_driver_case(broken.path(), "anthropic-api", "plain-turn-01");
+    let (broken_run, broken_note) = planted_driver_run(broken.path());
+    assert_eq!(
+        broken_note, None,
+        "a present-but-unloadable driver fixture reported as `no driver corpus`",
+    );
+    assert_eq!(broken_run.unloadable, 1);
+    assert_eq!(driver_asserted(&broken_run), 0);
+
+    // Populated: the line is withheld AND the run adjudicates something.
+    // This is the positive control D2.A requires -- `asserted` off zero
+    // over a real walk, which no assertion on `driver_corpus_note` alone
+    // can produce.
+    let populated = tempfile::tempdir().unwrap();
+    let case = plant_driver_case(populated.path(), "anthropic-api", "plain-turn-01");
+    make_conserved(&case);
+    let (populated_run, populated_note) = planted_driver_run(populated.path());
+    assert_eq!(populated_note, None);
+    assert_eq!(
+        driver_asserted(&populated_run),
+        1,
+        "a valid fixture two levels deep did not reach adjudication",
+    );
+}
+
+/// Fixtures adjudicated across every lane of a run.
+fn driver_asserted(run: &ConservationRun) -> usize {
+    run.lanes.iter().map(|l| l.asserted).sum()
 }
 
 #[test]

@@ -274,32 +274,38 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
 /// unsupported schema major). A degraded corpus -- e.g. one truncated by
 /// a log line-length limit at capture time -- thins `fixtures` while
 /// `skipped` rises, so the run's coverage is visible rather than silent.
+///
+/// `fixtures.len() + skipped` is the number of ENTRIES WALKED, which is
+/// the only honest answer to "did this corpus hold anything". A caller
+/// keying an emptiness note on `fixtures.len()` alone reports a corpus
+/// of broken fixtures as an ABSENT corpus, which is the loudest fact on
+/// disk reported as the quietest.
 #[derive(Debug, Default)]
 pub struct LoadedCorpus {
     pub fixtures: Vec<Fixture>,
     pub skipped: usize,
 }
 
-/// Walk `canon_root` for fixture subdirectories, sorting by directory
-/// name for deterministic test ordering. Skips dotfiles and any
-/// non-directory entry (e.g. `README.md`, `.gitkeep`). A subdirectory
-/// that fails to load (malformed `meta.json` or body JSON, missing
-/// required file, unsupported schema major) is logged to stderr (naming
-/// the directory and the error), counted in `LoadedCorpus.skipped`, and
-/// skipped rather than aborting the whole corpus, so one bad fixture
-/// cannot blind the run to every other fixture's regression signal. A
-/// final summary line reports loaded vs skipped so a thin corpus is
-/// visible. Filesystem-level errors reading `canon_root` itself still
-/// propagate as `Err`.
-pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError> {
+impl LoadedCorpus {
+    /// Entries the walk considered: loaded plus unloadable.
+    pub const fn entries_walked(&self) -> usize {
+        self.fixtures.len() + self.skipped
+    }
+}
+
+/// Immediate non-dot subdirectories of `parent`, sorted by name for
+/// deterministic test ordering. Non-directory entries (`README.md`,
+/// `.gitkeep`) are skipped. Filesystem-level errors reading `parent`
+/// itself propagate.
+fn child_dirs(parent: &Path) -> Result<Vec<PathBuf>, ReplayError> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let read = fs::read_dir(canon_root).map_err(|e| ReplayError::Io {
-        path: canon_root.display().to_string(),
+    let read = fs::read_dir(parent).map_err(|e| ReplayError::Io {
+        path: parent.display().to_string(),
         source: e,
     })?;
     for entry in read {
         let entry = entry.map_err(|e| ReplayError::Io {
-            path: canon_root.display().to_string(),
+            path: parent.display().to_string(),
             source: e,
         })?;
         let path = entry.path();
@@ -316,6 +322,17 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError>
         dirs.push(path);
     }
     dirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    Ok(dirs)
+}
+
+/// Load every directory in `dirs` as a fixture. One that fails to load
+/// (malformed `meta.json` or body JSON, missing required file,
+/// unsupported schema major) is logged to stderr naming the directory
+/// and the error, counted in `LoadedCorpus.skipped`, and skipped rather
+/// than aborting the whole corpus -- so one bad fixture cannot blind the
+/// run to every other fixture's regression signal. A final summary line
+/// reports loaded vs skipped so a thin corpus is visible.
+fn load_all(dirs: Vec<PathBuf>) -> LoadedCorpus {
     let mut fixtures = Vec::with_capacity(dirs.len());
     let mut skipped = 0usize;
     for dir in dirs {
@@ -335,7 +352,39 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError>
         fixtures.len(),
         skipped,
     );
-    Ok(LoadedCorpus { fixtures, skipped })
+    LoadedCorpus { fixtures, skipped }
+}
+
+/// Walk `canon_root` for fixture subdirectories ONE level deep: this is
+/// the LIVE-BOX corpus shape, which is flat and request-id-keyed.
+/// Loading, skipping, and reporting follow [`load_all`]; filesystem-level
+/// errors reading `canon_root` itself propagate as `Err`.
+///
+/// The driver corpus is keyed `<lane>/<case_id>` and needs
+/// [`discover_driver_fixtures`] instead. The depth belongs to the ROOT,
+/// not to the caller, which is why it is a second function rather than a
+/// parameter every live-box call site would have to pass correctly.
+pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError> {
+    Ok(load_all(child_dirs(canon_root)?))
+}
+
+/// Walk the DRIVER corpus root, whose fixtures land two levels deep at
+/// `<root>/<lane>/<case_id>`. Only the case directories are offered to
+/// the loader; a lane directory is never itself a fixture.
+///
+/// A lane directory holding no case directory contributes nothing --
+/// there is no fixture there to load and no fixture there to skip, and
+/// counting the lane itself as either would report a walk of the corpus
+/// shape as a walk of its contents. That is exactly the fault this
+/// function replaced: the single-level walk handed each lane directory
+/// to `load_fixture`, which refused it for a missing `meta.json`, so a
+/// perfectly good corpus read as `loaded 0, skipped 1`.
+pub fn discover_driver_fixtures(driver_root: &Path) -> Result<LoadedCorpus, ReplayError> {
+    let mut cases: Vec<PathBuf> = Vec::new();
+    for lane in child_dirs(driver_root)? {
+        cases.extend(child_dirs(&lane)?);
+    }
+    Ok(load_all(cases))
 }
 
 fn read_meta(dir: &Path) -> Result<FixtureMeta, ReplayError> {
@@ -515,59 +564,12 @@ fn parse_headers_value(value: &Value, path: &Path) -> Result<Vec<(String, String
 
 #[cfg(test)]
 mod tests {
+    use super::super::plant::{
+        current_meta, plant_driver_case, plant_fixture, write_required_files,
+    };
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
-
-    /// The full current-schema `meta.json` a rig-written fixture carries.
-    fn current_meta() -> Value {
-        json!({
-            "schema_version": FIXTURE_SCHEMA_VERSION,
-            "provider_kind": "anthropic",
-            "lane": "anthropic-api",
-            "ingress_kind": "anthropic",
-            "case_id": "smoke",
-            "config_sha": "abc123",
-            "client": {
-                "name": "claude-code",
-                "version": "2.1.167",
-                "connection_mode": "base-url",
-            },
-            "stream": false,
-            "model": "claude-sonnet-4-5",
-            "routectl_version": "0.8.0",
-        })
-    }
-
-    /// Write the four ALWAYS-required files plus the given `meta.json`.
-    /// Optional response files are the caller's business.
-    fn write_required_files(dir: &Path, meta: &Value) {
-        fs::write(
-            dir.join(META_JSON),
-            serde_json::to_vec_pretty(meta).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join(INGRESS_BODY),
-            serde_json::to_vec(&json!({"model": "x"})).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join(INGRESS_HEADERS),
-            serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join(OUTGOING_BODY),
-            serde_json::to_vec(&json!({"model": "y"})).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join(OUTGOING_HEADERS),
-            serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
-        )
-        .unwrap();
-    }
 
     fn write_headers_file(path: PathBuf) {
         fs::write(
@@ -1314,5 +1316,124 @@ mod tests {
         let f = load_fixture(&dir).unwrap();
 
         assert_eq!(f.outgoing_request["model"], json!("m"));
+    }
+
+    // ---- the two roots' walk depths, asserted separately ----
+    //
+    // The driver corpus lands at `<root>/<lane>/<case_id>` and the
+    // live-box corpus is flat and request-id-keyed. The pairs below pin
+    // BOTH directions on BOTH walkers: a depth fix that "works" by
+    // walking everything everywhere would let a live-box fixture be
+    // found two deep, and a walker that silently skips every entry
+    // satisfies any load assertion that only counts what came back.
+
+    #[test]
+    fn the_driver_walk_loads_a_case_two_levels_deep_and_never_the_lane_directory() {
+        // Arrange: two lanes, three cases.
+        let tmp = tempdir().unwrap();
+        plant_driver_case(tmp.path(), "anthropic-api", "plain-turn-01");
+        plant_driver_case(tmp.path(), "anthropic-api", "thinking-01");
+        plant_driver_case(tmp.path(), "openai-responses", "plain-turn-01");
+
+        // Act
+        let loaded = discover_driver_fixtures(tmp.path()).unwrap();
+
+        // Assert: the three CASE directories loaded and neither lane
+        // directory was offered to the loader as a fixture. `skipped`
+        // is the load-bearing half -- before the two-level walk, the
+        // lane directory itself was the entry and it counted here.
+        let names: Vec<_> = loaded.fixtures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["plain-turn-01", "thinking-01", "plain-turn-01"]);
+        assert_eq!(
+            loaded.skipped, 0,
+            "a lane directory was walked as a fixture"
+        );
+        assert_eq!(loaded.entries_walked(), 3);
+    }
+
+    /// PAIRED CONTROL for the test above: a genuinely broken case two
+    /// levels deep must still be REACHED and counted. Without it, a
+    /// walker that skips every entry silently passes the clean-corpus
+    /// assertion, since a corpus of nothing has no unexpected skips.
+    #[test]
+    fn the_driver_walk_counts_a_broken_case_two_levels_deep_as_skipped() {
+        // Arrange
+        let tmp = tempdir().unwrap();
+        plant_driver_case(tmp.path(), "anthropic-api", "good-01");
+        let bad = plant_driver_case(tmp.path(), "anthropic-api", "broken-01");
+        fs::remove_file(bad.join(META_JSON)).unwrap();
+
+        // Act
+        let loaded = discover_driver_fixtures(tmp.path()).unwrap();
+
+        // Assert
+        let names: Vec<_> = loaded.fixtures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["good-01"]);
+        assert_eq!(loaded.skipped, 1);
+        assert_eq!(loaded.entries_walked(), 2);
+    }
+
+    /// A lane directory holding nothing is corpus SHAPE, not corpus
+    /// content: it is neither a fixture nor a skipped fixture.
+    #[test]
+    fn an_empty_lane_directory_contributes_no_entry_to_the_driver_walk() {
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("anthropic-api")).unwrap();
+
+        let loaded = discover_driver_fixtures(tmp.path()).unwrap();
+
+        assert!(loaded.fixtures.is_empty());
+        assert_eq!(loaded.skipped, 0);
+        assert_eq!(loaded.entries_walked(), 0);
+    }
+
+    /// The live-box walk is unchanged and stays SINGLE-level: a fixture
+    /// one deep loads, and the same fixture planted two deep does not.
+    /// Its root is flat and request-id-keyed, and both replay drivers
+    /// walk it through `discover_fixtures`.
+    #[test]
+    fn the_live_box_walk_loads_one_level_deep_and_not_two() {
+        // Arrange: the same fixture content at both depths, in
+        // separate roots so neither can mask the other.
+        let flat = tempdir().unwrap();
+        plant_fixture(&flat.path().join("req-0001"));
+        let nested = tempdir().unwrap();
+        plant_fixture(&nested.path().join("anthropic-api").join("req-0001"));
+
+        // Act
+        let one_deep = discover_fixtures(flat.path()).unwrap();
+        let two_deep = discover_fixtures(nested.path()).unwrap();
+
+        // Assert
+        let names: Vec<_> = one_deep.fixtures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["req-0001"]);
+        assert_eq!(one_deep.skipped, 0);
+
+        // The intermediate directory is what the flat walk reaches, and
+        // it is not a fixture: nothing loads, and the entry is skipped
+        // rather than invisible.
+        assert!(
+            two_deep.fixtures.is_empty(),
+            "the live-box walk descended a level it must not",
+        );
+        assert_eq!(two_deep.skipped, 1);
+    }
+
+    /// `entries_walked` counts the loadable and the unloadable alike --
+    /// the distinction a caller needs to tell an EMPTY corpus from a
+    /// BROKEN one.
+    #[test]
+    fn entries_walked_counts_unloadable_entries_alongside_loaded_ones() {
+        let tmp = tempdir().unwrap();
+        plant_driver_case(tmp.path(), "anthropic-api", "good-01");
+        let bad = plant_driver_case(tmp.path(), "anthropic-api", "broken-01");
+        fs::remove_file(bad.join(META_JSON)).unwrap();
+
+        let loaded = discover_driver_fixtures(tmp.path()).unwrap();
+
+        assert_eq!(loaded.fixtures.len(), 1);
+        assert_eq!(loaded.skipped, 1);
+        assert_eq!(loaded.entries_walked(), 2);
+        assert_eq!(LoadedCorpus::default().entries_walked(), 0);
     }
 }
