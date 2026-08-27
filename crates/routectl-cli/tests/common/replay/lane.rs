@@ -953,6 +953,7 @@ pub fn workspace_root() -> Result<std::path::PathBuf, SymbolError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     // ---------- class derivation ----------
 
@@ -1079,6 +1080,39 @@ mod tests {
             "the error must carry the offending kind"
         );
         assert!(err.to_string().contains("anthropic"), "got: {err}");
+    }
+
+    #[test]
+    fn egress_kinds_is_the_same_set_as_the_config_provider_kinds() {
+        // Welds this module's hand-listed vocabulary to its source. Set
+        // equality in BOTH directions, not a length or subset check:
+        // a kind added to the config schema must gain a dialect row here,
+        // and if `CONFIG_PROVIDER_KINDS` ever SHRINKS (it is cfg-gated per
+        // provider feature, and a reduced-feature build is not a supported
+        // routectl-cli target) this fails loudly instead of narrowing in
+        // silence.
+        let config: BTreeSet<&str> = routectl_router::CONFIG_PROVIDER_KINDS
+            .iter()
+            .copied()
+            .collect();
+        let harness: BTreeSet<&str> = EGRESS_KINDS.iter().copied().collect();
+
+        let missing_here: Vec<&str> = config.difference(&harness).copied().collect();
+        let missing_in_config: Vec<&str> = harness.difference(&config).copied().collect();
+
+        assert!(
+            missing_here.is_empty(),
+            "provider kinds present in the config schema but absent from \
+             EGRESS_KINDS: {missing_here:?} -- a kind an operator can write \
+             as `kind = \"...\"` needs a dialect row in this module, or \
+             every fixture on its lane fails as an unknown egress kind",
+        );
+        assert!(
+            missing_in_config.is_empty(),
+            "tokens present in EGRESS_KINDS but absent from the config \
+             schema: {missing_in_config:?} -- this module must not invent \
+             egress kinds no config can name",
+        );
     }
 
     #[test]

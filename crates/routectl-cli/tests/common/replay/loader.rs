@@ -64,7 +64,14 @@ pub const FIXTURE_SCHEMA_VERSION: u32 = 1;
 /// pre-versioning directory is a valid major-1 fixture with those fields
 /// absent.
 const fn default_schema_version() -> u32 {
-    FIXTURE_SCHEMA_VERSION
+    // The literal 1, deliberately NOT `FIXTURE_SCHEMA_VERSION`. This is a
+    // historical fact about captures that predate the key; the constant is
+    // what THIS loader reads. They are equal only coincidentally, while the
+    // current major is still 1. Tracking the constant would make every
+    // pre-versioning fixture claim whatever major the loader happens to
+    // read, so a future bump would silently mis-read that corpus instead of
+    // letting `read_meta`'s gate refuse it.
+    1
 }
 
 /// Client identity that produced the captured ingress request. Pinned
@@ -722,6 +729,125 @@ mod tests {
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
         }
+    }
+
+    /// `default_schema_version()` must stay the LITERAL 1, never
+    /// `FIXTURE_SCHEMA_VERSION`. If it tracked the constant, bumping the
+    /// major would make every pre-versioning fixture in the unrecapturable
+    /// live-box corpus claim the NEW major and be half-loaded by a loader
+    /// built for a different directory shape -- instead of being refused
+    /// by `read_meta`'s gate, which exists to prevent exactly that.
+    #[test]
+    fn pre_versioning_default_major_is_a_literal_not_the_loader_constant() {
+        assert_eq!(
+            default_schema_version(),
+            1,
+            "a fixture with no `schema_version` key is major 1 as a historical \
+             fact -- it predates the key. Returning FIXTURE_SCHEMA_VERSION here \
+             makes the unrecapturable live-box corpus claim whatever major this \
+             loader reads, so a future bump mis-reads it silently instead of \
+             refusing it."
+        );
+
+        // The assert above is `1 == 1` while the constant is still 1, so it
+        // documents intent without guarding it. This half is the guard: read
+        // this function's own body out of the source and require the literal,
+        // so reverting it to track FIXTURE_SCHEMA_VERSION fails TODAY rather
+        // than on the day of the bump -- which is the day the unrecapturable
+        // live-box corpus would be silently mis-read.
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/common/replay/loader.rs"),
+        )
+        .expect("this test file must be readable to guard its own constant");
+        let body = src
+            .split_once("const fn default_schema_version() -> u32 {")
+            .expect("default_schema_version must exist with this exact signature")
+            .1
+            .split_once('}')
+            .expect("its body must be brace-closed")
+            .0;
+        // Strip line comments first: the body's own comment EXPLAINS why it does
+        // not use the constant, so a naive substring check fails on the
+        // explanation rather than on the code.
+        let code: String = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("FIXTURE_SCHEMA_VERSION"),
+            "default_schema_version's body names FIXTURE_SCHEMA_VERSION: it must \
+             return the literal 1. Tracking the constant is the defect this test \
+             exists to prevent, and an equality assertion cannot catch it until \
+             the constant has already moved. Code was: {code:?}"
+        );
+        assert!(
+            code.lines().any(|l| l.trim() == "1"),
+            "default_schema_version's body does not contain the bare literal 1; \
+             if the shape changed, update this guard deliberately. Code: {code:?}"
+        );
+    }
+
+    /// `scripts/capture_fixtures.sh` carries a REPLICA of
+    /// `FIXTURE_SCHEMA_VERSION` -- it stamps the major into every
+    /// `meta.json` from shell, without linking against this crate. The two
+    /// were joined only by a comment, which is the drift class already
+    /// closed once for the scrub gate's credential rules: bump the Rust
+    /// constant alone and every subsequent capture is refused by every
+    /// loader; bump the shell one alone and the corpus loads under a wrong
+    /// major.
+    ///
+    /// This test parses the assignment out of the script rather than
+    /// restating its value, so a hand-copied expectation cannot become a
+    /// third replica.
+    #[test]
+    fn capture_rig_schema_version_matches_the_loader_constant() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/capture_fixtures.sh")
+            .canonicalize()
+            .expect(
+                "capture_fixtures.sh must exist: it is the only writer of the \
+                 fixture schema_version",
+            );
+        let source = fs::read_to_string(&script).expect("capture_fixtures.sh must be readable");
+
+        // Take the shell assignment's right-hand side: `SCHEMA_VERSION=<n>`
+        // up to the end of that line.
+        let assignments: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("SCHEMA_VERSION="))
+            .collect();
+
+        assert_eq!(
+            assignments.len(),
+            1,
+            "found {} `SCHEMA_VERSION=` assignments in {} -- the parse broke or \
+             the rig grew a second writer of the major, and a silently-empty \
+             match would make this weld vacuous",
+            assignments.len(),
+            script.display()
+        );
+
+        let shell_version: u32 = assignments[0].trim().parse().unwrap_or_else(|e| {
+            panic!(
+                "`SCHEMA_VERSION={}` in {} is not an integer major ({e}) -- keep it \
+                 in step with FIXTURE_SCHEMA_VERSION",
+                assignments[0],
+                script.display()
+            )
+        });
+
+        assert_eq!(
+            shell_version,
+            FIXTURE_SCHEMA_VERSION,
+            "{} writes schema_version {} into every meta.json, but this loader \
+             reads major {} and refuses any other value. Keep the two in step: \
+             bumping one alone either refuses every new capture or loads the \
+             corpus under a wrong major.",
+            script.display(),
+            shell_version,
+            FIXTURE_SCHEMA_VERSION
+        );
     }
 
     /// The tolerance decision documented on `FixtureMeta`: a capture

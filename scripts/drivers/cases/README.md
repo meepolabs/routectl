@@ -88,4 +88,9 @@ python3 scripts/drivers/lib/validate_case.py --turns <case>
 
 ## Running a case
 
+A runner covering a whole lane derives the set of cases it expects at run
+time -- `cases/*.json` filtered on `lane` -- rather than reading a
+committed manifest, so adding or moving a case needs no second file kept
+in step with this directory.
+
 See the driver-mode section of [../../../docs/DEVELOPMENT.md](../../../docs/DEVELOPMENT.md).
