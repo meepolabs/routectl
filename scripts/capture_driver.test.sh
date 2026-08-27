@@ -235,11 +235,13 @@ make_work() {
     local work
     work="$(mktemp -d)"
     mkdir -p "$work/repo/scripts/drivers/config" \
+        "$work/repo/scripts/drivers/lib" \
         "$work/repo/crates/routectl-cli/tests/fixtures" \
         "$work/bin"
     cp "$RUNNER" "$work/repo/scripts/capture_driver.sh"
     cp "$RIG" "$work/repo/scripts/capture_fixtures.sh"
     cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
+    cp "$HERE/drivers/lib/confine.sh" "$work/repo/scripts/drivers/lib/confine.sh"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$work/repo/Cargo.toml"
