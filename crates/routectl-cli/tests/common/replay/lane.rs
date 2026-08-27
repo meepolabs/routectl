@@ -763,6 +763,18 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 4] = [
     },
 ];
 
+/// THE lock that serializes every reader of a per-exception counter DELTA.
+///
+/// The counters are process-global statics that only ever increase, so a
+/// zero-match gate has to read the delta across its own walk -- and that
+/// delta is attributable only while nothing else is incrementing them.
+/// Cargo runs the tests of one binary on several threads, so both a
+/// conservation walk AND a unit test that calls `Exception::matches`
+/// directly must hold THIS lock, not one lock each: two locks serialize
+/// each side against itself and leave the two sides racing, which reads as
+/// a doubled delta and passes or fails by timing.
+pub static COUNTER_DELTA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Every exception entry, across all lanes.
 pub fn all_exceptions() -> &'static [Exception] {
     &ANTHROPIC_FIDELITY_EXCEPTIONS
@@ -1593,6 +1605,9 @@ mod tests {
 
     #[test]
     fn a_match_increments_the_entrys_own_counter() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("thinking-temperature-clamp");
         let before = entry.matched_count();
 
@@ -1611,6 +1626,9 @@ mod tests {
 
     #[test]
     fn a_non_match_leaves_the_counter_alone() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("disabled-thinking-dropped");
         let before = entry.matched_count();
 
@@ -1630,6 +1648,9 @@ mod tests {
         // this binary, so a consumer that reads `matched_count()` directly
         // sees hits some other walk contributed. This demonstrates the
         // discipline the module docs require: snapshot, walk, subtract.
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("model-alias-suffix-resolved");
         let unrelated = vec![Divergence {
             path: "max_tokens".to_string(),

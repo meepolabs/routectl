@@ -127,6 +127,17 @@ A DRIVER capture (`--driver-mode`) lands keyed on `(lane, case_id)`:
 
     <out>/<lane>/<case_id>/
 
+The lane component is also the key to the per-lane HERMETIC CONFIG the
+driver run booted under: `scripts/drivers/config/<lane>.toml`, committed,
+one file per lane. `scripts/capture_driver.sh` copies it into the run's
+throwaway `$XDG_CONFIG_HOME/routectl/config.toml` and records its sha256
+as `meta.config_sha` -- the sha of the COMMITTED file, not of the booted
+copy, so the field names the scenario's config identity rather than
+changing per run. Editing a lane config therefore invalidates the
+comparability of every fixture previously captured on that lane, which is
+the point: without a pinned config, a rerun under a drifted one reads as
+client drift.
+
 Case keying is what makes a driver corpus diffable. A UUID-keyed corpus
 grows a fresh sibling on every rerun and has nothing to compare against;
 case-keyed, a rerun of the same scenario RE-LANDS on the same path, so it

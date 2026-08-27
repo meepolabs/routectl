@@ -104,7 +104,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -138,7 +137,7 @@ pub const UNPINNED_INGRESS_LABEL: &str = "<unpinned>";
 /// identify the class; the tail repeats it.
 const MAX_PATHS_REPORTED: usize = 5;
 
-/// Serializes adjudication across the whole process.
+/// Serializes adjudication against every OTHER reader of the counters.
 ///
 /// The per-exception match counters in [`super::lane`] are process-global
 /// statics that only ever increase, so a zero-match gate has to read the
@@ -146,7 +145,12 @@ const MAX_PATHS_REPORTED: usize = 5;
 /// other walk is running: two concurrent adjudications would each see the
 /// other's hits and a genuinely unexercised entry could be credited with a
 /// nonzero delta, passing a gate that should have failed.
-static ADJUDICATION_LOCK: Mutex<()> = Mutex::new(());
+///
+/// This is deliberately the SAME lock the unit tests that touch
+/// `Exception::matches` directly take. A private lock here would serialize
+/// walks against walks while still racing those tests, which showed up as a
+/// delta of 3 where 1 was asserted -- green alone, red in a full-suite run.
+use super::lane::COUNTER_DELTA_LOCK as ADJUDICATION_LOCK;
 
 // ---------------------------------------------------------------------
 // Gated lanes
