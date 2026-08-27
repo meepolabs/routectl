@@ -211,3 +211,11 @@ jobs:
       # HOME, git identity, and hostname ARE the deny set.
       - name: fixture scrub gate self-test
         run: bash scripts/scrub-fixture.test.sh
+
+      # The driver runner boots a daemon and kills it. A real boot needs a
+      # credential CI does not have, so the self-test injects a stub daemon
+      # through the runner's ROUTECTL_BIN override -- which still exercises
+      # the port probe, the health precondition, the cleanup trap, and the
+      # handoff to the capture rig.
+      - name: driver runner self-test
+        run: bash scripts/capture_driver.test.sh

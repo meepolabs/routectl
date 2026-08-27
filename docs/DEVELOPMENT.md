@@ -408,6 +408,60 @@ case produced no fixture". The full policy split is in the script header
 (`scripts/capture_fixtures.sh --help`); the on-disk layout is in
 [REPLAY-FIXTURES.md](REPLAY-FIXTURES.md).
 
+### The hermetic driver runner
+
+`scripts/capture_driver.sh` is what actually produces a driver-mode
+capture. It boots a hermetic routectl, hands the daemon to a driver
+command, and feeds the resulting trace to the rig:
+
+```
+scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
+  -- scripts/drivers/<driver-script> [args...]
+```
+
+What each run does, in order:
+
+1. Builds a throwaway workspace: a fresh `HOME` (empty), a fresh cwd that
+   is a git repo with a SYNTHETIC author (`Fixture Driver
+   <driver@fixtures.invalid>`), and a fresh `XDG_CONFIG_HOME` carrying
+   `routectl/config.toml` copied from the lane's committed config. A
+   driven client runs tools and reads their output back into its own
+   request bodies, so hermeticity is what keeps anything personal out of
+   a fixture in the first place -- the scrub gate is the proof half of
+   the same story, not a substitute for it.
+2. Picks a free port AFTER probing `ss -ltn`, then starts
+   `routectl serve --port <port> 2> "$RUN/trace.log"`. That redirect IS
+   the capture sink: `init_tracing` writes to stderr and the driven
+   daemon is not a service unit, so nothing truncates or journals it.
+3. Polls `/health` as a PRECONDITION, requiring both that the pid it
+   captured is alive and that the endpoint answers -- an occupied port
+   leaves someone else's listener answering, so "something responds" is
+   not proof. A daemon that never comes up aborts the run (exit 3) after
+   printing the tail of the trace.
+4. Runs the driver command with cwd in the throwaway repo and the base
+   URL plus all three fixture pins exported. `--help` lists the exact
+   variable names -- that block is the contract a driver script codes
+   against.
+5. Stops the daemon by the pid it captured from its own `$!` (never by
+   name, and never under `setsid`, which would capture the wrapper), then
+   runs the rig in `--driver-mode` against the trace, landing under
+   `crates/routectl-cli/tests/fixtures/driver/<lane>/<case-id>/`.
+
+A cleanup trap runs on every exit path, so an interrupted or failed run
+never leaves a daemon holding its port. Exit codes: 2 usage, 3 unhealthy
+daemon, 4 driver failure, 5 rig refusal, 6 no free port.
+
+`meta.config_sha` is the sha256 of the COMMITTED lane config
+(`scripts/drivers/config/<lane>.toml`), not of the copy the run boots
+from. The port arrives on the serve command line rather than as a rewrite
+of that file precisely so the hashed identity stays stable: a per-run sha
+could not distinguish config drift from a fresh run, which is the one
+question the field exists to answer.
+
+`scripts/capture_driver.test.sh` covers the runner against a STUB daemon
+(`ROUTECTL_BIN` selects the binary) -- a real boot needs a credential and
+CI has none.
+
 ## Style notes
 
 - ASCII-only in code, comments, and commit messages. No em-dashes,
