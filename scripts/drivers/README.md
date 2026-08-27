@@ -1,0 +1,45 @@
+# The harness drivers
+
+One file per harness. A driver maps ONE canonical interaction case (see
+[cases/README.md](cases/README.md)) onto one client's argv and
+environment, against the routectl that `scripts/capture_driver.sh` booted.
+
+## Why one file per harness and never a dispatch
+
+There is deliberately no `case "$harness"` statement anywhere here. Five
+near-duplicate blocks in one script is a drift surface, and more
+importantly "not yet drivable" has to degrade to NO FILE rather than to a
+dead branch: a branch that cannot run still reads as coverage, and a
+harness whose name cannot be committed could not be driven at all if the
+enumeration lived in tracked content. Shared behavior lives in
+[lib/common.sh](lib/common.sh) instead, which is what keeps the
+per-harness files small enough for the rule to stay affordable.
+
+## The files
+
+| File | Client | Notes |
+|---|---|---|
+| `claude-code.sh` | `claude`, interactive | Types the case's turns into a pty; supports both connection modes |
+| `claude-code-print.sh` | `claude -p` | Same binary, different wire shape: non-interactive turn structure and tool loop. Multi-turn resumes by session id |
+| `external-agent-cli.sh` | named by `ROUTECTL_DRIVER_AGENT_BIN` | Any third-party Anthropic-dialect CLI with a one-shot flag; the driver never names its client |
+
+A harness with no file here is not drivable on this box. Its missing
+piece is filed to the `wild-evidence` pen rather than stubbed.
+
+## Connection mode is a capture axis
+
+A MITM front proxy carries `role:"system"` turns inside `messages[]`;
+`base-url` mode inlines the same content as system-reminder text and sends
+zero system turns. Same client, same case, two wire shapes -- which is why
+`connection_mode` is a required fixture pin and why a driver refuses a
+front-proxy run whose proxy URL or CA is unset instead of falling back to
+base-url. A silent fallback would land a fixture labelled `front-proxy`
+whose shape is `base-url`, and every later cross-mode diff would read as
+client drift.
+
+## Running one
+
+See the driver-mode section of
+[../../docs/DEVELOPMENT.md](../../docs/DEVELOPMENT.md).
+`scripts/drivers.test.sh` covers the case set and every driver against a
+STUB daemon and a STUB client -- a real run needs a credential.

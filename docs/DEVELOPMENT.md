@@ -462,6 +462,98 @@ question the field exists to answer.
 (`ROUTECTL_BIN` selects the binary) -- a real boot needs a credential and
 CI has none.
 
+### The canonical interaction set
+
+What a driver run captures is one CASE: a file under
+`scripts/drivers/cases/`, `<case_id>.json`, describing one interaction.
+The set covers wire PATTERNS rather than models -- multi-turn tool loops,
+cache breakpoints, thinking, large contexts, plus a plain-turn baseline to
+diff the others against. A case file names no binary and no flag: mapping
+it onto a client's argv is a driver's job, which is what lets the same case
+be replayed through every drivable harness.
+
+The schema is documented in one place,
+[../scripts/drivers/cases/README.md](../scripts/drivers/cases/README.md),
+and enforced in one place,
+`scripts/drivers/lib/validate_case.py` -- the drivers read their case
+through it on every run, so a malformed case fails before a client opens a
+session:
+
+```
+python3 scripts/drivers/lib/validate_case.py --check scripts/drivers/cases/thinking-01.json
+```
+
+### The harness drivers
+
+One FILE per harness under `scripts/drivers/`, never a dispatch statement:
+a harness this box cannot drive has NO file, because a dead branch still
+reads as coverage and a harness whose name cannot be committed could not be
+driven at all if the enumeration lived in tracked content. Shared behavior
+(reading the case, seeding the throwaway cwd, the daemon precondition, the
+client-version read) lives in `scripts/drivers/lib/common.sh`.
+
+| Driver | Client | Selected by |
+|---|---|---|
+| `claude-code.sh` | interactive Claude Code | `ROUTECTL_DRIVER_CLAUDE_BIN`, default `claude` |
+| `claude-code-print.sh` | `claude -p` / Agent SDK print mode | same variable; the same binary, a different wire shape |
+| `external-agent-cli.sh` | any third-party Anthropic-dialect CLI | `ROUTECTL_DRIVER_AGENT_BIN`, REQUIRED, no default |
+
+### Running a case
+
+```
+scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
+  -- scripts/drivers/claude-code-print.sh
+```
+
+That lands `crates/routectl-cli/tests/fixtures/driver/anthropic-api/tools-multiturn-01/`.
+Add `--keep` to retain the run workspace, which holds the trace, the
+client's own output, and `client.txt` (the version the driver read from the
+binary at run time). A rerun of the same case re-lands on the same path and
+produces a diff.
+
+The MITM mode needs its two carriers, and an unset one is a refusal rather
+than a fallback to `base-url`:
+
+```
+ROUTECTL_DRIVER_PROXY_URL=http://127.0.0.1:8443 \
+ROUTECTL_DRIVER_PROXY_CA=$XDG_CONFIG_HOME/routectl/mitm-certs/ca.pem \
+scripts/capture_driver.sh --lane anthropic-api --case thinking-01 \
+  --connection-mode front-proxy -- scripts/drivers/claude-code.sh
+```
+
+Both modes matter because they emit different wire shapes: a front proxy
+carries `role:"system"` turns inside `messages[]` while `base-url` inlines
+the same content as system-reminder text and sends zero system turns. A
+silent fallback would land a fixture labelled `front-proxy` whose shape is
+`base-url`, and every later cross-mode diff would read as client drift.
+
+Driving the third harness supplies its binary and the flags it answers to;
+the driver's header lists them. A multi-turn case through it requires
+`ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG`, because N independent one-shots
+would land a fixture labelled multi-turn whose trace holds N first turns.
+
+```
+ROUTECTL_DRIVER_AGENT_BIN=<binary> \
+ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG=--continue \
+ROUTECTL_DRIVER_AGENT_MODEL_FLAG=-m \
+scripts/capture_driver.sh --lane anthropic-api --case thinking-01 \
+  -- scripts/drivers/external-agent-cli.sh
+```
+
+### A driver corpus is a snapshot of a client VERSION
+
+`meta.client.version` is the decay clock. Claude Code auto-updated 2.1.169
+-> 2.1.245 across one restart and changed its request shape mid-week; every
+driver reads the version from the binary at run time and fails the run when
+the binary cannot state it, because a fixture with no version cannot say
+which client shape it pins. Case keying is what converts that decay from
+silent rot into a visible diff.
+
+`scripts/drivers.test.sh` covers the case set and every driver against a
+stub daemon AND a stub client, injected through the same binary overrides
+listed above -- a real run needs a credential and spends tokens.
+
+
 ## Style notes
 
 - ASCII-only in code, comments, and commit messages. No em-dashes,

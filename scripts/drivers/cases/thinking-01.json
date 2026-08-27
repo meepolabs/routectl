@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case_id": "thinking-01",
+  "title": "Single reasoning-heavy turn with extended thinking requested and no tools",
+  "wire_pattern": "thinking",
+  "lane": "anthropic-api",
+  "turns": [
+    {
+      "prompt": "Three switches control three lamps in a room you can enter only once. Work out a procedure that identifies every switch, and explain why it is correct."
+    }
+  ],
+  "knobs": {
+    "tools": false,
+    "thinking": true,
+    "cache_breakpoints": false,
+    "context_padding_bytes": 0
+  },
+  "notes": "Tools are off so the thinking block is the only structural addition against the plain-turn baseline, which keeps a diff attributable."
+}

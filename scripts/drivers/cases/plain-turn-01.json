@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case_id": "plain-turn-01",
+  "title": "Single plain turn with every capability knob off",
+  "wire_pattern": "baseline",
+  "lane": "anthropic-api",
+  "turns": [
+    {
+      "prompt": "Reply with the single word acknowledged and nothing else."
+    }
+  ],
+  "knobs": {
+    "tools": false,
+    "thinking": false,
+    "cache_breakpoints": false,
+    "context_padding_bytes": 0
+  },
+  "notes": "The baseline every other case diffs against. Without it a structural difference cannot be attributed to the knob that caused it, since the client's floor shape moves between versions too."
+}

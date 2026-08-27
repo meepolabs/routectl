@@ -164,6 +164,18 @@ carrying a hostname or a real home path is refused by the landing gate
 itself. A case id holding a path separator or a traversal segment is
 refused outright, since it names a directory.
 
+The set of case ids a driver corpus can hold is itself committed DATA:
+`scripts/drivers/cases/<case_id>.json`, one file per case, each describing
+one interaction and naming no harness. The schema is documented in
+`scripts/drivers/cases/README.md` and enforced by
+`scripts/drivers/lib/validate_case.py`, which every driver runs against its
+case before a client opens a session -- so the id charset rule above is
+guaranteed at the source rather than only caught at the landing gate. The
+set covers wire PATTERNS (multi-turn tool use, cache breakpoints, thinking,
+large contexts, plus a plain-turn baseline), not named models: which model
+serves a pattern is the lane config's business. How to run one is in
+[DEVELOPMENT.md](DEVELOPMENT.md).
+
 Inside the fixture directory, `meta.json` and the two request halves are
 always present; the response halves are present when the capture
 observed them. The nine files the loader reads:
