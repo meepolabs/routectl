@@ -5568,6 +5568,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   skip list still catches the models whose overlay no fixture field pins), and
   the value-bounded failure reporter (no prompt text, no prefix of one, no
   container contents, allowlist fails closed, path and kind preserved)
+- `tests/scrub_gate_provider_shapes.rs` -- drift detector over the
+  sentinel-delimited `PROVIDER_SHAPE_KINDS` / `PROVIDER_SHAPE_EXCLUDED`
+  classification block in `scripts/scrub-fixture.sh`
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor

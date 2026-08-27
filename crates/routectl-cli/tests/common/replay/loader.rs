@@ -56,6 +56,41 @@ pub enum ReplayError {
 /// major: a format change that an existing fixture cannot satisfy bumps
 /// it, and `read_meta` refuses any other value outright rather than
 /// half-loading a shape it does not understand.
+///
+/// # The compatibility rule: no minor, ever -- recapture IS the migration
+///
+/// 1. ADDING AN OPTIONAL KEY is the only evolution permitted at a fixed
+///    major. This loader ignores keys it does not know ([`FixtureMeta`]
+///    carries no `deny_unknown_fields`) and every additive field carries
+///    `#[serde(default)]`, so a checkout that writes a new key stays
+///    readable by a checkout that has never heard of it. A consumer that
+///    NEEDS a key refuses the individual fixture lacking it -- the
+///    posture already documented on `lane` / `case_id` / `client` /
+///    `config_sha` -- rather than the loader refusing the corpus.
+/// 2. ANYTHING ELSE bumps this integer, and the bumping change
+///    RECAPTURES the committed driver corpus in the same commit. Driver
+///    fixtures are synthetic and reproducible by construction, so a
+///    single tree never holds a mixed-major committed corpus. That is
+///    why `read_meta` gates on `!=` and NOT on `>`: a fixture at a LOWER
+///    major is a directory shape this loader cannot read either, and
+///    half-loading it is the exact failure the gate exists to prevent.
+///    Do not weaken the comparison.
+/// 3. THERE IS NO MINOR, of any spelling. A second integer replicated
+///    across `scripts/capture_fixtures.sh`, this constant and
+///    `docs/REPLAY-FIXTURES.md` with nothing enforcing it reads as a
+///    guarantee and is not one. Recapture under clause 2 is the whole
+///    migration story.
+///
+/// The live-box corpus is EXEMPT from clause 2 and cannot be
+/// recaptured, which is why [`default_schema_version`] returns the
+/// literal 1 instead of tracking this constant.
+///
+/// Both directions of the gate are pinned by tests:
+/// `loader_accepts_a_fixture_whose_meta_carries_an_unknown_key`
+/// (clause 1's tolerance),
+/// `loader_rejects_a_fixture_at_an_unknown_schema_major` and
+/// `loader_rejects_a_fixture_below_the_current_schema_major`
+/// (clause 2's `!=`).
 pub const FIXTURE_SCHEMA_VERSION: u32 = 1;
 
 /// Implicit major for a fixture captured before `schema_version` was
@@ -113,6 +148,12 @@ pub struct FixtureClient {
 /// the individual fixture that lacks it. `schema_version` is the one
 /// hard gate, because a major bump means the directory shape itself
 /// changed and no per-field default can rescue it.
+///
+/// This struct also deliberately carries no `deny_unknown_fields`: an
+/// unknown key is IGNORED, which is clause 1 of the compatibility rule
+/// stated on [`FIXTURE_SCHEMA_VERSION`]. That rule governs how this
+/// schema may evolve; read it there rather than inferring it from the
+/// per-field defaults below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixtureMeta {
     /// Fixture-format major. Absent means major 1 (pre-versioning).
@@ -304,6 +345,8 @@ fn read_meta(dir: &Path) -> Result<FixtureMeta, ReplayError> {
         path: path.display().to_string(),
         source: e,
     })?;
+    // `!=`, not `>`: clause 2 of the rule on FIXTURE_SCHEMA_VERSION. A
+    // lower major is a directory shape this loader cannot read either.
     if meta.schema_version != FIXTURE_SCHEMA_VERSION {
         return Err(ReplayError::UnsupportedSchemaVersion {
             path: path.display().to_string(),
@@ -729,6 +772,68 @@ mod tests {
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
         }
+    }
+
+    /// Clause 2 of the compatibility rule, LOWER direction: the gate is
+    /// `!=`, not `>`. A fixture below the current major is a directory
+    /// shape this loader cannot read either, so half-loading it is the
+    /// same failure an unknown-higher major would cause. Weakening the
+    /// comparison to `>` -- the plausible "be liberal with old data"
+    /// edit -- turns this red, which is why the lower direction is
+    /// pinned at all.
+    #[test]
+    fn loader_rejects_a_fixture_below_the_current_schema_major() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        meta["schema_version"] = json!(0);
+        write_required_files(&dir, &meta);
+
+        let err = load_fixture(&dir).unwrap_err();
+
+        match &err {
+            ReplayError::UnsupportedSchemaVersion {
+                found, supported, ..
+            } => {
+                assert_eq!(*found, 0);
+                assert_eq!(*supported, FIXTURE_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
+    }
+
+    /// Clause 1 of the compatibility rule: adding an optional key is the
+    /// permitted evolution at a fixed major, which only holds because a
+    /// reader IGNORES keys it does not know. A checkout that writes a new
+    /// key must stay readable by a checkout built before it existed, so
+    /// `FixtureMeta` must never gain `deny_unknown_fields`.
+    #[test]
+    fn loader_accepts_a_fixture_whose_meta_carries_an_unknown_key() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        meta["a_key_this_loader_has_never_heard_of"] = json!({"nested": [1, 2, 3]});
+        write_required_files(&dir, &meta);
+
+        // Non-vacuity: prove the key reached disk. Without this the test
+        // would also pass if the fixture writer silently dropped it, which
+        // is tolerance of nothing.
+        let on_disk: Value =
+            serde_json::from_slice(&fs::read(dir.join(META_JSON)).unwrap()).unwrap();
+        assert!(
+            on_disk
+                .get("a_key_this_loader_has_never_heard_of")
+                .is_some(),
+            "the unknown key must be present in the written meta.json, or this \
+             test pins nothing: {on_disk}"
+        );
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.schema_version, FIXTURE_SCHEMA_VERSION);
+        assert_eq!(f.meta.provider_kind, "anthropic");
     }
 
     /// `default_schema_version()` must stay the LITERAL 1, never

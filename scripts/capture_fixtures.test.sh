@@ -786,6 +786,108 @@ else
 fi
 rm -rf "$work"
 
+# --- Case 14b: driver mode refuses an unclassified lane ---------------
+# The rig asks `scrub-fixture.sh --lane-known <lane>` and refuses on a
+# non-zero answer, so a fixture on a lane whose credential shape nobody
+# has classified cannot land. Every lane token normalize_lane emits is
+# classified in the shipped table -- which is the point of the table --
+# so the unclassified state is produced by narrowing the throwaway repo's
+# COPY of the gate, not by inventing a lane token the rig would map to an
+# empty lane (that is the neighbouring refusal, already covered).
+#
+# The narrowing is verified before the rig runs: a sed that matched
+# nothing would leave the table intact and this case would assert against
+# the classified path while claiming to cover the unclassified one.
+strip_shape_row() {
+    local tmp="$1" lane="$2"
+    local gate="$tmp/repo/scripts/scrub-fixture.sh"
+    grep -q "^  \"$lane=" "$gate" || return 1
+    sed -i "/^  \"$lane=/d" "$gate"
+    ! grep -q "^  \"$lane=" "$gate"
+}
+
+set_pins unclassified-lane-01 abc123 base-url
+work="$(make_repo)"
+if strip_shape_row "$work" gemini; then
+    rc=0
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000001d gemini)" \
+        --driver-mode || rc=$?
+    check "an unclassified lane refuses with exit 1, not the zero-landing 3" "1" "$rc"
+    if [ -d "$(captured_of "$work")/gemini" ]; then
+        echo "FAIL: a fixture on an unclassified lane reached the corpus"
+        fails=$((fails + 1))
+    else
+        echo "PASS: a fixture on an unclassified lane does not reach the corpus"
+    fi
+    # The message must NAME the lane: a runner reading only "not promoting"
+    # cannot tell this refusal from the scrub-residue one.
+    check_log "the unclassified-lane refusal names the lane" \
+        "lane 'gemini' has no credential-shape classification" "$work/rig.log"
+    # And it must not echo fixture content into a CI log.
+    if grep -qF "claude-sonnet-4-5" "$work/rig.log"; then
+        echo "FAIL: the unclassified-lane refusal echoed fixture content"
+        fails=$((fails + 1))
+    else
+        echo "PASS: the unclassified-lane refusal echoes no fixture content"
+    fi
+    # Nothing staged is left behind: the tmp directory is discarded, not
+    # abandoned under the corpus root for a later run to promote.
+    if [ -d "$(captured_of "$work")" ] &&
+        [ -n "$(find "$(captured_of "$work")" -maxdepth 1 -name '.tmp.*' -print -quit)" ]; then
+        echo "FAIL: the refused fixture left a staged tmp directory behind"
+        fails=$((fails + 1))
+    else
+        echo "PASS: the refused fixture leaves no staged tmp directory"
+    fi
+else
+    echo "FAIL: could not narrow the shape table in the throwaway gate copy"
+    fails=$((fails + 1))
+fi
+clear_pins
+rm -rf "$work"
+
+# Paired positive control for the case above: the SAME trace on the SAME
+# lane promotes against the unnarrowed table, so the refusal is the
+# lane-classification gate firing and not driver mode refusing every
+# gemini capture.
+set_pins classified-lane-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000001e gemini)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a classified lane still promotes at exit 0" "0" "$rc"
+if [ -f "$(captured_of "$work")/gemini/classified-lane-01/meta.json" ]; then
+    echo "PASS: a fixture on a classified lane is promoted"
+else
+    echo "FAIL: a fixture on a classified lane was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# The rule has ONE enforcement point. capture_driver.sh must carry no lane
+# vocabulary and no copy of the table: a second copy is the drift point
+# the single owner exists to avoid.
+assert_runner_holds_no_shape_table() {
+    local runner="$HERE/capture_driver.sh"
+    local pattern='PROVIDER_SHAPE_(KINDS|EXCLUDED)|--lane-known'
+    # Positive control: the pattern must actually match SOMETHING in this
+    # repo, or the absence assertion below passes against a typo.
+    if ! grep -qE "$pattern" "$RIG"; then
+        echo "FAIL: the shape-vocabulary pattern matches nothing in the rig; it cannot detect a copy"
+        fails=$((fails + 1))
+        return
+    fi
+    if grep -qE "$pattern" "$runner"; then
+        echo "FAIL: capture_driver.sh carries a second copy of the shape vocabulary"
+        fails=$((fails + 1))
+    else
+        echo "PASS: capture_driver.sh holds no copy of the shape table"
+    fi
+}
+assert_runner_holds_no_shape_table
+
 # --- Case 15: json_escape still covers the driver-mode pins -----------
 # Driver mode makes the pins mandatory, so the hostile values go in the
 # pins themselves. A case id names a DIRECTORY now, so the quote rides in

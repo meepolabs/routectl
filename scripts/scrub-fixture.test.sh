@@ -536,9 +536,28 @@ assert_caught "a legacy dotted google oauth token is caught" \
     "$(body_with "GEMINI_OAUTH=$(fake_key 'ya29.1.AADtN_V')")" \
     google-oauth-token
 
+# The accept boundary for the legacy-form alternative. The rule is TWO
+# alternatives (modern single run, or `ya29.<1-3 digits>.<opaque>`) rather
+# than one class widened with `.`, because the widened form was measured to
+# REFUSE all three fixtures below -- dotted prose with 20+ chars after the
+# prefix. The first control alone passed on the LENGTH FLOOR, not on any
+# punctuation boundary, so it did not prove what its name claimed.
 assert_clean "prose naming a short ya29 value then continuing a sentence is accepted" \
     ingress_request.json \
     "$(body_with "tokens look like ya29.SHORT. Then a new sentence continues here.")"
+
+assert_clean "a dotted ya29 prose run past the length floor is accepted" \
+    ingress_request.json \
+    "$(body_with "see ya29.oauth-token-refresh.flow.docs for the refresh flow")"
+
+assert_clean "a long dot-separated ya29 word list is accepted" \
+    ingress_request.json \
+    "$(body_with "ya29.token.value.here.and.more.text.follows in the prose")"
+
+assert_caught "a legacy dotted-digit google oauth token is still caught" \
+    ingress_request.json \
+    "$(body_with "GEMINI_OAUTH=$(fake_key 'ya29.1.AADtN_V')")" \
+    google-oauth-token
 
 # --- escaped-newline boundary, both directions -------------------------
 # A captured body is single-line JSON, so an embedded newline is the two
@@ -855,6 +874,86 @@ assert_help_lists_new_classes() {
     fi
 }
 assert_help_lists_new_classes
+
+# --- the --lane-known query mode --------------------------------------
+# Exit-code contract, driven through the REAL script. The rig's driver-mode
+# landing gate reads nothing but this status, so each of the three states
+# is pinned by its own case, including the EXCLUDED direction: a lane
+# classified as having no prefix-detectable shape answers 0, and only a
+# lane nobody has classified answers 1.
+assert_lane_known() {
+    local desc="$1" expected="$2"
+    shift 2
+    local rc=0
+    # Captured directly from the command, not from an enclosing `if`, for
+    # the reason assert_usage documents.
+    bash "$SCRUB" --lane-known "$@" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" = "$expected" ]; then
+        echo "PASS: --lane-known exits $expected -- $desc"
+    else
+        echo "FAIL: --lane-known expected exit $expected but got $rc -- $desc"
+        fails=$((fails + 1))
+    fi
+}
+
+assert_lane_known "a lane with a prefix-detectable shape is classified" 0 anthropic-api
+assert_lane_known "a second table lane is classified" 0 gemini
+# bedrock is in PROVIDER_SHAPE_EXCLUDED: no prefix shape, reason recorded
+# in the table. That is a verdict, so it is CLASSIFIED, not unknown.
+assert_lane_known "an explicitly excluded lane is classified, not unknown" 0 bedrock
+# The fail-closed state the whole mode exists for.
+assert_lane_known "a lane absent from both lists is unclassified" 1 not-a-lane
+assert_lane_known "an empty lane value is a usage error, not an answer" 2 ""
+
+# Usage errors that would otherwise read as a table verdict.
+assert_usage "--lane-known with no value is a usage error" --lane-known
+assert_usage "--lane-known and --check are mutually exclusive" \
+    --lane-known gemini --check "$SCRUB"
+assert_usage "--check and --lane-known are mutually exclusive in either order" \
+    --check "$SCRUB" --lane-known gemini
+assert_usage "--lane-known and --write are mutually exclusive" \
+    --lane-known gemini --write "$SCRUB"
+assert_usage "--lane-known takes no path argument" --lane-known gemini "$SCRUB"
+
+# The mode is a TABLE query: it must not scan, and must not depend on a
+# readable fixture or on the environment-derived deny set. A path that
+# does not exist is fatal to `--check`; `--lane-known` never looks at one,
+# and the WARN lines the deny-set derivation emits on an unconfigured box
+# would be noise from a mode that scans nothing.
+assert_lane_known_performs_no_scan() {
+    local out rc=0
+    out="$(cd / && HOME="" bash "$SCRUB" --lane-known anthropic-api 2>&1)" || rc=$?
+    if [ "$rc" != "0" ]; then
+        echo "FAIL: --lane-known exited $rc in an un-interrogable environment"
+        printf '%s\n' "$out"
+        fails=$((fails + 1))
+        return
+    fi
+    if printf '%s\n' "$out" | grep -q "WARN deny class"; then
+        echo "FAIL: --lane-known derived a deny set it never uses"
+        printf '%s\n' "$out"
+        fails=$((fails + 1))
+    else
+        echo "PASS: --lane-known answers from the table with no scan and no deny set"
+    fi
+}
+assert_lane_known_performs_no_scan
+
+# `--help` must document the mode: the rig depends on the exit contract,
+# and a mode absent from the usage block is a mode nobody calls correctly.
+assert_help_documents_lane_known() {
+    local out rc=0
+    out="$(bash "$SCRUB" --help 2>&1)" || rc=$?
+    if [ "$rc" = "0" ] &&
+        printf '%s\n' "$out" | grep -qF -- "--lane-known" &&
+        ! printf '%s\n' "$out" | grep -qF -- "END USAGE"; then
+        echo "PASS: --help documents --lane-known and leaks no sentinel"
+    else
+        echo "FAIL: --help omits --lane-known or leaks the sentinel (exit $rc)"
+        fails=$((fails + 1))
+    fi
+}
+assert_help_documents_lane_known
 
 # An empty directory would scan zero files; that must refuse, not PASS.
 assert_empty_dir_refused() {
