@@ -520,6 +520,21 @@ JWT_RE="$ANCHOR_LEFT"'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{1
 AWS_TEMP_KEY_ID_RE="$ANCHOR_LEFT"'ASIA[A-Z0-9]{16}'
 NVIDIA_API_KEY_RE="$ANCHOR_LEFT"'nvapi-[A-Za-z0-9_-]{20,}'
 
+# Bedrock's short-term API key. Prefix-keyed like its siblings.
+BEDROCK_API_KEY_RE="$ANCHOR_LEFT"'bedrock-api-key-[A-Za-z0-9_=&-]{20,}'
+
+# The two AWS credentials that have NO prefix of their own: the secret access
+# key is 40 opaque base64 characters and the session token is a long opaque
+# run, so neither can be keyed on its value the way every rule above is.
+# They are keyed on the ASSIGNMENT instead -- the variable NAME followed by
+# `=` or `:` and then an opaque run -- which is the shape they actually arrive
+# in: a `printenv` dump or an `~/.aws/credentials` excerpt echoed into a body.
+# That operator is what buys the specificity, so this stays a shape rule and
+# not the generic entropy matcher this gate refuses to become: the paired
+# accept controls cover every `env://AWS_SECRET_ACCESS_KEY` config spelling
+# and the "variable is unset" prose, which carry the name but no value.
+AWS_CRED_ASSIGN_RE='(AWS_SECRET_ACCESS_KEY|aws_secret_access_key|AWS_SESSION_TOKEN|aws_session_token)[[:space:]]*[=:][[:space:]]*[A-Za-z0-9/+=_-]{20,}'
+
 has_google_oauth_token() {
   grep -qE "$GOOGLE_OAUTH_TOKEN_RE" "$1"
 }
@@ -538,6 +553,14 @@ has_aws_temp_key_id() {
 
 has_nvidia_api_key() {
   grep -qE "$NVIDIA_API_KEY_RE" "$1"
+}
+
+has_bedrock_api_key() {
+  grep -qE "$BEDROCK_API_KEY_RE" "$1"
+}
+
+has_aws_cred_assignment() {
+  grep -qE "$AWS_CRED_ASSIGN_RE" "$1"
 }
 
 # --- provider shape coverage -----------------------------------------
@@ -563,15 +586,19 @@ PROVIDER_SHAPE_KINDS=(
   "openai-compat=sk-proj,sk-or-v1,nvapi"
   "openai-responses=sk-proj"
   "gemini=ya29,AIza"
+  "bedrock=bedrock-api-key,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN"
 )
 # Kinds with NO prefix-detectable credential shape, reason recorded per entry.
 PROVIDER_SHAPE_EXCLUDED=(
-  # bedrock: AWS_SECRET_ACCESS_KEY is 40 prefix-less base64 characters,
-  # structurally invisible to anything that is not an entropy matcher. The
-  # ASIA/AKIA rules cover the key ID only, never the secret, so classifying
-  # bedrock as "has a shape" on that basis would be a rubber stamp. Its
-  # SigV4 credentials are covered by the header layer (`x-amz-` prefix rule).
-  "bedrock"
+  # EMPTY, and that is a verdict rather than an oversight: every provider kind
+  # this build can name now has at least one body-layer credential shape the
+  # gate detects. bedrock was excluded here until its two prefix-less
+  # credentials (the secret access key, the session token) were keyed on their
+  # ASSIGNMENT rather than their value -- the exclusion's old reason cited the
+  # HEADER layer, which only covers credentials routectl itself puts on the
+  # wire and says nothing about a credential arriving in a captured BODY.
+  # A kind belongs here only when no name-keyed and no prefix-keyed rule can
+  # see its credential, and the reason must name the layer it was checked at.
 )
 # --- END PROVIDER_SHAPE_KINDS ---
 #
@@ -720,6 +747,8 @@ run_check() {
     has_jwt "$f" && findings+="  $f  jwt"$'\n'
     has_aws_temp_key_id "$f" && findings+="  $f  aws-temp-key-id"$'\n'
     has_nvidia_api_key "$f" && findings+="  $f  nvidia-api-key"$'\n'
+    has_bedrock_api_key "$f" && findings+="  $f  bedrock-api-key"$'\n'
+    has_aws_cred_assignment "$f" && findings+="  $f  aws-credential-assignment"$'\n'
     case "$f" in
       *.headers.json)
         local hrc=0
