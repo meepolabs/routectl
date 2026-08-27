@@ -30,9 +30,19 @@ version = 4
 host = "127.0.0.1"
 port = 8787
 
+# `auth_kind` is a WIRE-SHAPE declaration here, not a credential detail.
+# `oauth-bearer` against `api.anthropic.com` is what gates the whole cloak
+# surface -- signature re-signing, the pinned beta floor, the
+# `x-claude-code-session-id` header, user-agent resolution -- so it decides
+# what the captured EGRESS looks like. It is not defaultable: the default
+# is `api-key`, under which a subscription `oat01` token ships as
+# `x-api-key` and the upstream answers 401. The ref stays `env://`: the
+# token arrives already extracted, so no seat file and no refresh path
+# exist inside a driven run.
 [providers.anthropic]
 kind        = "anthropic-api"
 api_key_ref = "env://ROUTECTL_DRIVER_ANTHROPIC_API_KEY"
+auth_kind   = "oauth-bearer"
 
 [models.fixture-sonnet]
 provider = "anthropic"

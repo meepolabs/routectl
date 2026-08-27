@@ -794,6 +794,33 @@ else
     fails=$((fails + 1))
 fi
 
+# --- Case 12: the lane config declares the oauth-bearer wire shape ----
+# `auth_kind` decides what the captured egress LOOKS like: `oauth-bearer`
+# against api.anthropic.com is what turns on signature re-signing, the
+# pinned beta floor, the session-id header and user-agent resolution. The
+# field is not defaultable -- the default is `api-key`, under which a
+# subscription token ships as `x-api-key` for a 401 -- so a silent revert
+# would produce a lane nobody uses, or no fixture at all. Pinned here so
+# that revert is a test failure instead of a capture-time surprise.
+declares_oauth_bearer() {
+    if grep -qE '^[[:space:]]*auth_kind[[:space:]]*=[[:space:]]*"oauth-bearer"' "$1"; then
+        printf 'yes\n'
+    else
+        printf 'no\n'
+    fi
+}
+check "the committed lane config declares auth_kind = oauth-bearer" "yes" \
+    "$(declares_oauth_bearer "$LANE_CONFIG")"
+
+# Paired control: the same matcher on a copy with the line stripped must
+# report absence. A matcher broken into always-true would otherwise read
+# as a pass above.
+stripped="$(mktemp)"
+grep -v 'auth_kind' "$LANE_CONFIG" >"$stripped"
+check "the matcher reports absence when the declaration is stripped" "no" \
+    "$(declares_oauth_bearer "$stripped")"
+rm -f "$stripped"
+
 if [ "$fails" -gt 0 ]; then
     echo "capture_driver self-test: $fails failure(s)"
     exit 1
