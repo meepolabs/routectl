@@ -391,6 +391,266 @@ assert_clean "a model id resembling no vendor key prefix is accepted" \
     ingress_request.json \
     "$(body_with "model = claude-sonnet-4-5-20250929, provider = anthropic")"
 
+# --- the five vendor shapes with their own classes --------------------
+# Each of these passed --check at exit 0 before the rules existed, so a real
+# credential of the shape would NOT have been caught before promotion. Every fixture
+# below is ASSEMBLED via fake_key for the same reason the provider-key
+# block is: two of these shapes (`AIza`, JWT) are in the repo secret
+# scanner's default ruleset, and suppressing a scanner to keep a test
+# fixture is the wrong trade.
+#
+# A 35-char opaque run, the exact width the AIza rule requires.
+FAKE_RUN_35="0123456789abcdefghijABCDEFGHIJ_-xyz"
+# Hoisted: the withheld-value needle must stay byte-identical to its fixture,
+# and four inline copies is how that coupling breaks silently.
+FAKE_JWT_PAYLOAD="hbGciOiJSUzI1NiJ9.AAAABBBBCCCC.DDDDEEEEFFFF"
+
+assert_caught "a google oauth access token in a captured body" \
+    ingress_request.json \
+    "$(body_with "GEMINI_OAUTH=$(fake_key 'ya29.')")" \
+    google-oauth-token
+
+assert_caught "a google api key in a captured body" \
+    ingress_request.json \
+    "$(body_with "GEMINI_API_KEY=$(fake_key 'AIza' "$FAKE_RUN_35")")" \
+    google-api-key
+
+assert_caught "a bare three-segment jwt in a captured body" \
+    ingress_request.json \
+    "$(body_with "id_token was $(fake_key 'eyJ' "$FAKE_JWT_PAYLOAD")")" \
+    jwt
+
+assert_caught "a temporary aws access key id in a captured body" \
+    ingress_request.json \
+    "$(body_with "AWS_ACCESS_KEY_ID=$(fake_key 'ASIA' 'IOSFODNN7EXAMPLE')")" \
+    aws-temp-key-id
+
+assert_caught "an nvidia api key in a captured body" \
+    ingress_request.json \
+    "$(body_with "NVIDIA_API_KEY=$(fake_key 'nvapi-')")" \
+    nvidia-api-key
+
+# The class name is the whole diagnostic. A refusal that echoes the token
+# copies the leak into the CI log that reports it.
+assert_value_withheld() {
+    local desc="$1" filename="$2" content="$3" needle="$4"
+    local out rc work
+    out="$(run_scrub "$filename" "$content" --check)"
+    rc="${out%%$'\t'*}"
+    work="${out#*$'\t'}"
+    if [ "$rc" != "1" ]; then
+        echo "FAIL: expected exit 1 but got $rc -- $desc"
+        fails=$((fails + 1))
+    elif grep -qF -- "$needle" "$work/scrub.log"; then
+        echo "FAIL: the refusal echoed the matched value -- $desc"
+        fails=$((fails + 1))
+    else
+        echo "PASS: value withheld from the refusal -- $desc"
+    fi
+    rm -rf "$work"
+}
+
+assert_value_withheld "the jwt refusal names the class, never the token" \
+    ingress_request.json \
+    "$(body_with "id_token was $(fake_key 'eyJ' "$FAKE_JWT_PAYLOAD")")" \
+    "$(fake_key 'eyJ' "$FAKE_JWT_PAYLOAD")"
+
+# The accept direction for all five, drawn from REAL content rather than
+# invented near-misses: a gate with false positives is one whoever it
+# blocks switches off, so the accept set is part of the contract.
+
+# The in-tree test constant at crates/routectl-providers/src/gemini/auth.rs:63.
+# 11 chars after the dot, provably below the rule's {20,} floor.
+assert_clean "the in-tree short ya29 test token is accepted" \
+    ingress_request.json \
+    "$(body_with "apply_bearer(rb, \\\"ya29.token-value\\\")")"
+
+# Anchoring is what makes this pass: an `AIza` run sitting mid-base64 is
+# not a token boundary. Unanchored, this shape fires 2-4 times per 64MB of
+# random base64, and a captured SSE body is mostly base64.
+assert_clean "a base64 png data uri carrying an AIza run mid-payload is accepted" \
+    ingress_request.json \
+    "$(body_with "![shot](data:image/png;base64,iVBORw0KGgoAAAANSUhEUg$(fake_key 'AIza' "$FAKE_RUN_35")AAAASUVORK5CYII=)")"
+
+# One mid-payload accept control PER RULE. Without these, deleting
+# "$ANCHOR_LEFT" from an individual rule leaves the whole suite green --
+# measured: four of the five anchors were unverified, so they were
+# decoration a tuning pass could drop in silence, and each unanchored rule
+# reintroduces the measured false-positive mode inside base64 runs. Each
+# fixture below embeds the rule's own prefix MID-token, where a boundary
+# never occurs, so the rule must decline it.
+assert_clean "a base64 run carrying a ya29 sequence mid-payload is accepted" \
+    ingress_request.json \
+    "$(body_with "blob=iVBORw0KGgoAAAANSUhEUgAAquwXya29.${FAKE_RUN_35}AAAASUVORK5CYII=")"
+
+assert_clean "a base64 run carrying an eyJ-dotted sequence mid-payload is accepted" \
+    ingress_request.json \
+    "$(body_with "blob=iVBORw0KGgoAAAANSUheyJhbGciOiJSUzI1NiJ9.AAAABBBBCCCC.DDDDEEEEFFFFAAAASUVORK5CYII=")"
+
+assert_clean "a base64 run carrying an ASIA sequence mid-payload is accepted" \
+    ingress_request.json \
+    "$(body_with "blob=iVBORw0KGgoAAAANSUhEUgASIAIOSFODNN7EXAMPLEAAAASUVORK5CYII=")"
+
+assert_clean "a base64 run carrying an nvapi- sequence mid-payload is accepted" \
+    ingress_request.json \
+    "$(body_with "blob=iVBORw0KGgoAAAANSUhEUgnvapi-${FAKE_RUN_35}AAAASUVORK5CYII=")"
+
+assert_clean "a bare sha256 hex digest is accepted" \
+    ingress_request.json \
+    "$(body_with "config_sha = 9f2e4c1b7a05d38e6410cb92fd7e5a3b08c1de49f6027ab5c3d18e9f40a27b61")"
+
+assert_clean "a 40-char git rev is accepted" \
+    ingress_request.json \
+    "$(body_with "pinned at d51e5a3592cf4b7e08a1d6f3c29b5e470a8d1c26")"
+
+assert_clean "an SRI sha384 integrity hash is accepted" \
+    ingress_request.json \
+    "$(body_with "integrity=\\\"sha384-oqVuAfXRKap7fdgcCY5uykM6R9GqQ8Kuxy9rx7HNQlGYl1kPzQho1wx4JwY8wC\\\"")"
+
+assert_clean "a v7 uuid is accepted" \
+    ingress_request.json \
+    "$(body_with "request_id = 0192f8c1-7a3b-7d4e-8f01-23456789abcd")"
+
+assert_clean "a dated model id is accepted by the new vendor rules" \
+    ingress_request.json \
+    "$(body_with "model = claude-sonnet-4-5-20250929 and gemini-2.5-pro-002")"
+
+# Prose naming the prefixes with no token after them: routectl's own docs
+# and config-error messages do exactly this.
+assert_clean "prose naming the google and aws key prefixes with no token is accepted" \
+    ingress_request.json \
+    "$(body_with "google keys start AIza, oauth tokens ya29. and temporary aws ids ASIA")"
+
+# --- the shape-coverage table ----------------------------------------
+# PROVIDER_SHAPE_KINDS is read as TEXT by consumers that never execute the
+# script, so a row may not name a rule the gate does not actually have --
+# a stale row reads as coverage and provides none.
+# The LEGACY dotted access-token form. `ya29.1.AAD...` has a short middle
+# segment, so a rule whose body class excludes `.` sees only `1` after the
+# first dot and declines -- measured: it passed at exit 0 while the modern
+# single-run form was refused. The body class therefore admits `.`; the
+# paired prose control below proves that does not let the rule run through
+# sentence punctuation.
+assert_caught "a legacy dotted google oauth token is caught" \
+    ingress_request.json \
+    "$(body_with "GEMINI_OAUTH=$(fake_key 'ya29.1.AADtN_V')")" \
+    google-oauth-token
+
+assert_clean "prose naming a short ya29 value then continuing a sentence is accepted" \
+    ingress_request.json \
+    "$(body_with "tokens look like ya29.SHORT. Then a new sentence continues here.")"
+
+# --- escaped-newline boundary, both directions -------------------------
+# A captured body is single-line JSON, so an embedded newline is the two
+# BYTES `\` + `n`. `n` is a token character, so a credential that BEGINS an
+# escaped line presents no word boundary unless ANCHOR_LEFT accepts the
+# escape. Measured before the fix: all five rules exited 0 on exactly this
+# shape while the same token after `=` was refused, and 554 of the 250
+# committed live fixtures carry `\n` followed by a token character. These
+# five assertions are what keep the escape alternative in ANCHOR_LEFT.
+assert_caught "a google api key beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'AIza' "$FAKE_RUN_35")\\nend")" \
+    google-api-key
+
+assert_caught "a google oauth token beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'ya29.')\\nend")" \
+    google-oauth-token
+
+assert_caught "a jwt beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'eyJ' "$FAKE_JWT_PAYLOAD")\\nend")" \
+    jwt
+
+assert_caught "a temporary aws key id beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'ASIA' 'IOSFODNN7EXAMPLE')\\nend")" \
+    aws-temp-key-id
+
+assert_caught "an nvidia api key beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'nvapi-')\\nend")" \
+    nvidia-api-key
+
+assert_shape_table_rule_ids_exist() {
+    local block rows regexes row ids id missing="" row_count=0
+    block="$(sed -n \
+        '/^# --- BEGIN PROVIDER_SHAPE_KINDS ---$/,/^# --- END PROVIDER_SHAPE_KINDS ---$/p' \
+        "$SCRUB")"
+
+    # Non-vacuity: without these the loop below iterates zero rows and
+    # reports coverage it never checked.
+    if ! printf '%s\n' "$block" | grep -q '^PROVIDER_SHAPE_KINDS=($' ||
+        ! printf '%s\n' "$block" | grep -q '^PROVIDER_SHAPE_EXCLUDED=($'; then
+        echo "FAIL: the shape-coverage block is not two closed array literals between the sentinels"
+        fails=$((fails + 1))
+        return
+    fi
+
+    rows="$(printf '%s\n' "$block" | grep -E '^  "[a-z0-9-]+=' || true)"
+    # ONLY the credential-shape regexes, never every `*_RE=` line. A rule id
+    # is a claim that some CREDENTIAL rule keys on it, and the wider haystack
+    # accepts an incidental substring of an unrelated rule: `rwx` appears in
+    # LS_MODE_RE, `bearer` in BEARER_RE, so a bogus row like `some-kind=rwx`
+    # would read as covered by a gate that has no such rule -- the exact
+    # silent under-read this guard exists to prevent, arriving through it.
+    regexes="$(grep -E '^(PROVIDER_KEY|GOOGLE_OAUTH_TOKEN|GOOGLE_API_KEY|JWT|AWS_TEMP_KEY_ID|NVIDIA_API_KEY)_RE=' "$SCRUB")"
+
+    while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        row_count=$((row_count + 1))
+        ids="${row#*=}"
+        ids="${ids%\"}"
+        while IFS= read -r id; do
+            [ -n "$id" ] || continue
+            printf '%s\n' "$regexes" | grep -qF -- "$id" ||
+                missing+=" $id"
+        done < <(printf '%s\n' "${ids//,/$'\n'}")
+    done < <(printf '%s\n' "$rows")
+
+    # KIND-SIDE check. The rule-id direction above proves a row names a real
+    # regex; it says nothing about whether the KIND is a real lane token, so a
+    # row like `not-a-lane-token=sk-ant-api03` was accepted as coverage.
+    # normalize_lane in scripts/capture_fixtures.sh is the authority for the
+    # token set (it is what writes meta.lane), parsed out of that script rather
+    # than restated here -- a hand-copied list would be a third replica.
+    local rig
+    rig="$(dirname "$SCRUB")/capture_fixtures.sh"
+    local lane_tokens
+    lane_tokens="$(sed -n "/^normalize_lane()/,/^}/p" "$rig" \
+        | grep -oE "printf '[a-z-]+" | sed "s/printf '//" | sort -u)"
+    if [ "$(printf '%s\n' "$lane_tokens" | grep -c .)" -lt 5 ]; then
+        echo "FAIL: parsed only $(printf '%s\n' "$lane_tokens" | grep -c .) lane tokens from normalize_lane; the parse broke"
+        fails=$((fails + 1))
+    fi
+    local bad_kind=""
+    while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        printf '%s\n' "$lane_tokens" | grep -qx -- "$k" || bad_kind="$bad_kind $k"
+    done <<KINDS
+$(printf '%s\n' "$block" | grep -E '^  "[a-z0-9-]+=' | sed 's/^  "//; s/=.*//')
+$(printf '%s\n' "$block" | grep -E '^  "[a-z0-9-]+"$' | sed 's/^  "//; s/"$//')
+KINDS
+    if [ -n "$bad_kind" ]; then
+        echo "FAIL: shape-table names kinds that are not normalize_lane lane tokens --$bad_kind"
+        fails=$((fails + 1))
+    else
+        echo "PASS: every kind in the shape-coverage table is a real lane token"
+    fi
+
+    if [ "$row_count" -lt 4 ]; then
+        echo "FAIL: the shape-coverage table parsed only $row_count rows; the kind vocabulary has more"
+        fails=$((fails + 1))
+    elif [ -n "$missing" ]; then
+        echo "FAIL: shape-table rows name rule ids no regex in the gate carries --$missing"
+        fails=$((fails + 1))
+    else
+        echo "PASS: every rule id in the shape-coverage table appears verbatim in a gate regex"
+    fi
+}
+assert_shape_table_rule_ids_exist
+
 # --- auth-header -----------------------------------------------------
 # The header files are the load-bearing surface: a capture against an
 # OAuth lane records a live token there.
@@ -566,6 +826,35 @@ assert_usage "a nonexistent path is a usage error, not an empty clean scan" \
     --check /nonexistent/routectl-fixture
 assert_usage "the two modes are mutually exclusive" --check --write "$SCRUB"
 assert_usage "an unknown option is a usage error" --check --nope "$SCRUB"
+
+# `--help` renders the header block, and the class list in it must name
+# every class the gate can report. The sentinel must not leak into the
+# rendered output -- a magic line-count range silently started cutting
+# content once already, which is why the sentinel exists.
+assert_help_lists_new_classes() {
+    local out rc=0 class missing=""
+    out="$(bash "$SCRUB" --help 2>&1)" || rc=$?
+    if [ "$rc" != "0" ]; then
+        echo "FAIL: --help exited $rc"
+        fails=$((fails + 1))
+        return
+    fi
+    if printf '%s\n' "$out" | grep -qF -- "END USAGE"; then
+        echo "FAIL: --help leaked the END USAGE sentinel into its output"
+        fails=$((fails + 1))
+        return
+    fi
+    for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key; do
+        printf '%s\n' "$out" | grep -qF -- "$class" || missing+=" $class"
+    done
+    if [ -n "$missing" ]; then
+        echo "FAIL: the --help class list omits --$missing"
+        fails=$((fails + 1))
+    else
+        echo "PASS: --help names every new deny class and leaks no sentinel"
+    fi
+}
+assert_help_lists_new_classes
 
 # An empty directory would scan zero files; that must refuse, not PASS.
 assert_empty_dir_refused() {

@@ -49,6 +49,11 @@
 #                      scheme word matched case-insensitively
 #   provider-key       a raw vendor credential carrying no scheme word at
 #                      all (`sk-ant-api03-...`, `ghp_...`, `AKIA...`)
+#   google-oauth-token a `ya29.`-prefixed Google OAuth access token
+#   google-api-key     an `AIza`-prefixed Google API key
+#   jwt                a three-segment `eyJ`-prefixed JSON Web Token
+#   aws-temp-key-id    an `ASIA`-prefixed temporary AWS access key id
+#   nvidia-api-key     an `nvapi-`-prefixed NVIDIA API key
 #   headers-unparseable  a `*.headers.json` that is not valid JSON, so its
 #                      auth content cannot be inspected at all
 #
@@ -419,6 +424,110 @@ has_provider_key() {
   grep -qE "$PROVIDER_KEY_RE" "$1"
 }
 
+# Vendor shapes the prefix set above does not carry, each its OWN named
+# rule and its OWN finding class: a class name is the entire diagnostic a
+# refused capture gets, so folding five vendors into one alternation would
+# tell the operator "provider-key" and nothing about which shape to look
+# for. They also each need their own anchor, and one alternation cannot
+# carry five.
+#
+# LEFT ANCHOR, on every one of them. `(^|[^A-Za-z0-9_-])` requires the
+# prefix to begin a token rather than land mid-run. Measured: unanchored,
+# an `AIza`/`sk-`-shaped rule fires 2-4 times per 64MB of random base64
+# (an SSE body is exactly that); anchored, zero, with every positive
+# control still firing. A captured response body is mostly base64, so the
+# unanchored form is a gate somebody switches off.
+#
+# The `eyJ` prefix on the JWT rule is mandatory, and free: measured over
+# 462MB of real traffic, the eyJ-anchored rule and a bare three-segment
+# matcher have the IDENTICAL hit set, because neither standard nor
+# url-safe base64 emits `.`, so only a genuinely JWT-shaped value carries
+# the separators. A prefix-free three-segment rule buys no recall and is
+# the forbidden generic-entropy matcher arriving by a side door.
+#
+# NOT here, deliberately: the Google refresh-token `1//` shape. Unanchored
+# it hits 160 of the 250 corpus fixture files, every one a coincidence mid-SSE-base64;
+# anchored it hits zero. No demonstrated positive, a known 160-file false
+# positive mode.
+# The `\\[nrt]` alternative is LOAD-BEARING, not defensive. A captured body is
+# single-line JSON, so an embedded newline is the two BYTES `\` + `n`. `\` is
+# outside the token class but `n` is inside it, so without this alternative a
+# credential that BEGINS an escaped line reads as a continuation of the
+# preceding `...n` and no boundary is ever presented -- measured: a bare
+# `AIza`-shaped token on its own line of a chat message passed all five rules
+# at exit 0 while the same token after `=` was refused, and 554 of the 250
+# corpus files carry `\n` immediately followed by a token character. Adding the
+# escapes closes all five classes at zero measured false-positive cost across
+# that corpus and the whole accept set.
+ANCHOR_LEFT='(^|[^A-Za-z0-9_-]|\\[bfnrt]|\\u[0-9a-fA-F]{4})'
+
+GOOGLE_OAUTH_TOKEN_RE="$ANCHOR_LEFT"'ya29\.[A-Za-z0-9_.-]{20,}'
+GOOGLE_API_KEY_RE="$ANCHOR_LEFT"'AIza[0-9A-Za-z_-]{35}'
+JWT_RE="$ANCHOR_LEFT"'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+AWS_TEMP_KEY_ID_RE="$ANCHOR_LEFT"'ASIA[A-Z0-9]{16}'
+NVIDIA_API_KEY_RE="$ANCHOR_LEFT"'nvapi-[A-Za-z0-9_-]{20,}'
+
+has_google_oauth_token() {
+  grep -qE "$GOOGLE_OAUTH_TOKEN_RE" "$1"
+}
+
+has_google_api_key() {
+  grep -qE "$GOOGLE_API_KEY_RE" "$1"
+}
+
+has_jwt() {
+  grep -qE "$JWT_RE" "$1"
+}
+
+has_aws_temp_key_id() {
+  grep -qE "$AWS_TEMP_KEY_ID_RE" "$1"
+}
+
+has_nvidia_api_key() {
+  grep -qE "$NVIDIA_API_KEY_RE" "$1"
+}
+
+# --- provider shape coverage -----------------------------------------
+# The map from a provider KIND to the credential shapes this gate can
+# detect for it. Declared as a closed, sentinel-delimited array literal
+# because two other things read it without executing this script: the
+# `--lane-known` query mode and a Rust drift detector that parses the
+# block as text. Same posture as CRED_SUBSTRINGS above.
+#
+# The kind vocabulary is the lane token set `normalize_lane` emits in
+# scripts/capture_fixtures.sh, which is `ProviderEntry::kind_str()`.
+# Classification is THREE-state, mirroring
+# crates/routectl-cli/src/commands/provider_env.rs: a kind is in the
+# table, or explicitly excluded with a written reason, or unclassified --
+# and unclassified is a test failure. Two states would let a kind whose
+# real secret is undetectable ship as covered.
+#
+# --- BEGIN PROVIDER_SHAPE_KINDS ---
+# <kind_str token>=<rule-id>[,<rule-id>...]   rule ids are the vendor prefix
+# tokens each rule keys on, spelled so they appear VERBATIM in that rule's regex.
+# shellcheck disable=SC2034  # parsed as text by consumers that never execute this script
+PROVIDER_SHAPE_KINDS=(
+  "anthropic-api=sk-ant-api03,sk-ant-oat01,sk-ant-ort01"
+  "openai-compat=sk-proj,sk-or-v1,nvapi"
+  "openai-responses=sk-proj"
+  "gemini=ya29,AIza"
+)
+# Kinds with NO prefix-detectable credential shape, reason recorded per entry.
+# shellcheck disable=SC2034  # parsed as text by consumers that never execute this script
+PROVIDER_SHAPE_EXCLUDED=(
+  # bedrock: AWS_SECRET_ACCESS_KEY is 40 prefix-less base64 characters,
+  # structurally invisible to anything that is not an entropy matcher. The
+  # ASIA/AKIA rules cover the key ID only, never the secret, so classifying
+  # bedrock as "has a shape" on that basis would be a rubber stamp. Its
+  # SigV4 credentials are covered by the header layer (`x-amz-` prefix rule).
+  "bedrock"
+)
+# --- END PROVIDER_SHAPE_KINDS ---
+#
+# PROVIDER_SHAPE_EXCLUDED stays declared with its meaning documented even
+# if it ever empties -- same posture as gated_lanes.txt. An absent list
+# reads as "nothing to exclude"; an empty one reads as "we looked".
+
 # Credential-shape rules for a header NAME, mirroring is_redact_header /
 # header_name_looks_credential in crates/routectl-core/src/log_safe.rs.
 # Shared verbatim by the check and write paths so a fixture the writer
@@ -518,6 +627,11 @@ run_check() {
     has_ls_owner_column "$f" && findings+="  $f  ls-owner-column"$'\n'
     has_bearer_token "$f" && findings+="  $f  bearer-token"$'\n'
     has_provider_key "$f" && findings+="  $f  provider-key"$'\n'
+    has_google_oauth_token "$f" && findings+="  $f  google-oauth-token"$'\n'
+    has_google_api_key "$f" && findings+="  $f  google-api-key"$'\n'
+    has_jwt "$f" && findings+="  $f  jwt"$'\n'
+    has_aws_temp_key_id "$f" && findings+="  $f  aws-temp-key-id"$'\n'
+    has_nvidia_api_key "$f" && findings+="  $f  nvidia-api-key"$'\n'
     case "$f" in
       *.headers.json)
         local hrc=0
