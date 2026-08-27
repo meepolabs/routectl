@@ -77,6 +77,13 @@
 #   * `scrub-fixture.sh --check` runs after `--write` and a non-zero
 #     exit refuses the promotion. A driver fixture is canonical by
 #     construction or it is not landed.
+#   * The lane must be CLASSIFIED by the scrub gate --
+#     `scrub-fixture.sh --lane-known <lane>` exits non-zero and the
+#     fixture does not land. A `--check` pass on a lane whose credential
+#     shape nobody has classified proves nothing, so an unclassified
+#     lane fails closed. A lane the gate lists as having no
+#     prefix-detectable shape (with the reason recorded) counts as
+#     classified: that is a verdict, not ignorance.
 #
 # Exit codes:
 #   0  the run completed; `captured=<n>` on stdout
@@ -729,6 +736,20 @@ META
   if [ "$DRIVER_MODE" = 1 ]; then
     if [ -z "$lane" ]; then
       echo "capture_fixtures: no lane for $id (provider_kind '$pkind'); not promoting the fixture" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    # A lane the scrub gate holds no credential-shape classification for
+    # cannot promote. `--check` proved this fixture carries no residue of
+    # the shapes the gate KNOWS; on an unclassified lane that proof is
+    # vacuous, because nobody has yet said what a credential on it even
+    # looks like. The gate owns the table and answers the question, so
+    # there is exactly one place the vocabulary lives (a lane in
+    # PROVIDER_SHAPE_EXCLUDED answers "classified" -- its shape is absent
+    # by a written verdict, not by omission).
+    if ! bash "$SCRUB" --lane-known "$lane"; then
+      echo "capture_fixtures: lane '$lane' has no credential-shape classification in the" >&2
+      echo "scrub gate; not promoting $id -- classify the lane first." >&2
       rm -rf "$tmp"
       return 1
     fi

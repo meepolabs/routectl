@@ -15,6 +15,16 @@
 #                       on the first class found. Names the file and the
 #                       pattern CLASS; never echoes the matched value.
 #
+#   --lane-known <lane> QUERY the provider-shape table (PROVIDER_SHAPE_KINDS
+#                       / PROVIDER_SHAPE_EXCLUDED below): does this gate
+#                       have a credential-shape CLASSIFICATION for that
+#                       lane? Takes no path, reads no fixture, scans
+#                       nothing. Exit 0 classified, 1 unclassified.
+#                       scripts/capture_fixtures.sh calls it in driver mode
+#                       so a lane the gate knows nothing about cannot
+#                       promote a fixture. This is the ONE enforcement
+#                       point for that rule.
+#
 # Why the asymmetry: a rewriter silently promotes whatever pattern it
 # failed to anticipate, and the operator never learns the fixture was
 # dirty. So only the two transforms whose correct rewrite is unambiguous
@@ -80,8 +90,12 @@
 # own fixtures are full of `localhost` base URLs).
 #
 # Exit codes:
-#   0  clean (--check) or scrubbed (--write)
-#   1  residual personal data found (--check only)
+#   0  clean (--check), scrubbed (--write), or the lane is CLASSIFIED
+#      (--lane-known): either it carries a prefix-detectable shape or it
+#      is explicitly excluded with a written reason
+#   1  residual personal data found (--check), or the lane is
+#      UNCLASSIFIED (--lane-known) -- the gate has never been told
+#      anything about it
 #   2  usage error, unreadable path, or a missing prerequisite
 #
 # `--write` is NOT a substitute for `--check`: it never touches a git
@@ -138,12 +152,23 @@ fatal() {
 }
 
 MODE=""
+LANE_QUERY=""
 declare -a TARGETS=()
+
+MODES_EXCLUSIVE="--check, --write and --lane-known are mutually exclusive"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check) [ -z "$MODE" ] || fatal "--check and --write are mutually exclusive"; MODE="check"; shift ;;
-    --write) [ -z "$MODE" ] || fatal "--check and --write are mutually exclusive"; MODE="write"; shift ;;
+    --check) [ -z "$MODE" ] || fatal "$MODES_EXCLUSIVE"; MODE="check"; shift ;;
+    --write) [ -z "$MODE" ] || fatal "$MODES_EXCLUSIVE"; MODE="write"; shift ;;
+    --lane-known)
+      [ -z "$MODE" ] || fatal "$MODES_EXCLUSIVE"
+      MODE="lane-known"
+      shift
+      [ $# -gt 0 ] || fatal "--lane-known requires a <lane> value (see --help)"
+      LANE_QUERY="$1"
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do TARGETS+=("$1"); shift; done ;;
     -*) fatal "unknown option: $1" ;;
@@ -151,11 +176,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$MODE" ] || fatal "one of --check or --write is required (see --help)"
-[ "${#TARGETS[@]}" -gt 0 ] || fatal "at least one path is required (see --help)"
+[ -n "$MODE" ] || fatal "one of --check, --write or --lane-known is required (see --help)"
 
-command -v python3 >/dev/null 2>&1 ||
-  fatal "python3 not found; header JSON cannot be parsed and the gate refuses to guess"
+if [ "$MODE" = "lane-known" ]; then
+  # A table query, not a scan: no path, no fixture, no python3. An empty
+  # lane value is a usage error rather than an unclassified answer --
+  # `--lane-known "$lane"` with an unset variable would otherwise report
+  # the caller's own bug as a table verdict.
+  [ -n "$LANE_QUERY" ] || fatal "--lane-known was given an empty <lane> value (see --help)"
+  [ "${#TARGETS[@]}" -eq 0 ] || fatal "--lane-known takes no path argument (see --help)"
+else
+  [ "${#TARGETS[@]}" -gt 0 ] || fatal "at least one path is required (see --help)"
+
+  command -v python3 >/dev/null 2>&1 ||
+    fatal "python3 not found; header JSON cannot be parsed and the gate refuses to guess"
+fi
 
 # --- deny set --------------------------------------------------------
 # Parallel arrays: DENY_CLASS[i] names the class, DENY_VALUE[i] is the
@@ -253,9 +288,16 @@ derive_hostname() {
   add_deny "hostname" "$host" "wi"
 }
 
-derive_home
-derive_git_identity
-derive_hostname
+# The deny set and the file list belong to the two SCANNING modes only.
+# `--lane-known` answers from the table below and touches no fixture, so
+# deriving an environment deny set for it would emit WARN lines about
+# classes no scan is going to run, and collecting files would demand a
+# path the mode does not take.
+if [ "$MODE" != "lane-known" ]; then
+  derive_home
+  derive_git_identity
+  derive_hostname
+fi
 
 # --- file collection -------------------------------------------------
 # A target may be a fixture directory (scanned recursively) or a single
@@ -283,16 +325,18 @@ collect_files() {
   done
 }
 
-validate_targets
-
 declare -a FILES=()
-while IFS= read -r f; do
-  [ -n "$f" ] && FILES+=("$f")
-done < <(collect_files)
+if [ "$MODE" != "lane-known" ]; then
+  validate_targets
 
-# A directory target holding no files at all would otherwise scan nothing
-# and print PASS.
-[ "${#FILES[@]}" -gt 0 ] || fatal "no files found under the given path(s); refusing a vacuous scan"
+  while IFS= read -r f; do
+    [ -n "$f" ] && FILES+=("$f")
+  done < <(collect_files)
+
+  # A directory target holding no files at all would otherwise scan nothing
+  # and print PASS.
+  [ "${#FILES[@]}" -gt 0 ] || fatal "no files found under the given path(s); refusing a vacuous scan"
+fi
 
 # --- structural scanners ---------------------------------------------
 # Each returns 0 when the class is PRESENT in the file. None of them
@@ -449,7 +493,8 @@ has_provider_key() {
 # it hits 160 of the 250 corpus fixture files, every one a coincidence mid-SSE-base64;
 # anchored it hits zero. No demonstrated positive, a known 160-file false
 # positive mode.
-# The `\\[nrt]` alternative is LOAD-BEARING, not defensive. A captured body is
+# The JSON-escape alternatives (`\\[bfnrt]` and the `\\uXXXX` form) are
+# LOAD-BEARING, not defensive. A captured body is
 # single-line JSON, so an embedded newline is the two BYTES `\` + `n`. `\` is
 # outside the token class but `n` is inside it, so without this alternative a
 # credential that BEGINS an escaped line reads as a continuation of the
@@ -461,7 +506,15 @@ has_provider_key() {
 # that corpus and the whole accept set.
 ANCHOR_LEFT='(^|[^A-Za-z0-9_-]|\\[bfnrt]|\\u[0-9a-fA-F]{4})'
 
-GOOGLE_OAUTH_TOKEN_RE="$ANCHOR_LEFT"'ya29\.[A-Za-z0-9_.-]{20,}'
+# TWO alternatives, not one widened class. The modern form is a single
+# opaque run; the LEGACY form is `ya29.<1-3 digits>.<opaque>` and its short
+# middle segment leaves under the floor's worth of characters before the
+# second dot, so a single-run rule declines it. Admitting `.` into the body
+# class generally was measured to be WRONG: it refused
+# `ya29.oauth-token-refresh.flow.docs` and `ya29.a.b.c.d.e.f.g.h.i.j.k`,
+# which are prose, and a gate with false positives is a gate somebody
+# switches off. The legacy segment is spelled explicitly instead.
+GOOGLE_OAUTH_TOKEN_RE="$ANCHOR_LEFT"'ya29\.([0-9]{1,3}\.)?[A-Za-z0-9_-]{20,}'
 GOOGLE_API_KEY_RE="$ANCHOR_LEFT"'AIza[0-9A-Za-z_-]{35}'
 JWT_RE="$ANCHOR_LEFT"'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
 AWS_TEMP_KEY_ID_RE="$ANCHOR_LEFT"'ASIA[A-Z0-9]{16}'
@@ -490,9 +543,9 @@ has_nvidia_api_key() {
 # --- provider shape coverage -----------------------------------------
 # The map from a provider KIND to the credential shapes this gate can
 # detect for it. Declared as a closed, sentinel-delimited array literal
-# because two other things read it without executing this script: the
-# `--lane-known` query mode and a Rust drift detector that parses the
-# block as text. Same posture as CRED_SUBSTRINGS above.
+# because `--lane-known` reads it as data while a Rust drift detector
+# parses the same block as TEXT without executing this script. Same
+# posture as CRED_SUBSTRINGS above.
 #
 # The kind vocabulary is the lane token set `normalize_lane` emits in
 # scripts/capture_fixtures.sh, which is `ProviderEntry::kind_str()`.
@@ -505,7 +558,6 @@ has_nvidia_api_key() {
 # --- BEGIN PROVIDER_SHAPE_KINDS ---
 # <kind_str token>=<rule-id>[,<rule-id>...]   rule ids are the vendor prefix
 # tokens each rule keys on, spelled so they appear VERBATIM in that rule's regex.
-# shellcheck disable=SC2034  # parsed as text by consumers that never execute this script
 PROVIDER_SHAPE_KINDS=(
   "anthropic-api=sk-ant-api03,sk-ant-oat01,sk-ant-ort01"
   "openai-compat=sk-proj,sk-or-v1,nvapi"
@@ -513,7 +565,6 @@ PROVIDER_SHAPE_KINDS=(
   "gemini=ya29,AIza"
 )
 # Kinds with NO prefix-detectable credential shape, reason recorded per entry.
-# shellcheck disable=SC2034  # parsed as text by consumers that never execute this script
 PROVIDER_SHAPE_EXCLUDED=(
   # bedrock: AWS_SECRET_ACCESS_KEY is 40 prefix-less base64 characters,
   # structurally invisible to anything that is not an entropy matcher. The
@@ -527,6 +578,43 @@ PROVIDER_SHAPE_EXCLUDED=(
 # PROVIDER_SHAPE_EXCLUDED stays declared with its meaning documented even
 # if it ever empties -- same posture as gated_lanes.txt. An absent list
 # reads as "nothing to exclude"; an empty one reads as "we looked".
+
+# --- lane-known mode -------------------------------------------------
+# Answers ONE question off the table above: does the gate hold a
+# credential-shape classification for this lane?
+#
+# An EXCLUDED lane answers 0 (classified). Exclusion is a deliberate
+# verdict with a written reason recorded beside the entry -- somebody
+# looked at bedrock's credentials, found 40 prefix-less base64 characters
+# no prefix rule can see, and wrote down why, with the header layer
+# covering its SigV4 values. That is knowledge, not ignorance. Exit 1 is
+# reserved for the lane nobody has ever classified: an unclassified lane
+# means the gate cannot say whether a fixture on it would leak, and that
+# is the state a driver fixture may not promote through.
+lane_is_known() {
+  local lane="$1" row
+  for row in "${PROVIDER_SHAPE_KINDS[@]}"; do
+    [ "${row%%=*}" = "$lane" ] && return 0
+  done
+  for row in "${PROVIDER_SHAPE_EXCLUDED[@]}"; do
+    [ "$row" = "$lane" ] && return 0
+  done
+  return 1
+}
+
+run_lane_known() {
+  local lane="$1"
+  if lane_is_known "$lane"; then
+    # SILENT on success. The rig calls this per promotion, and a success line
+    # on stdout would interleave with its `captured=N` line -- the one piece
+    # of rig stdout a human reads. The exit code is the whole contract.
+    return 0
+  fi
+  echo "scrub-fixture: lane '$lane' has NO credential-shape classification" >&2
+  echo "scrub-fixture: add it to PROVIDER_SHAPE_KINDS, or to PROVIDER_SHAPE_EXCLUDED" >&2
+  echo "scrub-fixture: with the reason it has no prefix-detectable shape." >&2
+  return 1
+}
 
 # Credential-shape rules for a header NAME, mirroring is_redact_header /
 # header_name_looks_credential in crates/routectl-core/src/log_safe.rs.
@@ -733,4 +821,5 @@ run_write() {
 case "$MODE" in
   check) run_check ;;
   write) run_write ;;
+  lane-known) run_lane_known "$LANE_QUERY" ;;
 esac

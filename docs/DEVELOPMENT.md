@@ -405,7 +405,7 @@ which config was in force, or how the client connected. That mode stays
 tolerant of all three being unset, because an empty pin is honest there.
 
 `scripts/capture_fixtures.sh --driver-mode` is the other mode, for a
-hermetic capture where a driver KNOWS all three. It changes four things:
+hermetic capture where a driver KNOWS all three. It changes five things:
 
 - **All three pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
   `ROUTECTL_FIXTURE_CONFIG_SHA`, and `ROUTECTL_FIXTURE_CONNECTION_MODE`
@@ -425,6 +425,16 @@ hermetic capture where a driver KNOWS all three. It changes four things:
 - **`scrub-fixture.sh --check` runs after `--write`** and a non-zero exit
   refuses the promotion, so a driver fixture is canonical by construction
   or it is not landed.
+- **The lane must be CLASSIFIED by the scrub gate.** The rig asks
+  `scrub-fixture.sh --lane-known <lane>` and refuses to promote on a
+  non-zero answer. A `--check` pass says the fixture carries no residue of
+  the credential shapes the gate knows; on a lane whose credential shape
+  nobody has classified that proof is vacuous, so an unclassified lane
+  fails closed. A lane the gate records as having no prefix-detectable
+  shape -- with the reason written beside it, as bedrock's prefix-less AWS
+  secret is -- counts as classified: that is a verdict, not ignorance. The
+  table lives in `scripts/scrub-fixture.sh` and nowhere else, so adding a
+  provider lane means adding its row there.
 
 Any refusal exits non-zero, which is the signal a runner reads as "this
 case produced no fixture". The full policy split is in the script header

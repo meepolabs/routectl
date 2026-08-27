@@ -275,9 +275,11 @@ Fields:
   one major (`FIXTURE_SCHEMA_VERSION` in `loader.rs`) and refuses any
   other with a named error rather than half-loading a shape it does not
   understand. A fixture captured before the key existed is treated as
-  the current major: the key arrived alongside purely additive fields,
-  so a pre-versioning directory is a valid fixture with those fields
-  empty. This is the ONLY compatibility gate.
+  major 1: the key arrived alongside purely additive fields, so a
+  pre-versioning directory is a valid major-1 fixture with those fields
+  empty. This is the only VERSION gate, and the rule governing it is
+  "no minor, ever -- recapture is the migration" (see [Format
+  evolution](#format-evolution-no-minor-ever)).
 - `ingress_kind` -- which ingress dialect parsed the inbound body, in
   the vocabulary of `IngressAdapter::id()`
   (`crates/routectl-cli/src/ingress/mod.rs`), so a consumer dispatches
@@ -334,17 +336,53 @@ Fields:
   nothing reads it as a compatibility signal. `schema_version` is the
   only gate.
 
-### Backward compatibility
+### Format evolution: no minor, ever
 
-The loader TOLERATES a fixture captured before this schema settled: the
-added fields carry serde defaults, so an existing per-contributor corpus
-keeps loading. That is deliberate -- a clean break would zero out the
-only wire evidence anyone has on disk, and a past session cannot be
-recaptured. Tolerance is not permission to run an unpinned fixture
-through a GATED comparison: a consumer that needs a pinned lane, case,
-client, or config refuses the individual fixture that lacks it. Only
-`schema_version` is a hard gate, because a major bump means the
-directory shape itself changed and no per-field default can rescue it.
+Recapture IS the migration. Three clauses, and they are the whole rule:
+
+1. **Adding an OPTIONAL key is the only evolution permitted at a fixed
+   major.** A reader ignores keys it does not know (`FixtureMeta` carries
+   no `deny_unknown_fields`, and every additive field carries a serde
+   default), so a checkout that writes a new key stays readable by a
+   checkout that has never heard of it -- which is what makes a
+   contributor's branch readable by CI's base loader. A consumer that
+   NEEDS a key refuses the individual fixture lacking it; the loader does
+   not refuse the corpus.
+2. **Anything that is not "add an optional key" bumps the MAJOR, and the
+   bumping change RECAPTURES the committed driver corpus in the same
+   commit.** Driver fixtures are synthetic and reproducible by
+   construction, so a single tree never holds a mixed-major committed
+   corpus. That is why the loader gates on `!=` and NOT on `>`, and the
+   `!=` is CORRECT rather than a limitation: a fixture at a LOWER major
+   is a directory shape this loader cannot read either, and half-loading
+   it is the exact failure the gate exists to prevent. Do not weaken the
+   comparison. Both directions are pinned by tests in `loader.rs`.
+3. **There is no minor version, of any spelling.** A second integer
+   replicated across `scripts/capture_fixtures.sh`, the Rust constant and
+   this document, with nothing enforcing it, reads as a guarantee and is
+   not one. Clause 2's recapture is the entire migration story.
+
+The live-box corpus described in the next section is EXEMPT from clause 2
+and cannot be recaptured, which is why the loader's
+`default_schema_version()` returns the literal 1 rather than tracking
+`FIXTURE_SCHEMA_VERSION`.
+
+### Backward compatibility with the pre-schema live-box corpus
+
+This section describes tolerance for ONE unrepeatable population -- the
+per-contributor live-box captures taken before the schema settled. It is
+not the rule for the committed driver corpus; that is the previous
+section.
+
+The loader TOLERATES such a fixture: the added fields carry serde
+defaults, so an existing per-contributor corpus keeps loading. That is
+deliberate -- a clean break would zero out the only wire evidence anyone
+has on disk, and a past session cannot be recaptured. Tolerance is not
+permission to run an unpinned fixture through a GATED comparison: a
+consumer that needs a pinned lane, case, client, or config refuses the
+individual fixture that lacks it. `schema_version` stays a hard gate even
+here, because a major bump means the directory shape itself changed and no
+per-field default can rescue it.
 
 The rig's self-test (`scripts/capture_fixtures.test.sh`, run in CI)
 drives the real script over a synthetic trace and pins the emitted
