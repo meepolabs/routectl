@@ -1,0 +1,915 @@
+#!/usr/bin/env bash
+# Self-test for the canonical interaction set and the harness drivers.
+# Exits 0 when all assertions pass, non-zero on the first failure.
+#
+# NO REAL CLIENT AND NO REAL DAEMON. A real run needs a provider
+# credential; CI has none and a driven session spends tokens. So every
+# end-to-end case runs the REAL runner and the REAL driver against a STUB
+# `routectl` (injected through the runner's `ROUTECTL_BIN`) and a STUB
+# client (injected through each driver's documented binary override). The
+# stub daemon emits a canned trace on the same stderr the runner captures
+# from a real daemon, so the driver -> runner -> rig -> landing path is
+# exercised whole.
+#
+# Every case runs inside a throwaway repo carrying copies of the runner,
+# the rig, the scrub script, and the whole scripts/drivers tree, exactly as
+# the runner's own self-test does: the runner and the case validator both
+# resolve their roots from their own location, so a throwaway repo is what
+# keeps the real corpus out of the blast radius.
+#
+# The stub client dumps its argv and the environment it was handed to a
+# file OUTSIDE the run workspace, since the runner removes that workspace
+# on exit. Asserting the connection mode from inside the client's own
+# environment is the only honest place to assert it: that environment is
+# what decides which wire shape a real client would emit.
+#
+# Requires python3 (the case validator and the stub listener), `ss` (the
+# runner's port probe), and `script` (the interactive driver's pty).
+#
+# Run it from anywhere:
+#   bash scripts/drivers.test.sh
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+RUNNER="$HERE/capture_driver.sh"
+RIG="$HERE/capture_fixtures.sh"
+SCRUB="$HERE/scrub-fixture.sh"
+DRIVERS="$HERE/drivers"
+CASES="$DRIVERS/cases"
+VALIDATOR="$DRIVERS/lib/validate_case.py"
+
+DRIVER_FILES=(
+    "$DRIVERS/claude-code.sh"
+    "$DRIVERS/claude-code-print.sh"
+    "$DRIVERS/external-agent-cli.sh"
+)
+
+fails=0
+
+check() {
+    local label="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        echo "PASS: $label"
+    else
+        echo "FAIL: $label -- expected '$expected', got '$actual'"
+        fails=$((fails + 1))
+    fi
+}
+
+check_ne() {
+    local label="$1" forbidden="$2" actual="$3"
+    if [ "$forbidden" != "$actual" ]; then
+        echo "PASS: $label"
+    else
+        echo "FAIL: $label -- value must differ from '$forbidden'"
+        fails=$((fails + 1))
+    fi
+}
+
+fail() {
+    echo "FAIL: $1"
+    fails=$((fails + 1))
+}
+
+# Assert the validator ACCEPTS a case.
+accepts() {
+    local label="$1" path="$2" out
+    if out="$(python3 "$VALIDATOR" --check "$path" 2>&1)"; then
+        echo "PASS: $label"
+    else
+        fail "$label -- validator refused it: $out"
+    fi
+}
+
+# Assert the validator REFUSES a case, and that its refusal names the
+# reason rather than crashing: an unhandled traceback also exits non-zero.
+refuses() {
+    local label="$1" path="$2" needle="$3" out rc=0
+    out="$(python3 "$VALIDATOR" --check "$path" 2>&1)" || rc=$?
+    if [ "$rc" = 0 ]; then
+        fail "$label -- the validator ACCEPTED it"
+    elif ! printf '%s' "$out" | grep -qF -- "$needle"; then
+        fail "$label -- refused, but the reason did not mention '$needle': $out"
+    else
+        echo "PASS: $label"
+    fi
+}
+
+for tool in python3 ss git curl sha256sum script; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "FAIL: $tool not found; this self-test cannot exercise the drivers"
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------
+# Part 1: the canonical interaction set, as data
+# ---------------------------------------------------------------------
+
+case_files=()
+while IFS= read -r path; do
+    case_files+=("$path")
+done < <(find "$CASES" -maxdepth 1 -name '*.json' | sort)
+
+if [ "${#case_files[@]}" -lt 4 ]; then
+    fail "the case set holds only ${#case_files[@]} files; it must cover four wire patterns"
+else
+    echo "PASS: the case set holds ${#case_files[@]} case files"
+fi
+
+# Every committed case conforms to the documented schema. This is the
+# positive control the rejection assertions below need: without it a
+# validator that refused EVERYTHING would read as a clean sweep.
+for path in "${case_files[@]}"; do
+    accepts "$(basename "$path") conforms to the schema" "$path"
+done
+
+# Ids are unique. Two cases sharing an id would key on one landing
+# directory and the second capture would silently replace the first.
+id_count="${#case_files[@]}"
+uniq_count="$(
+    for path in "${case_files[@]}"; do
+        python3 "$VALIDATOR" --field case_id "$path"
+    done | sort -u | wc -l
+)"
+check "every case id is unique" "$id_count" "$uniq_count"
+
+# Ids are path-safe and neutral BY CHARSET, asserted on the committed set
+# rather than only inside the validator: the id names a directory under the
+# corpus root and is scanned by the scrub gate as part of meta.json.
+for path in "${case_files[@]}"; do
+    id="$(python3 "$VALIDATOR" --field case_id "$path")"
+    if printf '%s' "$id" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$'; then
+        echo "PASS: case id '$id' is path-safe and neutral"
+    else
+        fail "case id '$id' is outside the documented charset"
+    fi
+    check "case id '$id' matches its filename stem" "$(basename "$path" .json)" "$id"
+done
+
+# The set covers the four PATTERNS the corpus exists to pin. A set missing
+# one is a corpus that cannot detect drift in that shape at all.
+patterns="$(
+    for path in "${case_files[@]}"; do
+        python3 "$VALIDATOR" --field wire_pattern "$path"
+    done | sort -u
+)"
+for pattern in tool-use-multiturn cache-breakpoints thinking large-context; do
+    if printf '%s\n' "$patterns" | grep -qx "$pattern"; then
+        echo "PASS: the set covers the $pattern wire pattern"
+    else
+        fail "no case covers the $pattern wire pattern"
+    fi
+done
+
+# A case names no model: which model serves a pattern is the lane config's
+# business, and a model id in a case file would make the set a snapshot of
+# a model list instead of of a wire shape.
+if grep -rlE 'claude-[a-z]+-[0-9]|gpt-[0-9]|gemini-[0-9]' "$CASES" >/dev/null 2>&1; then
+    fail "a case file names a specific model"
+else
+    echo "PASS: no case file names a specific model"
+fi
+
+# A case embeds no harness invocation: that is a driver's job, and a case
+# that named a binary could only ever be replayed through one client. The
+# pattern is the SHAPE of an invocation -- a field that would carry a
+# command line -- rather than a list of client names: an enumeration here
+# would have to hold every harness's name in tracked content, which is the
+# thing the one-file-per-harness layout exists to avoid.
+invocation_re='"(harness|client|binary|bin|command|cmd|argv|exec|flags?|args)"[[:space:]]*:'
+if grep -qE "$invocation_re" "$CASES"/*.json; then
+    fail "a case file carries a harness invocation field"
+else
+    echo "PASS: no case file embeds a harness invocation"
+fi
+
+# --- The rejection half, each paired against the accepted original ------
+# A malformed case that reached a driver would be caught only after a
+# daemon was booted and a client was mid-session.
+mut="$(mktemp -d)"
+BASE_CASE="$CASES/tools-multiturn-01.json"
+
+# The rejections are asserted against MUTATIONS of a case the validator
+# just accepted, so a refusal can only be attributed to the mutation.
+#
+# The copy's `case_id` is rewritten to its own filename stem BEFORE the
+# mutation is applied. Otherwise every mutation would trip the stem rule
+# first and each assertion would pass for the wrong reason -- a mutation
+# that changes the id still wins, since it runs after.
+mutate() {
+    local name="$1" expr="$2"
+    local dest="$mut/$name.json"
+    python3 - "$BASE_CASE" "$dest" "$expr" "$name" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    case = json.load(fh)
+case["case_id"] = sys.argv[4]
+exec(sys.argv[3], {"case": case})
+with open(sys.argv[2], "w") as fh:
+    json.dump(case, fh)
+PY
+    printf '%s\n' "$dest"
+}
+
+# The id charset. A `../` or a `/` in an id escapes the lane directory the
+# rig confined the landing to, and the rig's own guard runs on OUT alone.
+#
+# The needle is the CHARSET message's own wording, not the field name: the
+# stem rule below also names `case_id`, so a laxer needle let all five of
+# these pass on the stem check alone -- confirmed by deleting the charset
+# check, which left them green.
+charset_needle="names the landing directory"
+refuses "an id with a traversal segment is refused" \
+    "$(mutate 'traversal' 'case["case_id"] = "../escaped"')" "$charset_needle"
+refuses "an id with a path separator is refused" \
+    "$(mutate 'separator' 'case["case_id"] = "lane/case"')" "$charset_needle"
+
+# These two are named so the file's own STEM is the offending id, which
+# leaves the charset rule as the only rule that can refuse them.
+refuses "an id with an uppercase character is refused" \
+    "$(mutate 'Tools-Multiturn-01' 'pass')" "$charset_needle"
+refuses "an id with an underscore is refused" \
+    "$(mutate 'tools_multiturn_01' 'pass')" "$charset_needle"
+refuses "an id that does not match its filename stem is refused" \
+    "$(mutate 'mismatched' 'case["case_id"] = "some-other-id"')" "filename stem"
+
+# The schema.
+refuses "a case missing a required key is refused" \
+    "$(mutate 'no-knobs' 'del case["knobs"]')" "missing keys"
+refuses "a case carrying an unknown key is refused" \
+    "$(mutate 'extra-key' 'case["harness"] = "some-cli"')" "unknown keys"
+refuses "a case on an unknown schema version is refused" \
+    "$(mutate 'wrong-version' 'case["schema_version"] = 2')" "schema_version"
+refuses "a case with an unknown wire pattern is refused" \
+    "$(mutate 'unknown-pattern' 'case["wire_pattern"] = "freeform"')" "wire_pattern"
+refuses "a case naming a lane with no committed config is refused" \
+    "$(mutate 'no-lane' 'case["lane"] = "no-such-lane"')" "no committed config"
+refuses "a case with an empty turn list is refused" \
+    "$(mutate 'no-turns' 'case["turns"] = []')" "turns"
+refuses "a turn carrying a key other than prompt is refused" \
+    "$(mutate 'extra-turn-key' 'case["turns"][0]["role"] = "user"')" "prompt"
+refuses "an empty prompt is refused" \
+    "$(mutate 'empty-prompt' 'case["turns"][0]["prompt"] = "  "')" "empty"
+refuses "a prompt carrying a newline is refused" \
+    "$(mutate 'multiline-prompt' 'case["turns"][0]["prompt"] = "one\ntwo"')" "single-line"
+refuses "an unknown knob is refused" \
+    "$(mutate 'unknown-knob' 'case["knobs"]["stream"] = True')" "unknown knobs"
+refuses "a missing knob is refused" \
+    "$(mutate 'missing-knob' 'del case["knobs"]["thinking"]')" "missing knobs"
+refuses "a non-boolean capability knob is refused" \
+    "$(mutate 'stringy-knob' 'case["knobs"]["tools"] = "yes"')" "boolean"
+refuses "a boolean where padding bytes belong is refused" \
+    "$(mutate 'boolean-padding' 'case["knobs"]["context_padding_bytes"] = True')" "integer"
+refuses "negative padding is refused" \
+    "$(mutate 'negative-padding' 'case["knobs"]["context_padding_bytes"] = -1')" "negative"
+refuses "padding past the cap is refused" \
+    "$(mutate 'huge-padding' 'case["knobs"]["context_padding_bytes"] = 1 << 30')" "cap"
+
+# Malformed JSON, and a non-object document.
+printf '{"schema_version": 1,\n' >"$mut/broken.json"
+refuses "a case that is not valid JSON is refused" "$mut/broken.json" "not valid JSON"
+printf '[]\n' >"$mut/array.json"
+refuses "a case that is not a JSON object is refused" "$mut/array.json" "JSON object"
+refuses "a missing case file is refused" "$mut/absent.json" "unreadable"
+
+# The paired positive control for every mutation above: the SAME machinery
+# that produced them, applied as a no-op, still yields an accepted case.
+accepts "an unmutated copy of the base case is still accepted" \
+    "$(mutate 'tools-multiturn-01' 'pass')"
+
+rm -rf "$mut"
+
+# ---------------------------------------------------------------------
+# Part 2: driver hygiene, asserted on the committed files
+# ---------------------------------------------------------------------
+
+for driver in "${DRIVER_FILES[@]}" "$DRIVERS/lib/common.sh"; do
+    if bash -n "$driver" 2>/dev/null; then
+        echo "PASS: $(basename "$driver") parses"
+    else
+        fail "$(basename "$driver") is not syntactically valid bash"
+        bash -n "$driver"
+    fi
+done
+
+# The script's CODE, comments stripped: the drivers' own headers explain at
+# length why they must NOT dispatch on a harness, so a whole-file grep
+# would fire on the explanation.
+code_lines() {
+    sed 's/#.*$//' "$1"
+}
+
+# ONE FILE PER HARNESS. A dispatch statement is the drift surface the
+# layout exists to avoid, and it cannot degrade an undrivable harness to
+# "no file" -- a dead branch still reads as coverage.
+dispatch_re='case[[:space:]]+"?\$\{?(harness|HARNESS|client|CLIENT)'
+for driver in "${DRIVER_FILES[@]}" "$DRIVERS/lib/common.sh"; do
+    if grep -qE "$dispatch_re" <(code_lines "$driver"); then
+        fail "$(basename "$driver") dispatches on a harness variable"
+    else
+        echo "PASS: $(basename "$driver") carries no harness dispatch"
+    fi
+done
+
+# No real home path in tracked driver or case content. A driven client
+# reads its cwd back into request bodies, and the scrub gate refuses a
+# fixture carrying one -- but a path baked into a committed script would
+# be refused at the landing gate on every future run instead of here.
+home_re='/home/[a-z]'
+home_hits=0
+while IFS= read -r hit; do
+    case "$hit" in
+        *"/home/user"*) ;;
+        *) home_hits=$((home_hits + 1)); echo "  offending line: $hit" ;;
+    esac
+done < <(grep -rnE "$home_re" "$DRIVERS" 2>/dev/null)
+check "no driver or case references a real home path" "0" "$home_hits"
+
+# No curl-based synthetic stand-in for a client. A hand-rolled request
+# proves nothing about a CLIENT's wire shape, which is the whole point of
+# a driver corpus -- and the drivers legitimately curl /health, so the
+# assertion is about a POSTED body, not about curl.
+if grep -qE 'curl[^|]*(-X[[:space:]]*POST|--data|-d[[:space:]])' \
+    <(cat <(code_lines "${DRIVER_FILES[0]}") \
+          <(code_lines "${DRIVER_FILES[1]}") \
+          <(code_lines "${DRIVER_FILES[2]}") \
+          <(code_lines "$DRIVERS/lib/common.sh")); then
+    fail "a driver posts a hand-built request instead of driving a client"
+else
+    echo "PASS: no driver posts a synthetic stand-in request"
+fi
+
+# Positive control for the three greps above. Without it a broken pattern
+# or a mistyped path would read as three clean passes.
+control="$(mktemp)"
+printf 'case "$harness" in claude) ;; esac\ncd /home/someone/work\ncurl -X POST http://x -d @body.json\n{"command": "run-me"}\n' >"$control"
+control_hits=0
+for pattern in "$dispatch_re" "$home_re" 'curl[^|]*(-X[[:space:]]*POST|--data|-d[[:space:]])' "$invocation_re"; do
+    if grep -qE "$pattern" "$control"; then
+        control_hits=$((control_hits + 1))
+    fi
+done
+check "the hygiene greps fire on a file that does contain them" "4" "$control_hits"
+rm -f "$control"
+
+# The runner's own live-daemon guards apply to a driver too: a driver runs
+# on a box where a real routectl serves the operator's own traffic.
+for driver in "${DRIVER_FILES[@]}" "$DRIVERS/lib/common.sh"; do
+    if grep -qE 'pkill|killall|9100|usage\.db' <(code_lines "$driver"); then
+        fail "$(basename "$driver") names the live daemon or kills by name"
+    else
+        echo "PASS: $(basename "$driver") names nothing the live daemon owns"
+    fi
+done
+
+# ---------------------------------------------------------------------
+# Fixtures for the end-to-end cases
+# ---------------------------------------------------------------------
+
+# The canned trace the stub daemon emits on stderr: a complete non-stream
+# request carrying BOTH request-side structural summaries, which driver
+# mode requires before it will land a fixture. The user-agent is what the
+# rig parses `meta.client.version` out of, so the version this trace
+# carries is the one a landed fixture must report. Every value is
+# synthetic.
+canned_trace() {
+    local id="019eab77-0000-4000-8000-0000000000e2"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false'
+    cat <<TRACE
+2026-08-26T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
+2026-08-26T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
+2026-08-26T10:00:00.200000Z TRACE $span: $target upstream success body provider_kind="anthropic" provider=p body={"id":"msg_1"} redact_prompts_enabled=false
+2026-08-26T10:00:00.300000Z TRACE $span: $target egress response body ingress="anthropic" body={"id":"msg_1"} redact_prompts_enabled=false
+2026-08-26T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/9.9.9 (external, cli)"],["content-type","application/json"]]
+2026-08-26T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
+2026-08-26T10:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
+2026-08-26T10:00:00.310000Z TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
+2026-08-26T10:00:00.400000Z TRACE $span: $target structural summary direction="ingress" $structural
+2026-08-26T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural
+TRACE
+}
+
+write_listener() {
+    cat >"$1" <<'PY'
+import http.server
+import socketserver
+import sys
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            body = b'{"status":"ok","version":"stub"}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), Handler) as srv:
+    srv.serve_forever()
+PY
+}
+
+# The stub `routectl`, same shape as the runner's own self-test uses:
+# records its pid, emits the canned trace on stderr, then EXECs the
+# listener so the pid the runner captured stays the pid holding the port.
+write_stub_routectl() {
+    cat >"$1" <<'SH'
+#!/usr/bin/env bash
+set -u
+port=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port) port="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$$" >"$STUB_PID_FILE"
+if [ -r "${STUB_TRACE_FILE:-}" ]; then
+    cat "$STUB_TRACE_FILE" >&2
+fi
+exec python3 "$STUB_LISTENER" "$port"
+SH
+    chmod +x "$1"
+}
+
+# The stub CLIENT. Dumps its argv and the environment that decides which
+# wire shape a real client would emit, APPENDING to a file outside the run
+# workspace (the runner removes that workspace on exit, and a multi-turn
+# driver invokes the client more than once).
+#
+# `STUB_CLIENT_RC` makes it fail on demand, which is how the driver's own
+# failure propagation is asserted. `STUB_CLIENT_VERSION` empty is how a
+# client that cannot state its version is asserted.
+write_stub_client() {
+    cat >"$1" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+    if [ "$arg" = "--version" ] || [ "$arg" = "-V" ]; then
+        printf '%s\n' "${STUB_CLIENT_VERSION-9.9.9 (Stub Client)}"
+        exit 0
+    fi
+done
+{
+    printf 'invocation argv=%s\n' "$*"
+    printf 'invocation base_url=%s\n' "${ANTHROPIC_BASE_URL:-}"
+    printf 'invocation api_key_set=%s\n' "$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo yes || echo no)"
+    printf 'invocation https_proxy=%s\n' "${HTTPS_PROXY:-}"
+    printf 'invocation node_ca=%s\n' "${NODE_EXTRA_CA_CERTS:-}"
+    printf 'invocation cwd=%s\n' "$PWD"
+    printf 'invocation home=%s\n' "$HOME"
+    printf 'invocation notes_alpha=%s\n' "$([ -f notes-alpha.txt ] && echo yes || echo no)"
+    printf 'invocation filler=%s\n' "$(ls filler-*.txt 2>/dev/null | wc -l)"
+    printf 'invocation table=%s\n' "$([ -f reference-table.txt ] && echo yes || echo no)"
+} >>"$CLIENT_OUT"
+exit "${STUB_CLIENT_RC:-0}"
+SH
+    chmod +x "$1"
+}
+
+# A throwaway repo carrying the real runner, rig, scrub script, lane
+# configs, and the whole real drivers tree, plus the two stubs.
+make_work() {
+    local work
+    work="$(mktemp -d)"
+    mkdir -p "$work/repo/scripts" "$work/repo/crates/routectl-cli/tests/fixtures" "$work/bin"
+    cp "$RUNNER" "$work/repo/scripts/capture_driver.sh"
+    cp "$RIG" "$work/repo/scripts/capture_fixtures.sh"
+    cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
+    cp -r "$DRIVERS" "$work/repo/scripts/drivers"
+    printf '[workspace.package]\nversion = "9.9.9"\n' >"$work/repo/Cargo.toml"
+    write_listener "$work/bin/listener.py"
+    write_stub_routectl "$work/bin/routectl-stub"
+    write_stub_client "$work/bin/client-stub"
+    canned_trace >"$work/canned-trace.log"
+    printf -- "-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n" >"$work/ca.pem"
+    printf '%s\n' "$work"
+}
+
+free_port() {
+    local candidate i=0
+    while [ "$i" -lt 200 ]; do
+        candidate=$((25000 + RANDOM % 4000))
+        if ! ss -ltn 2>/dev/null | awk -v p=":$candidate" \
+            'NR > 1 && index($4, p) == length($4) - length(p) + 1 { found = 1 } END { exit !found }'; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Run the real runner in the throwaway repo, driving one real driver
+# against both stubs. `--keep` is deliberate: the driver records the client
+# version into the run workspace, and a removed workspace could not be
+# asserted on. The kept path is read back out of the runner's own log.
+#
+# The driver path is ABSOLUTE. The runner runs its driver command with cwd
+# set to the run's throwaway git repo, so a repo-relative path would
+# resolve against that workspace instead of against the checkout.
+#
+# Usage: driver_run <work> <driver-relative-path> <case-id> [extra runner flags...]
+driver_run() {
+    local work="$1" driver="$2" case_id="$3"
+    shift 3
+    local port rc=0
+    port="$(free_port)"
+    (
+        cd "$work/repo" || exit 2
+        ROUTECTL_BIN="$work/bin/routectl-stub" \
+        STUB_PID_FILE="$work/stub.pid" \
+        STUB_TRACE_FILE="$work/canned-trace.log" \
+        STUB_LISTENER="$work/bin/listener.py" \
+        CLIENT_OUT="$work/client.txt" \
+        STUB_CLIENT_RC="${STUB_CLIENT_RC:-0}" \
+        ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
+        ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
+        ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG="--continue" \
+        ROUTECTL_DRIVER_AGENT_MODEL_FLAG="-m" \
+        ROUTECTL_DRIVER_AGENT_REASONING_FLAG="--reasoning" \
+        ROUTECTL_DRIVER_SETTLE_SECONDS=0 \
+        ROUTECTL_DRIVER_TURN_SECONDS=0 \
+        ROUTECTL_DRIVER_EXIT_SECONDS=0 \
+        ROUTECTL_DRIVER_PORT_MIN="$port" \
+        ROUTECTL_DRIVER_PORT_MAX="$port" \
+            bash scripts/capture_driver.sh --work "$work/runs" --keep \
+            --case "$case_id" --lane anthropic-api "$@" \
+            -- "$work/repo/scripts/drivers/$driver"
+    ) >"$work/runner.log" 2>&1 || rc=$?
+    return "$rc"
+}
+
+# The run workspace the runner kept, read from its own message.
+kept_run() {
+    sed -n 's/.*run workspace kept at //p' "$1/runner.log" | head -1
+}
+
+client_get() {
+    sed -n "s/^invocation $2=//p" "$1/client.txt"
+}
+
+meta_get() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    node = json.load(fh)
+for part in sys.argv[2].split("."):
+    node = node[part]
+print(node)
+PY
+}
+
+landed_meta() {
+    printf '%s\n' "$1/repo/crates/routectl-cli/tests/fixtures/driver/anthropic-api/$2/meta.json"
+}
+
+# ---------------------------------------------------------------------
+# Part 3: every driver runs end to end against the stubs
+# ---------------------------------------------------------------------
+
+for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
+    work="$(make_work)"
+    rc=0
+    driver_run "$work" "$driver" tools-multiturn-01 || rc=$?
+    check "$driver: a run against the stub daemon exits 0" "0" "$rc"
+
+    if [ -f "$work/client.txt" ]; then
+        echo "PASS: $driver: the client was actually invoked"
+        check "$driver: the client saw the runner's base url" \
+            "yes" "$([ -n "$(client_get "$work" api_key_set)" ] && echo yes || echo no)"
+        check "$driver: the throwaway cwd was seeded for the case" \
+            "yes" "$(client_get "$work" notes_alpha | head -1)"
+        check_ne "$driver: the client ran outside the invoking HOME" \
+            "$HOME" "$(client_get "$work" home | head -1)"
+    else
+        fail "$driver: the client never ran (runner log: $work/runner.log)"
+        sed -n '1,25p' "$work/runner.log"
+        fails=$((fails + 3))
+    fi
+
+    # The version read from the BINARY at run time is what gives a fixture
+    # its decay clock. Asserted from the run's own record, not from the
+    # trace: the trace's user-agent is synthetic here, while this value
+    # came out of the driver invoking the binary.
+    kept="$(kept_run "$work")"
+    if [ -n "$kept" ] && [ -f "$kept/client.txt" ]; then
+        check "$driver: the driver recorded the client version from the binary" \
+            "9.9.9 (Stub Client)" "$(sed -n 's/^version=//p' "$kept/client.txt")"
+        check "$driver: the run record names the case" \
+            "tools-multiturn-01" "$(sed -n 's/^case_id=//p' "$kept/client.txt")"
+    else
+        fail "$driver: no client record in the kept run workspace"
+        fails=$((fails + 1))
+    fi
+
+    meta="$(landed_meta "$work" tools-multiturn-01)"
+    if [ -f "$meta" ]; then
+        echo "PASS: $driver: the rig landed a fixture at <lane>/<case_id>"
+        check "$driver: meta.case_id carries the case" "tools-multiturn-01" \
+            "$(meta_get "$meta" case_id)"
+        check "$driver: meta.client.version is populated" "9.9.9" \
+            "$(meta_get "$meta" client.version)"
+        check "$driver: meta.client.connection_mode is populated" "base-url" \
+            "$(meta_get "$meta" client.connection_mode)"
+    else
+        fail "$driver: no fixture landed at $meta"
+        sed -n '1,30p' "$work/runner.log"
+        fails=$((fails + 3))
+    fi
+
+    [ -n "$kept" ] && rm -rf "$kept"
+    rm -rf "$work"
+done
+
+# ---------------------------------------------------------------------
+# Part 4: a driver fails closed
+# ---------------------------------------------------------------------
+
+# An unreachable daemon. The driver is invoked DIRECTLY here, with the
+# runner's contract hand-set: the runner's own health poll passes before a
+# driver starts, so a daemon that died in between is only reachable as a
+# driver-level case. Without the driver's own check the client would fail
+# in its own vocabulary -- a credential error, an empty session -- and the
+# rig would land a fixture off a trace holding no dialogue.
+work="$(make_work)"
+dead_port="$(free_port)"
+live_port="$(free_port)"
+while [ "$live_port" = "$dead_port" ]; do live_port="$(free_port)"; done
+
+# Invoke a driver outside the runner, with a caller-chosen base URL.
+direct_run() {
+    local work="$1" driver="$2" base="$3" rc=0
+    local run="$work/direct-run" cwd="$work/direct-work"
+    rm -rf "$run" "$cwd"
+    mkdir -p "$run" "$cwd"
+    (
+        cd "$work/repo" || exit 2
+        HOME="$work/direct-home" \
+        CLIENT_OUT="$work/client.txt" \
+        ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
+        ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
+        ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG="--continue" \
+        ROUTECTL_DRIVER_SETTLE_SECONDS=0 \
+        ROUTECTL_DRIVER_TURN_SECONDS=0 \
+        ROUTECTL_DRIVER_EXIT_SECONDS=0 \
+        ROUTECTL_BASE_URL="$base" \
+        ROUTECTL_DRIVER_RUN="$run" \
+        ROUTECTL_DRIVER_WORK="$cwd" \
+        ROUTECTL_FIXTURE_CASE_ID="${DIRECT_CASE:-tools-multiturn-01}" \
+        ROUTECTL_FIXTURE_CONFIG_SHA="deadbeef" \
+        ROUTECTL_FIXTURE_CONNECTION_MODE="${DIRECT_MODE:-base-url}" \
+            bash "scripts/drivers/$driver"
+    ) >"$work/direct.log" 2>&1 || rc=$?
+    return "$rc"
+}
+
+listener_pid=""
+python3 "$work/bin/listener.py" "$live_port" >/dev/null 2>&1 &
+listener_pid=$!
+i=0
+while [ "$i" -lt 40 ] && ! curl -fsS -m 1 "http://127.0.0.1:$live_port/health" >/dev/null 2>&1; do
+    sleep 0.1
+    i=$((i + 1))
+done
+
+if curl -fsS -m 1 "http://127.0.0.1:$live_port/health" >/dev/null 2>&1; then
+    echo "PASS: the paired reachable-daemon control has a live listener"
+    for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
+        rc=0
+        direct_run "$work" "$driver" "http://127.0.0.1:$live_port" || rc=$?
+        check "$driver: exits 0 against a reachable daemon" "0" "$rc"
+        rc=0
+        direct_run "$work" "$driver" "http://127.0.0.1:$dead_port" || rc=$?
+        check_ne "$driver: exits non-zero when the daemon is unreachable" "0" "$rc"
+        if grep -qF 'unreachable' "$work/direct.log"; then
+            echo "PASS: $driver: the refusal names the unreachable daemon"
+        else
+            fail "$driver: the refusal did not name the unreachable daemon"
+            sed -n '1,10p' "$work/direct.log"
+        fi
+    done
+else
+    fail "could not bind a listener; the reachable/unreachable pair proves nothing"
+    fails=$((fails + 8))
+fi
+[ -n "$listener_pid" ] && kill "$listener_pid" 2>/dev/null
+wait "$listener_pid" 2>/dev/null
+rm -rf "$work"
+
+# A client that cannot state its version, and a client that fails.
+work="$(make_work)"
+rc=0
+STUB_CLIENT_RC=9 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
+check_ne "a failing client aborts the run" "0" "$rc"
+if [ -f "$(landed_meta "$work" plain-turn-01)" ]; then
+    fail "a failing client still landed a fixture"
+else
+    echo "PASS: a failing client lands no fixture"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# An unknown case id: a driver reads its case from the runner's pin, so an
+# id with no case file is a run that would capture an interaction nobody
+# described.
+work="$(make_work)"
+rc=0
+driver_run "$work" claude-code-print.sh no-such-case || rc=$?
+check_ne "an unknown case id aborts the run" "0" "$rc"
+check_ne "the unknown-case run landed no fixture" "yes" \
+    "$([ -f "$(landed_meta "$work" no-such-case)" ] && echo yes || echo no)"
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# The third driver names no client of its own: an unset binary is a
+# refusal, not a default.
+work="$(make_work)"
+rc=0
+(
+    cd "$work/repo" || exit 2
+    ROUTECTL_BASE_URL="http://127.0.0.1:1" \
+    ROUTECTL_DRIVER_RUN="$work" \
+    ROUTECTL_DRIVER_WORK="$work" \
+    ROUTECTL_FIXTURE_CASE_ID="plain-turn-01" \
+    ROUTECTL_FIXTURE_CONNECTION_MODE="base-url" \
+        bash scripts/drivers/external-agent-cli.sh
+) >"$work/direct.log" 2>&1 || rc=$?
+check_ne "the third driver refuses to run with no client named" "0" "$rc"
+if grep -qF 'ROUTECTL_DRIVER_AGENT_BIN' "$work/direct.log"; then
+    echo "PASS: the third driver's refusal names the missing client variable"
+else
+    fail "the third driver's refusal did not name the missing client variable"
+fi
+rm -rf "$work"
+
+# ---------------------------------------------------------------------
+# Part 5: the claude-code driver honors BOTH connection modes
+# ---------------------------------------------------------------------
+# The two modes emit different wire shapes: a MITM front proxy carries
+# `role:"system"` turns inside `messages[]` while base-url mode inlines the
+# same content as system-reminder text with zero system turns. A mode that
+# did not reach the client's environment would land a fixture labelled
+# front-proxy whose shape is base-url, and every later cross-mode diff
+# would read as client drift.
+
+work="$(make_work)"
+rc=0
+driver_run "$work" claude-code.sh thinking-01 --connection-mode base-url || rc=$?
+check "claude-code: a base-url run exits 0" "0" "$rc"
+check "claude-code: base-url reaches the client as ANTHROPIC_BASE_URL" \
+    "yes" "$([ -n "$(client_get "$work" base_url | head -1)" ] && echo yes || echo no)"
+check "claude-code: base-url sets no proxy in the client's environment" \
+    "" "$(client_get "$work" https_proxy | head -1)"
+meta="$(landed_meta "$work" thinking-01)"
+if [ -f "$meta" ]; then
+    check "claude-code: base-url reaches the fixture pin" "base-url" \
+        "$(meta_get "$meta" client.connection_mode)"
+else
+    fail "claude-code: the base-url run landed no fixture"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+work="$(make_work)"
+rc=0
+ROUTECTL_DRIVER_PROXY_URL="http://127.0.0.1:18443" \
+ROUTECTL_DRIVER_PROXY_CA="$work/ca.pem" \
+    driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
+check "claude-code: a front-proxy run exits 0" "0" "$rc"
+check "claude-code: front-proxy reaches the client as HTTPS_PROXY" \
+    "http://127.0.0.1:18443" "$(client_get "$work" https_proxy | head -1)"
+check "claude-code: front-proxy points the client at the CA it must trust" \
+    "$work/ca.pem" "$(client_get "$work" node_ca | head -1)"
+check "claude-code: front-proxy does not also set a direct base url" \
+    "" "$(client_get "$work" base_url | head -1)"
+meta="$(landed_meta "$work" thinking-01)"
+if [ -f "$meta" ]; then
+    check "claude-code: front-proxy reaches the fixture pin" "front-proxy" \
+        "$(meta_get "$meta" client.connection_mode)"
+else
+    fail "claude-code: the front-proxy run landed no fixture"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# Paired refusal: front-proxy with no proxy configured must FAIL rather
+# than fall back to base-url. The success case above is what keeps this
+# from passing against a driver that refuses front-proxy outright.
+work="$(make_work)"
+rc=0
+driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
+check_ne "claude-code: front-proxy with no proxy url aborts" "0" "$rc"
+if grep -qF 'ROUTECTL_DRIVER_PROXY_URL' "$work/runner.log"; then
+    echo "PASS: claude-code: the refusal names the missing proxy url"
+else
+    fail "claude-code: the refusal did not name the missing proxy url"
+    sed -n '1,15p' "$work/runner.log"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# An unsupported mode is a refusal, not a silent base-url run.
+work="$(make_work)"
+rc=0
+driver_run "$work" claude-code.sh thinking-01 --connection-mode sidecar || rc=$?
+check_ne "claude-code: an unsupported connection mode aborts" "0" "$rc"
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# ---------------------------------------------------------------------
+# Part 6: the case's knobs actually reach the client
+# ---------------------------------------------------------------------
+# A knob the driver read but never applied would make the whole set
+# decorative: every case would capture the same shape under a different id.
+
+work="$(make_work)"
+driver_run "$work" claude-code-print.sh tools-multiturn-01 || true
+check "a multi-turn case invokes the client once per turn" "2" \
+    "$(client_get "$work" argv | wc -l)"
+if client_get "$work" argv | sed -n '2p' | grep -q -- '--resume'; then
+    echo "PASS: a multi-turn print run resumes rather than reopening"
+else
+    fail "a multi-turn print run did not resume the first turn's session"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+work="$(make_work)"
+driver_run "$work" claude-code-print.sh thinking-01 || true
+if client_get "$work" argv | grep -q -- '--effort'; then
+    echo "PASS: a thinking case asks the client for extended thinking"
+else
+    fail "a thinking case did not ask the client for extended thinking"
+fi
+if client_get "$work" argv | grep -q -- '--disallowed-tools'; then
+    echo "PASS: a no-tools case denies the client its tools"
+else
+    fail "a no-tools case left the client's tools enabled"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+work="$(make_work)"
+driver_run "$work" claude-code-print.sh large-context-01 || true
+padding_files="$(client_get "$work" filler | head -1)"
+if [ -n "$padding_files" ] && [ "$padding_files" -gt 0 ]; then
+    echo "PASS: a large-context case materializes its filler in the throwaway cwd"
+else
+    echo "FAIL: a large-context case left the client nothing large to read"
+    fails=$((fails + 1))
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# Paired control for the filler assertion: a case with zero padding must
+# leave NO filler, or the assertion above would pass on a driver that
+# always generated it.
+work="$(make_work)"
+driver_run "$work" claude-code-print.sh plain-turn-01 || true
+check "a case with no padding materializes no filler" "0" \
+    "$(client_get "$work" filler | head -1)"
+check "a case with no cache breakpoints materializes no reference table" "no" \
+    "$(client_get "$work" table | head -1)"
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+work="$(make_work)"
+driver_run "$work" claude-code-print.sh cache-breakpoints-01 || true
+check "a cache-breakpoint case materializes the prefix the turns reuse" "yes" \
+    "$(client_get "$work" table | head -1)"
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+if [ "$fails" -gt 0 ]; then
+    echo "drivers self-test: $fails failure(s)"
+    exit 1
+fi
+echo "drivers self-test: all assertions passed"

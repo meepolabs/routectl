@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "case_id": "cache-breakpoints-01",
+  "title": "Stable long prefix reused across turns so the client sets cache control",
+  "wire_pattern": "cache-breakpoints",
+  "lane": "anthropic-api",
+  "turns": [
+    {
+      "prompt": "Read reference-table.txt in full and summarize what kind of records it holds."
+    },
+    {
+      "prompt": "Using that same table, tell me how many records have an even-numbered id."
+    },
+    {
+      "prompt": "Still using that table, tell me which id appears last."
+    }
+  ],
+  "knobs": {
+    "tools": true,
+    "thinking": false,
+    "cache_breakpoints": true,
+    "context_padding_bytes": 65536
+  },
+  "notes": "Three turns over one unchanged prefix is what makes a client mark a breakpoint; a single turn gives it nothing to cache across."
+}

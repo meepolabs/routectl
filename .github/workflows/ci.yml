@@ -219,3 +219,12 @@ jobs:
       # handoff to the capture rig.
       - name: driver runner self-test
         run: bash scripts/capture_driver.test.sh
+
+      # The canonical interaction set and the harness drivers. Neither a
+      # real client nor a real daemon is available here -- a driven session
+      # needs a credential and spends tokens -- so the self-test injects a
+      # stub daemon and a stub client through the documented binary
+      # overrides. That still exercises the case schema, the driver's own
+      # preconditions, and both connection modes reaching a landed fixture.
+      - name: interaction set and driver self-test
+        run: bash scripts/drivers.test.sh

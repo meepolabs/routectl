@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "case_id": "tools-multiturn-01",
+  "title": "Two-turn tool loop over files the driver creates in the throwaway cwd",
+  "wire_pattern": "tool-use-multiturn",
+  "lane": "anthropic-api",
+  "turns": [
+    {
+      "prompt": "List the files in the current directory, then read notes-alpha.txt and tell me the number written in it."
+    },
+    {
+      "prompt": "Now read notes-beta.txt and tell me the sum of that number and the previous one."
+    }
+  ],
+  "knobs": {
+    "tools": true,
+    "thinking": false,
+    "cache_breakpoints": false,
+    "context_padding_bytes": 0
+  },
+  "notes": "The second turn forces the client to resend the first turn's tool_use / tool_result pair, which is the shape a single-turn case cannot produce."
+}
