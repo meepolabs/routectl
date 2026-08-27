@@ -559,6 +559,52 @@ assert_caught "a legacy dotted-digit google oauth token is still caught" \
     "$(body_with "GEMINI_OAUTH=$(fake_key 'ya29.1.AADtN_V')")" \
     google-oauth-token
 
+# --- the two AWS body shapes -------------------------------------------
+# bedrock was EXCLUDED from the shape table until these landed, on a reason
+# that cited the HEADER layer -- which covers only credentials routectl itself
+# puts on the wire and says nothing about one arriving in a captured BODY.
+# All three fixtures below passed --check at exit 0 before these rules.
+assert_caught "an aws secret access key assignment in a captured body" \
+    ingress_request.json \
+    "$(body_with "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY$FAKE_RUN")" \
+    aws-credential-assignment
+
+assert_caught "a lowercase aws credentials-file secret is caught" \
+    ingress_request.json \
+    "$(body_with "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY$FAKE_RUN")" \
+    aws-credential-assignment
+
+assert_caught "an aws session token assignment in a captured body" \
+    ingress_request.json \
+    "$(body_with "AWS_SESSION_TOKEN=IQoJb3JpZ2luX2Vj$FAKE_RUN$FAKE_RUN")" \
+    aws-credential-assignment
+
+assert_caught "a bedrock short-term api key in a captured body" \
+    ingress_request.json \
+    "$(body_with "AWS_BEARER_TOKEN_BEDROCK=$(fake_key 'bedrock-api-key-')&Version=1")" \
+    bedrock-api-key
+
+# The accept side, and the reason these rules key on the ASSIGNMENT rather than
+# the value: the secret is 40 opaque base64 chars and the session token is a
+# long opaque run, so a value-keyed rule would be the forbidden entropy
+# matcher. Every spelling below carries the NAME with no secret after it, which
+# is exactly how routectl's own config and docs reference them.
+assert_clean "an env ref to the aws secret key in config prose is accepted" \
+    ingress_request.json \
+    "$(body_with "secret_key_ref = \"env://AWS_SECRET_ACCESS_KEY\"")"
+
+assert_clean "an env ref to the aws session token is accepted" \
+    ingress_request.json \
+    "$(body_with "session_token_ref = \"env://AWS_SESSION_TOKEN\"")"
+
+assert_clean "prose naming the aws secret key variable is accepted" \
+    ingress_request.json \
+    "$(body_with "set AWS_SECRET_ACCESS_KEY in your environment before running")"
+
+assert_clean "prose naming the bedrock api key prefix is accepted" \
+    ingress_request.json \
+    "$(body_with "the bedrock-api-key- prefix names a short-term key")"
+
 # --- escaped-newline boundary, both directions -------------------------
 # A captured body is single-line JSON, so an embedded newline is the two
 # BYTES `\` + `n`. `n` is a token character, so a credential that BEGINS an
@@ -614,7 +660,7 @@ assert_shape_table_rule_ids_exist() {
     # LS_MODE_RE, `bearer` in BEARER_RE, so a bogus row like `some-kind=rwx`
     # would read as covered by a gate that has no such rule -- the exact
     # silent under-read this guard exists to prevent, arriving through it.
-    regexes="$(grep -E '^(PROVIDER_KEY|GOOGLE_OAUTH_TOKEN|GOOGLE_API_KEY|JWT|AWS_TEMP_KEY_ID|NVIDIA_API_KEY)_RE=' "$SCRUB")"
+    regexes="$(grep -E '^(PROVIDER_KEY|GOOGLE_OAUTH_TOKEN|GOOGLE_API_KEY|JWT|AWS_TEMP_KEY_ID|NVIDIA_API_KEY|BEDROCK_API_KEY|AWS_CRED_ASSIGN)_RE=' "$SCRUB")"
 
     while IFS= read -r row; do
         [ -n "$row" ] || continue
