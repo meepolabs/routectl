@@ -64,6 +64,9 @@
 #   4  the driver command exited non-zero
 #   5  the capture rig refused the fixture (see its own message)
 #   6  no free port in the search window
+#   7  the rig ran clean but landed NO fixture -- the case produced no
+#      completed request. Distinct from 5 on purpose: this one is
+#      retryable, a refusal is a defect in what the case produced
 #
 # `ROUTECTL_BIN` overrides the daemon binary (default `routectl`).
 # `ROUTECTL_DRIVER_PORT_MIN` / `ROUTECTL_DRIVER_PORT_MAX` narrow the port
@@ -370,6 +373,15 @@ ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
     --out "$DRIVER_OUT" \
     --allow-unsafe-out || rig_rc=$?
 
+# The mapping is explicit rather than a blanket non-zero -> 5, because the
+# rig distinguishes a REFUSAL (exit 1: it produced a fixture and rejected
+# it -- never retry) from a ZERO LANDING (exit 3: the case produced no
+# completed request -- retryable). Collapsing them here would make the
+# rig's distinction unobservable to any caller of this script.
+if [ "$rig_rc" = 3 ]; then
+  echo "capture_driver: case '$CASE_ID' on lane '$LANE' landed no fixture (see the rig's message)" >&2
+  exit 7
+fi
 if [ "$rig_rc" != 0 ]; then
   echo "capture_driver: capture rig refused the fixture for case '$CASE_ID' on lane '$LANE'" >&2
   exit 5

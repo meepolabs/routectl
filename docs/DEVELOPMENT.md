@@ -472,7 +472,11 @@ What each run does, in order:
 
 A cleanup trap runs on every exit path, so an interrupted or failed run
 never leaves a daemon holding its port. Exit codes: 2 usage, 3 unhealthy
-daemon, 4 driver failure, 5 rig refusal, 6 no free port.
+daemon, 4 driver failure, 5 rig refusal, 6 no free port, 7 the rig ran
+clean but landed no fixture. 5 and 7 are separate because a refusal means
+routectl produced a fixture the gate rejected (a defect, never retry)
+while a zero landing means the case produced no completed request
+(retryable).
 
 `meta.config_sha` is the sha256 of the COMMITTED lane config
 (`scripts/drivers/config/<lane>.toml`), not of the copy the run boots

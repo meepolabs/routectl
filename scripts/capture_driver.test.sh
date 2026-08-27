@@ -105,6 +105,33 @@ canned_trace() {
 TRACE
 }
 
+# A canned trace holding a SENT request that never completed: no
+# `upstream success body` and no `stream summary` line, so the rig finds
+# nothing to capture and refuses nothing. The runner must surface that as
+# its own exit 7, not fold it into the refusal exit 5.
+canned_trace_no_completion() {
+    local id="019eab77-0000-4000-8000-0000000000d2"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false'
+    cat <<TRACE
+2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
+2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
+2026-08-25T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"]]
+2026-08-25T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
+2026-08-25T10:00:00.400000Z TRACE $span: $target structural summary direction="ingress" $structural
+2026-08-25T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural
+TRACE
+}
+
+# A canned trace whose request DID complete but carries only the ingress
+# structural summary. Driver mode refuses a fixture with half its
+# structural evidence, so the rig exits 1 -- the path the runner maps to
+# exit 5, and the control proving 7 is not simply every non-zero rig exit.
+canned_trace_half_structural() {
+    canned_trace | grep -vF 'structural summary direction="outgoing"'
+}
+
 # The python listener, shared by the stub daemon and by the case that
 # OCCUPIES a port. Answers only `/health`; anything else 404s, because a
 # stub that answered everything would hide a runner that polled the wrong
@@ -660,7 +687,50 @@ else
 fi
 rm -rf "$work"
 
-# --- Case 9: the runner names nothing the operator's live daemon owns --
+# --- Case 9: the rig's verdict is MAPPED, not collapsed ---------------
+# A trace holding no completed request and a trace holding a fixture the
+# rig refuses are two different verdicts (retryable vs a defect), and a
+# blanket non-zero -> 5 mapping in the runner makes the rig's distinction
+# unobservable to anything calling this script. Both directions are
+# asserted here because the pair IS the contract.
+work="$(make_work)"
+canned_trace_no_completion >"$work/canned-trace.log"
+port_i="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_i" ROUTECTL_DRIVER_PORT_MAX="$port_i" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-09 || rc=$?
+check "a run whose trace holds no completed request exits 7" "7" "$rc"
+check_log "the exit-7 message names the case" "driver-selftest-09" \
+    "$work/runner.log"
+# Keyed on a substring UNIQUE to the RIG's message, not the shared
+# "landed no fixture" phrase both producers emit: with the shared phrase this
+# assertion passed when either producer's line was deleted, so the rig's
+# machine-facing half (the one carrying the trace path) was unpinned here.
+check_log "the rig's own zero-landing message reaches the runner log" \
+    "holds no completed request" "$work/runner.log"
+if [ -d "$(driver_corpus "$work")/anthropic-api/driver-selftest-09" ]; then
+    echo "FAIL: a run that landed no fixture created a corpus directory"
+    fails=$((fails + 1))
+else
+    echo "PASS: a run that landed no fixture creates no corpus directory"
+fi
+rm -rf "$work"
+
+# The other half of the mapping: a rig REFUSAL still exits 5. Driver mode
+# refuses a fixture carrying only half its structural evidence, so this
+# trace completes a request and then loses it at the landing gate.
+work="$(make_work)"
+canned_trace_half_structural >"$work/canned-trace.log"
+port_j="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_j" ROUTECTL_DRIVER_PORT_MAX="$port_j" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-09b || rc=$?
+check "a rig refusal still exits 5, not 7" "5" "$rc"
+check_log "the exit-5 message reports a refusal" "refused the fixture" \
+    "$work/runner.log"
+rm -rf "$work"
+
+# --- Case 10: the runner names nothing the operator's live daemon owns --
 # The runner runs on a box where a real routectl serves the operator's own
 # traffic. A name-based kill, the live port, or the live usage database
 # appearing anywhere in this script is a defect no functional test would
@@ -711,7 +781,7 @@ done
 check "the live-daemon greps fire on a script that does contain them" "4" "$control_hits"
 rm -f "$control"
 
-# --- Case 10: --help renders the header, sentinel included ------------
+# --- Case 11: --help renders the header, sentinel included ------------
 help_out="$(bash "$RUNNER" --help 2>&1 || true)"
 if printf '%s' "$help_out" | grep -q 'ROUTECTL_FIXTURE_CONFIG_SHA' &&
     ! printf '%s' "$help_out" | grep -q 'END USAGE'; then

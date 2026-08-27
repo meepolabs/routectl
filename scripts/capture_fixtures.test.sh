@@ -140,6 +140,26 @@ TRACE
     structural_line "$id" outgoing 500000
 }
 
+# A trace holding a SENT request that never completed: ingress and
+# outgoing bodies plus both structural summaries, and no `upstream success
+# body` / `stream summary` line for the rig to key a completion on. This is
+# what a 429, an upstream that returned no success body, or a client that
+# died mid-request leaves in the log -- the shape that makes driver mode
+# land zero fixtures with nothing refused.
+trace_no_completion() {
+    local id="$1" kind="${2:-anthropic}"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    cat <<TRACE
+2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
+2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=$kind:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="$kind" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
+2026-08-25T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"]]
+2026-08-25T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
+TRACE
+    structural_line "$id" ingress 400000
+    structural_line "$id" outgoing 500000
+}
+
 # Build a throwaway repo and print its root. Split out of run_rig so a
 # case can invoke the rig TWICE against the same captured tree, which is
 # the only way to observe what a rerun does to an existing landing dir.
@@ -175,6 +195,23 @@ rig_run() {
 # Path of the captured tree inside a throwaway repo.
 captured_of() {
     printf '%s\n' "$1/repo/crates/routectl-cli/tests/fixtures/captured"
+}
+
+# Same as rig_run, but keeps the two streams APART: `<tmp>/rig.out` and
+# `<tmp>/rig.err`. The zero-landing verdict splits across them on purpose
+# -- the human `captured=` line stays on stdout while the machine-facing
+# refusal names the case on stderr -- and a merged log cannot tell a
+# regression that moved one onto the other.
+rig_run_split() {
+    local tmp="$1" trace_text="$2"
+    shift 2
+    printf '%s\n' "$trace_text" >"$tmp/trace.log"
+    local rc=0
+    (
+        cd "$tmp/repo" || exit 2
+        bash scripts/capture_fixtures.sh --log "$tmp/trace.log" "$@"
+    ) >"$tmp/rig.out" 2>"$tmp/rig.err" || rc=$?
+    return "$rc"
 }
 
 # Build a throwaway repo, run the real rig in it against the given trace
@@ -717,6 +754,10 @@ if [ "$rc" -eq 0 ]; then
 else
     echo "PASS: driver mode refuses to promote a fixture the scrub check rejects"
 fi
+# A refusal is exit 1 and must never arrive as the zero-landing 3: a
+# refused fixture is a defect a runner must never retry, while a zero
+# landing is retryable. Conflated, the caller has to parse stderr.
+check "a scrub refusal exits 1, not the zero-landing 3" "1" "$rc"
 if [ -d "$(captured_of "$work")/anthropic-api/dirty-01" ]; then
     echo "FAIL: a scrub-refused fixture reached the corpus"
     fails=$((fails + 1))
@@ -816,7 +857,82 @@ check_log "the refusal names the already-landed case" "already landed this run" 
     "$work/rig.log"
 rm -rf "$work"
 
-# --- Case 18: --help still renders the header ------------------------
+# --- Case 18: driver mode landing ZERO fixtures is a failed run --------
+# The shape a 429, an upstream that returned no success body, or a client
+# that died mid-request leaves behind: the request was SENT (ingress and
+# outgoing bodies are traced) and nothing ever completed, so there is no
+# `upstream success body` and no `stream summary` for the rig to key on.
+# Exit 3 is the whole point of the case: without it this run is
+# byte-identical to a live-box quiet window and spends real tokens
+# reporting success.
+set_pins no-completion-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+# PREMISE ASSERTION. Without this the exit-3 assertions below hold for ANY
+# trace the rig finds nothing in -- an empty file, an unparseable one -- rather
+# than for the named cause: a request that was SENT and never COMPLETED. Same
+# shape as the vacuous-negative class in meta/learnings.md, where the fixture
+# never reaches the branch the test is named for.
+no_completion_trace="$(trace_no_completion 019eab77-0000-4000-8000-000000000017)"
+if printf '%s\n' "$no_completion_trace" | grep -q 'ingress request body' &&
+   printf '%s\n' "$no_completion_trace" | grep -q 'outgoing request body' &&
+   printf '%s\n' "$no_completion_trace" | grep -q 'structural summary direction="ingress"' &&
+   printf '%s\n' "$no_completion_trace" | grep -q 'structural summary direction="outgoing"' &&
+   ! printf '%s\n' "$no_completion_trace" | grep -q 'upstream success body' &&
+   ! printf '%s\n' "$no_completion_trace" | grep -q 'stream summary'; then
+    echo "PASS: the no-completion trace holds a SENT request and no completion"
+else
+    echo "FAIL: the no-completion fixture is not the shape it is named for --"
+    echo "FAIL: exit-3 would then be asserted for 'found nothing', not 'never completed'"
+    fails=$((fails + 1))
+fi
+
+rig_run_split "$work" "$(trace_no_completion 019eab77-0000-4000-8000-000000000017)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a driver run that lands zero fixtures exits 3" "3" "$rc"
+check_log "the zero-landing run still prints its captured= line on stdout" \
+    "captured=0" "$work/rig.out"
+check_log "the zero-landing message names the case id" "no-completion-01" \
+    "$work/rig.err"
+check_log "the zero-landing message names the trace path" "$work/trace.log" \
+    "$work/rig.err"
+rm -rf "$work"
+
+# The other direction, on the SAME trace: in live-box mode zero captures
+# is the normal answer for a quiet window and MUST stay exit 0. The two
+# modes' policies differ on purpose, so both are asserted here -- and the
+# exit-0 direction is the one that decays silently if the guard is ever
+# widened.
+clear_pins
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(trace_no_completion 019eab77-0000-4000-8000-000000000018)" || rc=$?
+check "a LIVE-BOX run over the same trace exits 0" "0" "$rc"
+check_log "the live-box zero-capture run reports captured=0" "captured=0" \
+    "$work/rig.out"
+if grep -q 'landed no fixture' "$work/rig.err"; then
+    echo "FAIL: live-box mode emitted the driver-mode zero-landing message"
+    fails=$((fails + 1))
+else
+    echo "PASS: live-box mode emits no zero-landing message"
+fi
+rm -rf "$work"
+
+# Positive control for the guard: the same driver path over a trace that
+# DOES hold a completed request still exits 0, so the 3 above is the
+# zero-landing check firing and not driver mode failing outright.
+set_pins completion-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000019)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a driver run that lands a fixture still exits 0" "0" "$rc"
+check_log "the landing run reports captured=1" "captured=1" "$work/rig.out"
+rm -rf "$work"
+
+# --- Case 19: --help still renders the header ------------------------
 # The usage extraction is sentinel-delimited; a line-count range silently
 # starts cutting the moment the header grows, and the driver-mode policy
 # is exactly the part a caller needs to read.

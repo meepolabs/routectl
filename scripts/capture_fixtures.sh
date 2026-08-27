@@ -84,6 +84,12 @@
 #      fixture was refused -- a refusal aborts the RUN, so a driver
 #      runner reads any non-zero exit as "this case produced no fixture"
 #   2  usage error, or an --out outside the captured tree
+#   3  DRIVER MODE ONLY: the run completed, refused nothing, and landed
+#      zero fixtures -- the driven case produced no completed request (a
+#      429, an upstream that returned no success body, a client that died
+#      before sending). Deliberately NOT folded into 1: this is retryable,
+#      while "we refused a fixture we produced" never is. In LIVE-BOX mode
+#      zero captures is the normal quiet-window answer and exits 0.
 # --- END USAGE ---
 
 # set -e so a partial-fixture mid-write failure aborts the script
@@ -805,6 +811,19 @@ if [ -n "$latest_ts" ]; then
 fi
 
 echo "captured=$captured since=$since latest=$latest_ts out=$OUT"
+
+# Driver mode only: landing zero is a failed run, not a quiet window.
+# Reaching this line already proves NO fixture was refused -- the script
+# runs under `set -e` and write_fixture's refusal `return 1` inside the
+# loop body aborts before here -- so `captured=0` here means unambiguously
+# that the trace held no completed request. Exit 3 keeps that retryable
+# verdict distinct from exit 1 ("we refused a fixture"), which never is.
+# Only the case id is nameable here: `lane` is local to write_fixture and
+# there is no traced provider_kind to normalize when nothing landed.
+if [ "$DRIVER_MODE" = 1 ] && [ "$captured" -eq 0 ]; then
+  echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' landed no fixture; the trace at $LOG holds no completed request" >&2
+  exit 3
+fi
 
 # === Symlink-component check sanity test (manual) ===
 #
