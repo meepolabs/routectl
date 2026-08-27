@@ -26,6 +26,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIG="$HERE/capture_fixtures.sh"
 SCRUB="$HERE/scrub-fixture.sh"
+CONFINE="$HERE/drivers/lib/confine.sh"
 
 fails=0
 
@@ -200,8 +201,12 @@ trace_driver_large() {
 make_repo() {
     local tmp
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/repo/scripts" "$tmp/repo/crates/routectl-cli/tests/fixtures"
+    mkdir -p "$tmp/repo/scripts/drivers/lib" \
+        "$tmp/repo/crates/routectl-cli/tests/fixtures"
     cp "$RIG" "$tmp/repo/scripts/capture_fixtures.sh"
+    # The rig sources its --out confinement from the shared library and
+    # refuses to run without it, so the throwaway repo carries the real one.
+    cp "$CONFINE" "$tmp/repo/scripts/drivers/lib/confine.sh"
     # The rig delegates scrubbing to scrub-fixture.sh and refuses to run
     # without it, so the throwaway repo carries the real script too.
     cp "$SCRUB" "$tmp/repo/scripts/scrub-fixture.sh"
@@ -1206,7 +1211,142 @@ else
 fi
 unset own_home placeholder_home
 
-# --- Case 20: --help still renders the header ------------------------
+# --- Case 20: --out confinement, both directions ---------------------
+# The confinement lives in scripts/drivers/lib/confine.sh, sourced by the
+# rig and by every other script that writes capture output to a
+# caller-supplied path. Fixtures carry RAW headers, so an --out the rig
+# accepts is a write of credential-bearing content to that path.
+#
+# Every refusal below is asserted alongside the ACCEPT that proves the
+# same machinery says yes when it should. Without the accept controls a
+# confinement that refused unconditionally -- or one that refused because
+# the throwaway repo was malformed -- would pass every refusal assertion.
+confine_trace="$(trace_non_stream 019eab77-0000-4000-8000-000000000020 anthropic)"
+
+# ACCEPT CONTROL for the whole case: an ordinary subdirectory under the
+# captured tree, no symlink anywhere, is accepted and the fixture lands.
+work="$(make_repo)"
+captured="$(captured_of "$work")"
+mkdir -p "$captured/plain"
+rc=0
+rig_run "$work" "$confine_trace" --out "$captured/plain" || rc=$?
+check "a plain subdirectory of the captured tree is accepted" "0" "$rc"
+if [ -d "$captured/plain/019eab77-0000-4000-8000-000000000020" ]; then
+    echo "PASS: the accepted --out is where the fixture lands"
+else
+    echo "FAIL: the accepted --out landed no fixture (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# REFUSAL 1: a DANGLING symlink component under the captured tree. This
+# is the case the per-component `[ -L ]` walk exists for and the only one
+# the physical resolution alone cannot see: `cd -P` walks up to the
+# nearest EXISTING ancestor, and a broken link plus a not-yet-created
+# leaf has no existing ancestor below the captured root to resolve
+# through, so the physical compare reports the path as confined.
+work="$(make_repo)"
+captured="$(captured_of "$work")"
+mkdir -p "$captured"
+ln -s /nonexistent-confinement-target "$captured/dangling"
+rc=0
+rig_run "$work" "$confine_trace" --out "$captured/dangling/leaf" || rc=$?
+check "a dangling symlink component in --out is refused with exit 2" "2" "$rc"
+check_log "the dangling-symlink refusal names the symlink component" \
+    "symlink component at" "$work/rig.log"
+rm -rf "$work"
+
+# PREMISE ASSERTION for refusal 1. The refusal above is only evidence
+# about the `[ -L ]` walk if the physical compare would have ACCEPTED the
+# same shape -- otherwise the walk is decoration and deleting it would
+# leave the suite green. Resolve the identical path through the library's
+# own `abspath_physical` and assert it reports as confined: `cd -P` walks
+# up to the nearest EXISTING ancestor, so the broken link and the
+# not-yet-created leaf both survive as an in-tree-looking tail.
+work="$(make_repo)"
+captured="$(captured_of "$work")"
+mkdir -p "$captured"
+ln -s /nonexistent-confinement-target "$captured/dangling"
+phys_verdict="$(
+    # shellcheck source=scripts/drivers/lib/confine.sh
+    . "$CONFINE"
+    root="$(abspath_physical "$captured")"
+    cand="$(abspath_physical "$captured/dangling/leaf")"
+    case "$cand" in
+        "$root" | "$root"/*) printf 'confined\n' ;;
+        *) printf 'outside\n' ;;
+    esac
+)"
+check "physical resolution alone reads the dangling path as confined" \
+    "confined" "$phys_verdict"
+rm -rf "$work"
+
+# REFUSAL 2: a LIVE symlink component under the captured tree pointing
+# out of it. Distinct from refusal 1 -- this one the physical compare
+# would also catch, so it pins that a resolvable link is refused at the
+# earlier, more specific message rather than falling through.
+work="$(make_repo)"
+captured="$(captured_of "$work")"
+mkdir -p "$captured" "$work/elsewhere"
+ln -s "$work/elsewhere" "$captured/live"
+rc=0
+rig_run "$work" "$confine_trace" --out "$captured/live/sub" || rc=$?
+check "a live symlink component in --out is refused with exit 2" "2" "$rc"
+check_log "the live-symlink refusal names the symlink component" \
+    "symlink component at" "$work/rig.log"
+rm -rf "$work"
+
+# REFUSAL 3: a `..` traversal that climbs out of the captured tree. The
+# lexical collapse normalizes it before the compare, so the refusal is
+# the containment test firing rather than a string mismatch on `..`.
+work="$(make_repo)"
+captured="$(captured_of "$work")"
+rc=0
+rig_run "$work" "$confine_trace" --out "$captured/../../../../src" || rc=$?
+check "a .. traversal out of the captured tree is refused with exit 2" "2" "$rc"
+check_log "the traversal refusal names the default captured dir" \
+    "outside the default captured dir" "$work/rig.log"
+rm -rf "$work"
+
+# ACCEPT CONTROL for refusal 3: a `..` traversal that lands BACK inside
+# the captured tree is accepted. Without it "reject anything containing
+# `..`" satisfies refusal 3, and the lexical collapse the refusal is
+# supposed to prove would be deletable.
+work="$(make_repo)"
+captured="$(captured_of "$work")"
+mkdir -p "$captured/inner"
+rc=0
+rig_run "$work" "$confine_trace" --out "$captured/inner/../inner" || rc=$?
+check "a .. traversal that stays inside the captured tree is accepted" "0" "$rc"
+rm -rf "$work"
+
+# ACCEPT CONTROL for the bypass: --allow-unsafe-out is what makes a
+# deliberate out-of-tree capture possible, so refusal 3 must not hold
+# with the flag set. This also proves the refusals above come from the
+# confinement block and not from an unrelated failure on the path.
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$confine_trace" --out "$work/outside" --allow-unsafe-out || rc=$?
+check "--allow-unsafe-out permits an out-of-tree --out" "0" "$rc"
+rm -rf "$work"
+
+# The helper is the ONLY copy: a re-implementation in the rig is the
+# exact drift D6 forbids, and it would be invisible to every assertion
+# above (both copies would pass).
+for fn in 'abspath_lexical()' 'abspath_physical()'; do
+    check "the rig defines no local $fn" "0" \
+        "$(grep -cF "$fn" "$RIG")"
+    check "the shared library defines $fn" "1" \
+        "$(grep -cF "$fn" "$CONFINE")"
+done
+# The literal being grepped for is the rig's own source line, so the `$`
+# inside it is text rather than an expansion.
+# shellcheck disable=SC2016
+source_lines="$(grep -c '^\. "\$CONFINE_LIB"$' "$RIG" | tr -d ' ')"
+check "the rig sources the shared confinement library" "1" "$source_lines"
+
+# --- Case 21: --help still renders the header ------------------------
 # The usage extraction is sentinel-delimited; a line-count range silently
 # starts cutting the moment the header grows, and the driver-mode policy
 # is exactly the part a caller needs to read.

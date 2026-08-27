@@ -151,6 +151,17 @@ if [ ! -r "$SCRUB" ]; then
   exit 1
 fi
 
+# The single owner of --out path confinement, shared with every other
+# script that writes capture output to a caller-supplied directory.
+# Absent library is a hard failure, never an unconfined write.
+CONFINE_LIB="$ROOT/scripts/drivers/lib/confine.sh"
+if [ ! -r "$CONFINE_LIB" ]; then
+  echo "capture_fixtures: confinement library not found at $CONFINE_LIB; refusing to capture" >&2
+  exit 1
+fi
+# shellcheck source=scripts/drivers/lib/confine.sh
+. "$CONFINE_LIB"
+
 # Escape a value for use inside a JSON string literal. The meta.json and
 # manifest lines below are emitted by hand (no jq dependency), so every
 # interpolated STRING value must come through here or a value carrying a
@@ -233,120 +244,17 @@ if [ "$DRIVER_MODE" = 1 ]; then
   esac
 fi
 
-# Lexically resolve a path to absolute, collapsing `.` and `..` without
-# touching the filesystem. Portable (no realpath / -m dependency) and
-# works for a not-yet-created directory. Symlinks are NOT followed: the
-# default captured tree has none and confinement only needs lexical
-# containment.
-abspath_lexical() {
-  case "$1" in
-    /*) _p="$1" ;;
-    *)  _p="$PWD/$1" ;;
-  esac
-  printf '%s\n' "$_p" | awk -F/ '
-    { n = 0
-      for (i = 1; i <= NF; i++) {
-        if ($i == "" || $i == ".") continue
-        if ($i == "..") { if (n > 0) n--; continue }
-        seg[++n] = $i
-      }
-      out = ""
-      for (i = 1; i <= n; i++) out = out "/" seg[i]
-      print (out == "" ? "/" : out)
-    }'
-}
-
-# Physically resolve a path to absolute, FOLLOWING symlinks, so a
-# symlinked component cannot disguise an out-of-tree destination as an
-# in-tree one. The path need not exist yet: walk up the RAW path (no
-# lexical `..` collapse first -- collapsing before symlink resolution is
-# unsafe, since `link/..` must resolve through the link, not cancel its
-# name) to the nearest EXISTING ancestor, resolve THAT with
-# `cd -P` / `pwd -P` (portable; no `realpath -m` dependency), then
-# re-append the non-existing tail. Tail components do not exist, so they
-# cannot be symlinks; a final lexical collapse of the combined path is
-# therefore physically faithful.
-abspath_physical() {
-  case "$1" in
-    /*) _p="$1" ;;
-    *)  _p="$PWD/$1" ;;
-  esac
-  _tail=""
-  while [ ! -e "$_p" ] && [ "$_p" != "/" ]; do
-    _tail="$(basename "$_p")${_tail:+/$_tail}"
-    _p="$(dirname "$_p")"
-  done
-  _phys="$(cd -P "$_p" 2>/dev/null && pwd -P)" || {
-    echo "cannot physically resolve path ancestor: $_p" >&2
-    exit 2
-  }
-  if [ -n "$_tail" ]; then
-    abspath_lexical "$_phys/$_tail"
-  else
-    printf '%s\n' "$_phys"
-  fi
-}
-
 # Confine --out to the default captured dir unless the operator
 # explicitly opts out. Fixtures carry RAW headers (auth included when
 # the daemon runs with ROUTECTL_TRACE_HEADERS) and the default tree is
 # gitignored; writing them into an arbitrary -- possibly git-tracked --
 # path risks committing secrets. OUT keeps its lexically-collapsed form
-# for the write path; the confinement test compares the PHYSICALLY
-# resolved (symlink-following) OUT against the physically resolved
-# default root. A purely lexical compare cannot see through a symlinked
-# subdir under the default tree, so `<default>/<symlink>/x` could escape
-# confinement -- resolving both sides physically closes that hole while
-# still normalizing `..` traversals such as `<default>/../../src`.
+# for the write path; the containment test itself lives in
+# scripts/drivers/lib/confine.sh, which is the only copy.
 OUT="$(abspath_lexical "$OUT")"
 DEFAULT_OUT_ABS="$(abspath_lexical "$ROOT/crates/routectl-cli/tests/fixtures/captured")"
 if [ "$ALLOW_UNSAFE_OUT" = 0 ]; then
-  # Belt-and-suspenders: walk every OUT component UNDER the captured
-  # root and reject any symlink, even a DANGLING one (target does not
-  # exist). The physical resolution further down walks up to the
-  # nearest EXISTING ancestor with `cd -P`, so a broken symlink under
-  # the captured tree (e.g. `<captured>/<dangling-link>/<leaf>` where
-  # leaf does not yet exist) slips past it; `mkdir -p` below also
-  # cannot reify a dangling symlink as a directory. `[ -L ]` is the
-  # POSIX symlink test -- true for any symlink regardless of whether
-  # its target resolves -- and it is run BEFORE physical resolution
-  # because resolution loses the per-component symlink information.
-  # Out-of-tree paths skip this loop and are rejected by the physical
-  # confinement test below.
-  case "$OUT" in
-    "$DEFAULT_OUT_ABS" | "$DEFAULT_OUT_ABS"/*)
-      _check="$DEFAULT_OUT_ABS"
-      _remaining="${OUT:${#DEFAULT_OUT_ABS}}"
-      _remaining="${_remaining#/}"
-      while [ -n "$_remaining" ]; do
-        case "$_remaining" in
-          */*) _seg="${_remaining%%/*}"; _remaining="${_remaining#*/}" ;;
-          *)   _seg="$_remaining"; _remaining="" ;;
-        esac
-        [ -z "$_seg" ] && continue
-        _check="$_check/$_seg"
-        if [ -L "$_check" ]; then
-          echo "refusing --out '$OUT': symlink component at '$_check'." >&2
-          echo "fixtures contain raw headers (auth when ROUTECTL_TRACE_HEADERS is on);" >&2
-          echo "a symlink under the captured tree could redirect writes outside it." >&2
-          echo "pass --allow-unsafe-out to override." >&2
-          exit 2
-        fi
-      done
-      ;;
-  esac
-
-  out_phys="$(abspath_physical "$OUT")"
-  default_phys="$(abspath_physical "$DEFAULT_OUT_ABS")"
-  case "$out_phys" in
-    "$default_phys" | "$default_phys"/*) : ;;
-    *)
-      echo "refusing --out '$OUT': outside the default captured dir '$DEFAULT_OUT_ABS'." >&2
-      echo "fixtures contain raw headers (auth when ROUTECTL_TRACE_HEADERS is on)." >&2
-      echo "pass --allow-unsafe-out to write outside the default tree on purpose." >&2
-      exit 2
-      ;;
-  esac
+  confine_out_under "$OUT" "$DEFAULT_OUT_ABS"
 fi
 
 mkdir -p "$OUT"
@@ -865,35 +773,3 @@ if [ "$DRIVER_MODE" = 1 ] && [ "$captured" -eq 0 ]; then
   echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' landed no fixture; the trace at $LOG holds no completed request" >&2
   exit 3
 fi
-
-# === Symlink-component check sanity test (manual) ===
-#
-# Verifies the per-component [-L] walk catches a dangling symlink in the
-# OUT path. The walk runs lexically before any filesystem touch, so a
-# synthetic captured/ tree exercises it without invoking the script.
-# Expected: the loop emits `PASS: detected <symlink path>`.
-#
-#   tmp="$(mktemp -d)"
-#   trap 'rm -rf "$tmp"' EXIT
-#   captured="$tmp/captured"
-#   mkdir -p "$captured"
-#   # Dangling symlink: target deliberately does not exist.
-#   ln -s "$tmp/no-such-target" "$captured/dangling"
-#   # Mirror the script's lexical walk in-process:
-#
-#   DEFAULT_OUT_ABS="$captured"
-#   OUT="$captured/dangling/leaf"
-#   _check="$DEFAULT_OUT_ABS"
-#   _remaining="${OUT:${#DEFAULT_OUT_ABS}}"
-#   _remaining="${_remaining#/}"
-#   hit=""
-#   while [ -n "$_remaining" ]; do
-#     case "$_remaining" in
-#       */*) _seg="${_remaining%%/*}"; _remaining="${_remaining#*/}" ;;
-#       *)   _seg="$_remaining"; _remaining="" ;;
-#     esac
-#     [ -z "$_seg" ] && continue
-#     _check="$_check/$_seg"
-#     if [ -L "$_check" ]; then hit="$_check"; break; fi
-#   done
-#   if [ -n "$hit" ]; then echo "PASS: detected $hit"; else echo "FAIL"; fi
