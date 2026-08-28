@@ -11,6 +11,7 @@
 # Usage:
 #   scripts/capture_driver.sh --lane <lane> --case <case-id> \
 #                             [--connection-mode <mode>] \
+#                             [--out <dir>] [--out-root <dir>] \
 #                             [--work <dir>] [--timeout <seconds>] \
 #                             [--keep] \
 #                             -- <driver-command> [args...]
@@ -24,6 +25,24 @@
 #                      personal data the scrub gate refuses).
 #   --connection-mode  how the driver reaches routectl. Default
 #                      `base-url`; pass `front-proxy` for a MITM run.
+#   --out              where the fixture lands. Default:
+#                      `.routectl-driver-scratch/` at the repo root,
+#                      which is gitignored. Deliberately NOT the
+#                      committed driver corpus -- an exploratory rerun of
+#                      a case would replace a reviewed fixture in place.
+#                      Promotion into the corpus is
+#                      scripts/promote_fixture.sh.
+#   --out-root         the confinement root --out must live under, chosen
+#                      from a CLOSED SET (the gitignored scratch root, or
+#                      ROUTECTL_DRIVER_OUT_ROOT when a run sets it). It is
+#                      a parameter rather than a constant because a run
+#                      that mounts this repo read-only cannot land
+#                      fixtures inside it, so no repo-relative constant
+#                      can name the destination. It is confined rather
+#                      than trusted: a root accepted from argv unchecked
+#                      would leave --out compared against a path the same
+#                      caller chose, which confines nothing.
+
 #   --work             parent for the run workspace. Default: mktemp.
 #   --timeout          seconds to wait for /health. Default 20.
 #   --keep             keep the run workspace (trace log included) for
@@ -65,7 +84,8 @@
 #
 # Exit codes:
 #   0  the driver ran and the rig landed the fixture
-#   2  usage error (unknown flag, missing lane config, no driver command)
+#   2  usage error (unknown flag, missing lane config, no driver command,
+#      or a `--out` this script refuses to write to)
 #   3  the hermetic daemon never became healthy
 #   4  the driver command exited non-zero
 #   5  the capture rig refused the fixture (see its own message)
@@ -92,14 +112,58 @@ CONFIG_DIR="$ROOT/scripts/drivers/config"
 CASES_DIR="$ROOT/scripts/drivers/cases"
 VALIDATE_CASE="$ROOT/scripts/drivers/lib/validate_case.py"
 
-# The driver corpus root, resolved from this script's own location the
-# same way the rig resolves its default. It is NOT caller-supplied: a
-# fixed repo-relative constant has no traversal or symlink surface to
-# guard, which is why passing the rig's `--allow-unsafe-out` below is
-# safe here. (The rig confines a caller-supplied `--out` to the live-box
-# `captured/` tree; the driver root is its gitignored sibling, so driver
-# mode's own documented landing root needs that flag.)
-DRIVER_OUT="$ROOT/crates/routectl-cli/tests/fixtures/driver"
+# The single owner of path confinement, shared with the rig and the
+# promote script. An absent library is a hard failure, never an
+# unconfined run: `--out` is caller-supplied and fixtures carry RAW
+# headers (auth included, since the daemon here runs with
+# ROUTECTL_TRACE_HEADERS on), so a run whose destination went unchecked
+# would be a write primitive aimed at whatever the caller named.
+CONFINE_LIB="$ROOT/scripts/drivers/lib/confine.sh"
+if [ ! -r "$CONFINE_LIB" ]; then
+  echo "capture_driver: confinement library not found at $CONFINE_LIB; refusing to run" >&2
+  exit 2
+fi
+# shellcheck source=scripts/drivers/lib/confine.sh
+. "$CONFINE_LIB"
+
+# The default landing root: a gitignored scratch tree, NOT the committed
+# driver corpus. A rerun of a case overwrites that case's fixture, so a
+# corpus default means every exploratory run replaces a reviewed fixture
+# in place; promotion into the corpus is a separate, scrub-gated step
+# (scripts/promote_fixture.sh).
+DEFAULT_SCRATCH="$ROOT/.routectl-driver-scratch"
+
+# Roots a caller may widen `--out` to, as a closed set. A run that mounts
+# the repo read-only cannot land fixtures inside it, so the set cannot be
+# "under the repo" -- but it must not be "anywhere either", or the
+# containment check below degenerates into comparing two caller-chosen
+# paths. `ROUTECTL_DRIVER_OUT_ROOT` names the one env seam a mounted run
+# needs; it is read here rather than accepted as a second free path so the
+# allowed set stays enumerable by reading this file.
+ALLOWED_OUT_ROOTS="$DEFAULT_SCRATCH${ROUTECTL_DRIVER_OUT_ROOT:+
+$ROUTECTL_DRIVER_OUT_ROOT}"
+
+# Refuse an `--out-root` outside the closed set. Exact match only: a
+# PREFIX test would accept `<allowed>-evil` beside `<allowed>`, and a
+# suffix-stripped compare would accept a parent. The candidate is already
+# lexically absolute here, and `confine_out_under` below still walks it
+# for symlink components, so this check owns membership and nothing else.
+confine_out_root() {
+  local _cand="$1" _allowed
+  while IFS= read -r _allowed; do
+    [ -n "$_allowed" ] || continue
+    [ "$_cand" = "$(abspath_lexical "$_allowed")" ] && return 0
+  done <<EOF
+$ALLOWED_OUT_ROOTS
+EOF
+  echo "capture_driver: refusing --out-root '$_cand': not an allowed landing root." >&2
+  echo "allowed: the gitignored scratch root, or the value of" >&2
+  echo "ROUTECTL_DRIVER_OUT_ROOT when the run sets it." >&2
+  echo "a root taken on trust would make the --out check compare two" >&2
+  echo "caller-chosen paths, which confines nothing." >&2
+  exit 2
+}
+
 
 # Daemon binary, overridable so the self-test can inject a stub. A real
 # boot needs credentials and CI has none.
@@ -116,6 +180,8 @@ PORT_TRIES=64
 LANE=""
 CASE_ID=""
 CONNECTION_MODE="base-url"
+DRIVER_OUT=""
+OUT_ROOT=""
 WORK_PARENT=""
 HEALTH_TIMEOUT=20
 KEEP=0
@@ -139,6 +205,10 @@ while [ $# -gt 0 ]; do
     --connection-mode)
       [ $# -ge 2 ] || die "--connection-mode requires a value" 2
       CONNECTION_MODE="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || die "--out requires a value" 2; DRIVER_OUT="$2"; shift 2 ;;
+    --out-root)
+      [ $# -ge 2 ] || die "--out-root requires a value" 2
+      OUT_ROOT="$2"; shift 2 ;;
     --work) [ $# -ge 2 ] || die "--work requires a value" 2; WORK_PARENT="$2"; shift 2 ;;
     --timeout) [ $# -ge 2 ] || die "--timeout requires a value" 2; HEALTH_TIMEOUT="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
@@ -184,6 +254,38 @@ WIRE_PATTERN="$(python3 "$VALIDATE_CASE" --field wire_pattern "$CASE_FILE")" ||
   die "case '$CASE_ID' declares no valid wire_pattern (see $CASE_FILE)" 2
 [ -n "$WIRE_PATTERN" ] ||
   die "case '$CASE_ID' declares an empty wire_pattern (see $CASE_FILE)" 2
+
+# ---------------------------------------------------------------------
+# Landing root
+# ---------------------------------------------------------------------
+
+# `--out` is CALLER-SUPPLIED, so this script owns a confinement check of
+# its own -- it does not inherit one from the rig. It hands the rig
+# `--allow-unsafe-out` below (the driver landing root is not the rig's
+# `captured/` tree, so the rig's own check would refuse every driver run),
+# which means the rig performs NO containment on this path. Without the
+# check here the runner would be an unconfined write primitive that lands
+# raw fixture headers -- auth included, since the daemon boots with
+# ROUTECTL_TRACE_HEADERS -- wherever the caller pointed it.
+#
+# `--out-root` WIDENS the allowed root, which is why it is itself confined
+# to ALLOWED_OUT_ROOTS rather than taken on trust. A root accepted from
+# argv unchecked would reduce the containment below to "the path is under
+# a path the same caller also chose", which is no containment at all --
+# `--out /anywhere/x --out-root /anywhere` would pass. The promote script
+# looks similar but is not: the caller-supplied root there governs only
+# what it READS, while its write destination is confined to a constant.
+#
+# Both paths resolve LEXICALLY first and are quoted at every use:
+# `$(...)` strips trailing newlines, so an unquoted substitution used as a
+# path can word-split into arguments a later command would act on.
+[ -n "$DRIVER_OUT" ] || DRIVER_OUT="$DEFAULT_SCRATCH"
+[ -n "$OUT_ROOT" ] || OUT_ROOT="$DEFAULT_SCRATCH"
+DRIVER_OUT="$(abspath_lexical "$DRIVER_OUT")"
+OUT_ROOT="$(abspath_lexical "$OUT_ROOT")"
+confine_out_root "$OUT_ROOT"
+confine_out_under "$DRIVER_OUT" "$OUT_ROOT"
+
 
 # ---------------------------------------------------------------------
 # Run workspace
@@ -384,10 +486,17 @@ fi
 DAEMON_PID=""
 
 # `--force`: the run's trace is a fresh file, so the rig's resume marker
-# (which lives in the corpus, across runs) would otherwise skip a rerun
-# of the same case whose timestamps predate the marker -- and a rerun
-# landing no fixture is exactly the drift signal this whole path exists
-# to produce.
+# (which lives in the landing root, across runs) would otherwise skip a
+# rerun of the same case whose timestamps predate the marker -- and a
+# rerun landing no fixture is exactly the drift signal this whole path
+# exists to produce.
+#
+# `--allow-unsafe-out`: the rig confines a caller-supplied `--out` to its
+# OWN `captured/` tree, and every driver landing root is outside it, so
+# the rig's check would refuse every driver run. The flag lifts the rig's
+# check only -- it does not lift this script's, which ran above against
+# `--out-root` before any daemon booted. Deleting that check would make
+# this line an unconfined write.
 rig_rc=0
 ROUTECTL_FIXTURE_CASE_ID="$CASE_ID" \
 ROUTECTL_FIXTURE_CONFIG_SHA="$CONFIG_SHA" \
@@ -412,4 +521,4 @@ if [ "$rig_rc" != 0 ]; then
   exit 5
 fi
 
-echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT config_sha=$CONFIG_SHA"
+echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT config_sha=$CONFIG_SHA out=$DRIVER_OUT"

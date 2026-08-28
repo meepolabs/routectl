@@ -286,7 +286,9 @@ make_work() {
     local case_id
     for case_id in driver-selftest-02 driver-selftest-03 driver-selftest-04 \
         driver-selftest-05 driver-selftest-06 driver-selftest-07 \
-        driver-selftest-08 driver-selftest-09 driver-selftest-09b; do
+        driver-selftest-08 driver-selftest-09 driver-selftest-09b \
+        driver-selftest-15 driver-selftest-15b driver-selftest-15c \
+        driver-selftest-15d driver-selftest-16 driver-selftest-16b; do
         write_case "$work/repo/scripts/drivers/cases" "$case_id" baseline
     done
     # The rig reads the workspace version from the repo-root Cargo.toml.
@@ -324,6 +326,8 @@ runner_run() {
         STUB_LISTENER="$work/bin/listener.py" \
         STUB_MODE="${STUB_MODE:-healthy}" \
         PROBE_OUT="$work/probe.txt" \
+        ROUTECTL_DRIVER_OUT_ROOT="${ROUTECTL_DRIVER_OUT_ROOT-$work
+$work/scratch}" \
             bash scripts/capture_driver.sh --work "$work/runs" "$@" \
             -- "$work/bin/probe-driver"
     ) >"$work/runner.log" 2>&1 || rc=$?
@@ -345,8 +349,10 @@ print(node)
 PY
 }
 
-driver_corpus() {
-    printf '%s\n' "$1/repo/crates/routectl-cli/tests/fixtures/driver"
+# Where a run with no `--out` lands: the gitignored scratch root at the
+# throwaway repo's root, NOT the committed corpus under tests/fixtures/.
+default_landing_root() {
+    printf '%s\n' "$1/repo/.routectl-driver-scratch"
 }
 
 # The script's CODE, comments stripped. The live-daemon greps below are
@@ -462,7 +468,7 @@ fi
 
 # The pins must reach the RIG too, not just the driver: meta.json is where
 # a rerun comparison reads them back.
-meta="$(driver_corpus "$work")/anthropic-api/driver-selftest-01/meta.json"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-01/meta.json"
 if [ -f "$meta" ]; then
     echo "PASS: the rig lands the fixture at <lane>/<case_id>"
     check "meta.case_id carries the pin" "driver-selftest-01" \
@@ -517,7 +523,7 @@ ROUTECTL_DRIVER_PORT_MIN="$port_b" ROUTECTL_DRIVER_PORT_MAX="$port_b" \
 check "a run with an explicit connection mode exits 0" "0" "$rc"
 check "the explicit connection mode reaches the driver" "front-proxy" \
     "$(probe_get "$work" connection_mode)"
-meta="$(driver_corpus "$work")/anthropic-api/driver-selftest-02/meta.json"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-02/meta.json"
 if [ -f "$meta" ]; then
     check "the explicit connection mode reaches meta.json" "front-proxy" \
         "$(meta_get "$meta" client.connection_mode)"
@@ -589,7 +595,7 @@ if [ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null; then
 else
     echo "PASS: an aborted run kills the daemon it started"
 fi
-if [ -d "$(driver_corpus "$work")/anthropic-api/driver-selftest-04" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-04" ]; then
     echo "FAIL: the aborted run landed a fixture"
     fails=$((fails + 1))
 else
@@ -734,7 +740,7 @@ rc=0
 check "a failing driver aborts with the driver exit code" "4" "$rc"
 check_log "the abort reports the driver's status" "driver command exited 7" \
     "$work/runner.log"
-if [ -d "$(driver_corpus "$work")/anthropic-api/driver-selftest-08" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-08" ]; then
     echo "FAIL: a failing driver still landed a fixture"
     fails=$((fails + 1))
 else
@@ -771,7 +777,7 @@ check_log "the exit-7 message names the case" "driver-selftest-09" \
 # machine-facing half (the one carrying the trace path) was unpinned here.
 check_log "the rig's own zero-landing message reaches the runner log" \
     "holds no completed request" "$work/runner.log"
-if [ -d "$(driver_corpus "$work")/anthropic-api/driver-selftest-09" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-09" ]; then
     echo "FAIL: a run that landed no fixture created a corpus directory"
     fails=$((fails + 1))
 else
@@ -945,6 +951,288 @@ runner_run "$work" --lane anthropic-api --case driver-selftest-01 || rc=$?
 check "a case declaring an unknown wire pattern is a usage error" "2" "$rc"
 check_log "the refusal names the invalid wire pattern" "wire_pattern" \
     "$work/runner.log"
+rm -rf "$work"
+
+# --- Case 15: --out is caller-supplied, so the runner confines it ------
+# The runner hands the rig `--allow-unsafe-out` (every driver landing root
+# is outside the rig's own `captured/` tree, so the rig's check would
+# refuse every driver run), which means the rig performs NO containment on
+# this path. The check therefore has to be the runner's own, and a fixture
+# carries RAW headers -- auth included, since the daemon boots with
+# ROUTECTL_TRACE_HEADERS -- so an unconfined `--out` is a write primitive
+# aimed wherever the caller pointed it.
+
+# The default with no `--out` is the gitignored scratch root, NOT the
+# committed corpus: a rerun of a case overwrites that case's fixture, so a
+# corpus default replaces a reviewed fixture in place.
+work="$(make_work)"
+port_o="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_o" ROUTECTL_DRIVER_PORT_MAX="$port_o" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
+check "a run with no --out exits 0" "0" "$rc"
+check "with no --out the fixture lands in the scratch root" "yes" \
+    "$([ -f "$(default_landing_root "$work")/anthropic-api/driver-selftest-15/meta.json" ] \
+        && echo yes || echo no)"
+check "with no --out nothing lands under tests/fixtures/" "no" \
+    "$([ -e "$work/repo/crates/routectl-cli/tests/fixtures/driver" ] && echo yes || echo no)"
+case "$(default_landing_root "$work")" in
+    */tests/fixtures/*)
+        echo "FAIL: the default landing root is inside tests/fixtures/"
+        fails=$((fails + 1))
+        ;;
+    *) echo "PASS: the default landing root is outside tests/fixtures/" ;;
+esac
+rm -rf "$work"
+
+# PAIRED CONTROL for every refusal below: a legitimate --out under the
+# allowed root is ACCEPTED and lands a fixture. Without it the refusals
+# are satisfiable by a guard that rejects everything.
+work="$(make_work)"
+scratch="$work/scratch"
+port_p="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_p" ROUTECTL_DRIVER_PORT_MAX="$port_p" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 \
+    --out "$scratch/land" --out-root "$scratch" || rc=$?
+check "an --out under the allowed root exits 0" "0" "$rc"
+check "an --out under the allowed root lands the fixture there" "yes" \
+    "$([ -f "$scratch/land/anthropic-api/driver-selftest-15/meta.json" ] && echo yes || echo no)"
+check_log "the accepted run reports the landing root it used" \
+    "out=$scratch/land" "$work/runner.log"
+rm -rf "$work"
+
+# An --out OUTSIDE the allowed root is refused. Keyed on the refusal arm's
+# own message, not merely on a non-zero exit: the runner calls
+# `confine_out_under` bare under `set -e`, so several unrelated arms (a
+# newline in the path, an unresolvable ancestor) abort the run identically
+# and an exit-code-only assertion would pass against a guard that never
+# performs the containment compare at all.
+work="$(make_work)"
+scratch="$work/scratch"
+mkdir -p "$scratch"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-15b \
+    --out "$work/outside-the-root" --out-root "$scratch" || rc=$?
+check "an --out outside the allowed root is a usage error" "2" "$rc"
+check_log "the refusal names the containment arm" "outside the default captured dir" \
+    "$work/runner.log"
+check "the refused run wrote nothing to the out-of-root path" "no" \
+    "$([ -e "$work/outside-the-root" ] && echo yes || echo no)"
+if [ -f "$work/stub.pid" ]; then
+    echo "FAIL: the runner booted a daemon before confining --out"
+    fails=$((fails + 1))
+else
+    echo "PASS: the --out refusal happens before any daemon boots"
+fi
+
+# A `..` traversal spelled under the root reaches the same arm.
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-15b \
+    --out "$scratch/../outside-via-dots" --out-root "$scratch" || rc=$?
+check "an --out escaping the allowed root via .. is a usage error" "2" "$rc"
+check_log "the .. refusal names the containment arm" "outside the default captured dir" \
+    "$work/runner.log"
+rm -rf "$work"
+
+# A symlinked component UNDER the root would redirect the write out of the
+# tree, and a purely lexical compare cannot see it.
+work="$(make_work)"
+scratch="$work/scratch"
+mkdir -p "$scratch" "$work/elsewhere"
+ln -s "$work/elsewhere" "$scratch/linked"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-15c \
+    --out "$scratch/linked/land" --out-root "$scratch" || rc=$?
+check "an --out with a symlinked component under the root is refused" "2" "$rc"
+check_log "the symlink refusal names the component" "symlink component" \
+    "$work/runner.log"
+check "the symlink target received nothing" "no" \
+    "$([ -e "$work/elsewhere/land" ] && echo yes || echo no)"
+
+# A DANGLING symlink component: physical resolution walks up to the
+# nearest EXISTING ancestor, so a broken link slips past `cd -P` and only
+# the library's per-component `[ -L ]` walk sees it.
+ln -s "$work/no-such-target" "$scratch/dangling"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-15d \
+    --out "$scratch/dangling/land" --out-root "$scratch" || rc=$?
+check "an --out with a DANGLING symlink component is refused" "2" "$rc"
+check_log "the dangling-symlink refusal names the component" "symlink component" \
+    "$work/runner.log"
+rm -rf "$work"
+
+# `--out` with no value is a usage error naming the flag. Invoked directly
+# rather than through `runner_run`, which always appends the driver
+# command: `--out --` would consume the separator as a value.
+work="$(make_work)"
+rc=0
+(
+    cd "$work/repo" || exit 2
+    bash scripts/capture_driver.sh --lane anthropic-api \
+        --case driver-selftest-15 --out
+) >"$work/runner.log" 2>&1 || rc=$?
+check "--out with no value is a usage error" "2" "$rc"
+check_log "the refusal names the valueless flag" "--out requires a value" \
+    "$work/runner.log"
+rc=0
+(
+    cd "$work/repo" || exit 2
+    bash scripts/capture_driver.sh --lane anthropic-api \
+        --case driver-selftest-15 --out-root
+) >"$work/runner.log" 2>&1 || rc=$?
+check "--out-root with no value is a usage error" "2" "$rc"
+check_log "the refusal names the valueless root flag" "--out-root requires a value" \
+    "$work/runner.log"
+rm -rf "$work"
+
+# The confinement logic lives in exactly ONE place. A second copy is a
+# path-traversal surface that drifts from the first, so assert the runner
+# CALLS the shared library and defines none of its parts -- with positive
+# controls proving each matcher fires on the file that does define them.
+CONFINE_LIB="$HERE/drivers/lib/confine.sh"
+check "the runner defines no abspath_lexical" "0" \
+    "$(grep -c '^abspath_lexical()' "$RUNNER")"
+check "the runner defines no abspath_physical" "0" \
+    "$(grep -c '^abspath_physical()' "$RUNNER")"
+check "the runner defines no confine_out_under" "0" \
+    "$(grep -c '^confine_out_under()' "$RUNNER")"
+check "the runner runs no per-component symlink test" "0" \
+    "$(grep -c '\[ -L ' "$RUNNER")"
+check "positive control: the library DOES define abspath_lexical" "1" \
+    "$(grep -c '^abspath_lexical()' "$CONFINE_LIB")"
+check "positive control: the library DOES define abspath_physical" "1" \
+    "$(grep -c '^abspath_physical()' "$CONFINE_LIB")"
+check "positive control: the library DOES define confine_out_under" "1" \
+    "$(grep -c '^confine_out_under()' "$CONFINE_LIB")"
+check "positive control: the library DOES run the symlink test" "1" \
+    "$(grep -q '\[ -L ' "$CONFINE_LIB" && echo 1 || echo 0)"
+check "the runner sources the shared library" "1" \
+    "$(grep -c 'drivers/lib/confine.sh"$' "$RUNNER")"
+
+# --- Case 15c: --out-root is itself confined to a closed set ----------
+# Without this, `--out` is confined against a root the SAME CALLER chose,
+# so `--out /anywhere/x --out-root /anywhere` satisfies the containment
+# check while landing raw fixture headers -- auth included -- wherever the
+# caller pointed. The check below is what makes the `--out` confinement
+# above mean something, so it needs its own refusal AND its own accept.
+rm -rf "$work"
+work="$(make_work)"
+rc=0
+# An empty seam means the closed set is the scratch root alone, which is
+# what a run with no environment override gets.
+ROUTECTL_DRIVER_OUT_ROOT="" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 \
+    --out "$work/pirate/land" --out-root "$work/pirate" || rc=$?
+check "an --out-root outside the closed set is a usage error" "2" "$rc"
+check_log "the refusal names the root flag" "refusing --out-root" \
+    "$work/runner.log"
+check "the refused run wrote nothing to the caller-chosen root" "no" \
+    "$([ -e "$work/pirate" ] && echo yes || echo no)"
+check "the root refusal precedes any daemon boot" "no" \
+    "$([ -f "$work/stub.pid" ] && echo yes || echo no)"
+
+# A PARENT of an allowed root must not pass either: a suffix-stripped or
+# prefix compare would accept it and re-open the same hole one level up.
+rc=0
+ROUTECTL_DRIVER_OUT_ROOT="$work/scratch" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 \
+    --out "$work/land" --out-root "$work" || rc=$?
+check "a PARENT of an allowed root is refused" "2" "$rc"
+
+# ACCEPT CONTROL: the same shape with the root named by the seam is
+# accepted, so the refusals above are not a gate that refuses everything.
+rm -rf "$work"
+work="$(make_work)"
+scratch="$work/scratch"
+port_r="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_r" ROUTECTL_DRIVER_PORT_MAX="$port_r" \
+ROUTECTL_DRIVER_OUT_ROOT="$scratch" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 \
+    --out "$scratch/land" --out-root "$scratch" || rc=$?
+check "an --out-root named by the environment seam is accepted" "0" "$rc"
+check "the accepted root lands the fixture under itself" "yes" \
+    "$([ -f "$scratch/land/anthropic-api/driver-selftest-15/meta.json" ] &&
+        echo yes || echo no)"
+
+# --- Case 16: the resume marker is PER landing root -------------------
+# The marker records how far a landing root has been captured. A shared
+# marker would let an exploratory scratch run advance it past a corpus
+# root's own timestamps, silently suppressing a corpus recapture -- and a
+# recapture that lands nothing is precisely the drift signal the driver
+# path exists to produce. Pinned here so a later refactor cannot "fix" the
+# path into a constant.
+
+# Run the rig the way the runner does but WITHOUT `--force`, which is what
+# makes the marker observable at all: the runner always forces, so a
+# runner-level assertion alone would pass against any marker path
+# whatsoever.
+rig_run() {
+    local work="$1" out="$2" case_id="$3"
+    shift 3
+    local rc=0
+    (
+        cd "$work/repo" || exit 2
+        ROUTECTL_FIXTURE_CASE_ID="$case_id" \
+        ROUTECTL_FIXTURE_CONFIG_SHA="$EXPECTED_SHA" \
+        ROUTECTL_FIXTURE_CONNECTION_MODE="base-url" \
+        ROUTECTL_FIXTURE_WIRE_PATTERN="baseline" \
+            bash scripts/capture_fixtures.sh --driver-mode \
+            --log "$work/canned-trace.log" --out "$out" --allow-unsafe-out "$@"
+    ) >>"$work/rig.log" 2>&1 || rc=$?
+    return "$rc"
+}
+
+work="$(make_work)"
+root_a="$work/root-a"
+root_b="$work/root-b"
+port_q="$(free_port)"
+port_r="$(free_port)"
+while [ "$port_r" = "$port_q" ]; do port_r="$(free_port)"; done
+
+# Two real runs, two different landing roots, same case.
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_q" ROUTECTL_DRIVER_PORT_MAX="$port_q" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-16 \
+    --out "$root_a" --out-root "$work" || rc=$?
+check "a run into the first landing root exits 0" "0" "$rc"
+check "the first landing root holds its OWN marker" "yes" \
+    "$([ -f "$root_a/.last_capture_ts" ] && echo yes || echo no)"
+check "the second landing root has no marker yet" "no" \
+    "$([ -e "$root_b/.last_capture_ts" ] && echo yes || echo no)"
+
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_r" ROUTECTL_DRIVER_PORT_MAX="$port_r" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-16 \
+    --out "$root_b" --out-root "$work" || rc=$?
+check "a run into the second landing root exits 0" "0" "$rc"
+check "the second landing root holds its own marker too" "yes" \
+    "$([ -f "$root_b/.last_capture_ts" ] && echo yes || echo no)"
+check "each root's fixture landed under that root" "yes" \
+    "$([ -f "$root_a/anthropic-api/driver-selftest-16/meta.json" ] &&
+        [ -f "$root_b/anthropic-api/driver-selftest-16/meta.json" ] && echo yes || echo no)"
+
+# The suppression pair, asserted without `--force` so the marker is
+# load-bearing. First direction is the POSITIVE CONTROL: a marker whose
+# timestamp postdates the trace DOES suppress a capture into its own root,
+# so the assertions below are about which root the marker governs and not
+# about a marker nothing reads.
+rm -rf "$root_a" "$root_b"
+mkdir -p "$root_a" "$root_b"
+printf '2099-01-01T00:00:00.000000Z\n' >"$root_a/.last_capture_ts"
+rc=0
+rig_run "$work" "$root_a" driver-selftest-16b || rc=$?
+check "a future marker suppresses a capture into ITS OWN root" "3" "$rc"
+check "the suppressed capture landed nothing in that root" "no" \
+    "$([ -e "$root_a/anthropic-api" ] && echo yes || echo no)"
+
+# Second direction: the same marker must not reach across roots.
+rc=0
+rig_run "$work" "$root_b" driver-selftest-16b || rc=$?
+check "the first root's marker does not suppress a capture into the second" "0" "$rc"
+check "the second root's capture landed despite the first root's marker" "yes" \
+    "$([ -f "$root_b/anthropic-api/driver-selftest-16b/meta.json" ] && echo yes || echo no)"
 rm -rf "$work"
 
 if [ "$fails" -gt 0 ]; then
