@@ -274,6 +274,21 @@ jobs:
       - name: capture cell wrapper self-test
         run: bash scripts/container/run_capture.test.sh
 
+      # A default-bridge container must not be able to reach a routectl
+      # daemon on its host, and the probe that says so must be able to
+      # reach something -- so the negative is paired with a throwaway host
+      # listener on a free port that the SAME container must reach at the
+      # SAME resolved gateway address. CI can run this because the halves
+      # that need no daemon are the file's own hygiene guards, and the
+      # rest SKIPS BY NAME: on a runner with no docker the container legs
+      # skip, and with no daemon answering /health the negative skips
+      # rather than passing vacuously against an unbound port. What CI
+      # therefore guards is that the guards themselves keep working -- no
+      # process-signalling, no database client against the live ledger,
+      # and the daemon's port named in exactly one place.
+      - name: capture cell isolation self-test
+        run: bash scripts/container/isolation.test.sh
+
       # The driver runner boots a daemon and kills it. A real boot needs a
       # credential CI does not have, so the self-test injects a stub daemon
       # through the runner's ROUTECTL_BIN override -- which still exercises
