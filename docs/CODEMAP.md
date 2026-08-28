@@ -5576,10 +5576,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/scrub_gate_provider_shapes.rs` -- drift detector over the
   sentinel-delimited `PROVIDER_SHAPE_KINDS` / `PROVIDER_SHAPE_EXCLUDED`
   classification block in `scripts/scrub-fixture.sh`
-- `tests/gitleaks_allowlist_scope.rs` -- drift detector over `.gitleaks.toml`'s
-  `[allowlist] paths`: pins the entry set exactly and asserts the committed
-  driver fixture corpus stays OUT of it, with a positive control that the same
-  matcher fires on the allowlisted live-capture root
+  ; ALSO carries the gitleaks path-allowlist scope block: pins the allowlist
+  entry set exactly and asserts the committed driver fixture corpus stays OUT
+  of every allowlist surface (singular, plural, and rule-scoped), matched
+  against representative FILE paths because that is what gitleaks evaluates,
+  with a positive control that the same matcher fires on the allowlisted
+  live-capture root
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor

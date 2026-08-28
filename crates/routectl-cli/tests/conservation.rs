@@ -102,6 +102,26 @@ fn load_root(
     }
 }
 
+/// The driver root, ALWAYS walked at driver depth and ALWAYS gateable.
+///
+/// The pairing of root to walk depth is fixed HERE rather than chosen at
+/// each call site: `Walk` makes depth a parameter, so a mis-paired call
+/// would reinstate exactly the bug this module fixes -- and with no driver
+/// corpus in CI the symptom is invisible, so nothing would catch it. Both
+/// the production path and the planted-corpus test go through this
+/// function, which is what makes the mis-pairing unwritable rather than
+/// merely untested.
+fn driver_root_loaded(root: &std::path::Path) -> LoadedRoot {
+    load_root("driver", root, Walk::Driver, true)
+}
+
+/// The live-box root, ALWAYS walked single-level and NEVER gateable: its
+/// bodies are real prompt traffic, report-only whatever the gated-lane
+/// list says.
+fn live_box_root_loaded(root: &std::path::Path) -> LoadedRoot {
+    load_root("live-box", root, Walk::LiveBox, false)
+}
+
 fn run_conservation() -> ConservationRun {
     let gated = match resolve_gated_lanes() {
         Ok(lanes) => lanes,
@@ -117,8 +137,8 @@ fn run_conservation() -> ConservationRun {
     };
 
     let roots = [
-        load_root("live-box", &local_root(), Walk::LiveBox, false),
-        load_root("driver", &driver_root(), Walk::Driver, true),
+        live_box_root_loaded(&local_root()),
+        driver_root_loaded(&driver_root()),
     ];
     adjudicate_roots(&roots, &gated, &baseline)
 }
@@ -183,7 +203,9 @@ const fn driver_corpus_note(driver_entries: usize) -> Option<&'static str> {
 /// uses, and adjudicate it. The live-box slice is deliberately absent so
 /// the assertions below are about the driver half alone.
 fn planted_driver_run(root: &std::path::Path) -> (ConservationRun, Option<&'static str>) {
-    let roots = [load_root("driver", root, Walk::Driver, true)];
+    // The SAME helper the production path uses, so this test covers the
+    // real pairing rather than re-asserting a pairing it chose itself.
+    let roots = [driver_root_loaded(root)];
     let note = driver_corpus_note(driver_entries_walked(&roots));
     let gated = resolve_gated_lanes().expect("the committed gated-lane list must resolve");
     let baseline = read_translation_baseline().expect("the committed baseline must read");
@@ -204,7 +226,7 @@ fn the_not_run_line_tracks_what_the_driver_walk_found() {
     let empty = tempfile::tempdir().unwrap();
     let (empty_run, empty_note) = planted_driver_run(empty.path());
     assert_eq!(empty_note, Some(NO_DRIVER_CORPUS));
-    assert_eq!(driver_asserted(&empty_run), 0);
+    assert_eq!(empty_run.asserted(), 0);
 
     // Present but unloadable: the line is WITHHELD -- a broken corpus is
     // the opposite of an absent one -- and nothing is asserted either,
@@ -217,7 +239,7 @@ fn the_not_run_line_tracks_what_the_driver_walk_found() {
         "a present-but-unloadable driver fixture reported as `no driver corpus`",
     );
     assert_eq!(broken_run.unloadable, 1);
-    assert_eq!(driver_asserted(&broken_run), 0);
+    assert_eq!(broken_run.asserted(), 0);
 
     // Populated: the line is withheld AND the run adjudicates something.
     // This is the positive control D2.A requires -- `asserted` off zero
@@ -229,17 +251,44 @@ fn the_not_run_line_tracks_what_the_driver_walk_found() {
     let (populated_run, populated_note) = planted_driver_run(populated.path());
     assert_eq!(populated_note, None);
     assert_eq!(
-        driver_asserted(&populated_run),
+        populated_run.asserted(),
         1,
         "a valid fixture two levels deep did not reach adjudication",
+    );
+    // `make_conserved` above is what makes this fixture actually conserved,
+    // and THIS is what makes that call load-bearing: `asserted` counts every
+    // fixture that reached the comparator, divergent or not, so reachability
+    // alone cannot tell a conserved fixture from a diverging one. Paired with
+    // the divergent control below.
+    assert_eq!(
+        populated_run
+            .lanes
+            .iter()
+            .map(|lane| lane.unexplained)
+            .sum::<usize>(),
+        0,
+        "a conserved fixture must leave no unexplained divergence",
+    );
+
+    // DIVERGENT CONTROL for the assertion above: the same plant WITHOUT
+    // make_conserved diverges, so the zero-unexplained claim is a real
+    // measurement rather than a property of the harness.
+    let divergent = tempfile::tempdir().unwrap();
+    plant_driver_case(divergent.path(), "anthropic-api", "plain-turn-01");
+    let (divergent_run, _) = planted_driver_run(divergent.path());
+    assert!(
+        divergent_run
+            .lanes
+            .iter()
+            .map(|lane| lane.unexplained)
+            .sum::<usize>()
+            > 0,
+        "the unconserved plant must diverge, or the conserved assertion above \
+         is satisfied by a harness that never compares bodies",
     );
 }
 
 /// Fixtures adjudicated across every lane of a run.
-fn driver_asserted(run: &ConservationRun) -> usize {
-    run.lanes.iter().map(|l| l.asserted).sum()
-}
-
 #[test]
 fn conservation_over_both_fixture_roots() {
     let run = run_conservation();

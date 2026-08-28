@@ -1418,22 +1418,4 @@ mod tests {
         );
         assert_eq!(two_deep.skipped, 1);
     }
-
-    /// `entries_walked` counts the loadable and the unloadable alike --
-    /// the distinction a caller needs to tell an EMPTY corpus from a
-    /// BROKEN one.
-    #[test]
-    fn entries_walked_counts_unloadable_entries_alongside_loaded_ones() {
-        let tmp = tempdir().unwrap();
-        plant_driver_case(tmp.path(), "anthropic-api", "good-01");
-        let bad = plant_driver_case(tmp.path(), "anthropic-api", "broken-01");
-        fs::remove_file(bad.join(META_JSON)).unwrap();
-
-        let loaded = discover_driver_fixtures(tmp.path()).unwrap();
-
-        assert_eq!(loaded.fixtures.len(), 1);
-        assert_eq!(loaded.skipped, 1);
-        assert_eq!(loaded.entries_walked(), 2);
-        assert_eq!(LoadedCorpus::default().entries_walked(), 0);
-    }
 }
