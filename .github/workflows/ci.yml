@@ -243,6 +243,15 @@ jobs:
       - name: fixture scrub gate self-test
         run: bash scripts/scrub-fixture.test.sh
 
+      # Promotion moves a fixture from a scratch root into the committed
+      # corpus. It needs no credential and no daemon -- it copies, re-runs
+      # the scrub gate, and renames -- so the self-test drives the real
+      # script over synthetic fixtures under a throwaway scratch root,
+      # including the merge and dirty-source refusals no real corpus can
+      # be used to provoke.
+      - name: fixture promotion self-test
+        run: bash scripts/promote_fixture.test.sh
+
       # The driver runner boots a daemon and kills it. A real boot needs a
       # credential CI does not have, so the self-test injects a stub daemon
       # through the runner's ROUTECTL_BIN override -- which still exercises
