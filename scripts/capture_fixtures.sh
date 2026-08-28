@@ -44,18 +44,19 @@
 #   ROUTECTL_FIXTURE_CASE_ID          scenario identity for rerun diffs
 #   ROUTECTL_FIXTURE_CONFIG_SHA       hash of the config in force
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  how the client reached routectl
+#   ROUTECTL_FIXTURE_WIRE_PATTERN     wire shape the case claims to cover
 #
 # TWO CAPTURE MODES, TWO POLICIES.
 #
 # Default (live-box): a trace drained from a real session. It genuinely
-# cannot observe the three pins above, so an empty pin is honest; the
+# cannot observe the four pins above, so an empty pin is honest; the
 # landing directory is keyed on `request_id`; a missing outgoing
 # structural summary warns; scrubbing is write-only.
 #
 # `--driver-mode`: a hermetic capture produced by a driver that KNOWS
 # every pin, so an empty pin is a bug rather than a fact:
 #
-#   * All three pins are MANDATORY. An unset one aborts the run naming
+#   * All four pins are MANDATORY. An unset one aborts the run naming
 #     the variable, because an empty case id collapses every case in a
 #     lane onto one landing directory and the corpus silently
 #     overwrites itself.
@@ -193,6 +194,12 @@ json_escape() {
 # than passing an unknown spelling through: a lane-gated consumer
 # refuses a fixture with no lane, so the fixture is still captured but
 # cannot be mistaken for a lane it was not verified to be.
+#
+# The two Bedrock spellings collapse to one lane here, and that is the
+# ONLY place the api-shape distinction is lost -- `meta.provider_kind`
+# keeps the raw token, so a consumer that needs to tell an invoke capture
+# from a converse one reads it there. There is deliberately no separate
+# api_shape field: it would duplicate a token already on disk.
 normalize_lane() {
   case "$1" in
     anthropic)                        printf 'anthropic-api\n' ;;
@@ -220,7 +227,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Driver mode fails closed on the three pins. `:?` aborts under `set -u`
+# Driver mode fails closed on the four pins. `:?` aborts under `set -u`
 # naming the variable, which is the whole point: an unset pin in a driver
 # run is a bug in the driver, and an empty case_id would collapse every
 # case in the lane onto one landing directory before anyone noticed. The
@@ -230,6 +237,7 @@ if [ "$DRIVER_MODE" = 1 ]; then
   : "${ROUTECTL_FIXTURE_CASE_ID:?driver mode requires a case id (ROUTECTL_FIXTURE_CASE_ID)}"
   : "${ROUTECTL_FIXTURE_CONFIG_SHA:?driver mode requires a config sha (ROUTECTL_FIXTURE_CONFIG_SHA)}"
   : "${ROUTECTL_FIXTURE_CONNECTION_MODE:?driver mode requires a connection mode (ROUTECTL_FIXTURE_CONNECTION_MODE)}"
+  : "${ROUTECTL_FIXTURE_WIRE_PATTERN:?driver mode requires a wire pattern (ROUTECTL_FIXTURE_WIRE_PATTERN)}"
 
   # The case id becomes two path components' worth of directory name, so
   # a separator or a traversal segment in it would land the fixture
@@ -557,7 +565,7 @@ write_fixture() {
   # EVERY string value goes through json_escape. The three token counts,
   # schema_version, and stream are numeric / boolean and must NOT be
   # quoted or escaped.
-  local j_id j_ts j_version j_alias j_model j_case j_sha
+  local j_id j_ts j_version j_alias j_model j_case j_sha j_wire
   local j_cname j_cversion j_cmode j_ikind j_pkind j_lane j_finish
   j_id="$(json_escape "$id")"
   j_ts="$(json_escape "$ts")"
@@ -566,6 +574,7 @@ write_fixture() {
   j_model="$(json_escape "${model:-}")"
   j_case="$(json_escape "${ROUTECTL_FIXTURE_CASE_ID:-}")"
   j_sha="$(json_escape "${ROUTECTL_FIXTURE_CONFIG_SHA:-}")"
+  j_wire="$(json_escape "${ROUTECTL_FIXTURE_WIRE_PATTERN:-}")"
   j_cname="$(json_escape "${client_name:-}")"
   j_cversion="$(json_escape "${client_version:-}")"
   j_cmode="$(json_escape "${ROUTECTL_FIXTURE_CONNECTION_MODE:-}")"
@@ -584,6 +593,7 @@ write_fixture() {
   "model": "$j_model",
   "case_id": "$j_case",
   "config_sha": "$j_sha",
+  "wire_pattern": "$j_wire",
   "client": {
     "name": "$j_cname",
     "version": "$j_cversion",

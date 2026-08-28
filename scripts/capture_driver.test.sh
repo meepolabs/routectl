@@ -222,6 +222,7 @@ set -u
     printf 'case_id=%s\n' "$ROUTECTL_FIXTURE_CASE_ID"
     printf 'config_sha=%s\n' "$ROUTECTL_FIXTURE_CONFIG_SHA"
     printf 'connection_mode=%s\n' "$ROUTECTL_FIXTURE_CONNECTION_MODE"
+    printf 'wire_pattern=%s\n' "$ROUTECTL_FIXTURE_WIRE_PATTERN"
     printf 'health=%s\n' "$(curl -fsS -m 2 "$ROUTECTL_BASE_URL/health" || echo unreachable)"
 } >"$PROBE_OUT"
 SH
@@ -229,6 +230,41 @@ SH
 }
 
 # Build a throwaway repo carrying the real runner, the real rig, the real
+# Write one throwaway case file the runner can derive a wire pattern
+# from. The runner reads the case file itself now (through
+# validate_case.py), so a self-test repo without one has no runnable case
+# at all. The pattern is a parameter, and case 1 uses a value that is
+# nobody's default, so an assertion on it cannot pass against a runner
+# that hardcodes one.
+write_case() {
+    local dir="$1" case_id="$2" pattern="$3"
+    cat >"$dir/$case_id.json" <<CASE
+{
+  "schema_version": 1,
+  "case_id": "$case_id",
+  "title": "Throwaway case for the runner self-test",
+  "wire_pattern": "$pattern",
+  "lane": "anthropic-api",
+  "turns": [
+    {
+      "prompt": "Say hello."
+    }
+  ],
+  "knobs": {
+    "tools": false,
+    "thinking": false,
+    "cache_breakpoints": false,
+    "context_padding_bytes": 0
+  }
+}
+CASE
+}
+
+# The wire pattern each self-test case declares. Case 1 claims a pattern
+# no default anywhere in the tree uses, so its end-to-end assertion is
+# about the derivation and not about a coincidence.
+SELFTEST_CASE_PATTERN_01="cache-breakpoints"
+
 # scrub script, and the real committed lane config, plus the stub daemon
 # and the probe driver. Prints the work root.
 make_work() {
@@ -236,13 +272,23 @@ make_work() {
     work="$(mktemp -d)"
     mkdir -p "$work/repo/scripts/drivers/config" \
         "$work/repo/scripts/drivers/lib" \
+        "$work/repo/scripts/drivers/cases" \
         "$work/repo/crates/routectl-cli/tests/fixtures" \
         "$work/bin"
     cp "$RUNNER" "$work/repo/scripts/capture_driver.sh"
     cp "$RIG" "$work/repo/scripts/capture_fixtures.sh"
     cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
     cp "$HERE/drivers/lib/confine.sh" "$work/repo/scripts/drivers/lib/confine.sh"
+    cp "$HERE/drivers/lib/validate_case.py" "$work/repo/scripts/drivers/lib/validate_case.py"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
+    write_case "$work/repo/scripts/drivers/cases" driver-selftest-01 \
+        "$SELFTEST_CASE_PATTERN_01"
+    local case_id
+    for case_id in driver-selftest-02 driver-selftest-03 driver-selftest-04 \
+        driver-selftest-05 driver-selftest-06 driver-selftest-07 \
+        driver-selftest-08 driver-selftest-09 driver-selftest-09b; do
+        write_case "$work/repo/scripts/drivers/cases" "$case_id" baseline
+    done
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$work/repo/Cargo.toml"
     write_listener "$work/bin/listener.py"
@@ -395,13 +441,15 @@ if [ -f "$work/probe.txt" ]; then
     check "XDG carries the routectl/ subdir with the lane config" "yes" \
         "$(probe_get "$work" xdg_config_present)"
 
-    # The three pins plus the base URL are the driver's whole interface.
+    # The four pins plus the base URL are the driver's whole interface.
     check "the case id pin reaches the driver" "driver-selftest-01" \
         "$(probe_get "$work" case_id)"
     check "the config sha pin reaches the driver" "$EXPECTED_SHA" \
         "$(probe_get "$work" config_sha)"
     check "the connection mode pin defaults to base-url" "base-url" \
         "$(probe_get "$work" connection_mode)"
+    check "the wire pattern pin reaches the driver" "$SELFTEST_CASE_PATTERN_01" \
+        "$(probe_get "$work" wire_pattern)"
     check "the base url pin names the selected port" "http://127.0.0.1:$port_a" \
         "$(probe_get "$work" base_url)"
     check "the daemon answered the driver's own health probe" \
@@ -409,7 +457,7 @@ if [ -f "$work/probe.txt" ]; then
 else
     echo "FAIL: the driver command never ran (runner log: $work/runner.log)"
     sed -n '1,20p' "$work/runner.log"
-    fails=$((fails + 8))
+    fails=$((fails + 9))
 fi
 
 # The pins must reach the RIG too, not just the driver: meta.json is where
@@ -425,10 +473,23 @@ if [ -f "$meta" ]; then
         "$(meta_get "$meta" client.connection_mode)"
     check "meta.lane is the normalized lane" "anthropic-api" \
         "$(meta_get "$meta" lane)"
+    # The wire pattern is DERIVED, so the expectation is read out of the
+    # case file the runner read -- not restated here. A restated constant
+    # would still pass if the runner stopped reading the case entirely,
+    # which is the whole failure the derivation exists to prevent. Read
+    # with a plain JSON parse rather than through validate_case.py, so the
+    # producer and the expectation do not share a reader.
+    case_pattern="$(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["wire_pattern"])' \
+        "$work/repo/scripts/drivers/cases/driver-selftest-01.json")"
+    check "the case file under test declares the pattern the run should record" \
+        "$SELFTEST_CASE_PATTERN_01" "$case_pattern"
+    check "meta.wire_pattern equals the case file's own wire_pattern" \
+        "$case_pattern" "$(meta_get "$meta" wire_pattern)"
 else
     echo "FAIL: no fixture landed at $meta (runner log: $work/runner.log)"
     sed -n '1,30p' "$work/runner.log"
-    fails=$((fails + 5))
+    fails=$((fails + 7))
 fi
 
 # Teardown: the run's own daemon pid is gone, and the workspace with it.
@@ -820,6 +881,71 @@ grep -v 'auth_kind' "$LANE_CONFIG" >"$stripped"
 check "the matcher reports absence when the declaration is stripped" "no" \
     "$(declares_oauth_bearer "$stripped")"
 rm -f "$stripped"
+
+# --- Case 13: the wire pattern is DERIVED, never declared on argv -----
+# A flag would let a caller record a pattern the case does not claim,
+# which is the same lie as an unpinned claim one layer earlier. Both
+# halves are asserted: the flag is refused as an unknown arg, and the
+# runner names no wire-pattern flag in its own argv parser.
+work="$(make_work)"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-01 \
+    --wire-pattern baseline || rc=$?
+check "a wire-pattern flag is an unknown arg" "2" "$rc"
+check_log "the refusal names the rejected flag" "unknown arg: --wire-pattern" \
+    "$work/runner.log"
+rm -rf "$work"
+
+if grep -nE -- '--wire.pattern\)' <(code_lines "$RUNNER"); then
+    echo "FAIL: the runner parses a wire-pattern flag; the value must come from the case"
+    fails=$((fails + 1))
+else
+    echo "PASS: the runner's argv parser names no wire-pattern flag"
+fi
+
+# Paired control for that grep: the same pattern MUST fire on a parser
+# that does accept the flag, or a broken invocation reads as a pass.
+control="$(mktemp)"
+printf '    --wire-pattern) WIRE_PATTERN="$2"; shift 2 ;;\n' >"$control"
+if grep -qE -- '--wire.pattern\)' "$control"; then
+    echo "PASS: the wire-pattern-flag grep fires on a parser that does accept it"
+else
+    echo "FAIL: the wire-pattern-flag grep matches nothing, so its absence proves nothing"
+    fails=$((fails + 1))
+fi
+rm -f "$control"
+
+# --- Case 14: an unreadable case file fails closed before any boot ----
+# The runner reads the case file for the pattern. A run whose case is
+# missing has no pattern to record, and a fixture with an empty claim is
+# worse than none -- so it must abort as a usage error, before a daemon
+# holds a port.
+work="$(make_work)"
+rm -f "$work/repo/scripts/drivers/cases/driver-selftest-01.json"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-01 || rc=$?
+check "a missing case file is a usage error" "2" "$rc"
+check_log "the refusal names the missing case file" "no case file for" \
+    "$work/runner.log"
+if [ -f "$work/stub.pid" ]; then
+    echo "FAIL: the runner booted a daemon before reading the case file"
+    fails=$((fails + 1))
+else
+    echo "PASS: the missing-case refusal happens before any daemon boots"
+fi
+rm -rf "$work"
+
+# The same shape for a case file that exists and declares a pattern
+# OUTSIDE the closed set: the validator refuses it, and the runner must
+# surface that as its own usage error rather than recording the value.
+work="$(make_work)"
+write_case "$work/repo/scripts/drivers/cases" driver-selftest-01 freeform
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-01 || rc=$?
+check "a case declaring an unknown wire pattern is a usage error" "2" "$rc"
+check_log "the refusal names the invalid wire pattern" "wire_pattern" \
+    "$work/runner.log"
+rm -rf "$work"
 
 if [ "$fails" -gt 0 ]; then
     echo "capture_driver self-test: $fails failure(s)"

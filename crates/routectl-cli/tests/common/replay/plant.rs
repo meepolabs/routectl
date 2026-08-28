@@ -30,6 +30,7 @@ pub fn current_meta() -> Value {
         "ingress_kind": "anthropic",
         "case_id": "smoke",
         "config_sha": "abc123",
+        "wire_pattern": "baseline",
         "client": {
             "name": "claude-code",
             "version": "2.1.167",

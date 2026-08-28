@@ -138,8 +138,9 @@ pub struct FixtureClient {
 ///
 /// BACKWARD COMPATIBILITY, decided deliberately: the loader TOLERATES a
 /// fixture captured before this schema settled. The fields added here
-/// (`lane`, `case_id`, `client`, `config_sha`, and `schema_version`
-/// itself) are additive, so `#[serde(default)]` lets the existing
+/// (`lane`, `case_id`, `client`, `config_sha`, `wire_pattern`, and
+/// `schema_version` itself) are additive, so `#[serde(default)]` lets the
+/// existing
 /// per-contributor corpus keep loading -- which is the point, since a
 /// clean break would zero out the only wire evidence anyone has on disk
 /// and there is no way to recapture a past session. Tolerance here is
@@ -163,6 +164,11 @@ pub struct FixtureMeta {
     /// `routectl-providers` (`anthropic`, not `anthropic-api`). Kept
     /// distinct from `lane`, which normalizes the same concept into the
     /// config vocabulary.
+    ///
+    /// This is also the api-shape carrier: `lane` collapses
+    /// `bedrock-invoke` and `bedrock-converse` onto one token, and this
+    /// raw value is what still tells the two apart. There is no separate
+    /// `api_shape` field for that reason.
     pub provider_kind: String,
     /// Egress lane token in the `kind_str()` vocabulary of
     /// `ProviderEntry` (`anthropic-api`, `openai-compat`,
@@ -189,6 +195,15 @@ pub struct FixtureMeta {
     /// the capture ran against an ad-hoc local config.
     #[serde(default)]
     pub config_sha: String,
+    /// Wire shape the driven case claims to cover, in the closed
+    /// vocabulary of `WIRE_PATTERNS` in
+    /// `scripts/drivers/lib/validate_case.py`. Derived from the case file
+    /// by the driver runner, so it records which shape a fixture was
+    /// captured FOR -- information that exists nowhere else on disk.
+    /// Empty on a live-box capture, which cannot observe it, and on any
+    /// fixture predating the key.
+    #[serde(default)]
+    pub wire_pattern: String,
     #[serde(default)]
     pub client: FixtureClient,
     pub stream: bool,
@@ -676,6 +691,48 @@ mod tests {
         assert_eq!(f.meta.ingress_kind, "openai-responses");
     }
 
+    /// The wire pattern is the one claim in `meta.json` that no other
+    /// file on disk carries, so a load that dropped it would leave the
+    /// fixture unable to say which shape it was captured for.
+    #[test]
+    fn loader_round_trips_the_wire_pattern_a_driver_case_claims() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        meta["wire_pattern"] = json!("cache-breakpoints");
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.wire_pattern, "cache-breakpoints");
+    }
+
+    /// Paired negative for the round-trip above: the key is ADDITIVE, so
+    /// a fixture written before it existed must still load, with the
+    /// claim empty rather than the load refused.
+    #[test]
+    fn loader_accepts_a_fixture_with_no_wire_pattern_key() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        assert!(
+            meta.as_object_mut()
+                .unwrap()
+                .remove("wire_pattern")
+                .is_some(),
+            "the planted meta must CARRY wire_pattern for its removal to be \
+             the condition under test",
+        );
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.wire_pattern, "");
+        assert_eq!(f.meta.case_id, "smoke");
+    }
+
     #[test]
     fn loader_accepts_upstream_and_egress_response_bodies_with_headers() {
         let tmp = tempdir().unwrap();
@@ -980,6 +1037,7 @@ mod tests {
         assert_eq!(f.meta.lane, "");
         assert_eq!(f.meta.case_id, "");
         assert_eq!(f.meta.config_sha, "");
+        assert_eq!(f.meta.wire_pattern, "");
         assert_eq!(f.meta.client.name, "");
         assert_eq!(f.upstream_response_headers.len(), 1);
     }

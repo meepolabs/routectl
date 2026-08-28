@@ -345,17 +345,20 @@ check_log() {
     fi
 }
 
-# Set / clear the three driver pins in one call, so a case cannot leak a
-# pin into the next one (driver mode is fail-closed on all three, so a
-# leaked pin turns a refusal assertion into a silent pass).
+# Set / clear the four driver pins in one call, so a case cannot leak a
+# pin into the next one (driver mode is fail-closed on all four, so a
+# leaked pin turns a refusal assertion into a silent pass). The wire
+# pattern defaults because most cases care about the other three; a case
+# that needs a specific claim passes it as the fourth argument.
 set_pins() {
     export ROUTECTL_FIXTURE_CASE_ID="$1"
     export ROUTECTL_FIXTURE_CONFIG_SHA="$2"
     export ROUTECTL_FIXTURE_CONNECTION_MODE="$3"
+    export ROUTECTL_FIXTURE_WIRE_PATTERN="${4:-baseline}"
 }
 clear_pins() {
     unset ROUTECTL_FIXTURE_CASE_ID ROUTECTL_FIXTURE_CONFIG_SHA \
-        ROUTECTL_FIXTURE_CONNECTION_MODE
+        ROUTECTL_FIXTURE_CONNECTION_MODE ROUTECTL_FIXTURE_WIRE_PATTERN
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -460,14 +463,18 @@ rm -rf "$work"
 export ROUTECTL_FIXTURE_CASE_ID="smoke-01"
 export ROUTECTL_FIXTURE_CONFIG_SHA="deadbeef"
 export ROUTECTL_FIXTURE_CONNECTION_MODE="base-url"
+export ROUTECTL_FIXTURE_WIRE_PATTERN="tool-use-multiturn"
 work="$(run_rig "$(trace_non_stream 019eab77-0000-4000-8000-000000000004 anthropic)")"
 meta="$work/repo/crates/routectl-cli/tests/fixtures/captured/019eab77-0000-4000-8000-000000000004/meta.json"
-unset ROUTECTL_FIXTURE_CASE_ID ROUTECTL_FIXTURE_CONFIG_SHA ROUTECTL_FIXTURE_CONNECTION_MODE
+unset ROUTECTL_FIXTURE_CASE_ID ROUTECTL_FIXTURE_CONFIG_SHA ROUTECTL_FIXTURE_CONNECTION_MODE \
+    ROUTECTL_FIXTURE_WIRE_PATTERN
 if [ -f "$meta" ] && is_valid_json "$meta"; then
     check "case_id comes from the environment" "smoke-01" "$(meta_get "$meta" case_id)"
     check "config_sha comes from the environment" "deadbeef" "$(meta_get "$meta" config_sha)"
     check "connection_mode comes from the environment" \
         "base-url" "$(meta_get "$meta" client.connection_mode)"
+    check "wire_pattern comes from the environment" \
+        "tool-use-multiturn" "$(meta_get "$meta" wire_pattern)"
 else
     echo "FAIL: pinned capture produced no parseable meta.json"
     fails=$((fails + 1))
@@ -538,10 +545,10 @@ fi
 rm -rf "$work"
 
 # --- Case 7: driver mode refuses on each unset pin, naming it ---------
-# Three cases plus a paired control. Without the control a rig that
+# Four cases plus a paired control. Without the control a rig that
 # refused unconditionally -- or one that refused for an unrelated reason --
-# would pass all three refusal assertions.
-for missing in CASE_ID CONFIG_SHA CONNECTION_MODE; do
+# would pass all four refusal assertions.
+for missing in CASE_ID CONFIG_SHA CONNECTION_MODE WIRE_PATTERN; do
     set_pins drift-01 abc123 base-url
     unset "ROUTECTL_FIXTURE_$missing"
     work="$(make_repo)"
@@ -565,14 +572,14 @@ for missing in CASE_ID CONFIG_SHA CONNECTION_MODE; do
     rm -rf "$work"
 done
 
-# Paired control: the SAME trace with all three pins unset captures fine
+# Paired control: the SAME trace with all four pins unset captures fine
 # on the unflagged live-box path, where an empty pin is honest.
 clear_pins
 work="$(make_repo)"
 rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000007)" || rc=$?
 meta="$(captured_of "$work")/019eab77-0000-4000-8000-000000000007/meta.json"
-check "live-box mode tolerates all three pins unset" "0" "$rc"
+check "live-box mode tolerates all four pins unset" "0" "$rc"
 if [ -f "$meta" ] && is_valid_json "$meta"; then
     check "an unpinned live-box capture leaves case_id empty" \
         "" "$(meta_get "$meta" case_id)"
@@ -580,6 +587,8 @@ if [ -f "$meta" ] && is_valid_json "$meta"; then
         "" "$(meta_get "$meta" config_sha)"
     check "an unpinned live-box capture leaves connection_mode empty" \
         "" "$(meta_get "$meta" client.connection_mode)"
+    check "an unpinned live-box capture leaves wire_pattern empty" \
+        "" "$(meta_get "$meta" wire_pattern)"
 else
     echo "FAIL: unpinned live-box capture produced no parseable meta.json"
     cat "$work/rig.log"
@@ -592,7 +601,7 @@ rm -rf "$work"
 # diff against. The lane directory comes from the NORMALIZED lane
 # (`anthropic` -> `anthropic-api`), so this also pins that the landing
 # path uses the kind_str() vocabulary rather than the traced token.
-set_pins tools-multiturn-01 abc123 base-url
+set_pins tools-multiturn-01 abc123 base-url tool-use-multiturn
 work="$(make_repo)"
 rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000008)" --driver-mode || rc=$?
@@ -605,6 +614,8 @@ if [ -d "$dir" ]; then
     assert_files_present "$dir" "a driver capture" "${REQUIRED_FILES[@]}"
     check "request_id survives in meta.json for traceability" \
         "019eab77-0000-4000-8000-000000000008" "$(meta_get "$dir/meta.json" request_id)"
+    check "the wire pattern pin reaches a driver meta.json" \
+        "tool-use-multiturn" "$(meta_get "$dir/meta.json" wire_pattern)"
 else
     echo "FAIL: driver mode did not land at <lane>/<case_id> (rig log: $work/rig.log)"
     cat "$work/rig.log"
@@ -933,7 +944,7 @@ assert_runner_holds_no_shape_table
 # config_sha and connection_mode while the case id stays path-safe -- the
 # escaping contract is per-value, and these are the two whose values a
 # driver sets programmatically without a path constraint.
-set_pins quote-case-01 'sha"with\quote' 'mode"x'
+set_pins quote-case-01 'sha"with\quote' 'mode"x' 'wire"y'
 work="$(make_repo)"
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000013)" --driver-mode || true
 clear_pins
@@ -946,6 +957,8 @@ if [ -f "$meta" ]; then
             'sha"with\quote' "$(meta_get "$meta" config_sha)"
         check "an embedded quote round-trips through connection_mode" \
             'mode"x' "$(meta_get "$meta" client.connection_mode)"
+        check "an embedded quote round-trips through wire_pattern" \
+            'wire"y' "$(meta_get "$meta" wire_pattern)"
     else
         echo "FAIL: a driver meta.json is invalid JSON when a pin carries a quote"
         cat "$meta"
