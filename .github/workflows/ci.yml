@@ -262,6 +262,18 @@ jobs:
       - name: image layer credential scan self-test
         run: bash scripts/container/image_scan.test.sh
 
+      # The host wrapper that runs one capture inside the capture-cell
+      # image. Its refusals -- host networking, privileged, the host pid
+      # namespace, a caller-added mount, a missing host binary, an in-repo
+      # scratch root -- are all decided from argv and the host filesystem
+      # before docker is consulted, so CI exercises every one of them with
+      # no daemon socket. The legs that DO enter a container run against a
+      # stub routectl, a stub seat carrying a token assembled at run time,
+      # and a stub driver, so no credential and no upstream is needed;
+      # those legs SKIP BY NAME where docker or the image is absent.
+      - name: capture cell wrapper self-test
+        run: bash scripts/container/run_capture.test.sh
+
       # The driver runner boots a daemon and kills it. A real boot needs a
       # credential CI does not have, so the self-test injects a stub daemon
       # through the runner's ROUTECTL_BIN override -- which still exercises
