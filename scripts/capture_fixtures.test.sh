@@ -1403,6 +1403,130 @@ check "no --out directory is created when the library is absent" "0" \
     "$([ -e "$work/outside" ] && echo 1 || echo 0)"
 rm -rf "$work"
 
+# The other fail-closed half: an UNRESOLVABLE confinement root. Both
+# resolvers report failure by `exit 2`, which terminates only the
+# command-substitution SUBSHELL -- so the assignment in the caller yields
+# an EMPTY string, and the prefix compare below it runs against an empty
+# root, which matches EVERY path. Without the explicit `|| exit 2` pair
+# and the emptiness refusal, the confinement RETURNS 0 for `/etc/anything`.
+#
+# The trigger is an ancestor the process cannot traverse: mode 000 on the
+# directory above the captured tree makes `cd -P` fail there, so the root
+# resolves empty while the candidate resolves fine. Root traverses
+# mode-000 directories, so the case is skipped -- named, never silently
+# passed -- for euid 0.
+#
+# The assertions call the library the way the SECOND caller shape does
+# (`confine_out_under ... || rc=$?`), not through the rig. The rig calls
+# it bare under `set -e`, so an unresolvable root aborts the rig by
+# errexit whether or not the guard exists: measured 2026-08-28, every
+# rig-level assertion here stays green with the guard deleted. Only a
+# caller that MAPS the exit code can observe the difference, and the
+# library is shared, so that shape is part of its contract.
+#
+# The guard is TWO mechanisms -- the `|| exit 2` pair on the assignments
+# and the emptiness refusal below them -- and either one alone refuses.
+# So the negative assertion goes red only when BOTH are removed, which is
+# the fail-open shape it exists to forbid; it is not evidence about either
+# half in isolation. Measured 2026-08-28.
+if [ "$(id -u)" = "0" ]; then
+    echo "SKIP: unresolvable-root confinement (euid 0 traverses mode-000 dirs)"
+else
+    work="$(make_repo)"
+    captured="$(captured_of "$work")"
+    # The captured tree lives under `<repo>/crates`; blocking traversal
+    # there is what makes the confinement root unresolvable.
+    blocked="$work/repo/crates"
+    # `chmod 000` on an ancestor leaves a directory nothing can delete, so
+    # the mode is restored from an EXIT trap too: a failure anywhere below
+    # would otherwise break the NEXT run and the harness's tmp cleanup.
+    trap 'chmod 755 "$blocked" 2>/dev/null || true; rm -rf "$work"' EXIT
+    chmod 000 "$blocked"
+
+    # PREMISE ASSERTION. The refusal below is only evidence about the
+    # guard if the compare it sits above would have ACCEPTED the same
+    # shape -- otherwise the guard is decoration and deleting it would
+    # leave the suite green. Resolve both sides through the library's own
+    # `abspath_physical` and run that bare compare.
+    phys_verdict="$(
+        # shellcheck source=scripts/drivers/lib/confine.sh
+        . "$CONFINE"
+        root="$(abspath_physical "$captured" 2>/dev/null)" || :
+        cand="$(abspath_physical "$work/outside")"
+        if [ -n "$root" ]; then
+            printf 'root-resolved\n'
+        else
+            case "$cand" in
+                "$root" | "$root"/*) printf 'empty-root-accepts\n' ;;
+                *) printf 'empty-root-refuses\n' ;;
+            esac
+        fi
+    )"
+    check "an unresolvable root resolves EMPTY and the bare compare then accepts an out-of-root path" \
+        "empty-root-accepts" "$phys_verdict"
+
+    # REFUSAL: the same out-of-root path through the real confinement is
+    # refused, with the exit code MAPPED rather than propagated by errexit.
+    # This is the assertion the guard owns.
+    rc=0
+    (
+        set -eu
+        # shellcheck source=scripts/drivers/lib/confine.sh
+        . "$CONFINE"
+        inner=0
+        confine_out_under "$work/outside" "$captured" || inner=$?
+        exit "$inner"
+    ) 2>"$work/confine.log" || rc=$?
+    check "an out-of-root path is refused when the confinement root is unresolvable" "2" "$rc"
+    # The refusal must come from the RESOLUTION arm. The newline check and
+    # the symlink walk sit ABOVE this guard and the out-of-tree compare
+    # below it, so a refusal from any of those would satisfy the exit-code
+    # assertion while testing nothing here.
+    check_log "the unresolvable-root refusal names the resolution failure" \
+        "cannot physically resolve path ancestor" "$work/confine.log"
+    for other_arm in 'contains a newline' 'symlink component at' \
+        'outside the default captured dir'; do
+        check "the unresolvable-root refusal is not the '$other_arm' arm" "0" \
+            "$(grep -cF -- "$other_arm" "$work/confine.log")"
+    done
+    # Only the ROOT side of the pair is asserted: an unresolvable CANDIDATE
+    # leaves a NON-empty root, so the compare below the guard rejects it on
+    # the out-of-tree arm regardless, and an assertion there would pass with
+    # the guard deleted.
+
+    # ACCEPT CONTROL: with traversal restored -- everything resolvable --
+    # the same call accepts an in-tree path. Without it a guard that refused
+    # unconditionally would satisfy the refusal above.
+    chmod 755 "$blocked"
+    mkdir -p "$captured/resolvable"
+    rc=0
+    (
+        set -eu
+        # shellcheck source=scripts/drivers/lib/confine.sh
+        . "$CONFINE"
+        inner=0
+        confine_out_under "$captured/resolvable" "$captured" || inner=$?
+        exit "$inner"
+    ) 2>"$work/confine.log" || rc=$?
+    check "an in-tree path is accepted once the confinement root resolves" "0" "$rc"
+
+    # And the rig-level outcome, which the errexit propagation also
+    # enforces: an unresolvable root must land no --out directory.
+    chmod 000 "$blocked"
+    confine_trace="$work/trace.log"
+    : >"$confine_trace"
+    rc=0
+    rig_run "$work" "$confine_trace" --out "$work/outside" || rc=$?
+    check "the rig refuses when the confinement root is unresolvable" "2" "$rc"
+    check "no --out directory is created when the confinement root is unresolvable" "0" \
+        "$([ -e "$work/outside" ] && echo 1 || echo 0)"
+    chmod 755 "$blocked"
+
+    trap - EXIT
+    rm -rf "$work"
+    unset blocked phys_verdict other_arm
+fi
+
 # --- Case 21: --help still renders the header ------------------------
 # The usage extraction is sentinel-delimited; a line-count range silently
 # starts cutting the moment the header grows, and the driver-mode policy
