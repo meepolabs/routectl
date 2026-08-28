@@ -576,8 +576,11 @@ print(node)
 PY
 }
 
+# Where the runner lands a fixture with no `--out`: the gitignored scratch
+# root at the repo root, not the committed corpus. This suite drives the
+# real runner in a throwaway repo, so the default is what it exercises.
 landed_meta() {
-    printf '%s\n' "$1/repo/crates/routectl-cli/tests/fixtures/driver/anthropic-api/$2/meta.json"
+    printf '%s\n' "$1/repo/.routectl-driver-scratch/anthropic-api/$2/meta.json"
 }
 
 # ---------------------------------------------------------------------

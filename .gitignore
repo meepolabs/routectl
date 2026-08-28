@@ -41,6 +41,13 @@ crates/routectl-cli/tests/fixtures/captured/
 # gating. Gitignored while that committability call is still open --
 # deleting THIS ONE LINE is the whole change when it is answered.
 crates/routectl-cli/tests/fixtures/driver/
+# Default landing root for scripts/capture_driver.sh. Exploratory driver
+# runs write here, never straight into the corpus above: a rerun of a case
+# overwrites that case's fixture, so a corpus default would replace a
+# reviewed fixture in place. Fixtures reach the corpus only through
+# scripts/promote_fixture.sh, which re-runs the scrub gate on the way in.
+# Scratch by definition -- nothing here is ever committed.
+.routectl-driver-scratch/
 # Claude Code per-project session state (scheduled tasks, local
 # settings, transient scratch). Never commit -- machine-specific.
 .claude/
