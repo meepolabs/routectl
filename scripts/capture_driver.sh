@@ -38,9 +38,15 @@
 #   ROUTECTL_DRIVER_WORK              the throwaway git repo (also cwd)
 #   HOME                              throwaway home, empty at boot
 #   XDG_CONFIG_HOME                   throwaway config root
-#   ROUTECTL_FIXTURE_CASE_ID          the three driver-mode pins, so a
+#   ROUTECTL_FIXTURE_CASE_ID          the four driver-mode pins, so a
 #   ROUTECTL_FIXTURE_CONFIG_SHA       driver can echo them into its own
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  logs and read them back
+#   ROUTECTL_FIXTURE_WIRE_PATTERN
+#
+# The wire pattern is DERIVED from the case file, never taken on argv: a
+# flag would let a caller declare a pattern the case does not claim, and
+# the recorded claim is the only on-disk evidence of which wire shape a
+# fixture was captured for.
 #
 # A driver maps ROUTECTL_BASE_URL onto whatever variable its client
 # reads; this script stays client-agnostic on purpose.
@@ -83,6 +89,8 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RIG="$ROOT/scripts/capture_fixtures.sh"
 CONFIG_DIR="$ROOT/scripts/drivers/config"
+CASES_DIR="$ROOT/scripts/drivers/cases"
+VALIDATE_CASE="$ROOT/scripts/drivers/lib/validate_case.py"
 
 # The driver corpus root, resolved from this script's own location the
 # same way the rig resolves its default. It is NOT caller-supplied: a
@@ -161,6 +169,21 @@ LANE_CONFIG="$CONFIG_DIR/$LANE.toml"
 # serve command line instead of patching, so the bytes happen to match
 # today; hashing the committed file keeps that true if that ever changes.)
 CONFIG_SHA="$(sha256sum "$LANE_CONFIG" | cut -d' ' -f1)"
+
+# The wire pattern the fixture will CLAIM, read out of the case file the
+# drivers read. Same shape as the lane-config check above: fail closed,
+# before any daemon boots, because a run that cannot name its pattern
+# would land a fixture whose claim is empty -- and an empty claim is
+# worse than none, since nothing downstream can tell it from a pattern
+# nobody recorded. `validate_case.py` validates the field against its
+# closed set on the way out, so a value that arrives here is a member of
+# that set; the exit status is what proves it arrived.
+CASE_FILE="$CASES_DIR/$CASE_ID.json"
+[ -r "$CASE_FILE" ] || die "no case file for '$CASE_ID' at $CASE_FILE" 2
+WIRE_PATTERN="$(python3 "$VALIDATE_CASE" --field wire_pattern "$CASE_FILE")" ||
+  die "case '$CASE_ID' declares no valid wire_pattern (see $CASE_FILE)" 2
+[ -n "$WIRE_PATTERN" ] ||
+  die "case '$CASE_ID' declares an empty wire_pattern (see $CASE_FILE)" 2
 
 # ---------------------------------------------------------------------
 # Run workspace
@@ -336,6 +359,7 @@ driver_rc=0
   ROUTECTL_FIXTURE_CASE_ID="$CASE_ID" \
   ROUTECTL_FIXTURE_CONFIG_SHA="$CONFIG_SHA" \
   ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
+  ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
     exec "$@"
 ) >"$RUN/driver.log" 2>&1 || driver_rc=$?
 
@@ -368,6 +392,7 @@ rig_rc=0
 ROUTECTL_FIXTURE_CASE_ID="$CASE_ID" \
 ROUTECTL_FIXTURE_CONFIG_SHA="$CONFIG_SHA" \
 ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
+ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
   bash "$RIG" --driver-mode --force \
     --log "$TRACE" \
     --out "$DRIVER_OUT" \

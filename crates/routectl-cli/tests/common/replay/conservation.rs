@@ -882,6 +882,7 @@ mod tests {
                 ingress_kind: ingress_kind.to_string(),
                 case_id: name.to_string(),
                 config_sha: String::new(),
+                wire_pattern: String::new(),
                 client: FixtureClient::default(),
                 stream: false,
                 model: None,
