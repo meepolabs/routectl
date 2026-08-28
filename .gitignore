@@ -54,3 +54,9 @@ scratch/
 # are archived out-of-repo by the operator; these are throwaway.
 bench-results/
 .routectl-bench-work/
+
+# Per-run scratch for the image layer credential scan self-test: an
+# extracted `docker save` tree, hundreds of MB, on real disk because /tmp
+# here is a tmpfs a cold build already fills. Removed by the self-test's
+# own exit trap; the ignore rule covers a run killed mid-scan.
+.routectl-image-scan-work/
