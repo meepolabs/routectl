@@ -1346,6 +1346,35 @@ done
 source_lines="$(grep -c '^\. "\$CONFINE_LIB"$' "$RIG" | tr -d ' ')"
 check "the rig sources the shared confinement library" "1" "$source_lines"
 
+# The fail-closed half of that contract: with the library ABSENT the rig
+# must refuse rather than fall back to writing unconfined.
+#
+# TWO independent mechanisms enforce this, which is why only the message
+# assertion below goes red when the explicit guard is downgraded to a
+# warning: the `. "$CONFINE_LIB"` source itself fails under `set -e`, so
+# the exit code and the no-directory assertions still hold. That is
+# defence in depth, not vacuity -- measured 2026-08-27. Keep all three:
+# the message assertion is the one that pins the EXPLICIT guard, and the
+# other two pin the outcome whichever mechanism fires. Every other
+# assertion in this case runs WITH the library present, so those are the
+# paired accept control -- without this one, a refactor that reordered the
+# guard below `mkdir -p "$OUT"`, or downgraded it to a warning, would keep
+# the whole suite green while turning the rig into an unconfined write
+# primitive for credential-bearing fixtures.
+work="$(make_repo)"
+confine_trace="$work/trace.log"
+: >"$confine_trace"
+rm -f "$work/repo/scripts/drivers/lib/confine.sh"
+rc=0
+rig_run "$work" "$confine_trace" --out "$work/outside" --allow-unsafe-out || rc=$?
+check "the rig refuses to run when the confinement library is absent" "1" "$rc"
+# rig_run funnels stdout+stderr into rig.log and returns only the code.
+check "the refusal names the missing library" "1" \
+    "$(grep -c 'confinement library not found' "$work/rig.log")"
+check "no --out directory is created when the library is absent" "0" \
+    "$([ -e "$work/outside" ] && echo 1 || echo 0)"
+rm -rf "$work"
+
 # --- Case 21: --help still renders the header ------------------------
 # The usage extraction is sentinel-delimited; a line-count range silently
 # starts cutting the moment the header grows, and the driver-mode policy
