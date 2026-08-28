@@ -288,6 +288,57 @@ fn the_not_run_line_tracks_what_the_driver_walk_found() {
     );
 }
 
+/// A single conserved driver case -- the shape the first committed
+/// fixture has -- reaches adjudication and does NOT indict the exception
+/// table.
+///
+/// Over a real walk, not over the scoping helper in isolation: the walk is
+/// what puts `asserted` above zero, and it is `asserted > 0` that arms the
+/// unexercised-exception rule at all. Before the two-level walk landed,
+/// this fixture never loaded, so the same assertion would have passed
+/// without the rule ever being reached -- a green that proved nothing.
+///
+/// The zero-hit precondition is asserted rather than assumed: a plain
+/// base-url turn sends no system turn, leaves thinking off, and names a
+/// model whose alias needs no suffix, so every anthropic entry is
+/// unreachable from it. If some later change made one of them fire here,
+/// this test would still pass while proving nothing about the scoping, so
+/// the zeros are checked first.
+#[test]
+fn one_conserved_driver_case_adjudicates_without_indicting_the_exception_table() {
+    let populated = tempfile::tempdir().unwrap();
+    let case = plant_driver_case(populated.path(), "anthropic-api", "plain-turn-01");
+    make_conserved(&case);
+
+    let (run, _) = planted_driver_run(populated.path());
+
+    assert_eq!(
+        run.asserted(),
+        1,
+        "the planted case must reach adjudication"
+    );
+    assert!(
+        run.exception_hits.iter().all(|hit| hit.hits == 0),
+        "this case is meant to exercise NO exception; the scoping assertion below \
+         is vacuous otherwise: {:?}",
+        run.exception_hits,
+    );
+    assert!(
+        !run.failures
+            .iter()
+            .any(|failure| failure.contains("zero divergences")),
+        "a one-case gateable slice indicted the exception table: {:?}",
+        run.failures,
+    );
+    assert_ne!(
+        run.verdict(),
+        Verdict::Fail,
+        "{} conservation failure(s):\n  - {}",
+        run.failures.len(),
+        run.failures.join("\n  - "),
+    );
+}
+
 /// Fixtures adjudicated across every lane of a run.
 #[test]
 fn conservation_over_both_fixture_roots() {
@@ -320,13 +371,12 @@ fn conservation_over_both_fixture_roots() {
 ///
 /// # The constants below are STALE and UNREPRODUCIBLE (2026-08-28)
 ///
-/// They were measured against a 250-fixture corpus that was DESTROYED by an
-/// operator error (`rm -rf "$(printf 'path\n')"` -- command substitution
-/// strips the trailing newline, so the argument resolved to the real
-/// `captured/` tree instead of a stray sibling). That corpus was live-box
-/// traffic: gitignored by design, never committed, and not reproducible --
-/// the container rig builds the DRIVER corpus, which is synthetic and a
-/// different corpus entirely.
+/// They were measured against a 250-fixture corpus that no longer exists: a
+/// path-quoting error in a cleanup command removed it (command substitution
+/// strips a trailing newline, so the argument resolved to the live tree rather
+/// than the intended sibling). That corpus was live-box traffic: gitignored by
+/// design, never committed, and not reproducible -- the container rig builds
+/// the DRIVER corpus, which is synthetic and a different corpus entirely.
 ///
 /// So `250 / 250 / 238 / 133 / 6 / 4` are a HISTORICAL RECORD, not a
 /// currently-verifiable measurement. Live capture has been re-enabled and the

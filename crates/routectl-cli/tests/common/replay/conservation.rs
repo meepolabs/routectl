@@ -39,9 +39,13 @@
 //!   ABSENT from the baseline fails, a path present in it is counted and
 //!   reported. Writing a real translation whitelist here would be
 //!   authoring the byte-fidelity milestone's spec as a table.
-//! - An exception matching ZERO divergences on a POPULATED lane is a
-//!   FAILURE. An unexercised matcher is an untested claim, and a
-//!   too-broad matcher is how a whitelist becomes a mute button.
+//! - An exception matching ZERO divergences on a POPULATED
+//!   NON-GATEABLE lane is a FAILURE. An unexercised matcher is an
+//!   untested claim, and a too-broad matcher is how a whitelist becomes
+//!   a mute button. Scoped to the non-gateable (live-box) corpus because
+//!   that is the corpus the exception table was measured against; see
+//!   `unexercised_exception_failures` for why a gateable slice is no
+//!   evidence about it.
 //! - A gated lane with zero asserted fixtures, or ANY skip on a gated
 //!   lane, is a FAILURE.
 //! - DEGRADED (loud, but not a failure): nothing was asserted, or the
@@ -377,6 +381,13 @@ pub struct LaneSummary {
     pub class: Option<LaneClass>,
     /// Whether this lane is gated for the fixtures counted here.
     pub gated: bool,
+    /// Whether the fixtures counted here came from a GATEABLE root, i.e.
+    /// the synthetic driver corpus rather than the live-box captures.
+    /// Distinct from `gated`, which additionally requires the lane to be
+    /// named in the gated list: a driver-corpus lane nobody gates yet is
+    /// still gateable, and it is gateability -- not gating -- that says
+    /// whether these fixtures are evidence about the exception table.
+    pub gateable: bool,
     /// Fixtures attributed to this lane, asserted or not.
     pub fixtures: usize,
     /// Fixtures actually compared.
@@ -657,6 +668,7 @@ pub fn adjudicate(
                     ingress: ingress_label,
                     egress: egress_token.to_string(),
                     gated: gated_here,
+                    gateable: slice.gateable,
                     ..LaneSummary::default()
                 });
             entry.fixtures += 1;
@@ -738,15 +750,31 @@ pub fn adjudicate(
     run
 }
 
-/// Exceptions that matched nothing on a lane that HAS asserted fixtures.
+/// Exceptions that matched nothing on a NON-GATEABLE lane that HAS
+/// asserted fixtures.
 ///
 /// Reads the per-run DELTAS, never the global counters: those are
 /// process-global statics shared by every walk in the binary, so a global
 /// read credits an entry with hits some other walk contributed and passes
 /// a gate that should have failed.
+///
+/// GATEABLE lanes are excluded, and the exclusion is the rule's scope
+/// rather than a softening of it. The exception table's hit counts were
+/// measured across the live-box corpus -- hundreds of real requests, in
+/// which every entry fires. The gateable (driver) corpus is synthetic and
+/// grows one deliberately-chosen case at a time, and a case cannot
+/// exercise every entry by construction: a plain base-url turn sends zero
+/// system turns, leaves thinking off, and names a model whose alias
+/// resolves without a suffix, so three of the four anthropic entries are
+/// unreachable from it. Counting that as an untested claim would indict
+/// the table over a slice that is no evidence about it, and the only way
+/// to satisfy such a rule is to force the first driver case to trip all
+/// four -- which makes the case a special-case of the transform list and
+/// still breaks on the second case. The driver corpus's own coverage
+/// question is a different question, and `gated_lane_failures` answers it.
 fn unexercised_exception_failures(lanes: &[LaneSummary], hits: &[ExceptionHits]) -> Vec<String> {
     let mut out = Vec::new();
-    for lane in lanes.iter().filter(|l| l.asserted > 0) {
+    for lane in lanes.iter().filter(|l| l.asserted > 0 && !l.gateable) {
         for hit in hits.iter().filter(|h| h.egress == lane.egress) {
             if hit.hits == 0 {
                 out.push(format!(
@@ -1046,6 +1074,53 @@ mod tests {
         }];
 
         assert!(unexercised_exception_failures(&[empty_lane], &unmatchable).is_empty());
+    }
+
+    /// The rule's SCOPE, both directions in one test.
+    ///
+    /// A gateable lane is the synthetic driver corpus: one deliberately
+    /// chosen case, which cannot reach every entry in the table. A
+    /// non-gateable lane is the corpus the table's hit counts were
+    /// measured against, where a zero is a real regression. A rule that
+    /// simply never fired would satisfy the first assertion alone, so the
+    /// second one is what makes the first mean anything.
+    #[test]
+    fn a_gateable_lane_cannot_indict_an_exception_but_a_live_box_lane_still_does() {
+        let unmatchable = vec![ExceptionHits {
+            id: "deliberately-unmatchable",
+            egress: "anthropic-api",
+            hits: 0,
+        }];
+        let one_asserted = LaneSummary {
+            ingress: "anthropic".to_string(),
+            egress: "anthropic-api".to_string(),
+            fixtures: 1,
+            asserted: 1,
+            ..LaneSummary::default()
+        };
+
+        let driver_lane = LaneSummary {
+            gateable: true,
+            ..one_asserted.clone()
+        };
+
+        assert!(
+            unexercised_exception_failures(&[driver_lane], &unmatchable).is_empty(),
+            "a one-case synthetic slice is no evidence about the exception table",
+        );
+
+        // PAIRED CONTROL: the same lane, the same single asserted
+        // fixture, the same zero-hit entry -- non-gateable this time, and
+        // it MUST still fail.
+        let live_box_lane = LaneSummary {
+            gateable: false,
+            ..one_asserted
+        };
+
+        let failures = unexercised_exception_failures(&[live_box_lane], &unmatchable);
+
+        assert_eq!(failures.len(), 1, "got: {failures:?}");
+        assert!(failures[0].contains("deliberately-unmatchable"));
     }
 
     /// End to end: a populated anthropic lane whose fixture exercises only
