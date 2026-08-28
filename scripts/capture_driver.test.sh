@@ -850,6 +850,53 @@ done
 check "the live-daemon greps fire on a script that does contain them" "4" "$control_hits"
 rm -f "$control"
 
+# --- Case 10b: neither capture script grows a container branch ---------
+# A container is a CALLER of these scripts: a wrapper invokes the runner
+# with the arguments it was given. The moment either script learns to
+# branch on whether it is containerized, the host path stops being the
+# supported one and dropping containers stops being a two-way door. An
+# absence is what review is worst at enforcing, so it is enforced
+# lexically here.
+forbidden_literals=('container' 'docker' 'CONTAINER')
+for script in "$RUNNER" "$RIG"; do
+    for literal in "${forbidden_literals[@]}"; do
+        check "$(basename "$script") carries no '$literal' literal" "0" \
+            "$(grep -c -- "$literal" "$script" || true)"
+    done
+done
+
+# Positive control for the six greps above: every pattern MUST fire on a
+# file that does contain the word, in the placements a real regression
+# would use -- a comment, a variable name, a string literal, a command,
+# and mid-word. Built at runtime rather than committed, so the control
+# itself is never a file the guard has to exempt.
+lit_control="$(mktemp)"
+printf '# container mode is unsupported\nCONTAINER_MODE=1\necho "inside a container"\ndocker run --rm true\ncontainerized_run() { :; }\n' >"$lit_control"
+lit_control_hits=0
+for literal in "${forbidden_literals[@]}"; do
+    if grep -q -- "$literal" "$lit_control"; then
+        lit_control_hits=$((lit_control_hits + 1))
+    fi
+done
+check "the container-literal greps fire on a file that does contain them" "3" \
+    "$lit_control_hits"
+
+# Case-awareness, demonstrated one placement at a time: the lowercase and
+# uppercase spellings are separate greps, so a failure names which
+# spelling a regression used instead of folding both into one pattern.
+case_control="$(mktemp)"
+printf '# container\n' >"$case_control"
+check "the lowercase grep catches a comment placement" "1" \
+    "$(grep -c -- 'container' "$case_control" || true)"
+check "the uppercase grep leaves a lowercase comment alone" "0" \
+    "$(grep -c -- 'CONTAINER' "$case_control" || true)"
+printf 'CONTAINER_MODE=1\n' >"$case_control"
+check "the uppercase grep catches a variable-name placement" "1" \
+    "$(grep -c -- 'CONTAINER' "$case_control" || true)"
+check "the lowercase grep leaves an uppercase variable name alone" "0" \
+    "$(grep -c -- 'container' "$case_control" || true)"
+rm -f "$lit_control" "$case_control"
+
 # --- Case 11: --help renders the header, sentinel included ------------
 help_out="$(bash "$RUNNER" --help 2>&1 || true)"
 if printf '%s' "$help_out" | grep -q 'ROUTECTL_FIXTURE_CONFIG_SHA' &&
