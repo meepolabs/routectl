@@ -1346,6 +1346,34 @@ done
 source_lines="$(grep -c '^\. "\$CONFINE_LIB"$' "$RIG" | tr -d ' ')"
 check "the rig sources the shared confinement library" "1" "$source_lines"
 
+# A NEWLINE in --out defeated every check below it: both resolvers read their
+# result back through `$(...)`, which strips trailing newlines, so the guard
+# validated only the FIRST line while `mkdir -p` created `<root>\n...` as a
+# SIBLING of the confinement root -- and that sibling is NOT covered by the
+# captured tree's gitignore entry, so credential-bearing content would land on
+# a git-TRACKED path. Measured and fixed 2026-08-28.
+work="$(make_repo)"
+confine_trace="$work/trace.log"
+: >"$confine_trace"
+rc=0
+rig_run "$work" "$confine_trace" --out "$(captured_of "$work")
+/escaped" || rc=$?
+check "a newline in --out is refused" "2" "$rc"
+check "the newline refusal names the cause" "1" \
+    "$(grep -c 'contains a newline' "$work/rig.log")"
+# The sibling the bypass used to create must not exist.
+check "no sibling of the confinement root is created" "0" \
+    "$(find "$work/repo/crates/routectl-cli/tests/fixtures" -maxdepth 1 -name 'captured*' \
+        ! -name captured | wc -l | tr -d ' ')"
+# ACCEPT CONTROL: the same path WITHOUT the newline is still accepted, so the
+# guard discriminates rather than refusing every path. (An earlier draft used
+# `$(printf '\n')` as the pattern, which strips to EMPTY and matches
+# everything -- it would have rejected every legitimate --out.)
+rc=0
+rig_run "$work" "$confine_trace" --out "$(captured_of "$work")/ok" || rc=$?
+check "the same --out without a newline is accepted" "0" "$rc"
+rm -rf "$work"
+
 # The fail-closed half of that contract: with the library ABSENT the rig
 # must refuse rather than fall back to writing unconfined.
 #

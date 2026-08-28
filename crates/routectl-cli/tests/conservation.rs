@@ -317,6 +317,34 @@ fn conservation_over_both_fixture_roots() {
 /// exactly the drift this harness exists to catch. When a recapture moves
 /// them, the diff on these constants is the review moment that change
 /// deserves.
+///
+/// # The constants below are STALE and UNREPRODUCIBLE (2026-08-28)
+///
+/// They were measured against a 250-fixture corpus that was DESTROYED by an
+/// operator error (`rm -rf "$(printf 'path\n')"` -- command substitution
+/// strips the trailing newline, so the argument resolved to the real
+/// `captured/` tree instead of a stray sibling). That corpus was live-box
+/// traffic: gitignored by design, never committed, and not reproducible --
+/// the container rig builds the DRIVER corpus, which is synthetic and a
+/// different corpus entirely.
+///
+/// So `250 / 250 / 238 / 133 / 6 / 4` are a HISTORICAL RECORD, not a
+/// currently-verifiable measurement. Live capture has been re-enabled and the
+/// corpus is rebuilding from current traffic; the counts it produces will
+/// legitimately differ (different traffic mix, a newer client, and shipped
+/// transforms that did not exist when the originals were taken).
+///
+/// WHEN THE REBUILT CORPUS IS LARGE ENOUGH TO BE A BASELINE: re-measure, then
+/// replace these constants in ONE commit whose body records the new corpus
+/// size and the date -- and do NOT soften them to ranges to make them fit.
+/// The exactness is the mechanism. Until then this test SKIPS on an absent or
+/// too-small corpus, which is honest but proves nothing: read the skip line,
+/// never a green result, as the signal.
+/// Fixture count the pinned baseline counts below were measured against.
+/// The gate for asserting them at all: a rebuilding corpus of any other size
+/// skips rather than reporting legitimate traffic as a regression.
+const BASELINE_CORPUS_FIXTURES: usize = 250;
+
 #[test]
 fn the_live_box_corpus_reduces_to_four_explained_classes_with_zero_unexplained() {
     let root = local_root();
@@ -331,6 +359,25 @@ fn the_live_box_corpus_reduces_to_four_explained_classes_with_zero_unexplained()
     let corpus = discover_fixtures(&root).expect("the live-box root exists, so it must walk");
     if corpus.fixtures.is_empty() {
         eprintln!("conservation: live-box root holds 0 fixtures; baseline assertion SKIPPED.");
+        return;
+    }
+    // The pinned counts below describe the DESTROYED 250-fixture corpus (see
+    // the staleness note above). A corpus that is rebuilding holds a different,
+    // smaller, entirely legitimate set -- asserting the old exact numbers
+    // against it would report a REAL corpus as a regression and invite someone
+    // to soften the assertions into ranges, which is what would actually break
+    // the harness. Skip loudly until the rebuild reaches the pinned size, and
+    // re-measure then.
+    if corpus.fixtures.len() != BASELINE_CORPUS_FIXTURES {
+        eprintln!(
+            "conservation: live-box root holds {} fixtures, not the {} the pinned \
+             baseline was measured against; baseline assertion SKIPPED. The pinned \
+             counts are a historical record of a corpus that no longer exists -- \
+             re-measure and replace them once the rebuild is large enough, and do \
+             not soften them to ranges.",
+            corpus.fixtures.len(),
+            BASELINE_CORPUS_FIXTURES,
+        );
         return;
     }
 
@@ -364,8 +411,8 @@ fn the_live_box_corpus_reduces_to_four_explained_classes_with_zero_unexplained()
         .iter()
         .find(|l| l.ingress == "anthropic" && l.egress == "anthropic-api")
         .expect("every corpus fixture rides the anthropic fidelity lane");
-    assert_eq!(anthropic.fixtures, 250);
-    assert_eq!(anthropic.asserted, 250);
+    assert_eq!(anthropic.fixtures, BASELINE_CORPUS_FIXTURES);
+    assert_eq!(anthropic.asserted, BASELINE_CORPUS_FIXTURES);
     assert_eq!(anthropic.skipped, 0);
     assert_eq!(
         anthropic.normalized, 238,

@@ -89,6 +89,30 @@ confine_out_under() {
   _cand="$1"
   _root="$2"
 
+  # A NEWLINE in the candidate defeats every check below. Both resolvers
+  # read their result back through `$(...)`, which strips trailing
+  # newlines and leaves a multi-line path validated only up to its FIRST
+  # line -- so the guard would approve `<root>` while the caller's
+  # `mkdir -p` creates `<root>\n...` as a SIBLING of the root. Measured
+  # 2026-08-27: that sibling is NOT covered by the captured tree's
+  # gitignore entry, so credential-bearing fixture content would land on
+  # a git-TRACKED path. Refused outright rather than made newline-safe:
+  # `awk` plus command substitution cannot carry an embedded newline
+  # faithfully, so a rejection is the only honest answer.
+  # The pattern is a LITERAL newline inside quotes, never `$(printf '\n')`:
+  # command substitution strips trailing newlines, so that spelling yields an
+  # EMPTY pattern which matches every path and rejects everything.
+  case "$_cand" in
+    *"
+"*)
+      echo "refusing --out: the path contains a newline." >&2
+      echo "fixtures contain raw headers (auth when ROUTECTL_TRACE_HEADERS is on);" >&2
+      echo "a newline splits the path so confinement would validate only its" >&2
+      echo "first line while the write lands somewhere else." >&2
+      exit 2
+      ;;
+  esac
+
   # Belt-and-suspenders: walk every candidate component UNDER the root
   # and reject any symlink, even a DANGLING one (target does not
   # exist). The physical resolution further down walks up to the
@@ -124,8 +148,22 @@ confine_out_under() {
       ;;
   esac
 
-  _out_phys="$(abspath_physical "$_cand")"
-  _root_phys="$(abspath_physical "$_root")"
+  # FAIL CLOSED on an unresolvable path. `abspath_physical`'s own `exit 2`
+  # terminates only the command-substitution SUBSHELL, so without these
+  # checks the assignment yields an EMPTY string and the `case` below
+  # compares against an empty prefix -- which matches everything, and the
+  # guard would accept `/etc/anything`. Today's single caller invokes this
+  # bare under `set -eu` so the failure propagates by accident; a caller
+  # that maps the exit code (`confine_out_under ... || rc=$?`, the shape
+  # `capture_driver.sh` already uses for the rig) would silently get a
+  # fail-open guard. Measured 2026-08-27.
+  _out_phys="$(abspath_physical "$_cand")" || exit 2
+  _root_phys="$(abspath_physical "$_root")" || exit 2
+  if [ -z "$_out_phys" ] || [ -z "$_root_phys" ]; then
+    echo "refusing --out '$_cand': could not physically resolve it or the" >&2
+    echo "confinement root '$_root'; an unresolved path cannot be confined." >&2
+    exit 2
+  fi
   case "$_out_phys" in
     "$_root_phys" | "$_root_phys"/*) : ;;
     *)
