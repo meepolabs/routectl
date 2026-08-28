@@ -44,12 +44,12 @@ usage() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)
-            [ $# -ge 2 ] || { echo "build: --version needs a value" >&2; exit 2; }
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "build: --version needs a non-empty value" >&2; exit 2; }
             VERSION="$2"
             shift 2
             ;;
         --tag)
-            [ $# -ge 2 ] || { echo "build: --tag needs a value" >&2; exit 2; }
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "build: --tag needs a non-empty value" >&2; exit 2; }
             TAG="$2"
             shift 2
             ;;
