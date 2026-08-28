@@ -252,6 +252,16 @@ jobs:
       - name: fixture promotion self-test
         run: bash scripts/promote_fixture.test.sh
 
+      # "No credential in any layer" is an acceptance claim about the
+      # capture-cell image, and a claim about an image nobody opened is an
+      # assumption -- so the self-test walks every layer of `docker save`
+      # output and runs the repo's own scrub gate over the extracted
+      # content. It SKIPS BY NAME where docker is absent, and its
+      # deliberately-dirty positive control runs even when the committed
+      # image is not built locally, so the step is never vacuous.
+      - name: image layer credential scan self-test
+        run: bash scripts/container/image_scan.test.sh
+
       # The driver runner boots a daemon and kills it. A real boot needs a
       # credential CI does not have, so the self-test injects a stub daemon
       # through the runner's ROUTECTL_BIN override -- which still exercises
