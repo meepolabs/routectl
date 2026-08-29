@@ -9,8 +9,9 @@
 # diverge (e.g. a stray non-ASCII byte slipping in before the ASCII-only
 # gate catches it elsewhere).
 #
-# Unlike check-drift.sh, this is a real gate, not a hygiene nag: an
-# over-limit subject exits non-zero and blocks the commit.
+# This is a real gate: an over-limit subject exits non-zero and blocks
+# the commit. It runs from the commit-msg stage of
+# .pre-commit-config.yaml, which appends the message-file path.
 #
 # Usage: check-subject-length.sh COMMIT_MSG_FILE
 

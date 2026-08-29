@@ -233,8 +233,8 @@ fn report_concurrent(
 /// The large-ledger cost curve for both budgeted status reads.
 ///
 /// `#[ignore]`d and never part of the default suite: seeding several million
-/// rows costs minutes, and the pre-commit gate already runs a full release
-/// build and test pass on every commit. Run it explicitly, in release (a debug
+/// rows costs minutes, and CI already runs a full release build and test pass.
+/// Run it explicitly, in release (a debug
 /// SQLite fold is several times slower for reasons the shipped binary never
 /// pays), and with `TMPDIR` pointed at real storage -- the default `/tmp` is a
 /// tmpfs on many systems, which would measure a RAM-backed ledger and quietly

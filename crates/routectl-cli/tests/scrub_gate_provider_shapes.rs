@@ -375,7 +375,7 @@ fn allowlist_paths() -> Vec<String> {
     let source = std::fs::read_to_string(&config).unwrap_or_else(|err| {
         panic!(
             "{GITLEAKS_CONFIG} must exist and be readable at {} ({err}): it \
-             configures the pre-commit secret scan",
+             configures the local and CI secret scan",
             config.display()
         )
     });

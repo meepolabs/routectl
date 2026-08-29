@@ -32,9 +32,9 @@ jobs:
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pin the gitleaks binary so CI and the local pre-commit hook scan
-          # with the SAME ruleset. Keep in lockstep with MIN_GITLEAKS in
-          # tools/git-hooks/pre-commit; bump both together.
+          # Pin the gitleaks binary so CI and the local commit gate scan
+          # with the SAME ruleset. Keep in lockstep with the gitleaks `rev`
+          # in .pre-commit-config.yaml; bump both together.
           GITLEAKS_VERSION: "8.30.1"
           # gitleaks-action v3 (node24 runtime) still requires a license key
           # for org-owned repos. Behavior and env interface unchanged from v2;

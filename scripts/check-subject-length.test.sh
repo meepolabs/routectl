@@ -7,7 +7,7 @@
 # or this repo's own history.
 #
 # Run it from anywhere:
-#   bash tools/git-hooks/check-subject-length.test.sh
+#   bash scripts/check-subject-length.test.sh
 
 set -uo pipefail
 

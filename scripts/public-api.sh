@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Public-API change detector: lists each library crate's public surface
-# via cargo-public-api and diffs it against a checked-in baseline. It is
-# an INFORMATIONAL tool -- NOT wired into the pre-commit hook and NOT
-# PR-blocking. A surface diff is expected whenever the author intended to
-# change the API; the author regenerates the touched baselines IN THE SAME
-# COMMIT (see public-api/POLICY.md).
+# via cargo-public-api and diffs it against a checked-in baseline. CI does
+# not run it and it is not PR-blocking; locally it is a commit-gate leg
+# that blocks only where the tooling below is installed (the availability
+# probe lives in scripts/public-api-if-available.sh). A surface diff is
+# expected whenever the author intended to change the API; the author
+# regenerates the touched baselines IN THE SAME COMMIT (see
+# public-api/POLICY.md).
 #
 # Bootstrap (one-time, per machine):
 #   cargo install cargo-public-api --version 0.52.0

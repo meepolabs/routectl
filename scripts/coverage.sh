@@ -3,7 +3,7 @@
 # machine-readable JSON report plus a human summary into an output dir.
 #
 # This is an INFORMATIONAL tool -- supporting evidence only. It is NOT
-# wired into the pre-commit hook, there are NO coverage baselines checked
+# wired into the commit gate, there are NO coverage baselines checked
 # into the repo, and there is NO threshold that fails a build. It is meant
 # to be run by hand at a feature's base and tip, and optionally at wave
 # boundaries, to observe where production behavior is exercised. The JSON

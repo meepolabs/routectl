@@ -51,7 +51,7 @@
 # be in a tier or declared unscanned with a reason.
 #
 # Pure grep -- no cargo invocation, so it stays cheap enough for a
-# pre-commit leg. Fail-closed: a missing `rg` or a renamed search path is a
+# commit-gate leg. Fail-closed: a missing `rg` or a renamed search path is a
 # gate FAILURE, never a vacuous PASS.
 
 set -euo pipefail

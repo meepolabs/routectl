@@ -10,9 +10,11 @@ An **informational change detector** for the crates' public API. It makes
 every surface change a visible, reviewable artifact in the same diff that
 causes it.
 
-It is **NOT a PR-blocking gate.** It is not wired into the pre-commit hook
-and does not fail CI. A surface diff is expected and fine whenever the
-change was intended.
+It is **NOT a PR-blocking gate** and does not fail CI. Locally it is a
+commit-gate leg, but a conditional one: it blocks only where
+`cargo-public-api` and its pinned nightly are installed, and warns
+instead of failing where they are not. A surface diff is expected and
+fine whenever the change was intended.
 
 ## Workflow
 
