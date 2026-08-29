@@ -121,6 +121,28 @@ is_excluded() {
 # out of code and commit messages is the author's and reviewer's job, not
 # this gate's.
 PATTERNS=(
+    # ORG-WIDE decision and tracking ids. Unlike every other core in this
+    # tier these are NOT routectl's -- they are conventions every project
+    # here uses, which is exactly why they leak: an id pasted from a
+    # decision log or a board reads as harmless prose in a comment. Found
+    # in a tracked comment in this repo (an internal tracking id in a test
+    # header) and, per a fleet scan, in tracked files across most repos,
+    # several of them public.
+    #
+    # MEASURED collision-free, so they need no per-repo tuning: across all
+    # tracked files, `DEC-` followed by letters returns zero (no DECIMAL /
+    # DECODE hit, since the core requires a hyphen THEN digits), and `MEE-`
+    # followed by letters returns zero.
+    #
+    # The digit count is BOUNDED at 3, which is not cosmetic. An unbounded
+    # `DEC-[0-9]+` matches the first three digits of `DEC-2024`, so a
+    # legitimate date-shaped token would be refused as an internal id --
+    # verified as a real false positive before this bound was added, using
+    # `DEC-2024 archive format support` as the fixture. Real ids are
+    # three digits today and a fourth would be a numbering change worth
+    # noticing here rather than absorbing silently.
+    'DEC-[0-9]{1,3}'
+    'MEE-[0-9]{1,3}'
     'R2-[A-Za-z0-9][A-Za-z0-9_-]*'
     'RV-[0-9]+'
     'T-(BREAKER|GATE|CLONE|DENY|ALIAS|ZERO|SSRF)'
