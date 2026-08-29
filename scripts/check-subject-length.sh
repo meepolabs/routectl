@@ -23,11 +23,16 @@ set -euo pipefail
 # ambiguity in the prose. The error message below states this bound
 # explicitly so the enforcement is never itself ambiguous.
 #
-# Overridable via the environment so a repo that wants a different bound
-# changes a value rather than editing this file. A magic number in a
-# shared script gets edited in place by whoever disagrees with it, which
-# turns a config difference into a fork.
-readonly SUBJECT_LIMIT="${SUBJECT_LENGTH_LIMIT:-70}"
+# DELIBERATELY A CONSTANT, NOT AN ENVIRONMENT OVERRIDE. An override is a
+# bypass that leaves no diff: anyone -- a person in a hurry or an agent
+# working autonomously -- sets it to 200 in the shell that runs the commit
+# and the bound is gone, with nothing in the tree to review. A constant
+# makes loosening the rule a tracked edit that shows up in a diff and gets
+# read like any other change. That is the whole value of the gate, so it
+# does not get a runtime escape hatch. A repo wanting a different bound
+# edits this line.
+readonly SUBJECT_LIMIT=70
+
 
 
 usage() {
