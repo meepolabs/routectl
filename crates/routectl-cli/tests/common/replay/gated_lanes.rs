@@ -240,8 +240,7 @@ mod tests {
         assert_eq!(lanes, vec!["bedrock"]);
     }
 
-    /// The committed list lives where the reader looks for it, whatever
-    /// its current contents (empty until the driver task populates it).
+    /// The committed list lives where the reader looks for it.
     #[test]
     fn committed_lane_list_path_is_a_sibling_of_the_fixture_roots() {
         let path = gated_lanes_path();
@@ -253,18 +252,16 @@ mod tests {
         );
     }
 
-    /// Pins the COMMITTED file's actual parse outcome: it is
-    /// comment-only, so reading it fails closed today. Deliberately
-    /// self-invalidating -- the commit that populates the list turns this
-    /// red, and flipping it to assert the populated set is exactly the
-    /// review moment that decision deserves.
+    /// Pins the COMMITTED file's parse outcome as an EXACT set, not a
+    /// membership check: a `contains` assertion would let a lane be added
+    /// to the list silently, and the whole risk of this file is an entry
+    /// no committed fixture backs. Asserting the full vector makes every
+    /// future lane addition turn this test red, which is the review
+    /// moment each entry deserves.
     #[test]
-    fn the_committed_lane_list_is_not_yet_populated_and_so_fails_closed() {
-        let err = read_gated_lanes().unwrap_err();
+    fn the_committed_lane_list_names_exactly_the_lanes_committed_fixtures_back() {
+        let lanes = read_gated_lanes().expect("the committed lane list must parse");
 
-        assert!(
-            matches!(err, GatedLaneError::NoLanesListed { .. }),
-            "expected the committed list to be empty and fail closed, got {err:?}",
-        );
+        assert_eq!(lanes, vec!["anthropic-api".to_string()]);
     }
 }

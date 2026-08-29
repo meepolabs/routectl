@@ -891,14 +891,26 @@ mod tests {
         }
     }
 
-    /// A body carrying all three matcher-visible transforms plus a lifted
-    /// system turn, i.e. the shape the anthropic lane actually produces.
-    /// Every exception on the lane is exercised by this one pair.
-    fn all_four_transforms(name: &str) -> Fixture {
+    /// A body carrying every matcher-visible transform plus both
+    /// length-changing ones. Every exception on the lane is exercised by
+    /// this one pair.
+    ///
+    /// It is a COMPOSITE of the two credential surfaces rather than a
+    /// portrait of either: the added `temperature` is the thinking clamp
+    /// (non-cloak) while the dropped `top_p` is the OAuth seat strip
+    /// (cloak), and no single real request produces both. That is
+    /// deliberate -- this fixture exists to reach every entry in one walk,
+    /// which is what makes the zero-match rule's own tests falsifiable.
+    fn all_transforms(name: &str) -> Fixture {
         let ingress = json!({
             "model": "claude-opus-4-8[1m]",
             "max_tokens": 1024,
+            "top_p": 0.9,
             "thinking": {"type": "disabled"},
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
+                {"type": "text", "text": "identity line"},
+            ],
             "messages": [
                 {"role": "user", "content": "first turn"},
                 {"role": "system", "content": "lifted out of the array"},
@@ -909,6 +921,14 @@ mod tests {
             "model": "claude-opus-4-8",
             "max_tokens": 1024,
             "temperature": 1.0,
+            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            "system": [
+                {
+                    "type": "text",
+                    "text": "identity line",
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                },
+            ],
             "messages": [
                 {"role": "user", "content": "first turn"},
                 {"role": "assistant", "content": "second turn"},
@@ -945,7 +965,7 @@ mod tests {
         // POSITIVE CONTROL FIRST: the explained pair really does pass, so
         // the failure below is caused by the added divergence and not by
         // the fixture shape being unadjudicable.
-        let clean = vec![all_four_transforms("explained")];
+        let clean = vec![all_transforms("explained")];
 
         let passing = run(&clean);
 
@@ -955,9 +975,9 @@ mod tests {
 
         // Same fixture with ONE unexplainable change: the wire dropped
         // half the token budget, which no exception claims.
-        let mut lossy = all_four_transforms("unexplained");
+        let mut lossy = all_transforms("unexplained");
         lossy.outgoing_request["max_tokens"] = json!(512);
-        let corpus = vec![all_four_transforms("explained"), lossy];
+        let corpus = vec![all_transforms("explained"), lossy];
 
         let failing = run(&corpus);
 
@@ -978,7 +998,7 @@ mod tests {
     #[test]
     fn failure_text_reports_paths_and_kinds_without_echoing_content() {
         let secret = "synthetic-prose-that-must-not-be-echoed";
-        let mut lossy = all_four_transforms("content-bearing");
+        let mut lossy = all_transforms("content-bearing");
         lossy.ingress_request["messages"][0]["content"] = json!(secret);
         let corpus = vec![lossy];
 
@@ -1000,7 +1020,7 @@ mod tests {
 
     #[test]
     fn the_normalizer_runs_before_the_diff_so_a_middle_removal_reconciles() {
-        let f = all_four_transforms("normalized");
+        let f = all_transforms("normalized");
 
         // POSITIVE CONTROL: diffed RAW, the middle removal shifts every
         // later element and the pair does not reconcile.
@@ -1125,8 +1145,8 @@ mod tests {
     }
 
     /// End to end: a populated anthropic lane whose fixture exercises only
-    /// the temperature clamp leaves the other three entries at zero, and
-    /// the run FAILS naming them.
+    /// the temperature clamp leaves every other entry at zero, and the run
+    /// FAILS naming them.
     #[test]
     fn a_corpus_that_exercises_only_one_exception_fails_on_the_rest() {
         let partial = fixture(
@@ -1149,6 +1169,9 @@ mod tests {
             "system-turn-lift",
             "model-alias-suffix-resolved",
             "disabled-thinking-dropped",
+            "billing-system-block-stripped",
+            "auto-cache-breakpoint-injected",
+            "oauth-sampling-stripped",
         ] {
             assert!(
                 partial_run
@@ -1160,10 +1183,10 @@ mod tests {
             );
         }
 
-        // POSITIVE CONTROL: the pair that exercises all four passes, so
+        // POSITIVE CONTROL: the pair that exercises every entry passes, so
         // the failure above is the zero-match rule firing and not this
         // corpus being unadjudicable.
-        let full = run(&[all_four_transforms("all-four")]);
+        let full = run(&[all_transforms("every-transform")]);
         assert_eq!(full.verdict(), Verdict::Pass, "{:?}", full.failures);
     }
 
@@ -1171,7 +1194,7 @@ mod tests {
 
     #[test]
     fn two_sequential_walks_report_their_own_hits_rather_than_a_running_total() {
-        let corpus = vec![all_four_transforms("first")];
+        let corpus = vec![all_transforms("first")];
 
         let first = run(&corpus);
         let second = run(&corpus);
@@ -1195,7 +1218,7 @@ mod tests {
         // POSITIVE CONTROL: the real vocabularies resolve, so the two
         // rejections below are boundaries and not a broken resolver.
         assert_eq!(
-            run(&[all_four_transforms("resolvable")]).verdict(),
+            run(&[all_transforms("resolvable")]).verdict(),
             Verdict::Pass,
         );
 
@@ -1283,7 +1306,7 @@ mod tests {
     #[test]
     fn a_gated_lane_with_zero_asserted_fixtures_fails_while_a_covered_one_passes() {
         let gated = GatedLanes::Listed(vec!["anthropic-api".to_string()]);
-        let covered = vec![all_four_transforms("covered")];
+        let covered = vec![all_transforms("covered")];
 
         // POSITIVE CONTROL: with real coverage the same gated lane passes.
         let ok = adjudicate(&[gated_slice(&covered)], &gated, &[]);
@@ -1309,7 +1332,7 @@ mod tests {
     fn any_skip_on_a_gated_lane_fails() {
         let gated = GatedLanes::Listed(vec!["anthropic-api".to_string()]);
         let corpus = vec![
-            all_four_transforms("asserted"),
+            all_transforms("asserted"),
             fixture(
                 "unpinned",
                 "anthropic",
@@ -1337,7 +1360,7 @@ mod tests {
     #[test]
     fn a_non_gateable_slice_is_never_gated_even_when_its_lane_is_listed() {
         let gated = GatedLanes::Listed(vec!["anthropic-api".to_string()]);
-        let corpus = vec![all_four_transforms("live-box")];
+        let corpus = vec![all_transforms("live-box")];
 
         let report_only = adjudicate(&[slice(&corpus)], &gated, &[]);
 
@@ -1394,11 +1417,16 @@ mod tests {
         ));
     }
 
+    /// The committed list resolves to a LISTED set, not to
+    /// [`GatedLanes::None`] -- the harness actually gates today. Exact,
+    /// like the reader-side assertion it mirrors, so a lane addition is a
+    /// review moment on both sides.
     #[test]
-    fn the_committed_gated_list_currently_names_no_lane() {
-        // Self-invalidating on purpose: the commit that populates the list
-        // turns this red, which is the review moment that change deserves.
-        assert_eq!(resolve_gated_lanes().unwrap(), GatedLanes::None);
+    fn the_committed_gated_list_resolves_to_exactly_the_gated_lanes() {
+        assert_eq!(
+            resolve_gated_lanes().unwrap(),
+            GatedLanes::Listed(vec!["anthropic-api".to_string()]),
+        );
     }
 
     // ---------- the translation baseline ----------
@@ -1579,12 +1607,12 @@ mod tests {
         );
 
         // POSITIVE CONTROL: one asserted fixture is enough to clear it.
-        assert_eq!(run(&[all_four_transforms("one")]).verdict(), Verdict::Pass);
+        assert_eq!(run(&[all_transforms("one")]).verdict(), Verdict::Pass);
     }
 
     #[test]
     fn unloadable_corpus_entries_degrade_the_run() {
-        let fixtures = vec![all_four_transforms("loaded")];
+        let fixtures = vec![all_transforms("loaded")];
 
         let degraded = adjudicate(
             &[CorpusSlice {
@@ -1606,7 +1634,7 @@ mod tests {
 
     #[test]
     fn the_report_ends_with_a_three_valued_verdict_line_and_one_line_per_lane() {
-        let lines = run(&[all_four_transforms("reported")]).report_lines();
+        let lines = run(&[all_transforms("reported")]).report_lines();
 
         assert_eq!(
             lines
