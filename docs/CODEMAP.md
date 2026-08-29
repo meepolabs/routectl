@@ -1,7 +1,8 @@
 # Codemap
 
-File-tree map of every Rust source file under `crates/`. Use this when
-you know the kind of code you're looking for ("eventstream decoding",
+File-tree map of every Rust source file under `crates/`, plus the
+`scripts/` shell surfaces listed in the last section. Use this when you
+know the kind of code you're looking for ("eventstream decoding",
 "Anthropic content-block translation", "SigV4 signing") but not the
 file path. For module-level architecture and dataflow, see
 [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -5582,6 +5583,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   against representative FILE paths because that is what gitleaks evaluates,
   with a positive control that the same matcher fires on the allowlisted
   live-capture root
+- `tests/wire_pattern_baseline.rs` -- single-fixture assertion that the
+  `plain-turn-01` driver case exhibits the baseline wire shape its `meta.json`
+  claims, plus falsifying controls over the predicate; deleted when the general
+  wire-pattern check lands
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor
@@ -5672,3 +5677,33 @@ Dev-dependency crate: shared test doubles and harnesses every other crate's
   request fixtures for the perf benches: the canonical `ChatRequest` plus raw
   wire bytes in both ingress dialects, seeded pseudo-random so two runs are
   byte-identical
+
+## scripts/ -- the capture container path and fixture promotion
+
+Shell, not Rust, and scoped: this section covers ONLY the container way to
+run a capture, the shared `--out` confinement helper, and the promotion
+step into the committed corpus. The rest of `scripts/` (the host capture
+rig, the scrub gate, the repo-hygiene checks) is not mapped here -- reach
+it through [DEVELOPMENT.md](DEVELOPMENT.md). Shell self-tests ARE listed
+because no cargo target runs them, so nothing else names their paths.
+
+- `container/Dockerfile` -- the capture-cell image: a digest-pinned base, a
+  client installer, and the runtime deps the shipped drivers invoke
+- `container/build.sh` -- local build of that image (`--version`, `--tag`)
+- `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
+  image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` plus a
+  verbatim `--` passthrough of the runner's own argv
+- `container/run_capture.test.sh` -- self-test for that wrapper: its
+  per-code argument refusals plus an accept leg against a stub binary, stub
+  seat, and stub driver
+- `container/image_scan.test.sh` -- per-layer credential scan of the image,
+  driven by the repo's own scrub gate, with a planted positive control
+- `container/isolation.test.sh` -- default-bridge network probe of the image;
+  paired negative and control legs through one probe function
+- `drivers/lib/confine.sh` -- sourced path-confinement helper
+  (`abspath_lexical`, `abspath_physical`, `confine_out_under`); the one copy of
+  the resolution pair and containment test every script taking a
+  caller-supplied output directory uses
+- `promote_fixture.sh` -- promotion of one captured fixture from a scratch
+  root into the committed driver corpus (`--from`, `--scratch-root`, `--to`)
+- `promote_fixture.test.sh` -- self-test for the promotion script
