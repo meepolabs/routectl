@@ -88,6 +88,24 @@ short_subject_long_body="fix: short subject
 $(printf 'a%.0s' $(seq 1 200))"
 assert_pass "short subject with a long body line" "$short_subject_long_body"
 
+# The bound is overridable, and the override is asserted in BOTH
+# directions on ONE fixture. A single direction would pass against a
+# script that ignored the variable entirely: a 50-char subject accepted
+# under a limit of 40 proves nothing on its own unless the same subject
+# is also seen to fail there.
+fifty="$(printf 'a%.0s' $(seq 1 50))"
+assert_pass "50-char subject under the default bound" "$fifty"
+(
+    export SUBJECT_LENGTH_LIMIT=40
+    assert_reject "the same subject rejected when the bound is lowered" "$fifty"
+    exit "$fails"
+) || fails=$((fails + $?))
+(
+    export SUBJECT_LENGTH_LIMIT=80
+    assert_pass "the same subject accepted again when the bound is raised" "$fifty"
+    exit "$fails"
+) || fails=$((fails + $?))
+
 if [[ "$fails" -ne 0 ]]; then
     echo "check-subject-length.test.sh: $fails assertion(s) failed" >&2
     exit 1

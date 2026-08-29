@@ -22,7 +22,13 @@ set -euo pipefail
 # a subject sitting exactly at the boundary is not punished for an
 # ambiguity in the prose. The error message below states this bound
 # explicitly so the enforcement is never itself ambiguous.
-readonly SUBJECT_LIMIT=70
+#
+# Overridable via the environment so a repo that wants a different bound
+# changes a value rather than editing this file. A magic number in a
+# shared script gets edited in place by whoever disagrees with it, which
+# turns a config difference into a fork.
+readonly SUBJECT_LIMIT="${SUBJECT_LENGTH_LIMIT:-70}"
+
 
 usage() {
     echo "usage: $0 COMMIT_MSG_FILE" >&2
