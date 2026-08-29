@@ -17,6 +17,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# Cancel redundant runs on the same branch. Keyed on event_name too, so a
+# push never cancels the weekly full-history scan (and vice versa) -- they
+# scan different things and the cron is the only one that sees history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scan:
     name: Scan for secrets
