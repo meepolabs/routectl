@@ -45,9 +45,8 @@ pub fn local_root() -> PathBuf {
 /// drivers. Canonical, and the ONLY root eligible for gating -- a
 /// driver-generated body contains nothing personal by construction.
 ///
-/// Gitignored in one line for now so the committability question stays
-/// open; removing that line is the whole change when it is answered.
-/// Which of its lanes a consumer may gate on comes from
+/// The corpus under this root is COMMITTED. Which of its lanes a
+/// consumer may gate on still comes from
 /// [`super::gated_lanes`], not from mere presence under this root.
 pub fn driver_root() -> PathBuf {
     fixtures_dir().join("driver")

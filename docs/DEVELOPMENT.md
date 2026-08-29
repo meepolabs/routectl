@@ -579,9 +579,8 @@ they are not interchangeable:
 Unlike the live-box `captured/` corpus, a driver fixture is hermetic by
 construction -- no real prompts, a synthetic git identity, an empty HOME --
 which is what makes it eligible for review and for gating in the first
-place. Check `git status` after a promotion: whether the corpus root is
-tracked yet is decided in `.gitignore`, and that is the one place to read
-it from.
+place. Check `git status` after a promotion: the corpus is committed, so a
+promoted fixture shows up as an addition staged for review.
 
 The runner keys a landing on `(lane, case_id)`, so a rerun of a case
 replaces that case's fixture wholesale. With the corpus as the default,
