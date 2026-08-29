@@ -11,21 +11,25 @@
 # Install (once per clone; see scripts/bootstrap.sh):
 #   pre-commit install --install-hooks
 #
-# `cargo test` is deliberately absent: CI runs the full suite, and a
-# multi-minute release suite on every commit is what drives people to
-# bypass the gate wholesale, taking the fast legs with it.
+# `cargo test` is deliberately absent FROM THE COMMIT STAGE: it was 275 of
+# 305 seconds, and a multi-minute release suite on every commit is what
+# drives people to bypass the gate wholesale, taking the fast legs with it.
+# It runs at the PRE-PUSH stage instead -- once per push rather than once per
+# commit, which is the same protection at a fraction of the cost.
 #
 # To skip one hook for one commit: SKIP=<hook-id> git commit ...
 
 minimum_pre_commit_version: '3.0.0'
 
-# `pre-commit install` installs ONLY the pre-commit stage by default. Both
-# stages are listed here so the commit-msg gates below cannot be silently
-# left uninstalled -- a check that exists in the config but in no installed
-# hook is worse than no check, because it reads as covered.
+# `pre-commit install` installs ONLY the pre-commit stage by default. All
+# three stages are listed here so the commit-msg and pre-push gates below
+# cannot be silently left uninstalled -- a check that exists in the config
+# but in no installed hook is worse than no check, because it reads as
+# covered.
 default_install_hook_types:
   - pre-commit
   - commit-msg
+  - pre-push
 
 # A hook that names no stage runs in EVERY installed stage, so without this
 # the whole cargo chain below would run a second time when the commit-msg
@@ -150,3 +154,38 @@ repos:
         entry: bash scripts/check-subject-length.sh
         language: system
         stages: [commit-msg]
+
+      # pre-push stage: the workspace test suite, run ONCE PER PUSH rather
+      # than once per commit. That is the whole reason this tier exists --
+      # the same protection against pushing a broken branch, at a fraction
+      # of the cost. A recent stretch of 27 unpushed commits would have run
+      # this once instead of roughly fifteen times.
+      #
+      # A check belongs at the earliest stage where it is cheap and the
+      # latest stage where it is authoritative. The secret scan above is the
+      # clearest case for the commit stage and must not move here: catching a
+      # secret after it is pushed is already too late, because it is in
+      # history and needs rotating.
+      #
+      # WHAT THIS DOES NOT DO, stated so nobody reads it as a stronger
+      # guarantee than it is: it does not prevent a non-bisectable
+      # INDIVIDUAL commit. A mid-branch commit can be broken while the branch
+      # tip is green, because this runs against the tip. The hand-rolled
+      # predecessor did not close that either -- it built the working tree,
+      # not the committed prefix -- so this is not a regression, but it is a
+      # real gap and no stage here closes it.
+      #
+      # The conservation suite is deliberately NOT run here. It is a known
+      # intermittent (the shared test module compiles into 21 test binaries
+      # that run in parallel, and its process-global counters race), which
+      # blocked roughly one commit in two while it was a commit-stage leg.
+      # A flaky check on a path where a human is waiting costs more than it
+      # catches; CI runs it serially with nobody blocked.
+      - id: cargo-test-workspace
+        name: cargo test --workspace --release (pre-push)
+        entry: cargo test --workspace --release -- --skip egress_replay_all --skip ingress_replay_all
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+

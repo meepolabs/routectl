@@ -313,3 +313,54 @@ jobs:
       # preconditions, and both connection modes reaching a landed fixture.
       - name: interaction set and driver self-test
         run: bash scripts/drivers.test.sh
+
+  public-api:
+    name: public-api baseline
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The ONLY place this check runs unconditionally. Locally it is a
+      # commit-gate leg that blocks where cargo-public-api and the pinned
+      # nightly happen to be installed and warns where they are not -- so a
+      # surface change authored on a machine without that toolchain reached
+      # the branch with nothing catching it. Needing a pinned nightly is
+      # exactly why it belongs here: CI pays that bootstrap once and
+      # reproducibly instead of every contributor paying it or silently
+      # skipping.
+      #
+      # Both pins are READ from where they already live rather than
+      # duplicated -- the nightly out of the script that selects it, the
+      # tool version out of the availability probe's own install hint. A
+      # second copy here would drift from the local leg and the two would
+      # disagree about what the surface even is.
+      - name: read the pinned toolchain and tool version
+        id: pins
+        run: |
+          set -euo pipefail
+          nightly="$(grep -oE '^PUBLIC_API_NIGHTLY=.*' scripts/public-api.sh | cut -d= -f2)"
+          version="$(grep -oE 'cargo-public-api --version [0-9]+\.[0-9]+\.[0-9]+' \
+            scripts/public-api-if-available.sh | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          # Fail closed: an empty pin would silently install a floating
+          # nightly or the latest tool, and the surface listing is only
+          # reproducible because both are fixed.
+          [ -n "$nightly" ] || { echo "::error::could not read PUBLIC_API_NIGHTLY" >&2; exit 1; }
+          [ -n "$version" ] || { echo "::error::could not read the cargo-public-api version" >&2; exit 1; }
+          echo "nightly=$nightly" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "public-api: nightly=$nightly cargo-public-api=$version"
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ steps.pins.outputs.nightly }}
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.7.5
+
+      # A non-zero exit means a baseline is out of date with the live
+      # surface -- someone changed the public API without regenerating it.
+      # That is the finding, not a wiring defect: regenerate the touched
+      # baseline in the same commit as the change, per public-api/POLICY.md.
+      - name: check public-API baselines
+        run: |
+          cargo install cargo-public-api --locked --version "${{ steps.pins.outputs.version }}"
+          bash scripts/public-api.sh --check all

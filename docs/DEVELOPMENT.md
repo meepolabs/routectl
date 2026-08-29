@@ -80,10 +80,16 @@ per clone:
 bash scripts/bootstrap.sh
 ```
 
-That installs both the `pre-commit` and `commit-msg` stages and
+That installs the `pre-commit`, `commit-msg` and `pre-push` stages and
 pre-builds each hook's environment. Installing from a linked worktree
 writes the clone's shared hooks directory, so one run covers every
-worktree.
+worktree. Re-run it after any change to the stage list, since a stage
+added to the config is not installed until something installs it.
+
+A clone that previously used the retired hand-rolled hooks will also
+carry `.git/hooks/*.legacy` files: pre-commit preserves whatever hook it
+displaced. They point at scripts that no longer exist and nothing
+invokes them, so they are inert -- delete them or ignore them.
 
 The full detail of every leg -- exact command, flags, and skip/fail
 conditions -- lives in the config itself, each leg named as it runs;
@@ -94,16 +100,35 @@ scan (its `rev` pins the binary, in lockstep with `GITLEAKS_VERSION` in
 log-display scan (flags `%`-rendered wire data in tracing fields),
 `cargo fmt --check`, a separate leg that runs rustfmt on `include!`d
 fragments `cargo fmt` never opens, `cargo clippy`, a lean
-providers-only `cargo check`, a local-only public-api-baseline check
-that skips with a warning instead of blocking when `cargo-public-api`
-or its pinned nightly isn't installed, and `cargo doc` with rustdoc
+providers-only `cargo check`, a public-api-baseline check that skips
+with a warning instead of blocking when `cargo-public-api` or its
+pinned nightly isn't installed (CI runs the same check
+unconditionally, so the local leg is an early warning rather than the
+guarantee), and `cargo doc` with rustdoc
 lints denied. The `commit-msg` stage applies the same identifier scan to
 the commit message, plus a subject-line length check.
 
-`cargo test` is deliberately not a leg: CI runs the full suite, and a
-multi-minute release suite on every commit is what drives people to
-bypass the gate wholesale, taking the fast legs with it. Run the
-verification gate above before pushing.
+`cargo test` is deliberately not a COMMIT-stage leg: it was 275 of the
+305 seconds a commit used to take, and a multi-minute release suite on
+every commit is what drives people to bypass the gate wholesale, taking
+the fast legs with it. It runs at the `pre-push` stage instead, once
+per push rather than once per commit -- the same protection against
+pushing a broken branch, at a fraction of the cost.
+
+The three stages divide by a single rule: a check belongs at the
+earliest stage where it is cheap and the latest stage where it is
+authoritative. The secret scan is the clearest case for the commit
+stage and stays there, because catching a secret after it is pushed is
+already too late -- it is in history and needs rotating. The test suite
+is authoritative about a branch, not about one commit, so it sits at
+pre-push. Everything with no local counterpart -- the advisory and
+licence scans, the public-API baseline -- is authoritative in CI.
+
+One thing the pre-push stage does NOT do: it does not prevent a
+non-bisectable individual commit. It runs against the branch tip, so a
+mid-branch commit can be broken while the tip is green. Nothing here
+closes that gap.
+
 
 Every leg runs against the STAGED tree, not the working tree --
 pre-commit stashes unstaged changes for the duration and restores them

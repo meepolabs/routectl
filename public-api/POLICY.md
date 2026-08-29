@@ -10,11 +10,17 @@ An **informational change detector** for the crates' public API. It makes
 every surface change a visible, reviewable artifact in the same diff that
 causes it.
 
-It is **NOT a PR-blocking gate** and does not fail CI. Locally it is a
-commit-gate leg, but a conditional one: it blocks only where
-`cargo-public-api` and its pinned nightly are installed, and warns
-instead of failing where they are not. A surface diff is expected and
-fine whenever the change was intended.
+It **IS a CI gate** and fails the build when a baseline is out of date
+with the live surface. That is the only place it runs unconditionally:
+locally it is a commit-gate leg, but a conditional one, blocking where
+`cargo-public-api` and its pinned nightly are installed and warning
+where they are not -- so the local leg is an early warning and CI is the
+guarantee.
+
+A surface diff is expected and fine whenever the change was intended.
+The gate does not object to the change; it objects to the baseline not
+being regenerated alongside it, which is what keeps every surface change
+a visible artifact in the diff that causes it.
 
 ## Workflow
 
