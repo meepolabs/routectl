@@ -48,7 +48,7 @@ set -euo pipefail
 # symlinked checkout would keep the symlink here while the fragment side
 # resolved through it, and the prefix test could never match -- rejecting every
 # legitimate fragment. `pwd -P` on both sides is also portable, which matters:
-# this leg runs in a contributor pre-commit hook and the project ships macOS
+# this leg runs in a contributor commit gate and the project ships macOS
 # builds, where `realpath -m` is not available (BSD realpath lacks `-m`).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -90,7 +90,7 @@ fi
 cd "$REPO_ROOT"
 
 # Before any rustfmt call, and repeated here rather than left to the caller:
-# this leg is invoked standalone as often as it is from the pre-commit hook,
+# this leg is invoked standalone as often as it is from the commit gate,
 # and a system rustfmt shadowing the rustup shim would format-check the
 # fragments against different defaults than `cargo fmt` uses on the modules.
 # The preflight also covers rustfmt's absence, which is why no separate

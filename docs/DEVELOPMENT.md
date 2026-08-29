@@ -21,7 +21,8 @@ cargo test --workspace --features bedrock,test-utils --release
 # The two catalog-codegen tests -- the selectors/snapshot flag weld and
 # the `catalog_baked.rs` drift guard -- are `#[cfg(feature =
 # "gen-catalog")]`, so they compile out of every command above. This leg
-# is what runs them; it is in both the pre-commit hook and CI.
+# is what runs them; CI runs it too. It is NOT in the local commit gate,
+# which carries no test legs.
 cargo test -p routectl-router --features gen-catalog --lib
 
 # Live matrix against real providers. Each provider's tests skip
@@ -47,7 +48,7 @@ cargo test -p routectl-cli --features live-integration --release \
 # and Cargo feature unification then re-enables bedrock (and the AWS
 # SDK) for the whole graph. The routectl CLI itself declares no
 # provider-gating features -- it ships every provider by design.
-# This providers-scoped check is what the pre-commit hook runs.
+# This providers-scoped check is what the commit gate runs.
 cargo check -p routectl-providers --no-default-features \
   --features openai-compat,anthropic-api
 
@@ -69,36 +70,46 @@ commands above.
 The live matrix is slow (~30s) and costs cents per run. Use it as a
 final gate, not a tight inner loop.
 
-## Git hooks (one-time setup)
+## Commit gate (one-time setup)
 
-The repo ships its hooks in `tools/git-hooks/`. Install them once per
-clone:
+The local commit gate is a [pre-commit](https://pre-commit.com) config,
+[`.pre-commit-config.yaml`](../.pre-commit-config.yaml). Install it once
+per clone:
 
 ```bash
-bash tools/git-hooks/install.sh
+bash scripts/bootstrap.sh
 ```
 
-This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
-full detail of every pre-commit leg -- exact commands, flags, and
-skip/fail conditions -- lives in
-[`tools/git-hooks/pre-commit`](../tools/git-hooks/pre-commit) itself,
-each one named by its own `echo` as the hook runs; treat the list below
-as a same-order summary, not a substitute for reading the script. In
-order: a toolchain preflight, the gitleaks staged-secret scan, an
-internal-identifier scan, a log-display scan (flags `%`-rendered wire
-data in tracing fields), `cargo fmt --check`, a separate leg that runs
-rustfmt on `include!`d fragments `cargo fmt` never opens, `cargo
-clippy`, a lean providers-only `cargo check`, a local-only
-public-api-baseline check that skips with a warning instead of blocking
-when `cargo-public-api` or its pinned nightly isn't installed, `cargo
-doc` with rustdoc lints denied, the `--workspace` test suite CI also
-runs (except the two replay suites, which need a contributor's local
-fixture corpus and so only run unfiltered in CI), and a `gen-catalog`-
-gated router-test leg no other leg compiles. The `commit-msg` hook
-applies the same identifier scan to the commit message, plus a
-subject-line length check. Set `ROUTECTL_SKIP_PRECOMMIT=1` to bypass
-the pre-commit gate while iterating; CI enforces the same rules
-fail-closed regardless.
+That installs both the `pre-commit` and `commit-msg` stages and
+pre-builds each hook's environment. Installing from a linked worktree
+writes the clone's shared hooks directory, so one run covers every
+worktree.
+
+The full detail of every leg -- exact command, flags, and skip/fail
+conditions -- lives in the config itself, each leg named as it runs;
+treat the list below as a same-order summary, not a substitute for
+reading it. In order: a toolchain preflight, the gitleaks staged-secret
+scan (its `rev` pins the binary, in lockstep with `GITLEAKS_VERSION` in
+`.github/workflows/gitleaks.yml`), an internal-identifier scan, a
+log-display scan (flags `%`-rendered wire data in tracing fields),
+`cargo fmt --check`, a separate leg that runs rustfmt on `include!`d
+fragments `cargo fmt` never opens, `cargo clippy`, a lean
+providers-only `cargo check`, a local-only public-api-baseline check
+that skips with a warning instead of blocking when `cargo-public-api`
+or its pinned nightly isn't installed, and `cargo doc` with rustdoc
+lints denied. The `commit-msg` stage applies the same identifier scan to
+the commit message, plus a subject-line length check.
+
+`cargo test` is deliberately not a leg: CI runs the full suite, and a
+multi-minute release suite on every commit is what drives people to
+bypass the gate wholesale, taking the fast legs with it. Run the
+verification gate above before pushing.
+
+Every leg runs against the STAGED tree, not the working tree --
+pre-commit stashes unstaged changes for the duration and restores them
+afterwards. A partially staged commit is therefore checked on exactly
+the code it contains. To skip one leg for one commit:
+`SKIP=<hook-id> git commit`; the ids are in the config.
 
 Every gate leg invokes `cargo` and `rustfmt` bare and relies on the
 rustup shim to honor the exact-patch pin in `rust-toolchain.toml`.
@@ -109,7 +120,7 @@ that `rustfmt` comes from the same toolchain build, so an exported
 ahead of the shim on `PATH` fails the hook instead of silently changing
 which compiler the gates cleared against. It is a version check, not a
 rustup check -- a toolchain that IS the pinned version passes however it
-was installed. It runs from the pre-commit hook and from
+was installed. It runs as the commit gate's first leg and from
 `scripts/fmt-fragments.sh` (which is also invoked standalone); CI's rust
 jobs select their toolchain through the setup action and so do not need
 it, but CI does run its self-test:
@@ -124,7 +135,7 @@ bash scripts/assert-toolchain.test.sh
 repo uses them to keep large test modules under the file-size ceiling.
 `scripts/fmt-fragments.sh` closes that hole: it resolves every
 `include!` call site and runs `rustfmt --edition 2024 --check` on each
-target. It runs as its own pre-commit and CI step, and takes no
+target. It runs as its own commit-gate leg and CI step, and takes no
 arguments:
 
 ```bash
@@ -376,8 +387,10 @@ day-to-day capture flow.
    only see the asserted/skipped/failed counts when something blows
    up.
 
-   Both of these legs are `--skip`ped by the pre-commit hook, which
-   states why at the call site. They drive real routectl code, so a
+   Both of these legs are known-red against a fixture corpus the
+   replay path cannot yet fully reproduce -- see
+   [REPLAY-FIXTURES.md](REPLAY-FIXTURES.md) for the per-class
+   breakdown. They drive real routectl code, so a
    fixture the replay path cannot yet reproduce (an unresolved model
    alias, a stale capture predating an invariant) fails rather than
    skips. The leg that adjudicates the whole corpus today is

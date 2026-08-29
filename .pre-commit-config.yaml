@@ -1,0 +1,152 @@
+# Local commit gate. Mirrors .github/workflows/ci.yml job "fmt + clippy +
+# check", plus two local-only legs CI does not run (public-api baseline
+# drift, rustdoc lints).
+#
+# WHY pre-commit rather than a hand-rolled hook script: pre-commit stashes
+# unstaged changes and runs every hook against the STAGED tree. The
+# hand-rolled predecessor ran cargo against the WORKING tree while the
+# commit carried the index, so a partial stage could pass on code that was
+# never committed -- or fail on code that was never staged.
+#
+# Install (once per clone; see scripts/bootstrap.sh):
+#   pre-commit install --install-hooks
+#
+# `cargo test` is deliberately absent: CI runs the full suite, and a
+# multi-minute release suite on every commit is what drives people to
+# bypass the gate wholesale, taking the fast legs with it.
+#
+# To skip one hook for one commit: SKIP=<hook-id> git commit ...
+
+minimum_pre_commit_version: '3.0.0'
+
+# `pre-commit install` installs ONLY the pre-commit stage by default. Both
+# stages are listed here so the commit-msg gates below cannot be silently
+# left uninstalled -- a check that exists in the config but in no installed
+# hook is worse than no check, because it reads as covered.
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+# A hook that names no stage runs in EVERY installed stage, so without this
+# the whole cargo chain below would run a second time when the commit-msg
+# hook fires. The two commit-msg hooks at the bottom set `stages:`
+# explicitly and so opt out of this default.
+default_stages: [pre-commit]
+
+repos:
+  # Runs BEFORE any cargo or rustfmt invocation: every leg below calls them
+  # bare and trusts the rustup shim to honor rust-toolchain.toml. This proves
+  # that trust held, so a green gate cannot mean "green against some other
+  # toolchain". `fail_fast` is what makes it a preflight rather than just
+  # another finding -- without it the remaining legs would run, and report,
+  # against the toolchain this hook just rejected.
+  - repo: local
+    hooks:
+      - id: toolchain-pin
+        name: toolchain pin preflight
+        entry: bash scripts/assert-toolchain.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+        fail_fast: true
+
+  # Staged secret scan. The rev is what pins the gitleaks BINARY (pre-commit
+  # builds it from this tag), which is the whole point of using the upstream
+  # hook here: an unversioned local gitleaks silently lacks rules the CI
+  # action has, and that bit this repo once -- an old system gitleaks missed a
+  # `jwt` finding the action caught. Keep this rev in lockstep with
+  # GITLEAKS_VERSION in .github/workflows/gitleaks.yml so local and CI scan
+  # with the same ruleset; bump both together.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Every leg below is `always_run` + `pass_filenames: false`. They are
+  # whole-workspace gates, and several read inputs no file filter would
+  # match: the log-display scan consults tools/log-display-allowlist.txt,
+  # the public-api leg diffs against public-api/*.txt, and each cargo leg
+  # can be broken by a Cargo manifest or a lint config rather than by a
+  # `.rs` file. A `types: [rust]` filter would green those commits.
+  - repo: local
+    hooks:
+      - id: internal-ids
+        name: internal-ID scan (staged added lines)
+        entry: bash scripts/check-internal-ids.sh --staged
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: log-display
+        name: log-display scan (% tracing fields on wire-derived values)
+        entry: bash scripts/check-log-display.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      # cargo fmt walks the module tree and so never opens an `include!`d
+      # fragment; without this leg the fmt gate above passes vacuously on
+      # every one of them.
+      - id: fmt-fragments
+        name: rustfmt --check on include!d fragments
+        entry: bash scripts/fmt-fragments.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy --workspace --all-targets --all-features
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: cargo-check-lean-providers
+        name: cargo check (lean providers build)
+        entry: cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      # Local-only leg; CI does not run this. Blocks wherever the tooling is
+      # present and warns (never fails) where it is absent, so a pinned
+      # nightly is not forced onto every contributor machine. The
+      # availability probe lives in the script, not here.
+      - id: public-api-baseline
+        name: cargo-public-api baseline check (skipped when tooling absent)
+        entry: bash scripts/public-api-if-available.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      # Scoped to the PUBLIC doc surface (no --document-private-items): the
+      # private-items pass resolves links that break in the published docs,
+      # so denying against it would green-light exactly the breakage this
+      # gate exists to catch.
+      - id: cargo-doc
+        name: cargo doc (rustdoc lints denied)
+        entry: env "RUSTDOCFLAGS=-D rustdoc::all" cargo doc --workspace --all-features --no-deps
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      # commit-msg stage: both hooks receive the prepared commit-message file
+      # as their sole argument.
+      - id: internal-ids-commit-msg
+        name: internal-ID scan (commit message)
+        entry: bash scripts/check-internal-ids.sh --commit-msg
+        language: system
+        stages: [commit-msg]
+
+      - id: subject-length
+        name: commit subject length
+        entry: bash scripts/check-subject-length.sh
+        language: system
+        stages: [commit-msg]

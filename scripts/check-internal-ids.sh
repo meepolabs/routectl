@@ -4,9 +4,9 @@
 # are meaningful only inside private planning docs; they must never reach
 # a public mirror of this repo.
 #
-# Single source of truth for the patterns -- the pre-commit hook,
-# commit-msg hook, and CI guard all call this script so the rule set
-# lives in exactly one place.
+# Single source of truth for the patterns -- both commit-gate stages
+# (pre-commit and commit-msg) and the CI guard all call this script so the
+# rule set lives in exactly one place.
 #
 # Modes:
 #   --staged            Scan ADDED lines of the staged diff (code path).
