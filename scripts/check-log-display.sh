@@ -136,6 +136,23 @@ if ! command -v rg >/dev/null 2>&1; then
     exit 1
 fi
 
+# PRESENCE IS NOT ENOUGH: every pattern below uses `-P` with lookaround, so a
+# ripgrep built WITHOUT PCRE2 cannot compile any of them. It does not fail
+# loudly -- the scan simply matches nothing and the gate reports clean, which
+# is the exact false all-clear this gate exists to prevent. Measured: the
+# distro package on the CI runner image is such a build, and with it every one
+# of this gate's own reject assertions flipped to "expected CAUGHT but passed"
+# while the scan itself exited 0.
+#
+# So the capability is probed directly rather than inferred from a version:
+# compile one trivial lookbehind and require it to work.
+if ! printf 'x\n' | rg -P '(?<!y)x' >/dev/null 2>&1; then
+    echo "log-display: FAIL ripgrep lacks PCRE2 support (-P); the gate cannot scan" >&2
+    echo "every pattern here uses lookaround, so this build would match NOTHING" >&2
+    echo "and report clean. Install a ripgrep built with PCRE2." >&2
+    exit 1
+fi
+
 missing_paths=""
 for p in "${SEARCH_PATHS[@]}" "${CONFIG_KEY_PATHS[@]}"; do
     if [[ ! -d "$p" ]]; then
