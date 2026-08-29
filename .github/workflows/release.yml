@@ -132,8 +132,18 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      # The action's code is SHA-pinned and the Rust version is passed as an
+      # explicit input, rather than riding a `@<rust-version>` ref. Those
+      # refs are BRANCHES, not tags: the only tag this action publishes is
+      # v1, and each `@1.NN.N` is v1 plus a one-line commit hardcoding that
+      # default. A branch is the weakest ref there is, and this file pins
+      # everything else precisely because refs move -- the v1 tag itself
+      # moved during the audit that produced this change. Passing the
+      # version here also keeps it legible in the workflow instead of
+      # encoded in a ref name.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
+          toolchain: 1.95.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
@@ -224,9 +234,13 @@ jobs:
       # undercuts the provenance attestation this workflow goes on to
       # generate. Bumping the pin is a deliberate one-line change here and
       # in rust-toolchain.toml.
+      #
+      # Action SHA-pinned with the version as an explicit input, per the
+      # reasoning at the validate job's toolchain step.
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
+          toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
