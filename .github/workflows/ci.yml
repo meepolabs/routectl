@@ -199,6 +199,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ripgrep is NOT on the ubuntu-22.04 runner image, and
+      # check-log-display.sh hard-requires it -- it prints
+      # "ripgrep (rg) not found; the gate cannot scan" and exits 1. So this
+      # job failed on a MISSING TOOL rather than on a finding, and had been
+      # red for that reason across multiple pushes while looking like a
+      # real gate failure.
+      #
+      # The script is right to fail closed: a scanner that cannot scan must
+      # never report clean. The defect was CI never providing what it needs.
+      # Installed here rather than made optional, because the alternative --
+      # skipping the scan when rg is absent -- is the false-all-clear this
+      # gate exists to prevent.
+      - name: install ripgrep (required by the log-display gate)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ripgrep
+          rg --version | head -1
+
       - name: compute scan base
         id: range
         run: |
