@@ -175,6 +175,34 @@ pub async fn serve_on_listener_with_overlay(
     listener: TcpListener,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
+    serve_on_listener_with_secrets(config, catalog_overlay, listener, config_path, None).await
+}
+
+/// `serve_on_listener_with_overlay` with the secret resolver INJECTABLE.
+///
+/// `secrets: None` is the production path and behaves exactly as before: a
+/// `CompositeStore` opened from the default location, whose OAuth arm also
+/// drives the credentials half of the file watcher.
+///
+/// `Some(store)` exists for tests that boot a real server to prove something
+/// about CONFIG rather than about credential resolution. Without this seam
+/// such a test silently resolves against the real store under
+/// `$XDG_CONFIG_HOME`, which makes it pass or fail on which seats the machine
+/// running it happens to have logged in -- two migration boot smokes did
+/// exactly that, passing on a developer box and failing in CI with
+/// `credential_unreadable` on every pool member.
+///
+/// An injected store gets NO credentials watcher: the watcher exists to
+/// notice rotation in the routectl-managed store, and a caller supplying its
+/// own resolver is not using that file. Stated here because the difference is
+/// invisible at the call site.
+pub async fn serve_on_listener_with_secrets(
+    config: Arc<Config>,
+    catalog_overlay: Arc<CatalogOverlay>,
+    listener: TcpListener,
+    config_path: Option<PathBuf>,
+    secrets: Option<Arc<dyn SecretStore>>,
+) -> Result<()> {
     // Composite resolver: oauth:// refs flow through OAuthStore (the
     // routectl-managed credentials.json), everything else through
     // MemoryStore. Built ONCE up here so the same `Arc<dyn
@@ -182,9 +210,15 @@ pub async fn serve_on_listener_with_overlay(
     // hot-swapping the Router would otherwise re-construct the
     // OAuthStore (losing its in-memory cache + per-provider
     // single-flight refresh mutexes) on every config change.
-    let composite = CompositeStore::open_default().await?;
-    let oauth_store = composite.oauth_store();
-    let secrets: Arc<dyn SecretStore> = Arc::new(composite);
+    let (secrets, oauth_store) = match secrets {
+        Some(injected) => (injected, None),
+        None => {
+            let composite = CompositeStore::open_default().await?;
+            let oauth_store = composite.oauth_store();
+            let secrets: Arc<dyn SecretStore> = Arc::new(composite);
+            (secrets, oauth_store)
+        }
+    };
 
     let router =
         build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())

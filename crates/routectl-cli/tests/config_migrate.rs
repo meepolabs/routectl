@@ -69,10 +69,25 @@ async fn boot_and_await_health(config: Arc<routectl_router::Config>) -> String {
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
 
+    // The secret store is INJECTED. Booting with the default resolver made
+    // these smokes read the real store under `$XDG_CONFIG_HOME`, so they
+    // passed or failed on which seats the machine happened to have logged
+    // in -- green on a box carrying an `anthropic` seat, and
+    // `credential_unreadable` on every pool member in CI. What is under test
+    // is that a MIGRATED CONFIG BOOTS, never credential resolution, so the
+    // store resolves anything and the boot depends on nothing outside the
+    // test.
+    let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(AnySecret);
     tokio::spawn(async move {
-        routectl_cli::server::serve_on_listener(config, listener, None)
-            .await
-            .expect("server failed to serve");
+        routectl_cli::server::serve_on_listener_with_secrets(
+            config,
+            Arc::new(routectl_router::CatalogOverlay::default()),
+            listener,
+            None,
+            Some(secrets),
+        )
+        .await
+        .expect("server failed to serve");
     });
 
     // Poll generously rather than sleeping a fixed tick, so a slow boot on a
