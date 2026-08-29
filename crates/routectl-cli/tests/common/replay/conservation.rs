@@ -117,7 +117,7 @@ use super::json_diff::{Divergence, DivergenceKind, diff_all};
 use super::lane::{
     INGRESS_IDS, LaneClass, LaneKey, all_exceptions, class_for_dialects,
     egress_lane_from_fixture_kind, exceptions_for_lane, ingress_dialect,
-    normalize_ingress_for_lane, unexplained,
+    normalize_ingress_for_lane, unexplained_for_fixture,
 };
 use super::loader::Fixture;
 
@@ -573,7 +573,7 @@ fn compare_fixture(
         &normalized_ingress,
         CONSERVATION_IGNORE_PATHS,
     );
-    let residual = unexplained(lane_key, &divergences);
+    let residual = unexplained_for_fixture(lane_key, fixture, &divergences);
     let explained = divergences.len() - residual.len();
 
     let (report_only, failing): (Vec<&Divergence>, Vec<&Divergence>) = match class {
@@ -854,6 +854,26 @@ mod tests {
 
     // ---------- synthetic fixtures (never captured content) ----------
 
+    /// The outgoing-header shape of a capture that egressed on routectl's
+    /// own OAuth credential, as it survives the fixture scrub: the `Bearer`
+    /// scheme stays, the token does not. What
+    /// `oauth-sampling-stripped`'s fixture gate reads.
+    fn bearer_outgoing_headers() -> Vec<(String, String)> {
+        vec![
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ("authorization".to_string(), "Bearer [REDACTED]".to_string()),
+        ]
+    }
+
+    /// The outgoing-header shape of an api-key egress: no `authorization`
+    /// at all, so the OAuth-only sampling strip could not have run.
+    fn api_key_outgoing_headers() -> Vec<(String, String)> {
+        vec![
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ("x-api-key".to_string(), "[REDACTED]".to_string()),
+        ]
+    }
+
     /// A fixture pair built from SYNTHESIZED bodies. Realism comes from
     /// the SHAPE -- key names, turn structure, value types -- never from
     /// copied capture content: a captured body carries the operator's real
@@ -901,6 +921,11 @@ mod tests {
     /// (cloak), and no single real request produces both. That is
     /// deliberate -- this fixture exists to reach every entry in one walk,
     /// which is what makes the zero-match rule's own tests falsifiable.
+    ///
+    /// Its outgoing headers carry the `Bearer` scheme, which is what makes
+    /// `oauth-sampling-stripped` eligible: that entry's fixture gate reads
+    /// the captured outgoing credential, and an api-key capture would
+    /// (correctly) leave the dropped `top_p` unexplained.
     fn all_transforms(name: &str) -> Fixture {
         let ingress = json!({
             "model": "claude-opus-4-8[1m]",
@@ -934,7 +959,10 @@ mod tests {
                 {"role": "assistant", "content": "second turn"},
             ],
         });
-        fixture(name, "anthropic", "anthropic", ingress, outgoing)
+        Fixture {
+            outgoing_request_headers: bearer_outgoing_headers(),
+            ..fixture(name, "anthropic", "anthropic", ingress, outgoing)
+        }
     }
 
     fn slice(fixtures: &[Fixture]) -> CorpusSlice<'_> {
@@ -1013,6 +1041,160 @@ mod tests {
         assert!(
             !text.contains(secret),
             "value leaked into failure text: {text}"
+        );
+    }
+
+    // ---------- the per-fixture eligibility gate ----------
+
+    /// The credential gate on `oauth-sampling-stripped`, both directions
+    /// over the SAME body.
+    ///
+    /// The production strip runs only for routectl's own OAuth-bearer
+    /// credential, so an api-key capture that lost `temperature` lost it to
+    /// something else and the divergence must survive adjudication. The
+    /// Bearer control is what proves the rejection is the gate firing and
+    /// not the body being unexplainable.
+    #[test]
+    fn the_sampling_strip_is_eligible_only_for_a_bearer_credential_capture() {
+        let ingress = json!({
+            "model": "m",
+            "temperature": 0.2,
+            "messages": [{"role": "user", "content": "one"}],
+        });
+        let outgoing = json!({"model": "m", "messages": [{"role": "user", "content": "one"}]});
+        let on_api_key = Fixture {
+            outgoing_request_headers: api_key_outgoing_headers(),
+            ..fixture(
+                "api-key-egress",
+                "anthropic",
+                "anthropic",
+                ingress,
+                outgoing,
+            )
+        };
+
+        let api_key_run = run(std::slice::from_ref(&on_api_key));
+
+        assert_eq!(
+            api_key_run.lanes[0].unexplained, 1,
+            "an api-key capture cannot have run the OAuth-only strip: {:?}",
+            api_key_run.failures,
+        );
+        assert!(
+            api_key_run
+                .failures
+                .iter()
+                .any(|f| f.contains("temperature")),
+            "got: {:?}",
+            api_key_run.failures,
+        );
+        assert_eq!(hits(&api_key_run, "oauth-sampling-stripped"), 0);
+
+        // POSITIVE CONTROL: the same bodies behind a Bearer credential ARE
+        // explained, so the assertion above is the gate and not the shape.
+        let on_bearer = Fixture {
+            name: "bearer-egress".to_string(),
+            outgoing_request_headers: bearer_outgoing_headers(),
+            ..on_api_key
+        };
+
+        let bearer_run = run(&[on_bearer]);
+
+        assert_eq!(
+            bearer_run.lanes[0].unexplained, 0,
+            "{:?}",
+            bearer_run.failures
+        );
+        assert_eq!(hits(&bearer_run, "oauth-sampling-stripped"), 1);
+    }
+
+    /// The `Bearer` scheme is matched case-insensitively (RFC 7235) and a
+    /// value that merely CONTAINS the word is not a bearer credential.
+    #[test]
+    fn the_credential_gate_reads_the_scheme_rather_than_the_whole_value() {
+        let ingress = json!({"model": "m", "top_p": 0.9});
+        let outgoing = json!({"model": "m"});
+        let with_authorization = |value: &str| Fixture {
+            outgoing_request_headers: vec![("Authorization".to_string(), value.to_string())],
+            ..fixture(
+                "cased",
+                "anthropic",
+                "anthropic",
+                ingress.clone(),
+                outgoing.clone(),
+            )
+        };
+
+        // Header name and scheme both off-case: still a bearer credential.
+        let cased = run(&[with_authorization("bEaReR [REDACTED]")]);
+        assert_eq!(cased.lanes[0].unexplained, 0, "{:?}", cased.failures);
+
+        // A different scheme whose value happens to mention the word.
+        let basic = run(&[with_authorization("Basic bearer-looking-value")]);
+        assert_eq!(basic.lanes[0].unexplained, 1, "{:?}", basic.failures);
+    }
+
+    /// The cardinality bound on `auto-cache-breakpoint-injected`: placement
+    /// writes at most a front marker plus the top-level one, so a third
+    /// same-shaped addition on ONE fixture stays unexplained.
+    #[test]
+    fn the_cache_entry_explains_at_most_two_markers_per_fixture() {
+        let ingress = json!({"model": "m", "system": [{"type": "text", "text": "s"}]});
+        let marker = json!({"type": "ephemeral", "ttl": "5m"});
+        let two = fixture(
+            "two-markers",
+            "anthropic",
+            "anthropic",
+            ingress,
+            json!({
+                "model": "m",
+                "cache_control": marker,
+                "system": [{"type": "text", "text": "s", "cache_control": marker}],
+            }),
+        );
+
+        // POSITIVE CONTROL: the two production slots are both explained.
+        let within_bound = run(&[two]);
+
+        assert_eq!(
+            within_bound.lanes[0].unexplained, 0,
+            "{:?}",
+            within_bound.failures
+        );
+        assert_eq!(hits(&within_bound, "auto-cache-breakpoint-injected"), 2);
+
+        let three = fixture(
+            "three-markers",
+            "anthropic",
+            "anthropic",
+            json!({
+                "model": "m",
+                "system": [
+                    {"type": "text", "text": "s"},
+                    {"type": "text", "text": "t"},
+                ],
+            }),
+            json!({
+                "model": "m",
+                "cache_control": marker,
+                "system": [
+                    {"type": "text", "text": "s", "cache_control": marker},
+                    {"type": "text", "text": "t", "cache_control": marker},
+                ],
+            }),
+        );
+
+        let over_bound = run(&[three]);
+
+        assert!(
+            over_bound.lanes[0].unexplained > 0,
+            "a third marker exceeds what placement can emit: {:?}",
+            over_bound.failures,
+        );
+        assert_eq!(
+            hits(&over_bound, "auto-cache-breakpoint-injected"),
+            2,
+            "a match past the bound must not inflate the entry's hit count",
         );
     }
 

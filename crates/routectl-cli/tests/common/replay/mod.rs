@@ -69,7 +69,7 @@ pub use lane::{
     ExceptionKind, INGRESS_IDS, LaneClass, LaneError, LaneKey, SymbolError, Transform,
     all_exceptions, class_for_dialects, egress_lane_from_fixture_kind, egress_lane_from_token,
     exceptions_for_lane, ingress_dialect, lane_class, normalize_ingress_for_lane, resolve_egress,
-    resolve_site_symbol, unexplained, workspace_root,
+    resolve_site_symbol, unexplained, unexplained_for_fixture, workspace_root,
 };
 pub use loader::{
     FIXTURE_SCHEMA_VERSION, Fixture, FixtureClient, FixtureMeta, LoadedCorpus, ReplayError,

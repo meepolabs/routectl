@@ -5476,7 +5476,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `diverges_only_in_messages`)
 - `tests/common/replay/lane.rs` -- derived lane class (`lane_class`,
   `resolve_egress`) and the wire-conservation exception table
-  (`all_exceptions`, `unexplained`, `normalize_ingress_for_lane`)
+  (`all_exceptions`, `unexplained`, `unexplained_for_fixture`,
+  `normalize_ingress_for_lane`)
 - `tests/common/replay/conservation.rs` -- the conservation adjudicator:
   compares a fixture's captured `ingress_request.json` against its captured
   `outgoing_request.json` through the lane class and exception table
