@@ -401,17 +401,36 @@ script are the shared contract; the corpus is yours.
 
 The recipe above is the LIVE-BOX mode: a trace drained from your own real
 session, where the rig cannot observe which scenario produced the request,
-which config was in force, or how the client connected. That mode stays
-tolerant of all three being unset, because an empty pin is honest there.
+which config was in force, how the client connected, or which wire shape
+the scenario was meant to exercise. That mode stays tolerant of all four
+being unset, because an empty pin is honest there.
 
 `scripts/capture_fixtures.sh --driver-mode` is the other mode, for a
-hermetic capture where a driver KNOWS all three. It changes five things:
+hermetic capture where a driver KNOWS all four. It changes five things:
 
-- **All three pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
-  `ROUTECTL_FIXTURE_CONFIG_SHA`, and `ROUTECTL_FIXTURE_CONNECTION_MODE`
-  must be set; an unset one aborts the run naming the variable. An empty
-  case id would collapse every case in the lane onto one landing
-  directory and the corpus would quietly overwrite itself.
+- **All four pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
+  `ROUTECTL_FIXTURE_CONFIG_SHA`, `ROUTECTL_FIXTURE_CONNECTION_MODE`, and
+  `ROUTECTL_FIXTURE_WIRE_PATTERN` must be set; an unset one aborts the run
+  naming the variable. An empty case id would collapse every case in the
+  lane onto one landing directory and the corpus would quietly overwrite
+  itself, and an empty wire pattern would land a fixture whose coverage
+  claim nothing downstream can tell from a claim nobody recorded.
+
+  **There is no `--wire-pattern` flag, and looking for one is the wrong
+  move.** The runner DERIVES that pin from the case file, by reading
+  `wire_pattern` out of `scripts/drivers/cases/<case-id>.json` through
+  `scripts/drivers/lib/validate_case.py --field wire_pattern`. A flag
+  would let a caller declare a pattern the case does not claim, which is
+  the coverage lie one layer earlier than the fixture. If you drive the
+  rig directly rather than through `scripts/capture_driver.sh`, you export
+  the variable yourself; if you go through the runner, it is already set
+  for you. Read the value the same way the runner does:
+
+  ```
+  python3 scripts/drivers/lib/validate_case.py --field wire_pattern \
+    scripts/drivers/cases/plain-turn-01.json
+  ```
+
 - **Landing keys on `(lane, case_id)`**, at `<out>/<lane>/<case_id>/`
   rather than `<out>/<request_id>/`, so a rerun of the same case produces
   a DIFF instead of a fresh sibling. The rerun replaces the previous
@@ -452,7 +471,15 @@ scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
   -- scripts/drivers/<driver-script> [args...]
 ```
 
-What each run does, in order:
+Before any daemon boots, the run reads the LANE CONFIG and the CASE FILE.
+The lane config it copies into the run's config root; the case file it reads
+for the wire-pattern pin. Both are fail-closed: a lane with no committed
+config, or a case whose file is missing or declares no valid `wire_pattern`,
+is a usage error (exit 2) rather than a run that boots and lands an unpinned
+fixture. Reading the case file at all is new -- the runner used to treat
+`--case` as an opaque scalar and leave the case file entirely to the drivers.
+
+What each run then does, in order:
 
 1. Builds a throwaway workspace: a fresh `HOME` (empty), a fresh cwd that
    is a git repo with a SYNTHETIC author (`Fixture Driver
@@ -472,13 +499,14 @@ What each run does, in order:
    not proof. A daemon that never comes up aborts the run (exit 3) after
    printing the tail of the trace.
 4. Runs the driver command with cwd in the throwaway repo and the base
-   URL plus all three fixture pins exported. `--help` lists the exact
+   URL plus all four fixture pins exported. `--help` lists the exact
    variable names -- that block is the contract a driver script codes
    against.
 5. Stops the daemon by the pid it captured from its own `$!` (never by
    name, and never under `setsid`, which would capture the wrapper), then
    runs the rig in `--driver-mode` against the trace, landing under
-   `crates/routectl-cli/tests/fixtures/driver/<lane>/<case-id>/`.
+   `<out>/<lane>/<case-id>/`. With no `--out`, that is
+   `.routectl-driver-scratch/<lane>/<case-id>/` at the repo root.
 
 A cleanup trap runs on every exit path, so an interrupted or failed run
 never leaves a daemon holding its port. Exit codes: 2 usage, 3 unhealthy
@@ -498,6 +526,93 @@ question the field exists to answer.
 `scripts/capture_driver.test.sh` covers the runner against a STUB daemon
 (`ROUTECTL_BIN` selects the binary) -- a real boot needs a credential and
 CI has none.
+
+### Where a driver capture lands: scratch, then promotion
+
+A driver fixture lands in a SCRATCH tree by default and reaches the
+reviewed corpus only through a second, deliberate step. Two roots, and
+they are not interchangeable:
+
+| Root | Path | What it is |
+|---|---|---|
+| Scratch (default `--out`) | `.routectl-driver-scratch/` at the repo root | gitignored by definition; nothing here is ever committed |
+| Corpus | `crates/routectl-cli/tests/fixtures/driver/` | the reviewed destination, reachable only through the promote script |
+
+Unlike the live-box `captured/` corpus, a driver fixture is hermetic by
+construction -- no real prompts, a synthetic git identity, an empty HOME --
+which is what makes it eligible for review and for gating in the first
+place. Check `git status` after a promotion: whether the corpus root is
+tracked yet is decided in `.gitignore`, and that is the one place to read
+it from.
+
+The runner keys a landing on `(lane, case_id)`, so a rerun of a case
+replaces that case's fixture wholesale. With the corpus as the default,
+every exploratory rerun would therefore overwrite a reviewed fixture in
+place. The scratch default is what buys you a free rerun: capture, look at
+it, capture again, and nothing tracked has moved.
+
+Two flags govern the destination:
+
+- `--out <dir>` -- where the fixture lands. Defaults to the scratch root
+  above.
+- `--out-root <dir>` -- the confinement root `--out` must live under. It
+  WIDENS what `--out` may name, which is why it is itself restricted to a
+  closed set: the scratch root, or the value of `ROUTECTL_DRIVER_OUT_ROOT`
+  when the run sets it. A root taken on trust would leave `--out` compared
+  against a path the same caller chose, which confines nothing.
+
+Both refusals are usage errors (exit 2) and both happen before a daemon
+boots, so a refused run costs nothing and leaves no directory behind.
+`--out-root` outside the closed set is refused as "not an allowed landing
+root"; an `--out` that resolves outside the root in force is refused for
+containment, including via a symlinked component anywhere along the path.
+The scratch root cannot be assumed present inside a run that mounts this
+repo read-only, which is why the allowed set has an environment seam at
+all rather than being a single repo-relative constant.
+
+The resume marker the rig keeps is scoped to the landing root, so a
+scratch run never suppresses a later corpus recapture of the same case.
+
+**Promotion into the corpus is `scripts/promote_fixture.sh`, never a hand
+`mv`.**
+
+```
+bash scripts/promote_fixture.sh \
+  --from .routectl-driver-scratch/anthropic-api/plain-turn-01 \
+  --scratch-root .routectl-driver-scratch
+```
+
+`--from` and `--scratch-root` are both required; `--scratch-root` exists
+because the scratch tree can sit outside the repo entirely, so there is no
+constant to derive it from, and a root guessed from `--from` would confine
+nothing. `--to` selects the corpus root and defaults to
+`crates/routectl-cli/tests/fixtures/driver`, confined to that default -- it
+can narrow the destination but never leave the corpus. `--from` must name
+a path exactly two components under the scratch root
+(`<scratch-root>/<lane>/<case-id>`), because that pair IS the corpus key.
+
+Two things the script does that a `mv` does not:
+
+- It lands by RENAME-ASIDE-THEN-DELETE. A `mv` of one fixture directory
+  over an existing one MERGES: files the previous capture wrote survive
+  beside the new ones. File presence is part of the fixture schema -- an
+  `upstream_response.json` present means the run was non-stream, absent
+  means it streamed -- so a merged directory is a fixture no single
+  capture ever produced, and every drift signal read off it is read off
+  evidence that does not exist. Promoting instead stages a copy beside the
+  destination, renames the old fixture aside, renames the new one into
+  place, and only then deletes the old: a reader sees the whole old
+  fixture or the whole new one, never a union.
+- It re-runs `scrub-fixture.sh --check` on the STAGED COPY before any
+  rename. The rig already checked at capture time, but a scratch fixture is
+  by design hand-inspectable and hand-editable in between -- that is what
+  scratch is FOR -- so this re-check is the only thing between an edited
+  scratch fixture and the corpus.
+
+Exit codes: 0 promoted, 1 the staged content failed the scrub gate
+(nothing was promoted and the destination is untouched), 2 usage, a
+confinement refusal, a `--from` that is not `<lane>/<case-id>` deep, or a
+scrub gate that could not run at all.
 
 ### The canonical interaction set
 
@@ -537,16 +652,21 @@ client-version read) lives in `scripts/drivers/lib/common.sh`.
 
 ### Running a case
 
+Every command in this section drives a real client against a real upstream:
+it needs a working credential and it SPENDS TOKENS. Nothing below is safe to
+run as a smoke test.
+
 ```
 scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
   -- scripts/drivers/claude-code-print.sh
 ```
 
-That lands `crates/routectl-cli/tests/fixtures/driver/anthropic-api/tools-multiturn-01/`.
-Add `--keep` to retain the run workspace, which holds the trace, the
-client's own output, and `client.txt` (the version the driver read from the
-binary at run time). A rerun of the same case re-lands on the same path and
-produces a diff.
+That lands `.routectl-driver-scratch/anthropic-api/tools-multiturn-01/` --
+scratch, not the corpus; promote it with `scripts/promote_fixture.sh` once
+you have reviewed it. Add `--keep` to retain the run workspace, which holds
+the trace, the client's own output, and `client.txt` (the version the driver
+read from the binary at run time). A rerun of the same case re-lands on the
+same path and produces a diff.
 
 The MITM mode needs its two carriers, and an unset one is a refusal rather
 than a fallback to `base-url`:
@@ -589,6 +709,141 @@ silent rot into a visible diff.
 `scripts/drivers.test.sh` covers the case set and every driver against a
 stub daemon AND a stub client, injected through the same binary overrides
 listed above -- a real run needs a credential and spends tokens.
+
+### Running a capture in a container
+
+`scripts/container/` holds a second WAY TO RUN the same capture: a
+Dockerfile, a build script, a host wrapper, and their self-tests. The
+wrapper is a CALLER of `scripts/capture_driver.sh`, never a mode inside it.
+Neither the runner nor the rig has a container-conditional branch (a
+self-test asserts that), so the host path stays fully supported and
+abandoning the container path costs nothing but deleting a directory.
+
+Build the image locally. There is no registry and no published artifact --
+the image is reproducible from the committed Dockerfile alone, and the base
+is pinned by digest so two contributors cannot silently differ on glibc:
+
+```
+bash scripts/container/build.sh
+```
+
+That writes `routectl-capture:default`. `--version <client-version>` bakes a
+different client version in as a build ARG and tags
+`routectl-capture:<version>`; `--tag <tag>` names the tag outright. Never a
+bare `:latest`, which would let a rebuild replace the image a fixture was
+captured under. Exit codes: 0 built, 1 build failed, 2 usage, 3 docker
+missing. The script reports the version it observes by running the client in
+the finished image, because that observed value -- not the requested ARG --
+is what a fixture records.
+
+The image carries the client and its runtime dependencies. It carries NO
+routectl binary and no Rust toolchain: build routectl on the host first
+(`cargo build --release`) and the wrapper bind-mounts it in. A toolchain
+layer would make the image a build environment and a fixture's provenance a
+question about which compiler ran where.
+
+Then run a capture through the wrapper. This spends real tokens and needs a
+real credential on the host, exactly like a host-path run:
+
+```
+bash scripts/container/run_capture.sh --scratch /var/tmp/routectl-cell -- \
+  --lane anthropic-api --case plain-turn-01 \
+  -- scripts/drivers/claude-code-print.sh
+```
+
+Two `--` separators, and that is deliberate: the wrapper's own flags stop at
+the first one, everything after it is the runner's argv verbatim, and the
+runner's own `--` still introduces the driver command. `--image <tag>`
+selects a non-default image.
+
+What crosses the boundary, and nothing else:
+
+| Host side | In-container | Mode |
+|---|---|---|
+| this repo | `/workspace` | READ-ONLY |
+| the host routectl binary | `/usr/local/lib/routectl/bin/routectl` | READ-ONLY |
+| `--scratch <dir>` | `/scratch` | writable, the only one |
+| the upstream token | `ROUTECTL_DRIVER_ANTHROPIC_API_KEY` | forwarded BY NAME |
+
+- **The read-only repo is load-bearing**, not tidiness. A driven agent runs
+  with file tools and permission prompts disabled; a writable repo mount
+  would let the thing under capture edit tracked source, and a capture is
+  evidence only if the tree that produced it did not move under it. That is
+  also why `--scratch` is required and must be outside the repo: with the
+  repo read-only there is nowhere inside it a fixture could be written. The
+  wrapper passes `--out /scratch` and `--out-root /scratch` to the runner and
+  sets `ROUTECTL_DRIVER_OUT_ROOT` so `/scratch` is a member of the runner's
+  closed set of allowed landing roots.
+- **NO SEAT FILE IS MOUNTED**, and none exists inside the container. The
+  wrapper reads the access token on the HOST and forwards it under the
+  environment variable name the lane config already resolves, passing it to
+  `docker run` by NAME rather than as a value in an argument vector. Nothing
+  in the container can refresh, rewrite, or perturb the operator's seat
+  store, and mid-run token expiry is therefore a HARD STOP rather than a
+  refresh: a clean upstream 401, the rig lands no fixture, and the wrapper
+  reports the runner's exit 7. Recapture with a fresh token. Mounting the
+  seat read-only was measured to be worse than not mounting it, so do not
+  reintroduce a mount for it.
+  `ROUTECTL_CAPTURE_CELL_SEAT` overrides which seat file is read, and
+  `ROUTECTL_BIN` which host binary is mounted; both exist so the self-test
+  can drive this script end to end with no credential and no daemon.
+- **No other host environment is forwarded.** That is a property, not an
+  omission: an inherited `ANTHROPIC_BASE_URL` is how a capture once recorded
+  a daemon nobody meant to capture, and a container starting from an empty
+  environment cannot inherit one.
+- **Default bridge networking, stated explicitly** even though it is
+  docker's default. The isolation the cell provides rests on the container
+  NOT being on the host's loopback, and a daemon whose default network had
+  been reconfigured would change that property while every assertion about
+  it still passed.
+- `--user` carries the host uid/gid, so the fixture lands owned by you. A
+  root-owned fixture could not be promoted or scrubbed without sudo.
+
+**The wrapper's exit code is the runner's, verbatim.** 0 and 2 through 7
+mean exactly what they mean on the host path, so a caller reads one contract
+either way. The wrapper's own refusals occupy a disjoint range, one code
+each, and every one of them fires before docker is consulted at all -- so a
+refusal reads identically on a box with no docker installed:
+
+| Code | Refusal |
+|---|---|
+| 10 | `--network host` or `--network=host` in the caller's argv |
+| 11 | `--net host` or `--net=host` |
+| 12 | `--privileged` |
+| 13 | `--pid host` or `--pid=host` |
+| 14 | any caller-added mount flag (`-v`, `--volume`, `--mount`, `--tmpfs`, `--volumes-from`) |
+| 15 | the host routectl binary is missing or not executable |
+| 16 | the scratch root is inside this repo |
+| 17 | docker is not installed or not on PATH |
+| 18 | the image is not present locally |
+| 19 | the seat file is unreadable |
+| 20 | the seat carries no usable access token |
+
+The first four get their own codes rather than sharing one because each
+independently dissolves the isolation the cell exists for, and a caller who
+reads only the number must be able to tell them apart. The mount refusal is
+deliberately an over-approximation: those tokens are refused anywhere in the
+argv, including after the driver separator. The image is never pulled from a
+registry (18 rather than a pull), because a run against a registry image
+would capture under a layer set nobody in this repo committed.
+
+Both scripts have shell self-tests in the same directory, which skip BY NAME
+when docker is absent rather than silently:
+
+```
+bash scripts/container/run_capture.test.sh
+bash scripts/container/image_scan.test.sh
+```
+
+The wrapper's refusal legs need no docker at all -- the wrapper decides every
+one of them from its argv and the host filesystem -- so they run everywhere;
+only the legs that actually start a container skip. Each property the
+refusals protect is then asserted from INSIDE a container by a driver stub
+that attempts the write and reports what happened, which is the only honest
+place to assert it. The layer scan runs this repo's own
+`scripts/scrub-fixture.sh` over the extracted content of every image layer,
+so credential vocabulary keeps exactly one owner, and it carries a positive
+control proving the scan can fail.
 
 
 ## Style notes
