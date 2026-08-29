@@ -48,13 +48,17 @@ separator.
 | `notes` | string | OPTIONAL, single-line |
 
 `knobs` is the neutral vocabulary a driver translates into its client's
-own flags. It carries capability INTENT, never a flag spelling:
+own flags. It carries capability INTENT, never a flag spelling. A `false`
+knob is an assertion about the wire, so a driver must FORCE the capability
+off rather than leave it to the client's default: clients ship with tools,
+thinking, and prompt caching on, so an unforced `false` captures the
+client's floor instead of the knob.
 
 | Key | Type | Meaning for a driver |
 |---|---|---|
-| `tools` | boolean | the client must be allowed to run tools, so the trace carries a tool loop |
-| `thinking` | boolean | the client must request extended thinking |
-| `cache_breakpoints` | boolean | the interaction must repeat a long stable prefix so the client sets cache control |
+| `tools` | boolean | true: the client must be allowed to run tools, so the trace carries a tool loop. false: no tool may reach the request body |
+| `thinking` | boolean | true: the client must request extended thinking. false: the request must carry no enabled thinking block |
+| `cache_breakpoints` | boolean | true: the interaction must repeat a long stable prefix so the client sets cache control. false: the request must carry no cache control at all |
 | `context_padding_bytes` | integer | `>= 0`; synthetic filler the driver materializes in the run's throwaway cwd for the client to read, to reach a large-context shape without shipping a large file in git |
 
 ### Case ids are neutral by construction

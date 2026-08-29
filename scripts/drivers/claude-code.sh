@@ -49,12 +49,6 @@ SETTLE_SECONDS="${ROUTECTL_DRIVER_SETTLE_SECONDS:-8}"
 TURN_SECONDS="${ROUTECTL_DRIVER_TURN_SECONDS:-45}"
 EXIT_SECONDS="${ROUTECTL_DRIVER_EXIT_SECONDS:-5}"
 
-# The tools a no-tools case must not be able to call. A case with
-# `tools: false` exists to capture the shape WITHOUT a tool loop, and a
-# client that decided to read a file anyway would land a fixture under the
-# wrong pattern.
-NO_TOOL_LIST="Bash Read Write Edit Glob Grep WebFetch WebSearch Task NotebookEdit TodoWrite"
-
 driver_require_runner_env
 driver_require_daemon
 CASE_FILE="$(driver_case_file)"
@@ -74,16 +68,31 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 argv=("$CLAUDE_BIN" --model "$DRIVER_REQUEST_MODEL")
 
+# EVERY false knob is FORCED off, never left to a default. The client's own
+# floor has tools, thinking, and prompt caching ON, so an unforced `false`
+# captures that floor rather than the knob -- a baseline case would land with
+# a tool list, a thinking budget, and cache breakpoints under a fixture
+# claiming none of them.
 if [ "$(driver_case_field "$CASE_FILE" tools)" = true ]; then
   argv+=(--permission-mode bypassPermissions)
 else
-  # shellcheck disable=SC2206 # the word split IS the flag's list form
-  argv+=(--disallowed-tools $NO_TOOL_LIST)
+  # The wildcard rather than an enumerated name list: a list silently rots as
+  # the client grows tools, and the enumeration it replaces leaked 16 of them
+  # onto the wire against a case asking for none.
+  argv+=(--disallowed-tools "*")
 fi
 
 if [ "$(driver_case_field "$CASE_FILE" thinking)" = true ]; then
   argv+=(--effort high)
   export MAX_THINKING_TOKENS="${ROUTECTL_DRIVER_THINKING_TOKENS:-8192}"
+else
+  # A zero budget is what turns the request's thinking block from
+  # {"type":"enabled",...} into {"type":"disabled"}.
+  export MAX_THINKING_TOKENS=0
+fi
+
+if [ "$(driver_case_field "$CASE_FILE" cache_breakpoints)" != true ]; then
+  export DISABLE_PROMPT_CACHING=1
 fi
 
 # Type the case's turns into the session, then leave. Written to a file

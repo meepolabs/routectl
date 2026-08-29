@@ -472,6 +472,8 @@ done
     printf 'invocation api_key_set=%s\n' "$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo yes || echo no)"
     printf 'invocation https_proxy=%s\n' "${HTTPS_PROXY:-}"
     printf 'invocation node_ca=%s\n' "${NODE_EXTRA_CA_CERTS:-}"
+    printf 'invocation thinking_tokens=%s\n' "${MAX_THINKING_TOKENS-unset}"
+    printf 'invocation caching_disabled=%s\n' "${DISABLE_PROMPT_CACHING-unset}"
     printf 'invocation cwd=%s\n' "$PWD"
     printf 'invocation home=%s\n' "$HOME"
     printf 'invocation notes_alpha=%s\n' "$([ -f notes-alpha.txt ] && echo yes || echo no)"
@@ -857,6 +859,16 @@ if client_get "$work" argv | sed -n '2p' | grep -q -- '--resume'; then
 else
     fail "a multi-turn print run did not resume the first turn's session"
 fi
+# Paired controls for the forced-off assertions below: a case whose knob is
+# TRUE must leave the knob alone, or those assertions would pass against a
+# driver that forced everything off unconditionally.
+if client_get "$work" argv | grep -q -- '--disallowed-tools'; then
+    fail "a tools case denied the client its tools anyway"
+else
+    echo "PASS: a tools case leaves the client's tools enabled"
+fi
+check "a no-thinking case forces the thinking budget to zero" "0" \
+    "$(client_get "$work" thinking_tokens | head -1)"
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
@@ -868,11 +880,18 @@ if client_get "$work" argv | grep -q -- '--effort'; then
 else
     fail "a thinking case did not ask the client for extended thinking"
 fi
-if client_get "$work" argv | grep -q -- '--disallowed-tools'; then
-    echo "PASS: a no-tools case denies the client its tools"
+check "a thinking case hands the client a non-zero thinking budget" "8192" \
+    "$(client_get "$work" thinking_tokens | head -1)"
+# The wildcard, not a name list: an enumeration cannot deny a tool the
+# client grew after this file was written, and the list it replaced leaked
+# 16 tools onto the wire under a case asking for none.
+if client_get "$work" argv | grep -qF -- '--disallowed-tools *'; then
+    echo "PASS: a no-tools case denies the client every tool by wildcard"
 else
-    fail "a no-tools case left the client's tools enabled"
+    fail "a no-tools case did not deny the client its tools by wildcard"
 fi
+check "a no-cache case forces prompt caching off in the client's environment" "1" \
+    "$(client_get "$work" caching_disabled | head -1)"
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
@@ -907,6 +926,8 @@ work="$(make_work)"
 driver_run "$work" claude-code-print.sh cache-breakpoints-01 || true
 check "a cache-breakpoint case materializes the prefix the turns reuse" "yes" \
     "$(client_get "$work" table | head -1)"
+check "a cache-breakpoint case leaves prompt caching enabled" "unset" \
+    "$(client_get "$work" caching_disabled | head -1)"
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
