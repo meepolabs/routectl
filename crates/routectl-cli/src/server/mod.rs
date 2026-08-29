@@ -32,7 +32,9 @@ pub use config_load::{LoadedConfig, load_effective_config, load_effective_config
 pub(crate) use config_load::{load_overlay_default, parse_config_only};
 pub(crate) use router_build::build_router_from_config_with_overlay;
 pub use secrets::CompositeStore;
-pub use serve::{serve, serve_on_listener, serve_on_listener_with_overlay};
+pub use serve::{
+    serve, serve_on_listener, serve_on_listener_with_overlay, serve_on_listener_with_secrets,
+};
 
 #[cfg(test)]
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
