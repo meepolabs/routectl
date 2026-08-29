@@ -1,17 +1,23 @@
 # Replay fixtures
 
-This document is the on-disk format reference for the local
-replay-fixture corpus at `crates/routectl-cli/tests/fixtures/captured/`.
-You only need it when writing or debugging replay tests; for the
-day-to-day capture recipe see [DEVELOPMENT.md](DEVELOPMENT.md)
-"Adding a replay fixture from a real session".
+This document is the on-disk format reference for the replay-fixture
+corpora under `crates/routectl-cli/tests/fixtures/`. You only need it
+when writing or debugging replay tests; for the day-to-day capture
+recipe see [DEVELOPMENT.md](DEVELOPMENT.md) "Adding a replay fixture
+from a real session".
 
-The directory is gitignored. Fixtures are captured locally by
-`scripts/capture_fixtures.sh` from a TRACE-level routectl session and
-consumed by the replay test drivers in `crates/routectl-cli/tests/`.
-**They never ship in the repo.** Each contributor maintains their
-own corpus relevant to their own development and regression-testing
-needs; the repo provides the harness, not the data.
+The LIVE-BOX corpus at `captured/` is gitignored. Its fixtures are
+captured locally by `scripts/capture_fixtures.sh` from a TRACE-level
+routectl session and consumed by the replay test drivers in
+`crates/routectl-cli/tests/`. **Those fixtures never ship in the
+repo.** Each contributor maintains their own such corpus relevant to
+their own development and regression-testing needs; the repo provides
+the harness, not the data.
+
+Its sibling `driver/` holds the hermetic driver corpus, which IS
+committed and review-gated -- see [Two corpus roots, two policies,
+never mixed](#two-corpus-roots-two-policies-never-mixed) below for the
+split.
 
 The live matrix at `crates/routectl-cli/tests/live_matrix.rs` stays
 the final regression gate. Replay catches wire-shape regressions
@@ -31,9 +37,18 @@ There are two fixture roots, siblings under
   comparison over it may never become a commit gate.
 - `driver/` -- fixtures produced by the hermetic fixture drivers.
   Hermetic by construction (nothing personal in them), so this is the
-  only root eligible for gating. Gitignored for now while the
-  committability question is open; the ignore entry is a single line
-  precisely so that answer is a one-line change.
+  only root eligible for gating, and it is COMMITTED: the corpus is
+  tracked in the repo, and a fixture reaches it only through
+  `scripts/promote_fixture.sh`, which re-runs the scrub gate on the way
+  in so every tracked fixture arrives review-gated. A driver capture
+  does NOT land here by default -- `scripts/capture_driver.sh` writes
+  into a gitignored SCRATCH root (`.routectl-driver-scratch/` at the
+  repo root unless `--out` says otherwise), because a rerun of a case
+  overwrites that case's fixture and a corpus default would replace a
+  reviewed fixture in place. Fixtures land two levels deep under this
+  root (`<root>/<lane>/<case_id>`), which is why the loader walks it
+  through `discover_driver_fixtures` rather than the single-level
+  `discover_fixtures` the flat `captured/` root uses.
 
 The separation is a DIRECTORY boundary rather than a naming
 convention: with one root, "never gate the live-box corpus" is a
@@ -77,19 +92,27 @@ path, so one clipped fixture never blinds the run to the rest.
 
 Recapture a refused fixture with a larger `ROUTECTL_TRACE_BODY_BYTES`.
 
-## Captured bodies that do NOT live in the corpus
+## Captured bodies that do NOT live in the LIVE-BOX corpus
 
 A captured upstream body that a shipping unit test must pin belongs in
-that test as an inline constant, not here. Because the corpus is
-gitignored, a corpus-backed assertion is unrunnable for every
-contributor but the one who captured it -- the test would silently skip
-or fail on a fresh checkout and in CI, which is exactly where a pinned
-regression body needs to hold.
+that test as an inline constant, not in `captured/`. Because the
+live-box corpus is gitignored, an assertion backed by it is unrunnable
+for every contributor but the one who captured it -- the test would
+silently skip or fail on a fresh checkout and in CI, which is exactly
+where a pinned regression body needs to hold.
 
-The rule of thumb: the corpus holds bodies a DRIVER iterates over
-(whatever the contributor happens to have), while a body a NAMED test
-asserts against goes inline. Inlining is only appropriate for a small,
-secret-free body -- a rejection envelope, not a full response.
+The rule of thumb, for the LIVE-BOX corpus: it holds bodies a DRIVER
+iterates over (whatever the contributor happens to have), while a body a
+NAMED test asserts against goes inline. Inlining is only appropriate for
+a small, secret-free body -- a rejection envelope, not a full response.
+
+The COMMITTED driver corpus is the exception: it ships in the repo, so a
+named test may assert directly against a driver fixture and that
+assertion runs on every checkout -- `tests/wire_pattern_baseline.rs`
+does exactly this against `driver/anthropic-api/plain-turn-01`. Such a
+test must SKIP BY NAME when the corpus is absent (print a NOT RUN line
+naming the missing fixture and return) rather than fail: a checkout
+without the corpus is missing evidence, not exhibiting a regression.
 
 Current inline captures:
 
@@ -123,9 +146,23 @@ lands at:
 
     crates/routectl-cli/tests/fixtures/captured/<request_id>/
 
-A DRIVER capture (`--driver-mode`) lands keyed on `(lane, case_id)`:
+A DRIVER capture (`--driver-mode`) lands keyed on `(lane, case_id)`, two
+components under the run's output root:
 
     <out>/<lane>/<case_id>/
+
+`<out>` is the gitignored SCRATCH root by default
+(`.routectl-driver-scratch/` at the repo root; `scripts/capture_driver.sh
+--out` may name another path, confined to `--out-root`), never the
+committed corpus: an exploratory rerun of a case would otherwise replace
+a reviewed fixture in place. A scratch fixture enters the corpus at
+`crates/routectl-cli/tests/fixtures/driver/<lane>/<case_id>/` only
+through `scripts/promote_fixture.sh`, which requires the source to sit
+exactly two components under its `--scratch-root`, re-runs
+`scrub-fixture.sh --check` on the STAGED copy (a scratch fixture is
+hand-editable between capture and promotion, so the rig's own capture-time
+scrub is no longer sufficient evidence), and refuses the promotion
+outright on a non-zero check.
 
 The lane component is also the key to the per-lane HERMETIC CONFIG the
 driver run booted under: `scripts/drivers/config/<lane>.toml`, committed,
@@ -254,6 +291,7 @@ broke the corpus.)
       "model": String,
       "case_id": String,
       "config_sha": String,
+      "wire_pattern": "baseline" | "tool-use-multiturn" | "cache-breakpoints" | "thinking" | "large-context",
       "client": {
         "name": String,
         "version": String,
@@ -291,7 +329,14 @@ Fields:
   in the `PROVIDER_KIND` const vocabulary of `routectl-providers` --
   in particular `"anthropic"` (not `"anthropic-api"`) for the
   api.anthropic.com client. The replay drivers select the matching
-  translator from this.
+  translator from this. It is also the API-SHAPE carrier: `lane`
+  collapses `bedrock-invoke` and `bedrock-converse` onto the single
+  `bedrock` token, while this raw provider token keeps them apart. There
+  is deliberately no separate `api_shape` field, because the raw token
+  already carries the distinction and `egress_lane_from_token`
+  (`common/replay/lane.rs`) resolves both Bedrock spellings straight
+  from it -- a second field would be a duplicate of a fact this one
+  already states.
 - `lane` -- the same egress concept in the `kind_str()` vocabulary of
   `ProviderEntry` (`crates/routectl-router/src/config/schema.rs`),
   which is the vocabulary a lane's class derives from. The rig
@@ -308,6 +353,26 @@ Fields:
 - `config_sha` -- hash of the config in force at capture time, so a
   rerun under a drifted config does not read as client drift. Written
   from `ROUTECTL_FIXTURE_CONFIG_SHA`.
+- `wire_pattern` -- the wire shape the driven case CLAIMS to cover, a
+  string in the closed `WIRE_PATTERNS` vocabulary enforced by
+  `scripts/drivers/lib/validate_case.py` (`baseline`,
+  `tool-use-multiturn`, `cache-breakpoints`, `thinking`,
+  `large-context`). DERIVED by the driver runner from the case file
+  (`scripts/capture_driver.sh` reads it through `validate_case.py --field
+  wire_pattern` and exports `ROUTECTL_FIXTURE_WIRE_PATTERN`) and never
+  accepted on argv: a flag would let a caller declare a pattern its case
+  does not claim, and the recorded claim is the only on-disk evidence of
+  which shape a fixture was captured for. Mandatory in driver mode with
+  the other environment pins; EMPTY on a live-box capture, which cannot
+  observe it, and on any fixture predating the key.
+
+  **In this release the claim is RECORDED, not ENFORCED.** No predicate
+  refuses a fixture whose body does not exhibit the shape it claims: the
+  loader stores the string and compares nothing, and the one executed
+  shape check (`crates/routectl-cli/tests/wire_pattern_baseline.rs`)
+  verifies the `baseline` predicate against exactly ONE committed
+  fixture, by name. A corpus-wide claim-vs-body gate does not exist yet,
+  so a mismatched claim on any other fixture goes unnoticed.
 - `client` -- which client produced the request. `name` / `version`
   come from the captured ingress `user-agent`; `connection_mode` comes
   from `ROUTECTL_FIXTURE_CONNECTION_MODE`, because the trace cannot
@@ -317,11 +382,12 @@ Fields:
   mode, so an unpinned mode makes a cross-mode comparison read as
   drift.
 
-  All three environment-sourced pins (`case_id`, `config_sha`,
-  `client.connection_mode`) are EMPTY when unset on the live-box path,
-  where a trace genuinely cannot observe them, and MANDATORY in driver
-  mode, where an unset pin is a bug in the driver rather than a fact
-  about the capture. Driver mode aborts naming the missing variable.
+  All four environment-sourced pins (`case_id`, `config_sha`,
+  `client.connection_mode`, `wire_pattern`) are EMPTY when unset on the
+  live-box path, where a trace genuinely cannot observe them, and
+  MANDATORY in driver mode, where an unset pin is a bug in the driver
+  rather than a fact about the capture. Driver mode aborts naming the
+  missing variable.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
   bodies. Stream fixtures are currently skipped by the replay
   drivers (stream-body replay is deferred -- the capture rig does
