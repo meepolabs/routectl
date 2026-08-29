@@ -87,6 +87,17 @@ on:
 permissions:
   contents: read
 
+# Serialize runs against the same ref, but NEVER cancel one. Every other
+# workflow here cancels a superseded run because re-running it is free;
+# this one attaches signed attestations and uploads release assets, so a
+# cancellation lands mid-publish and leaves a release half-populated with
+# no signal that it is incomplete. Waiting for the in-flight run costs
+# minutes; interrupting it costs a broken release. A second run against
+# the same ref queues behind the first instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -106,7 +117,24 @@ jobs:
     # Hard cap. PR CI gates the same checks but a tag can be pushed
     # against any SHA, so this is the ONLY pre-build gate at release
     # time -- a hung test must not block the pipeline indefinitely.
-    timeout-minutes: 20
+    #
+    # RAISED from 20 on measurement. The old cap could no longer clear a
+    # HEALTHY run: on the same commit, ci.yml's `cargo test --workspace
+    # --release` -- the identical command on the identical runner class,
+    # uncapped -- took 27m22s on its own and passed. This job runs that
+    # same suite after a 2m19s clippy, so 20m could not have been enough
+    # whatever the suite did. The last two runs to clear this job took
+    # 13m36s and 14m38s, both in June, already within 6 minutes of the
+    # cap; the suite has grown since.
+    #
+    # The cap still exists to stop a HUNG test, which is
+    # minutes-versus-forever, so a larger number costs nothing against
+    # that purpose. A too-small one cancels healthy runs, and GitHub
+    # reports a timeout as `cancelled` rather than as a failure -- which
+    # reads like an external stop and hides the cause. 45 leaves headroom
+    # over the ~30m this job now needs without approaching forever.
+    timeout-minutes: 45
+
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
