@@ -132,10 +132,10 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -154,12 +154,26 @@ jobs:
       # but a tag pushed against a SHA that hasn't seen CI (or against
       # a SHA that pre-dates a newly-published advisory) would
       # otherwise produce signed binaries containing a known-vulnerable
-      # dep with no second gate. Keep the action version aligned with
-      # ci.yml.
-      - name: cargo audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # dep with no second gate.
+      #
+      # Run as a CLI, NOT via rustsec/audit-check: that action reports
+      # through the check-runs API, which needs `checks: write`. This
+      # workflow grants `contents: read`, so the action failed with
+      # "Resource not accessible by integration" whatever the advisory
+      # state -- meaning the only pre-flight audit gate at release time
+      # was failing for a permissions reason rather than a real finding.
+      # ci.yml migrated off it for exactly this reason; the migration had
+      # not reached here. The CLI just exits non-zero on an advisory and
+      # works under a read-only token.
+      #
+      # The scanner is version-pinned like everything else in this file:
+      # an unpinned `cargo install` lets the tool that decides whether a
+      # release ships drift between runs. Bump deliberately.
+      - name: install and run cargo-audit
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+
 
   build:
     needs: [validate]
@@ -203,12 +217,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # Pinned to the same exact channel as rust-toolchain.toml and ci.yml,
+      # NOT `stable`. A release artifact built by a toolchain no gate ever
+      # ran is not reproducible: rebuilding the same tag months later would
+      # pick a different compiler and produce different bytes, which
+      # undercuts the provenance attestation this workflow goes on to
+      # generate. Bumping the pin is a deliberate one-line change here and
+      # in rust-toolchain.toml.
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
@@ -257,11 +278,11 @@ jobs:
           "ARTIFACT=$out" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
       - name: attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.ARTIFACT }}
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: artifact-${{ matrix.name }}
           path: |
@@ -287,7 +308,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
@@ -331,7 +352,7 @@ jobs:
           rm -f *.sha256
 
       - name: install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: sign aggregate SHA256SUMS
         shell: bash
@@ -354,7 +375,7 @@ jobs:
             SHA256SUMS
 
       - name: attest SHA256SUMS provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/SHA256SUMS
 
@@ -400,7 +421,7 @@ jobs:
       # This makes workflow_dispatch a true dry-run of the pipeline.
       - name: publish to GitHub Releases
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: dist/*
           body_path: release_notes.md
