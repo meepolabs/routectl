@@ -48,6 +48,30 @@
 //!
 //! Rule of thumb: length changes NORMALIZE, in-place value changes MATCH.
 //!
+//! # What a matcher cannot see, and the two hooks that cover it
+//!
+//! [`Transform::Matcher`] receives ONE [`Divergence`] and nothing else, so
+//! two classes of constraint are unexpressible in it and live on the
+//! [`Exception`] instead:
+//!
+//! - [`Exception::applies_to`] -- a per-FIXTURE eligibility gate, for a
+//!   transform gated on something outside the body. `normalize_claude_sampling`
+//!   runs only for routectl's own OAuth-bearer credential against
+//!   `api.anthropic.com`; keyed on the lane alone, its entry excused a
+//!   dropped `temperature` on every fixture of the lane, api-key captures
+//!   included. `None` -- the state of every ungated entry -- means every
+//!   fixture on the lane.
+//! - [`Exception::max_per_fixture`] -- a per-fixture CARDINALITY bound, for
+//!   a transform that writes a bounded number of identical shapes. Auto-cache
+//!   placement emits at most two markers per request; a matcher cannot
+//!   count, so the bound is enforced by [`unexplained_for_fixture`] and a
+//!   third same-shaped addition stays unexplained.
+//!
+//! Both are `Option`, both default to the unconstrained behavior, and a
+//! fixture-gated entry is consulted only through
+//! [`unexplained_for_fixture`] -- [`unexplained`] is the weaker
+//! fixture-less form and treats every entry as eligible.
+//!
 //! # Path-string ambiguity: the decision taken here
 //!
 //! `diff_all` joins object keys with `.`, so a literal key containing a
@@ -76,7 +100,10 @@
 //!    one entry whose constraint is on the KIND rather than on a value,
 //!    and it is sound for the same reason: its two paths are exact
 //!    top-level equalities that no nested key can reach, so there is no
-//!    caller-controlled subtree to forge from.
+//!    caller-controlled subtree to forge from. It additionally carries a
+//!    per-fixture credential gate ([`Exception::applies_to`]), so the weak
+//!    value constraint is not the only thing standing between it and a
+//!    fixture the transform never ran on.
 //! 2. No entry here targets a path inside a caller-controlled subtree. The
 //!    live entries address `messages`, `system`, `temperature`, `top_p`,
 //!    `model`, `thinking`, and the `cache_control` marker slots, all
@@ -115,6 +142,9 @@
 //!
 //! The `anthropic` -> `anthropic-api` lane carries captures from TWO
 //! credential surfaces, and the table's entries were measured on both.
+//! An entry whose transform fires on only ONE of them carries an
+//! [`Exception::applies_to`] gate keyed on the captured outgoing
+//! credential; an entry whose transform is credential-independent does not.
 //!
 //! The live-box corpus is the NON-cloak surface, and that scope is measured
 //! rather than assumed: the Claude Code billing text survives in the
@@ -131,11 +161,14 @@
 //! below:
 //!
 //! - The billing strip DOES fire, from both the always-on normalize path
-//!   and the cloak -- see `billing-system-block-stripped`.
+//!   and the cloak -- see `billing-system-block-stripped`. Because the
+//!   normalize-path call is unconditional on the credential, that entry
+//!   stays UNGATED: it fires on an api-key egress too.
 //! - `normalize_claude_sampling`
 //!   (`crates/routectl-providers/src/anthropic_api/extras.rs`) strips BOTH
 //!   `temperature` and `top_p` from the final body, because the OAuth seat
-//!   400s a request carrying either -- see `oauth-sampling-stripped`. On
+//!   400s a request carrying either -- see `oauth-sampling-stripped`, which
+//!   is gated to Bearer-credential captures for exactly that reason. On
 //!   this surface the two sampling entries COMPOSE rather than conflict:
 //!   `thinking-temperature-clamp` writes `1.0` during request assembly and
 //!   this strip removes the key at the egress boundary, so a capture here
@@ -184,11 +217,18 @@
 //! snapshot [`Exception::matched_count`] before its own walk and assert on
 //! the DELTA. Reading the global directly reports hits some other walk
 //! contributed and passes a gate that should have failed.
+//!
+//! And every writer holds [`COUNTER_DELTA_LOCK`] -- not only the callers of
+//! [`Exception::matches`]. [`Exception::normalize`] increments the same
+//! counters, so a test that merely calls [`normalize_ingress_for_lane`]
+//! races a concurrent delta reader and shows up as an unrelated test
+//! failing intermittently.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
+use super::loader::Fixture;
 use super::{Divergence, DivergenceKind};
 
 // ---------------------------------------------------------------------
@@ -576,6 +616,34 @@ pub struct Exception {
     /// is the other half); for a normalizer it declares the subtree the
     /// rewrite touches.
     pub path_predicate: fn(&str) -> bool,
+    /// Which FIXTURES this entry may be consulted for at all. `None` = every
+    /// fixture on the lane, which is what an entry whose production
+    /// transform runs for every request on the lane declares.
+    ///
+    /// Some transforms are gated on something a [`Divergence`] cannot see --
+    /// the credential the request egressed on, for instance. A
+    /// [`Transform::Matcher`] receives only the divergence, so a
+    /// lane-keyed-only entry for such a transform excuses the shape on
+    /// EVERY fixture of the lane, including one where the transform could
+    /// not have run and the loss is real. This hook is where that gate
+    /// lives: the predicate reads the fixture's captured evidence and says
+    /// whether the transform was reachable for it.
+    ///
+    /// Only a MATCHER may carry one today, and
+    /// `only_matchers_carry_a_fixture_gate` pins that: the normalizer seam
+    /// ([`normalize_ingress_for_lane`]) takes a body rather than a fixture,
+    /// so a gate declared on a normalizer would be silently ignored.
+    pub applies_to: Option<fn(&Fixture) -> bool>,
+    /// Most divergences ONE fixture may have explained by this entry.
+    /// `None` = unbounded.
+    ///
+    /// A [`Transform::Matcher`] sees one divergence at a time and so cannot
+    /// count; a production transform that writes at most N markers per
+    /// request needs the bound expressed here or the entry admits an
+    /// unbounded spray of the same shape. Enforced in [`unexplained`],
+    /// which is called once per fixture -- matches past the bound stay
+    /// unexplained.
+    pub max_per_fixture: Option<usize>,
     /// How the transform is applied.
     pub transform: Transform,
     /// How many divergences this entry has matched (matcher), or how many
@@ -590,6 +658,13 @@ impl Exception {
             Transform::Normalizer(_) => ExceptionKind::Normalizer,
             Transform::Matcher(_) => ExceptionKind::Matcher,
         }
+    }
+
+    /// Whether this entry may be consulted for `fixture` at all. An entry
+    /// with no [`Exception::applies_to`] hook applies to every fixture on
+    /// its lane.
+    pub fn eligible_for(&self, fixture: &Fixture) -> bool {
+        self.applies_to.is_none_or(|gate| gate(fixture))
     }
 
     /// Whether this entry explains `divergence`, counting the hit.
@@ -704,17 +779,45 @@ fn without_billing_system_block(body: &Value) -> Value {
     out
 }
 
-/// Whether `value` is an ephemeral cache-control object.
+/// The marker value auto-cache placement writes, as it serializes.
 ///
-/// The TTL is deliberately unconstrained: `CacheControl::ephemeral_5m` is
-/// today's auto-emit vocabulary and `ephemeral_1h` already exists in
-/// `routectl-core`, so pinning `5m` would make the entry stale the day a
-/// premium tier is auto-emitted. `type` is what carries the precision --
-/// Anthropic's only cache-control kind -- so a marker of any other kind
-/// stays a finding.
-fn is_ephemeral_cache_control(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("ephemeral")
+/// `CacheControl::ephemeral_5m()` (`routectl-core`, `cache_control.rs`) is
+/// the ONE value both placement sites assign -- the top-level terminal
+/// field and `place_front_marker`'s front slot -- and its `ttl` is
+/// `Some("5m")`, which serializes as a present key (the field skips
+/// serialization only when `None`).
+const AUTO_CACHE_TYPE: &str = "ephemeral";
+/// The `ttl` [`AUTO_CACHE_TYPE`] rides with. Pinned, not open: see
+/// [`is_auto_cache_marker`].
+const AUTO_CACHE_TTL: &str = "5m";
+
+/// Whether `value` is EXACTLY the marker auto-cache placement emits.
+///
+/// The TTL is pinned deliberately, and the earlier open-TTL reading was
+/// wrong: `CacheControl::ephemeral_1h` exists in `routectl-core` but no
+/// auto-placement site constructs it, so admitting `1h` excused a shape
+/// production cannot emit -- a caller marker mistaken for an injection, or
+/// a future placement change nobody had to review. An omitted `ttl` is
+/// likewise not the emitted shape: `ephemeral_5m()` carries `Some("5m")`.
+/// When a premium tier really is auto-emitted, widening this constant is
+/// the review moment that change deserves.
+fn is_auto_cache_marker(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    obj.get("type").and_then(Value::as_str) == Some(AUTO_CACHE_TYPE)
+        && obj.get("ttl").and_then(Value::as_str) == Some(AUTO_CACHE_TTL)
 }
+
+/// Most auto-cache markers one request can gain: the front marker plus the
+/// top-level terminal one.
+///
+/// `apply_auto_cache_placement`
+/// (`crates/routectl-router/src/router/dispatch.rs`) writes exactly two
+/// slots -- one `place_front_marker` call against a single `FrontSlot`, and
+/// one assignment to the top-level `cache_control` -- so a third
+/// same-shaped addition on one fixture is not this transform.
+const MAX_AUTO_CACHE_MARKERS: usize = 2;
 
 /// Whether `path` is one of the THREE places routectl's auto-cache
 /// placement writes a marker, in `diff_all`'s path grammar: the top-level
@@ -765,6 +868,40 @@ fn is_bracketed_alias_of(expected: &str, actual: &str) -> bool {
     suffix.len() > 2 && suffix.starts_with('[') && suffix.ends_with(']')
 }
 
+/// The header name whose value carries the OAuth-bearer credential.
+const AUTHORIZATION_HEADER: &str = "authorization";
+/// The credential scheme an OAuth-bearer egress presents. Case-insensitive
+/// per RFC 7235.
+const BEARER_SCHEME: &str = "bearer ";
+
+/// Whether the fixture's OUTGOING request egressed on a bearer credential.
+///
+/// The evidence survives scrubbing by design: the fixture scrub replaces
+/// the credential VALUE and keeps the scheme, so a captured OAuth egress
+/// reads `authorization: Bearer [REDACTED]` while an api-key egress carries
+/// `x-api-key` and no `authorization` at all. Keyed on the outgoing side,
+/// never the ingress: the client's own credential says nothing about which
+/// credential routectl re-signed the request with.
+///
+/// This is a NECESSARY condition for the cloak lane rather than the whole
+/// of it -- `is_cloak_lane`
+/// (`crates/routectl-providers/src/anthropic_api/client.rs`) additionally
+/// requires the `api.anthropic.com` host and a non-forwarded leg, neither
+/// of which a scrubbed capture pins (the outgoing `host` header is not
+/// recorded, and forwarding is not a fixture field). What it does exclude
+/// is the case the hole was about: an api-key fixture, where the transform
+/// provably did not run.
+fn outgoing_credential_is_bearer(fixture: &Fixture) -> bool {
+    fixture
+        .outgoing_request_headers
+        .iter()
+        .any(|(name, value)| {
+            name.eq_ignore_ascii_case(AUTHORIZATION_HEADER)
+                && value.len() >= BEARER_SCHEME.len()
+                && value[..BEARER_SCHEME.len()].eq_ignore_ascii_case(BEARER_SCHEME)
+        })
+}
+
 /// The exception entries on [`ANTHROPIC_FIDELITY_LANE`].
 ///
 /// Every `reason` below was re-confirmed by reading the named symbol in
@@ -789,6 +926,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         site_symbol: "lift_legacy_system_stripped",
         site_path: "crates/routectl-providers/src/anthropic_api/system.rs",
         path_predicate: is_messages_path,
+        applies_to: None,
+        max_per_fixture: None,
         transform: Transform::Normalizer(without_system_turns),
         matched: AtomicUsize::new(0),
     },
@@ -806,6 +945,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         site_symbol: "clamp_sampling_for_thinking",
         site_path: "crates/routectl-providers/src/anthropic_api/request.rs",
         path_predicate: |path| path == "temperature",
+        applies_to: None,
+        max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Added
                 && divergence.actual.as_ref().and_then(Value::as_f64) == Some(1.0)
@@ -836,6 +977,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         site_symbol: "complete_inner",
         site_path: "crates/routectl-router/src/router/dispatch.rs",
         path_predicate: |path| path == "model",
+        applies_to: None,
+        max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Changed
                 && match (
@@ -867,6 +1010,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         site_symbol: "strip_thinking_when_tool_choice_forces_use",
         site_path: "crates/routectl-providers/src/anthropic_api/extras.rs",
         path_predicate: |path| path == "thinking",
+        applies_to: None,
+        max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Removed
                 && divergence.expected.as_ref().and_then(|v| v.get("type"))
@@ -895,7 +1040,11 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
                  Length-changing, hence a NORMALIZER: the shift reports a divergence at every \
                  later system index plus a membership divergence at the tail, and an entry \
                  broad enough to whitelist that would cover the whole system array -- which \
-                 on this lane is most of the prompt. Deliberately NOT the non-CC system \
+                 on this lane is most of the prompt. It carries NO `applies_to` fixture gate, \
+                 deliberately and re-verified: the `request.rs` call is on the always-run \
+                 normalize path, unconditional on the credential, so the strip fires for an \
+                 api-key egress exactly as for an OAuth one and scoping it to a Bearer capture \
+                 would leave a real api-key fixture unadjudicable. Deliberately NOT the non-CC system \
                  reduction: `relocate_client_system` \
                  (crates/routectl-providers/src/anthropic_api/cloak/identity.rs) also reshapes \
                  `system[]`, but only for a non-Claude-Code client, and it MOVES content into \
@@ -904,6 +1053,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         site_symbol: "strip_billing_attribution",
         site_path: "crates/routectl-providers/src/system_filter.rs",
         path_predicate: is_system_path,
+        applies_to: None,
+        max_per_fixture: None,
         transform: Transform::Normalizer(without_billing_system_block),
         matched: AtomicUsize::new(0),
     },
@@ -920,26 +1071,31 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
                  per-attempt clone that is committed only once the full breakpoint sequence \
                  validates. Injection is withheld entirely when the caller supplied any \
                  breakpoint of its own, which is why this shows up as an ADDITION and never as \
-                 a rewrite of a caller marker. The value constraint tests `type == \
-                 \"ephemeral\"` only and leaves the TTL open: `5m` is today's auto-emit \
-                 vocabulary and `CacheControl::ephemeral_1h` already exists in \
-                 routectl-core, so pinning the TTL would make the entry stale the day a \
-                 premium tier is auto-emitted, whereas `type` is Anthropic's only \
-                 cache-control kind and a marker of another kind must keep surfacing. The path \
-                 predicate admits ONLY the three places placement writes -- the top-level \
+                 a rewrite of a caller marker. The value constraint is the EXACT emitted shape, \
+                 `type == \"ephemeral\"` AND `ttl == \"5m\"`: both placement sites assign \
+                 `CacheControl::ephemeral_5m()`, whose `ttl` is `Some(\"5m\")` and therefore \
+                 serializes as a present key, so an omitted TTL and the `1h` premium tier -- \
+                 `CacheControl::ephemeral_1h` exists in routectl-core but no auto-placement \
+                 site constructs it -- are shapes production cannot emit and must keep \
+                 surfacing. Widening the pin when a premium tier really is auto-emitted is the \
+                 review moment that change deserves. The path predicate admits ONLY the three \
+                 places placement writes -- the top-level \
                  field and a `cache_control` leaf directly under an indexed `system[]` / \
                  `tools[]` element -- so a `cache_control` key appearing anywhere else (inside \
                  `messages[]`, inside a tool's caller-authored `input_schema`) stays a \
-                 finding. In-place addition that moves no positions, hence a MATCHER.",
+                 finding. CARDINALITY is bounded per fixture rather than left to the matcher: \
+                 placement emits at most one front marker plus the top-level one, so \
+                 `max_per_fixture` caps the entry at two and a third same-shaped addition \
+                 stays unexplained -- a matcher sees one divergence at a time and cannot count. \
+                 In-place addition that moves no positions, hence a MATCHER.",
         site_symbol: "apply_auto_cache_placement",
         site_path: "crates/routectl-router/src/router/dispatch.rs",
         path_predicate: is_auto_cache_marker_path,
+        applies_to: None,
+        max_per_fixture: Some(MAX_AUTO_CACHE_MARKERS),
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Added
-                && divergence
-                    .actual
-                    .as_ref()
-                    .is_some_and(is_ephemeral_cache_control)
+                && divergence.actual.as_ref().is_some_and(is_auto_cache_marker)
         }),
         matched: AtomicUsize::new(0),
     },
@@ -953,12 +1109,20 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
                  keys it dropped: Anthropic's OAuth seat on api.anthropic.com 400s a \
                  `/v1/messages` body carrying either. It is the last word on the JSON -- called \
                  after `cloak_body` and before the outgoing-body trace -- so no later pass \
-                 re-introduces a stripped key. Gated on the LANE, not on the cloak state: \
-                 `is_cloak_lane` (crates/routectl-providers/src/anthropic_api/client.rs) is \
-                 OauthBearer auth plus an api.anthropic.com host plus a non-forwarded leg. The \
-                 committed capture on this lane rode that surface, and its headers say so: the \
-                 ingress request carries an `x-api-key` while the outgoing request carries an \
-                 `authorization: Bearer`. Both keys are admitted deliberately -- the production \
+                 re-introduces a stripped key. Gated on the CREDENTIAL LANE, not on the cloak \
+                 state: `is_cloak_lane` \
+                 (crates/routectl-providers/src/anthropic_api/client.rs) is OauthBearer auth \
+                 plus an api.anthropic.com host plus a non-forwarded leg, and the off-lane \
+                 preservation is pinned by the provider's own tests. That gate is invisible to \
+                 a divergence, so this entry carries an `applies_to` FIXTURE gate \
+                 (`outgoing_credential_is_bearer`) and is consulted only for a capture whose \
+                 OUTGOING headers present a `Bearer` credential -- the scheme survives \
+                 scrubbing while the value does not. Without it the entry excused a dropped \
+                 `temperature` on every fixture of the lane, including an api-key or forwarded \
+                 capture where the strip provably never ran and the loss is real. The gate is \
+                 NECESSARY rather than sufficient: a scrubbed capture pins no outgoing host and \
+                 no forwarding flag, so those two conditions stay unverifiable here. Both keys \
+                 are admitted deliberately -- the production \
                  strip removes the pair, so a predicate naming `temperature` alone would leave \
                  the same hole open for the first fixture that sends `top_p`. The removed VALUE \
                  is deliberately NOT pinned: the strip is unconditional on this lane and drops \
@@ -974,6 +1138,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         site_symbol: "normalize_claude_sampling",
         site_path: "crates/routectl-providers/src/anthropic_api/extras.rs",
         path_predicate: |path| path == "temperature" || path == "top_p",
+        applies_to: Some(outgoing_credential_is_bearer),
+        max_per_fixture: None,
         transform: Transform::Matcher(|divergence| divergence.kind == DivergenceKind::Removed),
         matched: AtomicUsize::new(0),
     },
@@ -1015,14 +1181,63 @@ pub fn normalize_ingress_for_lane(lane: &LaneKey, ingress: &Value) -> Value {
         })
 }
 
-/// The divergences on `lane` that no exception explains. Counting happens
-/// inside [`Exception::matches`], so a caller that adjudicates through
-/// this function keeps every entry's counter honest.
+/// The divergences on `lane` that no exception explains, with every entry
+/// on the lane considered eligible.
+///
+/// For a caller that holds NO fixture. A caller that does hold one uses
+/// [`unexplained_for_fixture`], which additionally consults each entry's
+/// [`Exception::applies_to`] gate -- a fixture-gated entry is
+/// unconditionally eligible here, so this form is strictly the weaker
+/// adjudication and is never the one a corpus walk wants.
 pub fn unexplained<'a>(lane: &LaneKey, divergences: &'a [Divergence]) -> Vec<&'a Divergence> {
-    let entries = exceptions_for_lane(lane);
+    residual(&exceptions_for_lane(lane), divergences)
+}
+
+/// The divergences on `lane` that no exception explains FOR THIS FIXTURE.
+///
+/// The fixture-aware form, and the one a corpus walk uses: an entry whose
+/// [`Exception::applies_to`] gate rejects the fixture is not consulted at
+/// all, so a transform that could not have run for this capture cannot
+/// excuse the shape it would have produced.
+pub fn unexplained_for_fixture<'a>(
+    lane: &LaneKey,
+    fixture: &Fixture,
+    divergences: &'a [Divergence],
+) -> Vec<&'a Divergence> {
+    let eligible: Vec<&'static Exception> = exceptions_for_lane(lane)
+        .into_iter()
+        .filter(|entry| entry.eligible_for(fixture))
+        .collect();
+    residual(&eligible, divergences)
+}
+
+/// The shared adjudication: which of `divergences` no entry of `entries`
+/// explains, enforcing each entry's [`Exception::max_per_fixture`] bound
+/// across this ONE call.
+///
+/// Counting happens inside [`Exception::matches`], so the bound is checked
+/// BEFORE the entry is consulted: a match past the bound must neither
+/// excuse the divergence nor inflate the entry's hit count, or a
+/// too-broad matcher reads as a well-exercised one.
+fn residual<'a>(
+    entries: &[&'static Exception],
+    divergences: &'a [Divergence],
+) -> Vec<&'a Divergence> {
+    let mut used = vec![0usize; entries.len()];
     divergences
         .iter()
-        .filter(|divergence| !entries.iter().any(|entry| entry.matches(divergence)))
+        .filter(|divergence| {
+            !entries.iter().enumerate().any(|(idx, entry)| {
+                if entry.max_per_fixture.is_some_and(|max| used[idx] >= max) {
+                    return false;
+                }
+                let matched = entry.matches(divergence);
+                if matched {
+                    used[idx] += 1;
+                }
+                matched
+            })
+        })
         .collect()
 }
 
@@ -1644,6 +1859,9 @@ mod tests {
 
     #[test]
     fn the_system_turn_normalizer_makes_a_length_changed_pair_diff_empty() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Mirrors the normalize-then-diff contract pinned in json_diff:
         // the lift removes turns from the MIDDLE of `.messages`, so every
         // later element shifts index and positional pairing collapses.
@@ -1682,6 +1900,9 @@ mod tests {
 
     #[test]
     fn the_normalizer_leaves_a_body_without_system_turns_untouched() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let body = json!({"messages": [{"role": "user", "content": "one"}]});
 
         let normalized = normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &body);
@@ -1691,6 +1912,9 @@ mod tests {
 
     #[test]
     fn the_normalizer_passes_through_a_body_with_no_messages_array() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let body = json!({"model": "m"});
 
         assert_eq!(
@@ -1729,6 +1953,9 @@ mod tests {
 
     #[test]
     fn the_billing_normalizer_realigns_a_system_array_the_strip_shrank() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The billing block is the FIRST system element, so removing it
         // shifts every later block: positional pairing then reports a
         // changed text at each surviving index plus a membership
@@ -1763,6 +1990,9 @@ mod tests {
 
     #[test]
     fn the_billing_normalizer_is_marker_keyed_not_position_keyed() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The production predicates test the block's own text, so a client
         // that sends the billing block SECOND is stripped identically.
         let ingress = json!({
@@ -1783,6 +2013,9 @@ mod tests {
 
     #[test]
     fn the_billing_normalizer_erases_no_other_system_block() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The negative that proves the normalizer is billing-SPECIFIC
         // rather than a blanket explanation of system-array shrinkage: a
         // wire body missing a NON-billing block must stay a finding.
@@ -1828,6 +2061,9 @@ mod tests {
 
     #[test]
     fn the_billing_normalizer_leaves_an_all_billing_system_alone() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A system array that is NOTHING but the billing block collapses
         // to an ABSENT `system` key upstream. That whole-field drop is a
         // shape this entry has never measured, so the rewrite declines it
@@ -1846,6 +2082,9 @@ mod tests {
 
     #[test]
     fn the_billing_normalizer_passes_through_a_non_array_system() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A flat-string system rides through: the harness runs over
         // whatever a fixture holds, and a shape mismatch is the diff's
         // finding to report.
@@ -2014,16 +2253,18 @@ mod tests {
                 "`{path}` is a placement slot"
             );
         }
-        // A premium TTL is admitted too: `ephemeral_1h` already exists, so
-        // pinning `5m` would stale the entry the day it is auto-emitted.
-        assert!(entry.matches(&Divergence {
+        // A premium TTL is a shape auto-placement never constructs: only
+        // `ephemeral_5m()` is assigned, so `1h` is a caller marker or an
+        // unreviewed placement change and must keep surfacing.
+        assert!(!entry.matches(&Divergence {
             path: "cache_control".to_string(),
             kind: DivergenceKind::Added,
             actual: Some(json!({"type": "ephemeral", "ttl": "1h"})),
             expected: None,
         }));
-        // A marker with no TTL at all is still the injection shape.
-        assert!(entry.matches(&Divergence {
+        // Nor is an omitted TTL: `ephemeral_5m()` carries `Some("5m")`, and
+        // the field skips serialization only when it is `None`.
+        assert!(!entry.matches(&Divergence {
             path: "cache_control".to_string(),
             kind: DivergenceKind::Added,
             actual: Some(json!({"type": "ephemeral"})),
@@ -2142,6 +2383,161 @@ mod tests {
         }));
     }
 
+    // ---------- the per-fixture eligibility gate ----------
+
+    /// A minimal fixture carrying only the outgoing headers the gate reads.
+    /// Bodies are irrelevant here: eligibility is decided before any
+    /// divergence is looked at.
+    fn fixture_with_outgoing_headers(headers: &[(&str, &str)]) -> super::super::loader::Fixture {
+        use super::super::loader::{FIXTURE_SCHEMA_VERSION, FixtureClient, FixtureMeta};
+        super::super::loader::Fixture {
+            name: "synthetic".to_string(),
+            ingress_request: json!({}),
+            ingress_request_headers: Vec::new(),
+            outgoing_request: json!({}),
+            outgoing_request_headers: headers
+                .iter()
+                .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
+                .collect(),
+            upstream_response_bytes: Vec::new(),
+            upstream_response_headers: Vec::new(),
+            egress_response_bytes: Vec::new(),
+            egress_response_headers: Vec::new(),
+            meta: FixtureMeta {
+                schema_version: FIXTURE_SCHEMA_VERSION,
+                provider_kind: "anthropic".to_string(),
+                lane: String::new(),
+                ingress_kind: "anthropic".to_string(),
+                case_id: "synthetic".to_string(),
+                config_sha: String::new(),
+                wire_pattern: String::new(),
+                client: FixtureClient::default(),
+                stream: false,
+                model: None,
+                routectl_version: None,
+            },
+        }
+    }
+
+    #[test]
+    fn the_sampling_entry_is_eligible_only_for_a_bearer_credential_capture() {
+        let entry = matcher("oauth-sampling-stripped");
+
+        // The committed capture's shape: the scrub keeps the scheme.
+        assert!(entry.eligible_for(&fixture_with_outgoing_headers(&[
+            ("anthropic-version", "2023-06-01"),
+            ("authorization", "Bearer [REDACTED]"),
+        ])));
+        // Case-insensitive on both the name and the scheme, per RFC 7235.
+        assert!(entry.eligible_for(&fixture_with_outgoing_headers(&[(
+            "Authorization",
+            "bEaReR [REDACTED]"
+        )])));
+
+        // An api-key egress: the OAuth-only strip could not have run.
+        assert!(!entry.eligible_for(&fixture_with_outgoing_headers(&[
+            ("anthropic-version", "2023-06-01"),
+            ("x-api-key", "[REDACTED]"),
+        ])));
+        // No outgoing headers at all.
+        assert!(!entry.eligible_for(&fixture_with_outgoing_headers(&[])));
+        // A different scheme whose value merely mentions the word.
+        assert!(!entry.eligible_for(&fixture_with_outgoing_headers(&[(
+            "authorization",
+            "Basic bearer-looking-value"
+        )])));
+        // The scheme as the whole value, with no credential after it: not
+        // the `Bearer <token>` shape a capture presents.
+        assert!(!entry.eligible_for(&fixture_with_outgoing_headers(&[(
+            "authorization",
+            "Bearer"
+        )])));
+        // The ingress credential says nothing about what routectl re-signed
+        // the request with, so it must not satisfy the gate.
+        let ingress_only = super::super::loader::Fixture {
+            ingress_request_headers: vec![(
+                "authorization".to_string(),
+                "Bearer [REDACTED]".to_string(),
+            )],
+            ..fixture_with_outgoing_headers(&[("x-api-key", "[REDACTED]")])
+        };
+        assert!(!entry.eligible_for(&ingress_only));
+    }
+
+    #[test]
+    fn an_ungated_entry_is_eligible_for_every_fixture_on_its_lane() {
+        // The default the other six entries rely on: no `applies_to` hook
+        // means the lane key alone decides, which is the behavior they were
+        // measured under. The billing strip specifically: its production
+        // call is on the always-run normalize path, so an api-key capture
+        // must stay adjudicable.
+        let api_key = fixture_with_outgoing_headers(&[("x-api-key", "[REDACTED]")]);
+        for entry in exceptions_for_lane(&ANTHROPIC_FIDELITY_LANE)
+            .into_iter()
+            .filter(|e| e.id != "oauth-sampling-stripped")
+        {
+            assert!(
+                entry.applies_to.is_none(),
+                "`{}` gained a fixture gate; the seven-entry table's gating is \
+                 asserted here so a new gate is a review moment",
+                entry.id
+            );
+            assert!(entry.eligible_for(&api_key), "`{}`", entry.id);
+        }
+    }
+
+    #[test]
+    fn only_matchers_carry_a_fixture_gate() {
+        // The normalizer seam takes a BODY, not a fixture, so a gate
+        // declared on a normalizer would be silently ignored -- an
+        // exception that reads as scoped while applying to everything.
+        for entry in all_exceptions() {
+            assert!(
+                entry.applies_to.is_none() || entry.kind() == ExceptionKind::Matcher,
+                "`{}` is a normalizer carrying an `applies_to` gate that nothing consults",
+                entry.id,
+            );
+        }
+    }
+
+    #[test]
+    fn the_cardinality_bound_stops_explaining_past_its_limit() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = matcher("auto-cache-breakpoint-injected");
+        let marker = |path: &str| Divergence {
+            path: path.to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
+            expected: None,
+        };
+        assert_eq!(entry.max_per_fixture, Some(2));
+
+        // POSITIVE CONTROL: the two production slots are explained and
+        // counted, so the third's rejection is the bound and not the shape.
+        let before = entry.matched_count();
+        let two = vec![marker("cache_control"), marker("system[0].cache_control")];
+        assert!(unexplained(&ANTHROPIC_FIDELITY_LANE, &two).is_empty());
+        assert_eq!(entry.matched_count() - before, 2);
+
+        let before = entry.matched_count();
+        let three = vec![
+            marker("cache_control"),
+            marker("system[0].cache_control"),
+            marker("system[1].cache_control"),
+        ];
+
+        let residual = unexplained(&ANTHROPIC_FIDELITY_LANE, &three);
+
+        assert_eq!(residual.len(), 1, "got: {residual:?}");
+        assert_eq!(
+            entry.matched_count() - before,
+            2,
+            "a match past the bound must not inflate the counter",
+        );
+    }
+
     // ---------- counters and adjudication ----------
 
     #[test]
@@ -2228,6 +2624,9 @@ mod tests {
 
     #[test]
     fn unexplained_keeps_only_the_divergences_no_exception_covers() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let explained = Divergence {
             path: "temperature".to_string(),
             kind: DivergenceKind::Added,
@@ -2249,6 +2648,9 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_registered_exceptions_explains_nothing() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Positive control for the lane keying: the same divergence the
         // anthropic lane explains is unexplained on a lane that never
         // claimed the transform.

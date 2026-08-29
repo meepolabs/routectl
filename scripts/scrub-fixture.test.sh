@@ -44,6 +44,11 @@ FAKE_GIT_NAME="Ada Contributor"
 FAKE_GIT_EMAIL="ada@example.invalid"
 FAKE_HOSTNAME="devbox-17"
 
+# The value a fully-collapsed credential is replaced by. Mirrors
+# REDACTED_SECRET in scripts/scrub-fixture.sh; the bearer form keeps the
+# scheme in front of it.
+BARE_PLACEHOLDER="[REDACTED]"
+
 if ! command -v python3 >/dev/null 2>&1; then
     echo "FAIL: python3 not found; this self-test cannot exercise header redaction"
     exit 1
@@ -167,6 +172,25 @@ assert_write() {
         fails=$((fails + 1))
     fi
     rm -rf "$work"
+}
+
+# Whether the WRITTEN headers file `$1` maps header name `$2` to EXACTLY
+# the value `$3` -- one occurrence of the name, that value and no other.
+#
+# Parsed as JSON rather than grepped: a count of placeholder occurrences
+# says nothing about WHICH name each one landed under, so a pass that
+# redacted the wrong header (or left one name unredacted while another
+# gained a second placeholder) reads identically. Name comparison is
+# case-insensitive, values exact.
+written_header_equals() {
+    printf '%s' "$1" | python3 -c '
+import json, sys
+
+name = sys.argv[1].lower()
+want = sys.argv[2]
+values = [v for n, v in json.load(sys.stdin) if n.lower() == name]
+sys.exit(0 if values == [want] else 1)
+' "$2" "$3"
 }
 
 # A realistic captured ingress body: the shape a real fixture carries,
@@ -905,25 +929,42 @@ assert_clean "per-request correlation headers stay visible" \
 # --write redacts them the same way it redacts a credential: the NAME
 # survives so the wire shape the fixture pins is intact, only the VALUE
 # collapses.
-ACCOUNT_HEADERS_RAW="[[\"anthropic-organization-id\",\"$(fresh_uuid_v4)\"],[\"anthropic-workspace-id\",\"wrkspc_01AAAAAAAAAAAAAAAAAAAAAA\"],[\"x-claude-code-session-id\",\"$(fresh_uuid_v4)\"],[\"cf-ray\",\"a32952d20e9aba30-SEA\"]]"
+#
+# Each raw value is RETAINED in its own variable so the assertions can bind
+# a name to a value in both directions: the written file must map each of
+# the three names to exactly the bare placeholder, and each raw value must
+# be gone. A count of placeholder occurrences cannot do that -- three
+# placeholders is equally consistent with one name redacted twice and
+# another left alone.
+ACCOUNT_ORG_ID_RAW="$(fresh_uuid_v4)"
+ACCOUNT_WORKSPACE_ID_RAW="wrkspc_01AAAAAAAAAAAAAAAAAAAAAA"
+ACCOUNT_SESSION_ID_RAW="$(fresh_uuid_v4)"
+ACCOUNT_CORRELATION_RAW="a32952d20e9aba30-SEA"
+ACCOUNT_HEADERS_RAW="[[\"anthropic-organization-id\",\"$ACCOUNT_ORG_ID_RAW\"],[\"anthropic-workspace-id\",\"$ACCOUNT_WORKSPACE_ID_RAW\"],[\"x-claude-code-session-id\",\"$ACCOUNT_SESSION_ID_RAW\"],[\"cf-ray\",\"$ACCOUNT_CORRELATION_RAW\"]]"
 
-assert_write "the organization and workspace ids do not survive the write pass" \
+assert_write "no account-scoped raw value survives the write pass" \
     upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
-    '! printf "%s" "$WRITTEN" | grep -q "wrkspc_01AAAAAAAAAAAAAAAAAAAAAA"'
+    '! printf "%s" "$WRITTEN" | grep -qF "$ACCOUNT_ORG_ID_RAW" &&
+     ! printf "%s" "$WRITTEN" | grep -qF "$ACCOUNT_WORKSPACE_ID_RAW" &&
+     ! printf "%s" "$WRITTEN" | grep -qF "$ACCOUNT_SESSION_ID_RAW"'
 
-assert_write "the account-scoped header NAMES survive redaction" \
+assert_write "each account-scoped name maps to exactly the bare placeholder" \
     upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
-    'printf "%s" "$WRITTEN" | grep -q "\"anthropic-organization-id\"" &&
-     printf "%s" "$WRITTEN" | grep -q "\"anthropic-workspace-id\"" &&
-     printf "%s" "$WRITTEN" | grep -q "\"x-claude-code-session-id\""'
+    'written_header_equals "$WRITTEN" anthropic-organization-id "$BARE_PLACEHOLDER" &&
+     written_header_equals "$WRITTEN" anthropic-workspace-id "$BARE_PLACEHOLDER" &&
+     written_header_equals "$WRITTEN" x-claude-code-session-id "$BARE_PLACEHOLDER"'
 
-assert_write "each account-scoped value collapses to the bare placeholder" \
+# PAIRED CONTROL for the assertion above: the same comparator must REFUSE a
+# value that is not the placeholder, or the three assertions pass for a
+# reason unrelated to redaction.
+assert_write "the header comparator refuses a value the write pass did not produce" \
     upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
-    '[ "$(printf "%s" "$WRITTEN" | grep -oF "[REDACTED]" | wc -l)" = "3" ]'
+    '! written_header_equals "$WRITTEN" anthropic-organization-id "$ACCOUNT_ORG_ID_RAW" &&
+     ! written_header_equals "$WRITTEN" anthropic-organization-id "Bearer $BARE_PLACEHOLDER"'
 
 assert_write "a per-request correlation header value survives the write pass" \
     upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
-    'printf "%s" "$WRITTEN" | grep -qF "a32952d20e9aba30-SEA"'
+    'written_header_equals "$WRITTEN" cf-ray "$ACCOUNT_CORRELATION_RAW"'
 
 # --- headers-unparseable ---------------------------------------------
 # A headers file the gate cannot parse has auth content it cannot inspect;
