@@ -383,3 +383,48 @@ jobs:
         run: |
           cargo install cargo-public-api --locked --version "${{ steps.pins.outputs.version }}"
           bash scripts/public-api.sh --check all
+
+  # The fleet-wide dependency gate, and the only one that is identical in
+  # every repo whatever the stack -- it reads Cargo.lock here and other
+  # lockfiles elsewhere, including any nested below the repo root that a
+  # stack-specific tool would never be pointed at.
+  #
+  # Rust keeps cargo-audit and cargo-deny alongside it, deliberately: the
+  # three do NOT overlap. This reports advisories but not YANKED crates,
+  # since a yank is a crates.io registry state rather than an OSV
+  # advisory -- the yanked chacha20 that turned this workflow red was
+  # invisible to it and caught by the other two.
+  #
+  # The pinned CLI, not google/osv-scanner-action: that action ships
+  # reusable workflows whose upload-sarif input defaults to true, which
+  # needs `security-events: write` plus code scanning -- unavailable to a
+  # private repo on a free plan. The binary keeps this job on
+  # `contents: read` and works the same everywhere.
+  osv-scan:
+    name: dependency vulnerabilities
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Pin AND verify before executing, so a tampered release artifact
+      # fails the job rather than running. The checksums file names the
+      # upstream artifact, so verify under that name before renaming.
+      - name: install osv-scanner
+        env:
+          OSV_VERSION: 2.5.1
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}"
+          curl -sSfL -o /tmp/osv-scanner    "${BASE}/osv-scanner_linux_amd64"
+          curl -sSfL -o /tmp/osv_SHA256SUMS "${BASE}/osv-scanner_SHA256SUMS"
+          ( cd /tmp && cp osv-scanner osv-scanner_linux_amd64 \
+            && grep ' osv-scanner_linux_amd64$' osv_SHA256SUMS | sha256sum --check --status )
+          chmod +x /tmp/osv-scanner
+          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      # `-r .` walks the tree for every lockfile it recognises rather than
+      # naming Cargo.lock, so a lockfile added later is covered without an
+      # edit here. Exits non-zero on a finding.
+      - name: scan lockfiles
+        run: osv-scanner scan source -r .
