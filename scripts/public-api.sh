@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Public-API change detector: lists each library crate's public surface
-# via cargo-public-api and diffs it against a checked-in baseline. CI does
-# not run it and it is not PR-blocking; locally it is a commit-gate leg
-# that blocks only where the tooling below is installed (the availability
-# probe lives in scripts/public-api-if-available.sh). A surface diff is
+# via cargo-public-api and diffs it against a checked-in baseline. CI runs
+# it unconditionally and a stale baseline FAILS the build; locally it is a
+# commit-gate leg that blocks only where the tooling below is installed
+# (the availability probe lives in scripts/public-api-if-available.sh), so
+# the local leg is an early warning and CI is the guarantee. A surface diff is
 # expected whenever the author intended to change the API; the author
 # regenerates the touched baselines IN THE SAME COMMIT (see
 # public-api/POLICY.md).

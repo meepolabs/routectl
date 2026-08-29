@@ -37,12 +37,12 @@ rustup toolchain list 2>/dev/null | grep -qF "$PUBLIC_API_NIGHTLY" ||
     missing+=("nightly toolchain $PUBLIC_API_NIGHTLY -- install: rustup toolchain install $PUBLIC_API_NIGHTLY --profile minimal")
 
 if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "public-api: WARNING skipping baseline check (local-only leg; CI does not run this)" >&2
+    echo "public-api: WARNING skipping baseline check locally; CI runs it unconditionally" >&2
     for m in "${missing[@]}"; do
         echo "public-api:   missing $m" >&2
     done
     exit 0
 fi
 
-echo "public-api: baseline check (local-only leg; CI does not run this)"
+echo "public-api: baseline check (early warning; CI runs it unconditionally)"
 exec bash scripts/public-api.sh --check all
