@@ -121,36 +121,62 @@ jobs:
       - name: cargo test (router, gen-catalog feature)
         run: cargo test -p routectl-router --features gen-catalog --release --lib
 
-      # The wire-conservation leg, run for its OUTPUT. Both fixture roots are
-      # gitignored, so this checkout has no corpus and the leg adjudicates
-      # nothing -- which is exactly why it cannot be left to the workspace
-      # step above, where a bare green would read as a passing gate. The grep
-      # promotes the harness's own named-skip line to a step-level statement,
-      # and fails the step if the line is absent, so "no corpus" can never be
-      # reported by silence. When a driver corpus is committed the harness
-      # stops printing the line, the grep fails, and this step is rewritten to
-      # assert the verdict instead -- that flip is the review moment the first
-      # committed fixture deserves.
+      # The wire-conservation leg, run for its VERDICT: the driver corpus is
+      # tracked, so every checkout adjudicates it and a Fail verdict already
+      # fails the test binary. The greps after the run are the positive
+      # control on top of that green -- a corpus that went missing or that
+      # loaded nothing would make the harness assert zero fixtures, and zero
+      # coverage on a gated lane must not read as a passing gate. So the
+      # gated anthropic->anthropic-api lane line must be present with a
+      # nonzero asserted count, and the harness's named-skip line must be
+      # absent: the fixtures are tracked, so their absence means a broken
+      # checkout, not an empty corpus. Only counts are left unpinned; they
+      # grow as the corpus grows.
       #
-      # --test-threads=1 is load-bearing here, not tidiness: under --nocapture
-      # parallel threads interleave their stderr mid-line, which can splice
-      # other output into the middle of the line the grep matches and fail this
-      # step over a formatting race.
-      - name: wire conservation (named skip on an empty corpus)
+      # The evidence is read from the committed-corpus test's own output
+      # section, not from the whole log: the harness's unit tests plant
+      # synthetic corpora and print both the named-skip line and their own
+      # gated lane lines, which would satisfy or trip either grep no matter
+      # what the real corpus holds.
+      #
+      # Two mechanical properties, both load-bearing rather than tidiness:
+      # --test-threads=1 under --nocapture, because parallel threads
+      # interleave their stderr mid-line and can splice other output into the
+      # middle of a matched line, failing this step over a formatting race;
+      # and pipefail with the tee, without which cargo's exit status is lost
+      # to the pipe and the verdict stops gating anything.
+      - name: wire conservation (verdict on the committed corpus)
         run: |
+          set -e
           set -o pipefail
           log="$RUNNER_TEMP/conservation.log"
           cargo test -p routectl-cli --release --test conservation \
             -- --nocapture --test-threads=1 2>&1 | tee "$log"
-          if grep -qF 'conservation: NOT RUN (no driver corpus in this checkout)' "$log"; then
-            echo "conservation: NOT RUN (no driver corpus in this checkout)"
-            echo "This job asserts NOTHING about wire conservation. The gate is wired;"
-            echo "it bites the moment a driver fixture is committed."
-            exit 0
+
+          block="$RUNNER_TEMP/conservation-committed-corpus.log"
+          awk '/^test conservation_over_both_fixture_roots \.\.\./ { inblock = 1 }
+               inblock { print }
+               inblock && /^(ok|FAILED)$/ { exit }' "$log" > "$block"
+          if ! grep -q . "$block"; then
+            echo "conservation: the committed-corpus test produced no output; the" >&2
+            echo "harness was renamed or never ran, so this step asserts nothing." >&2
+            exit 1
           fi
-          echo "conservation: the named-skip line is gone, so a driver corpus is present" >&2
-          echo "in this checkout -- rewrite this step to assert the run verdict." >&2
-          exit 1
+          if grep -qF 'no driver corpus in this checkout' "$block"; then
+            echo "conservation: the driver corpus is absent from this checkout, but its" >&2
+            echo "fixtures are tracked -- the checkout or the corpus is broken." >&2
+            exit 1
+          fi
+          lane=$(grep -E 'conservation: lane anthropic->anthropic-api .*gated=yes' "$block") || {
+            echo "conservation: no gated anthropic->anthropic-api lane in the run" >&2
+            exit 1
+          }
+          echo "$lane"
+          if printf '%s\n' "$lane" | grep -qE 'asserted=0([^0-9]|$)'; then
+            echo "conservation: the gated lane asserted 0 fixtures; a gate at zero" >&2
+            echo "coverage is decorative green." >&2
+            exit 1
+          fi
 
   audit:
     name: cargo audit

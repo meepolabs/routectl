@@ -5557,8 +5557,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   zero unexplained) when that per-contributor corpus is present -- skipping
   loudly when it is not. Emits `NO_DRIVER_CORPUS` (the
   `conservation: NOT RUN ...` named skip) whenever zero driver fixtures
-  loaded; CI's own conservation step greps for that line and fails if it is
-  absent, so an empty gating corpus can never be reported by silence
+  loaded; the driver corpus is tracked, so CI's conservation step asserts
+  the run verdict and fails if that line appears or if the gated lane
+  asserted zero fixtures
 - `tests/replay_ingress.rs` -- replay-driven ingress contract test; walks
   captured fixtures, mounts the upstream response in wiremock, drives egress
   `complete()`, renders the canonical `ChatResponse` via
