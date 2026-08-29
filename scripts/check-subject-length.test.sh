@@ -88,23 +88,37 @@ short_subject_long_body="fix: short subject
 $(printf 'a%.0s' $(seq 1 200))"
 assert_pass "short subject with a long body line" "$short_subject_long_body"
 
-# The bound is overridable, and the override is asserted in BOTH
-# directions on ONE fixture. A single direction would pass against a
-# script that ignored the variable entirely: a 50-char subject accepted
-# under a limit of 40 proves nothing on its own unless the same subject
-# is also seen to fail there.
-fifty="$(printf 'a%.0s' $(seq 1 50))"
-assert_pass "50-char subject under the default bound" "$fifty"
+# The bound must NOT be reachable from the environment. An override would be
+# a bypass with no diff -- set it high in the shell that runs the commit and
+# the gate is gone, with nothing in the tree to review. So this asserts the
+# absence of an escape hatch, and the assertion is written to fail if one is
+# ever added: an over-limit subject stays REFUSED even with a generously
+# permissive value exported under every plausible variable name.
+over_by_one="$(printf 'a%.0s' $(seq 1 71))"
 (
-    export SUBJECT_LENGTH_LIMIT=40
-    assert_reject "the same subject rejected when the bound is lowered" "$fifty"
+    export SUBJECT_LENGTH_LIMIT=500 SUBJECT_LIMIT=500 MAX_SUBJECT_LENGTH=500
+    assert_reject "71-char subject still refused with a permissive env override" "$over_by_one"
     exit "$fails"
 ) || fails=$((fails + $?))
+
+# Paired control for the assertion above: with those same variables exported,
+# a legitimate subject still PASSES. Without this, the assertion is satisfiable
+# by a script that refuses everything whenever the environment is dirty.
 (
-    export SUBJECT_LENGTH_LIMIT=80
-    assert_pass "the same subject accepted again when the bound is raised" "$fifty"
+    export SUBJECT_LENGTH_LIMIT=500 SUBJECT_LIMIT=500 MAX_SUBJECT_LENGTH=500
+    assert_pass "in-limit subject still accepted with the same env set" "fix: a short subject"
     exit "$fails"
 ) || fails=$((fails + $?))
+
+# The bound is a literal in the source, not read from anywhere: a grep-level
+# guard so a future edit that reintroduces an override is a test failure
+# rather than a silent loosening.
+if grep -qE 'SUBJECT_LIMIT="?\$\{' "$CHECKER"; then
+    echo "FAIL: the bound is read from the environment -- that is a bypass with no diff"
+    fails=$((fails + 1))
+else
+    echo "PASS: the bound is a source constant, not an environment read"
+fi
 
 if [[ "$fails" -ne 0 ]]; then
     echo "check-subject-length.test.sh: $fails assertion(s) failed" >&2
