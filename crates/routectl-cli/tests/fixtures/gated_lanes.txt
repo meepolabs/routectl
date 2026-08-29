@@ -10,10 +10,9 @@
 # under tests/fixtures/captured/ are report-only and are never gated,
 # whatever this file says.
 #
-# NAMES ZERO LANES, deliberately, and that is the honest state rather
-# than an unfinished one: the driver corpus under tests/fixtures/driver/
-# is empty, so there is no lane any consumer could gate on. An entry
-# here that no committed fixture backs would be a decorative gate.
+# NAMES EXACTLY the lanes that committed fixtures under
+# tests/fixtures/driver/ actually back -- one lane today. An entry here
+# that no committed fixture backs would be a decorative gate.
 #
 # The reader is FAIL-CLOSED: with no lane listed it returns
 # NoLanesListed rather than an empty gated set, so a consumer cannot
@@ -21,8 +20,9 @@
 # harness maps that one variant onto "no lane gated", and it announces
 # the emptiness on its own output line.
 #
-# POPULATED BY the first successful driver capture -- add the lane the
-# landed fixtures actually ride, read off the capture, never the lane
-# hoped for. The harness carries a self-invalidating test pinning this
-# file's current comment-only parse outcome; turning it red is the
-# review moment that first entry deserves.
+# ADDING A LANE means a capture landed on it: read the lane off that
+# capture's meta.lane, never off the lane hoped for. The harness pins
+# this file's parse outcome as an EXACT set, so every addition here
+# turns that test red -- which is the review moment each entry deserves.
+
+anthropic-api

@@ -120,6 +120,12 @@ fn plain_turn_01_carries_its_claimed_baseline_shape() {
         fixture.meta.wire_pattern, "baseline",
         "{CASE} asserts the baseline predicate but records a different wire_pattern",
     );
+    assert_eq!(
+        fixture.meta.ingress_kind, "anthropic",
+        "{CASE} must keep a non-empty ingress_kind: the conservation harness SKIPS a fixture \
+         whose ingress_kind is empty, and with lane `{LANE}` gated a skip turns the gate red \
+         for zero coverage -- a symptom that reads as unrelated to the lost token",
+    );
 }
 
 // ---------------------------------------------------------------------------

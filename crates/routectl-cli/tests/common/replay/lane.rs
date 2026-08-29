@@ -70,12 +70,19 @@
 //! 1. A path predicate alone must NOT be trusted against a
 //!    caller-controlled key subtree (tool `input_schema` is the known
 //!    one). Every entry in this table pairs its path predicate with a
-//!    value constraint, so forging the path is not enough to be excused --
-//!    the forged key would also have to carry the exact value shape the
-//!    transform produces.
+//!    constraint on the divergence itself, so forging the path is not
+//!    enough to be excused -- the forged key would also have to carry the
+//!    exact shape the transform produces. `oauth-sampling-stripped` is the
+//!    one entry whose constraint is on the KIND rather than on a value,
+//!    and it is sound for the same reason: its two paths are exact
+//!    top-level equalities that no nested key can reach, so there is no
+//!    caller-controlled subtree to forge from.
 //! 2. No entry here targets a path inside a caller-controlled subtree. The
-//!    four live entries address `messages`, `temperature`, `model`, and
-//!    `thinking`, all routectl-owned.
+//!    live entries address `messages`, `system`, `temperature`, `top_p`,
+//!    `model`, `thinking`, and the `cache_control` marker slots, all
+//!    routectl-owned. The cache-marker entry's path predicate is written to
+//!    EXCLUDE the one caller-controlled subtree that can carry a
+//!    `cache_control`-shaped key (a tool's `input_schema`).
 //!
 //! Also inherited: `ignore_paths` cannot express wildcards
 //! (`messages[*].role`), which is intended -- this table filters the
@@ -106,34 +113,47 @@
 //!
 //! # Credential-lane scope of the table
 //!
-//! The entries below are scoped to the NON-cloak `anthropic` ->
-//! `anthropic-api` lane, and that scope is measured rather than assumed:
-//! the Claude Code billing text survives in the outgoing `system` of the
-//! overwhelming majority of corpus fixtures, and `cloak_body`
-//! (`crates/routectl-providers/src/anthropic_api/client.rs`) strips it on
-//! the OAuth own-anthropic lane -- so the cloak gate was false for these
-//! captures. Corroborating: no fixture carries `temperature` on ingress
-//! while many have it ADDED, which is only possible if
+//! The `anthropic` -> `anthropic-api` lane carries captures from TWO
+//! credential surfaces, and the table's entries were measured on both.
+//!
+//! The live-box corpus is the NON-cloak surface, and that scope is measured
+//! rather than assumed: the Claude Code billing text survives in the
+//! outgoing `system` of the overwhelming majority of those fixtures, and
+//! `cloak_body` (`crates/routectl-providers/src/anthropic_api/client.rs`)
+//! strips it on the OAuth own-anthropic lane -- so the cloak gate was false
+//! for those captures. Corroborating: no such fixture carries `temperature`
+//! on ingress while many have it ADDED, which is only possible if
 //! `normalize_claude_sampling` never ran.
 //!
-//! A capture on the OAuth cloak lane would need its own entries, and the
-//! transforms that would want them are named here so the next contributor
-//! re-derives rather than rediscovers:
+//! The committed driver corpus is the OAuth cloak surface (its outgoing
+//! headers carry an `authorization: Bearer`, its ingress an `x-api-key`).
+//! On that surface two further transforms fire, and both have entries
+//! below:
 //!
+//! - The billing strip DOES fire, from both the always-on normalize path
+//!   and the cloak -- see `billing-system-block-stripped`.
 //! - `normalize_claude_sampling`
 //!   (`crates/routectl-providers/src/anthropic_api/extras.rs`) strips BOTH
 //!   `temperature` and `top_p` from the final body, because the OAuth seat
-//!   400s a request carrying either. On that lane the temperature entry
-//!   below inverts: the clamp's forced `1.0` never reaches the wire, so its
-//!   [`DivergenceKind::Added`] matcher would see a
-//!   [`DivergenceKind::Removed`] and report zero matches.
+//!   400s a request carrying either -- see `oauth-sampling-stripped`. On
+//!   this surface the two sampling entries COMPOSE rather than conflict:
+//!   `thinking-temperature-clamp` writes `1.0` during request assembly and
+//!   this strip removes the key at the egress boundary, so a capture here
+//!   reports a REMOVED `temperature` while a non-cloak capture reports an
+//!   ADDED one. Two directions, two sites, two entries.
+//!
+//! The remaining cloak sub-transforms are named here so the next
+//! contributor re-derives rather than rediscovers:
+//!
 //! - `cloak_oauth_egress`
 //!   (`crates/routectl-providers/src/anthropic_api/cloak.rs`) and its
 //!   sub-transforms. Two of them move positions and are therefore
 //!   NORMALIZER-shaped by this module's own rule:
 //!   `relocate_client_system` (`cloak/identity.rs`) moves the client
 //!   system into the first user message, and `sort_custom_tools_by_name`
-//!   (`cloak/tool_sort.rs`) reorders `tools[]`.
+//!   (`cloak/tool_sort.rs`) reorders `tools[]`. Both are gated on a
+//!   NON-Claude-Code client, so a genuine-client capture does not reach
+//!   them.
 //!
 //! Those entries are deliberately NOT written yet: they would match zero
 //! divergences on today's corpus, and the zero-match rule would correctly
@@ -636,6 +656,99 @@ fn is_messages_path(path: &str) -> bool {
     path == "messages" || path.starts_with("messages[")
 }
 
+/// Whether `path` addresses `.system` or any element beneath it.
+fn is_system_path(path: &str) -> bool {
+    path == "system" || path.starts_with("system[")
+}
+
+/// The marker that identifies a Claude Code billing/attribution system
+/// block. The SAME rule the production strips use
+/// (`system_filter::is_billing_attribution_block` and
+/// `cloak::billing::block_is_billing`): a leading occurrence in the block's
+/// `text` after trimming leading whitespace. Never a position in the array,
+/// so a client that sends the block second is treated identically.
+const BILLING_BLOCK_MARKER: &str = "x-anthropic-billing-header:";
+
+/// Whether a `system[]` element is the billing/attribution block.
+fn system_block_is_billing(block: &Value) -> bool {
+    block
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.trim_start().starts_with(BILLING_BLOCK_MARKER))
+}
+
+/// Drop the billing/attribution block from `.system`, the ingress-side
+/// mirror of the egress strip. Immutable: returns a new body.
+///
+/// Passes the body through unchanged when `system` is not an array, when no
+/// element carries the marker, and when EVERY element does: a system array
+/// that is nothing but the billing block collapses to an ABSENT `system`
+/// key upstream, and modelling that here would explain a whole-field drop
+/// this entry has never measured.
+fn without_billing_system_block(body: &Value) -> Value {
+    let Some(blocks) = body.get("system").and_then(Value::as_array) else {
+        return body.clone();
+    };
+    let kept: Vec<Value> = blocks
+        .iter()
+        .filter(|block| !system_block_is_billing(block))
+        .cloned()
+        .collect();
+    if kept.len() == blocks.len() || kept.is_empty() {
+        return body.clone();
+    }
+    let mut out = body.clone();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("system".to_string(), Value::Array(kept));
+    }
+    out
+}
+
+/// Whether `value` is an ephemeral cache-control object.
+///
+/// The TTL is deliberately unconstrained: `CacheControl::ephemeral_5m` is
+/// today's auto-emit vocabulary and `ephemeral_1h` already exists in
+/// `routectl-core`, so pinning `5m` would make the entry stale the day a
+/// premium tier is auto-emitted. `type` is what carries the precision --
+/// Anthropic's only cache-control kind -- so a marker of any other kind
+/// stays a finding.
+fn is_ephemeral_cache_control(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("ephemeral")
+}
+
+/// Whether `path` is one of the THREE places routectl's auto-cache
+/// placement writes a marker, in `diff_all`'s path grammar: the top-level
+/// `cache_control` field (the terminal marker), or the `cache_control` leaf
+/// of an indexed `system[]` / `tools[]` element (the front marker, whose
+/// `FrontSlot` resolves to the last wire-eligible system block else the
+/// last custom tool).
+///
+/// A `cache_control` leaf anywhere else -- inside `messages[]`, inside a
+/// tool's caller-authored `input_schema` -- is NOT admitted: auto-placement
+/// never writes there, so such a key came from the caller and appears on
+/// BOTH sides of the diff rather than as an addition.
+fn is_auto_cache_marker_path(path: &str) -> bool {
+    if path == "cache_control" {
+        return true;
+    }
+    let Some(parent) = path.strip_suffix(".cache_control") else {
+        return false;
+    };
+    is_indexed_element_of(parent, "system") || is_indexed_element_of(parent, "tools")
+}
+
+/// Whether `path` is exactly `<array_key>[<digits>]`.
+fn is_indexed_element_of(path: &str, array_key: &str) -> bool {
+    let Some(index) = path
+        .strip_prefix(array_key)
+        .and_then(|rest| rest.strip_prefix('['))
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Whether `expected` is `actual` plus a NON-EMPTY bracketed suffix, e.g.
 /// `claude-opus-4-8[1m]` against `claude-opus-4-8`.
 ///
@@ -656,7 +769,7 @@ fn is_bracketed_alias_of(expected: &str, actual: &str) -> bool {
 ///
 /// Every `reason` below was re-confirmed by reading the named symbol in
 /// current code; `site_symbol` records which one.
-static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 4] = [
+static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
     Exception {
         lane: ANTHROPIC_FIDELITY_LANE,
         id: "system-turn-lift",
@@ -759,6 +872,109 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 4] = [
                 && divergence.expected.as_ref().and_then(|v| v.get("type"))
                     == Some(&Value::String("disabled".to_string()))
         }),
+        matched: AtomicUsize::new(0),
+    },
+    Exception {
+        lane: ANTHROPIC_FIDELITY_LANE,
+        id: "billing-system-block-stripped",
+        reason: "The ingress `system[]` carries the Claude Code billing/attribution block (a \
+                 block whose `text` starts with the `x-anthropic-billing-header:` marker after \
+                 trimming leading whitespace) and the wire `system[]` does not, so the array \
+                 shrinks and every later block shifts index. Confirmed at \
+                 `strip_billing_attribution` \
+                 (crates/routectl-providers/src/system_filter.rs), which drops the marked \
+                 block from the canonical `SystemContent` and is called unconditionally from \
+                 the anthropic-api request assembly (`request.rs`) -- an anthropic-api \
+                 provider can be pointed at a third-party host where the OAuth cloak never \
+                 fires, so the strip runs on the always-on normalize path. The OAuth cloak \
+                 repeats it on the assembled JSON body at `strip_billing_block` \
+                 (crates/routectl-providers/src/anthropic_api/cloak/billing.rs), keyed on the \
+                 SAME leading marker, so either path produces this shape. Identified by the \
+                 marker, never by position: both production predicates test the block's own \
+                 text, so a client that sends the block second is stripped identically. \
+                 Length-changing, hence a NORMALIZER: the shift reports a divergence at every \
+                 later system index plus a membership divergence at the tail, and an entry \
+                 broad enough to whitelist that would cover the whole system array -- which \
+                 on this lane is most of the prompt. Deliberately NOT the non-CC system \
+                 reduction: `relocate_client_system` \
+                 (crates/routectl-providers/src/anthropic_api/cloak/identity.rs) also reshapes \
+                 `system[]`, but only for a non-Claude-Code client, and it MOVES content into \
+                 the first user message rather than dropping the billing block. This entry \
+                 models only the billing removal, so a relocation keeps surfacing.",
+        site_symbol: "strip_billing_attribution",
+        site_path: "crates/routectl-providers/src/system_filter.rs",
+        path_predicate: is_system_path,
+        transform: Transform::Normalizer(without_billing_system_block),
+        matched: AtomicUsize::new(0),
+    },
+    Exception {
+        lane: ANTHROPIC_FIDELITY_LANE,
+        id: "auto-cache-breakpoint-injected",
+        reason: "An ephemeral `cache_control` marker appears on the wire that the client never \
+                 sent: the top-level field (the TERMINAL marker) and/or the `cache_control` \
+                 leaf of the last wire-eligible `system[]` block, else the last custom tool \
+                 (the FRONT marker). Confirmed at `apply_auto_cache_placement` \
+                 (crates/routectl-router/src/router/dispatch.rs), which assigns \
+                 `CacheControl::ephemeral_5m()` to the top-level field and places the front \
+                 marker through `place_front_marker` in the same file, both on a throwaway \
+                 per-attempt clone that is committed only once the full breakpoint sequence \
+                 validates. Injection is withheld entirely when the caller supplied any \
+                 breakpoint of its own, which is why this shows up as an ADDITION and never as \
+                 a rewrite of a caller marker. The value constraint tests `type == \
+                 \"ephemeral\"` only and leaves the TTL open: `5m` is today's auto-emit \
+                 vocabulary and `CacheControl::ephemeral_1h` already exists in \
+                 routectl-core, so pinning the TTL would make the entry stale the day a \
+                 premium tier is auto-emitted, whereas `type` is Anthropic's only \
+                 cache-control kind and a marker of another kind must keep surfacing. The path \
+                 predicate admits ONLY the three places placement writes -- the top-level \
+                 field and a `cache_control` leaf directly under an indexed `system[]` / \
+                 `tools[]` element -- so a `cache_control` key appearing anywhere else (inside \
+                 `messages[]`, inside a tool's caller-authored `input_schema`) stays a \
+                 finding. In-place addition that moves no positions, hence a MATCHER.",
+        site_symbol: "apply_auto_cache_placement",
+        site_path: "crates/routectl-router/src/router/dispatch.rs",
+        path_predicate: is_auto_cache_marker_path,
+        transform: Transform::Matcher(|divergence| {
+            divergence.kind == DivergenceKind::Added
+                && divergence
+                    .actual
+                    .as_ref()
+                    .is_some_and(is_ephemeral_cache_control)
+        }),
+        matched: AtomicUsize::new(0),
+    },
+    Exception {
+        lane: ANTHROPIC_FIDELITY_LANE,
+        id: "oauth-sampling-stripped",
+        reason: "The ingress carried a top-level `temperature` and/or `top_p` and the wire body \
+                 carries neither. Confirmed at `normalize_claude_sampling` \
+                 (crates/routectl-providers/src/anthropic_api/extras.rs), which removes BOTH \
+                 keys from the FINAL outbound body and emits one contents-free WARN naming the \
+                 keys it dropped: Anthropic's OAuth seat on api.anthropic.com 400s a \
+                 `/v1/messages` body carrying either. It is the last word on the JSON -- called \
+                 after `cloak_body` and before the outgoing-body trace -- so no later pass \
+                 re-introduces a stripped key. Gated on the LANE, not on the cloak state: \
+                 `is_cloak_lane` (crates/routectl-providers/src/anthropic_api/client.rs) is \
+                 OauthBearer auth plus an api.anthropic.com host plus a non-forwarded leg. The \
+                 committed capture on this lane rode that surface, and its headers say so: the \
+                 ingress request carries an `x-api-key` while the outgoing request carries an \
+                 `authorization: Bearer`. Both keys are admitted deliberately -- the production \
+                 strip removes the pair, so a predicate naming `temperature` alone would leave \
+                 the same hole open for the first fixture that sends `top_p`. The removed VALUE \
+                 is deliberately NOT pinned: the strip is unconditional on this lane and drops \
+                 whatever the caller, the thinking clamp, or a `provider_extras` smuggle put \
+                 there, so pinning a value would fail to explain the identical transform on the \
+                 next capture that happens to send a different one. Distinct from \
+                 `thinking-temperature-clamp` and deliberately a separate entry: that one is an \
+                 ADDED `1.0` -- a value the wire GAINS from the clamp at request-assembly time \
+                 -- while this is a REMOVED key, a value the wire LOSES at the egress boundary. \
+                 Different direction, different site, and on this lane the two compose (the \
+                 clamp writes `1.0`, then this strips it), which is why one entry could not \
+                 cover both. In-place key removal that moves no positions, hence a MATCHER.",
+        site_symbol: "normalize_claude_sampling",
+        site_path: "crates/routectl-providers/src/anthropic_api/extras.rs",
+        path_predicate: |path| path == "temperature" || path == "top_p",
+        transform: Transform::Matcher(|divergence| divergence.kind == DivergenceKind::Removed),
         matched: AtomicUsize::new(0),
     },
 ];
@@ -1191,32 +1407,24 @@ mod tests {
     }
 
     #[test]
-    fn the_anthropic_fidelity_lane_carries_one_normalizer_and_three_matchers() {
+    fn the_anthropic_fidelity_lane_carries_two_normalizers_and_five_matchers() {
         let entries = exceptions_for_lane(&ANTHROPIC_FIDELITY_LANE);
 
-        let ids: Vec<&str> = entries.iter().map(|entry| entry.id).collect();
+        let kinds: Vec<(&str, ExceptionKind)> = entries.iter().map(|e| (e.id, e.kind())).collect();
         assert_eq!(
-            ids,
+            kinds,
             vec![
-                "system-turn-lift",
-                "thinking-temperature-clamp",
-                "model-alias-suffix-resolved",
-                "disabled-thinking-dropped",
-            ]
+                ("system-turn-lift", ExceptionKind::Normalizer),
+                ("thinking-temperature-clamp", ExceptionKind::Matcher),
+                ("model-alias-suffix-resolved", ExceptionKind::Matcher),
+                ("disabled-thinking-dropped", ExceptionKind::Matcher),
+                ("billing-system-block-stripped", ExceptionKind::Normalizer),
+                ("auto-cache-breakpoint-injected", ExceptionKind::Matcher),
+                ("oauth-sampling-stripped", ExceptionKind::Matcher),
+            ],
+            "the length-changing entries must be NORMALIZERS and the in-place \
+             value changes MATCHERS",
         );
-        assert_eq!(
-            entries[0].kind(),
-            ExceptionKind::Normalizer,
-            "the length-changing system-turn lift must be a NORMALIZER"
-        );
-        for entry in &entries[1..] {
-            assert_eq!(
-                entry.kind(),
-                ExceptionKind::Matcher,
-                "`{}` is an in-place value change",
-                entry.id
-            );
-        }
     }
 
     // ---------- symbol resolution ----------
@@ -1517,6 +1725,141 @@ mod tests {
         );
     }
 
+    // ---------- the billing-block normalizer ----------
+
+    #[test]
+    fn the_billing_normalizer_realigns_a_system_array_the_strip_shrank() {
+        // The billing block is the FIRST system element, so removing it
+        // shifts every later block: positional pairing then reports a
+        // changed text at each surviving index plus a membership
+        // divergence at the tail.
+        let ingress = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
+                {"type": "text", "text": "identity line"},
+                {"type": "text", "text": "the long prompt"},
+            ],
+        });
+        let outgoing = json!({
+            "system": [
+                {"type": "text", "text": "identity line"},
+                {"type": "text", "text": "the long prompt"},
+            ],
+        });
+
+        // Positive control: diffed raw, one explained transform reports
+        // three divergences over a three-block array.
+        let raw = super::super::diff_all(&outgoing, &ingress, &[]);
+        assert_eq!(raw.len(), 3, "got: {raw:?}");
+
+        let normalized = super::super::diff_all(
+            &outgoing,
+            &normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &ingress),
+            &[],
+        );
+
+        assert!(normalized.is_empty(), "got: {normalized:?}");
+    }
+
+    #[test]
+    fn the_billing_normalizer_is_marker_keyed_not_position_keyed() {
+        // The production predicates test the block's own text, so a client
+        // that sends the billing block SECOND is stripped identically.
+        let ingress = json!({
+            "system": [
+                {"type": "text", "text": "identity line"},
+                {"type": "text", "text": "  \n x-anthropic-billing-header: cc_version=1.2.3;"},
+            ],
+        });
+
+        let normalized = normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &ingress);
+
+        assert_eq!(
+            normalized["system"],
+            json!([{"type": "text", "text": "identity line"}]),
+            "leading whitespace before the marker still matches, at any index",
+        );
+    }
+
+    #[test]
+    fn the_billing_normalizer_erases_no_other_system_block() {
+        // The negative that proves the normalizer is billing-SPECIFIC
+        // rather than a blanket explanation of system-array shrinkage: a
+        // wire body missing a NON-billing block must stay a finding.
+        let ingress = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
+                {"type": "text", "text": "identity line"},
+                {"type": "text", "text": "the long prompt"},
+            ],
+        });
+        // The identity line is gone from the wire too -- not a transform
+        // this entry claims.
+        let outgoing = json!({
+            "system": [
+                {"type": "text", "text": "the long prompt"},
+            ],
+        });
+
+        let residual = super::super::diff_all(
+            &outgoing,
+            &normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &ingress),
+            &[],
+        );
+
+        assert!(
+            !residual.is_empty(),
+            "dropping a non-billing block must survive the normalizer as a divergence",
+        );
+
+        // A body whose only marker-free blocks shrink is untouched by the
+        // rewrite at all.
+        let marker_free = json!({
+            "system": [
+                {"type": "text", "text": "identity line"},
+                {"type": "text", "text": "the long prompt"},
+            ],
+        });
+        assert_eq!(
+            normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &marker_free),
+            marker_free,
+        );
+    }
+
+    #[test]
+    fn the_billing_normalizer_leaves_an_all_billing_system_alone() {
+        // A system array that is NOTHING but the billing block collapses
+        // to an ABSENT `system` key upstream. That whole-field drop is a
+        // shape this entry has never measured, so the rewrite declines it
+        // and the divergence keeps surfacing.
+        let body = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
+            ],
+        });
+
+        assert_eq!(
+            normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &body),
+            body
+        );
+    }
+
+    #[test]
+    fn the_billing_normalizer_passes_through_a_non_array_system() {
+        // A flat-string system rides through: the harness runs over
+        // whatever a fixture holds, and a shape mismatch is the diff's
+        // finding to report.
+        for body in [
+            json!({"system": "x-anthropic-billing-header: cc_version=1.2.3;"}),
+            json!({"model": "m"}),
+        ] {
+            assert_eq!(
+                normalize_ingress_for_lane(&ANTHROPIC_FIDELITY_LANE, &body),
+                body
+            );
+        }
+    }
+
     // ---------- the matchers ----------
 
     fn matcher(id: &str) -> &'static Exception {
@@ -1644,6 +1987,158 @@ mod tests {
             kind: DivergenceKind::Removed,
             actual: None,
             expected: Some(json!({"type": "disabled"})),
+        }));
+    }
+
+    #[test]
+    fn the_cache_matcher_matches_an_injected_ephemeral_marker_and_nothing_else() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = matcher("auto-cache-breakpoint-injected");
+
+        // The three slots placement writes: the top-level terminal marker
+        // and the front marker on a system block or a custom tool.
+        for path in [
+            "cache_control",
+            "system[1].cache_control",
+            "tools[3].cache_control",
+        ] {
+            assert!(
+                entry.matches(&Divergence {
+                    path: path.to_string(),
+                    kind: DivergenceKind::Added,
+                    actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
+                    expected: None,
+                }),
+                "`{path}` is a placement slot"
+            );
+        }
+        // A premium TTL is admitted too: `ephemeral_1h` already exists, so
+        // pinning `5m` would stale the entry the day it is auto-emitted.
+        assert!(entry.matches(&Divergence {
+            path: "cache_control".to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!({"type": "ephemeral", "ttl": "1h"})),
+            expected: None,
+        }));
+        // A marker with no TTL at all is still the injection shape.
+        assert!(entry.matches(&Divergence {
+            path: "cache_control".to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!({"type": "ephemeral"})),
+            expected: None,
+        }));
+
+        // A cache-control kind routectl never injects: the type is what
+        // carries the precision, so this must keep surfacing.
+        assert!(!entry.matches(&Divergence {
+            path: "cache_control".to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!({"type": "permanent", "ttl": "5m"})),
+            expected: None,
+        }));
+        // Same path, no type at all.
+        assert!(!entry.matches(&Divergence {
+            path: "cache_control".to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!({"ttl": "5m"})),
+            expected: None,
+        }));
+        // routectl REWRITING a caller's marker is a different transform:
+        // injection is withheld entirely when the caller supplied one.
+        assert!(!entry.matches(&Divergence {
+            path: "cache_control".to_string(),
+            kind: DivergenceKind::Changed,
+            actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
+            expected: Some(json!({"type": "ephemeral", "ttl": "1h"})),
+        }));
+        // The wire DROPPING a caller's marker is wire loss, not injection.
+        assert!(!entry.matches(&Divergence {
+            path: "system[1].cache_control".to_string(),
+            kind: DivergenceKind::Removed,
+            actual: None,
+            expected: Some(json!({"type": "ephemeral", "ttl": "5m"})),
+        }));
+        // Paths auto-placement never writes, including the one
+        // caller-controlled subtree that can carry the key name.
+        for path in [
+            "messages[0].content[0].cache_control",
+            "tools[0].input_schema.properties.cache_control",
+            "system.cache_control",
+            "system[].cache_control",
+            "cache_control.ttl",
+            "metadata.cache_control",
+        ] {
+            assert!(
+                !entry.matches(&Divergence {
+                    path: path.to_string(),
+                    kind: DivergenceKind::Added,
+                    actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
+                    expected: None,
+                }),
+                "`{path}` is not a placement slot"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sampling_strip_matches_both_dropped_keys_and_nothing_else() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = matcher("oauth-sampling-stripped");
+
+        // The production strip removes the PAIR, so both keys match. The
+        // value is not part of the claim: whatever the caller sent, the
+        // seat-driven strip drops it.
+        for (path, sent) in [
+            ("temperature", json!(1)),
+            ("temperature", json!(0.2)),
+            ("top_p", json!(0.9)),
+        ] {
+            assert!(
+                entry.matches(&Divergence {
+                    path: path.to_string(),
+                    kind: DivergenceKind::Removed,
+                    actual: None,
+                    expected: Some(sent.clone()),
+                }),
+                "`{path}` carrying {sent} is what the strip removes"
+            );
+        }
+
+        // A sampling key the strip leaves alone: the seat accepts it, so
+        // its loss is real.
+        assert!(!entry.matches(&Divergence {
+            path: "top_k".to_string(),
+            kind: DivergenceKind::Removed,
+            actual: None,
+            expected: Some(json!(40)),
+        }));
+        // A REWRITE of the caller's value is not this transform -- the
+        // strip removes the key outright.
+        assert!(!entry.matches(&Divergence {
+            path: "temperature".to_string(),
+            kind: DivergenceKind::Changed,
+            actual: Some(json!(1.0)),
+            expected: Some(json!(0.2)),
+        }));
+        // An ADDED temperature stays `thinking-temperature-clamp`'s
+        // territory: that entry is a value the wire GAINS, this one a
+        // value the wire LOSES.
+        assert!(!entry.matches(&Divergence {
+            path: "temperature".to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!(1.0)),
+            expected: None,
+        }));
+        // A nested key that merely ends in one of the two names.
+        assert!(!entry.matches(&Divergence {
+            path: "provider_extras.temperature".to_string(),
+            kind: DivergenceKind::Removed,
+            actual: None,
+            expected: Some(json!(0.5)),
         }));
     }
 
