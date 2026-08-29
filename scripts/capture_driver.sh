@@ -298,7 +298,13 @@ else
   RUN="$(mktemp -d)"
 fi
 
-RUN_HOME="$RUN/home"
+# `client-home`, not `home`: the driven client reads $HOME back into its
+# request bodies (its memory-dir path lands in the system prompt), and a
+# segment literally named `home` makes that echoed path match the scrub
+# gate's `/home/<name>` deny class mid-string. The gate is deliberately
+# over-approximate; the runner's job is to keep the string out of the
+# fixture, not to carve an exception through the gate.
+RUN_HOME="$RUN/client-home"
 RUN_XDG="$RUN/xdg"
 RUN_WORK="$RUN/work"
 TRACE="$RUN/trace.log"

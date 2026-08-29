@@ -53,7 +53,7 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # `--session-id` wants a uuid, and an environment-derived one would put a
 # machine identifier in the client's own session directory.
 SESSION_ID="${ROUTECTL_DRIVER_SESSION_ID:-$(
-  printf '%s' "$ROUTECTL_FIXTURE_CASE_ID" | sha256sum | cut -c1-32 |
+  printf '%s' "$ROUTECTL_FIXTURE_CASE_ID" | sha256sum | cut -c1-30 |
     sed 's/^\(........\)\(....\)\(...\)\(...\)\(............\)$/\1-\2-4\3-8\4-\5/'
 )}"
 
