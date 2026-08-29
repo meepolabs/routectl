@@ -259,10 +259,10 @@ assert_clean "a loopback base URL is not a hostname hit" \
 
 # --- seat-session-id -------------------------------------------------
 # routectl resolves a seat's stored `session_id` on the OAuth-bearer
-# surface and puts it on the wire as `x-claude-code-session-id`, which the
-# header rules classify VISIBLE -- so `--write` keeps the value and every
-# fixture captured on that lane carries the same stable identifier. Both
-# gates passed it before this class existed.
+# surface and puts it on the wire as `x-claude-code-session-id`. The
+# `claude-session-header` class now denies that header by NAME, so this
+# class is what catches the value once it has been copied out of a header
+# and into a body, where no name-keyed rule can see it.
 #
 # The seat store is planted per case under the case's own throwaway XDG.
 # Its shape mirrors crates/routectl-auth/src/oauth/types.rs
@@ -303,10 +303,10 @@ assert_caught "the seat's session id in a captured metadata user_id" \
     seat-session-id \
     "$SEAT_STORE"
 
-# The header the router actually emits. Its name carries no credential
-# substring and does not end in `-key`, so the header layer classifies it
-# VISIBLE and `--write` leaves the value verbatim -- this class is the only
-# thing that looks at it.
+# The header the router actually emits. Two classes now fire on it -- this
+# one on the derived seat value, `claude-session-header` on the name -- and
+# this case pins that the environment-derived class still names itself, so
+# the value-keyed coverage cannot quietly disappear behind the name rule.
 assert_caught "the seat's session id in the x-claude-code-session-id header" \
     ingress_request.headers.json \
     "[[\"content-type\",\"application/json\"],[\"x-claude-code-session-id\",\"$SEAT_SESSION_ID\"]]" \
@@ -855,6 +855,76 @@ assert_clean "operational quota and signing-metadata headers stay visible" \
     ingress_request.headers.json \
     '[["x-ratelimit-limit-tokens","40000"],["x-ratelimit-remaining-tokens","39000"],["x-amz-date","20260825T100000Z"],["anthropic-beta","prompt-caching-2024-07-31"]]'
 
+# --- anthropic-account-id / claude-session-header --------------------
+# The account-scoped header names. Both classes are STRUCTURAL: they key on
+# the header NAME and need no environment value, because the ids are plain
+# uuids and a value-shaped rule would refuse every uuid in a body. The
+# values below are freshly generated per run, so no case can pass by
+# matching a literal this file carries.
+#
+# The reject direction runs with NO seat planted, which is what proves the
+# classes are structural: nothing in the environment supplies these values.
+assert_caught "a raw anthropic-organization-id on a captured upstream response" \
+    upstream_response.headers.json \
+    "[[\"date\",\"Sat, 29 Aug 2026 05:58:22 GMT\"],[\"anthropic-organization-id\",\"$(fresh_uuid_v4)\"]]" \
+    anthropic-account-id
+
+assert_caught "a raw anthropic-workspace-id on a captured upstream response" \
+    upstream_response.headers.json \
+    "[[\"anthropic-workspace-id\",\"wrkspc_01$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(22)))')\"]]" \
+    anthropic-account-id
+
+# Denied by NAME regardless of provenance: this value is not in any seat
+# store, so only the name rule can see it.
+assert_caught "a raw x-claude-code-session-id on an outgoing request" \
+    outgoing_request.headers.json \
+    "[[\"anthropic-version\",\"2023-06-01\"],[\"x-claude-code-session-id\",\"$(fresh_uuid_v4)\"]]" \
+    claude-session-header
+
+# The paired accept direction: the placeholder under the same three names
+# must pass, or a scrubbed fixture is permanently unpromotable.
+assert_clean "the placeholder under all three account-scoped names is accepted" \
+    upstream_response.headers.json \
+    '[["anthropic-organization-id","[REDACTED]"],["anthropic-workspace-id","[REDACTED]"],["x-claude-code-session-id","[REDACTED]"]]'
+
+# THE CONTROL that keeps the name-keyed rule from degenerating into
+# "reject any uuid": a BODY full of uuids carries no header names at all
+# and must pass. Same posture as the seat-session-id accept control above.
+assert_clean "arbitrary uuids in a captured body are accepted" \
+    ingress_request.json \
+    "$(body_with "trace $(fresh_uuid_v4) then $(fresh_uuid_v4) and $(fresh_uuid_v4)")"
+
+# The correlatable-but-not-account-scoped headers that sit in the same
+# upstream file. They change per request and this pass deliberately does
+# not deny them, so the accept direction is pinned: a later widening that
+# swept them in would break here rather than silently over-redact.
+assert_clean "per-request correlation headers stay visible" \
+    upstream_response.headers.json \
+    "[[\"request-id\",\"req_011CeWXWuCqEVv1rSy1zBpZq\"],[\"traceresponse\",\"00-70542af3ab8ac1366b24adc35a5f7d9b-671e9b3152a4ace9-01\"],[\"cf-ray\",\"a32952d20e9aba30-SEA\"],[\"x-client-request-id\",\"$(fresh_uuid_v4)\"]]"
+
+# --write redacts them the same way it redacts a credential: the NAME
+# survives so the wire shape the fixture pins is intact, only the VALUE
+# collapses.
+ACCOUNT_HEADERS_RAW="[[\"anthropic-organization-id\",\"$(fresh_uuid_v4)\"],[\"anthropic-workspace-id\",\"wrkspc_01AAAAAAAAAAAAAAAAAAAAAA\"],[\"x-claude-code-session-id\",\"$(fresh_uuid_v4)\"],[\"cf-ray\",\"a32952d20e9aba30-SEA\"]]"
+
+assert_write "the organization and workspace ids do not survive the write pass" \
+    upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
+    '! printf "%s" "$WRITTEN" | grep -q "wrkspc_01AAAAAAAAAAAAAAAAAAAAAA"'
+
+assert_write "the account-scoped header NAMES survive redaction" \
+    upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
+    'printf "%s" "$WRITTEN" | grep -q "\"anthropic-organization-id\"" &&
+     printf "%s" "$WRITTEN" | grep -q "\"anthropic-workspace-id\"" &&
+     printf "%s" "$WRITTEN" | grep -q "\"x-claude-code-session-id\""'
+
+assert_write "each account-scoped value collapses to the bare placeholder" \
+    upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
+    '[ "$(printf "%s" "$WRITTEN" | grep -oF "[REDACTED]" | wc -l)" = "3" ]'
+
+assert_write "a per-request correlation header value survives the write pass" \
+    upstream_response.headers.json "$ACCOUNT_HEADERS_RAW" \
+    'printf "%s" "$WRITTEN" | grep -qF "a32952d20e9aba30-SEA"'
+
 # --- headers-unparseable ---------------------------------------------
 # A headers file the gate cannot parse has auth content it cannot inspect;
 # that is a refusal, not a pass.
@@ -954,6 +1024,7 @@ run_write_then_check() {
 }
 
 run_write_then_check ingress_request.headers.json "$HEADERS_LIVE"
+run_write_then_check upstream_response.headers.json "$ACCOUNT_HEADERS_RAW"
 run_write_then_check ingress_request.json \
     "$(body_with "cat @HOME@/.config/routectl/config.toml")"
 
@@ -999,7 +1070,8 @@ assert_help_lists_new_classes() {
         fails=$((fails + 1))
         return
     fi
-    for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key seat-session-id; do
+    for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key seat-session-id \
+        anthropic-account-id claude-session-header; do
         printf '%s\n' "$out" | grep -qF -- "$class" || missing+=" $class"
     done
     if [ -n "$missing" ]; then

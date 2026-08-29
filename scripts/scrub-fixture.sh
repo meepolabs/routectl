@@ -4,12 +4,12 @@
 #
 # Two modes, deliberately asymmetric:
 #
-#   --write <path>...   Apply the two transforms that are proven safe to
+#   --write <path>...   Apply the transforms that are proven safe to
 #                       automate: rewrite the operator's own home path to
 #                       a neutral placeholder, and redact the VALUE of
-#                       every credential-shaped header while keeping its
-#                       NAME. Runs as the fixture is written, before it is
-#                       promoted into the corpus.
+#                       every credential-shaped and every account-scoped
+#                       header while keeping its NAME. Runs as the fixture
+#                       is written, before it is promoted into the corpus.
 #
 #   --check <path>...   Scan for residual personal data and exit NON-ZERO
 #                       on the first class found. Names the file and the
@@ -27,7 +27,7 @@
 #
 # Why the asymmetry: a rewriter silently promotes whatever pattern it
 # failed to anticipate, and the operator never learns the fixture was
-# dirty. So only the two transforms whose correct rewrite is unambiguous
+# dirty. So only the transforms whose correct rewrite is unambiguous
 # are automated; everything else refuses and leaves the call to a human.
 # `--check` is what a capture pipeline runs before promoting a fixture.
 #
@@ -55,16 +55,31 @@
 #                      on the OAuth-bearer surface, so a capture on that
 #                      surface records a stable per-credential identifier
 #                      that fingerprints the operator across every fixture.
-#                      The header rules classify that name as VISIBLE (it
-#                      carries no credential substring and does not end in
-#                      `-key`), so the value survives `--write` verbatim and
-#                      nothing else in this gate would ever look at it.
+#                      This class is what catches the value once it has
+#                      been copied OUT of a header -- into a body, a
+#                      metadata `user_id`, a tool-output transcript --
+#                      where no name-keyed rule can see it.
 #   home-prefix        any `/home/<name>` other than the placeholder
 #   home-prefix-encoded  the same, dash-encoded
 #   ls-owner-column    an `ls -l` / `ls -l@` / `ls -o` long listing whose
 #                      owner or group column is not a neutral name
 #   auth-header        a credential-shaped header name whose value is not
 #                      a redaction placeholder
+#   anthropic-account-id  an `anthropic-organization-id` or
+#                      `anthropic-workspace-id` header whose value is not a
+#                      redaction placeholder. These arrive on a real
+#                      upstream response and name the operator's cloud
+#                      account; in the same file they sit beside the
+#                      request id, the trace parent and the quota
+#                      utilisation numbers, so the account id is what turns
+#                      that telemetry into a profile of one operator.
+#   claude-session-header  an `x-claude-code-session-id` header whose value
+#                      is not a redaction placeholder. Denied by NAME
+#                      regardless of provenance: the value is
+#                      container-minted on some lanes and seat-derived on
+#                      others, a public auditor cannot tell the two apart
+#                      from the committed file, so the committed form is
+#                      always the placeholder.
 #   bearer-token       a `bearer <opaque>` value anywhere in the fixture,
 #                      scheme word matched case-insensitively
 #   provider-key       a raw vendor credential carrying no scheme word at
@@ -792,6 +807,23 @@ def is_secret_name(name):
         return True
     return lc.endswith("-key")
 
+# Header names that are not credentials but identify the operator's cloud
+# ACCOUNT or SEAT. Keyed on the name, never on the value: every one of these
+# carries a plain uuid, and a value-shaped rule would refuse every
+# legitimate uuid in a captured body. One class name per group, because the
+# class name is the entire diagnostic a refusal gets.
+ACCOUNT_SCOPED_NAMES = {
+    "anthropic-organization-id": "anthropic-account-id",
+    "anthropic-workspace-id": "anthropic-account-id",
+    "x-claude-code-session-id": "claude-session-header",
+}
+
+def account_scoped_class(name):
+    return ACCOUNT_SCOPED_NAMES.get(name.lower())
+
+def needs_redaction(name):
+    return is_secret_name(name) or account_scoped_class(name) is not None
+
 def load_pairs(path):
     import json
     with open(path, encoding="utf-8") as fh:
@@ -799,7 +831,9 @@ def load_pairs(path):
     return doc
 PY
 
-# Exit 0 clean, 3 an unredacted credential value survives, 4 unparseable.
+# Exit 0 clean, 3 an unredacted value survives, 4 unparseable. On 3 the
+# CLASS NAMES found are printed one per line -- never the values -- so one
+# parse of the file reports every header-layer class at once.
 headers_auth_state() {
   local rc=0
   python3 - "$1" "$REDACTED_BEARER" "$REDACTED_SECRET" <<PY || rc=$?
@@ -814,16 +848,24 @@ except Exception:
     sys.exit(4)
 if not isinstance(doc, list):
     sys.exit(4)
+found = []
 for entry in doc:
     if not isinstance(entry, list) or len(entry) < 2:
         continue
     name, value = entry[0], entry[1]
     if not isinstance(name, str):
         continue
-    if not is_secret_name(name):
+    if not needs_redaction(name):
         continue
-    if not isinstance(value, str) or value not in accepted:
-        sys.exit(3)
+    if isinstance(value, str) and value in accepted:
+        continue
+    cls = account_scoped_class(name) if not is_secret_name(name) else "auth-header"
+    if cls not in found:
+        found.append(cls)
+if found:
+    for cls in found:
+        print(cls)
+    sys.exit(3)
 sys.exit(0)
 PY
   return $rc
@@ -861,11 +903,16 @@ run_check() {
     has_aws_cred_assignment "$f" && findings+="  $f  aws-credential-assignment"$'\n'
     case "$f" in
       *.headers.json)
-        local hrc=0
-        headers_auth_state "$f" || hrc=$?
+        local hrc=0 hclasses hclass
+        hclasses="$(headers_auth_state "$f")" || hrc=$?
         case "$hrc" in
           0) : ;;
-          3) findings+="  $f  auth-header"$'\n' ;;
+          3)
+            while IFS= read -r hclass; do
+              [ -n "$hclass" ] || continue
+              findings+="  $f  $hclass"$'\n'
+            done <<<"$hclasses"
+            ;;
           4) findings+="  $f  headers-unparseable"$'\n' ;;
           *) fatal "header inspection failed on $f" ;;
         esac
@@ -908,11 +955,11 @@ rewrite_home() {
     "$file"
 }
 
-# Replace the VALUE of every credential-shaped header with a placeholder,
-# keeping the NAME. Parsed and re-emitted with a real JSON parser: a
-# regex rewrite of a JSON document cannot tell a malformed input from a
-# clean one, and an unparseable headers file here is a hard failure rather
-# than a silently-unredacted promotion.
+# Replace the VALUE of every credential-shaped and every account-scoped
+# header with a placeholder, keeping the NAME. Parsed and re-emitted with a
+# real JSON parser: a regex rewrite of a JSON document cannot tell a
+# malformed input from a clean one, and an unparseable headers file here is
+# a hard failure rather than a silently-unredacted promotion.
 redact_headers_file() {
   local file="$1" rc=0
   python3 - "$file" "$REDACTED_BEARER" "$REDACTED_SECRET" <<PY || rc=$?
@@ -930,7 +977,7 @@ for entry in doc:
     if not isinstance(entry, list) or len(entry) < 2:
         continue
     name, value = entry[0], entry[1]
-    if not isinstance(name, str) or not is_secret_name(name):
+    if not isinstance(name, str) or not needs_redaction(name):
         continue
     if isinstance(value, str) and value.lstrip()[:7].lower() == "bearer ":
         entry[1] = redacted_bearer
