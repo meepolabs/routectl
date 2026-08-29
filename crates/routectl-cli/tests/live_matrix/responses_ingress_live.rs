@@ -2,8 +2,8 @@
 
 // -- OpenAI Responses INGRESS (POST /v1/responses over HTTP) ----------------
 //
-// Operator-gated end-to-end row for the Responses ingress wired in
-// MEE-105: spins up the real axum server via `serve_on_listener` and
+// Operator-gated end-to-end row for the Responses ingress: spins up the
+// real axum server via `serve_on_listener` and
 // sends a Responses-shaped body to `POST /v1/responses`, exercising the
 // full ingress -> canonical -> egress -> ingress-render stack over HTTP
 // (the other matrix rows call the Router directly; this one is the only

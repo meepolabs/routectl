@@ -136,8 +136,29 @@ assert_clean "vendor model in JSON value" '{"models_dev_model":"MiniMax-M3"}'
 assert_clean "M<n> inside identifier" "the M3_BODY constant"
 assert_clean "T<n> inside identifier" "field T5_total here"
 
+# POSITIVE (org-wide tier): decision and tracking ids are not routectl's
+# own shapes, which is exactly why they leak -- an id pasted from a
+# decision log reads as harmless prose. One was found in a tracked comment
+# in this repo and the same shapes are in tracked files across the fleet.
+assert_caught "decision id" "see DEC-012 for the rationale"
+assert_caught "decision id, three digits" "superseded by DEC-094"
+assert_caught "tracking id" "wired in MEE-105"
+assert_caught "tracking id, two digits" "closes MEE-50"
+assert_caught "decision id, one digit" "per DEC-1"
+
+# NEGATIVE (org-wide tier): the digit count is BOUNDED at 3 for a reason.
+# An unbounded core matches the first three digits of a date-shaped token,
+# so these are the controls that pin the bound rather than decorate it --
+# verified as a real false positive before the bound was added.
+assert_clean "date-shaped DEC token" "DEC-2024 archive format support"
+assert_clean "date-shaped MEE token" "MEE-20260828 log format"
+assert_clean "DEC inside a word" "handle DECIMAL rounding in the cost sum"
+assert_clean "DECODE in prose" "decode the payload before hashing"
+assert_clean "MEE inside a word" "bump the MEEPO client to 3.1"
+
 # NEGATIVE: ordinary content must NOT be caught.
 assert_clean "plain TODO" "TODO: refactor this later"
+
 assert_clean "issue ref" "fixes #123 in the tracker"
 assert_clean "model name claude" "route to claude-opus-4-8"
 assert_clean "model name gpt-5" "default model is gpt-5"
