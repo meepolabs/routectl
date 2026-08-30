@@ -5,7 +5,7 @@
   "wire_pattern": "tool-use-multiturn",
   "turns": [
     {
-      "prompt": "List the files in the current directory, then read notes-alpha.txt and tell me the number written in it."
+      "prompt": "Read notes-alpha.txt and tell me the number written in it."
     },
     {
       "prompt": "Now read notes-beta.txt and tell me the sum of that number and the previous one."
@@ -17,5 +17,5 @@
     "cache_breakpoints": false,
     "context_padding_bytes": 0
   },
-  "notes": "The second turn forces the client to resend the first turn's tool_use / tool_result pair, which is the shape a single-turn case cannot produce."
+  "notes": "The second turn forces the client to resend the first turn's tool_use / tool_result pair, which is the shape a single-turn case cannot produce. Turn 1 deliberately names a file instead of asking for a directory listing: a listing comes back into the request body carrying the account name that owns the files, which the scrub gate's ls-owner-column class denies -- correctly, since it cannot tell a container's synthetic account from a real one. Reading a named file reaches a tool just as reliably and carries no owner column. Redefined 2026-08-30, before this case had ever produced a committed fixture."
 }

@@ -238,6 +238,20 @@ unwind_driver_promotions() {
   fi
 }
 
+# The driver-mode selection record: which candidate this run pinned, how
+# many it examined, how many it skipped, and the ordering basis it used.
+# Emitted on BOTH the success path and the refusal path -- a run that ends
+# in a refusal is the one where a reader most needs to know which candidate
+# was reached, and reconstructing that by correlating request ids across a
+# log is the work this line exists to remove.
+#
+# NO BODY CONTENT: every field is an id, a count, or the fixed basis token.
+# A rig log is a CI artifact, and a body is unscrubbed at the point a
+# refusal prints.
+emit_selection_line() {
+  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED ordering_basis=first-ingress-body"
+}
+
 # Print the header block as usage. Delimited by a sentinel rather than a
 # line count: a magic `1,NNp` range silently starts cutting content the
 # moment the header grows, and the driver-mode policy is exactly the part
@@ -1189,6 +1203,11 @@ while IFS=$'\t' read -r ts id pkind ikind; do
   # fixture is not the case's evidence.
   if [ "$write_rc" != 0 ]; then
     unwind_driver_promotions
+    # The refusal path needs this line MORE than the success path: it is the
+    # only record of which candidate the run reached and how many it skipped
+    # to get there, and a reader who has to reconstruct that by correlating
+    # request ids across a log is doing the work the line exists to remove.
+    [ "$DRIVER_MODE" = 1 ] && emit_selection_line
     exit "$write_rc"
   fi
   SELECTED_REQUEST_ID="$id"
@@ -1223,7 +1242,7 @@ echo "captured=$captured since=$since latest=$latest_ts out=$OUT"
 # ordering-basis token -- a rig log is a CI artifact, and a body is
 # unscrubbed at the point this prints.
 if [ "$DRIVER_MODE" = 1 ]; then
-  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED ordering_basis=first-ingress-body"
+  emit_selection_line
 fi
 
 # Driver mode only: landing zero is a failed run, not a quiet window, and
