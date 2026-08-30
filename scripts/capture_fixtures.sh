@@ -46,20 +46,33 @@
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  how the client reached routectl
 #   ROUTECTL_FIXTURE_WIRE_PATTERN     wire shape the case claims to cover
 #
+# One further driver-mode pin is NOT recorded into meta.json, because the
+# value it pins is already there as a traced fact:
+#   ROUTECTL_FIXTURE_EXPECTED_INGRESS  ingress dialect the run expects
+#
 # TWO CAPTURE MODES, TWO POLICIES.
 #
 # Default (live-box): a trace drained from a real session. It genuinely
-# cannot observe the four pins above, so an empty pin is honest; the
-# landing directory is keyed on `request_id`; a missing outgoing
-# structural summary warns; scrubbing is write-only.
+# cannot observe the pins above, so an empty pin is honest; the landing
+# directory is keyed on `request_id`; a missing outgoing structural
+# summary warns; scrubbing is write-only.
 #
 # `--driver-mode`: a hermetic capture produced by a driver that KNOWS
 # every pin, so an empty pin is a bug rather than a fact:
 #
-#   * All four pins are MANDATORY. An unset one aborts the run naming
+#   * All five pins are MANDATORY. An unset one aborts the run naming
 #     the variable, because an empty case id collapses every case in a
 #     lane onto one landing directory and the corpus silently
 #     overwrites itself.
+#   * ROUTECTL_FIXTURE_EXPECTED_INGRESS is checked against the
+#     vocabulary in scripts/drivers/lib/ingress_kinds.sh before any
+#     daemon output is read, and then against the TRACED
+#     `meta.ingress_kind` before the promoting mv. A client that accepts
+#     the runner's connection carriers and ignores them reaches an
+#     upstream on its own dialect and lands a fixture that is evidence
+#     for the wrong one -- an environment check cannot see that, because
+#     the environment said what the run intended. The traced token says
+#     what the daemon actually parsed.
 #   * Landing directories key on `(lane, case_id)` --
 #     `<out>/<lane>/<case_id>/` -- so a rerun of the same case RE-LANDS
 #     on the same path and produces a DIFF instead of a fresh sibling.
@@ -180,6 +193,20 @@ if [ ! -r "$CONFINE_LIB" ]; then
 fi
 # shellcheck source=scripts/drivers/lib/confine.sh
 . "$CONFINE_LIB"
+
+# The single owner of the ingress-dialect vocabulary, shared with the
+# runner and the promote script. Absent library is a hard failure, never
+# an unvalidated expected-ingress pin: a pin nothing checks against the
+# vocabulary would accept a typo, and a typo can never equal a traced
+# token, so every capture would refuse for a reason that names the wrong
+# fault.
+INGRESS_KINDS_LIB="$ROOT/scripts/drivers/lib/ingress_kinds.sh"
+if [ ! -r "$INGRESS_KINDS_LIB" ]; then
+  echo "capture_fixtures: ingress vocabulary not found at $INGRESS_KINDS_LIB; refusing to capture" >&2
+  exit 1
+fi
+# shellcheck source=scripts/drivers/lib/ingress_kinds.sh
+. "$INGRESS_KINDS_LIB"
 
 # Escape a value for use inside a JSON string literal. The meta.json and
 # manifest lines below are emitted by hand (no jq dependency), so every
@@ -334,7 +361,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Driver mode fails closed on the four pins. `:?` aborts under `set -u`
+# Driver mode fails closed on the five pins. `:?` aborts under `set -u`
 # naming the variable, which is the whole point: an unset pin in a driver
 # run is a bug in the driver, and an empty case_id would collapse every
 # case in the lane onto one landing directory before anyone noticed. The
@@ -345,6 +372,17 @@ if [ "$DRIVER_MODE" = 1 ]; then
   : "${ROUTECTL_FIXTURE_CONFIG_SHA:?driver mode requires a config sha (ROUTECTL_FIXTURE_CONFIG_SHA)}"
   : "${ROUTECTL_FIXTURE_CONNECTION_MODE:?driver mode requires a connection mode (ROUTECTL_FIXTURE_CONNECTION_MODE)}"
   : "${ROUTECTL_FIXTURE_WIRE_PATTERN:?driver mode requires a wire pattern (ROUTECTL_FIXTURE_WIRE_PATTERN)}"
+  : "${ROUTECTL_FIXTURE_EXPECTED_INGRESS:?driver mode requires an expected ingress dialect (ROUTECTL_FIXTURE_EXPECTED_INGRESS)}"
+
+  # Checked against the vocabulary HERE, before the trace is read: a pin
+  # outside the closed set can never equal a traced token, so leaving it
+  # to the comparison below would refuse every capture with a message
+  # about a dialect mismatch rather than about the typo that caused it.
+  if ! ingress_kind_is_known "$ROUTECTL_FIXTURE_EXPECTED_INGRESS"; then
+    echo "capture_fixtures: refusing expected ingress '$ROUTECTL_FIXTURE_EXPECTED_INGRESS':" >&2
+    echo "it is not an ingress dialect this build parses ($(ingress_kinds_list))." >&2
+    exit 2
+  fi
 
   # The case id becomes two path components' worth of directory name, so
   # a separator or a traversal segment in it would land the fixture
@@ -771,11 +809,11 @@ META
   # neutralizes the contributor's own home path, so `--check` verifies the
   # rewritten bytes rather than the raw capture.
 
-  # Driver mode enforces the two CLAIMS the fixture records about itself,
-  # in the slot the ordering contract reserves: after `--check` on the full
-  # bytes, before the promotion. Both refusals discard the staged directory
-  # and `return 1` so `set -e` cannot promote it, which the runner reports
-  # as a rig refusal -- a defect, never retryable.
+  # Driver mode enforces the CLAIMS the fixture records about itself, in
+  # the slot the ordering contract reserves: after `--check` on the full
+  # bytes, before the promotion. Every refusal discards the staged
+  # directory and `return 1` so `set -e` cannot promote it, which the
+  # runner reports as a rig refusal -- a defect, never retryable.
   if [ "$DRIVER_MODE" = 1 ]; then
     # The claimed pattern comes from the recorded pin, never from argv: a
     # flag would let a caller declare a pattern the case does not claim,
@@ -788,6 +826,29 @@ META
     fi
 
     if ! assert_mode_seam_coherent "$tmp" "$id"; then
+      rm -rf "$tmp"
+      return 1
+    fi
+
+    # The expected-ingress pin against the TRACED dialect. `$ikind` was
+    # parsed out of the daemon's own `ingress request body` line, so it
+    # says which adapter really parsed the request -- while the pin says
+    # which one the run was set up to reach. A client that took the
+    # runner's carriers and then talked its own dialect anyway lands here
+    # with the two disagreeing, and no environment check upstream could
+    # have seen it.
+    #
+    # There is deliberately no separate arm for an EMPTY traced token: the
+    # pin is validated to be a vocabulary member, so it is never empty, and
+    # an unequal comparison already refuses. (In-scope selection requires a
+    # non-empty traced token anyway -- a request whose dialect the trace
+    # does not name is never a candidate -- so a driver run with an
+    # unobserved dialect lands nothing and exits 3 rather than reaching
+    # here.)
+    if [ "$ikind" != "$ROUTECTL_FIXTURE_EXPECTED_INGRESS" ]; then
+      echo "capture_fixtures: $id was captured on ingress dialect '$ikind' but the run" >&2
+      echo "expects '$ROUTECTL_FIXTURE_EXPECTED_INGRESS': the client reached routectl on a dialect this" >&2
+      echo "case is not evidence for; not promoting the fixture." >&2
       rm -rf "$tmp"
       return 1
     fi

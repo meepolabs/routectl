@@ -36,6 +36,7 @@ RUNNER="$HERE/capture_driver.sh"
 RIG="$HERE/capture_fixtures.sh"
 SCRUB="$HERE/scrub-fixture.sh"
 LANE_CONFIG="$HERE/drivers/config/anthropic-api.toml"
+INGRESS_KINDS="$HERE/drivers/lib/ingress_kinds.sh"
 
 fails=0
 
@@ -296,6 +297,7 @@ set -u
     printf 'config_sha=%s\n' "$ROUTECTL_FIXTURE_CONFIG_SHA"
     printf 'connection_mode=%s\n' "$ROUTECTL_FIXTURE_CONNECTION_MODE"
     printf 'wire_pattern=%s\n' "$ROUTECTL_FIXTURE_WIRE_PATTERN"
+    printf 'expected_ingress=%s\n' "$ROUTECTL_FIXTURE_EXPECTED_INGRESS"
     printf 'proxy_url=%s\n' "${ROUTECTL_DRIVER_PROXY_URL:-}"
     printf 'proxy_ca=%s\n' "${ROUTECTL_DRIVER_PROXY_CA:-}"
     printf 'proxy_ca_readable=%s\n' \
@@ -357,6 +359,7 @@ make_work() {
     cp "$HERE/drivers/lib/confine.sh" "$work/repo/scripts/drivers/lib/confine.sh"
     cp "$HERE/drivers/lib/validate_case.py" "$work/repo/scripts/drivers/lib/validate_case.py"
     cp "$HERE/drivers/lib/verify_pattern.py" "$work/repo/scripts/drivers/lib/verify_pattern.py"
+    cp "$INGRESS_KINDS" "$work/repo/scripts/drivers/lib/ingress_kinds.sh"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
     cp "$HERE/drivers/config/anthropic-api.front-proxy.toml" \
         "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml"
@@ -366,8 +369,9 @@ make_work() {
     for case_id in driver-selftest-02 driver-selftest-03 driver-selftest-04 \
         driver-selftest-05 driver-selftest-06 driver-selftest-07 \
         driver-selftest-08 driver-selftest-09 driver-selftest-09b \
-        driver-selftest-15 driver-selftest-15b driver-selftest-15c \
-        driver-selftest-15d driver-selftest-16 driver-selftest-16b; do
+        driver-selftest-13b driver-selftest-15 driver-selftest-15b \
+        driver-selftest-15c driver-selftest-15d driver-selftest-16 \
+        driver-selftest-16b; do
         write_case "$work/repo/scripts/drivers/cases" "$case_id" baseline
     done
     # The rig reads the workspace version from the repo-root Cargo.toml.
@@ -392,10 +396,22 @@ make_work() {
 # The port window is caller-controlled through the runner's documented
 # overrides so a case can force a collision; `STUB_MODE` selects the
 # stub's behavior.
+#
+# `--expected-ingress` is PREPENDED from `RUNNER_EXPECTED_INGRESS`
+# (default `anthropic`, matching the canned trace's traced dialect) so the
+# thirty-odd cases about other parts of the contract do not each restate a
+# flag they are not about. It is prepended rather than appended so a case
+# passing its own `--expected-ingress` still wins -- the runner's parser
+# assigns per occurrence, last one in argv order. Setting the variable
+# EMPTY omits the flag entirely, which is how the required-flag case drives
+# a run without it.
 runner_run() {
     local work="$1"
     shift
     local rc=0
+    local -a pin=()
+    local expected="${RUNNER_EXPECTED_INGRESS-anthropic}"
+    [ -n "$expected" ] && pin=(--expected-ingress "$expected")
     (
         cd "$work/repo" || exit 2
         ROUTECTL_BIN="$work/bin/routectl-stub" \
@@ -409,7 +425,8 @@ runner_run() {
         PROBE_OUT="$work/probe.txt" \
         ROUTECTL_DRIVER_OUT_ROOT="${ROUTECTL_DRIVER_OUT_ROOT-$work
 $work/scratch}" \
-            bash scripts/capture_driver.sh --work "$work/runs" "$@" \
+            bash scripts/capture_driver.sh --work "$work/runs" \
+            "${pin[@]+"${pin[@]}"}" "$@" \
             -- "$work/bin/probe-driver"
     ) >"$work/runner.log" 2>&1 || rc=$?
     return "$rc"
@@ -539,7 +556,7 @@ if [ -f "$work/probe.txt" ]; then
     check "XDG carries the routectl/ subdir with the lane config" "yes" \
         "$(probe_get "$work" xdg_config_present)"
 
-    # The four pins plus the base URL are the driver's whole interface.
+    # The five pins plus the base URL are the driver's whole interface.
     check "the case id pin reaches the driver" "driver-selftest-01" \
         "$(probe_get "$work" case_id)"
     check "the config sha pin reaches the driver" "$EXPECTED_SHA" \
@@ -548,6 +565,12 @@ if [ -f "$work/probe.txt" ]; then
         "$(probe_get "$work" connection_mode)"
     check "the wire pattern pin reaches the driver" "$SELFTEST_CASE_PATTERN_01" \
         "$(probe_get "$work" wire_pattern)"
+    # Exported for a driver to echo into its own logs, exactly as the other
+    # four are. Nothing in scripts/drivers/ reads it -- the rig is the
+    # enforcer -- but a pin the driver environment cannot see would leave a
+    # failed run unattributable from the driver's own record.
+    check "the expected ingress pin reaches the driver" "anthropic" \
+        "$(probe_get "$work" expected_ingress)"
     check "the base url pin names the selected port" "http://127.0.0.1:$port_a" \
         "$(probe_get "$work" base_url)"
     check "the daemon answered the driver's own health probe" \
@@ -963,7 +986,8 @@ port_e="$(free_port)"
     ROUTECTL_DRIVER_PORT_MIN="$port_e" \
     ROUTECTL_DRIVER_PORT_MAX="$port_e" \
         exec bash scripts/capture_driver.sh --lane anthropic-api \
-        --work "$work/runs" --case driver-selftest-05 -- sleep 60
+        --work "$work/runs" --case driver-selftest-05 \
+        --expected-ingress anthropic -- sleep 60
 ) >"$work/runner.log" 2>&1 &
 runner_pid=$!
 # Wait for the daemon to be up before signalling, so the signal lands
@@ -1035,7 +1059,8 @@ check_log "the refusal names the missing lane config" "no committed config for l
 rc=0
 (
     cd "$work/repo" || exit 2
-    bash scripts/capture_driver.sh --lane anthropic-api --case driver-selftest-07
+    bash scripts/capture_driver.sh --lane anthropic-api --case driver-selftest-07 \
+        --expected-ingress anthropic
 ) >"$work/runner.log" 2>&1 || rc=$?
 check "a missing driver command is a usage error" "2" "$rc"
 check_log "the refusal names the missing driver command" "no driver command given" \
@@ -1043,7 +1068,8 @@ check_log "the refusal names the missing driver command" "no driver command give
 rc=0
 (
     cd "$work/repo" || exit 2
-    bash scripts/capture_driver.sh --case driver-selftest-07 -- true
+    bash scripts/capture_driver.sh --case driver-selftest-07 \
+        --expected-ingress anthropic -- true
 ) >"$work/runner.log" 2>&1 || rc=$?
 check "a missing lane is a usage error" "2" "$rc"
 # An inverted window makes the modulo in the port draw a modulo by a
@@ -1072,7 +1098,8 @@ rc=0
     ROUTECTL_DRIVER_PORT_MIN="$port_h" \
     ROUTECTL_DRIVER_PORT_MAX="$port_h" \
         bash scripts/capture_driver.sh --lane anthropic-api \
-        --work "$work/runs" --case driver-selftest-08 -- sh -c 'exit 7'
+        --work "$work/runs" --case driver-selftest-08 \
+        --expected-ingress anthropic -- sh -c 'exit 7'
 ) >"$work/runner.log" 2>&1 || rc=$?
 check "a failing driver aborts with the driver exit code" "4" "$rc"
 check_log "the abort reports the driver's status" "driver command exited 7" \
@@ -1390,6 +1417,104 @@ else
 fi
 rm -f "$control"
 
+# --- Case 13b: --expected-ingress is REQUIRED, validated, and forwarded --
+# The exception to case 13's derive-rather-than-accept rule, and the
+# reasoning is the reason it is an exception: nothing the runner reads names
+# the dialect. The lane config declares the EGRESS provider (a translation
+# lane exists so the two differ) and a case describes a dialect-agnostic
+# interaction, so the value belongs to the (driver, lane) pairing the caller
+# chose. What must therefore be asserted here is that it cannot be omitted,
+# cannot be a value this build does not parse, and does reach the rig.
+work="$(make_work)"
+rc=0
+RUNNER_EXPECTED_INGRESS="" runner_run "$work" --lane anthropic-api \
+    --case driver-selftest-13b || rc=$?
+check "an omitted --expected-ingress is a usage error" "2" "$rc"
+check_log "the refusal names the missing flag" "--expected-ingress is required" \
+    "$work/runner.log"
+# Before any daemon boots: a run that got as far as holding a port for a
+# pin it could have refused from argv alone spends time and a port on a
+# capture that can never land.
+if [ -f "$work/stub.pid" ]; then
+    echo "FAIL: the runner booted a daemon before checking the expected-ingress pin"
+    fails=$((fails + 1))
+else
+    echo "PASS: the missing-pin refusal happens before any daemon boots"
+fi
+rm -rf "$work"
+
+# A value outside the vocabulary is refused too, and NAMED: the pin is
+# compared against a traced token downstream, so an unvalidated typo would
+# refuse every capture with a message about the fixture rather than the
+# flag. `anthropic-api` is the trap spelling -- it is a real token in the
+# LANE vocabulary and in no ingress one.
+work="$(make_work)"
+rc=0
+RUNNER_EXPECTED_INGRESS="anthropic-api" runner_run "$work" --lane anthropic-api \
+    --case driver-selftest-13b || rc=$?
+check "an out-of-vocabulary --expected-ingress is a usage error" "2" "$rc"
+check_log "the refusal names the offending value" "'anthropic-api'" \
+    "$work/runner.log"
+check_log "the refusal lists what it would have accepted" "openai-responses" \
+    "$work/runner.log"
+if [ -f "$work/stub.pid" ]; then
+    echo "FAIL: the runner booted a daemon on an out-of-vocabulary pin"
+    fails=$((fails + 1))
+else
+    echo "PASS: the out-of-vocabulary refusal happens before any daemon boots"
+fi
+rm -rf "$work"
+
+# PAIRED CONTROL, and the load-bearing half: the pin the caller passed is
+# the one the RIG enforced, not a default the runner substituted. The canned
+# trace is Anthropic-dialect, so a run pinning another dialect must be
+# REFUSED by the rig (exit 5) -- which is only observable if the flag
+# actually reached it. Asserted for every non-matching vocabulary member, so
+# a runner that forwarded a hardcoded `anthropic` would fail here rather
+# than pass on a single lucky value.
+mapfile -t SELFTEST_INGRESS_KINDS < <(
+    sed -n '/^# --- BEGIN INGRESS_KINDS ---$/,/^# --- END INGRESS_KINDS ---$/p' \
+        "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
+)
+check "the ingress vocabulary parses to a non-empty set" "1" \
+    "$([ "${#SELFTEST_INGRESS_KINDS[@]}" -gt 0 ] && echo 1 || echo 0)"
+for kind in "${SELFTEST_INGRESS_KINDS[@]}"; do
+    [ "$kind" = anthropic ] && continue
+    work="$(make_work)"
+    rc=0
+    RUNNER_EXPECTED_INGRESS="$kind" runner_run "$work" --lane anthropic-api \
+        --case driver-selftest-13b || rc=$?
+    check "pinning '$kind' against an anthropic trace is a rig refusal (exit 5)" \
+        "5" "$rc"
+    check_log "the rig's refusal names the pin the runner forwarded" "$kind" \
+        "$work/runner.log"
+    if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-13b" ]; then
+        echo "FAIL: a fixture landed under a pin the traced dialect contradicts"
+        fails=$((fails + 1))
+    else
+        echo "PASS: nothing lands under a pin the traced dialect contradicts"
+    fi
+    rm -rf "$work"
+done
+
+# An absent ingress vocabulary is a hard failure, never an unvalidated pin.
+# The removal is verified first: a delete that matched nothing would assert
+# against the present-library path.
+work="$(make_work)"
+if [ -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ]; then
+    rc=0
+    runner_run "$work" --lane anthropic-api --case driver-selftest-13b || rc=$?
+    check "an absent ingress vocabulary refuses the run with exit 2" "2" "$rc"
+    check_log "the refusal names the missing vocabulary" \
+        "ingress vocabulary not found" "$work/runner.log"
+else
+    echo "FAIL: could not remove the ingress vocabulary from the throwaway repo"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
 # --- Case 14: an unreadable case file fails closed before any boot ----
 # The runner reads the case file for the pattern. A run whose case is
 # missing has no pattern to record, and a fixture with an empty claim is
@@ -1647,6 +1772,7 @@ rig_run() {
         ROUTECTL_FIXTURE_CONFIG_SHA="$EXPECTED_SHA" \
         ROUTECTL_FIXTURE_CONNECTION_MODE="base-url" \
         ROUTECTL_FIXTURE_WIRE_PATTERN="baseline" \
+        ROUTECTL_FIXTURE_EXPECTED_INGRESS="anthropic" \
             bash scripts/capture_fixtures.sh --driver-mode \
             --log "$work/canned-trace.log" --out "$out" --allow-unsafe-out "$@"
     ) >>"$work/rig.log" 2>&1 || rc=$?

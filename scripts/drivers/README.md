@@ -26,6 +26,24 @@ per-harness files small enough for the rule to stay affordable.
 A harness with no file here is not drivable on this box. Its missing
 piece is filed to the `wild-evidence` pen rather than stubbed.
 
+## The dialect a driver's client speaks is the CALLER's pin
+
+A case is deliberately dialect-agnostic and a lane config declares only the
+EGRESS provider, so neither names which dialect the driven client reaches
+routectl on. The (driver, lane) PAIRING does, and the caller chooses that
+pairing -- so the dialect arrives as the runner's required
+`--expected-ingress` and is compared against the traced
+`meta.ingress_kind` before any fixture lands. Nothing in this directory
+reads the pin; a driver's job is to point its client at the runner's daemon,
+not to certify what it did once it got there.
+
+The failure it catches is specific to this directory's shape: an
+Anthropic-dialect driver handed a client that speaks another dialect ACCEPTS
+the connection carriers and ignores them, so the run looks clean at every
+env-check and lands a fixture that is evidence for the wrong dialect. That
+is also why a client whose dialect differs earns its own driver file rather
+than a flag on an existing one.
+
 ## Connection mode is a capture axis
 
 A MITM front proxy carries `role:"system"` turns inside `messages[]`;

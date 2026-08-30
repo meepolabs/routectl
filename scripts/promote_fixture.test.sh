@@ -31,6 +31,16 @@ PROMOTE="$HERE/promote_fixture.sh"
 SCRUB="$HERE/scrub-fixture.sh"
 CONFINE="$HERE/drivers/lib/confine.sh"
 VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
+INGRESS_KINDS="$HERE/drivers/lib/ingress_kinds.sh"
+
+# The dialects the script accepts as an expected-ingress pin, read out of
+# the shared library rather than restated: a restated list would pass this
+# suite while the script refused the value a real promotion passes.
+declare -a KNOWN_INGRESS_KINDS
+mapfile -t KNOWN_INGRESS_KINDS < <(
+    sed -n '/^# --- BEGIN INGRESS_KINDS ---$/,/^# --- END INGRESS_KINDS ---$/p' \
+        "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
+)
 
 fails=0
 
@@ -88,6 +98,7 @@ make_work() {
     cp "$CONFINE" "$work/repo/scripts/drivers/lib/confine.sh"
     cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
     cp "$VERIFY_PATTERN" "$work/repo/scripts/drivers/lib/verify_pattern.py"
+    cp "$INGRESS_KINDS" "$work/repo/scripts/drivers/lib/ingress_kinds.sh"
     printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$FAKE_HOSTNAME" >"$work/stubbin/hostname"
     chmod +x "$work/stubbin/hostname"
     (
@@ -102,16 +113,26 @@ make_work() {
 # Run the real promotion script from inside the throwaway repo. Returns
 # its exit status; stdout+stderr land in `<work>/promote.log`, truncated
 # per run, so a case can assert on the refusal message.
+# `--expected-ingress` is PREPENDED from `PROMOTE_EXPECTED_INGRESS`
+# (default `anthropic`, matching what mk_promotable_fixture's meta.json
+# traces) so the thirty-odd cases about other gates do not each restate a
+# flag they are not about. Prepended rather than appended so a case passing
+# its own value still wins -- the parser assigns per occurrence, last one in
+# argv order. Setting the variable EMPTY omits the flag, which is how the
+# required-flag case drives a promotion without it.
 promote() {
     local work="$1"
     shift
     local rc=0
+    local -a pin=()
+    local expected="${PROMOTE_EXPECTED_INGRESS-anthropic}"
+    [ -n "$expected" ] && pin=(--expected-ingress "$expected")
     (
         cd "$work/repo" || exit 2
         HOME="$work/home/acontributor" \
             XDG_CONFIG_HOME="$work/xdg" \
             PATH="$work/stubbin:$PATH" \
-            bash scripts/promote_fixture.sh "$@"
+            bash scripts/promote_fixture.sh "${pin[@]+"${pin[@]}"}" "$@"
     ) >"$work/promote.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -150,7 +171,7 @@ mk_promotable_fixture() {
     local dir="$1"
     shift
     mk_fixture "$dir" \
-        'meta.json={"case_id":"plain-turn-01","wire_pattern":"baseline","client":{"connection_mode":"base-url"}}' \
+        'meta.json={"case_id":"plain-turn-01","wire_pattern":"baseline","ingress_kind":"anthropic","client":{"connection_mode":"base-url"}}' \
         'ingress_request.json={"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}' \
         'ingress_request.headers.json=[["content-type","application/json"]]' \
         "structural.txt=$(baseline_structural_line)" \
@@ -393,7 +414,7 @@ check "no staging directory survives a seam refusal" "0" "$(tmp_dirs_in "$corpus
 
 # PAIRED CONTROL: front-proxy WITH the seam header promotes.
 mk_promotable_fixture "$scratch/anthropic-api/fp-seam-01" \
-    'meta.json={"case_id":"fp-seam-01","wire_pattern":"baseline","client":{"connection_mode":"front-proxy"}}' \
+    'meta.json={"case_id":"fp-seam-01","wire_pattern":"baseline","ingress_kind":"anthropic","client":{"connection_mode":"front-proxy"}}' \
     "ingress_request.headers.json=[[\"$SEAM_HEADER\",\"[REDACTED]\"],[\"content-type\",\"application/json\"]]"
 rc=0
 promote "$work" --from "$scratch/anthropic-api/fp-seam-01" \
@@ -420,7 +441,7 @@ check "the base-url destination stays absent after a seam refusal" "ABSENT" \
 # case-insensitive on the wire, so a case-sensitive gate would refuse a real
 # front-proxy capture whose proxy hop spelled the header differently.
 mk_promotable_fixture "$scratch/anthropic-api/fp-upper-01" \
-    'meta.json={"case_id":"fp-upper-01","wire_pattern":"baseline","client":{"connection_mode":"front-proxy"}}' \
+    'meta.json={"case_id":"fp-upper-01","wire_pattern":"baseline","ingress_kind":"anthropic","client":{"connection_mode":"front-proxy"}}' \
     "ingress_request.headers.json=[[\"$(printf '%s' "$SEAM_HEADER" | tr '[:lower:]' '[:upper:]')\",\"[REDACTED]\"]]"
 rc=0
 promote "$work" --from "$scratch/anthropic-api/fp-upper-01" \
@@ -492,6 +513,155 @@ if [ -f "$work/repo/scripts/drivers/lib/verify_pattern.py" ] &&
         "$(tree_manifest "$work/repo/$CORPUS_REL/anthropic-api/plain-turn-01")"
 else
     echo "FAIL: could not remove the predicate from the throwaway repo"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 5e: the traced ingress dialect must equal the caller's pin ----
+# The SECOND boundary of the pin the rig already checked at capture time,
+# and the one that covers the window the scratch root exists for: a fixture
+# inspected and hand-edited before it lands. The failure class is a client
+# that ACCEPTS the runner's connection carriers and reaches routectl on its
+# own dialect anyway -- every environment check passes, because the
+# environment recorded the intent faithfully.
+#
+# The pin arrives on ARGV rather than being read off the fixture because
+# `meta.ingress_kind` is the traced FACT this gate compares against, and a
+# fact checked against itself asserts nothing.
+work="$(make_work)"
+scratch="$work/scratch"
+corpus="$work/repo/$CORPUS_REL"
+
+check "the ingress vocabulary parses to a non-empty set" "1" \
+    "$([ "${#KNOWN_INGRESS_KINDS[@]}" -gt 0 ] && echo 1 || echo 0)"
+
+# PREMISE: the two fixtures below differ in exactly the traced token the
+# gate reads, so a refusal is about the dialect and not about anything else
+# the other gates key on.
+mk_promotable_fixture "$scratch/anthropic-api/ingress-mismatch-01" \
+    'meta.json={"case_id":"ingress-mismatch-01","wire_pattern":"baseline","ingress_kind":"openai-responses","client":{"connection_mode":"base-url"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/ingress-mismatch-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture whose traced dialect is not the pinned one is refused with exit 1" \
+    "1" "$rc"
+# Both dialects in the message: the pair is what says whether the fixture
+# or the pin was wrong, and without it a caller cannot tell this refusal
+# from the pattern or seam ones.
+check_log "the refusal names the traced dialect" "openai-responses" \
+    "$work/promote.log"
+check_log "the refusal names the expected dialect" "expects 'anthropic'" \
+    "$work/promote.log"
+check "the destination stays absent after an ingress refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/ingress-mismatch-01")"
+check "no staging directory survives an ingress refusal" "0" "$(tmp_dirs_in "$corpus")"
+
+# PAIRED CONTROL: the SAME fixture under the pin that matches it promotes.
+# Without it the gate is satisfiable by one that refuses every
+# non-Anthropic dialect.
+rc=0
+PROMOTE_EXPECTED_INGRESS="openai-responses" \
+    promote "$work" --from "$scratch/anthropic-api/ingress-mismatch-01" \
+    --scratch-root "$scratch" || rc=$?
+check "the same fixture under the matching pin promotes at exit 0" "0" "$rc"
+check "the matching-dialect fixture landed in the corpus" "1" \
+    "$([ -f "$corpus/anthropic-api/ingress-mismatch-01/meta.json" ] && echo 1 || echo 0)"
+
+# An UNPINNED traced dialect is refused with the rest: empty means the
+# capture did not observe the dialect, which is honest for a live-box drain
+# and never true of the driver corpus this script promotes into. A fixture
+# nothing can dispatch is not evidence for any dialect, the caller's
+# included -- so this may not be waved through as "no claim to check".
+mk_promotable_fixture "$scratch/anthropic-api/ingress-unpinned-01" \
+    'meta.json={"case_id":"ingress-unpinned-01","wire_pattern":"baseline","ingress_kind":"","client":{"connection_mode":"base-url"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/ingress-unpinned-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture pinning no ingress dialect is refused with exit 1" "1" "$rc"
+check_log "the refusal says the traced dialect is unpinned" "unpinned" \
+    "$work/promote.log"
+check "the destination stays absent after an unpinned-ingress refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/ingress-unpinned-01")"
+
+# A fixture whose meta.json omits `ingress_kind` ENTIRELY is the same fault
+# wearing a different shape, and it is the one a hand-written scratch
+# fixture actually has. A reader defaulting an absent key to the pin would
+# promote it.
+mk_promotable_fixture "$scratch/anthropic-api/ingress-absent-01" \
+    'meta.json={"case_id":"ingress-absent-01","wire_pattern":"baseline","client":{"connection_mode":"base-url"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/ingress-absent-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture with no ingress_kind key at all is refused with exit 1" "1" "$rc"
+rm -rf "$work"
+
+# EVERY member of the vocabulary is accepted as a pin against a fixture
+# tracing it. A single-value control could not tell the validator apart
+# from one hardcoding `anthropic`, and the dialects that are NOT it are the
+# whole reason the pin exists.
+for kind in "${KNOWN_INGRESS_KINDS[@]}"; do
+    work="$(make_work)"
+    scratch="$work/scratch"
+    corpus="$work/repo/$CORPUS_REL"
+    mk_promotable_fixture "$scratch/anthropic-api/vocab-01" \
+        "meta.json={\"case_id\":\"vocab-01\",\"wire_pattern\":\"baseline\",\"ingress_kind\":\"$kind\",\"client\":{\"connection_mode\":\"base-url\"}}"
+    rc=0
+    PROMOTE_EXPECTED_INGRESS="$kind" \
+        promote "$work" --from "$scratch/anthropic-api/vocab-01" \
+        --scratch-root "$scratch" || rc=$?
+    check "the vocabulary member '$kind' is accepted as a pin and promotes" "0" "$rc"
+    rm -rf "$work"
+done
+
+# The flag is REQUIRED and VALIDATED, both as usage errors before any
+# staging happens: an omitted pin would leave the gate with nothing to
+# compare, and an out-of-vocabulary one can never equal a traced token, so
+# it would refuse every fixture with a message about the fixture rather
+# than about the flag. `anthropic-api` is the trap spelling -- a real token
+# in the LANE vocabulary and in no ingress one.
+work="$(make_work)"
+scratch="$work/scratch"
+corpus="$work/repo/$CORPUS_REL"
+mk_promotable_fixture "$scratch/anthropic-api/plain-turn-01"
+rc=0
+PROMOTE_EXPECTED_INGRESS="" promote "$work" \
+    --from "$scratch/anthropic-api/plain-turn-01" --scratch-root "$scratch" || rc=$?
+check "an omitted --expected-ingress is a usage error" "2" "$rc"
+check_log "the usage error names the missing flag" "--expected-ingress is required" \
+    "$work/promote.log"
+check "nothing landed without an expected-ingress pin" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/plain-turn-01")"
+
+rc=0
+PROMOTE_EXPECTED_INGRESS="anthropic-api" promote "$work" \
+    --from "$scratch/anthropic-api/plain-turn-01" --scratch-root "$scratch" || rc=$?
+check "an out-of-vocabulary --expected-ingress is a usage error" "2" "$rc"
+check_log "the usage error names the offending value" "'anthropic-api'" \
+    "$work/promote.log"
+check_log "the usage error lists what it would have accepted" "openai-responses" \
+    "$work/promote.log"
+check "nothing landed under an out-of-vocabulary pin" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/plain-turn-01")"
+check "no staging directory survives an expected-ingress usage error" "0" \
+    "$(tmp_dirs_in "$corpus")"
+
+# An absent vocabulary library is a hard failure, never an unvalidated pin
+# -- the same fail-closed shape the confinement library and the scrub gate
+# have. The removal is verified first, or the assertion would hold against
+# the present-library path.
+if [ -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ]; then
+    rc=0
+    promote "$work" --from "$scratch/anthropic-api/plain-turn-01" \
+        --scratch-root "$scratch" || rc=$?
+    check "an absent ingress vocabulary refuses the promotion" "2" "$rc"
+    check_log "the refusal names the missing vocabulary" \
+        "ingress vocabulary not found" "$work/promote.log"
+    check "nothing landed with no vocabulary to validate the pin" "ABSENT" \
+        "$(tree_manifest "$corpus/anthropic-api/plain-turn-01")"
+else
+    echo "FAIL: could not remove the ingress vocabulary from the throwaway repo"
     fails=$((fails + 1))
 fi
 rm -rf "$work"

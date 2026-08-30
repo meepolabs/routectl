@@ -10,6 +10,7 @@
 #
 # Usage:
 #   scripts/capture_driver.sh --lane <lane> --case <case-id> \
+#                             --expected-ingress <dialect> \
 #                             [--connection-mode <mode>] \
 #                             [--out <dir>] [--out-root <dir>] \
 #                             [--work <dir>] [--timeout <seconds>] \
@@ -23,6 +24,13 @@
 #                      scenario name and must never be derived from the
 #                      environment (a hostname or a real path in it is
 #                      personal data the scrub gate refuses).
+#   --expected-ingress which ingress dialect the driven client is expected
+#                      to reach routectl on -- `anthropic`, `openai`, or
+#                      `openai-responses` (the vocabulary in
+#                      scripts/drivers/lib/ingress_kinds.sh). REQUIRED,
+#                      with no default, and enforced against the TRACED
+#                      dialect at both promotion boundaries. See "WHY THIS
+#                      ONE ARRIVES ON ARGV" below.
 #   --connection-mode  how the driver reaches routectl. Default
 #                      `base-url`; pass `front-proxy` for a MITM run.
 #                      The mode and the lane config must agree, both
@@ -63,10 +71,11 @@
 #   ROUTECTL_DRIVER_WORK              the throwaway git repo (also cwd)
 #   HOME                              throwaway home, empty at boot
 #   XDG_CONFIG_HOME                   throwaway config root
-#   ROUTECTL_FIXTURE_CASE_ID          the four driver-mode pins, so a
+#   ROUTECTL_FIXTURE_CASE_ID          the five driver-mode pins, so a
 #   ROUTECTL_FIXTURE_CONFIG_SHA       driver can echo them into its own
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  logs and read them back
 #   ROUTECTL_FIXTURE_WIRE_PATTERN
+#   ROUTECTL_FIXTURE_EXPECTED_INGRESS
 #
 # In front-proxy mode only, two more:
 #
@@ -84,6 +93,29 @@
 # flag would let a caller declare a pattern the case does not claim, and
 # the recorded claim is the only on-disk evidence of which wire shape a
 # fixture was captured for.
+#
+# WHY THIS ONE ARRIVES ON ARGV. `--expected-ingress` is the exception to
+# the derive-rather-than-accept rule above, because nothing this script
+# reads names the value:
+#
+#   * the lane config declares the EGRESS provider (`kind`,
+#     `api_key_ref`, `auth_kind`) and says nothing about which dialect a
+#     client speaks INBOUND -- a translation lane exists precisely so the
+#     two differ;
+#   * a case describes an INTERACTION and is deliberately
+#     dialect-agnostic: the same turns and knobs are driven through
+#     different clients on different dialects, which is what makes two
+#     lanes' fixtures comparable at all;
+#   * the DRIVER does know its client's dialect, but it runs downstream of
+#     the pin export -- the rig reads the pins from this script's
+#     environment, and there is no channel back up from a driver -- so a
+#     driver-owned pin would arrive after the only reader needed it.
+#
+# So the pin is a property of the (driver, lane) PAIRING the caller
+# chooses, and the caller is the only layer that holds it. It is required
+# rather than defaulted: a default of `anthropic` would be silently wrong
+# for exactly the non-Anthropic client this check exists to catch, which
+# is the empty claim wearing a plausible value.
 #
 # A driver maps ROUTECTL_BASE_URL onto whatever variable its client
 # reads; this script stays client-agnostic on purpose.
@@ -103,8 +135,8 @@
 # Exit codes:
 #   0  the driver ran and the rig landed the fixture
 #   2  usage error (unknown flag, missing lane config, no driver command,
-#      a mode/config mismatch, or a `--out` this script refuses to write
-#      to)
+#      a mode/config mismatch, an expected-ingress dialect outside the
+#      vocabulary, or a `--out` this script refuses to write to)
 #   3  the hermetic daemon never became healthy
 #   4  the driver command exited non-zero
 #   5  the capture rig refused the fixture (see its own message)
@@ -152,6 +184,19 @@ if [ ! -r "$CONFINE_LIB" ]; then
 fi
 # shellcheck source=scripts/drivers/lib/confine.sh
 . "$CONFINE_LIB"
+
+# The single owner of the ingress-dialect vocabulary, shared with the rig
+# and the promote script. Absent library is a hard failure, never an
+# unvalidated `--expected-ingress`: the pin is enforced against a traced
+# token downstream, so an unchecked typo would fail every capture with a
+# dialect-mismatch message instead of naming the flag that was wrong.
+INGRESS_KINDS_LIB="$ROOT/scripts/drivers/lib/ingress_kinds.sh"
+if [ ! -r "$INGRESS_KINDS_LIB" ]; then
+  echo "capture_driver: ingress vocabulary not found at $INGRESS_KINDS_LIB; refusing to run" >&2
+  exit 2
+fi
+# shellcheck source=scripts/drivers/lib/ingress_kinds.sh
+. "$INGRESS_KINDS_LIB"
 
 # The default landing root: a gitignored scratch tree, NOT the committed
 # driver corpus. A rerun of a case overwrites that case's fixture, so a
@@ -207,6 +252,7 @@ PORT_TRIES=64
 LANE=""
 CASE_ID=""
 CONNECTION_MODE="base-url"
+EXPECTED_INGRESS=""
 DRIVER_OUT=""
 OUT_ROOT=""
 WORK_PARENT=""
@@ -232,6 +278,9 @@ while [ $# -gt 0 ]; do
     --connection-mode)
       [ $# -ge 2 ] || die "--connection-mode requires a value" 2
       CONNECTION_MODE="$2"; shift 2 ;;
+    --expected-ingress)
+      [ $# -ge 2 ] || die "--expected-ingress requires a value" 2
+      EXPECTED_INGRESS="$2"; shift 2 ;;
     --out) [ $# -ge 2 ] || die "--out requires a value" 2; DRIVER_OUT="$2"; shift 2 ;;
     --out-root)
       [ $# -ge 2 ] || die "--out-root requires a value" 2
@@ -247,6 +296,18 @@ done
 
 [ -n "$LANE" ] || die "--lane is required" 2
 [ -n "$CASE_ID" ] || die "--case is required" 2
+
+# Required with NO default, and validated against the closed vocabulary
+# before any daemon boots. A default would be silently wrong for exactly
+# the non-Anthropic client the downstream check exists to catch, and an
+# out-of-vocabulary value can never equal a traced token -- so an
+# unvalidated one would turn every run into a dialect-mismatch refusal
+# that names the wrong fault. See "WHY THIS ONE ARRIVES ON ARGV" above.
+[ -n "$EXPECTED_INGRESS" ] ||
+  die "--expected-ingress is required (one of: $(ingress_kinds_list)); it is the pin the promotion gates check the traced dialect against" 2
+ingress_kind_is_known "$EXPECTED_INGRESS" ||
+  die "unsupported --expected-ingress '$EXPECTED_INGRESS' (one of: $(ingress_kinds_list))" 2
+
 [ $# -ge 1 ] || die "no driver command given (pass it after \`--\`)" 2
 
 # An inverted window makes `RANDOM % (MAX - MIN + 1)` a modulo by a
@@ -624,6 +685,7 @@ driver_rc=0
   ROUTECTL_FIXTURE_CONFIG_SHA="$CONFIG_SHA" \
   ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
   ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
+  ROUTECTL_FIXTURE_EXPECTED_INGRESS="$EXPECTED_INGRESS" \
     exec "$@"
 ) >"$RUN/driver.log" 2>&1 || driver_rc=$?
 
@@ -664,6 +726,7 @@ ROUTECTL_FIXTURE_CASE_ID="$CASE_ID" \
 ROUTECTL_FIXTURE_CONFIG_SHA="$CONFIG_SHA" \
 ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
 ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
+ROUTECTL_FIXTURE_EXPECTED_INGRESS="$EXPECTED_INGRESS" \
   bash "$RIG" --driver-mode --force \
     --log "$TRACE" \
     --out "$DRIVER_OUT" \
@@ -683,4 +746,4 @@ if [ "$rig_rc" != 0 ]; then
   exit 5
 fi
 
-echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT${MITM_PORT:+ mitm_port=$MITM_PORT} config_sha=$CONFIG_SHA out=$DRIVER_OUT"
+echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT${MITM_PORT:+ mitm_port=$MITM_PORT} config_sha=$CONFIG_SHA expected_ingress=$EXPECTED_INGRESS out=$DRIVER_OUT"
