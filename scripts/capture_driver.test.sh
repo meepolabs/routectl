@@ -935,6 +935,91 @@ check "the matcher reports absence when the declaration is stripped" "no" \
     "$(declares_oauth_bearer "$stripped")"
 rm -f "$stripped"
 
+# --- Case 12b: the front-proxy config is a TWIN of the base config -----
+# The front-proxy lane needs a `[mitm]` block and the base lane must not
+# grow one (an unused block still binds a listener and mints a CA), so the
+# two lanes are two committed files. That only works while they differ by
+# NOTHING but the `[mitm]` table and their header comments: a provider,
+# model, or alias that drifts between them silently confounds every
+# comparison between a base-url fixture and a front-proxy one, since each
+# file is hashed into its own fixtures' `config_sha` and nothing else
+# records the difference. Welded here so a divergence is a test failure.
+FRONT_PROXY_CONFIG="$HERE/drivers/config/anthropic-api.front-proxy.toml"
+check "the front-proxy lane config is committed and readable" "yes" \
+    "$([ -r "$FRONT_PROXY_CONFIG" ] && echo yes || echo no)"
+check "the front-proxy config declares auth_kind = oauth-bearer" "yes" \
+    "$(declares_oauth_bearer "$FRONT_PROXY_CONFIG")"
+
+# Comments and blank lines carry no wire meaning, so both sides are
+# reduced to their key-bearing lines; the `[mitm]` table is dropped
+# wherever it appears, which is what makes the twin comparable to a base
+# config that has none.
+config_wire_lines() {
+    awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*$/ { next }
+        /^\[/            { in_mitm = ($0 == "[mitm]") }
+        in_mitm          { next }
+        { print }
+    ' "$1"
+}
+
+twins_agree() {
+    if diff -q <(config_wire_lines "$1") <(config_wire_lines "$2") >/dev/null 2>&1; then
+        printf 'yes\n'
+    else
+        printf 'no\n'
+    fi
+}
+
+check "the two lane configs differ only by the [mitm] table and comments" "yes" \
+    "$(twins_agree "$LANE_CONFIG" "$FRONT_PROXY_CONFIG")"
+
+# PAIRED CONTROL: the same comparison on a twin whose provider block was
+# mutated MUST report a difference. Without it the check above is
+# satisfiable by a comparison that always passes -- e.g. an awk program
+# that swallows every line, or a `diff` whose exit status is discarded.
+mutated="$(mktemp)"
+sed 's/^kind        = "anthropic-api"$/kind        = "openai-compat"/' \
+    "$FRONT_PROXY_CONFIG" >"$mutated"
+check_ne "the mutation actually altered the twin" \
+    "$(sha256sum <"$FRONT_PROXY_CONFIG" | cut -d' ' -f1)" \
+    "$(sha256sum <"$mutated" | cut -d' ' -f1)"
+check "the comparison reports a difference when the provider block drifts" "no" \
+    "$(twins_agree "$LANE_CONFIG" "$mutated")"
+rm -f "$mutated"
+
+# The `[mitm]` table itself: present on the twin, absent from the base,
+# and pinned to the Anthropic origin and host -- config validation refuses
+# any other value, because the proxy forwards the client's full-scope
+# token. The base-config direction is this matcher's positive control in
+# reverse: it must report absence there or its presence report proves
+# nothing.
+declares_pinned_mitm() {
+    if grep -q '^\[mitm\]$' "$1" &&
+        grep -qE '^[[:space:]]*upstream_origin[[:space:]]*=[[:space:]]*"https://api\.anthropic\.com"[[:space:]]*$' "$1" &&
+        grep -qE '^[[:space:]]*mitm_host[[:space:]]*=[[:space:]]*"api\.anthropic\.com"[[:space:]]*$' "$1"; then
+        printf 'yes\n'
+    else
+        printf 'no\n'
+    fi
+}
+check "the front-proxy config carries a [mitm] table pinned to the Anthropic origin" \
+    "yes" "$(declares_pinned_mitm "$FRONT_PROXY_CONFIG")"
+check "the base lane config carries no [mitm] table" "no" \
+    "$(declares_pinned_mitm "$LANE_CONFIG")"
+
+# Both halves of the hashed-bytes contract have to be readable in the
+# file: the header says an edit invalidates prior fixtures' comparability,
+# and the port is marked as a placeholder the runner overrides on argv.
+# Without the latter a maintainer "fixes" the port and re-keys every
+# front-proxy fixture's identity.
+check "the front-proxy header carries the editing-invalidates-comparability contract" \
+    "1" "$(grep -c "invalidates every prior fixture's comparability" \
+        "$FRONT_PROXY_CONFIG" || true)"
+check "the front-proxy config names the argv override for the MITM port" "yes" \
+    "$(grep -q -- 'serve --mitm-port' "$FRONT_PROXY_CONFIG" && echo yes || echo no)"
+
 # --- Case 13: the wire pattern is DERIVED, never declared on argv -----
 # A flag would let a caller record a pattern the case does not claim,
 # which is the same lie as an unpinned claim one layer earlier. Both
