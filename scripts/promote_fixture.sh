@@ -61,7 +61,8 @@
 #   0  promoted; the destination now holds exactly the source's file set
 #   1  the staged content failed a landing gate -- residual personal data,
 #      a body that does not exhibit the wire pattern its `meta.json`
-#      claims, or captured ingress headers that contradict its recorded
+#      claims, a connection-mode claim outside the two the corpus holds,
+#      or captured ingress headers that contradict its recorded
 #      connection mode. Nothing was promoted.
 #   2  usage error, a confinement refusal, a fixture path that is not
 #      `<scratch-root>/<lane>/<case-id>`, or a missing prerequisite
@@ -269,6 +270,27 @@ if ! python3 "$VERIFY_PATTERN" "$STAGED" "$CLAIMED_PATTERN"; then
   echo "its meta.json claims ('$CLAIMED_PATTERN'). the destination '$DST' is untouched." >&2
   exit 1
 fi
+
+# The mode claim is a CLOSED SET, checked before the seam evidence is
+# even read: the corpus this script promotes into is the driver one,
+# where every fixture records the mode its runner pinned, so an empty or
+# unrecognized mode is an edited or malformed claim. Waving it past the
+# seam gate would promote exactly the hand-edited fixture these gates
+# exist to catch -- the gate below has no arm for such a mode, and "no
+# arm fired" is not "checked and coherent".
+case "$CLAIMED_MODE" in
+  front-proxy|base-url) : ;;
+  "")
+    echo "promote_fixture: refusing to promote '$SRC': its meta.json records no connection mode," >&2
+    echo "so the seam gate has no claim to check. the destination '$DST' is untouched." >&2
+    exit 1
+    ;;
+  *)
+    echo "promote_fixture: refusing to promote '$SRC': it records unsupported connection mode" >&2
+    echo "'$CLAIMED_MODE' (base-url or front-proxy). the destination '$DST' is untouched." >&2
+    exit 1
+    ;;
+esac
 
 # The connection-mode claim, enforced against the staged ingress headers.
 # An environment carrier proves INTENT; the seam header is the only
