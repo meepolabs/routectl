@@ -1082,6 +1082,65 @@ check "an inverted port window is a usage error" "2" "$rc"
 check_log "the refusal names the inverted window" "is inverted" "$work/runner.log"
 rm -rf "$work"
 
+# --- Case 7b: the (lane, variant) convention resolves by the DOT -------
+# A variant is a FILENAME, not a mechanism: `<lane>.<variant>` reads
+# `config/<lane>.<variant>.toml` through the same one-line resolution every
+# lane uses. Nothing here special-cases the dot, which is exactly why it
+# needs pinning -- a contributor who commits
+# `config/<lane>-<variant>.toml` must get a refusal rather than a run that
+# boots the BASE lane and lands a fixture pinned to the wrong config sha.
+#
+# The accept leg asserts the SHA, not the exit status: a mis-resolve to the
+# base lane would also exit 0, and the sha is the only value that names
+# which file actually booted.
+work="$(make_work)"
+canned_trace_front_proxy >"$work/canned-trace.log"
+VARIANT_CONFIG="$HERE/drivers/config/anthropic-api.front-proxy.toml"
+VARIANT_SHA="$(sha256sum "$VARIANT_CONFIG" | cut -d' ' -f1)"
+check_ne "the variant config is not byte-identical to its base lane" \
+    "$EXPECTED_SHA" "$VARIANT_SHA"
+pair_v="$(free_port_pair)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$pair_v" ROUTECTL_DRIVER_PORT_MAX="$((pair_v + 1))" \
+    runner_run "$work" --lane anthropic-api.front-proxy \
+    --case driver-selftest-02 --connection-mode front-proxy || rc=$?
+check "a dotted lane name runs" "0" "$rc"
+check "a dotted lane name resolves to the DOTTED config file" \
+    "$VARIANT_SHA" "$(probe_get "$work" config_sha)"
+
+# The hyphenated misspelling, with THAT file present and the dotted one
+# gone: the refusal must come from resolution, not from an empty config
+# dir. A runner that stripped or normalized the separator would boot the
+# hyphenated file under the dotted name and land a fixture whose
+# `config_sha` names a file the operator never chose.
+mv "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml" \
+    "$work/repo/scripts/drivers/config/anthropic-api-front-proxy.toml"
+# The accept leg above left this run's pid record behind, so it is cleared
+# before the assertion that the refusal booted nothing.
+rm -f "$work/stub.pid"
+rc=0
+runner_run "$work" --lane anthropic-api.front-proxy \
+    --case driver-selftest-02 --connection-mode front-proxy || rc=$?
+check "a dotted lane whose only committed file is hyphenated is a usage error" \
+    "2" "$rc"
+check_log "the refusal names the DOTTED path it looked for" \
+    "anthropic-api.front-proxy.toml" "$work/runner.log"
+check "the mis-resolved run booted no daemon" "no" \
+    "$([ -f "$work/stub.pid" ] && echo yes || echo no)"
+
+# The mirror leg: the hyphenated NAME must not reach the dotted file
+# either. Without it, "the hyphen is refused" could hold merely because
+# one file was missing rather than because the name is taken literally.
+mv "$work/repo/scripts/drivers/config/anthropic-api-front-proxy.toml" \
+    "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml"
+rc=0
+runner_run "$work" --lane anthropic-api-front-proxy \
+    --case driver-selftest-02 --connection-mode front-proxy || rc=$?
+check "a hyphenated lane name never resolves to the dotted twin" "2" "$rc"
+check_log "the mirror refusal names the HYPHENATED path" \
+    "anthropic-api-front-proxy.toml" "$work/runner.log"
+rm -rf "$work"
+
 # --- Case 8: a failing driver aborts before the rig runs --------------
 # A driver that failed produced no dialogue, so a fixture from its trace
 # would be evidence of nothing.
@@ -1271,6 +1330,99 @@ else
     printf '%s\n' "$help_out" | tail -5
     fails=$((fails + 1))
 fi
+
+# --- Case 11b: the ROUTECTL_DRIVER_* namespace is fully classified -----
+# The namespace is public the moment a stranger can contribute a driver,
+# so the header's STABLE / INTERNAL-TUNING split has to match the names
+# the scripts actually read. The lists are derived from the header and the
+# namespace is derived from the scripts -- neither is restated here, or the
+# assertion would only prove this file agrees with itself.
+#
+# Both directions matter. An unclassified name is a public surface nobody
+# declared; a classified name no script reads is a promise about a variable
+# that does nothing.
+driver_env_section() {
+    awk -v from="$1" -v to="$2" '
+        $0 ~ from { on = 1; next }
+        on && to != "" && $0 ~ to { on = 0 }
+        on && /^#   ROUTECTL_DRIVER_[A-Z0-9_]+/ { print $2 }
+    ' "$RUNNER" | sort -u
+}
+STABLE_NAMES="$(driver_env_section '^# STABLE --' '^# INTERNAL TUNING --')"
+INTERNAL_NAMES="$(driver_env_section '^# INTERNAL TUNING --' '^# --- END USAGE ---$')"
+check_ne "the header declares a non-empty STABLE list" "" "$STABLE_NAMES"
+check_ne "the header declares a non-empty INTERNAL list" "" "$INTERNAL_NAMES"
+check "no name is in both lists" "" \
+    "$(comm -12 <(printf '%s\n' "$STABLE_NAMES") <(printf '%s\n' "$INTERNAL_NAMES"))"
+
+# Every name the runner, the drivers, the shared library, the committed
+# lane configs, and the capture-cell wrapper actually read. The runner
+# contributes only the CODE below its usage sentinel: scanning its header
+# too would make the header satisfy itself, and the direction that catches
+# a promise about a variable nothing reads would be vacuous.
+#
+# The bare namespace PREFIX is dropped: the lane configs mention it as
+# prose when naming the passthrough, and a prefix is not a variable.
+runner_code() {
+    sed '1,/^# --- END USAGE ---$/d' "$RUNNER"
+}
+DRIVER_ENV_SOURCES=(
+    "$HERE/drivers/claude-code.sh"
+    "$HERE/drivers/claude-code-print.sh"
+    "$HERE/drivers/external-agent-cli.sh"
+    "$HERE/drivers/lib/common.sh"
+    "$HERE/drivers/config/anthropic-api.toml"
+    "$HERE/drivers/config/anthropic-api.front-proxy.toml"
+    "$HERE/container/run_capture.sh"
+)
+USED_NAMES="$(cat <(runner_code) "${DRIVER_ENV_SOURCES[@]}" |
+    grep -oh 'ROUTECTL_DRIVER_[A-Z0-9_]*' |
+    grep -vx 'ROUTECTL_DRIVER_' | sort -u)"
+check_ne "the scripts read a non-empty driver namespace" "" "$USED_NAMES"
+CLASSIFIED_NAMES="$(printf '%s\n%s\n' "$STABLE_NAMES" "$INTERNAL_NAMES" | sort -u)"
+check "every name the scripts read is classified" "" \
+    "$(comm -23 <(printf '%s\n' "$USED_NAMES") <(printf '%s\n' "$CLASSIFIED_NAMES") | tr '\n' ' ' | sed 's/ $//')"
+check "every classified name is one the scripts read" "" \
+    "$(comm -13 <(printf '%s\n' "$USED_NAMES") <(printf '%s\n' "$CLASSIFIED_NAMES") | tr '\n' ' ' | sed 's/ $//')"
+
+# The split is a CLAIM about what a fixture's wire shape depends on, so
+# two of its members are pinned by name against the wrong side: the
+# credential the client holds locally is the documented on-ramp, and the
+# port window exists only so a self-test can boot without a daemon.
+check "the local-client credential is STABLE" "yes" \
+    "$(printf '%s\n' "$STABLE_NAMES" | grep -qx ROUTECTL_DRIVER_CLIENT_API_KEY && echo yes || echo no)"
+check "the port window is INTERNAL" "yes" \
+    "$(printf '%s\n' "$INTERNAL_NAMES" | grep -qx ROUTECTL_DRIVER_PORT_MIN && echo yes || echo no)"
+check "the port window is not also STABLE" "no" \
+    "$(printf '%s\n' "$STABLE_NAMES" | grep -qx ROUTECTL_DRIVER_PORT_MIN && echo yes || echo no)"
+
+# The split reaches a driver author through `--help`, not only by reading
+# the file: the header is the runner's own usage output. Asserted on a name
+# from EACH list rather than on the section labels, which also appear in
+# the header's own introduction and would pass on a header whose lists were
+# gone.
+check "--help renders a name from the STABLE list" "yes" \
+    "$(printf '%s' "$help_out" | grep -q 'ROUTECTL_DRIVER_CLIENT_BEARER' && echo yes || echo no)"
+check "--help renders a name from the INTERNAL list" "yes" \
+    "$(printf '%s' "$help_out" | grep -q 'ROUTECTL_DRIVER_SESSION_ID' && echo yes || echo no)"
+
+# The fixture pins are the THIRD stable list, and the one most likely to
+# gain a member: every new pin is another mandatory export. Same derivation
+# on both sides -- the header's list against the pins the runner actually
+# exports -- so a sixth pin added without a header row is red.
+FIXTURE_LISTED="$(awk '
+    /^# The fixture pins are a THIRD stable list/ { on = 1; next }
+    on && /^# STABLE --/ { on = 0 }
+    on && /^#   ROUTECTL_FIXTURE_[A-Z0-9_]+$/ { print $2 }
+' "$RUNNER" | sort -u)"
+FIXTURE_EXPORTED="$(runner_code |
+    grep -oh 'ROUTECTL_FIXTURE_[A-Z0-9_]*' | sort -u)"
+check_ne "the header lists the fixture pins" "" "$FIXTURE_LISTED"
+check_ne "the runner exports fixture pins" "" "$FIXTURE_EXPORTED"
+check "every pin the runner exports is listed" "" \
+    "$(comm -23 <(printf '%s\n' "$FIXTURE_EXPORTED") <(printf '%s\n' "$FIXTURE_LISTED") | tr '\n' ' ' | sed 's/ $//')"
+check "every listed pin is one the runner exports" "" \
+    "$(comm -13 <(printf '%s\n' "$FIXTURE_EXPORTED") <(printf '%s\n' "$FIXTURE_LISTED") | tr '\n' ' ' | sed 's/ $//')"
 
 # --- Case 12: the lane config declares the oauth-bearer wire shape ----
 # `auth_kind` decides what the captured egress LOOKS like: `oauth-bearer`

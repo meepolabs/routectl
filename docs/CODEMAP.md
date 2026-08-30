@@ -5728,6 +5728,10 @@ because no cargo target runs them, so nothing else names their paths.
   copy the capture rig, the driver runner, and the promotion script validate
   their expected-ingress pin against, welded to `IngressAdapter::id()` by
   the shell self-tests
+- `drivers/profiles/README.md` -- the client-profile seam, committed with ZERO
+  profiles: the closed-set and `key=value` rules, the forbidden keys, and the
+  ordering constraint `driver_load_client_profile` enforces (a profile loads
+  before the connection-mode apply; a load after it is refused)
 - `promote_fixture.sh` -- promotion of one captured fixture from a scratch
   root into the committed driver corpus (`--from`, `--scratch-root`,
   `--expected-ingress`, `--to`); re-runs the landing gates on the staged copy

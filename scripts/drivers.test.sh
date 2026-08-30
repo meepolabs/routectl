@@ -1795,6 +1795,216 @@ kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
 
+# ---------------------------------------------------------------------
+# Part 7: the client-profile seam, and its ordering constraint
+# ---------------------------------------------------------------------
+# ZERO profiles are committed (the closed set is empty until a cell needs
+# one), so every leg here writes a throwaway profile into a throwaway repo.
+# What is asserted is the RULE, not any profile: the ordering latch, and
+# the forbidden classes the README states.
+#
+# The ordering is the load-bearing one. `driver_apply_anthropic_connection_mode`
+# clears both modes' carriers precisely because the runner forwards the
+# caller's environment and an operator who routes their own client through
+# routectl already has ANTHROPIC_BASE_URL set. A profile applied AFTER that
+# clear could re-set it, and the run would capture the operator's LIVE
+# daemon while landing a fixture labelled hermetic.
+
+work="$(make_work)"
+PROFILES="$work/repo/scripts/drivers/profiles"
+mkdir -p "$PROFILES"
+
+# Exercise the library directly. A profile is a LIBRARY concern -- no
+# committed driver loads one yet -- and the two orderings cannot both be
+# reached through a driver that hardcodes one of them.
+#
+# `<order>` is `before` or `after`, naming when the profile is loaded
+# relative to the connection-mode apply. Prints the loader's own message on
+# failure; returns its exit status.
+profile_run() {
+    local order="$1" name="$2" rc=0
+    (
+        set -eu
+        cd "$work/repo" || exit 9
+        export ROUTECTL_BASE_URL="http://127.0.0.1:1"
+        export ROUTECTL_DRIVER_RUN="$work" ROUTECTL_DRIVER_WORK="$work"
+        export ROUTECTL_FIXTURE_CASE_ID="plain-turn-01"
+        export ROUTECTL_FIXTURE_CONNECTION_MODE="base-url"
+        . scripts/drivers/lib/common.sh
+        if [ "$order" = before ]; then
+            driver_load_client_profile "$name"
+            driver_apply_anthropic_connection_mode
+        else
+            driver_apply_anthropic_connection_mode
+            driver_load_client_profile "$name"
+        fi
+        printf 'base_url=%s\n' "${ANTHROPIC_BASE_URL:-}" >"$work/profile.txt"
+        printf 'applied=%s\n' "${PROFILE_PROBE:-unset}" >>"$work/profile.txt"
+    ) >"$work/profile.log" 2>&1 || rc=$?
+    return "$rc"
+}
+
+# The ACCEPTED control comes first: without it, "a late load is refused"
+# is satisfiable by a loader that refuses every load.
+printf 'PROFILE_PROBE=applied\n' >"$PROFILES/selftest.env"
+rm -f "$work/profile.txt"
+rc=0
+profile_run before selftest || rc=$?
+check "a profile loaded BEFORE the connection-mode apply is accepted" "0" "$rc"
+check "the accepted profile's key reached the client environment" "applied" \
+    "$(sed -n 's/^applied=//p' "$work/profile.txt")"
+check "the accepted profile left the mode's own carrier in force" \
+    "http://127.0.0.1:1" "$(sed -n 's/^base_url=//p' "$work/profile.txt")"
+
+# The REFUSAL: same profile, same file, only the order changed.
+rm -f "$work/profile.txt"
+rc=0
+profile_run after selftest || rc=$?
+check "a profile loaded AFTER the connection-mode apply is refused" "2" "$rc"
+if grep -qF 'AFTER the connection-mode apply' "$work/profile.log"; then
+    echo "PASS: the late-load refusal names the ordering"
+else
+    fail "the late-load refusal did not name the ordering"
+    sed -n '1,5p' "$work/profile.log"
+fi
+check "the refused late load exported nothing" "no" \
+    "$([ -f "$work/profile.txt" ] && echo yes || echo no)"
+
+# The forbidden classes the README states, each refused by name, each
+# against the same accepted-order call the control above proved works --
+# so a refusal is attributable to the profile's content and to nothing else.
+profile_refuses() {
+    local label="$1" body="$2" needle="$3" rc=0
+    printf '%s\n' "$body" >"$PROFILES/selftest-bad.env"
+    profile_run before selftest-bad || rc=$?
+    if [ "$rc" = 0 ]; then
+        fail "$label -- the loader ACCEPTED it"
+    elif ! grep -qF -- "$needle" "$work/profile.log"; then
+        fail "$label -- refused, but the reason did not name '$needle'"
+        sed -n '1,5p' "$work/profile.log"
+    else
+        echo "PASS: $label"
+    fi
+    rm -f "$PROFILES/selftest-bad.env"
+}
+
+# A connection carrier is THE fault this seam exists to prevent: the one
+# that would silently repoint the client at the operator's live daemon.
+profile_refuses "a profile naming ANTHROPIC_BASE_URL is refused" \
+    'ANTHROPIC_BASE_URL=http://127.0.0.1:65535' "connection carrier"
+profile_refuses "a profile naming a proxy carrier is refused" \
+    'HTTPS_PROXY=http://127.0.0.1:65535' "connection carrier"
+profile_refuses "a profile naming the MITM trust path is refused" \
+    'NODE_EXTRA_CA_CERTS=/tmp/not-a-ca.pem' "connection carrier"
+profile_refuses "a profile naming a provider credential is refused" \
+    'ANTHROPIC_API_KEY=sk-not-a-real-key' "credential"
+profile_refuses "a profile naming a bearer is refused" \
+    'SOME_BEARER=nope' "credential"
+# The two substitution legs are single-quoted on purpose: the fixture is
+# the LITERAL `$(...)` / backtick a profile would carry, so an expansion
+# here would test nothing.
+# shellcheck disable=SC2016
+profile_refuses "a profile value carrying a shell substitution is refused" \
+    'MAX_THINKING_TOKENS=$(id -u)' "shell substitution"
+# shellcheck disable=SC2016
+profile_refuses "a profile value carrying a backtick is refused" \
+    'MAX_THINKING_TOKENS=`id -u`' "shell substitution"
+profile_refuses "a profile line that is not key=value is refused" \
+    'rm -rf /' "non-key=value line"
+profile_refuses "a profile key that is not a variable name is refused" \
+    'not a key=1' "invalid key"
+
+# THE ACCEPT SET, drawn from the keys a profile actually exists to carry.
+# The credential rule classifies untrusted key NAMES, so moving its
+# boundary moves it in both directions: a substring test on `TOKEN` refuses
+# `MAX_THINKING_TOKENS`, which is the thinking-tier knob -- a body-shape
+# axis and the most likely content of the first real profile. Without these
+# legs a tightened rule reads as a stricter gate instead of a broken seam.
+profile_accepts() {
+    local label="$1" body="$2" rc=0
+    printf '%s\n' "$body" >"$PROFILES/selftest-ok.env"
+    profile_run before selftest-ok || rc=$?
+    if [ "$rc" = 0 ]; then
+        echo "PASS: $label"
+    else
+        fail "$label -- the loader REFUSED it"
+        sed -n '1,3p' "$work/profile.log"
+    fi
+    rm -f "$PROFILES/selftest-ok.env"
+}
+profile_accepts "the thinking-tier knob is accepted" 'MAX_THINKING_TOKENS=8192'
+profile_accepts "a client feature flag is accepted" 'DISABLE_PROMPT_CACHING=1'
+profile_accepts "an MCP config path is accepted" 'CLAUDE_MCP_CONFIG=mcp.json'
+profile_accepts "a comment and a blank line are accepted" '# a profile
+'
+
+# The closed set is closed: a name is a committed profile in this
+# directory or it is nothing. No path argument, no traversal.
+rc=0
+profile_run before no-such-profile || rc=$?
+check "an uncommitted profile name is refused" "2" "$rc"
+if grep -qF 'no committed client profile' "$work/profile.log"; then
+    echo "PASS: the refusal names the missing committed profile"
+else
+    fail "the refusal did not name the missing committed profile"
+fi
+rc=0
+profile_run before ../config/anthropic-api || rc=$?
+check "a profile name with a path component is refused" "2" "$rc"
+if grep -qF 'closed set' "$work/profile.log"; then
+    echo "PASS: the traversal refusal names the closed set"
+else
+    fail "the traversal refusal did not name the closed set"
+fi
+rm -rf "$work"
+
+# ZERO profiles are committed, and the README is what carries the rules
+# until one is. Each grep names a LOAD-BEARING statement rather than a
+# heading: a heading can be reworded, and a rule the README stops stating
+# is a rule the first profile author will get wrong.
+committed_profiles="$(find "$DRIVERS/profiles" -maxdepth 1 -name '*.env' 2>/dev/null | wc -l)"
+check "the committed profile set is still empty" "0" "$committed_profiles"
+PROFILES_README="$DRIVERS/profiles/README.md"
+check "the profiles directory carries its README" "yes" \
+    "$([ -r "$PROFILES_README" ] && echo yes || echo no)"
+readme_states() {
+    check "the profiles README states $1" "yes" \
+        "$(grep -qF -- "$2" "$PROFILES_README" && echo yes || echo no)"
+}
+readme_states "the closed-set rule" "The set of profiles is CLOSED"
+readme_states "that a profile is parsed, not sourced" "PARSED, not sourced"
+readme_states "the forbidden connection carriers" "ANTHROPIC_BASE_URL"
+readme_states "the forbidden credential suffixes" "_BEARER"
+readme_states "the forbidden shell substitution" "backtick"
+readme_states "the before-apply half of the ordering rule" \
+    "BEFORE \`driver_apply_anthropic_connection_mode\`"
+readme_states "the after-apply refusal" "load after it is REFUSED"
+readme_states "the deferred client-side pin" "client_config_sha"
+
+# Positive control: every grep above MUST fire on a file that does carry
+# the statement, and MUST NOT on one that does not. Without it a mistyped
+# needle reads as a clean pass on a README that says nothing.
+readme_control="$(mktemp)"
+printf 'nothing load-bearing here\n' >"$readme_control"
+control_misses=0
+while IFS= read -r needle; do
+    grep -qF -- "$needle" "$PROFILES_README" || control_misses=$((control_misses + 1))
+    ! grep -qF -- "$needle" "$readme_control" || control_misses=$((control_misses + 1))
+done <<'NEEDLES'
+The set of profiles is CLOSED
+PARSED, not sourced
+load after it is REFUSED
+NEEDLES
+check "the README greps fire on the README and not on an empty control" "0" \
+    "$control_misses"
+rm -f "$readme_control"
+
+# No `client_config_sha` anywhere yet: it lands with the first profile, and
+# an always-empty pin answers neither question the two-pin design separates.
+check "no script writes a client_config_sha pin" "0" \
+    "$(grep -rl 'client_config_sha' "$RIG" "$RUNNER" "$DRIVERS" \
+        --exclude=README.md 2>/dev/null | wc -l)"
+
 if [ "$fails" -gt 0 ]; then
     echo "drivers self-test: $fails failure(s)"
     exit 1

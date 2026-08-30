@@ -44,6 +44,23 @@ env-check and lands a fixture that is evidence for the wrong dialect. That
 is also why a client whose dialect differs earns its own driver file rather
 than a flag on an existing one.
 
+## Client profiles
+
+[profiles/](profiles/README.md) is the seam for named, committed CLIENT
+settings, and is deliberately empty of profiles until a cell needs one.
+Its README carries the closed-set rule, the forbidden keys, and the
+ordering constraint the loader enforces -- read it before writing the
+first profile.
+
+## The lane config and its variants
+
+A driver never names a lane: the runner resolves
+`config/<lane>.toml` and copies it into the run's config root. A second
+DEPLOYMENT SHAPE of the same provider is a `<lane>.<variant>` filename
+(`anthropic-api.front-proxy.toml` beside `anthropic-api.toml`) and nothing
+more -- no path segment, no `meta.json` field, no flag. A wire-affecting
+per-deployment value lives INSIDE the file, where `config_sha` covers it.
+
 ## Connection mode is a capture axis
 
 A MITM front proxy carries `role:"system"` turns inside `messages[]`;

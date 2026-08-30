@@ -598,6 +598,103 @@ question the field exists to answer.
 (`ROUTECTL_BIN` selects the binary) -- a real boot needs a credential and
 CI has none.
 
+### The (lane, variant) convention
+
+A lane needing a second DEPLOYMENT SHAPE of the same provider spells it
+`<lane>.<variant>` and commits `scripts/drivers/config/<lane>.<variant>.toml`.
+`anthropic-api.front-proxy` beside `anthropic-api` is the shipped example:
+same provider, same credential, one carrying a `[mitm]` block.
+
+There is no variant mechanism. The runner resolves `$CONFIG_DIR/$LANE.toml`
+and the dot is simply part of the lane name, so the convention costs one
+filename and nothing else. That is also why it needs writing down: a
+contributor who commits `config/<lane>-<variant>.toml` and passes the dotted
+name gets a usage error rather than a run that boots the BASE lane and lands
+a fixture whose `config_sha` names a file nobody chose. Both directions are
+pinned in `scripts/capture_driver.test.sh` -- the dotted name resolves to
+the dotted file's sha, and the hyphenated spelling resolves to neither.
+
+**The variant is a FILENAME ONLY.** Deliberately absent, and looking for any
+of them is the wrong move:
+
+- **No path segment.** A fixture lands under the lane the TRACE reports
+  (derived from `provider_kind`), so both twins land under
+  `anthropic-api/` and are distinguished by `case_id`. A variant segment
+  would be a fixture-format break.
+- **No `variant` field in `meta.json`.** `config_sha` already identifies
+  the exact config bytes that booted; a second record naming the variant
+  could only drift from it.
+- **No `--variant` flag and no second sha.** A wire-affecting
+  per-deployment value lives INSIDE the hashed file, where the one hash
+  already covers it.
+
+### The ROUTECTL_DRIVER_* contract: stable vs internal tuning
+
+The namespace is public the moment a stranger can contribute a driver, so
+the runner's own usage header (`scripts/capture_driver.sh --help`) carries
+the split, in two lists plus the fixture pins:
+
+- **STABLE** -- the documented on-ramp: the exported run contract
+  (`ROUTECTL_DRIVER_PORT` / `_RUN` / `_WORK`), the front-proxy carriers, the
+  client-binary overrides, the generic-agent argv names
+  (`ROUTECTL_DRIVER_AGENT_*`), the client's PLACEHOLDER credentials
+  (`ROUTECTL_DRIVER_CLIENT_API_KEY` / `_BEARER`), the real upstream
+  credentials under the per-provider convention
+  `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` (plus `_ACCOUNT_ID` where the
+  provider's auth surface needs one), and the two names that change the
+  captured wire (`ROUTECTL_DRIVER_REQUEST_MODEL`, `_THINKING_TOKENS`).
+  Renaming one breaks a contributor's driver or changes what a landed
+  fixture MEANS.
+- **INTERNAL TUNING** -- names that change only HOW a run executes on one
+  box, with no landed fixture's wire shape depending on any of them: the
+  port search window, the pty pacing seconds, the landing-root seam, the
+  print driver's session id. Renameable without notice; nothing outside
+  this repo should name them.
+- **The fixture pins** (`ROUTECTL_FIXTURE_*`) are a third stable list,
+  stable for the same reason they are mandatory: a driver echoes them and
+  the rig refuses a run missing one, so a rename breaks both ends at once.
+
+Two of those are one letter apart in intent and a contributor will confuse
+them: `ROUTECTL_DRIVER_CLIENT_API_KEY` is the PLACEHOLDER the client holds
+locally, which never leaves the daemon, while
+`ROUTECTL_DRIVER_<PROVIDER>_API_KEY` is the REAL upstream credential
+routectl injects on egress. The provider convention is keyed on the
+PROVIDER (`anthropic`, `openai`, `gemini`), never on the lane.
+
+The header is not prose a rename can silently outdate:
+`scripts/capture_driver.test.sh` derives all three lists from it, derives
+the namespace and the exported pins from the scripts, and asserts the sets
+are equal in both directions. A name in a script and in neither list is
+red; so is a classified name no script reads, and so is a sixth pin added
+without a header row.
+
+### Client profiles
+
+`scripts/drivers/profiles/` holds named, committed CLIENT settings a driver
+applies before launching its client, loaded by
+`driver_load_client_profile` in `scripts/drivers/lib/common.sh`. The
+directory is deliberately EMPTY of profiles today -- the seam and its rules
+ship first, populated by whoever has a cell that needs one. The rules live
+in [../scripts/drivers/profiles/README.md](../scripts/drivers/profiles/README.md).
+
+One of them is enforced in code rather than stated, and it is the reason
+the seam shipped before its first user:
+
+**A profile is loaded BEFORE `driver_apply_anthropic_connection_mode`; a
+load AFTER it is REFUSED.** That function's first act is to unset both
+modes' connection carriers, because the runner forwards the caller's
+environment and an operator who routes their own client through routectl
+already has `ANTHROPIC_BASE_URL` set. A profile applied after the clear
+could re-set that carrier, and the run would capture the operator's LIVE
+daemon while landing a fixture labelled hermetic. That is a fault this
+project caught once, so the loader carries a latch instead of trusting the
+order, and it refuses connection carriers and provider credentials by name
+on top of it.
+
+No `client_config_sha` pin exists yet: it lands in the same change as the
+first profile. An always-empty second pin answers neither of the two
+questions two pins exist to separate.
+
 ### Where a driver capture lands: scratch, then promotion
 
 A driver fixture lands in a SCRATCH tree by default and reaches the

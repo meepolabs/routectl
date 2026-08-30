@@ -18,7 +18,31 @@
 #                             -- <driver-command> [args...]
 #
 #   --lane             which committed lane config to boot under; reads
-#                      scripts/drivers/config/<lane>.toml
+#                      scripts/drivers/config/<lane>.toml, with no
+#                      special-casing of any kind.
+#
+#                      THE VARIANT CONVENTION. A lane that needs a second
+#                      deployment shape of the same provider spells it
+#                      `<lane>.<variant>` and commits
+#                      `config/<lane>.<variant>.toml` --
+#                      `anthropic-api.front-proxy` beside
+#                      `anthropic-api`. The dot is not a separator this
+#                      script knows about: it is part of the lane name,
+#                      which is why a contributor who writes
+#                      `config/<lane>-<variant>.toml` and passes the
+#                      dotted name gets a usage error here instead of a
+#                      silent boot against the base lane.
+#
+#                      The variant is a FILENAME ONLY. It is not a path
+#                      segment (a fixture lands under the lane the TRACE
+#                      reports, derived from `provider_kind`, so both
+#                      twins land under the same `anthropic-api/`), not a
+#                      `meta.json` field, and not a flag. A per-deployment
+#                      value that changes the wire lives INSIDE the file,
+#                      where `config_sha` already covers it -- one hash
+#                      over the bytes that booted is what identifies the
+#                      exact config, and a second record naming the
+#                      variant could only drift from it.
 #   --case             scenario id, e.g. `tools-multiturn-01`. Names the
 #                      landing directory, so it must be a path-safe
 #                      scenario name and must never be derived from the
@@ -153,10 +177,79 @@
 #      the proxied CONNECT has nothing to hit, and an operator sent to
 #      the health layer would debug the wrong thing
 #
-# `ROUTECTL_BIN` overrides the daemon binary (default `routectl`).
-# `ROUTECTL_DRIVER_PORT_MIN` / `ROUTECTL_DRIVER_PORT_MAX` narrow the port
-# search window. Both exist so the self-test can drive the boot path
-# without a real daemon and without a real credential.
+# `ROUTECTL_BIN` overrides the daemon binary (default `routectl`). It sits
+# outside the driver namespace below on purpose: it names the DAEMON, not
+# anything a driver reads.
+#
+# THE ROUTECTL_DRIVER_* SURFACE: STABLE vs INTERNAL TUNING.
+#
+# This namespace is public the moment a stranger can contribute a driver,
+# so every name in it is classified below and the two lists are asserted
+# against the scripts by scripts/capture_driver.test.sh. A name that
+# appears in a script and in neither list is a red test rather than a
+# silent third category.
+#
+# The fixture pins are a THIRD stable list, in their own
+# `ROUTECTL_FIXTURE_*` namespace, and stable for the same reason the pins
+# are mandatory -- a driver echoes them and the rig refuses a run that is
+# missing one, so a rename breaks both ends at once:
+#   ROUTECTL_FIXTURE_CASE_ID
+#   ROUTECTL_FIXTURE_CONFIG_SHA
+#   ROUTECTL_FIXTURE_CONNECTION_MODE
+#   ROUTECTL_FIXTURE_WIRE_PATTERN
+#   ROUTECTL_FIXTURE_EXPECTED_INGRESS
+#
+# STABLE -- a contributor codes against these. Renaming one breaks a
+# driver, or changes what a landed fixture MEANS, so it moves only behind
+# a deprecation path:
+#   ROUTECTL_DRIVER_PORT                  the run's exported contract: the
+#   ROUTECTL_DRIVER_RUN                   port, the workspace roots, and
+#   ROUTECTL_DRIVER_WORK                  the front-proxy carriers a
+#   ROUTECTL_DRIVER_PROXY_URL             driver maps onto its client
+#   ROUTECTL_DRIVER_PROXY_CA
+#   ROUTECTL_DRIVER_CLAUDE_BIN            which binary a driver drives
+#   ROUTECTL_DRIVER_AGENT_BIN
+#   ROUTECTL_DRIVER_AGENT_ONESHOT_FLAG    the generic-agent argv mapping:
+#   ROUTECTL_DRIVER_AGENT_VERSION_FLAG    a third-party CLI is drivable
+#   ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG   through external-agent-cli.sh
+#   ROUTECTL_DRIVER_AGENT_MODEL_FLAG      only by these names
+#   ROUTECTL_DRIVER_AGENT_REASONING_FLAG
+#   ROUTECTL_DRIVER_AGENT_REASONING_LEVEL
+#   ROUTECTL_DRIVER_AGENT_EXTRA_ARGS
+#   ROUTECTL_DRIVER_CLIENT_API_KEY        the PLACEHOLDER credential the
+#   ROUTECTL_DRIVER_CLIENT_BEARER         client holds locally, which
+#                                         never reaches an upstream
+#   ROUTECTL_DRIVER_ANTHROPIC_API_KEY     the REAL upstream credentials,
+#   ROUTECTL_DRIVER_OPENAI_API_KEY        under the per-provider
+#   ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID     convention
+#                                         ROUTECTL_DRIVER_<PROVIDER>_API_KEY
+#                                         (plus _ACCOUNT_ID where the
+#                                         provider's auth surface needs
+#                                         one) -- keyed on the PROVIDER,
+#                                         never on the lane, and already
+#                                         committed in the lane configs
+#                                         and the capture-cell wrapper,
+#                                         which is their one resolver
+#   ROUTECTL_DRIVER_REQUEST_MODEL         both change the captured wire
+#   ROUTECTL_DRIVER_THINKING_TOKENS       (the `model` field, the thinking
+#                                         shape), so they are stable by
+#                                         the same rule: a rename would
+#                                         change what a corpus means
+#
+# INTERNAL TUNING -- these change only HOW a run executes on one box. No
+# landed fixture's wire shape depends on any of them, so they may be
+# renamed or dropped without notice and nothing outside this repo should
+# name them:
+#   ROUTECTL_DRIVER_PORT_MIN              the port search window, narrowed
+#   ROUTECTL_DRIVER_PORT_MAX              so the self-test can drive the
+#                                         boot path without a real daemon
+#   ROUTECTL_DRIVER_TURN_SECONDS          pty pacing for the interactive
+#   ROUTECTL_DRIVER_SETTLE_SECONDS        driver; matrix-wide "set once,
+#   ROUTECTL_DRIVER_EXIT_SECONDS          never varied"
+#   ROUTECTL_DRIVER_OUT_ROOT              the landing-root seam a run that
+#                                         mounts this repo read-only needs
+#   ROUTECTL_DRIVER_SESSION_ID            the print driver's resume id,
+#                                         otherwise derived from the case
 # --- END USAGE ---
 
 # set -e so a failed boot step aborts instead of driving a daemon that
