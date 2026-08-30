@@ -849,6 +849,7 @@ done
     printf 'invocation argv=%s\n' "$*"
     printf 'invocation base_url=%s\n' "${ANTHROPIC_BASE_URL:-}"
     printf 'invocation api_key_set=%s\n' "$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo yes || echo no)"
+    printf 'invocation bearer=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}"
     printf 'invocation https_proxy=%s\n' "${HTTPS_PROXY:-}"
     printf 'invocation node_ca=%s\n' "${NODE_EXTRA_CA_CERTS:-}"
     printf 'invocation thinking_tokens=%s\n' "${MAX_THINKING_TOKENS-unset}"
@@ -1157,12 +1158,18 @@ rm -rf "$work"
 
 work="$(make_work)"
 rc=0
-driver_run "$work" claude-code.sh thinking-01 --connection-mode base-url || rc=$?
+# The inherited bearer is what makes the two "no bearer" assertions below
+# non-vacuous: base-url mode must CLEAR a carrier the caller's environment
+# already holds, not merely decline to add one.
+ANTHROPIC_AUTH_TOKEN="inherited-carrier-must-not-survive" \
+    driver_run "$work" claude-code.sh thinking-01 --connection-mode base-url || rc=$?
 check "claude-code: a base-url run exits 0" "0" "$rc"
 check "claude-code: base-url reaches the client as ANTHROPIC_BASE_URL" \
     "yes" "$([ -n "$(client_get "$work" base_url | head -1)" ] && echo yes || echo no)"
 check "claude-code: base-url sets no proxy in the client's environment" \
     "" "$(client_get "$work" https_proxy | head -1)"
+check "claude-code: base-url clears an inherited bearer and sets none" \
+    "" "$(client_get "$work" bearer | head -1)"
 meta="$(landed_meta "$work" thinking-01)"
 if [ -f "$meta" ]; then
     check "claude-code: base-url reaches the fixture pin" "base-url" \
@@ -1178,6 +1185,7 @@ work="$(make_work)"
 rc=0
 ROUTECTL_DRIVER_PROXY_URL="http://127.0.0.1:18443" \
 ROUTECTL_DRIVER_PROXY_CA="$work/ca.pem" \
+ANTHROPIC_AUTH_TOKEN="inherited-carrier-must-not-survive" \
     driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
 check "claude-code: a front-proxy run exits 0" "0" "$rc"
 check "claude-code: front-proxy reaches the client as HTTPS_PROXY" \
@@ -1186,6 +1194,15 @@ check "claude-code: front-proxy points the client at the CA it must trust" \
     "$work/ca.pem" "$(client_get "$work" node_ca | head -1)"
 check "claude-code: front-proxy does not also set a direct base url" \
     "" "$(client_get "$work" base_url | head -1)"
+# The seam's admission gate rejects an x-api-key-only request before body
+# parse, so the bearer carrier must reach the client -- and it must be the
+# driver's own placeholder rather than whatever the caller's environment
+# had inherited, which the unconditional unset clears first.
+check "claude-code: front-proxy exports the bearer carrier the seam admits on" \
+    "routectl-driver-front-proxy-placeholder-not-a-token" \
+    "$(client_get "$work" bearer | head -1)"
+check "claude-code: front-proxy still exports the client's api key too" \
+    "yes" "$(client_get "$work" api_key_set | head -1)"
 meta="$(landed_meta "$work" thinking-01)"
 if [ -f "$meta" ]; then
     check "claude-code: front-proxy reaches the fixture pin" "front-proxy" \
@@ -1193,6 +1210,22 @@ if [ -f "$meta" ]; then
 else
     fail "claude-code: the front-proxy run landed no fixture"
 fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# A caller whose client validates the carrier's shape can pass its own
+# value through. Without this leg the placeholder assertion above would
+# hold equally against an arm that hardcoded the constant.
+work="$(make_work)"
+rc=0
+ROUTECTL_DRIVER_PROXY_URL="http://127.0.0.1:18443" \
+ROUTECTL_DRIVER_PROXY_CA="$work/ca.pem" \
+ROUTECTL_DRIVER_CLIENT_BEARER="caller-supplied-placeholder" \
+    driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
+check "claude-code: a front-proxy run with a caller-supplied bearer exits 0" "0" "$rc"
+check "claude-code: a caller-supplied bearer replaces the placeholder" \
+    "caller-supplied-placeholder" "$(client_get "$work" bearer | head -1)"
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"

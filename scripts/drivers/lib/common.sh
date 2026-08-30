@@ -171,6 +171,18 @@ driver_local_api_key() {
   printf '%s\n' "${ROUTECTL_DRIVER_CLIENT_API_KEY:-$DRIVER_LOCAL_KEY_PLACEHOLDER}"
 }
 
+# The bearer a front-proxy client puts on the wire as `Authorization`. It
+# is a PLACEHOLDER, not a credential: the MITM seam admits a request only
+# if one is present, and the request is then dispatched with the lane
+# config's own `api_key_ref` credential -- the inbound bearer never leaves
+# the daemon. So an obviously-fake value is both sufficient and the only
+# correct thing to put in a driver environment.
+DRIVER_LOCAL_BEARER_PLACEHOLDER="routectl-driver-front-proxy-placeholder-not-a-token"
+
+driver_local_bearer() {
+  printf '%s\n' "${ROUTECTL_DRIVER_CLIENT_BEARER:-$DRIVER_LOCAL_BEARER_PLACEHOLDER}"
+}
+
 # Export the environment an Anthropic-dialect client needs to reach the
 # runner's daemon in the run's connection mode. THE TWO MODES EMIT
 # DIFFERENT WIRE SHAPES -- a MITM front proxy carries `role:"system"`
@@ -183,6 +195,25 @@ driver_local_api_key() {
 # lane config, so both arrive from the caller and an unset one fails the
 # run: a front-proxy request that silently fell back to base-url would
 # land labelled front-proxy and read as client drift forever.
+#
+# front-proxy ALSO needs a bearer, because the seam's admission gate
+# rejects an `x-api-key`-only request before body parse. A probe of the
+# admitted path measured where the credential on the wire comes from: the
+# lane config's own provider credential, never the inbound bearer (the
+# outgoing leg carried the daemon's minted identity, and mutating only the
+# config credential -- with the client's bearer untouched -- changed the
+# dispatch outcome). The exported bearer is therefore a placeholder that
+# satisfies admission and nothing else, so no real client token belongs in
+# a driver environment and none is accepted as a requirement here.
+# `ANTHROPIC_API_KEY` stays exported alongside it for the client's own
+# credential preflight. That the bearer actually reaches the wire as
+# `authorization` is confirmed from a recorded real-client trace before
+# any paid run.
+#
+# The gate's second requirement, `x-claude-code-session-id`, needs no
+# export: the real client mints and sends it natively. A synthetic
+# preflight request written by hand must carry both headers or it is
+# rejected at admission and proves nothing.
 driver_apply_anthropic_connection_mode() {
   # EVERY mode starts by clearing the OTHER mode's carriers. The runner
   # gives a driver a fresh HOME and cwd but forwards the caller's
@@ -209,6 +240,7 @@ driver_apply_anthropic_connection_mode() {
       export HTTPS_PROXY="$ROUTECTL_DRIVER_PROXY_URL"
       export https_proxy="$ROUTECTL_DRIVER_PROXY_URL"
       export NODE_EXTRA_CA_CERTS="$ROUTECTL_DRIVER_PROXY_CA"
+      export ANTHROPIC_AUTH_TOKEN="$(driver_local_bearer)"
       export ANTHROPIC_API_KEY="$(driver_local_api_key)"
       ;;
     *)
