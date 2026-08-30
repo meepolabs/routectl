@@ -24,6 +24,13 @@ CASES_DIR="$DRIVERS_DIR/cases"
 PROFILES_DIR="$DRIVERS_DIR/profiles"
 VALIDATE_CASE="$DRIVERS_DIR/lib/validate_case.py"
 
+# Basename of the run record `driver_record_client` writes. The runner
+# reads `version=` back out of this file after the driver exits, so the
+# name is a REPLICA of `CLIENT_RECORD` in scripts/capture_driver.sh (a
+# driver library is not sourced by the runner; the drivers self-test
+# asserts the two spellings agree).
+DRIVER_CLIENT_RECORD="client.txt"
+
 driver_die() {
   echo "driver: $1" >&2
   exit "${2:-1}"
@@ -93,8 +100,15 @@ driver_require_daemon() {
 # out of the ingress `user-agent` -- the client's own self-report on the
 # WIRE, which is the value a replay consumer can act on. The read here is
 # the driver-side half: it fails the run BEFORE a session opens when the
-# binary cannot be interrogated, and it puts the version in the run's own
-# record (kept by the runner's `--keep`) next to the case and mode pins.
+# binary cannot be interrogated, and it writes the version into the run's
+# own record next to the case and mode pins.
+#
+# That record is not only a debugging artifact: the runner reads
+# `version=` back out of it after the driver exits and forwards it to the
+# rig as the binary-side pin, so the read reaches the fixture BEFORE the
+# run workspace is removed. Two independent statements of one client's
+# version then sit on the fixture, and a promotion boundary can refuse
+# their disagreement instead of trusting the wire alone.
 #
 # args: <client-name> <binary> [version-flag, default --version]
 driver_record_client() {
@@ -107,7 +121,7 @@ driver_record_client() {
     printf 'version=%s\n' "$version"
     printf 'connection_mode=%s\n' "$ROUTECTL_FIXTURE_CONNECTION_MODE"
     printf 'case_id=%s\n' "$ROUTECTL_FIXTURE_CASE_ID"
-  } >"$ROUTECTL_DRIVER_RUN/client.txt"
+  } >"$ROUTECTL_DRIVER_RUN/$DRIVER_CLIENT_RECORD"
   echo "driver: client=$name version=$version case=$ROUTECTL_FIXTURE_CASE_ID"
 }
 

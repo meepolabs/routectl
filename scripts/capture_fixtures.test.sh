@@ -39,6 +39,7 @@ mapfile -t KNOWN_INGRESS_KINDS < <(
     sed -n '/^# --- BEGIN INGRESS_KINDS ---$/,/^# --- END INGRESS_KINDS ---$/p' \
         "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
 )
+CLIENT_VERSION="$HERE/drivers/lib/client_version.py"
 
 fails=0
 
@@ -292,6 +293,10 @@ make_repo() {
     # And for the ingress vocabulary the expected-ingress pin is validated
     # against, for the same fail-closed reason.
     cp "$INGRESS_KINDS" "$tmp/repo/scripts/drivers/lib/ingress_kinds.sh"
+    # Same for the client-version comparator: without it the rig would
+    # promote the client-controlled user-agent as an unchecked claim, so it
+    # refuses to run rather than skip the comparison.
+    cp "$CLIENT_VERSION" "$tmp/repo/scripts/drivers/lib/client_version.py"
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$tmp/repo/Cargo.toml"
     printf '%s\n' "$tmp"
@@ -1822,6 +1827,153 @@ if [ -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ] &&
     fi
 else
     echo "FAIL: could not remove the ingress vocabulary from the throwaway repo"
+    fails=$((fails + 1))
+fi
+clear_pins
+rm -rf "$work"
+
+# --- Case 19e: the two client-version statements must agree ------------
+# `meta.client.version` comes from the CLIENT-CONTROLLED ingress
+# user-agent; `meta.client.binary_version` is the version the driver read
+# off the running binary and the runner forwarded. Two reads of one client,
+# so a disagreement means the fixture is evidence about neither -- and a
+# client that auto-updated mid-run is exactly what produces one.
+#
+# The wire value in `trace_driver` is `2.1.167`. Every leg below drives the
+# binary-side pin and nothing else, so a verdict is attributable to the pair.
+
+# The pin the runner forwards. Set alongside the four so a leg cannot leak
+# it into the next one -- a leaked value would turn an absence assertion
+# into a silent pass.
+set_binary_version() {
+    export ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION="$1"
+}
+clear_binary_version() {
+    unset ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION
+}
+
+# AGREEMENT PROMOTES, and the binary-side value LANDS. The pin carries the
+# decorated spelling a real binary prints while the wire carries the bare
+# token, so this leg is also what proves the comparison is on tokens: a
+# string comparison would refuse it and refuse every real capture.
+set_pins cv-agree-01 abc123 base-url baseline
+set_binary_version "2.1.167 (Claude Code)"
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000003a)" --driver-mode || rc=$?
+clear_pins
+clear_binary_version
+check "agreeing client versions promote at exit 0" "0" "$rc"
+meta="$(captured_of "$work")/anthropic-api/cv-agree-01/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "the binary-side version lands verbatim, decoration included" \
+        "2.1.167 (Claude Code)" "$(meta_get "$meta" client.binary_version)"
+    check "the wire version lands unchanged beside it" \
+        "2.1.167" "$(meta_get "$meta" client.version)"
+else
+    echo "FAIL: the agreeing case produced no parseable meta.json"
+    cat "$work/rig.log"
+    fails=$((fails + 2))
+fi
+rm -rf "$work"
+
+# DISAGREEMENT REFUSES. Same trace, same pins, only the binary-side value
+# moved -- so the refusal cannot be explained by anything but the pair.
+set_pins cv-disagree-01 abc123 base-url baseline
+set_binary_version "2.1.246 (Claude Code)"
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000003b)" --driver-mode || rc=$?
+clear_pins
+clear_binary_version
+check "disagreeing client versions refuse with exit 1" "1" "$rc"
+check_log "the refusal names the binary-side reading" "off the binary" "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/cv-disagree-01" ]; then
+    echo "FAIL: a fixture whose two client versions disagree reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a fixture whose two client versions disagree does not reach the corpus"
+fi
+rm -rf "$work"
+
+# AN ABSENT BINARY-SIDE PIN IS RECORDED AS ABSENT AND PROMOTES. This is the
+# live-box shape (no binary to interrogate) and the shape of every fixture
+# captured before the pin existed, so refusing it would refuse the corpus
+# rather than the contradiction. The recorded field is EMPTY, never
+# backfilled from the wire: a field that mirrored its counterpart could
+# never contradict it, which is the whole mechanism.
+set_pins cv-absent-binary-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000003c)" --driver-mode || rc=$?
+clear_pins
+check "an unset binary-side version promotes at exit 0" "0" "$rc"
+meta="$(captured_of "$work")/anthropic-api/cv-absent-binary-01/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "an unset binary-side version is recorded as empty" "" \
+        "$(meta_get "$meta" client.binary_version)"
+    check "the wire version is still recorded, so the empty field is the new one" \
+        "2.1.167" "$(meta_get "$meta" client.version)"
+else
+    echo "FAIL: the absent-binary-version case produced no parseable meta.json"
+    cat "$work/rig.log"
+    fails=$((fails + 2))
+fi
+rm -rf "$work"
+
+# AN ABSENT WIRE VERSION IS RECORDED AS ABSENT AND PROMOTES, the reverse
+# direction. The trace's user-agent is stripped of its version while the
+# binary-side pin is populated, so the pair is unprovable rather than
+# contradicted. Without this leg the gate would be satisfiable by one that
+# only ever handled an absent binary side.
+set_pins cv-absent-wire-01 abc123 base-url baseline
+set_binary_version "2.1.167 (Claude Code)"
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver 019eab77-0000-4000-8000-00000000003d |
+        sed 's|claude-cli/2\.1\.167 (external, cli)|claude-cli|')" --driver-mode || rc=$?
+clear_pins
+clear_binary_version
+check "an absent wire version promotes at exit 0" "0" "$rc"
+meta="$(captured_of "$work")/anthropic-api/cv-absent-wire-01/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "an absent wire version is recorded as empty" "" \
+        "$(meta_get "$meta" client.version)"
+    check "the binary-side version is NOT copied into the wire field" \
+        "2.1.167 (Claude Code)" "$(meta_get "$meta" client.binary_version)"
+    check "the client name still parses, so the version alone went missing" \
+        "claude-cli" "$(meta_get "$meta" client.name)"
+else
+    echo "FAIL: the absent-wire-version case produced no parseable meta.json"
+    cat "$work/rig.log"
+    fails=$((fails + 3))
+fi
+rm -rf "$work"
+
+# An absent comparator is a HARD failure, never an unchecked promotion --
+# the same fail-closed shape the wire-pattern predicate has. The removal is
+# verified before the run: a delete that matched nothing would assert
+# against the present-comparator path.
+set_pins cv-no-comparator-01 abc123 base-url baseline
+work="$(make_repo)"
+if [ -f "$work/repo/scripts/drivers/lib/client_version.py" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/client_version.py" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/client_version.py" ]; then
+    rc=0
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000003e)" \
+        --driver-mode || rc=$?
+    check "an absent client-version comparator refuses the run with exit 1" "1" "$rc"
+    check_log "the refusal names the missing comparator" \
+        "client-version comparator not found" "$work/rig.log"
+    if [ -d "$(captured_of "$work")/anthropic-api" ]; then
+        echo "FAIL: a fixture landed with no comparator to check its versions"
+        fails=$((fails + 1))
+    else
+        echo "PASS: nothing lands when the comparator is absent"
+    fi
+else
+    echo "FAIL: could not remove the comparator from the throwaway repo"
     fails=$((fails + 1))
 fi
 clear_pins

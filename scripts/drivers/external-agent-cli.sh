@@ -76,6 +76,15 @@ driver_apply_anthropic_connection_mode
 # prints nothing fails the run inside driver_record_client.
 driver_record_client external-agent-cli "$AGENT_BIN" "$VERSION_FLAG"
 
+# The updater brake, applied AFTER the version read so the value recorded is
+# the one the run will keep. A client that updated itself mid-run would land
+# a fixture whose binary-side version and wire user-agent disagree, which
+# the promotion gate refuses -- so this is what keeps the contributor
+# on-ramp from producing unpromotable captures. The variable is the Claude
+# Code spelling; a client that does not read it is unaffected, which is the
+# right trade for the one driver whose client is arbitrary.
+export DISABLE_AUTOUPDATER=1
+
 turn_count="$(driver_case_turns "$CASE_FILE" | wc -l)"
 CONTINUE_FLAG="${ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG:-}"
 if [ "$turn_count" -gt 1 ] && [ -z "$CONTINUE_FLAG" ]; then

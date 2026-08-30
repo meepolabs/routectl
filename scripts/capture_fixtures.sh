@@ -50,6 +50,19 @@
 # value it pins is already there as a traced fact:
 #   ROUTECTL_FIXTURE_EXPECTED_INGRESS  ingress dialect the run expects
 #
+# And one more, OPTIONAL in both modes:
+#   ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION
+#                                     the version the driver read off the
+#                                     RUNNING client binary, forwarded by
+#                                     the runner. Recorded as
+#                                     `client.binary_version`, empty when
+#                                     unset. Optional in DRIVER mode too:
+#                                     a driver that cannot interrogate its
+#                                     client already fails its own run, so
+#                                     making the pin mandatory here would
+#                                     only refuse a live-box capture that
+#                                     genuinely has no binary to read.
+#
 # TWO CAPTURE MODES, TWO POLICIES.
 #
 # Default (live-box): a trace drained from a real session. It genuinely
@@ -98,6 +111,12 @@
 #     header name never transited the seam whatever its environment
 #     said, and a `base-url` fixture that carries it did. Either
 #     mismatch refuses the promotion.
+#   * The two independent statements of the CLIENT VERSION -- the wire
+#     value parsed from the client-controlled `user-agent` and the
+#     binary-side value the driver read off the running client -- are
+#     compared by `scripts/drivers/lib/client_version.py`, and a
+#     DISAGREEMENT refuses the promotion. Either value ABSENT is recorded
+#     as absent and promotes: the pair is unprovable, not contradicted.
 #   * The lane must be CLASSIFIED by the scrub gate --
 #     `scrub-fixture.sh --lane-known <lane>` exits non-zero and the
 #     fixture does not land. A `--check` pass on a lane whose credential
@@ -180,6 +199,16 @@ fi
 VERIFY_PATTERN="$ROOT/scripts/drivers/lib/verify_pattern.py"
 if [ ! -r "$VERIFY_PATTERN" ]; then
   echo "capture_fixtures: wire-pattern predicate not found at $VERIFY_PATTERN; refusing to capture" >&2
+  exit 1
+fi
+
+# The comparison side of the two client-version statements. Same fail-closed
+# shape as the predicate above: an absent comparator would leave the
+# client-controlled user-agent as an unchecked claim on every landed
+# fixture, which is the defect it exists to close.
+CLIENT_VERSION="$ROOT/scripts/drivers/lib/client_version.py"
+if [ ! -r "$CLIENT_VERSION" ]; then
+  echo "capture_fixtures: client-version comparator not found at $CLIENT_VERSION; refusing to capture" >&2
   exit 1
 fi
 
@@ -346,6 +375,39 @@ assert_mode_seam_coherent() {
       ;;
   esac
   return 0
+}
+
+# Refuse a staged fixture whose two statements of the client version
+# CONTRADICT each other. `client.version` is parsed from the ingress
+# `user-agent` -- the client's own self-report, which the client controls;
+# `client.binary_version` was read off the running binary by the driver
+# before any session opened. Two reads of one client, so a disagreement
+# means the fixture is not evidence about either version, and the shape
+# that produces one is a client that auto-updated mid-run.
+#
+# ABSENCE ON EITHER SIDE PROMOTES. A live-box capture has no binary to
+# read, and a client whose user-agent carries no version has said nothing
+# to contradict; the comparator reports that as NOT COMPARABLE (exit 3) and
+# the absence is already recorded in meta.json as an empty field. Refusing
+# it would refuse the client rather than the contradiction.
+assert_client_version_coherent() {
+  local id="$1" binary="$2" wire="$3"
+
+  local cmp_rc=0
+  python3 "$CLIENT_VERSION" --compare "$binary" "$wire" || cmp_rc=$?
+  case "$cmp_rc" in
+    0|3) return 0 ;;
+    1)
+      echo "capture_fixtures: $id records client version '$wire' on the wire but its driver" >&2
+      echo "read '$binary' off the binary; not promoting the fixture." >&2
+      return 1
+      ;;
+    *)
+      echo "capture_fixtures: the client-version comparator could not run for $id, so the" >&2
+      echo "two version statements are unchecked; not promoting the fixture." >&2
+      return 1
+      ;;
+  esac
 }
 
 while [ $# -gt 0 ]; do
@@ -637,6 +699,13 @@ write_fixture() {
   local client_name client_version
   client_name="$(printf '%s' "$h_ing" | grep -oE '\["user-agent","[^"/]+' | head -1 | sed 's/.*,"//')"
   client_version="$(printf '%s' "$h_ing" | grep -oE '\["user-agent","[^"/]+/[0-9][^ "]*' | head -1 | sed 's#.*/##')"
+  # The driver-side half of the client identity: the version read off the
+  # RUNNING binary, forwarded by the runner before the run workspace was
+  # removed. EMPTY is a real value here -- a live-box capture has no binary
+  # to read -- and it is recorded as empty rather than backfilled from the
+  # wire, because a field that silently mirrors its own counterpart cannot
+  # contradict it.
+  local client_binary_version="${ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION:-}"
   local lane
   lane="$(normalize_lane "$pkind")"
 
@@ -711,7 +780,7 @@ write_fixture() {
   # schema_version, and stream are numeric / boolean and must NOT be
   # quoted or escaped.
   local j_id j_ts j_version j_alias j_model j_case j_sha j_wire
-  local j_cname j_cversion j_cmode j_ikind j_pkind j_lane j_finish
+  local j_cname j_cversion j_cbinver j_cmode j_ikind j_pkind j_lane j_finish
   j_id="$(json_escape "$id")"
   j_ts="$(json_escape "$ts")"
   j_version="$(json_escape "$ROUTECTL_VERSION")"
@@ -722,6 +791,7 @@ write_fixture() {
   j_wire="$(json_escape "${ROUTECTL_FIXTURE_WIRE_PATTERN:-}")"
   j_cname="$(json_escape "${client_name:-}")"
   j_cversion="$(json_escape "${client_version:-}")"
+  j_cbinver="$(json_escape "$client_binary_version")"
   j_cmode="$(json_escape "${ROUTECTL_FIXTURE_CONNECTION_MODE:-}")"
   j_ikind="$(json_escape "$ikind")"
   j_pkind="$(json_escape "$pkind")"
@@ -742,6 +812,7 @@ write_fixture() {
   "client": {
     "name": "$j_cname",
     "version": "$j_cversion",
+    "binary_version": "$j_cbinver",
     "connection_mode": "$j_cmode"
   },
   "ingress_kind": "$j_ikind",
@@ -849,6 +920,19 @@ META
       echo "capture_fixtures: $id was captured on ingress dialect '$ikind' but the run" >&2
       echo "expects '$ROUTECTL_FIXTURE_EXPECTED_INGRESS': the client reached routectl on a dialect this" >&2
       echo "case is not evidence for; not promoting the fixture." >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+
+    # The client-version comparison runs LAST of the four, and after the
+    # expected-ingress gate specifically: that gate decides whether this
+    # fixture is evidence for the dialect it is being landed as at all,
+    # which is a question about the fixture's IDENTITY, while this one is
+    # about whether the client's two self-statements agree. A wrong-dialect
+    # capture reported as a version disagreement would name the smaller
+    # fault of the two.
+    if ! assert_client_version_coherent "$id" "$client_binary_version" \
+         "${client_version:-}"; then
       rm -rf "$tmp"
       return 1
     fi

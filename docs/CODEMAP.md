@@ -5719,6 +5719,9 @@ because no cargo target runs them, so nothing else names their paths.
   driven by the repo's own scrub gate, with a planted positive control
 - `container/isolation.test.sh` -- default-bridge network probe of the image;
   paired negative and control legs through one probe function
+- `drivers/lib/client_version.py` -- `--compare <binary> <wire>` verdict on a
+  fixture's two client-version statements; the one owner of the comparison both
+  promotion boundaries run
 - `drivers/lib/confine.sh` -- sourced path-confinement helper
   (`abspath_lexical`, `abspath_physical`, `confine_out_under`); the one copy of
   the resolution pair and containment test every script taking a
@@ -5736,6 +5739,6 @@ because no cargo target runs them, so nothing else names their paths.
   root into the committed driver corpus (`--from`, `--scratch-root`,
   `--expected-ingress`, `--to`); re-runs the landing gates on the staged copy
   (scrub `--check`, the wire-pattern predicate, the connection-mode /
-  MITM-seam-header coherence check, and the traced-ingress-vs-pin check)
-  because a scratch fixture is hand-editable
+  MITM-seam-header coherence check, the traced-ingress-vs-pin check, and the
+  client-version comparison) because a scratch fixture is hand-editable
 - `promote_fixture.test.sh` -- self-test for the promotion script
