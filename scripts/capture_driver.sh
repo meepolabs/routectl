@@ -112,6 +112,14 @@
 #   7  the rig ran clean but landed NO fixture -- the case produced no
 #      completed request. Distinct from 5 on purpose: this one is
 #      retryable, a refusal is a defect in what the case produced
+#   8  front-proxy only: the daemon is healthy but its MITM front-proxy
+#      listener never became ready -- no structured listening line for
+#      the selected MITM port in the trace within the timeout, a proxy
+#      startup-error line in the trace, or a CA unreadable at the path
+#      this script exports. Distinct from 3 on purpose: MITM startup
+#      failure is non-fatal to the daemon, so /health stays green while
+#      the proxied CONNECT has nothing to hit, and an operator sent to
+#      the health layer would debug the wrong thing
 #
 # `ROUTECTL_BIN` overrides the daemon binary (default `routectl`).
 # `ROUTECTL_DRIVER_PORT_MIN` / `ROUTECTL_DRIVER_PORT_MAX` narrow the port
@@ -529,6 +537,62 @@ if [ "$healthy" = 0 ]; then
   echo "--- tail of $TRACE ---" >&2
   tail -n 20 "$TRACE" >&2 || true
   exit 3
+fi
+
+# ---------------------------------------------------------------------
+# MITM readiness (front-proxy only)
+# ---------------------------------------------------------------------
+
+# /health proves the DAEMON, not the proxy: MITM startup failure is
+# non-fatal in serve.rs (the daemon logs and keeps serving), so a healthy
+# daemon can carry a dead front-proxy listener -- and the driven client's
+# proxied CONNECT would hit nothing, surfacing as a client error nobody
+# can attribute. The gate is the structured listening line for the
+# SELECTED MITM port in the trace plus a readable CA at the path this run
+# exports; a startup-error line in the trace is already a terminal
+# verdict, so it fails immediately instead of waiting out the deadline.
+#
+# Both matches anchor on the emitter and the event, never on a phrase a
+# request body could contain, and the trace lines carry ANSI escapes --
+# stripped here before any anchored match, because the escapes sit inside
+# the `addr=` field the port anchor reads.
+if [ "$CONNECTION_MODE" = "front-proxy" ]; then
+  MITM_EMITTER="routectl_cli::server::serve"
+  mitm_trace() {
+    sed 's/\x1b\[[0-9;]*m//g' "$TRACE" 2>/dev/null || true
+  }
+  mitm_listening() {
+    mitm_trace | grep -Eq \
+      "${MITM_EMITTER}.*MITM front-proxy listening.*addr=127\.0\.0\.1:${MITM_PORT}([^0-9]|$)"
+  }
+  mitm_startup_error() {
+    mitm_trace | grep -Eq "${MITM_EMITTER}.*MITM proxy failed to start"
+  }
+  mitm_fail() {
+    echo "capture_driver: $1" >&2
+    echo "--- tail of $TRACE ---" >&2
+    tail -n 20 "$TRACE" >&2 || true
+    exit 8
+  }
+
+  mitm_ready=0
+  i=0
+  while [ "$i" -lt "$deadline_polls" ]; do
+    if mitm_startup_error; then
+      mitm_fail "MITM front-proxy listener failed to start (startup error in the trace); the daemon is healthy on port $PORT, the proxy layer on port $MITM_PORT is down"
+    fi
+    if mitm_listening; then
+      mitm_ready=1
+      break
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+  if [ "$mitm_ready" = 0 ]; then
+    mitm_fail "MITM front-proxy listener on port $MITM_PORT never became ready within ${HEALTH_TIMEOUT}s; the daemon is healthy, the proxy layer is not"
+  fi
+  [ -r "$PROXY_CA" ] ||
+    mitm_fail "MITM front-proxy CA is not readable at $PROXY_CA; the listener is up but a client cannot trust it"
 fi
 
 # ---------------------------------------------------------------------

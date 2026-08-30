@@ -197,10 +197,21 @@ PY
 # open without ever binding, which is the "daemon came up but never became
 # ready" shape the health precondition exists to catch.
 #
-# When `--mitm-port` arrives, the stub records it and mints the CA under
-# the run's XDG root exactly where the real daemon does at listener start
-# -- so the CA path the runner exports names a readable file, the same
-# property a real front-proxy boot provides.
+# When `--mitm-port` arrives, the stub records it, emits the structured
+# MITM listening line on stderr WITH the ANSI escapes the real trace
+# carries (so the runner's strip-before-match is load-bearing in the
+# green leg, not decorative), and mints the CA under the run's XDG root
+# exactly where the real daemon does at listener start -- so the CA path
+# the runner exports names a readable file, the same property a real
+# front-proxy boot provides. `STUB_MITM_MODE` selects the failure shape:
+# `ready` (default) emits the line and mints the CA; `silent` answers
+# /health but never emits the line (the non-fatal startup failure the
+# readiness gate exists to catch); `startup-error` emits the daemon's
+# MITM startup-error line instead of the listening line; `no-ca` emits
+# the line but mints no CA; `wrong-port` emits the line naming a port
+# the run never selected, because a gate satisfied by ANY listening
+# line would pass against a listener bound somewhere the client is not
+# pointed.
 write_stub_routectl() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -221,9 +232,28 @@ if [ -r "${STUB_TRACE_FILE:-}" ]; then
 fi
 if [ -n "$mitm_port" ]; then
     printf '%s\n' "$mitm_port" >"${STUB_MITM_PORT_FILE:-$STUB_PORT_FILE.mitm}"
-    mkdir -p "$XDG_CONFIG_HOME/routectl/mitm-certs/current"
-    printf -- '-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n' \
-        >"$XDG_CONFIG_HOME/routectl/mitm-certs/current/mitm-ca-cert.pem"
+    mitm_mode="${STUB_MITM_MODE:-ready}"
+    case "$mitm_mode" in
+        startup-error)
+            printf '\033[2m2026-08-25T10:00:00.040000Z\033[0m \033[31mERROR\033[0m \033[2mroutectl_cli::server::serve\033[0m\033[2m:\033[0m MITM proxy failed to start; routectl continues to serve without it \033[3merror\033[0m\033[2m=\033[0mstub startup failure\n' >&2
+            ;;
+        silent)
+            :
+            ;;
+        *)
+            line_port="$mitm_port"
+            if [ "$mitm_mode" = "wrong-port" ]; then
+                line_port=$((mitm_port + 1))
+            fi
+            printf '\033[2m2026-08-25T10:00:00.050000Z\033[0m \033[32m INFO\033[0m \033[2mroutectl_cli::server::serve\033[0m\033[2m:\033[0m MITM front-proxy listening \033[3maddr\033[0m\033[2m=\033[0m127.0.0.1:%s \033[3mmitm_host\033[0m\033[2m=\033[0mapi.anthropic.com\n' \
+                "$line_port" >&2
+            ;;
+    esac
+    if [ "$mitm_mode" != "no-ca" ]; then
+        mkdir -p "$XDG_CONFIG_HOME/routectl/mitm-certs/current"
+        printf -- '-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n' \
+            >"$XDG_CONFIG_HOME/routectl/mitm-certs/current/mitm-ca-cert.pem"
+    fi
 fi
 if [ "${STUB_MODE:-healthy}" = "deaf" ]; then
     exec sleep 600
@@ -365,6 +395,7 @@ runner_run() {
         STUB_TRACE_FILE="$work/canned-trace.log" \
         STUB_LISTENER="$work/bin/listener.py" \
         STUB_MODE="${STUB_MODE:-healthy}" \
+        STUB_MITM_MODE="${STUB_MITM_MODE:-ready}" \
         PROBE_OUT="$work/probe.txt" \
         ROUTECTL_DRIVER_OUT_ROOT="${ROUTECTL_DRIVER_OUT_ROOT-$work
 $work/scratch}" \
@@ -656,6 +687,144 @@ fi
 check "the front-proxy run hashes the front-proxy lane config" \
     "$(sha256sum "$HERE/drivers/config/anthropic-api.front-proxy.toml" | cut -d' ' -f1)" \
     "$(probe_get "$work" config_sha)"
+rm -rf "$work"
+
+# --- Case 2a: MITM readiness is a gate; /health is not enough ----------
+# MITM startup failure is NON-FATAL to the daemon (serve.rs logs and
+# keeps serving), so a healthy /health does not prove the front-proxy
+# listener exists -- a runner that trusted it would drive a client whose
+# proxied CONNECT hits nothing. The runner therefore gates a front-proxy
+# run on the structured listening line for the SELECTED MITM port plus a
+# readable CA, with its own exit 8, distinct from the unhealthy-daemon 3
+# so the operator debugging "healthy daemon, dead proxy" is not sent to
+# the health layer. Case 2 above is the PAIRED CONTROL: the same gate
+# lets a ready listener through, so the three refusals below are not a
+# gate that refuses everything. The stub emits the listening line WITH
+# the ANSI escapes the real trace carries, so Case 2 passing also proves
+# the runner strips them before its anchored match.
+
+# Leg 1: the listening line never appears. The stub answers /health but
+# stays silent about the proxy, which is exactly what a non-fatal MITM
+# startup failure that logged nothing recognizable looks like.
+work="$(make_work)"
+canned_trace_front_proxy >"$work/canned-trace.log"
+pair_lo="$(free_port_pair)"
+pair_hi=$((pair_lo + 1))
+rc=0
+STUB_MITM_MODE=silent \
+ROUTECTL_DRIVER_PORT_MIN="$pair_lo" ROUTECTL_DRIVER_PORT_MAX="$pair_hi" \
+    runner_run "$work" --lane anthropic-api.front-proxy --case driver-selftest-02 \
+    --connection-mode front-proxy --timeout 2 || rc=$?
+check "a missing MITM listening line exits 8" "8" "$rc"
+check_log "the exit-8 message names the front-proxy listener, not the health layer" \
+    "MITM front-proxy listener" "$work/runner.log"
+if grep -qF "never became healthy" "$work/runner.log"; then
+    echo "FAIL: the proxy-layer failure reused the unhealthy-daemon message"
+    fails=$((fails + 1))
+else
+    echo "PASS: the proxy-layer failure never claims the daemon was unhealthy"
+fi
+check_log "the exit-8 path prints the trace tail, as the health gate does" \
+    "--- tail of" "$work/runner.log"
+if [ -f "$work/probe.txt" ]; then
+    echo "FAIL: the driver ran against a dead front-proxy listener"
+    fails=$((fails + 1))
+else
+    echo "PASS: the driver never runs when the front-proxy listener is not ready"
+fi
+stub_pid="$(cat "$work/stub.pid" 2>/dev/null || true)"
+if [ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null; then
+    echo "FAIL: the exit-8 run leaked its daemon (pid $stub_pid still alive)"
+    kill -9 "$stub_pid" 2>/dev/null
+    fails=$((fails + 1))
+else
+    echo "PASS: an exit-8 run kills the daemon it started"
+fi
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-02" ]; then
+    echo "FAIL: the exit-8 run landed a fixture"
+    fails=$((fails + 1))
+else
+    echo "PASS: the exit-8 run lands no fixture"
+fi
+rm -rf "$work"
+
+# Leg 2: the daemon logs its MITM startup-error line. That line is a
+# terminal verdict -- the proxy will never come up -- so the runner must
+# fail fast on it instead of waiting out the timeout: asserted by giving
+# the run a deadline far longer than the wall-clock bound below.
+work="$(make_work)"
+canned_trace_front_proxy >"$work/canned-trace.log"
+pair_lo="$(free_port_pair)"
+pair_hi=$((pair_lo + 1))
+rc=0
+leg_started="$(date +%s)"
+STUB_MITM_MODE=startup-error \
+ROUTECTL_DRIVER_PORT_MIN="$pair_lo" ROUTECTL_DRIVER_PORT_MAX="$pair_hi" \
+    runner_run "$work" --lane anthropic-api.front-proxy --case driver-selftest-02 \
+    --connection-mode front-proxy --timeout 30 || rc=$?
+leg_elapsed=$(( $(date +%s) - leg_started ))
+check "an MITM startup-error line in the trace exits 8" "8" "$rc"
+check_log "the startup-error message names the proxy layer" \
+    "MITM front-proxy listener failed to start" "$work/runner.log"
+if [ "$leg_elapsed" -lt 15 ]; then
+    echo "PASS: the startup-error verdict fails fast instead of waiting out the timeout"
+else
+    echo "FAIL: the startup-error leg took ${leg_elapsed}s against a 30s timeout"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# Leg 3: the listening line appears but the CA the runner exports is not
+# there to read. A client told to trust a CA it cannot open fails its
+# own way; the runner refuses first, at the same layer, same exit.
+work="$(make_work)"
+canned_trace_front_proxy >"$work/canned-trace.log"
+pair_lo="$(free_port_pair)"
+pair_hi=$((pair_lo + 1))
+rc=0
+STUB_MITM_MODE=no-ca \
+ROUTECTL_DRIVER_PORT_MIN="$pair_lo" ROUTECTL_DRIVER_PORT_MAX="$pair_hi" \
+    runner_run "$work" --lane anthropic-api.front-proxy --case driver-selftest-02 \
+    --connection-mode front-proxy --timeout 2 || rc=$?
+check "a missing CA exits 8" "8" "$rc"
+check_log "the missing-CA message names the CA path" \
+    "CA is not readable" "$work/runner.log"
+rm -rf "$work"
+
+# Leg 3b: a listening line for a port the run never selected does not
+# satisfy the gate. The line names the port the client's proxied CONNECT
+# must reach; a gate satisfied by ANY listening line would pass against
+# a listener bound somewhere the exported carrier does not point.
+work="$(make_work)"
+canned_trace_front_proxy >"$work/canned-trace.log"
+pair_lo="$(free_port_pair)"
+pair_hi=$((pair_lo + 1))
+rc=0
+STUB_MITM_MODE=wrong-port \
+ROUTECTL_DRIVER_PORT_MIN="$pair_lo" ROUTECTL_DRIVER_PORT_MAX="$pair_hi" \
+    runner_run "$work" --lane anthropic-api.front-proxy --case driver-selftest-02 \
+    --connection-mode front-proxy --timeout 2 || rc=$?
+check "a listening line for an unselected port exits 8" "8" "$rc"
+check_log "the wrong-port failure names the port the run selected" \
+    "MITM front-proxy listener on port" "$work/runner.log"
+rm -rf "$work"
+
+# Leg 4: base-url runs gain NO gate and NO new exit path. A base-url boot
+# passes no --mitm-port, so its trace holds no listening line and no CA
+# is ever minted -- the exact conditions the gate refuses -- and the run
+# must still exit 0 without a word about the proxy layer.
+work="$(make_work)"
+port_fp="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_fp" ROUTECTL_DRIVER_PORT_MAX="$port_fp" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-02 || rc=$?
+check "a base-url run with no listening line and no CA still exits 0" "0" "$rc"
+if grep -qF "MITM front-proxy listener" "$work/runner.log"; then
+    echo "FAIL: a base-url run mentions the front-proxy readiness gate"
+    fails=$((fails + 1))
+else
+    echo "PASS: a base-url run never touches the front-proxy readiness gate"
+fi
 rm -rf "$work"
 
 # --- Case 2b: mode/config coherence refuses BOTH mismatches ------------

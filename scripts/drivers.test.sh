@@ -917,9 +917,11 @@ PY
 # The stub `routectl`, same shape as the runner's own self-test uses:
 # records its pid, emits the canned trace on stderr, then EXECs the
 # listener so the pid the runner captured stays the pid holding the port.
-# When the runner passes `--mitm-port` (front-proxy mode), the stub mints
-# the CA under the run's XDG root exactly where the real daemon does at
-# listener start, so the CA path the runner exports names a readable file.
+# When the runner passes `--mitm-port` (front-proxy mode), the stub emits
+# the structured MITM listening line the runner's readiness gate anchors
+# on (with the ANSI escapes the real trace carries) and mints the CA
+# under the run's XDG root exactly where the real daemon does at listener
+# start, so the CA path the runner exports names a readable file.
 write_stub_routectl() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -938,6 +940,8 @@ if [ -r "${STUB_TRACE_FILE:-}" ]; then
     cat "$STUB_TRACE_FILE" >&2
 fi
 if [ -n "$mitm_port" ]; then
+    printf '\033[2m2026-08-25T10:00:00.050000Z\033[0m \033[32m INFO\033[0m \033[2mroutectl_cli::server::serve\033[0m\033[2m:\033[0m MITM front-proxy listening \033[3maddr\033[0m\033[2m=\033[0m127.0.0.1:%s \033[3mmitm_host\033[0m\033[2m=\033[0mapi.anthropic.com\n' \
+        "$mitm_port" >&2
     mkdir -p "$XDG_CONFIG_HOME/routectl/mitm-certs/current"
     printf -- '-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n' \
         >"$XDG_CONFIG_HOME/routectl/mitm-certs/current/mitm-ca-cert.pem"
