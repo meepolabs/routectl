@@ -109,7 +109,45 @@
 #     case's claim is the statement of WHICH of them the case means. A
 #     candidate whose captured bytes do not exhibit the claim is SKIPPED
 #     and counted; the next candidate is considered. Candidates are
-#     examined in first-`ingress request body` order (see in_scope_ids).
+#     examined in first-`ingress request body` order (see in_scope_ids),
+#     and THE FIRST candidate satisfying the claim is the one the case
+#     pins. First-match encodes no assumption about whether a claim grows
+#     or shrinks across a turn, and it is the MINIMAL witness -- the
+#     smallest body that proves the shape, which matters because a tool
+#     loop's later requests carry strictly more `tool_result` bytes.
+#     "Richest" and "last" are timing properties rather than wire shapes,
+#     and would pin a fixture to client chattiness, so two deployments'
+#     fixtures for one case would stop being comparable.
+#
+#     STAGE ALL, VALIDATE ALL, PROMOTE ONCE. Every candidate is staged,
+#     scrubbed, checked and validated; only the SELECTED staged directory
+#     is retained, and a single promotion plus a single manifest append
+#     happen after the whole scan succeeds. Every gate below is computed
+#     from the CANDIDATE's own bytes and trace lines -- the lane from its
+#     `provider_kind`, the seam check from its header capture, the
+#     expected-ingress pin from its traced dialect -- so a later
+#     candidate can refuse the run for a reason the selected candidate
+#     passed. Promoting as the scan ran meant such a refusal deleted the
+#     evidence the run had already landed correctly; with nothing promoted
+#     while candidates are still being examined, that is structurally
+#     impossible rather than merely unwound.
+#
+#     A LATER CANDIDATE THAT ALSO SATISFIES THE CLAIM IS REDUNDANT, not
+#     ambiguous: a tool loop resends its `tool_use` / `tool_result` pair
+#     in every later request, so a monotone claim is satisfied by every
+#     candidate after the first witness. It is counted separately from a
+#     skip (`candidates_redundant`), because a reader seeing two skips
+#     would conclude two requests failed the claim when one failed and
+#     one was a redundant witness.
+#
+#     A redundant match is accepted only as a strict CONTINUATION of the
+#     selected one: same traced ingress kind, same normalized lane and raw
+#     provider kind, same model, and a turn list strictly LONGER. A client
+#     retry, a fallback attempt carrying the same history, and a stray
+#     side-request are none of those, and a trace holding two genuinely
+#     different interactions under one case id is refused here -- that is
+#     what keeps "one case id pins one interaction" enforced by something.
+#
 #     The recorded connection mode is still enforced against the captured
 #     ingress headers: a `front-proxy` fixture whose headers do not carry
 #     the MITM seam header name never transited the seam whatever its
@@ -125,7 +163,10 @@
 #     RUN. ONE deliberate exception, named as one: scrub `--check` residue
 #     is per-request and stays FATAL, because silently skipping past a
 #     body that carried a credential shape would turn the loudest safety
-#     signal in the pipeline into a per-request footnote.
+#     signal in the pipeline into a per-request footnote. Staging every
+#     candidate is what keeps that exception meaningful: a `break` on the
+#     first match would leave the rest of the turn unscrubbed and
+#     unchecked.
 #   * The two independent statements of the CLIENT VERSION -- the wire
 #     value parsed from the client-controlled `user-agent` and the
 #     binary-side value the driver read off the running client -- are
@@ -147,7 +188,10 @@
 #      runner reads any non-zero exit as "this case produced no fixture".
 #      In driver mode this also covers "candidates existed but NONE
 #      exhibited the claim": the case describes a shape its own run did
-#      not produce, which is a case defect and never retryable.
+#      not produce, which is a case defect and never retryable. And it
+#      covers a later candidate that exhibits the claim but is NOT a
+#      continuation of the selected one -- a trace holding two different
+#      interactions under one case id, equally a case defect.
 #   2  usage error, or an --out outside the captured tree
 #   3  DRIVER MODE ONLY: the run completed, refused nothing, and landed
 #      zero fixtures because there was NO candidate at all -- the driven
@@ -192,41 +236,90 @@ DRIVER_LANDED=""
 # documented exit codes above.
 PATTERN_MISMATCH_RC=90
 
+# write_fixture's return code for "this candidate satisfies the claim, but
+# an earlier candidate already did". Distinguished from a pattern mismatch
+# because the two say opposite things about the same case: a mismatch is a
+# request that does not carry the shape, a REDUNDANT match is a further
+# witness of the shape the selected candidate already proved. A tool loop
+# resends its `tool_use` / `tool_result` pair in every later request, so
+# under a monotone claim redundancy is the NORMAL shape of a multi-turn
+# capture rather than a defect. Adjacent to the mismatch code for the same
+# reason it is not in the low range.
+REDUNDANT_MATCH_RC=91
+
 # Selector accounting, driver mode only. Every completed request in the
 # trace is a CANDIDATE for the run's single case id; the recorded wire
-# pattern decides which one the case means. Reported as one structured
-# line at the end of the run.
+# pattern decides which one the case means, and the FIRST satisfying
+# candidate is the selection. Reported as one structured line at the end
+# of the run.
+#
+# `candidates_redundant` is its own counter and never folded into
+# `candidates_skipped`: a reader seeing two skips would conclude two
+# requests failed the claim, when one failed and one was a further witness
+# of the shape that landed.
 CANDIDATES_EXAMINED=0
 CANDIDATES_SKIPPED=0
+CANDIDATES_REDUNDANT=0
 SELECTED_REQUEST_ID=""
+
+# The staged (not yet promoted) directory of the SELECTED candidate, its
+# landing path, and the manifest line it will append -- all held until the
+# scan over every candidate has succeeded. Empty until a candidate
+# satisfies the claim; only ONE candidate ever fills them, because the
+# selection is the first match.
+SELECTED_STAGED=""
+SELECTED_DST=""
+SELECTED_MANIFEST_LINE=""
+
+# The selected candidate's COMPLETION timestamp, which becomes the resume
+# marker's value once the promotion lands. Under promote-once the marker is
+# written after the scan rather than as each candidate is examined, so it
+# has to be carried out of the loop rather than read off the loop variable.
+SELECTED_TS=""
+
+# The selected candidate's identity fields, kept for the continuation
+# comparison a later redundant match is held to. Every one is already
+# computed per candidate by write_fixture, so the check is a comparison
+# rather than new plumbing.
+SELECTED_IKIND=""
+SELECTED_LANE=""
+SELECTED_PKIND=""
+SELECTED_MODEL=""
+SELECTED_TURNS=0
 
 # Byte length of manifest.jsonl before this run appended anything, so a
 # driver run ending in a refusal can put the append-only file back. Set
 # once the landing root exists.
 MANIFEST_BYTES_BEFORE=0
 
-# A driver run that ends in a refusal must leave NO promoted fixture and no
-# manifest line. The refusal was not transactional: the already-landed
-# refusal is raised only when a SECOND request keys on the same landing
-# path, by which point the first is promoted and manifested -- so the abort
-# used to leave the WRONG fixture in the landing root for a later reader to
-# mistake for the case's evidence.
+# Discard whatever this run staged but has not promoted. Under promote-once
+# nothing is promoted while candidates are still being examined, so a
+# refusal from any candidate -- including one AFTER the selected candidate
+# -- has no promoted fixture to destroy and no manifest line to retract.
+# What remains to clean up is the staged directory the selection was
+# holding, which the startup sweep would prune on the next run anyway; it
+# is removed here so a refusal leaves the landing root as it found it.
 #
-# The unwind is driver mode only. Live-box mode keys on request_id, so each
-# of its captures is independent evidence and a later refusal says nothing
-# about an earlier one.
+# Driver mode only. Live-box mode promotes each capture as it goes and
+# stages nothing across candidates: it keys on request_id, so each of its
+# captures is independent evidence and a later refusal says nothing about
+# an earlier one.
 #
-# The previous directory a rerun replaced is NOT restored: replace-not-merge
-# already deletes it on a successful rerun, so a reader never had a
-# guarantee it survived one. What this promises is only that the run leaves
-# nothing it promoted itself.
-unwind_driver_promotions() {
+# The manifest restore is retained rather than deleted: the append now
+# happens once after the scan, so under promote-once this is belt to
+# promote-once's braces, and a future edit that reintroduces an in-scan
+# append would otherwise silently lose the guarantee.
+discard_driver_staging() {
   [ "$DRIVER_MODE" = 1 ] || return 0
   local dst
   for dst in $DRIVER_LANDED; do
     rm -rf "$dst"
   done
   DRIVER_LANDED=""
+  if [ -n "$SELECTED_STAGED" ]; then
+    rm -rf "$SELECTED_STAGED"
+    SELECTED_STAGED=""
+  fi
   if [ -f "$OUT/manifest.jsonl" ]; then
     # truncate(1) is not assumed present: the manifest is append-only, so
     # the prefix is copied forward and renamed over, the same shape the
@@ -239,17 +332,18 @@ unwind_driver_promotions() {
 }
 
 # The driver-mode selection record: which candidate this run pinned, how
-# many it examined, how many it skipped, and the ordering basis it used.
-# Emitted on BOTH the success path and the refusal path -- a run that ends
-# in a refusal is the one where a reader most needs to know which candidate
-# was reached, and reconstructing that by correlating request ids across a
-# log is the work this line exists to remove.
+# many it examined, how many it skipped, how many were redundant witnesses,
+# and the ordering basis it used. Emitted on BOTH the success path and the
+# refusal path -- a run that ends in a refusal is the one where a reader
+# most needs to know which candidate was reached, and reconstructing that
+# by correlating request ids across a log is the work this line exists to
+# remove.
 #
 # NO BODY CONTENT: every field is an id, a count, or the fixed basis token.
 # A rig log is a CI artifact, and a body is unscrubbed at the point a
 # refusal prints.
 emit_selection_line() {
-  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED ordering_basis=first-ingress-body"
+  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED candidates_redundant=$CANDIDATES_REDUNDANT ordering_basis=first-ingress-body"
 }
 
 # Print the header block as usage. Delimited by a sentinel rather than a
@@ -392,6 +486,18 @@ MITM_SEAM_HEADER="x-routectl-mitm-proxied"
 # about names.
 INGRESS_HEADERS_FILE="ingress_request.headers.json"
 
+# The captured inbound body of a fixture directory, and the two keys a turn
+# list can live under -- `messages` for the Anthropic and chat-completions
+# shapes, `input` for the Responses shape. REPLICAS of INGRESS_BODY_FILE,
+# ANTHROPIC_TURNS_KEY and RESPONSES_TURNS_KEY in
+# scripts/drivers/lib/verify_pattern.py, because the rig runs in throwaway
+# trees and reading a Python constant out of a sibling script at runtime
+# would make the census depend on that file's layout rather than on its
+# values. The self-test asserts the spellings agree.
+INGRESS_BODY_FILE="ingress_request.json"
+ANTHROPIC_TURNS_KEY="messages"
+RESPONSES_TURNS_KEY="input"
+
 # Does the fixture's captured ingress header set carry $MITM_SEAM_HEADER?
 # 0 yes, 1 no, 2 the question could not be answered from the file.
 #
@@ -499,6 +605,83 @@ assert_client_version_coherent() {
       return 1
       ;;
   esac
+}
+
+# Length of a staged fixture's captured ingress turn list, or 0 when the
+# body is absent or unparseable. The key differs by dialect -- `messages`
+# for the Anthropic and chat-completions shapes, `input` for the Responses
+# shape -- and the census reads whichever one the body ACTUALLY carries,
+# the same rule the wire-pattern predicate uses so the two cannot disagree
+# about what a turn list is.
+#
+# An unreadable body yields 0 rather than failing: this feeds the
+# continuation comparison, where "strictly longer" is the test, and 0 can
+# never be strictly longer than a selected candidate's count. A body the
+# rig could not parse therefore fails the comparison rather than passing it
+# by default.
+ingress_turn_count() {
+  python3 - "$1" "$ANTHROPIC_TURNS_KEY" "$RESPONSES_TURNS_KEY" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+keys = sys.argv[2:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        body = json.load(handle)
+except (OSError, UnicodeDecodeError, ValueError):
+    print(0)
+    sys.exit(0)
+if not isinstance(body, dict):
+    print(0)
+    sys.exit(0)
+for key in keys:
+    turns = body.get(key)
+    if isinstance(turns, list):
+        print(len(turns))
+        sys.exit(0)
+print(0)
+PY
+}
+
+# Refuse a REDUNDANT match that is not a strict CONTINUATION of the
+# selected candidate. This is the surviving job of the old already-landed
+# refusal: two requests satisfying one monotone claim is the normal shape
+# of a tool loop, but a trace holding two genuinely DIFFERENT interactions
+# under one case id is not, and nothing else in the pipeline would catch
+# it.
+#
+# Continuation means: the same traced ingress dialect, the same normalized
+# lane and the same raw provider kind, the same model, and a turn list
+# strictly LONGER than the selected candidate's. A client retry and a
+# fallback attempt carry the SAME history, so neither is strictly longer;
+# an alias arm that resolved to a different provider changes the lane or
+# the raw kind; a stray side-request changes the model or the dialect.
+#
+# Every field compared here was already computed for the candidate on the
+# way to this point, so this is a comparison rather than new plumbing.
+assert_redundant_is_continuation() {
+  local id="$1" ikind="$2" lane="$3" pkind="$4" model="$5" turns="$6"
+
+  local mismatch=""
+  [ "$ikind" = "$SELECTED_IKIND" ] || mismatch="ingress dialect"
+  [ "$lane" = "$SELECTED_LANE" ] || mismatch="${mismatch:-lane}"
+  [ "$pkind" = "$SELECTED_PKIND" ] || mismatch="${mismatch:-provider kind}"
+  [ "$model" = "$SELECTED_MODEL" ] || mismatch="${mismatch:-model}"
+  if [ -n "$mismatch" ]; then
+    echo "capture_fixtures: $id also exhibits the claim of case '$ROUTECTL_FIXTURE_CASE_ID' but is not a" >&2
+    echo "continuation of the selected request $SELECTED_REQUEST_ID: its $mismatch differs, so the trace" >&2
+    echo "holds two different interactions under one case id; not promoting anything." >&2
+    return 1
+  fi
+  if [ "$turns" -le "$SELECTED_TURNS" ]; then
+    echo "capture_fixtures: $id also exhibits the claim of case '$ROUTECTL_FIXTURE_CASE_ID' but carries" >&2
+    echo "$turns ingress turn(s) against the selected request $SELECTED_REQUEST_ID's $SELECTED_TURNS." >&2
+    echo "A continuation extends the history, so this is a retry or a side-request rather than a" >&2
+    echo "later turn of the same interaction; not promoting anything." >&2
+    return 1
+  fi
+  return 0
 }
 
 while [ $# -gt 0 ]; do
@@ -681,22 +864,67 @@ in_scope_ids() {
   ' "$stripped" | sort -k1,1 | cut -f2-
 }
 
+# Atomically move a staged directory onto its landing path. The single
+# owner of the promoting rename, shared by both modes so neither can drift
+# into a merge.
+#
+# Until the rename succeeds the landing directory holds its previous
+# contents (or does not exist); an interrupted run leaves a `.tmp.*` dir
+# that the next startup sweep removes.
+#
+# A RE-LANDING REPLACES the previous fixture rather than merging into it:
+# the old directory is renamed aside under a `.tmp.` name, the new one moves
+# into place, and only then is the old one deleted. A merge would leave
+# files from the previous run that this capture never observed -- e.g. an
+# `upstream_response.json` from a non-stream run surviving into a stream
+# rerun -- and file presence IS the schema, so the drift signal would be
+# read off a directory no single capture ever produced. A failed second
+# rename restores the previous directory rather than leaving the path with
+# none.
+#
+# The staged directory is left in place on failure: the caller decides
+# whether to discard it or hold it, and the startup sweep prunes it either
+# way.
+promote_staged_dir() {
+  local staged="$1" dst="$2" id="$3"
+  if [ -d "$dst" ]; then
+    local stale="$OUT/.tmp.stale.$id.$$"
+    mv "$dst" "$stale" || return 1
+    if ! mv "$staged" "$dst"; then
+      mv "$stale" "$dst" || true
+      return 1
+    fi
+    rm -rf "$stale"
+    return 0
+  fi
+  mv "$staged" "$dst" || return 1
+}
+
 # For one request_id, write its fixture directory.
 #
 # Atomicity contract: writes go to a per-request tmp directory
-# `$OUT/.tmp.<id>.XXXXXX` and are promoted to the landing path via a
-# single mv(1) only after every file lands. A crash between the
-# first file write and the mv leaves a `.tmp.*` directory behind,
-# which the startup sweep prunes on the next run -- the landing
-# directory is never half-populated, so the
-# `[ -d "$OUT/$id" ] && continue` idempotency guard in the caller
-# can be trusted. The manifest append happens AFTER the mv so a
-# dangling manifest entry never points to a missing directory.
+# `$OUT/.tmp.<id>.XXXXXX`. A crash before the promotion leaves a `.tmp.*`
+# directory behind, which the startup sweep prunes on the next run -- the
+# landing directory is never half-populated, so the
+# `[ -d "$OUT/$id" ] && continue` idempotency guard in the caller can be
+# trusted.
 #
-# The landing path differs by mode: `$OUT/<request_id>` for a live-box
-# capture, `$OUT/<lane>/<case_id>` in driver mode (see the header). It is
-# resolved late, after the lane is normalized, because the lane is
-# derived from the trace rather than passed in.
+# WHERE THE PROMOTION HAPPENS DIFFERS BY MODE, and that is the whole shape
+# of driver-mode transactionality:
+#
+#   * LIVE-BOX mode promotes here, at the end of this function, and appends
+#     its manifest line right after the rename. Each of its captures keys on
+#     its own request_id and is independent evidence, so there is nothing to
+#     hold back and nothing a later capture's failure says about an earlier
+#     one.
+#   * DRIVER mode does NOT promote here. It RETAINS the staged directory of
+#     the SELECTED candidate (plus the manifest line it would append) and
+#     returns; the caller promotes once, after every candidate has been
+#     examined. Every gate in this function is computed from the candidate's
+#     own bytes and trace lines, so a later candidate can refuse the run for
+#     a reason the selected candidate passed -- and promoting mid-scan meant
+#     such a refusal destroyed the correct fixture the run had already
+#     landed.
 #
 # ERREXIT IS NOT ARMED IN THIS BODY. The caller captures the return status
 # so it can skip a non-matching candidate, and bash disables errexit for
@@ -1104,54 +1332,64 @@ META
       return 1
     fi
     dst="$OUT/$lane/$ROUTECTL_FIXTURE_CASE_ID"
-    # One case id pins ONE interaction, so two completed requests in one
-    # driver trace both key on this path and the second would silently
-    # overwrite the first. Refuse instead: the driver is capturing a case
-    # it did not isolate, and a corpus entry that depends on which request
-    # finished last is not evidence of anything.
-    case " $DRIVER_LANDED " in
-      *" $dst "*)
-        echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' on lane '$lane' already landed this run;" >&2
-        echo "refusing $id -- one driver run captures one case." >&2
+
+    # THE SELECTION, and the reason nothing is promoted here. This candidate
+    # has now passed every gate; whether it is the case's evidence depends
+    # on whether an EARLIER candidate already satisfied the claim, because
+    # the selection is the FIRST match in first-ingress-body order.
+    local turns
+    turns="$(ingress_turn_count "$tmp/$INGRESS_BODY_FILE")"
+
+    if [ -n "$SELECTED_STAGED" ]; then
+      # A LATER MATCH IS REDUNDANT, not ambiguous. A tool loop resends its
+      # `tool_use` / `tool_result` pair in every subsequent request, so a
+      # monotone claim is satisfied by every candidate after the first
+      # witness -- two matches is the normal shape of a multi-turn capture.
+      # What the old already-landed refusal was really catching is a trace
+      # holding two genuinely DIFFERENT interactions under one case id, and
+      # that is what the continuation check below still refuses.
+      if ! assert_redundant_is_continuation "$id" "$ikind" "$lane" "$pkind" \
+           "${model:-}" "$turns"; then
         rm -rf "$tmp"
         return 1
-        ;;
-    esac
-    mkdir -p "$OUT/$lane" || { rm -rf "$tmp"; return 1; }
-  else
-    dst="$OUT/$id"
+      fi
+      rm -rf "$tmp"
+      return "$REDUNDANT_MATCH_RC"
+    fi
+
+    # First match: RETAIN the staged directory rather than promoting it, and
+    # remember the identity fields a later redundant match is compared
+    # against. The caller promotes once, after the scan.
+    SELECTED_STAGED="$tmp"
+    SELECTED_DST="$dst"
+    SELECTED_REQUEST_ID="$id"
+    SELECTED_TS="$ts"
+    SELECTED_IKIND="$ikind"
+    SELECTED_LANE="$lane"
+    SELECTED_PKIND="$pkind"
+    SELECTED_MODEL="${model:-}"
+    SELECTED_TURNS="$turns"
+    # The manifest line is BUILT here, where its escaped values are in
+    # scope, and appended by the caller after the promotion -- so a
+    # dangling manifest entry never points to a missing directory, and a
+    # refusal from a later candidate leaves the append-only file untouched
+    # rather than needing it retracted.
+    SELECTED_MANIFEST_LINE="{\"request_id\":\"$j_id\",\"captured_at\":\"$j_ts\",\"routectl_version\":\"$j_version\",\"alias\":\"$j_alias\",\"model\":\"$j_model\",\"case_id\":\"$j_case\",\"ingress_kind\":\"$j_ikind\",\"provider_kind\":\"$j_pkind\",\"lane\":\"$j_lane\",\"stream\":$stream_flag,\"finish_reason\":\"$j_finish\",\"input_tokens\":${input_tokens:-0},\"output_tokens\":${output_tokens:-0},\"total_tokens\":${total_tokens:-0}}"
+    echo "$id"
+    return 0
   fi
 
-  # Atomically promote the tmp directory into place. Until this rename
-  # succeeds the landing directory holds its previous contents (or does
-  # not exist); an interrupted run leaves a `.tmp.*` dir that the next
-  # startup sweep removes.
+  dst="$OUT/$id"
+
+  # LIVE-BOX PROMOTION. Each live-box capture keys on its own request_id and
+  # is independent evidence, so it promotes as it is written and appends its
+  # manifest line immediately: there is no selection to hold it back for,
+  # and a later capture's failure says nothing about this one.
   #
-  # A driver rerun REPLACES the previous fixture for that case rather than
-  # merging into it: the old directory is renamed aside under a `.tmp.`
-  # name, the new one moves into place, and only then is the old one
-  # deleted. A merge would leave files from the previous run that this
-  # capture never observed -- e.g. an `upstream_response.json` from a
-  # non-stream run surviving into a stream rerun -- and file presence IS
-  # the schema, so the drift signal would be read off a directory no
-  # single capture ever produced.
-  # Each mv is guarded: with errexit unarmed in this body a failed rename
-  # would fall through to the manifest append and record a fixture that
-  # never landed. The stale-aside case restores the previous directory
-  # rather than leaving the case with none.
-  if [ -d "$dst" ]; then
-    local stale="$OUT/.tmp.stale.$id.$$"
-    mv "$dst" "$stale" || { rm -rf "$tmp"; return 1; }
-    if ! mv "$tmp" "$dst"; then
-      mv "$stale" "$dst" || true
-      rm -rf "$tmp"
-      return 1
-    fi
-    rm -rf "$stale"
-  else
-    mv "$tmp" "$dst" || { rm -rf "$tmp"; return 1; }
-  fi
-  DRIVER_LANDED="$DRIVER_LANDED $dst"
+  # The rename is guarded: with errexit unarmed in this body a failed
+  # promotion would fall through to the manifest append and record a fixture
+  # that never landed.
+  promote_staged_dir "$tmp" "$dst" "$id" || { rm -rf "$tmp"; return 1; }
 
   # Append to manifest.jsonl AFTER the rename so a dangling manifest
   # entry never points to a missing directory. One JSONL line per
@@ -1163,6 +1401,19 @@ META
 MANIFEST_LINE
 
   echo "$id"
+}
+
+# Promote the SELECTED staged fixture and append its manifest line. Driver
+# mode only, called ONCE after every candidate has been examined and none
+# refused the run.
+promote_selected_fixture() {
+  [ -n "$SELECTED_STAGED" ] || return 0
+  mkdir -p "$(dirname "$SELECTED_DST")" || return 1
+  promote_staged_dir "$SELECTED_STAGED" "$SELECTED_DST" \
+    "$SELECTED_REQUEST_ID" || return 1
+  SELECTED_STAGED=""
+  DRIVER_LANDED="$DRIVER_LANDED $SELECTED_DST"
+  printf '%s\n' "$SELECTED_MANIFEST_LINE" >> "$OUT/manifest.jsonl"
 }
 
 # Iterate over candidates in first-ingress-body order, apply --limit if set.
@@ -1196,19 +1447,41 @@ while IFS=$'\t' read -r ts id pkind ikind; do
     CANDIDATES_SKIPPED=$((CANDIDATES_SKIPPED + 1))
     continue
   fi
+  # A LATER WITNESS of the shape the selected candidate already proved,
+  # verified to be a strict continuation of it. Counted on its own line
+  # field rather than as a skip: a reader seeing two skips would conclude
+  # two requests failed the claim, when one failed and one carried the same
+  # shape one turn further on.
+  if [ "$DRIVER_MODE" = 1 ] && [ "$write_rc" = "$REDUNDANT_MATCH_RC" ]; then
+    CANDIDATES_REDUNDANT=$((CANDIDATES_REDUNDANT + 1))
+    continue
+  fi
   # THE RE-RAISE. Anything else non-zero is a run-level refusal and ends
   # the run with its own status, which is what errexit used to do for free.
-  # A driver run that ends in a refusal leaves nothing it promoted: the
-  # already-landed refusal fires only after a first fixture landed, and that
-  # fixture is not the case's evidence.
+  # A driver run that ends in a refusal leaves nothing it promoted, and
+  # under promote-once that is STRUCTURAL rather than unwound: the single
+  # promotion happens after this loop, so a refusal from a candidate AFTER
+  # the selected one has no promoted fixture to destroy. What the discard
+  # cleans up is the staged directory the selection was holding.
   if [ "$write_rc" != 0 ]; then
-    unwind_driver_promotions
+    discard_driver_staging
     # The refusal path needs this line MORE than the success path: it is the
     # only record of which candidate the run reached and how many it skipped
     # to get there, and a reader who has to reconstruct that by correlating
     # request ids across a log is doing the work the line exists to remove.
     [ "$DRIVER_MODE" = 1 ] && emit_selection_line
     exit "$write_rc"
+  fi
+  # DRIVER MODE KEEPS SCANNING past its selection and does NOT count a
+  # landing here: nothing has landed yet. Every remaining candidate is still
+  # staged, scrubbed and `--check`ed -- the one deliberate per-request
+  # exception to the skip rule is fatal residue, and a `break` on the first
+  # match would leave the rest of the turn unexamined for it. `--limit` is
+  # deliberately not honored as a break in this mode either, for the same
+  # reason: one driver run pins one case, so a cap on landings has nothing
+  # to cap and would only stop the scan early.
+  if [ "$DRIVER_MODE" = 1 ]; then
+    continue
   fi
   SELECTED_REQUEST_ID="$id"
   captured=$((captured + 1))
@@ -1217,6 +1490,22 @@ while IFS=$'\t' read -r ts id pkind ikind; do
     break
   fi
 done < <(in_scope_ids)
+
+# THE SINGLE PROMOTION. Driver mode reaches here only when every candidate
+# was examined and none refused the run, so the selected staged fixture is
+# now known to be the case's evidence and nothing later can retract it. The
+# manifest append rides along inside, after the rename.
+if [ "$DRIVER_MODE" = 1 ] && [ -n "$SELECTED_STAGED" ]; then
+  if ! promote_selected_fixture; then
+    echo "capture_fixtures: could not promote the selected fixture for case" >&2
+    echo "'$ROUTECTL_FIXTURE_CASE_ID' into $SELECTED_DST; landing nothing." >&2
+    discard_driver_staging
+    emit_selection_line
+    exit 1
+  fi
+  captured=1
+  latest_ts="$SELECTED_TS"
+fi
 
 # Update resume marker only if we captured something. Write to a temp
 # file inside $OUT and rename over the marker so an interrupt mid-write
@@ -1248,9 +1537,10 @@ fi
 # Driver mode only: landing zero is a failed run, not a quiet window, and
 # the two ways to land zero carry OPPOSITE verdicts.
 #
-# The loop re-raises every run-level refusal, so reaching this line proves
-# no fixture was refused for a per-run reason. What remains splits on the
-# candidate count:
+# The loop re-raises every run-level refusal and the promotion above sets
+# `captured=1` whenever a candidate was selected, so reaching this line with
+# zero means the scan finished having selected nothing. What remains splits
+# on the candidate count:
 #
 #   * candidates existed and every one was SKIPPED -- the case claims a
 #     wire shape none of the requests its own run produced carried. That
@@ -1260,6 +1550,9 @@ fi
 #   * zero candidates -- the trace held no completed request at all (a
 #     429, an upstream that returned no success body, a client that died
 #     before sending). Retryable, and unchanged: exit 3.
+#
+# A REDUNDANT candidate cannot reach here: redundancy is defined against a
+# selection, so a run that counted one has a selected fixture and landed it.
 #
 # No new exit code, deliberately: the f4 matrix runner reads the rig's
 # retryable / not-retryable distinction off exactly these two, and a third

@@ -249,44 +249,81 @@ TRACE
 # across two candidates is how the ordering control drives a trace whose
 # completion order contradicts its ingress order.
 #
-# `$4` is the shape: `baseline` (a plain body, no tools offered) or `tools`
-# (a resent tool_use / tool_result pair with a tools array on the
-# structural line). One satisfies the `baseline` claim and refuses
-# `tool-use-multiturn`; the other does the reverse. Every value is
-# synthetic.
+# `$4` is the shape:
+#
+#   baseline      a plain body, no turn list, no tools offered -- satisfies
+#                 the `baseline` claim and refuses `tool-use-multiturn`
+#   tools         a resent tool_use / tool_result pair over THREE turns,
+#                 with a tools array on the structural line -- the reverse
+#   tools-long    the same interaction one turn further on: FIVE turns, the
+#                 first three byte-identical to `tools`. This is what a tool
+#                 loop's next request really looks like, and it is the only
+#                 shape that satisfies the claim AND is a strict
+#                 CONTINUATION of `tools`
+#   tools-retry   three turns like `tools` but a DIFFERENT tool call, so it
+#                 satisfies the claim while carrying no more history than
+#                 the candidate before it -- a retry, not a later turn
+#
+# `$5` and `$6` override the model and the traced provider kind, so a
+# candidate can satisfy the claim while differing from the selected one in
+# an identity field the continuation check reads. Every value is synthetic.
 candidate_trace() {
     local id="$1" ts_ing="$2" ts_comp="$3" shape="${4:-baseline}"
+    local model="${5:-claude-sonnet-4-5}" kind="${6:-anthropic}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
     local target="routectl_core::log_safe:"
-    local body='{"model":"claude-sonnet-4-5"}'
+    local body="{\"model\":\"$model\"}"
     local tools_len=0
-    if [ "$shape" = tools ]; then
-        body='{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"list the files"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}]}'
-        tools_len=16
-    fi
+    # The three-turn tool loop, as one exchange. `tools-long` appends the
+    # assistant's answer and the user's next prompt to exactly these turns,
+    # so the continuation relation the rig checks is visible in the fixture
+    # text rather than asserted about it.
+    local t_user='{"role":"user","content":"list the files"}'
+    local t_call='{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]}'
+    local t_result='{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}'
+    case "$shape" in
+        tools)
+            body="{\"model\":\"$model\",\"messages\":[$t_user,$t_call,$t_result]}"
+            tools_len=16
+            ;;
+        tools-long)
+            body="{\"model\":\"$model\",\"messages\":[$t_user,$t_call,$t_result,{\"role\":\"assistant\",\"content\":\"notes.txt is the only file\"},{\"role\":\"user\",\"content\":\"now read it\"}]}"
+            tools_len=16
+            ;;
+        tools-retry)
+            body="{\"model\":\"$model\",\"messages\":[$t_user,{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_02\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_02\",\"content\":\"notes.txt\"}]}]}"
+            tools_len=16
+            ;;
+    esac
     cat <<TRACE
 $ts_ing TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body=$body redact_prompts_enabled=false
-$ts_ing TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body=$body redact_prompts_enabled=false
-$ts_comp TRACE $span: $target upstream success body provider_kind="anthropic" provider=p body={"id":"msg_1"} redact_prompts_enabled=false
+$ts_ing TRACE $span:complete_with_options{alias=my-alias}:complete{provider=$kind:p model=$model}: $target outgoing request body provider_kind="$kind" provider=p body=$body redact_prompts_enabled=false
+$ts_comp TRACE $span: $target upstream success body provider_kind="$kind" provider=p body={"id":"msg_1"} redact_prompts_enabled=false
 $ts_comp TRACE $span: $target egress response body ingress="anthropic" body={"id":"msg_1"} redact_prompts_enabled=false
 $ts_ing TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"],["content-type","application/json"]]
 $ts_ing TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
 $ts_comp TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
 $ts_comp TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
 TRACE
-    structural_line "$id" ingress 400000 | sed "s/tools_len=0/tools_len=$tools_len/"
-    structural_line "$id" outgoing 500000 | sed "s/tools_len=0/tools_len=$tools_len/"
+    structural_line "$id" ingress 400000 |
+        sed -e "s/tools_len=0/tools_len=$tools_len/" -e "s/claude-sonnet-4-5/$model/"
+    structural_line "$id" outgoing 500000 |
+        sed -e "s/tools_len=0/tools_len=$tools_len/" -e "s/claude-sonnet-4-5/$model/"
 }
 
 # The request ids and timestamps the selector controls share. Two
 # candidates, A initiated before B, both completing after both ingress
-# bodies -- the shape one agentic turn really produces.
+# bodies -- the shape one agentic turn really produces. A third id and pair
+# of timestamps for the measured three-candidate shape (control 4b).
 SEL_ID_A="019eab77-0000-4000-8000-0000000000a1"
 SEL_ID_B="019eab77-0000-4000-8000-0000000000b2"
+SEL_ID_C="019eab77-0000-4000-8000-0000000000c4"
 SEL_TS_ING_A="2026-08-25T12:00:00.100000Z"
 SEL_TS_ING_B="2026-08-25T12:00:01.100000Z"
+SEL_TS_ING_C="2026-08-25T12:00:02.000000Z"
 SEL_TS_COMP_A="2026-08-25T12:00:02.100000Z"
 SEL_TS_COMP_B="2026-08-25T12:00:03.100000Z"
+SEL_TS_COMP_C="2026-08-25T12:00:04.100000Z"
 
 # A two-candidate trace: `$1` is A's shape, `$2` is B's. Written A-first,
 # which is also ingress order, so an ordering-independent selector and a
@@ -295,6 +332,32 @@ SEL_TS_COMP_B="2026-08-25T12:00:03.100000Z"
 selector_trace() {
     candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" "$1"
     candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" "$2"
+}
+
+# The MEASURED shape of the failed paid capture: three candidates in
+# ingress order, shapes chosen by the caller.
+selector_trace_3() {
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" "$1"
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" "$2"
+    candidate_trace "$SEL_ID_C" "$SEL_TS_ING_C" "$SEL_TS_COMP_C" "$3"
+}
+
+# Length of a landed fixture's captured ingress turn list, printed so an
+# assertion on WHICH request landed can read the turn count rather than a
+# grep verdict. `none` when there is no landed body to count.
+landed_turn_count() {
+    if [ ! -f "$1/ingress_request.json" ]; then
+        printf 'none\n'
+        return 0
+    fi
+    python3 - "$1/ingress_request.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    body = json.load(handle)
+print(len(body.get("messages", [])))
+PY
 }
 
 # Body of a landed fixture's ingress capture, as one line.
@@ -1201,11 +1264,16 @@ for bad in ../escape 'nested/case'; do
     rm -rf "$work"
 done
 
-# --- Case 17: two completed requests under one case id are refused ----
+# --- Case 17: two requests that are not one interaction are refused ----
 # One case id pins ONE interaction. Two completions in a single driver
-# trace both key on the same landing path, so the second would silently
-# overwrite the first and the corpus entry would depend on completion
-# order. The refusal says the driver captured a case it did not isolate.
+# trace both key on the same landing path, and these two are byte-identical
+# single-turn requests -- neither extends the other, so the trace holds two
+# separate interactions rather than two turns of one. The refusal says so.
+#
+# Two requests that ARE one interaction is a different verdict entirely and
+# is asserted by the redundant-match controls further down: a tool loop
+# resends its pair in every later request, so a later match is the normal
+# shape rather than a defect.
 set_pins shared-01 abc123 base-url
 work="$(make_repo)"
 rc=0
@@ -1218,8 +1286,8 @@ if [ "$rc" -eq 0 ]; then
 else
     echo "PASS: driver mode refuses two requests under one case id"
 fi
-check_log "the refusal names the already-landed case" "already landed this run" \
-    "$work/rig.log"
+check_log "the refusal says the second request does not extend the first" \
+    "A continuation extends the history" "$work/rig.log"
 rm -rf "$work"
 
 # --- Case 18: driver mode landing ZERO fixtures is a failed run --------
@@ -1588,6 +1656,23 @@ else
     echo "PASS: no crates tree in this checkout; the seam-name weld is not asserted"
 fi
 unset redact_list
+
+# The rig's turn-list constants are REPLICAS of verify_pattern.py's, and the
+# continuation check compares a turn count the predicate also reads. A
+# drifted replica would count turns under a key the predicate does not use,
+# so a redundant candidate's history length would be measured as 0 and every
+# redundant match would refuse for a reason nothing in the trace caused.
+for pair in "INGRESS_BODY_FILE:INGRESS_BODY_FILE" \
+    "ANTHROPIC_TURNS_KEY:ANTHROPIC_TURNS_KEY" \
+    "RESPONSES_TURNS_KEY:RESPONSES_TURNS_KEY"; do
+    IFS=: read -r rig_name py_name <<<"$pair"
+    rig_value="$(sed -n "s/^$rig_name=\"\\(.*\\)\"$/\\1/p" "$RIG")"
+    py_value="$(sed -n "s/^$py_name = \"\\(.*\\)\"$/\\1/p" "$VERIFY_PATTERN")"
+    check "the rig's $rig_name replica equals the predicate's" "$py_value" "$rig_value"
+    check "and the $rig_name replica is non-empty" "1" \
+        "$([ -n "$rig_value" ] && echo 1 || echo 0)"
+done
+unset rig_name py_name rig_value py_value
 
 # PREMISE ASSERTION: the seam-bearing trace must really carry the header
 # NAME in its ingress header line and the plain one must really not.
@@ -2191,19 +2276,287 @@ else
 fi
 rm -rf "$work"
 
-# CONTROL 4: two candidates, BOTH satisfy -> still the already-landed
-# refusal, unchanged. The skip must NOT have widened into "one case id may
-# land many requests": two requests that both satisfy the claim is genuine
-# ambiguity, and a `break` there would silently pin whichever one sorted
-# first.
+# CONTROL 4: two candidates, BOTH satisfy the claim -> the FIRST lands, the
+# run SUCCEEDS, and the selection line reports one REDUNDANT candidate.
+#
+# A tool loop resends its `tool_use` / `tool_result` pair in every later
+# request, so under a monotone claim every candidate after the first witness
+# satisfies it: two matches is the NORMAL shape of a multi-turn capture, not
+# an ambiguity signal. The earlier ruling refused here, and that refusal
+# destroyed a correct fixture on a real paid run.
+#
+# Asserted on BODY IDENTITY: an exit-only assertion passes on a rig that
+# landed the SECOND candidate. The second is a strict continuation carrying
+# five turns against the first's three, so the turn count says which one
+# filled the directory.
 set_pins select-both-01 abc123 base-url tool-use-multiturn
 work="$(make_repo)"
 rc=0
-rig_run "$work" "$(selector_trace tools tools)" --driver-mode || rc=$?
+rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$?
 clear_pins
-check "two candidates that BOTH satisfy the claim still refuse with exit 1" "1" "$rc"
-check_log "the ambiguity refusal is still the already-landed one" \
-    "already landed this run" "$work/rig.log"
+dir="$(captured_of "$work")/anthropic-api/select-both-01"
+check "two candidates that BOTH satisfy the claim SUCCEED" "0" "$rc"
+check "the FIRST candidate's body landed, not the later witness's" "3" \
+    "$(landed_turn_count "$dir")"
+check "meta.request_id names the FIRST candidate" "$SEL_ID_A" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+check "the redundant witness appends no second manifest line" "1" \
+    "$(wc -l <"$(captured_of "$work")/manifest.jsonl" 2>/dev/null | tr -d ' ')"
+check_log "the selection line counts the later match as REDUNDANT" \
+    "candidates_redundant=1" "$work/rig.out"
+# And NOT as a skip: a reader seeing a skip would conclude a request failed
+# the claim, when it carried the same shape one turn further on.
+check_log "the redundant witness is not counted as a skip" \
+    "candidates_skipped=0" "$work/rig.out"
+rm -rf "$work"
+
+# PREMISE ASSERTION for control 4. The two candidates must really both
+# satisfy the claim, and the second must really be the longer one --
+# otherwise "the first landed" is asserted against a trace where the second
+# was skipped for failing the claim, which every rig in this file's history
+# would pass.
+sel_both_premise="$(
+    d1="$(mktemp -d)" && d2="$(mktemp -d)"
+    for pair in "$d1 tools" "$d2 tools-long"; do
+        set -- $pair
+        mkdir -p "$1"
+        printf '%s\n' "$(candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" "$2")" |
+            sed -n 's/.*ingress request body ingress="anthropic" body=\(.*\) redact_prompts_enabled=false$/\1/p' \
+            >"$1/ingress_request.json"
+        printf '%s\n' "$(structural_line "$SEL_ID_A" ingress 400000 | sed 's/tools_len=0/tools_len=16/')" \
+            >"$1/structural.txt"
+    done
+    v1=refused
+    v2=refused
+    python3 "$VERIFY_PATTERN" "$d1" tool-use-multiturn 2>/dev/null && v1=satisfied
+    python3 "$VERIFY_PATTERN" "$d2" tool-use-multiturn 2>/dev/null && v2=satisfied
+    printf '%s %s %s %s\n' "$v1" "$v2" \
+        "$(landed_turn_count "$d1")" "$(landed_turn_count "$d2")"
+    rm -rf "$d1" "$d2"
+)"
+check "both control-4 candidates satisfy the claim and the second is longer" \
+    "satisfied satisfied 3 5" "$sel_both_premise"
+unset sel_both_premise
+
+# CONTROL 4b: THE MEASURED SHAPE of the failed paid capture -- three
+# candidates, the first failing the claim, the second and third matching.
+# The SECOND's body lands, the third counts redundant, the run succeeds.
+# This is the exact run that landed the correct fixture and then deleted it.
+set_pins select-measured-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace_3 baseline tools tools-long)" \
+    --driver-mode || rc=$?
+clear_pins
+dir="$(captured_of "$work")/anthropic-api/select-measured-01"
+check "the measured three-candidate shape SUCCEEDS" "0" "$rc"
+check "the SECOND candidate's body landed" "3" "$(landed_turn_count "$dir")"
+check "meta.request_id names the second candidate" "$SEL_ID_B" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+check_log "the measured run counts one skip and one redundant witness" \
+    "candidates_examined=3 candidates_skipped=1 candidates_redundant=1" "$work/rig.out"
+rm -rf "$work"
+
+# CONTROL 4c: a redundant match that is NOT a strict CONTINUATION is a
+# REFUSAL and nothing lands. This is the surviving job of the old
+# already-landed refusal: two requests satisfying one monotone claim is
+# normal, but a trace holding two genuinely DIFFERENT interactions under one
+# case id is a case the driver did not isolate, and nothing else in the
+# pipeline would catch it.
+#
+# Four independent non-continuations are driven, one per field the check
+# reads, because a mistake in any one of them would otherwise be masked by
+# the others passing.
+for leg in \
+    "retry:tools-retry:claude-sonnet-4-5:anthropic:A continuation extends the history" \
+    "model:tools-long:claude-opus-4-1:anthropic:its model differs" \
+    "provider:tools-long:claude-sonnet-4-5:openai-compat:its lane differs"; do
+    IFS=: read -r name shape model kind msg <<<"$leg"
+    set_pins "noncont-$name-01" abc123 base-url tool-use-multiturn
+    work="$(make_repo)"
+    rc=0
+    rig_run_split "$work" "$(
+        candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+        candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" "$shape" \
+            "$model" "$kind"
+    )" --driver-mode || rc=$?
+    clear_pins
+    check "a non-continuation redundant match ($name) REFUSES with exit 1" "1" "$rc"
+    check_log "the $name refusal names the field that differs" "$msg" "$work/rig.err"
+    if [ -d "$(captured_of "$work")/anthropic-api/noncont-$name-01" ]; then
+        echo "FAIL: the $name non-continuation left a promoted fixture"
+        fails=$((fails + 1))
+    else
+        echo "PASS: the $name non-continuation lands nothing"
+    fi
+    check "the $name non-continuation appends no manifest line" "0" \
+        "$([ -f "$(captured_of "$work")/manifest.jsonl" ] &&
+            wc -l <"$(captured_of "$work")/manifest.jsonl" | tr -d ' ' || echo 0)"
+    rm -rf "$work"
+done
+unset name shape model kind msg
+
+# ACCEPT CONTROL for 4c: the SAME two-candidate shape whose second candidate
+# IS a strict continuation promotes at exit 0. Without it every refusal
+# above holds for a rig that refuses any two-candidate trace, and the
+# continuation check would be satisfiable by a check that always says no.
+set_pins noncont-accept-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$?
+clear_pins
+check "a strict continuation of the selected candidate promotes at exit 0" "0" "$rc"
+check "and the FIRST candidate's body is what landed" "3" \
+    "$(landed_turn_count "$(captured_of "$work")/anthropic-api/noncont-accept-01")"
+rm -rf "$work"
+
+# CONTROL 4d: scrub residue on a REDUNDANT candidate still ABORTS fatally
+# and nothing is promoted. This is the keep-scanning safety property: a
+# `break` on the first match would leave every later candidate of the turn
+# unscrubbed and un-`--check`ed, so the loudest safety signal in the
+# pipeline would become a per-request footnote by omission rather than by
+# decision.
+#
+# The residue rides the SECOND candidate, which satisfies the claim -- so
+# the run has already made its selection when the dirty body is read, and a
+# rig that stopped scanning at the selection would exit 0 having landed the
+# first.
+set_pins redundant-scrub-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long |
+        sed 's#"now read it"#"now read /home/someoneelse/notes.txt"#'
+)" --driver-mode || rc=$?
+clear_pins
+captured="$(captured_of "$work")"
+check "scrub residue on a REDUNDANT candidate is FATAL, not a redundant skip" "1" "$rc"
+check_log "the fatal refusal is the scrub check" "scrub check refused" "$work/rig.err"
+if [ -d "$captured/anthropic-api/redundant-scrub-01" ]; then
+    echo "FAIL: residue on a redundant candidate still promoted the selection"
+    fails=$((fails + 1))
+else
+    echo "PASS: residue on a redundant candidate promotes nothing"
+fi
+check "residue on a redundant candidate appends no manifest line" "0" \
+    "$([ -f "$captured/manifest.jsonl" ] && wc -l <"$captured/manifest.jsonl" | tr -d ' ' || echo 0)"
+rm -rf "$work"
+
+# PREMISE ASSERTION for 4d: the residue really must ride the LATER
+# candidate. Without it the refusal above holds for a rig that read the
+# residue on the first candidate -- the shape control 6 already covers --
+# and the keep-scanning property would be untested.
+redundant_dirty_position="$(
+    printf '%s\n' "$(
+        candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+        candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long |
+            sed 's#"now read it"#"now read /home/someoneelse/notes.txt"#'
+    )" | grep -c "request_id=$SEL_ID_A.*someoneelse"
+)"
+check "the 4d residue rides the LATER candidate only" "0" \
+    "$redundant_dirty_position"
+unset redundant_dirty_position
+
+# CONTROL 4e: a refusal from a candidate AFTER the selected one leaves no
+# promoted fixture and no manifest line -- and CANNOT have deleted a fixture
+# promoted earlier in the run, because promote-once means none was.
+#
+# This is the class the amendment found, not one instance of it. The gates
+# the earlier ruling called per-run are all computed PER CANDIDATE: the lane
+# from each request's traced `provider_kind`, the seam check from that
+# request's header capture, the expected-ingress pin from that request's
+# traced dialect. So a LATER candidate can refuse for a reason the selected
+# candidate passed. Driven through the expected-ingress pin, whose refusal
+# code is 1 and whose input differs per candidate.
+#
+# The structural claim is asserted directly: no `.tmp.` staging survives
+# either, so the run left the landing root exactly as it found it rather
+# than promoting and unwinding.
+set_pins later-refusal-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long |
+        sed 's/ingress="anthropic"/ingress="openai"/g'
+)" --driver-mode || rc=$?
+clear_pins
+captured="$(captured_of "$work")"
+check "a refusal from a LATER candidate exits 1" "1" "$rc"
+check_log "the later candidate's own dialect is what refused" \
+    "was captured on ingress dialect 'openai'" "$work/rig.err"
+if [ -d "$captured/anthropic-api/later-refusal-01" ]; then
+    echo "FAIL: a later candidate's refusal left the selection promoted"
+    fails=$((fails + 1))
+else
+    echo "PASS: a later candidate's refusal leaves no promoted fixture"
+fi
+check "a later candidate's refusal leaves no manifest line" "0" \
+    "$([ -f "$captured/manifest.jsonl" ] && wc -l <"$captured/manifest.jsonl" | tr -d ' ' || echo 0)"
+if [ -n "$(find "$captured" -maxdepth 1 -name '.tmp.*' -print -quit 2>/dev/null)" ]; then
+    echo "FAIL: a later candidate's refusal left staged tmp state behind"
+    fails=$((fails + 1))
+else
+    echo "PASS: a later candidate's refusal leaves no staged tmp state"
+fi
+# THE STRUCTURAL PROPERTY, asserted rather than inferred: the rig must never
+# have created the landing path at all during the run. A promote-then-unwind
+# rig leaves the LANE directory behind (mkdir -p ran before the promotion);
+# a promote-once rig creates it only at the single promotion, which this run
+# never reached.
+if [ -d "$captured/anthropic-api" ]; then
+    echo "FAIL: the run created the lane directory, so it promoted mid-scan"
+    fails=$((fails + 1))
+else
+    echo "PASS: promote-once never created the lane directory on the refusal path"
+fi
+rm -rf "$work"
+
+# PAIRED CONTROL for 4e's structural assertion: the same shape WITHOUT the
+# later refusal does create the lane directory and land the fixture. Without
+# it "no lane directory" passes on a rig that never creates one at all.
+set_pins later-refusal-clean-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$?
+clear_pins
+captured="$(captured_of "$work")"
+check "the same shape without the later refusal exits 0" "0" "$rc"
+if [ -d "$captured/anthropic-api/later-refusal-clean-01" ]; then
+    echo "PASS: the clean run DOES create the lane directory and land the fixture"
+else
+    echo "FAIL: the clean run landed nothing, so 4e's lane assertion is vacuous"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# CONTROL 4f: the selection line carries `candidates_redundant` on BOTH the
+# success and the refusal path. The success leg is asserted in control 4
+# above; this is the refusal leg, where a reader most needs the count and
+# where a line that only ever printed the field on success would pass.
+set_pins redundant-line-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long
+    candidate_trace "$SEL_ID_C" "$SEL_TS_ING_C" "$SEL_TS_COMP_C" tools-long |
+        sed 's/ingress="anthropic"/ingress="openai"/g'
+)" --driver-mode || rc=$?
+clear_pins
+check "the redundant-then-refused run exits 1" "1" "$rc"
+sel_line="$(grep -h 'capture_fixtures: selection ' "$work/rig.out" "$work/rig.err" 2>/dev/null)"
+for field in "candidates_examined=3" "candidates_skipped=0" \
+    "candidates_redundant=1" "selected_request_id=$SEL_ID_A"; do
+    if printf '%s' "$sel_line" | grep -qF -- "$field"; then
+        echo "PASS: the refusal-path selection line carries $field"
+    else
+        echo "FAIL: the refusal-path selection line lacks $field -- '$sel_line'"
+        fails=$((fails + 1))
+    fi
+done
+unset sel_line
 rm -rf "$work"
 
 # CONTROL 5: THE SET -E HAZARD. Capturing write_fixture's status to enable
@@ -2344,13 +2697,17 @@ rm -rf "$work"
 # selector a non-matching candidate never promotes, but the property is
 # asserted rather than assumed.
 #
-# Driven through the already-landed refusal, which is the one class that
-# fires AFTER a promotion has happened -- the only shape where a promoted
-# fixture could survive a refusal at all.
+# Driven through a refusal from a candidate whose REFUSAL CLASS is the one
+# the earlier rig raised only after a promotion had happened: the second
+# candidate satisfies the claim but is not a continuation, so the run has
+# made its selection and staged it before the refusal fires. That is the only
+# shape where a promoted fixture could survive a refusal at all -- and under
+# promote-once the selection is still staged rather than promoted, which is
+# why nothing survives.
 set_pins refusal-clean-01 abc123 base-url tool-use-multiturn
 work="$(make_repo)"
 rc=0
-rig_run "$work" "$(selector_trace tools tools)" --driver-mode || rc=$?
+rig_run "$work" "$(selector_trace tools tools-retry)" --driver-mode || rc=$?
 clear_pins
 captured="$(captured_of "$work")"
 check "a run ending in refusal exits 1" "1" "$rc"
@@ -2384,12 +2741,14 @@ rm -rf "$work"
 # file has the two orders agreeing.
 #
 # A is initiated first and completes LAST; B is initiated second and
-# completes FIRST. Both satisfy the claim, so ordering is the ONLY thing
-# that can decide which one lands -- and the already-landed refusal names
-# the loser, so the winner is unambiguous.
+# completes FIRST. Both satisfy the claim and NEITHER extends the other --
+# they are two three-turn exchanges with different tool calls -- so whichever
+# is considered second is refused as a non-continuation, and the refusal
+# names it. Ordering is therefore the only thing that can decide which id
+# appears in the message.
 sel_swap_trace="$(
     candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_B" tools
-    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_A" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_A" tools-retry
 )"
 
 # PREMISE ASSERTION: the two orders must really contradict. Without this
@@ -2409,19 +2768,18 @@ else
 fi
 unset sel_ing_order sel_comp_order
 
-# Both candidates satisfy the claim, so this run REFUSES on ambiguity --
-# and the refusal names the SECOND-considered request, which is what says
-# which one was considered first. Ingress order puts A first, so B must be
-# the one refused.
+# The candidate considered SECOND is the one the non-continuation refusal
+# names, which is what says which one was considered first. Ingress order
+# puts A first, so B must be the one named.
 set_pins order-basis-01 abc123 base-url tool-use-multiturn
 work="$(make_repo)"
 rc=0
 rig_run "$work" "$sel_swap_trace" --driver-mode || rc=$?
 clear_pins
-check "the contradicting-order run refuses on ambiguity" "1" "$rc"
+check "the contradicting-order run refuses the non-continuation" "1" "$rc"
 check_log "candidates are ordered by INGRESS body: the later-initiated one is refused" \
-    "refusing $SEL_ID_B" "$work/rig.log"
-if grep -qF "refusing $SEL_ID_A" "$work/rig.log"; then
+    "capture_fixtures: $SEL_ID_B also exhibits" "$work/rig.log"
+if grep -qF "capture_fixtures: $SEL_ID_A also exhibits" "$work/rig.log"; then
     echo "FAIL: the earlier-INITIATED request was refused, so the order keyed on completion"
     fails=$((fails + 1))
 else
@@ -2468,7 +2826,7 @@ sel_line="$(grep -h 'capture_fixtures: selection ' "$work/rig.out" "$work/rig.er
 check "exactly ONE selection line is emitted" "1" \
     "$(printf '%s\n' "$sel_line" | grep -c 'selection ' || true)"
 for field in "case=selection-line-01" "selected_request_id=$SEL_ID_B" \
-    "candidates_examined=2" "candidates_skipped=1" \
+    "candidates_examined=2" "candidates_skipped=1" "candidates_redundant=0" \
     "ordering_basis=first-ingress-body"; do
     if printf '%s' "$sel_line" | grep -qF -- "$field"; then
         echo "PASS: the selection line carries $field"
