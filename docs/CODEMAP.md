@@ -5485,7 +5485,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `normalize_ingress_for_lane`, and the pair-aware form a corpus walk uses,
   `normalize_ingress_for_pair` / `system_turns_were_lifted` /
   `in_band_system_turns`, which applies the system-turn rewrite only to a
-  pair that evidences the lift)
+  pair that evidences the lift) plus the fixture-level tool-identity check a
+  matcher cannot express (`tool_identity_preserved` / `ToolIdentityError` /
+  `mcp_tool_rename_explained`: injectivity and cardinality over the two
+  bodies, since a per-divergence predicate cannot see two tool names
+  collapsing onto one)
 - `tests/common/replay/conservation.rs` -- the conservation adjudicator:
   compares a fixture's captured `ingress_request.json` against its captured
   `outgoing_request.json` through the lane class and exception table

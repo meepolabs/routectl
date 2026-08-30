@@ -26,9 +26,10 @@
 mod common;
 
 use common::replay::{
-    ConservationRun, CorpusSlice, Fixture, Verdict, adjudicate, discover_driver_fixtures,
-    discover_fixtures, driver_root, local_root, make_conserved, plant_driver_case,
-    plant_unloadable_driver_case, read_translation_baseline, resolve_gated_lanes,
+    ConservationRun, CorpusSlice, Fixture, Verdict, adjudicate, current_meta,
+    discover_driver_fixtures, discover_fixtures, driver_root, local_root, make_conserved,
+    plant_driver_case, plant_unloadable_driver_case, read_translation_baseline,
+    resolve_gated_lanes, write_required_files,
 };
 
 /// The one line a checkout with no driver fixtures must print.
@@ -353,6 +354,88 @@ fn conservation_over_both_fixture_roots() {
     );
 }
 
+/// The case_id of the committed tool-loop capture the mcp tool-rename
+/// entry was measured on.
+const TOOL_LOOP_CASE: &str = "tools-multiturn-01";
+
+/// Tool NAME divergences the tool-loop capture carries: one per custom
+/// tool declaration in its `tools[]` array plus the resent `tool_use` that
+/// references one of them.
+///
+/// EXACT, and re-derivable rather than remembered: the capture declares 24
+/// custom tools (none of them an Anthropic native builtin, which the
+/// producer skips) and resends one `tool_use`, and the rename walks every
+/// declaration plus that reference. Not 24 and not 26 -- a count that moved
+/// means either the capture changed or the entry's path predicate started
+/// reaching somewhere the producer does not write, and both are review
+/// moments rather than numbers to update.
+const TOOL_LOOP_NAME_DIVERGENCES: usize = 25;
+
+/// CONTROL 1: the motivating capture. The mcp tool-rename entry explains
+/// EXACTLY its name divergences and the fixture adjudicates with
+/// `unexplained == 0`.
+///
+/// Scoped to the one fixture rather than to the whole driver corpus so the
+/// count stays attributable: a second tool-using capture would move a
+/// corpus-wide total while proving nothing new about this entry.
+#[test]
+fn the_tool_loop_capture_has_every_name_divergence_explained_and_no_other() {
+    let root = driver_root();
+    let corpus = match discover_driver_fixtures(&root) {
+        Ok(corpus) => corpus,
+        Err(e) => panic!("the driver root {} must walk: {e}", root.display()),
+    };
+    let Some(tool_loop) = corpus
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.meta.case_id == TOOL_LOOP_CASE)
+        .cloned()
+    else {
+        eprintln!(
+            "conservation: driver root `{}` holds no `{TOOL_LOOP_CASE}` case; the \
+             tool-rename measurement is SKIPPED.",
+            root.display(),
+        );
+        return;
+    };
+
+    let gated = resolve_gated_lanes().expect("the committed gated-lane list must resolve");
+    let baseline = read_translation_baseline().expect("the committed baseline must read");
+    let fixtures = [tool_loop];
+    let run = adjudicate(
+        &[CorpusSlice {
+            label: "driver",
+            fixtures: &fixtures,
+            unloadable: 0,
+            gateable: true,
+        }],
+        &gated,
+        &baseline,
+    );
+    for line in run.report_lines() {
+        eprintln!("{line}");
+    }
+
+    let hits = run
+        .exception_hits
+        .iter()
+        .find(|hit| hit.id == "mcp-tool-name-prefixed")
+        .expect("the entry must be in the table")
+        .hits;
+    assert_eq!(
+        hits, TOOL_LOOP_NAME_DIVERGENCES,
+        "the entry must explain exactly the capture's tool-name divergences: {:?}",
+        run.failures,
+    );
+    assert_eq!(
+        run.lanes.iter().map(|lane| lane.unexplained).sum::<usize>(),
+        0,
+        "every divergence on this capture is an explained transform: {:?}",
+        run.failures,
+    );
+    assert_eq!(run.verdict(), Verdict::Pass, "{:?}", run.failures);
+}
+
 /// Every fixture in the COMMITTED driver corpus pins a non-empty
 /// `ingress_kind` and a non-empty `wire_pattern`.
 ///
@@ -407,29 +490,33 @@ fn every_committed_driver_fixture_pins_its_ingress_kind_and_wire_pattern() {
     );
 }
 
-/// The COMMITTED corpus still loads after `client.binary_version` was
-/// added to the schema.
+/// The COMMITTED corpus still LOADS. That is the whole corpus-wide claim,
+/// and it is deliberately not an assertion about `client.binary_version`.
 ///
-/// The field is additive by construction (a serde default on
-/// [`common::replay::FixtureClient`]), and this is the assertion that the
-/// construction holds against the fixtures ACTUALLY ON DISK rather than
-/// against a planted variant: every committed fixture predates the key, so
-/// a required field -- or a default that failed to apply -- would show up
-/// here as a corpus that stopped walking. A required field is a major
-/// fixture-format bump, which under the committed-corpus regime orphans
-/// every contributed cell whose session cannot be re-driven.
+/// The predecessor asserted that NO committed fixture carried the key,
+/// which is a snapshot wearing a control's clothes: an absence assertion
+/// over a GROWING corpus breaks on the first capture that carries the key,
+/// and "update the number" would make it a snapshot that must be edited
+/// whenever reality moves. The property actually wanted is a LOADER
+/// property -- the loader tolerates the key's presence AND its absence --
+/// and that lives on planted fixtures, where both states can be
+/// constructed. See `the_loader_tolerates_the_binary_client_version_key_either_way`.
 ///
-/// It asserts the LOAD and the field's absence-value, never a populated
-/// value: the corpus was captured before the driver-side read reached the
-/// rig, so demanding a value here would demand a recapture the regime is
-/// built to avoid.
+/// What survives here is the genuine corpus invariant: `skipped == 0`. A
+/// required-field bump is what that catches, and a required field is a
+/// major fixture-format bump which under the committed-corpus regime
+/// orphans every contributed cell whose session cannot be re-driven.
+///
+/// The corpus-wide claim that IS kept about the key is the one that stays
+/// true as the corpus grows: at least one committed fixture still LACKS it,
+/// so the default path stays exercised by real data.
 ///
 /// The absent-corpus skip keys on ENTRIES WALKED, not on fixtures LOADED.
 /// Keying on the loaded count would make this test SKIP in exactly the
 /// state it exists to catch: a required field stops every fixture loading,
 /// which leaves the loaded set empty and reads as "no corpus here".
 #[test]
-fn the_committed_corpus_loads_with_the_binary_client_version_key_absent() {
+fn the_committed_corpus_loads() {
     let root = driver_root();
     let corpus = match discover_driver_fixtures(&root) {
         Ok(corpus) => corpus,
@@ -439,7 +526,7 @@ fn the_committed_corpus_loads_with_the_binary_client_version_key_absent() {
     if walked == 0 {
         eprintln!(
             "conservation: driver root `{}` holds no fixture entry at all; the \
-             additive-field tolerance assertion is SKIPPED.",
+             corpus-loads assertion is SKIPPED.",
             root.display(),
         );
         return;
@@ -448,31 +535,101 @@ fn the_committed_corpus_loads_with_the_binary_client_version_key_absent() {
     assert_eq!(
         corpus.skipped,
         0,
-        "adding client.binary_version must not skip a committed fixture: an additive key \
-         carries a default, and a fixture that stopped loading means the key became \
-         required -- a major fixture-format bump that orphans contributed cells. \
+        "the committed corpus must load: a fixture that stopped loading means a field \
+         became required -- a major fixture-format bump that orphans contributed cells. \
          {walked} entr(ies) walked, {} loaded",
         corpus.fixtures.len(),
     );
 
-    // The wire-side value is what these fixtures DO carry, so asserting it
-    // alongside is the positive control: without it, a loader that returned
-    // an all-empty `client` would satisfy the absence check above.
+    // The wire-side value is what every fixture carries, whatever its
+    // binary-side state, so it is the positive control that the loader
+    // populated `client` at all rather than returning an empty struct.
     for fixture in &corpus.fixtures {
         assert!(
             !fixture.meta.client.version.is_empty(),
-            "committed fixture `{}` carries no wire-side client.version, so the \
-             absence assertion below proves nothing about the new key",
-            fixture.name,
-        );
-        assert!(
-            fixture.meta.client.binary_version.is_empty(),
-            "committed fixture `{}` records a binary-side client version; it was \
-             captured before the driver-side read reached the rig, so this is a \
-             recapture (update this assertion) or a hand edit",
+            "committed fixture `{}` carries no wire-side client.version, so nothing here \
+             proves the loader populated `client`",
             fixture.name,
         );
     }
+
+    assert!(
+        corpus
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.meta.client.binary_version.is_empty()),
+        "every committed fixture now records a binary-side client version, so the \
+         key-absent default path is no longer exercised by real data; the planted \
+         fixtures still cover it, but a corpus that lost the state should be a review \
+         moment",
+    );
+}
+
+/// The LOADER property the corpus-wide absence assertion was standing in
+/// for: `client.binary_version` is additive, so a fixture WITH the key and
+/// a fixture WITHOUT it both load, and the value round-trips.
+///
+/// Planted rather than measured on the corpus, because the two states are
+/// what the property is about and a growing corpus cannot be relied on to
+/// hold both. This is the one place the tolerance is falsifiable: a
+/// required field, or a default that failed to apply, turns one of the two
+/// arms red regardless of what the committed fixtures happen to carry.
+#[test]
+fn the_loader_tolerates_the_binary_client_version_key_either_way() {
+    let planted = tempfile::tempdir().unwrap();
+    let with_key = plant_driver_case(planted.path(), "anthropic-api", "with-binary-version");
+    let without_key = plant_driver_case(planted.path(), "anthropic-api", "without-binary-version");
+
+    let mut meta = current_meta();
+    meta["case_id"] = serde_json::json!("with-binary-version");
+    meta["client"]["binary_version"] = serde_json::json!("9.9.9 (Claude Code)");
+    write_required_files(&with_key, &meta);
+
+    let mut bare = current_meta();
+    bare["case_id"] = serde_json::json!("without-binary-version");
+    assert!(
+        bare["client"]
+            .as_object_mut()
+            .expect("the planted client is an object")
+            .remove("binary_version")
+            .is_some(),
+        "the planted meta must CARRY the key for its removal to be the condition under test",
+    );
+    write_required_files(&without_key, &bare);
+
+    let corpus = discover_driver_fixtures(planted.path()).expect("the planted root must walk");
+
+    assert_eq!(
+        corpus.skipped, 0,
+        "both states must LOAD; an additive key refuses neither",
+    );
+    assert_eq!(corpus.fixtures.len(), 2);
+
+    let carried = corpus
+        .fixtures
+        .iter()
+        .find(|f| f.meta.case_id == "with-binary-version")
+        .expect("the key-carrying fixture must load");
+    let absent = corpus
+        .fixtures
+        .iter()
+        .find(|f| f.meta.case_id == "without-binary-version")
+        .expect("the key-absent fixture must load");
+
+    assert_eq!(
+        carried.meta.client.binary_version, "9.9.9 (Claude Code)",
+        "the value must round-trip rather than merely not refusing the key",
+    );
+    assert_eq!(
+        absent.meta.client.binary_version, "",
+        "absence must read as empty rather than backfilled from the wire value, or the \
+         two versions could never disagree",
+    );
+    // Positive control on the arm above: the wire-side value is present on
+    // BOTH, so the empty binary-side value is the key's absence and not a
+    // loader that returned an all-empty `client`.
+    assert_eq!(carried.meta.client.version, absent.meta.client.version);
+    assert!(!absent.meta.client.version.is_empty());
 }
 
 /// The measured baseline of the live-box corpus, asserted only WHEN THAT

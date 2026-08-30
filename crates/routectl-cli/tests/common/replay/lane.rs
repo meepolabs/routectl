@@ -244,6 +244,7 @@
 //! races a concurrent delta reader and shows up as an unrelated test
 //! failing intermittently.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
@@ -960,11 +961,204 @@ fn outgoing_credential_is_bearer(fixture: &Fixture) -> bool {
         })
 }
 
+/// The single-underscore prefix whose result is DOUBLED rather than
+/// prefixed again, mirroring `MCP_SINGLE_PREFIX` in the producer.
+const MCP_SINGLE_PREFIX: &str = "mcp_";
+/// The canonical double-underscore prefix the producer normalizes to,
+/// mirroring `MCP_DOUBLE_PREFIX` in the producer.
+const MCP_DOUBLE_PREFIX: &str = "mcp__";
+
+/// The one non-indexed tool-name path the producer walks.
+const TOOL_CHOICE_NAME_PATH: &str = "tool_choice.name";
+
+/// The canonical `mcp__` form of a tool name, or `None` when the producer
+/// leaves the name alone (it already starts with `mcp__`, and such a name
+/// records no reverse entry either).
+///
+/// Replicates all three cases of `renamed_to_mcp`
+/// (`crates/routectl-providers/src/anthropic_api/cloak/tool_rename.rs`):
+/// already-`mcp__` is unchanged, a single-underscore `mcp_x` becomes
+/// `mcp__x` rather than `mcp__mcp_x`, and any other name is prefixed.
+fn canonical_mcp_rename(name: &str) -> Option<String> {
+    if name.starts_with(MCP_DOUBLE_PREFIX) {
+        return None;
+    }
+    if let Some(suffix) = name.strip_prefix(MCP_SINGLE_PREFIX) {
+        return Some(format!("{MCP_DOUBLE_PREFIX}{suffix}"));
+    }
+    Some(format!("{MCP_DOUBLE_PREFIX}{name}"))
+}
+
+/// Whether the wire value is EXACTLY what the producer would have written
+/// for the ingress value.
+///
+/// Never `actual.starts_with("mcp__")`: that admits a truncation
+/// (`mcp__Rea`), a cross-tool substitution (`mcp__Foo` where the ingress
+/// said `Bar`), a doubled prefix (`mcp__mcp_x`), and a rewrite of a name
+/// the producer would have left alone -- i.e. exactly the tool-name
+/// tampering conservation exists to catch.
+fn is_canonical_mcp_rename(divergence: &Divergence) -> bool {
+    let (Some(wire), Some(ingress)) = (
+        divergence.actual.as_ref().and_then(Value::as_str),
+        divergence.expected.as_ref().and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    canonical_mcp_rename(ingress).is_some_and(|renamed| renamed == wire)
+}
+
+/// Whether `path` is exactly `messages[<digits>].content[<digits>]`.
+fn is_message_content_element(path: &str) -> bool {
+    let Some((message, part)) = path.split_once('.') else {
+        return false;
+    };
+    is_indexed_element_of(message, "messages") && is_indexed_element_of(part, "content")
+}
+
+/// Whether `path` is exactly
+/// `messages[<digits>].content[<digits>].content[<digits>]`, the nested
+/// `tool_result.content[]` level.
+fn is_nested_content_element(path: &str) -> bool {
+    let Some((outer, inner)) = path.rsplit_once('.') else {
+        return false;
+    };
+    is_message_content_element(outer) && is_indexed_element_of(inner, "content")
+}
+
+/// Whether `path` is EXACTLY one of the five tool-name paths the producer
+/// walks. Each shape is matched by equality on every segment, never by
+/// suffix: a `.name` under any `tools` subtree at any depth would reach
+/// into a namespace container's nested `tools[]` and mask an ingress-side
+/// defect that must stay findable.
+fn is_tool_name_path(path: &str) -> bool {
+    if path == TOOL_CHOICE_NAME_PATH {
+        return true;
+    }
+    if let Some(parent) = path.strip_suffix(".name")
+        && (is_indexed_element_of(parent, "tools") || is_message_content_element(parent))
+    {
+        return true;
+    }
+    if let Some(parent) = path.strip_suffix(".tool_name")
+        && (is_message_content_element(parent) || is_nested_content_element(parent))
+    {
+        return true;
+    }
+    false
+}
+
+/// Why a fixture's tool IDENTITY did not survive the rename, as the
+/// fixture-level check reports it. Both variants name only tool NAMES and
+/// counts, which are wire identifiers rather than caller prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolIdentityError {
+    /// The `tools[]` arrays are different lengths, so no index-aligned
+    /// pairing exists at all.
+    Cardinality {
+        /// Names on the ingress side.
+        ingress: usize,
+        /// Names on the wire side.
+        wire: usize,
+    },
+    /// Two or more distinct ingress names landed on ONE wire name, so the
+    /// rename was not injective and the reverse map is ambiguous.
+    Collision {
+        /// The wire name more than one ingress name resolved to.
+        wire: String,
+        /// The colliding ingress names, sorted.
+        ingress: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for ToolIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cardinality { ingress, wire } => write!(
+                f,
+                "the tools[] array carries {ingress} name(s) on ingress and {wire} on the \
+                 wire; the rename is prefix-only and changes no array length"
+            ),
+            Self::Collision { wire, ingress } => write!(
+                f,
+                "tool names {ingress:?} both resolve to the wire name `{wire}`; every \
+                 individual rename is prefix-valid but tool identity collapsed and the \
+                 reverse map is ambiguous"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ToolIdentityError {}
+
+/// The `tools[].name` values a body declares, in array order. A tool
+/// object with no string `name` contributes nothing -- the producer skips
+/// such an entry too, and a shape mismatch is the diff's finding.
+fn declared_tool_names(body: &Value) -> Vec<&str> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a fixture's tool identity survived the rename: the `tools[]`
+/// arrays are the same length, and the index-aligned ingress -> wire name
+/// mapping is INJECTIVE.
+///
+/// The hole this closes, and the reason the matcher alone is not enough: a
+/// [`Transform::Matcher`] receives ONE [`Divergence`], so it cannot see
+/// that two source names collapsed onto one wire name (`x` and `mcp_x`
+/// both canonicalize to `mcp__x`). Every individual divergence is then
+/// prefix-valid and the matcher passes while tool IDENTITY collapsed.
+///
+/// Scoped to `tools[]` deliberately: that array is where tool identity is
+/// DECLARED, and both properties are derivable from the two bodies the
+/// harness already holds. Widening it to re-derive which message-history
+/// references belong to which declaration would make the harness
+/// re-implement the producer's classification, which the checked relation
+/// already narrows.
+pub fn tool_identity_preserved(ingress: &Value, outgoing: &Value) -> Result<(), ToolIdentityError> {
+    let ingress_names = declared_tool_names(ingress);
+    let wire_names = declared_tool_names(outgoing);
+    if ingress_names.len() != wire_names.len() {
+        return Err(ToolIdentityError::Cardinality {
+            ingress: ingress_names.len(),
+            wire: wire_names.len(),
+        });
+    }
+    let mut sources: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (from, to) in ingress_names.iter().zip(&wire_names) {
+        let entry = sources.entry(to).or_default();
+        if !entry.contains(from) {
+            entry.push(from);
+        }
+    }
+    for (wire, mut ingress) in sources {
+        if ingress.len() > 1 {
+            ingress.sort_unstable();
+            return Err(ToolIdentityError::Collision {
+                wire: wire.to_string(),
+                ingress: ingress.into_iter().map(str::to_string).collect(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The id of the entry whose fixture-level companion check is
+/// [`tool_identity_preserved`]. Named once so the entry and the check
+/// that backs it cannot drift apart.
+pub const MCP_TOOL_RENAME_ID: &str = "mcp-tool-name-prefixed";
+
 /// The exception entries on [`ANTHROPIC_FIDELITY_LANE`].
 ///
 /// Every `reason` below was re-confirmed by reading the named symbol in
 /// current code; `site_symbol` records which one.
-static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
+static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
     Exception {
         lane: ANTHROPIC_FIDELITY_LANE,
         id: "system-turn-lift",
@@ -1203,6 +1397,71 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
         transform: Transform::Matcher(|divergence| divergence.kind == DivergenceKind::Removed),
         matched: AtomicUsize::new(0),
     },
+    Exception {
+        lane: ANTHROPIC_FIDELITY_LANE,
+        id: MCP_TOOL_RENAME_ID,
+        reason: "A tool NAME on the wire is the ingress name prefixed with `mcp__`. Confirmed at \
+                 `normalize_tool_names_to_mcp` \
+                 (crates/routectl-providers/src/anthropic_api/cloak/tool_rename.rs), which is \
+                 always-on for the OAuth cloak lane. WHY THE REWRITE EXISTS, quoted from that \
+                 function's own doc comment so a reader of a firing exception does not have to go \
+                 find it: \"A non-Claude-Code request whose tool SET contains enough non-`mcp__` \
+                 names is diverted to the extra-usage billing lane; prefixing every such name with \
+                 `mcp__` keeps the request in the subscription lane.\" So this is a BILLING \
+                 CLASSIFIER accommodation, not a naming preference. The five paths the producer \
+                 walks, VERBATIM from its doc comment -- `tools[].name`, `tool_choice.name` (when \
+                 `tool_choice.type == \"tool\"`), `messages[].content[]` `tool_use` `.name`, \
+                 `messages[].content[]` `tool_reference` `.tool_name`, and nested \
+                 `tool_result.content[]` `tool_reference` `.tool_name` -- and each is matched as an \
+                 EXACT shape, never by suffix: a predicate admitting any `.name` under any `tools` \
+                 subtree at any depth would reach into a namespace container's nested `tools[]` \
+                 and could mask the ingress-side unwrap defect this very capture is the first \
+                 evidence for. RE-DERIVE THE FIVE SHAPES FROM THE PRODUCER'S WALK whenever that \
+                 walk changes: the site-symbol weld pins only that the named symbol exists in the \
+                 cited file, not the path set, and a predicate BROADER than the producer silently \
+                 excuses an untouched path (the narrow direction fails loud instead). The value \
+                 constraint is the EXACT canonical relation `actual == renamed_to_mcp(ingress)`, \
+                 replicating all three producer cases: an already-`mcp__` name is UNCHANGED (and \
+                 records no reverse entry), a single-underscore `mcp_x` becomes `mcp__x` and NOT \
+                 `mcp__mcp_x`, and any bare name is prefixed. `actual.starts_with(\"mcp__\")` is \
+                 refused: it would admit a truncation, a cross-tool substitution (`mcp__Foo` where \
+                 the client said `Bar`), the doubling done wrong, and a rewrite of a name the \
+                 producer would have left alone -- exactly the tool-name tampering conservation \
+                 exists to catch. Same discipline as the model entry's `is_bracketed_alias_of`: \
+                 admit only the shape the transform produces. Gated on the CREDENTIAL via \
+                 `applies_to` (`outgoing_credential_is_bearer`), mirroring \
+                 `oauth-sampling-stripped`, because a Matcher receives only a `Divergence` and the \
+                 gate cannot live in it: ungated, this entry would permit a tool-name rewrite on a \
+                 lane where the transform provably did not run, whereas gated-too-narrow fails \
+                 loud and is fixed by widening one line. THAT GATE IS NECESSARY, NOT SUFFICIENT: \
+                 `is_cloak_lane` (crates/routectl-providers/src/anthropic_api/client.rs) also \
+                 requires the api.anthropic.com host and a non-forwarded leg, and a scrubbed \
+                 capture pins neither, so those two conditions stay unverifiable here. \
+                 `max_per_fixture` is None deliberately: there is no production ceiling to \
+                 express, so any number would be a corpus fact wearing a transform's clothes. NO \
+                 reverse-direction arm: the reverse map touches the RESPONSE and this harness \
+                 compares request bodies only, so an arm for it would claim coverage that does not \
+                 exist. What this matcher CANNOT see is a COLLISION -- two ingress names \
+                 canonicalizing onto one wire name, where every individual divergence is \
+                 prefix-valid while tool identity collapsed -- because it receives one divergence \
+                 at a time; `tool_identity_preserved` closes that at FIXTURE level with an \
+                 injectivity plus cardinality check over the two bodies. Recorded because it will \
+                 fire later: `sort_custom_tools_by_name` \
+                 (crates/routectl-providers/src/anthropic_api/cloak/tool_sort.rs) is the \
+                 position-moving sibling on the same array and is NORMALIZER-shaped; when it \
+                 fires, THIS entry goes red because index-aligned pairs stop being prefix pairs, \
+                 and that is the correct failure -- do NOT widen this entry to absorb it. In-place \
+                 value change that moves no positions, hence a MATCHER.",
+        site_symbol: "normalize_tool_names_to_mcp",
+        site_path: "crates/routectl-providers/src/anthropic_api/cloak/tool_rename.rs",
+        path_predicate: is_tool_name_path,
+        applies_to: Some(outgoing_credential_is_bearer),
+        max_per_fixture: None,
+        transform: Transform::Matcher(|divergence| {
+            divergence.kind == DivergenceKind::Changed && is_canonical_mcp_rename(divergence)
+        }),
+        matched: AtomicUsize::new(0),
+    },
 ];
 
 /// THE lock that serializes every reader of a per-exception counter DELTA.
@@ -1220,6 +1479,23 @@ pub static COUNTER_DELTA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Every exception entry, across all lanes.
 pub fn all_exceptions() -> &'static [Exception] {
     &ANTHROPIC_FIDELITY_EXCEPTIONS
+}
+
+/// Whether the mcp tool-rename entry is what explained any of `explained`
+/// for this fixture, i.e. whether [`tool_identity_preserved`] is owed on it.
+///
+/// Reads the entry's PATH PREDICATE and its eligibility gate and never its
+/// [`Transform::Matcher`]: the divergences handed in were already
+/// adjudicated, so re-running the matcher would count every hit twice and a
+/// too-broad entry would read as a well-exercised one.
+pub fn mcp_tool_rename_explained(fixture: &Fixture, explained: &[&Divergence]) -> bool {
+    let Some(entry) = all_exceptions()
+        .iter()
+        .find(|entry| entry.id == MCP_TOOL_RENAME_ID)
+    else {
+        return false;
+    };
+    entry.eligible_for(fixture) && explained.iter().any(|d| (entry.path_predicate)(&d.path))
 }
 
 /// The entries claimed for `lane`.
@@ -1717,7 +1993,7 @@ mod tests {
     }
 
     #[test]
-    fn the_anthropic_fidelity_lane_carries_two_normalizers_and_five_matchers() {
+    fn the_anthropic_fidelity_lane_carries_two_normalizers_and_six_matchers() {
         let entries = exceptions_for_lane(&ANTHROPIC_FIDELITY_LANE);
 
         let kinds: Vec<(&str, ExceptionKind)> = entries.iter().map(|e| (e.id, e.kind())).collect();
@@ -1731,6 +2007,7 @@ mod tests {
                 ("billing-system-block-stripped", ExceptionKind::Normalizer),
                 ("auto-cache-breakpoint-injected", ExceptionKind::Matcher),
                 ("oauth-sampling-stripped", ExceptionKind::Matcher),
+                ("mcp-tool-name-prefixed", ExceptionKind::Matcher),
             ],
             "the length-changing entries must be NORMALIZERS and the in-place \
              value changes MATCHERS",
@@ -2478,8 +2755,164 @@ mod tests {
         }));
     }
 
-    // ---------- the per-fixture eligibility gate ----------
+    #[test]
+    fn the_tool_rename_matcher_admits_only_the_five_paths_the_producer_walks() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = matcher(MCP_TOOL_RENAME_ID);
+        let renamed = |path: &str| Divergence {
+            path: path.to_string(),
+            kind: DivergenceKind::Changed,
+            actual: Some(json!("mcp__Read")),
+            expected: Some(json!("Read")),
+        };
 
+        for path in [
+            "tools[0].name",
+            "tool_choice.name",
+            "messages[2].content[1].name",
+            "messages[2].content[1].tool_name",
+            "messages[2].content[1].content[0].tool_name",
+        ] {
+            assert!(entry.matches(&renamed(path)), "`{path}` is a producer path");
+        }
+
+        // Paths the producer does NOT walk, including a `.name` nested
+        // deeper than any of the five and the caller-authored subtree a
+        // forged key could come from.
+        for path in [
+            "tools[0].input_schema.properties.name",
+            "tools[0].tools[1].name",
+            "messages[0].content[0].content[0].content[0].tool_name",
+            "messages[0].name",
+            "metadata.name",
+            "name",
+            "tools.name",
+            "tools[].name",
+            "tool_choice.tool_name",
+            "messages[0].content[0].name.name",
+        ] {
+            assert!(
+                !entry.matches(&renamed(path)),
+                "`{path}` is outside the producer's walk"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tool_rename_matcher_admits_only_the_exact_canonical_relation() {
+        let _guard = super::COUNTER_DELTA_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = matcher(MCP_TOOL_RENAME_ID);
+        let rename = |wire: &str, ingress: &str| Divergence {
+            path: "tools[0].name".to_string(),
+            kind: DivergenceKind::Changed,
+            actual: Some(json!(wire)),
+            expected: Some(json!(ingress)),
+        };
+
+        // The three producer cases that DO produce a divergence: a bare
+        // name prefixed, and a single-underscore prefix doubled rather
+        // than prefixed again.
+        assert!(entry.matches(&rename("mcp__Read", "Read")));
+        assert!(entry.matches(&rename("mcp__read_file", "read_file")));
+        assert!(entry.matches(&rename("mcp__x", "mcp_x")));
+
+        // Every shape a `starts_with("mcp__")` constraint would have
+        // admitted and the producer cannot emit.
+        assert!(!entry.matches(&rename("mcp__Bar", "Foo")), "cross-tool");
+        assert!(!entry.matches(&rename("mcp__Rea", "Read")), "truncation");
+        assert!(
+            !entry.matches(&rename("mcp__mcp_x", "mcp_x")),
+            "the doubling done wrong"
+        );
+        assert!(
+            !entry.matches(&rename("mcp__Read", "mcp__Write")),
+            "an already-prefixed name is left ALONE, so a rewrite of one is not this transform"
+        );
+        assert!(
+            !entry.matches(&rename("mcp__mcp__Read", "mcp__Read")),
+            "re-prefixing an already-canonical name is not idempotent"
+        );
+
+        // The reverse direction touches the RESPONSE, which this harness
+        // never sees, so an un-prefixing on the request is wire loss.
+        assert!(!entry.matches(&rename("Read", "mcp__Read")));
+        // A name that merely gains the prefix as a SUFFIX or infix.
+        assert!(!entry.matches(&rename("Readmcp__", "Read")));
+        // The key appearing or vanishing wholesale is a different shape.
+        assert!(!entry.matches(&Divergence {
+            path: "tools[0].name".to_string(),
+            kind: DivergenceKind::Added,
+            actual: Some(json!("mcp__Read")),
+            expected: None,
+        }));
+        assert!(!entry.matches(&Divergence {
+            path: "tools[0].name".to_string(),
+            kind: DivergenceKind::Removed,
+            actual: None,
+            expected: Some(json!("Read")),
+        }));
+        // A non-string value on either side.
+        assert!(!entry.matches(&Divergence {
+            path: "tools[0].name".to_string(),
+            kind: DivergenceKind::Changed,
+            actual: Some(json!("mcp__Read")),
+            expected: Some(json!(["Read"])),
+        }));
+    }
+
+    #[test]
+    fn the_tool_identity_check_reads_injectivity_and_cardinality() {
+        let names = |names: &[&str]| json!({"tools": names.iter().map(|n| json!({"name": n})).collect::<Vec<_>>()});
+
+        // POSITIVE CONTROL: the shape the producer actually emits over a
+        // mixed prefix set, so the rejections below are the properties and
+        // not a check that refuses everything.
+        assert_eq!(
+            tool_identity_preserved(
+                &names(&["Read", "mcp_x", "mcp__Write"]),
+                &names(&["mcp__Read", "mcp__x", "mcp__Write"]),
+            ),
+            Ok(())
+        );
+        assert_eq!(tool_identity_preserved(&json!({}), &json!({})), Ok(()));
+
+        // A COLLISION: `x` and `mcp_x` both canonicalize onto `mcp__x`, so
+        // every individual rename is prefix-valid while tool identity
+        // collapsed and the reverse map became ambiguous.
+        assert_eq!(
+            tool_identity_preserved(&names(&["x", "mcp_x"]), &names(&["mcp__x", "mcp__x"])),
+            Err(ToolIdentityError::Collision {
+                wire: "mcp__x".to_string(),
+                ingress: vec!["mcp_x".to_string(), "x".to_string()],
+            })
+        );
+
+        // CARDINALITY: the rename is prefix-only and changes no length, so
+        // a shorter wire array is a lost declaration.
+        assert_eq!(
+            tool_identity_preserved(&names(&["Read", "Write"]), &names(&["mcp__Read"])),
+            Err(ToolIdentityError::Cardinality {
+                ingress: 2,
+                wire: 1
+            })
+        );
+
+        // The SAME name declared twice on both sides is not a collision:
+        // one ingress name maps to one wire name, which is injective.
+        assert_eq!(
+            tool_identity_preserved(
+                &names(&["Read", "Read"]),
+                &names(&["mcp__Read", "mcp__Read"])
+            ),
+            Ok(())
+        );
+    }
+
+    // ---------- the per-fixture eligibility gate ----------
     /// A minimal fixture carrying only the outgoing headers the gate reads.
     /// Bodies are irrelevant here: eligibility is decided before any
     /// divergence is looked at.
@@ -2559,9 +2992,15 @@ mod tests {
         assert!(!entry.eligible_for(&ingress_only));
     }
 
+    /// The entries that carry a per-fixture credential gate, and the only
+    /// ones allowed to. Both transforms behind them run on the OAuth cloak
+    /// lane alone, so a capture on any other credential must leave the
+    /// shape they would have produced unexplained.
+    const GATED_ENTRY_IDS: [&str; 2] = ["oauth-sampling-stripped", MCP_TOOL_RENAME_ID];
+
     #[test]
     fn an_ungated_entry_is_eligible_for_every_fixture_on_its_lane() {
-        // The default the other six entries rely on: no `applies_to` hook
+        // The default the other entries rely on: no `applies_to` hook
         // means the lane key alone decides, which is the behavior they were
         // measured under. The billing strip specifically: its production
         // call is on the always-run normalize path, so an api-key capture
@@ -2569,15 +3008,25 @@ mod tests {
         let api_key = fixture_with_outgoing_headers(&[("x-api-key", "[REDACTED]")]);
         for entry in exceptions_for_lane(&ANTHROPIC_FIDELITY_LANE)
             .into_iter()
-            .filter(|e| e.id != "oauth-sampling-stripped")
+            .filter(|e| !GATED_ENTRY_IDS.contains(&e.id))
         {
             assert!(
                 entry.applies_to.is_none(),
-                "`{}` gained a fixture gate; the seven-entry table's gating is \
-                 asserted here so a new gate is a review moment",
+                "`{}` gained a fixture gate; the table's gating is asserted here so a \
+                 new gate is a review moment",
                 entry.id
             );
             assert!(entry.eligible_for(&api_key), "`{}`", entry.id);
+        }
+
+        // Paired positive: every id named above really IS gated, so the
+        // exclusion list is not quietly covering an ungated entry.
+        for id in GATED_ENTRY_IDS {
+            assert!(
+                matcher(id).applies_to.is_some(),
+                "`{id}` is exempted from the ungated assertion but carries no gate",
+            );
+            assert!(!matcher(id).eligible_for(&api_key), "`{id}`");
         }
     }
 

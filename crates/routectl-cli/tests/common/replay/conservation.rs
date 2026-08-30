@@ -127,8 +127,8 @@ use super::harness::bounded_body_diff;
 use super::json_diff::{Divergence, DivergenceKind, diff_all};
 use super::lane::{
     INGRESS_IDS, LaneClass, LaneKey, all_exceptions, class_for_dialects,
-    egress_lane_from_fixture_kind, exceptions_for_lane, ingress_dialect,
-    normalize_ingress_for_pair, unexplained_for_fixture,
+    egress_lane_from_fixture_kind, exceptions_for_lane, ingress_dialect, mcp_tool_rename_explained,
+    normalize_ingress_for_pair, tool_identity_preserved, unexplained_for_fixture,
 };
 use super::loader::Fixture;
 
@@ -530,7 +530,11 @@ enum FixtureOutcome {
         unexplained: usize,
         report_only: usize,
         normalized: bool,
-        failure: Option<String>,
+        /// Every way this fixture failed. A list rather than one message
+        /// because the divergence adjudication and the fixture-level
+        /// tool-identity check are independent verdicts, and folding the
+        /// second into the first would let a clean divergence set hide it.
+        failures: Vec<String>,
     },
     /// Not compared, with a reason.
     Skipped(String),
@@ -590,6 +594,10 @@ fn compare_fixture(
     );
     let residual = unexplained_for_fixture(lane_key, fixture, &divergences);
     let explained = divergences.len() - residual.len();
+    let explained_divergences: Vec<&Divergence> = divergences
+        .iter()
+        .filter(|d| !residual.iter().any(|r| std::ptr::eq(*r, *d)))
+        .collect();
 
     let (report_only, failing): (Vec<&Divergence>, Vec<&Divergence>) = match class {
         // A fidelity lane has no baseline: every residual divergence is
@@ -600,7 +608,8 @@ fn compare_fixture(
             .partition(|d| baseline_covers(baseline, lane_key.ingress, lane_key.egress, &d.path)),
     };
 
-    let failure = (!failing.is_empty()).then(|| {
+    let mut failures: Vec<String> = Vec::new();
+    if !failing.is_empty() {
         let mut msg = format!(
             "fixture `{}` on lane {}->{} ({}): {}",
             fixture.name,
@@ -621,15 +630,29 @@ fn compare_fixture(
         ) {
             msg.push_str(&format!(" | bounded shape: {summary}"));
         }
-        msg
-    });
+        failures.push(msg);
+    }
+    // The companion check the mcp tool-rename entry owes at FIXTURE level:
+    // a matcher sees one divergence at a time, so a rename this entry
+    // explained per-name can still have collapsed two tool identities onto
+    // one wire name. Owed only where the entry actually explained something
+    // -- on any other fixture the arrays it reads carry no claim.
+    if mcp_tool_rename_explained(fixture, &explained_divergences)
+        && let Err(e) = tool_identity_preserved(&normalized_ingress, &fixture.outgoing_request)
+    {
+        failures.push(format!(
+            "fixture `{}` on lane {}->{}: the tool-name rename was explained per name but \
+             tool identity did not survive it: {e}",
+            fixture.name, lane_key.ingress, lane_key.egress,
+        ));
+    }
 
     FixtureOutcome::Compared {
         explained,
         unexplained: residual.len(),
         report_only: report_only.len(),
         normalized,
-        failure,
+        failures,
     }
 }
 
@@ -728,16 +751,16 @@ pub fn adjudicate(
                     unexplained: residual,
                     report_only,
                     normalized,
-                    failure,
+                    failures,
                 } => {
                     entry.asserted += 1;
                     entry.explained += explained;
                     entry.unexplained += residual;
                     entry.report_only += report_only;
                     entry.normalized += usize::from(normalized);
-                    if let Some(msg) = failure {
+                    if !failures.is_empty() {
                         entry.failed += 1;
-                        run.failures.push(msg);
+                        run.failures.extend(failures);
                     }
                 }
             }
@@ -861,7 +884,7 @@ fn degradations(run: &ConservationRun) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::lane::{in_band_system_turns, system_turns_were_lifted};
+    use super::super::lane::{MCP_TOOL_RENAME_ID, in_band_system_turns, system_turns_were_lifted};
     use super::super::loader::{FIXTURE_SCHEMA_VERSION, FixtureClient, FixtureMeta};
     use super::*;
     use serde_json::json;
@@ -939,15 +962,17 @@ mod tests {
     /// which is what makes the zero-match rule's own tests falsifiable.
     ///
     /// Its outgoing headers carry the `Bearer` scheme, which is what makes
-    /// `oauth-sampling-stripped` eligible: that entry's fixture gate reads
-    /// the captured outgoing credential, and an api-key capture would
-    /// (correctly) leave the dropped `top_p` unexplained.
+    /// `oauth-sampling-stripped` and `mcp-tool-name-prefixed` eligible:
+    /// both entries' fixture gate reads the captured outgoing credential,
+    /// and an api-key capture would (correctly) leave the dropped `top_p`
+    /// and the prefixed tool name unexplained.
     fn all_transforms(name: &str) -> Fixture {
         let ingress = json!({
             "model": "claude-opus-4-8[1m]",
             "max_tokens": 1024,
             "top_p": 0.9,
             "thinking": {"type": "disabled"},
+            "tools": [{"name": "Read"}],
             "system": [
                 {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
                 {"type": "text", "text": "identity line"},
@@ -963,6 +988,7 @@ mod tests {
             "max_tokens": 1024,
             "temperature": 1.0,
             "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            "tools": [{"name": "mcp__Read"}],
             "system": [
                 {
                     "type": "text",
@@ -1211,6 +1237,291 @@ mod tests {
             hits(&over_bound, "auto-cache-breakpoint-injected"),
             2,
             "a match past the bound must not inflate the entry's hit count",
+        );
+    }
+
+    // ---------- the mcp tool-name rename ----------
+
+    /// A tool-using pair: `tools[]` declarations plus the resent `tool_use`
+    /// that references one of them, with the wire names supplied by the
+    /// caller so a control can tamper with exactly one of them.
+    fn tool_pair(
+        name: &str,
+        ingress_names: &[&str],
+        wire_names: &[&str],
+        resent: (&str, &str),
+    ) -> Fixture {
+        let tools = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| json!({"name": n, "input_schema": {"type": "object"}}))
+                .collect::<Vec<_>>()
+        };
+        let body = |names: &[&str], used: &str| {
+            json!({
+                "model": "m",
+                "max_tokens": 1024,
+                "tools": tools(names),
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "go"}]},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "tu_1", "name": used, "input": {}}],
+                    },
+                ],
+            })
+        };
+        Fixture {
+            outgoing_request_headers: bearer_outgoing_headers(),
+            ..fixture(
+                name,
+                "anthropic",
+                "anthropic",
+                body(ingress_names, resent.0),
+                body(wire_names, resent.1),
+            )
+        }
+    }
+
+    /// CONTROL 7: the credential gate on the tool-rename entry. The
+    /// production rewrite is the OAuth cloak's, so an api-key capture
+    /// carrying the SAME divergences must leave every one of them
+    /// unexplained.
+    #[test]
+    fn the_tool_rename_is_eligible_only_for_a_bearer_credential_capture() {
+        let on_bearer = tool_pair(
+            "bearer-tools",
+            &["Read", "Write"],
+            &["mcp__Read", "mcp__Write"],
+            ("Read", "mcp__Read"),
+        );
+
+        // POSITIVE CONTROL: behind a Bearer credential the three name
+        // divergences (two declarations plus the resent tool_use) are
+        // explained, so the api-key rejection below is the gate and not
+        // the body being unexplainable.
+        let bearer_run = run(std::slice::from_ref(&on_bearer));
+
+        assert_eq!(
+            bearer_run.lanes[0].unexplained, 0,
+            "{:?}",
+            bearer_run.failures
+        );
+        assert_eq!(hits(&bearer_run, MCP_TOOL_RENAME_ID), 3);
+
+        let on_api_key = Fixture {
+            name: "api-key-tools".to_string(),
+            outgoing_request_headers: api_key_outgoing_headers(),
+            ..on_bearer
+        };
+
+        let api_key_run = run(&[on_api_key]);
+
+        assert_eq!(
+            api_key_run.lanes[0].unexplained, 3,
+            "an api-key capture cannot have run the cloak-lane rewrite: {:?}",
+            api_key_run.failures,
+        );
+        assert_eq!(hits(&api_key_run, MCP_TOOL_RENAME_ID), 0);
+    }
+
+    /// CONTROLS 2-5: a tampered wire name still FAILS, one shape per
+    /// assertion. Each forgery satisfies `starts_with("mcp__")` -- which is
+    /// exactly why the value constraint is the canonical relation instead.
+    #[test]
+    fn a_tampered_tool_name_still_fails_however_it_starts_with_the_prefix() {
+        // POSITIVE CONTROL: the untampered pair adjudicates clean, so each
+        // failure below is attributable to the one name that was changed.
+        let clean = tool_pair(
+            "untampered",
+            &["Read", "mcp_x", "mcp__Write"],
+            &["mcp__Read", "mcp__x", "mcp__Write"],
+            ("Read", "mcp__Read"),
+        );
+        let clean_run = run(&[clean]);
+        assert_eq!(
+            clean_run.lanes[0].unexplained, 0,
+            "{:?}",
+            clean_run.failures
+        );
+
+        for (label, ingress, wire) in [
+            // CONTROL 2: `mcp__` plus a DIFFERENT tool's name. The
+            // substituted name is one the fixture does not DECLARE, so the
+            // verdict is attributable to the value constraint alone -- a
+            // substitution onto a declared sibling's name would ALSO
+            // collapse identity and the injectivity check would answer
+            // first.
+            (
+                "cross-tool substitution",
+                ["Read", "mcp_x", "mcp__Write"],
+                ["mcp__Bash", "mcp__x", "mcp__Write"],
+            ),
+            // CONTROL 3: a truncated name.
+            (
+                "truncation",
+                ["Read", "mcp_x", "mcp__Write"],
+                ["mcp__Rea", "mcp__x", "mcp__Write"],
+            ),
+            // CONTROL 4: the doubling done wrong.
+            (
+                "single-underscore result",
+                ["Read", "mcp_x", "mcp__Write"],
+                ["mcp__Read", "mcp__mcp_x", "mcp__Write"],
+            ),
+            // CONTROL 5: a name the producer would leave ALONE appearing
+            // CHANGED.
+            (
+                "already-prefixed name rewritten",
+                ["Read", "mcp_x", "mcp__Write"],
+                ["mcp__Read", "mcp__x", "mcp__Written"],
+            ),
+        ] {
+            let tampered = tool_pair(label, &ingress, &wire, ("Read", "mcp__Read"));
+
+            let tampered_run = run(&[tampered]);
+
+            assert_eq!(
+                tampered_run.lanes[0].unexplained, 1,
+                "{label} must stay a finding: {:?}",
+                tampered_run.failures,
+            );
+            assert!(
+                tampered_run
+                    .failures
+                    .iter()
+                    .any(|f| f.contains(label) && f.contains("no exception explains these")),
+                "{label} must fail as an unexplained DIVERGENCE, so the verdict is the value \
+                 constraint rather than the fixture-level identity check: {:?}",
+                tampered_run.failures,
+            );
+            assert_eq!(tampered_run.verdict(), Verdict::Fail, "{label}");
+        }
+    }
+
+    /// CONTROL 6: a divergence on a path OUTSIDE the five producer shapes
+    /// still fails -- including a `.name` nested deeper than the producer
+    /// walks, and one inside the caller-authored `input_schema` subtree.
+    ///
+    /// Each case carries the EXACT canonical relation and the exact
+    /// `Changed` kind, so the only thing standing between it and being
+    /// excused is the path predicate.
+    #[test]
+    fn a_canonically_renamed_name_outside_the_producer_paths_still_fails() {
+        // The one caller-controlled subtree a forged path could come from;
+        // a namespace container's NESTED tools[], which is the ingress-side
+        // unwrap defect that must stay findable; and a top-level `name`.
+        let off_path_sites: [fn(&mut Value, &str); 3] = [
+            |body, name| body["tools"][0]["input_schema"]["properties"]["name"] = json!(name),
+            |body, name| body["tools"][0]["tools"] = json!([{"name": name}]),
+            |body, name| body["name"] = json!(name),
+        ];
+
+        for site in off_path_sites {
+            let mut off_path =
+                tool_pair("off-path", &["Read"], &["mcp__Read"], ("Read", "mcp__Read"));
+            site(&mut off_path.ingress_request, "Read");
+            site(&mut off_path.outgoing_request, "mcp__Read");
+
+            let off_path_run = run(&[off_path]);
+
+            assert_eq!(
+                off_path_run.lanes[0].unexplained, 1,
+                "a canonical rename off the producer's walk must stay a finding: {:?}",
+                off_path_run.failures,
+            );
+            assert_eq!(off_path_run.verdict(), Verdict::Fail);
+        }
+    }
+
+    /// CONTROL 8: a COLLISION fails on the fixture-level injectivity check
+    /// even though every individual divergence is prefix-valid.
+    #[test]
+    fn a_collision_fails_on_injectivity_though_every_divergence_is_prefix_valid() {
+        let collided = tool_pair(
+            "collision",
+            &["x", "mcp_x"],
+            &["mcp__x", "mcp__x"],
+            ("x", "mcp__x"),
+        );
+
+        let collision_run = run(&[collided]);
+
+        // The divergence set alone is CLEAN -- both renames are exactly
+        // what the producer would write for their own ingress name -- which
+        // is the whole reason the check cannot live in the matcher.
+        assert_eq!(
+            collision_run.lanes[0].unexplained, 0,
+            "each individual rename is prefix-valid: {:?}",
+            collision_run.failures,
+        );
+        assert_eq!(collision_run.verdict(), Verdict::Fail);
+        assert_eq!(collision_run.lanes[0].failed, 1);
+        assert!(
+            collision_run
+                .failures
+                .iter()
+                .any(|f| f.contains("collision") && f.contains("mcp__x")),
+            "the failure must name the fixture and the collided wire name: {:?}",
+            collision_run.failures,
+        );
+    }
+
+    /// CONTROL 9: a `tools[]` array shorter on the wire than on ingress
+    /// fails on cardinality. The rename is prefix-only and changes no
+    /// length, so a lost declaration is wire loss.
+    #[test]
+    fn a_tools_array_shorter_on_the_wire_fails_on_cardinality() {
+        let mut truncated = tool_pair(
+            "dropped-declaration",
+            &["Read", "Write"],
+            &["mcp__Read", "mcp__Write"],
+            ("Read", "mcp__Read"),
+        );
+        truncated.outgoing_request["tools"] =
+            json!([{"name": "mcp__Read", "input_schema": {"type": "object"}}]);
+
+        let truncated_run = run(&[truncated]);
+
+        assert_eq!(truncated_run.verdict(), Verdict::Fail);
+        assert!(
+            truncated_run
+                .failures
+                .iter()
+                .any(|f| f.contains("dropped-declaration")),
+            "got: {:?}",
+            truncated_run.failures,
+        );
+        assert!(
+            truncated_run
+                .failures
+                .iter()
+                .any(|f| f.contains("2 name(s) on ingress and 1 on the wire")),
+            "the cardinality verdict must be reported alongside the lost element: {:?}",
+            truncated_run.failures,
+        );
+    }
+
+    /// The injectivity check is owed only where this entry EXPLAINED
+    /// something. A fixture whose tool names never diverge carries no claim
+    /// about them, so a duplicate declaration it happens to hold on both
+    /// sides is not this check's business.
+    #[test]
+    fn the_identity_check_is_not_owed_on_a_fixture_the_entry_did_not_explain() {
+        let unrenamed = tool_pair(
+            "no-rename",
+            &["mcp__x", "mcp__x"],
+            &["mcp__x", "mcp__x"],
+            ("mcp__x", "mcp__x"),
+        );
+
+        let unrenamed_run = run(&[unrenamed]);
+
+        assert_eq!(hits(&unrenamed_run, MCP_TOOL_RENAME_ID), 0);
+        assert_eq!(
+            unrenamed_run.lanes[0].failed, 0,
+            "no rename was explained, so no identity claim is owed: {:?}",
+            unrenamed_run.failures,
         );
     }
 
@@ -1586,6 +1897,7 @@ mod tests {
             "billing-system-block-stripped",
             "auto-cache-breakpoint-injected",
             "oauth-sampling-stripped",
+            MCP_TOOL_RENAME_ID,
         ] {
             assert!(
                 partial_run
