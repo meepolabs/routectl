@@ -377,6 +377,16 @@ Fields:
   Bedrock api_shapes -> `bedrock`, which `kind_str()` does not split).
   An unmapped provider kind leaves this EMPTY and warns, rather than
   passing an unknown spelling through as if it were a lane token.
+
+  The rig harvests the raw kind ONLY from the `routectl_core::log_safe`
+  traces that own the provider vocabulary (the outgoing and upstream body
+  and header lines). Other emitters write a field of the same name in a
+  DIFFERENT vocabulary -- the router's capability-observation WARN carries
+  the config entry's `kind_str()` spelling -- and both are correct at their
+  own site, so the harvest is anchored to its emitter rather than to the
+  field name. Adding a `kind_str()` arm to the normalization would be the
+  conflation, not the fix: it would key the api-shape distinction off a
+  token that does not carry it.
 - `case_id` -- stable identity of the SCENARIO, as opposed to the
   one-off `request_id`. A rerun of the same case re-lands on the same
   identity, so it either matches or diffs. Written from
@@ -424,9 +434,9 @@ Fields:
   `--check`s and validates EVERY candidate, retains only the selected staged
   directory, and performs a single promotion plus a single manifest append
   after the whole scan succeeds. Every landing gate is computed from the
-  candidate's own bytes and trace lines -- the lane from its
-  `provider_kind`, the seam check from its header capture, the
-  expected-ingress pin from its traced dialect -- so a LATER candidate can
+  candidate's own bytes and trace lines -- the seam check from its header
+  capture, the expected-ingress pin from its traced dialect -- so a LATER
+  candidate can
   refuse the run for a reason the selected candidate passed. Promoting as
   the scan ran meant such a refusal destroyed the correct fixture the run
   had already landed; with nothing promoted while candidates are still being
@@ -448,12 +458,18 @@ Fields:
   interactions under one case id is REFUSED: that is what keeps "one case id
   pins one interaction" enforced by something.
 
-  PER-REQUEST FACTS MAY SKIP; PER-RUN FACTS ABORT. The wire pattern is the
-  only per-request fact among the landing gates -- a missing structural
-  summary, an unclassified lane, seam/mode incoherence, an unexpected
-  ingress dialect and an empty lane are properties of the RUN, identical
-  for every request in the trace, so aborting on them is correct and
-  stricter. ONE deliberate exception: scrub `--check` residue is
+  PER-REQUEST FACTS MAY SKIP; PER-RUN FACTS ABORT. Two per-request facts
+  among the landing gates. The wire pattern is one. LANE RESOLUTION is the
+  other: the lane comes from THIS request's traced `provider_kind`, so a
+  candidate whose lane will not resolve says nothing about a candidate
+  already selected off its own lines -- with a selection held it is a SKIP
+  and the selection still promotes, and with none held it is still the
+  refusal, because that candidate is the one the case would pin and a
+  fixture nothing can gate must fail closed. A missing structural summary,
+  an unclassified lane, seam/mode incoherence and an unexpected ingress
+  dialect remain properties of the RUN, identical for every request in the
+  trace, so aborting on them is correct and stricter. ONE deliberate
+  exception: scrub `--check` residue is
   per-request and stays FATAL, because silently skipping past a body that
   carried a credential shape would turn the loudest safety signal in the
   pipeline into a per-request footnote. Scanning every candidate is what

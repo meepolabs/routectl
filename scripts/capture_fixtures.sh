@@ -123,8 +123,8 @@
 #     scrubbed, checked and validated; only the SELECTED staged directory
 #     is retained, and a single promotion plus a single manifest append
 #     happen after the whole scan succeeds. Every gate below is computed
-#     from the CANDIDATE's own bytes and trace lines -- the lane from its
-#     `provider_kind`, the seam check from its header capture, the
+#     from the CANDIDATE's own bytes and trace lines -- the seam check
+#     from its header capture, the
 #     expected-ingress pin from its traced dialect -- so a later
 #     candidate can refuse the run for a reason the selected candidate
 #     passed. Promoting as the scan ran meant such a refusal deleted the
@@ -156,16 +156,21 @@
 #     identical for every request in the trace, so skipping past it would
 #     only reach the same verdict one candidate later.
 #
-#     PER-REQUEST FACTS MAY SKIP, PER-RUN FACTS ABORT. The wire pattern is
-#     the only per-request fact among the gates: a missing structural
-#     summary, an unclassified lane, seam/mode incoherence, an
-#     unexpected ingress dialect and an empty lane are properties of the
-#     RUN. ONE deliberate exception, named as one: scrub `--check` residue
-#     is per-request and stays FATAL, because silently skipping past a
-#     body that carried a credential shape would turn the loudest safety
-#     signal in the pipeline into a per-request footnote. Staging every
-#     candidate is what keeps that exception meaningful: a `break` on the
-#     first match would leave the rest of the turn unscrubbed and
+#     PER-REQUEST FACTS MAY SKIP, PER-RUN FACTS ABORT. Two per-request
+#     facts among the gates. The wire pattern is one. The other is LANE
+#     RESOLUTION: the lane comes from THIS request's traced
+#     `provider_kind`, so a candidate whose lane will not resolve says
+#     nothing about a candidate already selected off its own lines -- with
+#     a selection held it is a SKIP, and with none held it is still the
+#     refusal, because that candidate is the one the case would pin. A
+#     missing structural summary, an unclassified lane, seam/mode
+#     incoherence and an unexpected ingress dialect remain properties of
+#     the RUN. ONE deliberate exception, named as one: scrub `--check`
+#     residue is per-request and stays FATAL, because silently skipping
+#     past a body that carried a credential shape would turn the loudest
+#     safety signal in the pipeline into a per-request footnote. Staging
+#     every candidate is what keeps that exception meaningful: a `break` on
+#     the first match would leave the rest of the turn unscrubbed and
 #     unchecked.
 #   * The two independent statements of the CLIENT VERSION -- the wire
 #     value parsed from the client-controlled `user-agent` and the
@@ -246,6 +251,31 @@ PATTERN_MISMATCH_RC=90
 # capture rather than a defect. Adjacent to the mismatch code for the same
 # reason it is not in the low range.
 REDUNDANT_MATCH_RC=91
+
+# write_fixture's return code for "this candidate's own traced
+# provider_kind resolved to no lane, and an earlier candidate is already
+# selected".
+#
+# THE LANE IS A PER-REQUEST FACT. It is computed from THIS request's own
+# trace lines -- its `provider_kind` field, which names the provider the
+# alias arm resolved to for this request -- so a candidate whose lane will
+# not resolve says nothing about the selected candidate, whose lane resolved
+# from its own lines. Treating it as a run-level refusal is what let a LATER
+# candidate discard an already-gated selection: promote-once meant nothing
+# was corrupted, but the run still ended with no fixture when a valid one
+# had been chosen. So it joins the pattern mismatch as a SKIP.
+#
+# ONLY when a selection already exists. A candidate reaching the lane gate
+# with nothing selected yet IS the request the case would pin, and a fixture
+# nothing can gate is refused rather than skipped past -- the fail-closed
+# reading is unchanged for the request that would land.
+#
+# Distinct from the mismatch code because the two are different facts about
+# the candidate and the selection line counts them the same way only by
+# choice: a lane that will not resolve is counted as a skip, since a reader
+# needs "one candidate was not usable" and the two reasons are both in the
+# rig's own warning above it.
+LANE_UNRESOLVED_RC=92
 
 # Selector accounting, driver mode only. Every completed request in the
 # trace is a CANDIDATE for the run's single case id; the recorded wire
@@ -439,6 +469,24 @@ fi
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
+
+# The tracing target and the message set that OWN the provider vocabulary
+# normalize_lane maps. REPLICAS of the log_safe.rs module path and of the
+# four call sites that pass a `provider_kind` field: `trace_outgoing_body`,
+# `trace_upstream_success_body`, and the two header traces (HDR_MSG_OUTGOING
+# / HDR_MSG_UPSTREAM). Replicas because the rig runs in throwaway trees
+# carrying scripts/ and no crates/; the self-test welds each spelling to the
+# Rust source where that tree exists.
+#
+# `upstream error body` is deliberately ABSENT: it is a DEBUG line on the
+# failure path, and a request whose upstream errored has no completion
+# marker, so it is never a candidate. Adding it would widen the anchor to a
+# line no in-scope request emits.
+PROVIDER_KIND_TARGET="routectl_core::log_safe: "
+PROVIDER_KIND_MESSAGES="outgoing request body
+upstream success body
+outgoing request headers
+upstream response headers"
 
 # Normalize a traced `provider_kind` into the LANE vocabulary --
 # `ProviderEntry::kind_str()` in
@@ -789,6 +837,24 @@ strip_ansi < "$LOG" > "$stripped"
 # value is in scope. The completion line carries `request_id=...` and
 # a timestamp at the start of the line.
 #
+# BOTH HARVESTS ARE SCOPED TO THE EMITTER THAT OWNS THE VOCABULARY, and
+# for `provider_kind` that is load-bearing rather than tidy. Two
+# unrelated emitters spell a field of that name with two different
+# vocabularies: the log_safe traces below carry the providers-crate
+# PROVIDER_KIND const (`anthropic`), while the router's capability
+# observation carries the CONFIG ENTRY's kind_str() (`anthropic-api`).
+# Neither is wrong at its own site, and normalize_lane maps only the
+# first. A scan on the bare field name is therefore a scan over two
+# vocabularies at once: it took whichever line came last, handed the
+# config spelling to normalize_lane, and left the lane empty on every
+# request where a capability observation acted.
+#
+# First-wins is NOT the fix. It resolves today's line order by accident
+# and inverts the moment an emitter moves. Anchoring on the emitter's own
+# target and message -- the way the ingress arm already does -- makes a
+# future third emitter of the same field name a no-op here instead of a
+# silent lane change.
+#
 # EACH ROW CARRIES TWO TIMESTAMPS, and the distinction is load-bearing:
 #
 #   * the ORDERING key is the FIRST `ingress request body` occurrence for
@@ -806,7 +872,12 @@ strip_ansi < "$LOG" > "$stripped"
 # line is absent is not a candidate at all (`ingress_seen`), so the
 # ordering key is never empty for a row this prints.
 in_scope_ids() {
-  awk -v since="$since" '
+  awk -v since="$since" \
+      -v pk_target="$PROVIDER_KIND_TARGET" \
+      -v pk_messages="$PROVIDER_KIND_MESSAGES" '
+    BEGIN {
+      pk_msg_n = split(pk_messages, pk_msg, "\n")
+    }
     /ingress request body ingress="[^"]+"/ {
       if (match($0, /request_id=[0-9a-f-]+/)) {
         id = substr($0, RSTART+11, RLENGTH-11)
@@ -822,11 +893,25 @@ in_scope_ids() {
       }
     }
     /provider_kind="[^"]+"/ {
-      if (match($0, /request_id=[0-9a-f-]+/)) {
+      # THE EMITTER ANCHOR. Only lines whose message -- at the position
+      # right after the FIRST log_safe target -- is one of the
+      # provider-vocabulary messages may set this. A capability
+      # observation carries the same field name in the config-entry
+      # vocabulary and is skipped here, and a body that quotes one of
+      # these lines sits past the first target occurrence so it can never
+      # select either.
+      p = index($0, pk_target)
+      if (p > 0 && match($0, /request_id=[0-9a-f-]+/)) {
         id = substr($0, RSTART+11, RLENGTH-11)
-        if (match($0, /provider_kind="[^"]+"/)) {
-          k = substr($0, RSTART+15, RLENGTH-16)
-          provider_kind[id] = k
+        rest = substr($0, p + length(pk_target))
+        for (i = 1; i <= pk_msg_n; i++) {
+          if (substr(rest, 1, length(pk_msg[i])) != pk_msg[i]) continue
+          # First occurrence WITHIN the matched message: the field region
+          # precedes body=, so a body copy of the field cannot be read.
+          if (match(rest, /provider_kind="[^"]+"/)) {
+            provider_kind[id] = substr(rest, RSTART+15, RLENGTH-16)
+          }
+          break
         }
       }
     }
@@ -1313,6 +1398,18 @@ META
   local dst
   if [ "$DRIVER_MODE" = 1 ]; then
     if [ -z "$lane" ]; then
+      # A LANE THAT WILL NOT RESOLVE IS A PER-REQUEST FACT: it comes from
+      # THIS request's own traced `provider_kind`, so it says nothing about
+      # a candidate already selected off its own lines. With a selection
+      # held, skip this candidate; with none held, this is the request the
+      # case would pin and a fixture nothing can gate fails closed.
+      if [ -n "$SELECTED_STAGED" ]; then
+        echo "capture_fixtures: no lane for $id (provider_kind '$pkind'); skipping this" >&2
+        echo "candidate -- the lane is computed from its own trace lines and says nothing" >&2
+        echo "about the already-selected candidate." >&2
+        rm -rf "$tmp"
+        return "$LANE_UNRESOLVED_RC"
+      fi
       echo "capture_fixtures: no lane for $id (provider_kind '$pkind'); not promoting the fixture" >&2
       rm -rf "$tmp"
       return 1
@@ -1454,6 +1551,16 @@ while IFS=$'\t' read -r ts id pkind ikind; do
   # shape one turn further on.
   if [ "$DRIVER_MODE" = 1 ] && [ "$write_rc" = "$REDUNDANT_MATCH_RC" ]; then
     CANDIDATES_REDUNDANT=$((CANDIDATES_REDUNDANT + 1))
+    continue
+  fi
+  # A LATER CANDIDATE WHOSE OWN LANE DID NOT RESOLVE, with a selection
+  # already held. The lane is computed from that candidate's own traced
+  # `provider_kind`, so it is a per-request fact and cannot indict the
+  # selection -- counted as a skip and scanned past. write_fixture returns
+  # this code only when a selection exists; the no-selection case is still
+  # the run-level refusal re-raised below.
+  if [ "$DRIVER_MODE" = 1 ] && [ "$write_rc" = "$LANE_UNRESOLVED_RC" ]; then
+    CANDIDATES_SKIPPED=$((CANDIDATES_SKIPPED + 1))
     continue
   fi
   # THE RE-RAISE. Anything else non-zero is a run-level refusal and ends
