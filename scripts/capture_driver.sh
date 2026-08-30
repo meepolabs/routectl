@@ -210,6 +210,7 @@
 #   ROUTECTL_FIXTURE_CONNECTION_MODE
 #   ROUTECTL_FIXTURE_WIRE_PATTERN
 #   ROUTECTL_FIXTURE_EXPECTED_INGRESS
+#   ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION
 #
 # STABLE -- a contributor codes against these. Renaming one breaks a
 # driver, or changes what a landed fixture MEANS, so it moves only behind
