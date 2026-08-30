@@ -413,10 +413,40 @@ Fields:
   order -- the beginning of the request, not its completion marker, because
   stream flush timing can otherwise reorder two requests whose initiation
   order was fixed, and a selector over a nondeterministic order is a
-  nondeterministic selector.
+  nondeterministic selector. **The FIRST candidate satisfying the claim is
+  the one the case pins:** first-match encodes no assumption about whether a
+  claim grows or shrinks across a turn, and it is the minimal witness --
+  "richest" and "last" are timing properties rather than wire shapes, and
+  would pin a fixture to client chattiness so two deployments' fixtures for
+  one case would stop being comparable.
 
-  Two candidates that BOTH satisfy the claim is genuine ambiguity and stays
-  a hard refusal: one case id pins one interaction.
+  **STAGE ALL, VALIDATE ALL, PROMOTE ONCE.** Driver mode stages, scrubs,
+  `--check`s and validates EVERY candidate, retains only the selected staged
+  directory, and performs a single promotion plus a single manifest append
+  after the whole scan succeeds. Every landing gate is computed from the
+  candidate's own bytes and trace lines -- the lane from its
+  `provider_kind`, the seam check from its header capture, the
+  expected-ingress pin from its traced dialect -- so a LATER candidate can
+  refuse the run for a reason the selected candidate passed. Promoting as
+  the scan ran meant such a refusal destroyed the correct fixture the run
+  had already landed; with nothing promoted while candidates are still being
+  examined, that is structurally impossible rather than merely unwound.
+  Live-box mode is unchanged: it keys on `request_id`, so each of its
+  captures is independent evidence and promotes as it is written.
+
+  A LATER CANDIDATE THAT ALSO SATISFIES THE CLAIM IS REDUNDANT, not
+  ambiguous: a tool loop resends its `tool_use` / `tool_result` pair in every
+  later request, so a monotone claim is satisfied by every candidate after
+  the first witness. It is counted separately from a skip
+  (`candidates_redundant`), because a reader seeing two skips would conclude
+  two requests failed the claim when one failed and one was a redundant
+  witness. A redundant match is accepted only as a strict CONTINUATION of
+  the selected one -- same traced ingress kind, same normalized lane and raw
+  provider kind, same model, and a turn list strictly LONGER. A client
+  retry, a fallback attempt carrying the same history, and a stray
+  side-request are none of those, so a trace holding two genuinely different
+  interactions under one case id is REFUSED: that is what keeps "one case id
+  pins one interaction" enforced by something.
 
   PER-REQUEST FACTS MAY SKIP; PER-RUN FACTS ABORT. The wire pattern is the
   only per-request fact among the landing gates -- a missing structural
@@ -426,7 +456,9 @@ Fields:
   stricter. ONE deliberate exception: scrub `--check` residue is
   per-request and stays FATAL, because silently skipping past a body that
   carried a credential shape would turn the loudest safety signal in the
-  pipeline into a per-request footnote.
+  pipeline into a per-request footnote. Scanning every candidate is what
+  keeps that exception meaningful: stopping at the first match would leave
+  the rest of the turn unscrubbed and unchecked.
 
   Landing zero fixtures in driver mode therefore splits two ways, with
   opposite retry verdicts and NO new exit code: candidates existed and none
@@ -437,10 +469,11 @@ Fields:
 
   The rig emits ONE structured selection line per driver run naming the
   case id, the selected request id, how many candidates were examined, how
-  many were skipped, and the ordering basis. It logs no bodies. This is
-  observability, not identity, so it is a log line and deliberately NOT a
-  meta field: under the selector the ordinal is not the selection basis, so
-  a recorded one would preserve a number nothing reads.
+  many were skipped, how many were redundant witnesses, and the ordering
+  basis. It logs no bodies. This is observability, not identity, so it is a
+  log line and deliberately NOT a meta field: under the selector the ordinal
+  is not the selection basis, so a recorded one would preserve a number
+  nothing reads.
 
   `scripts/promote_fixture.sh` re-runs the same predicate on the staged
   bytes, against the pattern the staged `meta.json` records, because a
