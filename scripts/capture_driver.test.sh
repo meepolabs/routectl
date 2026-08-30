@@ -163,6 +163,25 @@ canned_trace_half_structural() {
     canned_trace | grep -vF 'structural summary direction="outgoing"'
 }
 
+# A canned trace holding TWO completed requests, NEITHER of which exhibits
+# the pattern its case claims. The rig's wire-pattern check is a selector
+# over the several requests one agentic turn produces, so this is the third
+# way a driver run can land nothing -- and it is a CASE DEFECT, never
+# retryable, so the runner must map it to 5 alongside the other refusals
+# rather than to the retryable 7. Both requests are `baseline` in shape
+# while the case claims `cache-breakpoints`, which no request here carries.
+#
+# The two copies are separated by DAY rather than by hour: the canned
+# trace's `T<hh>` timestamp field is a token the internal-ID scanner reads
+# as a label, so rewriting the hour would trip that gate on this file.
+canned_trace_no_candidate_matches() {
+    local i
+    for i in 1 2; do
+        canned_trace |
+            sed "s/0000000000d1/0000000000e$i/g; s/2026-08-25/2026-08-2$((25 + i))/g"
+    done
+}
+
 # The python listener, shared by the stub daemon and by the case that
 # OCCUPIES a port. Answers only `/health`; anything else 404s, because a
 # stub that answered everything would hide a runner that polled the wrong
@@ -379,6 +398,7 @@ make_work() {
     for case_id in driver-selftest-02 driver-selftest-03 driver-selftest-04 \
         driver-selftest-05 driver-selftest-06 driver-selftest-07 \
         driver-selftest-08 driver-selftest-09 driver-selftest-09b \
+        driver-selftest-09c \
         driver-selftest-13b driver-selftest-15 driver-selftest-15b \
         driver-selftest-15c driver-selftest-15d driver-selftest-16 \
         driver-selftest-16b; do
@@ -1231,6 +1251,37 @@ ROUTECTL_DRIVER_PORT_MIN="$port_j" ROUTECTL_DRIVER_PORT_MAX="$port_j" \
 check "a rig refusal still exits 5, not 7" "5" "$rc"
 check_log "the exit-5 message reports a refusal" "refused the fixture" \
     "$work/runner.log"
+rm -rf "$work"
+
+# THE THIRD WAY to land nothing, and the boundary that could collapse: the
+# rig's wire-pattern check is a SELECTOR over the several requests one
+# agentic turn produces, so `captured=0` now splits. Candidates existed and
+# none exhibited the claim -> a CASE DEFECT (exit 5, never retry).
+# Zero candidates -> retryable (exit 7, asserted above). Collapsed, the
+# matrix runner would retry a case defect forever, spending real tokens each
+# time to reach the same verdict.
+#
+# The case here claims `cache-breakpoints` while both completed requests are
+# `baseline` in shape, so both are examined and both are skipped.
+work="$(make_work)"
+write_case "$work/repo/scripts/drivers/cases" driver-selftest-09c cache-breakpoints
+canned_trace_no_candidate_matches >"$work/canned-trace.log"
+port_k="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_k" ROUTECTL_DRIVER_PORT_MAX="$port_k" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-09c || rc=$?
+check "candidates that all fail the claim exit 5 (a defect), not 7 (retryable)" \
+    "5" "$rc"
+check_log "the rig's all-skipped message names the candidate count" \
+    "examined 2 candidate" "$work/runner.log"
+check_log "the rig's selection line reaches the runner log" \
+    "candidates_skipped=2" "$work/runner.log"
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-09c" ]; then
+    echo "FAIL: a run whose candidates all failed created a corpus directory"
+    fails=$((fails + 1))
+else
+    echo "PASS: a run whose candidates all failed creates no corpus directory"
+fi
 rm -rf "$work"
 
 # --- Case 10: the runner names nothing the operator's live daemon owns --

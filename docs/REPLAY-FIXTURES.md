@@ -353,10 +353,11 @@ Fields:
   the shell self-tests weld to the Rust source.
 
   Deliberately NOT re-derived alongside it: a lane-equality check (the lane
-  comes FROM the same trace, so it cannot disagree with itself), a
+  comes FROM the same trace, so it cannot disagree with itself) and a
   `config_sha` equality check (the runner computes it from the file it
-  booted), and an exactly-one-completed-request check (the rig already
-  refuses a zero-landing driver run with its own exit code).
+  booted). Nor an exactly-one-completed-request check: one agentic turn
+  legitimately produces several, and the wire-pattern selector below is
+  what decides which of them a case pins.
 - `provider_kind` -- which egress provider produced the outgoing body,
   in the `PROVIDER_KIND` const vocabulary of `routectl-providers` --
   in particular `"anthropic"` (not `"anthropic-api"`) for the
@@ -398,18 +399,55 @@ Fields:
   the other environment pins; EMPTY on a live-box capture, which cannot
   observe it, and on any fixture predating the key.
 
-  **The claim is ENFORCED AT PROMOTION.** `scripts/drivers/lib/verify_pattern.py`
-  holds one predicate per pattern in the closed vocabulary, read off the
-  fixture's own ingress structural line or ingress body, and the capture
-  rig invokes it in driver mode after `scrub-fixture.sh --check` and before
-  the promotion `mv`. A fixture whose captured bytes do not exhibit the
-  pattern its pin records is DISCARDED, and the rig exits non-zero -- which
-  the driver runner reports as a rig refusal, a defect that is never
-  retryable. `scripts/promote_fixture.sh` re-runs the same predicate on the
-  staged bytes, against the pattern the staged `meta.json` records, because
-  a scratch fixture is hand-editable between capture and promotion. An
-  absent predicate script is a hard failure in both, never an unverified
-  promotion.
+  **The claim is a SELECTOR, enforced at promotion.**
+  `scripts/drivers/lib/verify_pattern.py` holds one predicate per pattern in
+  the closed vocabulary, read off the fixture's own ingress structural line
+  or ingress body, and the capture rig invokes it in driver mode after
+  `scrub-fixture.sh --check` and before the promotion `mv`.
+
+  ONE agentic turn produces SEVERAL completed upstream requests, and the
+  case's claim is the statement of WHICH of them the case means. Each
+  completed request in the trace is a CANDIDATE; a candidate whose captured
+  bytes do not exhibit the claim is DISCARDED and SKIPPED, and the next one
+  is considered. Candidates are examined in first-`ingress request body`
+  order -- the beginning of the request, not its completion marker, because
+  stream flush timing can otherwise reorder two requests whose initiation
+  order was fixed, and a selector over a nondeterministic order is a
+  nondeterministic selector.
+
+  Two candidates that BOTH satisfy the claim is genuine ambiguity and stays
+  a hard refusal: one case id pins one interaction.
+
+  PER-REQUEST FACTS MAY SKIP; PER-RUN FACTS ABORT. The wire pattern is the
+  only per-request fact among the landing gates -- a missing structural
+  summary, an unclassified lane, seam/mode incoherence, an unexpected
+  ingress dialect and an empty lane are properties of the RUN, identical
+  for every request in the trace, so aborting on them is correct and
+  stricter. ONE deliberate exception: scrub `--check` residue is
+  per-request and stays FATAL, because silently skipping past a body that
+  carried a credential shape would turn the loudest safety signal in the
+  pipeline into a per-request footnote.
+
+  Landing zero fixtures in driver mode therefore splits two ways, with
+  opposite retry verdicts and NO new exit code: candidates existed and none
+  matched is a case defect (the rig's refusal exit, never retryable), while
+  zero candidates is a transient (the zero-landing exit, retryable). A
+  driver run ending in a refusal leaves no promoted fixture and no manifest
+  line.
+
+  The rig emits ONE structured selection line per driver run naming the
+  case id, the selected request id, how many candidates were examined, how
+  many were skipped, and the ordering basis. It logs no bodies. This is
+  observability, not identity, so it is a log line and deliberately NOT a
+  meta field: under the selector the ordinal is not the selection basis, so
+  a recorded one would preserve a number nothing reads.
+
+  `scripts/promote_fixture.sh` re-runs the same predicate on the staged
+  bytes, against the pattern the staged `meta.json` records, because a
+  scratch fixture is hand-editable between capture and promotion -- there
+  it is a GATE rather than a selector, since a staged directory is one
+  request. An absent predicate script is a hard failure in both, never an
+  unverified promotion.
 
   **Dialect scope, per pattern.** `tool-use-multiturn` is dialect-tolerant:
   one census picks the turn list by which key the captured body carries

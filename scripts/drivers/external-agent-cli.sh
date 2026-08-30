@@ -112,7 +112,11 @@ while IFS= read -r prompt; do
   [ "${#common_argv[@]}" -gt 0 ] && argv+=("${common_argv[@]}")
   argv+=("$ONESHOT_FLAG" "$prompt")
   rc=0
-  "${argv[@]}" >>"$ROUTECTL_DRIVER_RUN/agent-turns.log" 2>&1 || rc=$?
+  # The client's stdin is /dev/null, never the loop's. Inherited, a client
+  # that reads stdin drains the remaining prompts off the pipe this loop is
+  # still reading from, and a multi-turn case collapses into one turn
+  # carrying every prompt concatenated.
+  "${argv[@]}" </dev/null >>"$ROUTECTL_DRIVER_RUN/agent-turns.log" 2>&1 || rc=$?
   if [ "$rc" != 0 ]; then
     echo "driver: the agent CLI exited $rc on turn $turn" >&2
     tail -n 20 "$ROUTECTL_DRIVER_RUN/agent-turns.log" >&2 || true

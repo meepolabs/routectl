@@ -26,6 +26,22 @@ per-harness files small enough for the rule to stay affordable.
 A harness with no file here is not drivable on this box. Its missing
 piece is filed to the `wild-evidence` pen rather than stubbed.
 
+## A turn loop never lends the client its stdin
+
+`claude-code-print.sh` and `external-agent-cli.sh` both feed the case's
+turns through a `while read` loop, so the loop's stdin is a pipe holding
+the REMAINING prompts. Both redirect the client's stdin from `/dev/null`:
+a client that reads stdin otherwise drains that pipe, and a 2-turn case
+runs ONE turn with every prompt concatenated into a single user text block
+-- a fixture claiming a multi-turn shape it never carried.
+`claude-code.sh` is structurally exempt (it pipes a generated keystroke
+script into a pty, with no client sitting in the loop).
+
+The self-test's stub client DRAINS stdin for exactly this reason. A stub
+that ignored it cannot exhibit the bug, so the "once per turn" assertion
+passed against a stub incapable of failing it -- and it does pass, measured,
+with either driver's redirect removed.
+
 ## The dialect a driver's client speaks is the CALLER's pin
 
 A case is deliberately dialect-agnostic and a lane config declares only the

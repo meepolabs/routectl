@@ -94,7 +94,13 @@ while IFS= read -r prompt; do
     argv+=(--resume "$SESSION_ID")
   fi
   rc=0
-  "${argv[@]}" "$prompt" >>"$ROUTECTL_DRIVER_RUN/print-turns.log" 2>&1 || rc=$?
+  # The client's stdin is /dev/null, never the loop's. Inherited, the
+  # client reads the remaining prompts off the pipe this loop is still
+  # reading from: a 2-turn case then ran ONE turn with both prompts
+  # concatenated into a single user text block, and the fixture claimed a
+  # multi-turn shape it never carried.
+  "${argv[@]}" "$prompt" \
+    </dev/null >>"$ROUTECTL_DRIVER_RUN/print-turns.log" 2>&1 || rc=$?
   if [ "$rc" != 0 ]; then
     echo "driver: $CLAUDE_BIN --print turn $turn exited $rc" >&2
     tail -n 20 "$ROUTECTL_DRIVER_RUN/print-turns.log" >&2 || true
