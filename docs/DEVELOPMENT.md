@@ -549,10 +549,15 @@ What each run then does, in order:
 A cleanup trap runs on every exit path, so an interrupted or failed run
 never leaves a daemon holding its port. Exit codes: 2 usage, 3 unhealthy
 daemon, 4 driver failure, 5 rig refusal, 6 no free port, 7 the rig ran
-clean but landed no fixture. 5 and 7 are separate because a refusal means
-routectl produced a fixture the gate rejected (a defect, never retry)
-while a zero landing means the case produced no completed request
-(retryable).
+clean but landed no fixture, 8 (front-proxy only) the daemon is healthy
+but its MITM listener never became ready. 5 and 7 are separate because a
+refusal means routectl produced a fixture the gate rejected (a defect,
+never retry) while a zero landing means the case produced no completed
+request (retryable). 8 is separate from 3 because MITM startup failure
+is non-fatal to the daemon -- `/health` stays green while the proxied
+CONNECT has nothing to hit -- so an operator debugging "healthy daemon,
+dead proxy" from the unhealthy-daemon message would look at the wrong
+layer.
 
 `meta.config_sha` is the sha256 of the COMMITTED lane config
 (`scripts/drivers/config/<lane>.toml`), not of the copy the run boots
@@ -747,13 +752,18 @@ the trace, the client's own output, and `client.txt` (the version the driver
 read from the binary at run time). A rerun of the same case re-lands on the
 same path and produces a diff.
 
-The MITM mode needs its two carriers, and an unset one is a refusal rather
-than a fallback to `base-url`:
+The MITM mode selects its own second port, exports the two carriers
+(`ROUTECTL_DRIVER_PROXY_URL`, `ROUTECTL_DRIVER_PROXY_CA`) into the driver
+environment itself, and gates the run on the proxy listener actually
+being ready (exit 8 when it is not). The CA it points a client at is the
+one the daemon mints at listener start, under the run's throwaway config
+root at `mitm-certs/current/mitm-ca-cert.pem` -- `current` is the
+generation symlink the cert store swaps on re-mint. The lane must be the
+`[mitm]`-carrying twin; the mode and the lane config are checked against
+each other before any daemon boots:
 
 ```
-ROUTECTL_DRIVER_PROXY_URL=http://127.0.0.1:8443 \
-ROUTECTL_DRIVER_PROXY_CA=$XDG_CONFIG_HOME/routectl/mitm-certs/ca.pem \
-scripts/capture_driver.sh --lane anthropic-api --case thinking-01 \
+scripts/capture_driver.sh --lane anthropic-api.front-proxy --case thinking-01 \
   --connection-mode front-proxy -- scripts/drivers/claude-code.sh
 ```
 
@@ -878,7 +888,7 @@ What crosses the boundary, and nothing else:
 - `--user` carries the host uid/gid, so the fixture lands owned by you. A
   root-owned fixture could not be promoted or scrubbed without sudo.
 
-**The wrapper's exit code is the runner's, verbatim.** 0 and 2 through 7
+**The wrapper's exit code is the runner's, verbatim.** 0 and 2 through 8
 mean exactly what they mean on the host path, so a caller reads one contract
 either way. The wrapper's own refusals occupy a disjoint range, one code
 each, and every one of them fires before docker is consulted at all -- so a

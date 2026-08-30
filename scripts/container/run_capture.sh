@@ -9,7 +9,7 @@
 #
 # Everything after `--` is handed to capture_driver.sh VERBATIM inside the
 # container, and the container's exit code comes back out of this script
-# unchanged -- so the runner's 0/2/3/4/5/6/7 contract is what a caller
+# unchanged -- so the runner's 0/2/3/4/5/6/7/8 contract is what a caller
 # reads, exactly as it would from a host run.
 #
 # Usage:
@@ -96,7 +96,7 @@
 # differently; that cost is smaller than a mount flag reaching docker
 # because it sat after the driver separator.
 #
-# Exit codes 0 and 2-7 are the runner's, propagated verbatim. 2 doubles as
+# Exit codes 0 and 2-8 are the runner's, propagated verbatim. 2 doubles as
 # this script's own usage error, which is the same class of fault.
 #
 # `ROUTECTL_BIN` selects the host binary to mount (default
