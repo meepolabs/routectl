@@ -149,42 +149,71 @@ fake_key() { printf '%s%s' "$1" "${2:-$FAKE_RUN}"; }
 
 FAKE_TOKEN="$(fake_key 'stub-oat-' "${FAKE_RUN}IJKLMNOP")"
 
-# Compared by DIGEST, never by value. The token here is fake, but a
-# self-test that echoes a token into a log teaches the shape a later edit
-# would copy against a real one.
-FAKE_TOKEN_SHA="$(printf '%s' "$FAKE_TOKEN" | sha256sum | cut -d' ' -f1)"
+# The codex seat's own token and account id, DISTINCT from the anthropic
+# ones. Distinct because the wrapper keys the variable name on the provider:
+# with one shared value, a wrapper that forwarded the anthropic token under
+# the openai name would pass every digest assertion.
+FAKE_CODEX_TOKEN="$(fake_key 'stub-codex-' "${FAKE_RUN}QRSTUVWX")"
+FAKE_CODEX_ACCOUNT="11111111-2222-4333-8444-555555555555"
+
+# A gemini API key the operator would have exported. gemini is NOT an OAuth
+# provider, so it has no seat entry and its credential can only arrive as an
+# env passthrough -- which is the second of the wrapper's two sources.
+FAKE_GEMINI_KEY="$(fake_key 'stub-gemini-' "${FAKE_RUN}YZ012345")"
+
+# Compared by DIGEST, never by value. The values here are fake, but a
+# self-test that echoes a credential into a log teaches the shape a later
+# edit would copy against a real one.
+sha_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+FAKE_TOKEN_SHA="$(sha_of "$FAKE_TOKEN")"
+FAKE_CODEX_TOKEN_SHA="$(sha_of "$FAKE_CODEX_TOKEN")"
+FAKE_CODEX_ACCOUNT_SHA="$(sha_of "$FAKE_CODEX_ACCOUNT")"
+FAKE_GEMINI_KEY_SHA="$(sha_of "$FAKE_GEMINI_KEY")"
 
 SEAT_DIR="$WORK/seat"
 mkdir -p "$SEAT_DIR"
 SEAT="$SEAT_DIR/credentials.json"
 
-# The real seat's shape, one provider deep, written through python so the
-# JSON is well-formed rather than hand-quoted. Every neighbouring field a
-# real seat carries is deliberately present: the wrapper must read exactly
-# one of them.
+# The real seat's shape, written through python so the JSON is well-formed
+# rather than hand-quoted. Every neighbouring field a real seat carries is
+# deliberately present: the wrapper must read exactly the ones it needs.
+#
+# TWO seats, because the convention under test is per-provider: `anthropic`
+# (whose key is the provider name) and `codex` (whose key is the OAUTH ID,
+# not the `openai` provider name -- that mapping is the thing a lane author
+# would otherwise guess wrong). `account.account_id` is the field
+# `openai-responses` + `chatgpt-oauth` requires, and it is present on BOTH
+# seats so an assertion about the codex one cannot pass by reading the
+# anthropic one.
 write_seat() {
-    python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
 import json, sys
 
-token = sys.argv[2]
+path, anthropic_token, codex_token, codex_account = sys.argv[1:5]
+def record(token, account_id):
+    return {
+        "access_token": token,
+        "refresh_token": "stub-refresh-value",
+        "token_type": "Bearer",
+        "expires_at_unix": 4102444800,
+        "session_id": "00000000-0000-4000-8000-000000000000",
+        "account": {"email": "stub@example.invalid", "account_id": account_id},
+    }
+
 doc = {
     "schema_version": 1,
     "providers": {
-        "anthropic": {
-            "access_token": token,
-            "refresh_token": "stub-refresh-value",
-            "token_type": "Bearer",
-            "expires_at_unix": 4102444800,
-            "session_id": "00000000-0000-4000-8000-000000000000",
-        }
+        "anthropic": record(anthropic_token, "00000000-0000-4000-8000-0000000000aa"),
+        "codex": record(codex_token, codex_account),
     },
 }
-with open(sys.argv[1], "w", encoding="utf-8") as fh:
+with open(path, "w", encoding="utf-8") as fh:
     json.dump(doc, fh)
 PY
 }
 
-write_seat "$SEAT" "$FAKE_TOKEN"
+write_seat "$SEAT" "$FAKE_TOKEN" "$FAKE_CODEX_TOKEN" "$FAKE_CODEX_ACCOUNT"
 
 # ---------------------------------------------------------------------
 # Stubs the container legs mount and run
@@ -268,8 +297,13 @@ PY
 # write must SUCCEED; either one alone is satisfiable by a container that
 # can write nothing, or by one that can write everything.
 #
-# The token is reported as a DIGEST. Comparing digests proves the value
-# arrived intact without a token ever reaching a file or a log line.
+# Every credential is reported as a DIGEST, and its ABSENCE as the empty
+# string rather than as a digest of nothing: `sha256sum` of an empty input
+# is a fixed value, so a leg asserting "this variable did not cross" would
+# otherwise be asserting a constant and would pass against a wrapper that
+# forwarded an empty value -- which is the exact fault the by-name refusal
+# exists to prevent. Comparing digests proves a value arrived intact
+# without a credential ever reaching a file or a log line.
 write_stub_driver() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -278,12 +312,27 @@ assets=/scratch/assets
 out="$assets/probe.txt"
 seat_xdg="${XDG_CONFIG_HOME:-/nonexistent}/routectl/credentials.json"
 seat_home="${HOME:-/nonexistent}/.config/routectl/credentials.json"
+
+# `<name>_present` and `<name>_sha` for one variable. An unset or empty
+# variable reports `no` and an EMPTY sha, never the digest of "".
+report_credential() {
+    local label="$1" value="${2:-}"
+    if [ -n "$value" ]; then
+        printf '%s_present=yes\n' "$label"
+        printf '%s_sha=%s\n' "$label" \
+            "$(printf '%s' "$value" | sha256sum | cut -d' ' -f1)"
+    else
+        printf '%s_present=no\n' "$label"
+        printf '%s_sha=\n' "$label"
+    fi
+}
+
 {
     printf 'cwd=%s\n' "$PWD"
-    printf 'token_present=%s\n' \
-        "$([ -n "${ROUTECTL_DRIVER_ANTHROPIC_API_KEY:-}" ] && echo yes || echo no)"
-    printf 'token_sha=%s\n' \
-        "$(printf '%s' "${ROUTECTL_DRIVER_ANTHROPIC_API_KEY:-}" | sha256sum | cut -d' ' -f1)"
+    report_credential anthropic_key "${ROUTECTL_DRIVER_ANTHROPIC_API_KEY:-}"
+    report_credential openai_key "${ROUTECTL_DRIVER_OPENAI_API_KEY:-}"
+    report_credential openai_account "${ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID:-}"
+    report_credential gemini_key "${ROUTECTL_DRIVER_GEMINI_API_KEY:-}"
     printf 'seat_at_xdg=%s\n' "$([ -e "$seat_xdg" ] && echo yes || echo no)"
     printf 'seat_at_home=%s\n' "$([ -e "$seat_home" ] && echo yes || echo no)"
     printf 'seat_anywhere=%s\n' \
@@ -392,6 +441,50 @@ wrapper_run() {
             bash "$WRAPPER" "$@"
     ) >"$root.log" 2>&1 || rc=$?
     return "$rc"
+}
+
+# Run the wrapper with a per-leg environment prefix. `env -u` UNSETS every
+# provider variable the surrounding shell might carry: this suite runs on an
+# operator's box, and a real exported credential variable would satisfy a
+# refusal leg from the environment and turn it green for the wrong reason.
+# `LEG_SEAT` selects a seat other than the shared valid one.
+#
+# Usage: provider_run <scratch-root> <VAR=value>... -- [wrapper args...]
+provider_run() {
+    local root="$1"
+    shift
+    local env_pairs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+        env_pairs+=("$1")
+        shift
+    done
+    shift
+    local rc=0
+    (
+        cd "$REPO_ROOT" || exit 2
+        env \
+            -u ROUTECTL_DRIVER_ANTHROPIC_API_KEY \
+            -u ROUTECTL_DRIVER_OPENAI_API_KEY \
+            -u ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID \
+            -u ROUTECTL_DRIVER_GEMINI_API_KEY \
+            "ROUTECTL_BIN=$root/stub-routectl" \
+            "ROUTECTL_CAPTURE_CELL_SEAT=${LEG_SEAT:-$SEAT}" \
+            "${env_pairs[@]}" \
+            bash "$WRAPPER" "$@"
+    ) >"$root.log" 2>&1 || rc=$?
+    return "$rc"
+}
+
+# Read one field out of a landed probe report.
+probe_get() {
+    sed -n "s/^$2=//p" "$1/$ASSETS_REL/probe.txt" | head -1
+}
+
+# Whether the container legs can run at all. Both the accept control and
+# every in-container assertion depend on it.
+container_available() {
+    command -v docker >/dev/null 2>&1 &&
+        docker image inspect "$IMAGE" >/dev/null 2>&1
 }
 
 # A refusal leg. The scratch root is valid and the binary and seat are
@@ -575,6 +668,121 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# Part 3b: the per-provider credential convention
+# ---------------------------------------------------------------------
+#
+# The convention is `ROUTECTL_DRIVER_<PROVIDER>_API_KEY`, keyed on the
+# PROVIDER (`anthropic`, `openai`, `gemini`) and never on the lane. These
+# legs pin the three things a contributor writing the next lane config
+# would otherwise get wrong, and each is REFUSED BY NAME rather than
+# forwarded empty: an empty credential 401s at the upstream and reports as
+# the runner's retryable exit 7, which is indistinguishable from a case
+# that produced no request.
+#
+# `--provider` legs run on the SHARED valid seat unless a leg names its own,
+# so the only variable is the provider asked for.
+
+# gemini is NOT an OAuth provider: it has no seat entry, so with its env
+# var unset there is no source at all. THIS IS THE CORE REFUSAL -- the
+# wrapper must name the provider rather than forward an empty value.
+GEMINI_NO_CRED_ROOT="$(new_scratch)"
+rc=0
+provider_run "$GEMINI_NO_CRED_ROOT" -- \
+    --scratch "$GEMINI_NO_CRED_ROOT/land" --provider gemini -- \
+    --lane anthropic-api --case plain-turn-01 \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a provider with no seat entry and no env var is refused with exit 20" \
+    "20" "$rc"
+check_refusal "the no-credential refusal names the PROVIDER" \
+    "provider 'gemini' has no credential" "$GEMINI_NO_CRED_ROOT.log"
+check_refusal "the no-credential refusal names the VARIABLE it looked for" \
+    "ROUTECTL_DRIVER_GEMINI_API_KEY" "$GEMINI_NO_CRED_ROOT.log"
+
+# THE PAIRED CONTROL for the refusal above. Without it, "refuses a provider
+# with no credential" is satisfiable by a wrapper that refuses gemini
+# always -- or every provider always. Same provider, same seat, one
+# difference: the env var is set.
+GEMINI_OK_ROOT="$(new_scratch)"
+rc=0
+provider_run "$GEMINI_OK_ROOT" \
+    "ROUTECTL_DRIVER_GEMINI_API_KEY=$FAKE_GEMINI_KEY" -- \
+    --scratch "$GEMINI_OK_ROOT/land" --provider gemini -- \
+    --lane anthropic-api --case plain-turn-01 --timeout 20 \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+if container_available; then
+    check "the SAME provider with its env var set is not refused" "0" "$rc"
+    check "the env-passthrough credential reached the container intact" \
+        "$FAKE_GEMINI_KEY_SHA" "$(probe_get "$GEMINI_OK_ROOT/land" gemini_key_sha)"
+    # A run asked for gemini alone must forward NOTHING else. A wrapper
+    # that exported the whole convention regardless of --provider would
+    # pass every assertion above.
+    check "a gemini-only run forwards no anthropic credential" "no" \
+        "$(probe_get "$GEMINI_OK_ROOT/land" anthropic_key_present)"
+else
+    # The refusal ran without docker; its control cannot. Named, because a
+    # silent skip here leaves the refusal above uncontrolled.
+    skip "the paired control for the no-credential refusal -- it needs the"
+    skip "  container, so nothing verified that a resolvable gemini credential"
+    skip "  SUCCEEDS. The refusal leg above is uncontrolled in this run."
+fi
+
+# An unknown provider is a USAGE error (2), not a missing credential (20).
+# The distinction is what sends the operator to their own typo instead of
+# to their seat store.
+BAD_PROVIDER_ROOT="$(new_scratch)"
+rc=0
+provider_run "$BAD_PROVIDER_ROOT" -- \
+    --scratch "$BAD_PROVIDER_ROOT/land" --provider anthropic-api -- \
+    --lane anthropic-api --case plain-turn-01 \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "an unknown --provider is a usage error, not a missing credential" "2" "$rc"
+check_refusal "the unknown-provider refusal says a lane name is not a provider" \
+    "never a lane name" "$BAD_PROVIDER_ROOT.log"
+
+# A codex seat carrying a token but NO account id. `openai-responses` +
+# `chatgpt-oauth` REQUIRES the account id (the factory's
+# `validate_openai_responses_account_id` refuses a static bearer without
+# one), so a run that forwarded the token alone would boot a daemon and
+# fail at config validation -- or, worse, 401 at the upstream.
+NO_ACCOUNT_SEAT="$WORK/seat-no-account.json"
+python3 - "$NO_ACCOUNT_SEAT" "$FAKE_CODEX_TOKEN" <<'PY'
+import json, sys
+path, token = sys.argv[1], sys.argv[2]
+doc = {
+    "schema_version": 1,
+    "providers": {
+        "codex": {
+            "access_token": token,
+            "refresh_token": "stub-refresh-value",
+            "token_type": "Bearer",
+            "expires_at_unix": 4102444800,
+            "account": {"email": "stub@example.invalid"},
+        }
+    },
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+NO_ACCOUNT_ROOT="$(new_scratch)"
+rc=0
+LEG_SEAT="$NO_ACCOUNT_SEAT" provider_run "$NO_ACCOUNT_ROOT" -- \
+    --scratch "$NO_ACCOUNT_ROOT/land" --provider openai -- \
+    --lane anthropic-api --case plain-turn-01 \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a codex seat token with no account id is refused with exit 20" "20" "$rc"
+check_refusal "the missing-account-id refusal says chatgpt-oauth requires it" \
+    "REQUIRES the account id" "$NO_ACCOUNT_ROOT.log"
+
+# No refusal on this path may echo seat content either. The account-id
+# refusal reads a seat that HOLDS a token, so it is the one with something
+# to spill.
+if grep -qF -- "$FAKE_CODEX_TOKEN" "$NO_ACCOUNT_ROOT.log"; then
+    fail "the missing-account-id refusal leaked the seat's access token"
+else
+    echo "PASS: the missing-account-id refusal echoes no credential value"
+fi
+
+# ---------------------------------------------------------------------
 # Part 4: the wrapper's own argv carries no seat mount
 # ---------------------------------------------------------------------
 #
@@ -595,14 +803,41 @@ else
     echo "PASS: no mount in the wrapper names a seat or a credentials file"
 fi
 
-# The token crosses BY NAME. `-e VAR=value` would put it in this
-# process's argv, and /proc/<pid>/cmdline is readable by every account on
-# the box.
-if grep -qE -- '-e "[$][{]?TOKEN_VAR[}]?" \\$' "$WRAPPER"; then
-    echo "PASS: the token is forwarded by NAME, not as -e VAR=value"
+# EVERY credential crosses BY NAME. `-e VAR=value` would put the value in
+# this process's argv, and /proc/<pid>/cmdline is readable by every account
+# on the box. The set is per-run now, so the assertion is on the ARRAY the
+# wrapper builds: it must hold only `-e "$var"`, never a value.
+if grep -qE -- '\+=\(-e "[$]var"\)$' "$WRAPPER"; then
+    echo "PASS: credentials are forwarded by NAME, not as -e VAR=value"
 else
-    fail "the token is forwarded by NAME, not as -e VAR=value"
+    fail "credentials are forwarded by NAME, not as -e VAR=value"
 fi
+
+# The COMPLEMENT of the line above, and the assertion that actually holds
+# as the convention grows: NO `-e` flag anywhere in the wrapper's docker
+# invocation may carry a credential value. The two path variables are the
+# only permitted `-e VAR=value` forms, and they are named -- so a future
+# `-e "$var=$value"` fails here even if the array line above survives
+# untouched.
+UNEXPECTED_VALUE_ENV="$(grep -E '^ +-e "' "$WRAPPER" |
+    grep -cvE '^ +-e "(ROUTECTL_BIN|ROUTECTL_DRIVER_OUT_ROOT)=')"
+check "no -e flag in the docker invocation carries a value beyond the two paths" \
+    "0" "$UNEXPECTED_VALUE_ENV"
+
+# A resolved credential value is named by exactly ONE variable in the
+# wrapper (`$value`), which makes "where can a credential go?" a question
+# with a readable answer: every line that mentions it must be one of three
+# shapes -- the emptiness test, the seat read, and the single export.
+#
+# Asserted as a WHITELIST rather than as a count of the export line. A count
+# stays green against an ADDED leak (an `echo "$value"`, a `printf "$value"
+# >file`), which is the exact edit this exists to catch -- measured while
+# mutation-verifying, where a file write beside the export failed to turn a
+# count-based assertion red.
+VALUE_LINES="$(grep -nE '[$][{]?value[}]?' "$WRAPPER" |
+    grep -cvE ':( +)(if \[ -z "[$]value" \]|\[ -n "[$]value" \] \|\||export "[$]var=[$]value"$|value="[$]\(extract_seat_field)')"
+check "no line in the wrapper puts a credential value anywhere but the export" \
+    "0" "$VALUE_LINES"
 
 # ---------------------------------------------------------------------
 # Part 5: docker itself absent
@@ -662,10 +897,6 @@ fi
 # Part 6: the container legs
 # ---------------------------------------------------------------------
 
-probe_get() {
-    sed -n "s/^$2=//p" "$1/$ASSETS_REL/probe.txt" | head -1
-}
-
 run_container_legs() {
     local root rc
 
@@ -706,10 +937,21 @@ run_container_legs() {
         "$(case "$(probe_get "$land" base_url)" in http://127.0.0.1:*) echo yes ;; *) echo no ;; esac)"
 
     # --- the seat is not there ---------------------------------------
+    # The DEFAULT provider set is `anthropic` alone, so this leg is also
+    # the behavioural-unchanged assertion for the pre-existing path: no
+    # `--provider` flag, one credential, the same variable name.
     check "the token reached the container as ROUTECTL_DRIVER_ANTHROPIC_API_KEY" \
-        "yes" "$(probe_get "$land" token_present)"
+        "yes" "$(probe_get "$land" anthropic_key_present)"
     check "the token arrived intact, compared by digest" \
-        "$FAKE_TOKEN_SHA" "$(probe_get "$land" token_sha)"
+        "$FAKE_TOKEN_SHA" "$(probe_get "$land" anthropic_key_sha)"
+    # A default run must forward NOTHING beyond the default provider. The
+    # seat this suite writes HOLDS a codex entry, so a wrapper that
+    # extracted every seat it found would leak a credential the run never
+    # asked for -- into a container running a driven agent.
+    check "a default run forwards no openai credential" "no" \
+        "$(probe_get "$land" openai_key_present)"
+    check "a default run forwards no openai account id" "no" \
+        "$(probe_get "$land" openai_account_present)"
     check "no seat file exists at the path routectl resolves" "no" \
         "$(probe_get "$land" seat_at_xdg)"
     check "no seat file exists under the container's HOME either" "no" \
@@ -742,6 +984,61 @@ run_container_legs() {
     # sudo.
     check "the landed fixture is owned by the invoking user" "$(id -u)" \
         "$(stat -c '%u' "$land/anthropic-api/plain-turn-01/meta.json" 2>/dev/null)"
+
+    # --- the codex pair: token AND account id ------------------------
+    # `openai-responses` + `chatgpt-oauth` requires BOTH. This is the
+    # paired control for the missing-account-id refusal above, and it is
+    # the only leg that proves the openai variables carry the CODEX seat's
+    # values rather than the anthropic seat's -- which is why the two
+    # seats' fake values are distinct.
+    root="$(new_scratch healthy)"
+    rc=0
+    provider_run "$root" -- --scratch "$root/land" --provider openai -- \
+        --lane anthropic-api --case plain-turn-01 --timeout 20 \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "a run asking for openai alone exits 0" "0" "$rc"
+
+    if [ -f "$root/land/$ASSETS_REL/probe.txt" ]; then
+        local codex_land="$root/land"
+        check "the codex seat token crossed as ROUTECTL_DRIVER_OPENAI_API_KEY" \
+            "$FAKE_CODEX_TOKEN_SHA" "$(probe_get "$codex_land" openai_key_sha)"
+        check "the codex account id crossed as ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID" \
+            "$FAKE_CODEX_ACCOUNT_SHA" "$(probe_get "$codex_land" openai_account_sha)"
+        # Keyed on the PROVIDER, and the openai variable must hold the
+        # CODEX seat's token -- not the anthropic one that shares the file.
+        check "the openai variable does not carry the anthropic seat's token" "no" \
+            "$([ "$(probe_get "$codex_land" openai_key_sha)" = "$FAKE_TOKEN_SHA" ] && echo yes || echo no)"
+        check "an openai-only run forwards no anthropic credential" "no" \
+            "$(probe_get "$codex_land" anthropic_key_present)"
+    else
+        fail "the openai leg's driver never ran inside the container (log: $root.log)"
+    fi
+
+    # --- the account id rides ONLY with a seat token ------------------
+    # An env-sourced token is the api-key surface, for which the factory
+    # REFUSES an `account_id_ref` outright -- so forwarding an account id
+    # alongside it would turn a working lane into a config error. Asserted
+    # against the FULL seat, which HOLDS a codex account id: a wrapper that
+    # resolved the account id independently of the token's source would
+    # find one and forward it.
+    root="$(new_scratch healthy)"
+    rc=0
+    provider_run "$root" \
+        "ROUTECTL_DRIVER_OPENAI_API_KEY=$FAKE_GEMINI_KEY" -- \
+        --scratch "$root/land" --provider openai -- \
+        --lane anthropic-api --case plain-turn-01 --timeout 20 \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "an env-sourced openai token is not refused for want of an account id" \
+        "0" "$rc"
+    if [ -f "$root/land/$ASSETS_REL/probe.txt" ]; then
+        local env_land="$root/land"
+        check "the env-sourced token crossed, not the seat's" \
+            "$FAKE_GEMINI_KEY_SHA" "$(probe_get "$env_land" openai_key_sha)"
+        check "no account id rides an env-sourced token" "no" \
+            "$(probe_get "$env_land" openai_account_present)"
+    else
+        fail "the env-sourced openai leg's driver never ran (log: $root.log)"
+    fi
 
     # --- exit codes propagate VERBATIM -------------------------------
     # The runner distinguishes seven outcomes and callers act on the

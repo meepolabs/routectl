@@ -5707,11 +5707,14 @@ because no cargo target runs them, so nothing else names their paths.
   client installer, and the runtime deps the shipped drivers invoke
 - `container/build.sh` -- local build of that image (`--version`, `--tag`)
 - `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
-  image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` plus a
-  verbatim `--` passthrough of the runner's own argv
+  image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` /
+  repeatable `--provider` plus a verbatim `--` passthrough of the runner's own
+  argv. The one owner of the `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` credential
+  convention: per-provider resolution from the seat or the environment, with
+  the chatgpt-oauth account-id variable
 - `container/run_capture.test.sh` -- self-test for that wrapper: its
   per-code argument refusals plus an accept leg against a stub binary, stub
-  seat, and stub driver
+  seat, and stub driver, each refusal paired with its resolvable control
 - `container/image_scan.test.sh` -- per-layer credential scan of the image,
   driven by the repo's own scrub gate, with a planted positive control
 - `container/isolation.test.sh` -- default-bridge network probe of the image;

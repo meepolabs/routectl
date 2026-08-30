@@ -170,6 +170,22 @@ DRIVER_REQUEST_MODEL="${ROUTECTL_DRIVER_REQUEST_MODEL:-claude-sonnet-4-5}"
 # upstream credential from the lane config's `api_key_ref`. A caller with
 # a client that validates the value can pass its own through
 # ROUTECTL_DRIVER_CLIENT_API_KEY.
+#
+# THIS IS A PLACEHOLDER, NOT A CREDENTIAL, and the distinction is the one a
+# lane-config author gets wrong -- the two names are one letter apart in
+# intent:
+#
+#   ROUTECTL_DRIVER_CLIENT_API_KEY / ROUTECTL_DRIVER_CLIENT_BEARER
+#       what the CLIENT presents to the LOCAL daemon. Never reaches an
+#       upstream. Defaulted to an obviously-fake value here, correctly.
+#   ROUTECTL_DRIVER_<PROVIDER>_API_KEY
+#       the REAL upstream credential routectl injects on egress, keyed on
+#       routectl's own provider name (`anthropic`, `openai`, `gemini`) and
+#       never on a lane. A lane config names it as
+#       `api_key_ref = "env://..."`. Never defaulted and never placeheld:
+#       an absent one refuses the run rather than 401ing at the upstream.
+#       See scripts/container/run_capture.sh for the full convention,
+#       including the account-id variable the chatgpt-oauth surface needs.
 DRIVER_LOCAL_KEY_PLACEHOLDER="routectl-driver-local"
 
 driver_local_api_key() {

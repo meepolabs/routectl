@@ -908,7 +908,58 @@ What crosses the boundary, and nothing else:
 | this repo | `/workspace` | READ-ONLY |
 | the host routectl binary | `/usr/local/lib/routectl/bin/routectl` | READ-ONLY |
 | `--scratch <dir>` | `/scratch` | writable, the only one |
-| the upstream token | `ROUTECTL_DRIVER_ANTHROPIC_API_KEY` | forwarded BY NAME |
+| one credential per `--provider` | `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | forwarded BY NAME |
+
+#### The per-provider credential convention
+
+Read this before writing a lane config. The variable name is keyed on the
+PROVIDER, never on the lane:
+
+```
+ROUTECTL_DRIVER_<PROVIDER>_API_KEY
+```
+
+with `<PROVIDER>` the upper-cased form of a name in routectl's own provider
+vocabulary -- `anthropic`, `openai`, `gemini`. Both openai kinds
+(`openai-responses` and `openai-compat`) share the ONE `openai` name,
+because routectl's own conventional-env-var table gives them one variable:
+an `openai-responses.toml` lane and an `openai-compat.toml` lane both
+resolve `ROUTECTL_DRIVER_OPENAI_API_KEY`. A per-lane spelling would
+multiply the names a contributor has to know by the number of lanes, and
+would make two lanes on one credential look like two credentials.
+
+**Do not confuse these with the client placeholders.** They are one letter
+apart in intent, and this is the confusion that costs an afternoon:
+
+| Variable | What it is |
+|---|---|
+| `ROUTECTL_DRIVER_CLIENT_API_KEY`, `ROUTECTL_DRIVER_CLIENT_BEARER` | PLACEHOLDERS. What the driven CLIENT presents to the LOCAL daemon; never reaches an upstream. Defaulted to obviously-fake values in `scripts/drivers/lib/common.sh`, and correctly so -- the MITM seam only checks that a bearer is PRESENT. |
+| `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | The REAL upstream credential routectl injects on egress. A lane config names it as `api_key_ref = "env://..."`. Never defaulted, never placeheld: an absent one refuses the run. |
+
+A provider whose egress needs more than a bearer gets one additional
+variable per extra field, same keying:
+`ROUTECTL_DRIVER_<PROVIDER>_ACCOUNT_ID`. Today exactly one provider needs
+it -- `openai-responses` with `auth_kind = "chatgpt-oauth"` REQUIRES the
+seat's ChatGPT account id, so a codex lane config pairs
+`api_key_ref = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"` with
+`account_id_ref = "env://ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID"`.
+
+`--provider <name>` (repeatable, default `anthropic`) selects which
+credentials cross the boundary. How each one is obtained depends on whether
+it is an OAuth provider on this box, and the wrapper decides that per
+provider:
+
+- **the env var is set** -- passed straight through. The explicit act wins,
+  and it is the only way to reach the api-key surface of a provider whose
+  seat holds an OAuth credential.
+- **no env var, a seat entry exists** -- extracted on the HOST from the seat
+  file. Note the seat is keyed by OAUTH ID, not by provider name: the
+  `openai` credential lives under `codex`.
+- **neither** -- REFUSED BY NAME, exit 20. An empty credential would 401 at
+  the upstream and surface as the runner's retryable exit 7, which is
+  indistinguishable from a case that produced no request. `gemini` is not
+  an OAuth provider, so its credential can only arrive as an env
+  passthrough.
 
 - **The read-only repo is load-bearing**, not tidiness. A driven agent runs
   with file tools and permission prompts disabled; a writable repo mount
@@ -919,10 +970,11 @@ What crosses the boundary, and nothing else:
   wrapper passes `--out /scratch` and `--out-root /scratch` to the runner and
   sets `ROUTECTL_DRIVER_OUT_ROOT` so `/scratch` is a member of the runner's
   closed set of allowed landing roots.
-- **NO SEAT FILE IS MOUNTED**, and none exists inside the container. The
-  wrapper reads the access token on the HOST and forwards it under the
-  environment variable name the lane config already resolves, passing it to
-  `docker run` by NAME rather than as a value in an argument vector. Nothing
+- **NO SEAT FILE IS MOUNTED**, and none exists inside the container. For a
+  seat-backed provider the wrapper reads the access token on the HOST and
+  forwards it under the environment variable name the lane config already
+  resolves, passing it to `docker run` by NAME rather than as a value in an
+  argument vector. Nothing
   in the container can refresh, rewrite, or perturb the operator's seat
   store, and mid-run token expiry is therefore a HARD STOP rather than a
   refresh: a clean upstream 401, the rig lands no fixture, and the wrapper
@@ -935,7 +987,9 @@ What crosses the boundary, and nothing else:
 - **No other host environment is forwarded.** That is a property, not an
   omission: an inherited `ANTHROPIC_BASE_URL` is how a capture once recorded
   a daemon nobody meant to capture, and a container starting from an empty
-  environment cannot inherit one.
+  environment cannot inherit one. Only the credential variables of the
+  providers the run asked for cross -- a run that did not name a provider
+  forwards nothing for it, even when the seat holds one.
 - **Default bridge networking, stated explicitly** even though it is
   docker's default. The isolation the cell provides rests on the container
   NOT being on the host's loopback, and a daemon whose default network had
@@ -961,8 +1015,8 @@ refusal reads identically on a box with no docker installed:
 | 16 | the scratch root is inside this repo |
 | 17 | docker is not installed or not on PATH |
 | 18 | the image is not present locally |
-| 19 | the seat file is unreadable |
-| 20 | the seat carries no usable access token |
+| 19 | the seat file is unreadable (only when a seat-backed provider was asked for) |
+| 20 | an asked-for provider has neither a seat entry nor its env var |
 
 The first four get their own codes rather than sharing one because each
 independently dissolves the isolation the cell exists for, and a caller who
