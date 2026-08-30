@@ -291,6 +291,7 @@ seat_home="${HOME:-/nonexistent}/.config/routectl/credentials.json"
     printf 'base_url=%s\n' "${ROUTECTL_BASE_URL:-}"
     printf 'case_id=%s\n' "${ROUTECTL_FIXTURE_CASE_ID:-}"
     printf 'wire_pattern=%s\n' "${ROUTECTL_FIXTURE_WIRE_PATTERN:-}"
+    printf 'expected_ingress=%s\n' "${ROUTECTL_FIXTURE_EXPECTED_INGRESS:-}"
     printf 'routectl_bin=%s\n' "${ROUTECTL_BIN:-}"
     printf 'out_root=%s\n' "${ROUTECTL_DRIVER_OUT_ROOT:-}"
     if printf 'mutated\n' 2>/dev/null >/workspace/Cargo.toml; then
@@ -403,7 +404,7 @@ refuse_case() {
     local root rc=0
     root="$(new_scratch)"
     wrapper_run "$root" --scratch "$root/land" -- \
-        --lane anthropic-api --case plain-turn-01 "$@" \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic "$@" \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "$label is refused with exit $expected" "$expected" "$rc"
     check_refusal "$label names itself in the wrapper's own refusal" "$needle" "$root.log"
@@ -469,7 +470,7 @@ rc=0
     ROUTECTL_BIN="$MISSING_BIN_ROOT/no-such-binary" \
     ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
         bash "$WRAPPER" --scratch "$MISSING_BIN_ROOT/land" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$MISSING_BIN_ROOT.log" 2>&1 || rc=$?
 check "a missing host binary is refused with exit 15" "15" "$rc"
@@ -486,7 +487,7 @@ rc=0
     ROUTECTL_BIN="$NOEXEC_ROOT/plain-file" \
     ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
         bash "$WRAPPER" --scratch "$NOEXEC_ROOT/land" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$NOEXEC_ROOT.log" 2>&1 || rc=$?
 check "a non-executable host binary is refused with exit 15" "15" "$rc"
@@ -499,7 +500,7 @@ rc=0
     ROUTECTL_BIN="$IN_REPO_ROOT/stub-routectl" \
     ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
         bash "$WRAPPER" --scratch "$IN_REPO_SCRATCH" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$IN_REPO_ROOT.log" 2>&1 || rc=$?
 check "a scratch root inside the repo is refused with exit 16" "16" "$rc"
@@ -522,7 +523,7 @@ rc=0
     ROUTECTL_BIN="$SYMLINK_ROOT/stub-routectl" \
     ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
         bash "$WRAPPER" --scratch "$SYMLINK_ROOT/repo-link/target" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$SYMLINK_ROOT.log" 2>&1 || rc=$?
 check "a scratch root symlinked back into the repo is refused with exit 16" \
@@ -535,7 +536,7 @@ rc=0
     ROUTECTL_BIN="$UNREADABLE_SEAT_ROOT/stub-routectl" \
     ROUTECTL_CAPTURE_CELL_SEAT="$WORK/no-such-seat.json" \
         bash "$WRAPPER" --scratch "$UNREADABLE_SEAT_ROOT/land" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$UNREADABLE_SEAT_ROOT.log" 2>&1 || rc=$?
 check "an unreadable seat file is refused with exit 19" "19" "$rc"
@@ -559,7 +560,7 @@ rc=0
     ROUTECTL_BIN="$NO_TOKEN_ROOT/stub-routectl" \
     ROUTECTL_CAPTURE_CELL_SEAT="$NO_TOKEN_SEAT" \
         bash "$WRAPPER" --scratch "$NO_TOKEN_ROOT/land" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$NO_TOKEN_ROOT.log" 2>&1 || rc=$?
 check "a seat with no anthropic access token is refused with exit 20" "20" "$rc"
@@ -641,7 +642,7 @@ if command -v docker >/dev/null 2>&1 && [ -x "$NO_DOCKER_BIN/bash" ]; then
         ROUTECTL_BIN="$NO_DOCKER_ROOT/stub-routectl" \
         ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
             bash "$WRAPPER" --scratch "$NO_DOCKER_ROOT/land" -- \
-            --lane anthropic-api --case plain-turn-01 \
+            --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
             -- "/scratch/$ASSETS_REL/driver.sh"
     ) >"$NO_DOCKER_ROOT.log" 2>&1 || rc=$?
     check "an absent docker is refused with exit 17" "17" "$rc"
@@ -674,7 +675,7 @@ run_container_legs() {
     root="$(new_scratch healthy)"
     rc=0
     wrapper_run "$root" --scratch "$root/land" -- \
-        --lane anthropic-api --case plain-turn-01 --timeout 20 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic --timeout 20 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "a well-formed invocation exits 0" "0" "$rc"
 
@@ -696,6 +697,11 @@ run_container_legs() {
         "$(probe_get "$land" case_id)"
     check "the runner derived the wire pattern from the case file" "baseline" \
         "$(probe_get "$land" wire_pattern)"
+    # The pin the wrapper passed through verbatim. It rides the `--`
+    # passthrough like every other runner flag, so this also says the
+    # wrapper added no argv rewriting of its own for the newest one.
+    check "the runner's expected-ingress pin reached the driver" "anthropic" \
+        "$(probe_get "$land" expected_ingress)"
     check "the driver saw the hermetic daemon's loopback base url" "yes" \
         "$(case "$(probe_get "$land" base_url)" in http://127.0.0.1:*) echo yes ;; *) echo no ;; esac)"
 
@@ -744,14 +750,14 @@ run_container_legs() {
     root="$(new_scratch nolanding)"
     rc=0
     wrapper_run "$root" --scratch "$root/land" -- \
-        --lane anthropic-api --case plain-turn-01 --timeout 20 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic --timeout 20 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "an inner runner exit 7 comes out of the wrapper as 7" "7" "$rc"
 
     root="$(new_scratch deaf)"
     rc=0
     wrapper_run "$root" --scratch "$root/land" -- \
-        --lane anthropic-api --case plain-turn-01 --timeout 3 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic --timeout 3 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "an inner runner exit 3 comes out of the wrapper as 3" "3" "$rc"
 
@@ -761,7 +767,7 @@ run_container_legs() {
     root="$(new_scratch healthy)"
     rc=0
     wrapper_run "$root" --scratch "$root/land" -- \
-        --lane no-such-lane --case plain-turn-01 --timeout 20 \
+        --lane no-such-lane --case plain-turn-01 --expected-ingress anthropic --timeout 20 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "an inner runner exit 2 comes out of the wrapper as 2" "2" "$rc"
 
@@ -770,7 +776,7 @@ run_container_legs() {
     rc=0
     wrapper_run "$root" --scratch "$root/land" \
         --image "routectl-capture:no-such-tag-exists" -- \
-        --lane anthropic-api --case plain-turn-01 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "an absent image is refused with exit 18" "18" "$rc"
 }

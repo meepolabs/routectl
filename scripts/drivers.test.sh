@@ -40,6 +40,7 @@ DRIVERS="$HERE/drivers"
 CASES="$DRIVERS/cases"
 VALIDATOR="$DRIVERS/lib/validate_case.py"
 VERIFIER="$DRIVERS/lib/verify_pattern.py"
+INGRESS_KINDS="$DRIVERS/lib/ingress_kinds.sh"
 CLASSIFICATION="$DRIVERS/lib/wire_pattern_classification.tsv"
 
 DRIVER_FILES=(
@@ -854,6 +855,79 @@ done
 rm -rf "$pat"
 
 # ---------------------------------------------------------------------
+# Part 1c: the ingress-dialect vocabulary
+# ---------------------------------------------------------------------
+# The closed set the expected-ingress pin is validated against, at all
+# three enforcement points. It is a REPLICA of what `IngressAdapter::id()`
+# returns, because the rig runs in throwaway trees that carry scripts/ and
+# no crates/ -- so a weld to the real source is the only thing keeping the
+# copy honest. A drifted replica refuses a dialect this build parses, or
+# accepts one it does not.
+
+mapfile -t DECLARED_INGRESS_KINDS < <(
+    sed -n '/^# --- BEGIN INGRESS_KINDS ---$/,/^# --- END INGRESS_KINDS ---$/p' \
+        "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
+)
+check "the vocabulary parses to a non-empty set" "1" \
+    "$([ "${#DECLARED_INGRESS_KINDS[@]}" -gt 0 ] && echo 1 || echo 0)"
+
+# The weld. Guarded on the crates tree's presence -- this suite also runs
+# from a scripts-only checkout, where there is nothing to weld to.
+ingress_src_dir="$ROOT/crates/routectl-cli/src/ingress"
+if [ -d "$ingress_src_dir" ]; then
+    real_ingress_kinds="$(grep -rhA1 -- "fn id(&self) -> &'static str {" "$ingress_src_dir" |
+        sed -n 's/^ *"\([a-z0-9-]\+\)" *$/\1/p' | sort -u | tr '\n' ' ')"
+    check "the source-derived ingress set is non-empty" "1" \
+        "$([ -n "$real_ingress_kinds" ] && echo 1 || echo 0)"
+    check "the declared vocabulary equals the adapters' own id() set" \
+        "$real_ingress_kinds" \
+        "$(printf '%s\n' "${DECLARED_INGRESS_KINDS[@]}" | sort -u | tr '\n' ' ')"
+    unset real_ingress_kinds
+else
+    echo "PASS: no crates tree in this checkout; the ingress vocabulary weld is not asserted"
+fi
+unset ingress_src_dir
+
+# The membership predicate, exercised through the library itself so the
+# assertions are about the code the three scripts call and not about a
+# re-implementation. The EMPTY string is deliberately not a member: empty
+# means "the capture did not observe the dialect" everywhere else in the
+# schema, and a pin is a statement about what a run expects -- so treating
+# it as a wildcard would make the whole gate satisfiable by an unobserved
+# capture.
+(
+    # shellcheck source=scripts/drivers/lib/ingress_kinds.sh
+    . "$INGRESS_KINDS"
+    fails=0
+    for kind in "${DECLARED_INGRESS_KINDS[@]}"; do
+        if ingress_kind_is_known "$kind"; then
+            echo "PASS: '$kind' is recognized as a vocabulary member"
+        else
+            echo "FAIL: declared member '$kind' is not recognized by the predicate"
+            fails=$((fails + 1))
+        fi
+        if printf '%s' "$(ingress_kinds_list)" | grep -qF -- "$kind"; then
+            echo "PASS: the refusal list names '$kind'"
+        else
+            echo "FAIL: the refusal list omits declared member '$kind'"
+            fails=$((fails + 1))
+        fi
+    done
+    # `anthropic-api` is the trap spelling: a real token in the LANE
+    # vocabulary and in no ingress one, so a predicate keyed on a substring
+    # or on the lane set would accept it.
+    for reject in "" "anthropic-api" "openai-compat" "bedrock" "ANTHROPIC"; do
+        if ingress_kind_is_known "$reject"; then
+            echo "FAIL: '$reject' was accepted as an ingress dialect"
+            fails=$((fails + 1))
+        else
+            echo "PASS: '${reject:-<empty>}' is refused as an ingress dialect"
+        fi
+    done
+    exit "$fails"
+) || fails=$((fails + $?))
+
+# ---------------------------------------------------------------------
 # Part 2: driver hygiene, asserted on the committed files
 # ---------------------------------------------------------------------
 
@@ -935,6 +1009,30 @@ for driver in "${DRIVER_FILES[@]}" "$DRIVERS/lib/common.sh"; do
         echo "PASS: $(basename "$driver") names nothing the live daemon owns"
     fi
 done
+
+# NO DRIVER READS THE EXPECTED-INGRESS PIN, and that is the layering, not
+# an omission. The pin belongs to the (driver, lane) pairing the CALLER
+# chose; the rig is the enforcer, and it reads the value from the same
+# environment. A driver that consulted it could only decide whether to
+# refuse a run it has no other reason to doubt -- further from the traced
+# evidence than the rig already is -- and a driver that BRANCHED on it
+# would be the harness dispatch this layout exists to forbid, wearing a
+# different variable name.
+for driver in "${DRIVER_FILES[@]}" "$DRIVERS/lib/common.sh"; do
+    if grep -qF 'ROUTECTL_FIXTURE_EXPECTED_INGRESS' <(code_lines "$driver"); then
+        fail "$(basename "$driver") reads the expected-ingress pin; the rig owns that check"
+    else
+        echo "PASS: $(basename "$driver") leaves the expected-ingress check to the rig"
+    fi
+done
+
+# Positive control for that grep: it must fire on a file that DOES read the
+# pin, or four clean passes prove nothing. The rig is the real such file.
+if grep -qF 'ROUTECTL_FIXTURE_EXPECTED_INGRESS' <(code_lines "$RIG"); then
+    echo "PASS: the expected-ingress grep fires on the rig, which does read the pin"
+else
+    fail "the expected-ingress grep matches nothing in the rig, so its absence proves nothing"
+fi
 
 # ---------------------------------------------------------------------
 # Fixtures for the end-to-end cases
@@ -1198,7 +1296,8 @@ driver_run() {
         ROUTECTL_DRIVER_PORT_MIN="$port" \
         ROUTECTL_DRIVER_PORT_MAX="$((port + 1))" \
             bash scripts/capture_driver.sh --work "$work/runs" --keep \
-            --case "$case_id" --lane "${DRIVER_LANE:-anthropic-api}" "$@" \
+            --case "$case_id" --lane "${DRIVER_LANE:-anthropic-api}" \
+            --expected-ingress "${DRIVER_EXPECTED_INGRESS:-anthropic}" "$@" \
             -- "$work/repo/scripts/drivers/$driver"
     ) >"$work/runner.log" 2>&1 || rc=$?
     return "$rc"
@@ -1282,10 +1381,26 @@ for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
             "$(meta_get "$meta" client.version)"
         check "$driver: meta.client.connection_mode is populated" "base-url" \
             "$(meta_get "$meta" client.connection_mode)"
+        # The traced dialect the expected-ingress gate compared the pin
+        # against. Recorded rather than the pin itself, which is why the
+        # gate is a comparison at all -- and asserted here so a run that
+        # landed the fixture is known to have landed it having AGREED, not
+        # having skipped the check.
+        check "$driver: meta.ingress_kind carries the traced dialect the pin was checked against" \
+            "anthropic" "$(meta_get "$meta" ingress_kind)"
+        # The pin is NOT recorded: the value it pins is already on disk as
+        # the traced token above, so a second copy could only ever disagree
+        # with the fact it was checked against. This repo has already
+        # deleted two speculative meta fields for the same reason.
+        if grep -q 'expected_ingress' "$meta"; then
+            fail "$driver: meta.json records the expected-ingress pin beside the traced dialect"
+        else
+            echo "PASS: $driver: meta.json records no second copy of the traced dialect"
+        fi
     else
         fail "$driver: no fixture landed at $meta"
         sed -n '1,30p' "$work/runner.log"
-        fails=$((fails + 3))
+        fails=$((fails + 5))
     fi
 
     [ -n "$kept" ] && rm -rf "$kept"
@@ -1329,6 +1444,7 @@ direct_run() {
         ROUTECTL_FIXTURE_CASE_ID="${DIRECT_CASE:-tools-multiturn-01}" \
         ROUTECTL_FIXTURE_CONFIG_SHA="deadbeef" \
         ROUTECTL_FIXTURE_CONNECTION_MODE="${DIRECT_MODE:-base-url}" \
+        ROUTECTL_FIXTURE_EXPECTED_INGRESS="anthropic" \
             bash "scripts/drivers/$driver"
     ) >"$work/direct.log" 2>&1 || rc=$?
     return "$rc"

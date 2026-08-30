@@ -4,6 +4,7 @@
 #
 #   scripts/promote_fixture.sh --from <fixture-dir> \
 #                             --scratch-root <dir> \
+#                             --expected-ingress <dialect> \
 #                             [--to <corpus-root>]
 #
 #   --from          the fixture directory to promote. Must live exactly
@@ -15,6 +16,18 @@
 #                   container mounts the repo read-only), so there is no
 #                   repo-relative constant to derive it from, and a root
 #                   guessed from --from would confine nothing.
+#   --expected-ingress
+#                   which ingress dialect the fixture is meant to be
+#                   evidence for, from the vocabulary in
+#                   scripts/drivers/lib/ingress_kinds.sh. Required, no
+#                   default, and refused unless it equals the fixture's
+#                   TRACED `meta.ingress_kind`. It arrives on argv rather
+#                   than being read off the fixture for the reason the
+#                   whole gate exists: `ingress_kind` is the traced fact,
+#                   so comparing it against itself would assert nothing.
+#                   The rig checked the same pin at capture time; this is
+#                   the second boundary, and the one that covers a scratch
+#                   fixture edited in between.
 #   --to            the corpus root to promote INTO. Defaults to
 #                   `crates/routectl-cli/tests/fixtures/driver` and is
 #                   itself confined to that default, so this flag can
@@ -48,6 +61,13 @@
 # exactly what these gates exist to catch, so an unreadable meta.json is a
 # refusal rather than a skip.
 #
+# `ingress_kind` is the one field read from meta.json that is NOT a claim:
+# the rig parsed it out of the daemon's own trace, so it is a traced fact.
+# Its gate therefore takes the other side of the comparison from the
+# CALLER (`--expected-ingress`) -- a fact checked against itself asserts
+# nothing, and the failure this catches is a client that took the runner's
+# connection carriers and then reached routectl on its own dialect anyway.
+#
 # The checks run on the STAGED COPY, before any rename: what gets scanned
 # is byte-for-byte what would land, and a refusal has nothing to undo.
 #
@@ -62,14 +82,16 @@
 #   1  the staged content failed a landing gate -- residual personal data,
 #      a body that does not exhibit the wire pattern its `meta.json`
 #      claims, a connection-mode claim outside the two the corpus holds,
-#      or captured ingress headers that contradict its recorded
-#      connection mode. Nothing was promoted.
+#      captured ingress headers that contradict its recorded connection
+#      mode, or a traced `ingress_kind` that is not the dialect
+#      `--expected-ingress` names. Nothing was promoted.
 #   2  usage error, a confinement refusal, a fixture path that is not
 #      `<scratch-root>/<lane>/<case-id>`, or a missing prerequisite
 #      (this is also what a scrub gate that could not run at all reports)
 #
 # Run it from anywhere:
-#   bash scripts/promote_fixture.sh --from ... --scratch-root ...
+#   bash scripts/promote_fixture.sh --from ... --scratch-root ... \
+#                                   --expected-ingress ...
 # --- END USAGE ---
 
 set -eu
@@ -97,6 +119,17 @@ CONFINE_LIB="$ROOT/scripts/drivers/lib/confine.sh"
 # shellcheck source=scripts/drivers/lib/confine.sh
 . "$CONFINE_LIB"
 
+# The single owner of the ingress-dialect vocabulary, shared with the rig
+# and the runner. Absent library is a hard failure, never an unvalidated
+# `--expected-ingress`: an out-of-vocabulary pin can never equal a traced
+# token, so it would refuse every fixture with a message about the fixture
+# rather than about the flag.
+INGRESS_KINDS_LIB="$ROOT/scripts/drivers/lib/ingress_kinds.sh"
+[ -r "$INGRESS_KINDS_LIB" ] ||
+  fatal "ingress vocabulary not found at $INGRESS_KINDS_LIB; refusing to promote"
+# shellcheck source=scripts/drivers/lib/ingress_kinds.sh
+. "$INGRESS_KINDS_LIB"
+
 # The single owner of credential and personal-data vocabulary.
 SCRUB="$ROOT/scripts/scrub-fixture.sh"
 [ -r "$SCRUB" ] ||
@@ -119,6 +152,7 @@ DEFAULT_CORPUS="$ROOT/crates/routectl-cli/tests/fixtures/driver"
 
 SRC=""
 SCRATCH_ROOT=""
+EXPECTED_INGRESS=""
 CORPUS="$DEFAULT_CORPUS"
 
 while [ $# -gt 0 ]; do
@@ -127,6 +161,9 @@ while [ $# -gt 0 ]; do
     --scratch-root)
       [ $# -ge 2 ] || fatal "--scratch-root requires a value"
       SCRATCH_ROOT="$2"; shift 2 ;;
+    --expected-ingress)
+      [ $# -ge 2 ] || fatal "--expected-ingress requires a value"
+      EXPECTED_INGRESS="$2"; shift 2 ;;
     --to) [ $# -ge 2 ] || fatal "--to requires a value"; CORPUS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fatal "unknown arg: $1" ;;
@@ -135,6 +172,10 @@ done
 
 [ -n "$SRC" ] || fatal "--from is required (see --help)"
 [ -n "$SCRATCH_ROOT" ] || fatal "--scratch-root is required (see --help)"
+[ -n "$EXPECTED_INGRESS" ] ||
+  fatal "--expected-ingress is required (one of: $(ingress_kinds_list)); it is the dialect the fixture's traced ingress_kind must equal"
+ingress_kind_is_known "$EXPECTED_INGRESS" ||
+  fatal "unsupported --expected-ingress '$EXPECTED_INGRESS' (one of: $(ingress_kinds_list))"
 [ -n "$CORPUS" ] || fatal "--to cannot be empty"
 
 SRC="$(abspath_lexical "$SRC")"
@@ -243,6 +284,7 @@ try:
     client = meta.get("client")
     print(meta.get("wire_pattern", ""))
     print(client.get("connection_mode", "") if isinstance(client, dict) else "")
+    print(meta.get("ingress_kind", ""))
 except (OSError, UnicodeDecodeError, ValueError) as exc:
     print(f"promote_fixture: unreadable staged meta.json: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -255,6 +297,7 @@ if [ "$claim_read_rc" -ne 0 ]; then
 fi
 CLAIMED_PATTERN="$(printf '%s\n' "$CLAIMS" | sed -n 1p)"
 CLAIMED_MODE="$(printf '%s\n' "$CLAIMS" | sed -n 2p)"
+TRACED_INGRESS="$(printf '%s\n' "$CLAIMS" | sed -n 3p)"
 
 # The wire-pattern claim, enforced against the staged bytes. An EMPTY claim
 # is a live-box capture, which genuinely could not observe the pin; the
@@ -343,6 +386,24 @@ case "$CLAIMED_MODE:$seam_rc" in
     fi
     ;;
 esac
+
+# The expected-ingress pin against the fixture's TRACED dialect. The rig
+# ran the same comparison at capture time; this boundary is what covers the
+# window the scratch root exists for -- a fixture whose bytes were
+# inspected, edited, and are now being landed.
+#
+# An EMPTY traced token is refused with the rest: empty means the capture
+# did not observe the dialect, which is honest for a live-box drain and
+# never true of the driver corpus this script promotes into. A fixture
+# nothing can dispatch is not evidence for any dialect, including the one
+# the caller named.
+if [ "$TRACED_INGRESS" != "$EXPECTED_INGRESS" ]; then
+  echo "promote_fixture: refusing to promote '$SRC': its traced ingress dialect is" >&2
+  echo "'${TRACED_INGRESS:-<unpinned>}' but this promotion expects '$EXPECTED_INGRESS', so the" >&2
+  echo "fixture is evidence for a dialect it is not being landed as." >&2
+  echo "the destination '$DST' is untouched." >&2
+  exit 1
+fi
 
 # Rename-aside-then-delete. Both operands are absolute (a
 # `cd <dir> && rm` compound short-circuits into a no-op when cwd already

@@ -28,6 +28,17 @@ RIG="$HERE/capture_fixtures.sh"
 SCRUB="$HERE/scrub-fixture.sh"
 CONFINE="$HERE/drivers/lib/confine.sh"
 VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
+INGRESS_KINDS="$HERE/drivers/lib/ingress_kinds.sh"
+
+# The ingress dialects the rig accepts as an expected-ingress pin, read out
+# of the shared library rather than restated: a restated list would pass
+# this suite while the rig refused the value a real run passes. The library
+# is itself welded to `IngressAdapter::id()` further down.
+declare -a KNOWN_INGRESS_KINDS
+mapfile -t KNOWN_INGRESS_KINDS < <(
+    sed -n '/^# --- BEGIN INGRESS_KINDS ---$/,/^# --- END INGRESS_KINDS ---$/p' \
+        "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
+)
 
 fails=0
 
@@ -106,10 +117,14 @@ structural_line() {
 
 # A non-stream trace carrying BOTH request-side structural summaries --
 # the shape a driver capture must produce, since driver mode refuses a
-# fixture with half its structural evidence.
+# fixture with half its structural evidence. `$3` is the traced INGRESS
+# token, forwarded so a case can drive a dialect other than the default:
+# the expected-ingress gate compares its pin against exactly this value,
+# and with every driver trace saying `anthropic` a rig that ignored the
+# traced token would be indistinguishable from one that reads it.
 trace_driver() {
-    local id="$1" kind="${2:-anthropic}"
-    trace_non_stream "$id" "$kind"
+    local id="$1" kind="${2:-anthropic}" ingress="${3:-anthropic}"
+    trace_non_stream "$id" "$kind" "$ingress"
     structural_line "$id" ingress 400000
     structural_line "$id" outgoing 500000
 }
@@ -274,6 +289,9 @@ make_repo() {
     # Same for the wire-pattern predicate: the rig refuses to run without
     # it rather than promote an unverified claim.
     cp "$VERIFY_PATTERN" "$tmp/repo/scripts/drivers/lib/verify_pattern.py"
+    # And for the ingress vocabulary the expected-ingress pin is validated
+    # against, for the same fail-closed reason.
+    cp "$INGRESS_KINDS" "$tmp/repo/scripts/drivers/lib/ingress_kinds.sh"
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$tmp/repo/Cargo.toml"
     printf '%s\n' "$tmp"
@@ -409,20 +427,24 @@ check_log() {
     fi
 }
 
-# Set / clear the four driver pins in one call, so a case cannot leak a
-# pin into the next one (driver mode is fail-closed on all four, so a
+# Set / clear the five driver pins in one call, so a case cannot leak a
+# pin into the next one (driver mode is fail-closed on all five, so a
 # leaked pin turns a refusal assertion into a silent pass). The wire
-# pattern defaults because most cases care about the other three; a case
-# that needs a specific claim passes it as the fourth argument.
+# pattern and the expected ingress default because most cases care about
+# the other three; a case that needs a specific claim passes it as the
+# fourth or fifth argument. Both defaults match what `trace_driver`
+# produces, so a case that does not name them still promotes.
 set_pins() {
     export ROUTECTL_FIXTURE_CASE_ID="$1"
     export ROUTECTL_FIXTURE_CONFIG_SHA="$2"
     export ROUTECTL_FIXTURE_CONNECTION_MODE="$3"
     export ROUTECTL_FIXTURE_WIRE_PATTERN="${4:-baseline}"
+    export ROUTECTL_FIXTURE_EXPECTED_INGRESS="${5:-anthropic}"
 }
 clear_pins() {
     unset ROUTECTL_FIXTURE_CASE_ID ROUTECTL_FIXTURE_CONFIG_SHA \
-        ROUTECTL_FIXTURE_CONNECTION_MODE ROUTECTL_FIXTURE_WIRE_PATTERN
+        ROUTECTL_FIXTURE_CONNECTION_MODE ROUTECTL_FIXTURE_WIRE_PATTERN \
+        ROUTECTL_FIXTURE_EXPECTED_INGRESS
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -608,11 +630,34 @@ else
 fi
 rm -rf "$work"
 
+# The extraction must not be displaceable by the expected-ingress PIN. That
+# pin is compared against the traced token, and `promote_fixture.sh` reads
+# `meta.ingress_kind` back as the traced fact at the second boundary -- so a
+# rig that recorded the pin instead would turn both gates into a value
+# compared with itself, and the whole check would pass on every capture.
+#
+# Driven on the LIVE-BOX path with the pin set, because that is the only
+# configuration where the two values can be made to differ: in driver mode a
+# disagreement is refused before anything lands, so no landed fixture could
+# ever distinguish them.
+export ROUTECTL_FIXTURE_EXPECTED_INGRESS="anthropic"
+work="$(run_rig "$(trace_non_stream 019eab77-0000-4000-8000-000000000006b anthropic openai-responses)")"
+unset ROUTECTL_FIXTURE_EXPECTED_INGRESS
+meta="$work/repo/crates/routectl-cli/tests/fixtures/captured/019eab77-0000-4000-8000-000000000006b/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "ingress_kind stays the TRACED token when a contradicting pin is set" \
+        "openai-responses" "$(meta_get "$meta" ingress_kind)"
+else
+    echo "FAIL: the pin-vs-trace capture produced no parseable meta.json"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
 # --- Case 7: driver mode refuses on each unset pin, naming it ---------
-# Four cases plus a paired control. Without the control a rig that
+# Five cases plus a paired control. Without the control a rig that
 # refused unconditionally -- or one that refused for an unrelated reason --
-# would pass all four refusal assertions.
-for missing in CASE_ID CONFIG_SHA CONNECTION_MODE WIRE_PATTERN; do
+# would pass all five refusal assertions.
+for missing in CASE_ID CONFIG_SHA CONNECTION_MODE WIRE_PATTERN EXPECTED_INGRESS; do
     set_pins drift-01 abc123 base-url
     unset "ROUTECTL_FIXTURE_$missing"
     work="$(make_repo)"
@@ -636,14 +681,14 @@ for missing in CASE_ID CONFIG_SHA CONNECTION_MODE WIRE_PATTERN; do
     rm -rf "$work"
 done
 
-# Paired control: the SAME trace with all four pins unset captures fine
+# Paired control: the SAME trace with every pin unset captures fine
 # on the unflagged live-box path, where an empty pin is honest.
 clear_pins
 work="$(make_repo)"
 rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000007)" || rc=$?
 meta="$(captured_of "$work")/019eab77-0000-4000-8000-000000000007/meta.json"
-check "live-box mode tolerates all four pins unset" "0" "$rc"
+check "live-box mode tolerates every pin unset" "0" "$rc"
 if [ -f "$meta" ] && is_valid_json "$meta"; then
     check "an unpinned live-box capture leaves case_id empty" \
         "" "$(meta_get "$meta" case_id)"
@@ -1595,6 +1640,192 @@ check_log "the refusal says the connection mode is unprovable" "unprovable" \
     "$work/rig.log"
 rm -rf "$work"
 unset seam_trace
+
+# --- Case 19d: the expected ingress must equal the TRACED dialect ------
+# The failure class three new clients introduce: a client that ACCEPTS the
+# runner's connection carriers and then reaches routectl on its OWN dialect
+# anyway. Every environment check passes -- the environment recorded the
+# intent faithfully -- and the fixture lands as evidence for a dialect it
+# never carried. `meta.ingress_kind` is a TRACED fact, so the gate is a
+# comparison against the run's pin.
+#
+# The vocabulary the pin is validated against must be derivable and must
+# match the ingress adapters' own `id()` bodies: a drifted replica would
+# refuse a dialect this build really parses, or accept one it does not.
+# Guarded on the crates tree's presence -- this suite also runs from a
+# scripts-only checkout.
+check "the ingress vocabulary parses to a non-empty set" "1" \
+    "$([ "${#KNOWN_INGRESS_KINDS[@]}" -gt 0 ] && echo 1 || echo 0)"
+ingress_src_dir="$HERE/../crates/routectl-cli/src/ingress"
+if [ -d "$ingress_src_dir" ]; then
+    real_kinds="$(grep -rhA1 -- "fn id(&self) -> &'static str {" "$ingress_src_dir" |
+        sed -n 's/^ *"\([a-z0-9-]\+\)" *$/\1/p' | sort -u | tr '\n' ' ')"
+    declared_kinds="$(printf '%s\n' "${KNOWN_INGRESS_KINDS[@]}" | sort -u | tr '\n' ' ')"
+    check "the declared ingress vocabulary equals the adapters' own id() set" \
+        "$real_kinds" "$declared_kinds"
+    unset real_kinds declared_kinds
+else
+    echo "PASS: no crates tree in this checkout; the ingress vocabulary weld is not asserted"
+fi
+unset ingress_src_dir
+
+# PREMISE ASSERTION: the two traces must really differ in the ingress token
+# the gate reads, and in nothing else the other gates key on. Without this
+# the refusal below could be about anything.
+if printf '%s\n' "$(trace_driver 019eab77-0000-4000-8000-000000000040 anthropic openai-responses)" |
+    grep -q 'ingress request body ingress="openai-responses"' &&
+    printf '%s\n' "$(trace_driver 019eab77-0000-4000-8000-000000000041)" |
+    grep -q 'ingress request body ingress="anthropic"'; then
+    echo "PASS: the ingress-gate traces differ in the traced dialect the gate reads"
+else
+    echo "FAIL: the ingress-gate traces are not the shapes they are named for --"
+    echo "FAIL: a refusal would then be asserted for something other than the dialect"
+    fails=$((fails + 1))
+fi
+
+# A capture whose TRACED dialect is not the pinned one is refused.
+set_pins ingress-mismatch-01 abc123 base-url baseline anthropic
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver 019eab77-0000-4000-8000-000000000040 anthropic openai-responses)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a capture on an unexpected ingress dialect refuses with exit 1" "1" "$rc"
+# Both dialects in the message: a runner reading only "not promoting"
+# cannot tell this refusal from the pattern or seam ones, and the pair is
+# what says whether the client or the pin was wrong.
+check_log "the refusal names the traced dialect" "openai-responses" "$work/rig.log"
+check_log "the refusal names the expected dialect" "expects 'anthropic'" \
+    "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/ingress-mismatch-01" ]; then
+    echo "FAIL: a fixture on an unexpected dialect reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a fixture on an unexpected dialect does not reach the corpus"
+fi
+if [ -d "$(captured_of "$work")" ] &&
+    [ -n "$(find "$(captured_of "$work")" -maxdepth 1 -name '.tmp.*' -print -quit)" ]; then
+    echo "FAIL: the ingress refusal left a staged tmp directory behind"
+    fails=$((fails + 1))
+else
+    echo "PASS: the ingress refusal leaves no staged tmp directory"
+fi
+rm -rf "$work"
+
+# PAIRED CONTROL, mandatory: the same trace under the pin that MATCHES it
+# promotes. Without it the gate is satisfiable by one that refuses every
+# non-Anthropic capture.
+set_pins ingress-match-01 abc123 base-url baseline openai-responses
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver 019eab77-0000-4000-8000-000000000040 anthropic openai-responses)" \
+    --driver-mode || rc=$?
+clear_pins
+check "the same capture under the matching pin promotes at exit 0" "0" "$rc"
+if [ -f "$(captured_of "$work")/anthropic-api/ingress-match-01/meta.json" ]; then
+    echo "PASS: a capture whose traced dialect equals its pin is promoted"
+    check "the promoted fixture records the traced dialect it was gated on" \
+        "openai-responses" \
+        "$(meta_get "$(captured_of "$work")/anthropic-api/ingress-match-01/meta.json" ingress_kind)"
+else
+    echo "FAIL: a matching-dialect fixture was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# A trace with NO extractable ingress token lands NOTHING rather than
+# landing a fixture the pin cannot be checked against: the rig's in-scope
+# selection requires the `ingress request body` line to NAME a dialect, so
+# a request whose dialect the trace does not carry is never a candidate.
+# Driver mode reports that as its zero-landing exit 3 (retryable), which is
+# a different verdict from the mismatch refusal above (never retryable) --
+# asserted here so the two cannot silently collapse into one.
+set_pins ingress-unpinned-01 abc123 base-url baseline anthropic
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver 019eab77-0000-4000-8000-000000000041 |
+        sed 's/ingress request body ingress="anthropic"/ingress request body ingress=""/')" \
+    --driver-mode || rc=$?
+clear_pins
+check "a capture whose ingress dialect was not traced lands nothing (exit 3)" "3" "$rc"
+if [ -d "$(captured_of "$work")/anthropic-api" ]; then
+    echo "FAIL: a fixture with no traced dialect reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a fixture with no traced dialect does not reach the corpus"
+fi
+rm -rf "$work"
+
+# A pin OUTSIDE the vocabulary is a usage error (exit 2), refused before
+# the trace is read: it can never equal a traced token, so leaving it to
+# the comparison would refuse every capture with a message about the
+# fixture rather than about the typo.
+set_pins ingress-bogus-01 abc123 base-url baseline anthropic-api
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000042)" \
+    --driver-mode || rc=$?
+clear_pins
+check "an expected-ingress value outside the vocabulary is a usage error" "2" "$rc"
+check_log "the vocabulary refusal names the offending value" "anthropic-api" \
+    "$work/rig.log"
+check_log "the vocabulary refusal lists what it would have accepted" \
+    "openai-responses" "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api" ]; then
+    echo "FAIL: a fixture landed under an out-of-vocabulary expected ingress"
+    fails=$((fails + 1))
+else
+    echo "PASS: nothing lands under an out-of-vocabulary expected ingress"
+fi
+rm -rf "$work"
+
+# EVERY member of the vocabulary is accepted as a pin, driven end to end
+# against a trace on that dialect. A single-value control could not tell
+# the validator apart from one hardcoding `anthropic`, and the whole point
+# of the pin is the dialects that are NOT it.
+for kind in "${KNOWN_INGRESS_KINDS[@]}"; do
+    set_pins "ingress-vocab-01" abc123 base-url baseline "$kind"
+    work="$(make_repo)"
+    rc=0
+    rig_run "$work" \
+        "$(trace_driver 019eab77-0000-4000-8000-000000000043 anthropic "$kind")" \
+        --driver-mode || rc=$?
+    clear_pins
+    check "the vocabulary member '$kind' is accepted as a pin and promotes" "0" "$rc"
+    rm -rf "$work"
+done
+
+# An absent ingress vocabulary is a HARD failure, never an unvalidated pin
+# -- the same fail-closed shape the rig uses for the scrub script and the
+# wire-pattern predicate. The removal is verified before the run: a delete
+# that matched nothing would assert against the present-library path.
+set_pins no-vocab-01 abc123 base-url baseline anthropic
+work="$(make_repo)"
+if [ -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ]; then
+    rc=0
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000044)" \
+        --driver-mode || rc=$?
+    check "an absent ingress vocabulary refuses the run with exit 1" "1" "$rc"
+    check_log "the refusal names the missing vocabulary" \
+        "ingress vocabulary not found" "$work/rig.log"
+    if [ -d "$(captured_of "$work")/anthropic-api" ]; then
+        echo "FAIL: a fixture landed with no vocabulary to validate its pin"
+        fails=$((fails + 1))
+    else
+        echo "PASS: nothing lands when the ingress vocabulary is absent"
+    fi
+else
+    echo "FAIL: could not remove the ingress vocabulary from the throwaway repo"
+    fails=$((fails + 1))
+fi
+clear_pins
+rm -rf "$work"
 
 # --- Case 20: --out confinement, both directions ---------------------
 # The confinement lives in scripts/drivers/lib/confine.sh, sourced by the

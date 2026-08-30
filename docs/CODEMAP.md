@@ -5720,9 +5720,15 @@ because no cargo target runs them, so nothing else names their paths.
   (`abspath_lexical`, `abspath_physical`, `confine_out_under`); the one copy of
   the resolution pair and containment test every script taking a
   caller-supplied output directory uses
+- `drivers/lib/ingress_kinds.sh` -- sourced ingress-dialect vocabulary
+  (`INGRESS_KINDS`, `ingress_kind_is_known`, `ingress_kinds_list`); the one
+  copy the capture rig, the driver runner, and the promotion script validate
+  their expected-ingress pin against, welded to `IngressAdapter::id()` by
+  the shell self-tests
 - `promote_fixture.sh` -- promotion of one captured fixture from a scratch
-  root into the committed driver corpus (`--from`, `--scratch-root`, `--to`);
-  re-runs the landing gates on the staged copy (scrub `--check`, the
-  wire-pattern predicate, and the connection-mode / MITM-seam-header
-  coherence check) because a scratch fixture is hand-editable
+  root into the committed driver corpus (`--from`, `--scratch-root`,
+  `--expected-ingress`, `--to`); re-runs the landing gates on the staged copy
+  (scrub `--check`, the wire-pattern predicate, the connection-mode /
+  MITM-seam-header coherence check, and the traced-ingress-vs-pin check)
+  because a scratch fixture is hand-editable
 - `promote_fixture.test.sh` -- self-test for the promotion script

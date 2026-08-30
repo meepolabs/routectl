@@ -444,15 +444,16 @@ the scenario was meant to exercise. That mode stays tolerant of all four
 being unset, because an empty pin is honest there.
 
 `scripts/capture_fixtures.sh --driver-mode` is the other mode, for a
-hermetic capture where a driver KNOWS all four. It changes five things:
+hermetic capture where a driver KNOWS every pin. It changes six things:
 
-- **All four pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
-  `ROUTECTL_FIXTURE_CONFIG_SHA`, `ROUTECTL_FIXTURE_CONNECTION_MODE`, and
-  `ROUTECTL_FIXTURE_WIRE_PATTERN` must be set; an unset one aborts the run
-  naming the variable. An empty case id would collapse every case in the
-  lane onto one landing directory and the corpus would quietly overwrite
-  itself, and an empty wire pattern would land a fixture whose coverage
-  claim nothing downstream can tell from a claim nobody recorded.
+- **All five pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
+  `ROUTECTL_FIXTURE_CONFIG_SHA`, `ROUTECTL_FIXTURE_CONNECTION_MODE`,
+  `ROUTECTL_FIXTURE_WIRE_PATTERN`, and
+  `ROUTECTL_FIXTURE_EXPECTED_INGRESS` must be set; an unset one aborts the
+  run naming the variable. An empty case id would collapse every case in
+  the lane onto one landing directory and the corpus would quietly
+  overwrite itself, and an empty wire pattern would land a fixture whose
+  coverage claim nothing downstream can tell from a claim nobody recorded.
 
   **There is no `--wire-pattern` flag, and looking for one is the wrong
   move.** The runner DERIVES that pin from the case file, by reading
@@ -469,6 +470,27 @@ hermetic capture where a driver KNOWS all four. It changes five things:
     scripts/drivers/cases/plain-turn-01.json
   ```
 
+  `ROUTECTL_FIXTURE_EXPECTED_INGRESS` is the exception that DOES arrive on
+  argv, as the runner's `--expected-ingress`. Nothing the runner reads
+  names the value: a lane config declares the EGRESS provider and says
+  nothing about the client's inbound dialect (a translation lane exists so
+  the two differ), and a case describes a dialect-agnostic interaction on
+  purpose. The pin is a property of the (driver, lane) pairing the caller
+  chose, so the caller supplies it -- with no default, because a default
+  of `anthropic` would be silently wrong for exactly the non-Anthropic
+  client the gate below exists to catch.
+
+- **The expected ingress dialect is enforced against the TRACED one.**
+  `meta.ingress_kind` is parsed out of the daemon's own trace, so it says
+  which adapter really handled the request; the pin says which one the run
+  was set up to reach. A client that accepts the runner's connection
+  carriers and then talks its own dialect anyway lands a fixture that is
+  evidence for the wrong dialect, and no environment check can see that --
+  the environment recorded the intent faithfully. A disagreement refuses
+  the promotion. The dialect vocabulary lives in
+  `scripts/drivers/lib/ingress_kinds.sh` (a replica of `IngressAdapter::id()`,
+  welded to it by the shell self-tests), and a pin outside it is a usage
+  error rather than a guaranteed mismatch.
 - **Landing keys on `(lane, case_id)`**, at `<out>/<lane>/<case_id>/`
   rather than `<out>/<request_id>/`, so a rerun of the same case produces
   a DIFF instead of a fresh sibling. The rerun replaces the previous
@@ -506,8 +528,14 @@ command, and feeds the resulting trace to the rig:
 
 ```
 scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
+  --expected-ingress anthropic \
   -- scripts/drivers/<driver-script> [args...]
 ```
+
+`--expected-ingress` is required and names the dialect the driven client is
+expected to reach routectl on. It is validated against
+`scripts/drivers/lib/ingress_kinds.sh` before any daemon boots and compared
+against the TRACED dialect before any fixture lands.
 
 Before any daemon boots, the run reads the LANE CONFIG and the CASE FILE.
 The lane config it copies into the run's config root; the case file it reads
@@ -621,10 +649,17 @@ scratch run never suppresses a later corpus recapture of the same case.
 ```
 bash scripts/promote_fixture.sh \
   --from .routectl-driver-scratch/anthropic-api/plain-turn-01 \
-  --scratch-root .routectl-driver-scratch
+  --scratch-root .routectl-driver-scratch \
+  --expected-ingress anthropic
 ```
 
-`--from` and `--scratch-root` are both required; `--scratch-root` exists
+`--from`, `--scratch-root`, and `--expected-ingress` are all required.
+`--expected-ingress` is the second boundary of the ingress pin: the rig
+checked it at capture time, and this check is what covers the window the
+scratch root exists for -- a fixture inspected and hand-edited before it
+lands. It arrives on argv rather than being read off the fixture because
+`meta.ingress_kind` is the traced FACT this gate compares against, and a
+fact checked against itself asserts nothing; `--scratch-root` exists
 because the scratch tree can sit outside the repo entirely, so there is no
 constant to derive it from, and a root guessed from `--from` would confine
 nothing. `--to` selects the corpus root and defaults to
@@ -762,7 +797,7 @@ run as a smoke test.
 
 ```
 scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
-  -- scripts/drivers/claude-code-print.sh
+  --expected-ingress anthropic -- scripts/drivers/claude-code-print.sh
 ```
 
 That lands `.routectl-driver-scratch/anthropic-api/tools-multiturn-01/` --
@@ -784,7 +819,8 @@ each other before any daemon boots:
 
 ```
 scripts/capture_driver.sh --lane anthropic-api.front-proxy --case thinking-01 \
-  --connection-mode front-proxy -- scripts/drivers/claude-code.sh
+  --connection-mode front-proxy --expected-ingress anthropic \
+  -- scripts/drivers/claude-code.sh
 ```
 
 Both modes matter because they emit different wire shapes: a front proxy
@@ -803,7 +839,7 @@ ROUTECTL_DRIVER_AGENT_BIN=<binary> \
 ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG=--continue \
 ROUTECTL_DRIVER_AGENT_MODEL_FLAG=-m \
 scripts/capture_driver.sh --lane anthropic-api --case thinking-01 \
-  -- scripts/drivers/external-agent-cli.sh
+  --expected-ingress anthropic -- scripts/drivers/external-agent-cli.sh
 ```
 
 ### A driver corpus is a snapshot of a client VERSION
@@ -856,7 +892,7 @@ real credential on the host, exactly like a host-path run:
 
 ```
 bash scripts/container/run_capture.sh --scratch /var/tmp/routectl-cell -- \
-  --lane anthropic-api --case plain-turn-01 \
+  --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
   -- scripts/drivers/claude-code-print.sh
 ```
 

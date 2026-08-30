@@ -161,7 +161,8 @@ committed corpus: an exploratory rerun of a case would otherwise replace
 a reviewed fixture in place. A scratch fixture enters the corpus at
 `crates/routectl-cli/tests/fixtures/driver/<lane>/<case_id>/` only
 through `scripts/promote_fixture.sh`, which requires the source to sit
-exactly two components under its `--scratch-root`, re-runs
+exactly two components under its `--scratch-root`, requires the dialect the
+fixture is being landed as (`--expected-ingress`), re-runs
 `scrub-fixture.sh --check` on the STAGED copy (a scratch fixture is
 hand-editable between capture and promotion, so the rig's own capture-time
 scrub is no longer sufficient evidence), and refuses the promotion
@@ -328,6 +329,33 @@ Fields:
   could not extract the token -- never a sentinel word outside that
   vocabulary, matching how `lane` reports its unmapped case and the
   empty-means-unpinned convention the rest of the schema uses.
+
+  A TRACED FACT, not a claim: it is parsed out of the daemon's own
+  `ingress request body` line, so it says which adapter really handled the
+  request. That is what makes it usable as the enforcement side of a gate.
+
+  **The dialect is ENFORCED AT PROMOTION, against a pin the caller
+  supplies.** A driver run passes `--expected-ingress <dialect>`
+  (`scripts/capture_driver.sh`), which becomes the mandatory
+  `ROUTECTL_FIXTURE_EXPECTED_INGRESS` pin, and both boundaries refuse a
+  fixture whose traced `ingress_kind` differs -- the capture rig in driver
+  mode, in the same slot the wire-pattern and seam gates occupy, and
+  `scripts/promote_fixture.sh` on the staged copy, which also takes the
+  dialect on argv. The failure this catches is a client that ACCEPTS the
+  runner's connection carriers and then reaches routectl on its own dialect
+  anyway: the environment recorded the intent faithfully, so no
+  environment check can see it, and the fixture would land as evidence for
+  a dialect it never carried. An empty traced token is refused with the
+  rest, because the driver corpus is never the live-box case where an
+  unpinned dialect is honest. The pin's vocabulary lives in
+  `scripts/drivers/lib/ingress_kinds.sh`, a replica of the `id()` set that
+  the shell self-tests weld to the Rust source.
+
+  Deliberately NOT re-derived alongside it: a lane-equality check (the lane
+  comes FROM the same trace, so it cannot disagree with itself), a
+  `config_sha` equality check (the runner computes it from the file it
+  booted), and an exactly-one-completed-request check (the rig already
+  refuses a zero-landing driver run with its own exit code).
 - `provider_kind` -- which egress provider produced the outgoing body,
   in the `PROVIDER_KIND` const vocabulary of `routectl-providers` --
   in particular `"anthropic"` (not `"anthropic-api"`) for the
@@ -433,12 +461,15 @@ Fields:
   comparison is on the header NAME, case-insensitively; the value is a
   redaction placeholder by the time the gate runs.
 
-  All four environment-sourced pins (`case_id`, `config_sha`,
-  `client.connection_mode`, `wire_pattern`) are EMPTY when unset on the
-  live-box path, where a trace genuinely cannot observe them, and
-  MANDATORY in driver mode, where an unset pin is a bug in the driver
+  All four environment-sourced pins recorded in meta.json (`case_id`,
+  `config_sha`, `client.connection_mode`, `wire_pattern`) are EMPTY when
+  unset on the live-box path, where a trace genuinely cannot observe them,
+  and MANDATORY in driver mode, where an unset pin is a bug in the driver
   rather than a fact about the capture. Driver mode aborts naming the
-  missing variable.
+  missing variable. `ROUTECTL_FIXTURE_EXPECTED_INGRESS` is the fifth
+  mandatory driver-mode pin and is NOT recorded: the value it pins is
+  already on disk as the traced `ingress_kind`, so a second copy could
+  only ever disagree with the fact it was checked against.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
   bodies. Stream fixtures are currently skipped by the replay
   drivers (stream-body replay is deferred -- the capture rig does

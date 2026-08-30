@@ -30,6 +30,11 @@ driver_die() {
 # Fail closed on the runner's contract rather than on a downstream
 # symptom. A driver launched outside the runner would otherwise reach a
 # client with an empty base URL and produce a capture of nothing.
+#
+# ROUTECTL_FIXTURE_EXPECTED_INGRESS is deliberately absent from this list:
+# no driver reads it, and the rig fails closed on it independently. A
+# driver-side requirement would only make a driver refuse for a pin it has
+# no use for, in a place further from the reader than the rig already is.
 driver_require_runner_env() {
   local var
   for var in ROUTECTL_BASE_URL ROUTECTL_DRIVER_RUN ROUTECTL_DRIVER_WORK \
