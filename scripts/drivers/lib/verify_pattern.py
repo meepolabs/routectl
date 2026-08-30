@@ -94,11 +94,13 @@ TOOL_RESULT_TYPES = ("tool_result", "function_call_output")
 # A `large-context` claim must mean the CONTEXT was large, not that the
 # client's own preamble was. Claude Code's floor request -- one short
 # prompt, every capability knob off -- already carries ~28 KB of system
-# prompt and reminder text, so any floor near that size is satisfied by
-# every fixture the corpus will ever hold, including the baseline. This
-# floor sits an order of magnitude above that preamble and well under the
-# padding a large-context case generates, so it separates the two without
-# encoding either exactly.
+# prompt and reminder text, and a request that merely ENABLES tools carries
+# 121-125 KB of declarations before any content reaches the body, measured
+# across every tool-using fixture in the corpus. So the separation this
+# floor has to make is against the latter figure, not the former: it sits
+# above every body the corpus has ever observed without padding in it,
+# while a case whose tool results carry the padding clears it. It is not
+# tuned to any one fixture in either direction.
 MIN_LARGE_CONTEXT_BYTES = 256 * 1024
 
 # Pattern tokens deliberately absent from the predicate table: they have a
