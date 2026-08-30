@@ -905,11 +905,20 @@ assert_caught "a raw x-claude-code-session-id on an outgoing request" \
     "[[\"anthropic-version\",\"2023-06-01\"],[\"x-claude-code-session-id\",\"$(fresh_uuid_v4)\"]]" \
     claude-session-header
 
-# The paired accept direction: the placeholder under the same three names
+# The openai-responses account header. Reached the wire only once the
+# capture wrapper could forward a seat's account id, so it is denied by the
+# same structural name rule rather than a value shape -- the id is a plain
+# uuid and a value rule would refuse every uuid in a body.
+assert_caught "a raw chatgpt-account-id on an outgoing request" \
+    outgoing_request.headers.json \
+    "[[\"originator\",\"codex_cli_rs\"],[\"chatgpt-account-id\",\"$(fresh_uuid_v4)\"]]" \
+    chatgpt-account-id
+
+# The paired accept direction: the placeholder under the same four names
 # must pass, or a scrubbed fixture is permanently unpromotable.
-assert_clean "the placeholder under all three account-scoped names is accepted" \
+assert_clean "the placeholder under all four account-scoped names is accepted" \
     upstream_response.headers.json \
-    '[["anthropic-organization-id","[REDACTED]"],["anthropic-workspace-id","[REDACTED]"],["x-claude-code-session-id","[REDACTED]"]]'
+    '[["anthropic-organization-id","[REDACTED]"],["anthropic-workspace-id","[REDACTED]"],["x-claude-code-session-id","[REDACTED]"],["chatgpt-account-id","[REDACTED]"]]'
 
 # THE CONTROL that keeps the name-keyed rule from degenerating into
 # "reject any uuid": a BODY full of uuids carries no header names at all
@@ -1112,7 +1121,7 @@ assert_help_lists_new_classes() {
         return
     fi
     for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key seat-session-id \
-        anthropic-account-id claude-session-header; do
+        anthropic-account-id claude-session-header chatgpt-account-id; do
         printf '%s\n' "$out" | grep -qF -- "$class" || missing+=" $class"
     done
     if [ -n "$missing" ]; then
