@@ -39,6 +39,8 @@ SCRUB="$HERE/scrub-fixture.sh"
 DRIVERS="$HERE/drivers"
 CASES="$DRIVERS/cases"
 VALIDATOR="$DRIVERS/lib/validate_case.py"
+VERIFIER="$DRIVERS/lib/verify_pattern.py"
+CLASSIFICATION="$DRIVERS/lib/wire_pattern_classification.tsv"
 
 DRIVER_FILES=(
     "$DRIVERS/claude-code.sh"
@@ -281,6 +283,383 @@ accepts "an unmutated copy of the base case is still accepted" \
     "$(mutate 'tools-multiturn-01' 'pass')"
 
 rm -rf "$mut"
+
+# ---------------------------------------------------------------------
+# Part 1b: the wire-pattern predicate
+# ---------------------------------------------------------------------
+# `meta.wire_pattern` is a recorded CLAIM; this is the code that decides
+# whether the captured bytes back it. Every leg below runs the predicate
+# against a staged fixture directory built here, so a refusal can only be
+# attributed to the one clause the leg flips -- a fixture-reading assertion
+# alone cannot distinguish a real check from one that passes on any input.
+
+pat="$(mktemp -d)"
+
+# Assert the verifier ACCEPTS a staged fixture as exhibiting a pattern.
+exhibits() {
+    local label="$1" dir="$2" pattern="$3" out
+    if out="$(python3 "$VERIFIER" "$dir" "$pattern" 2>&1)"; then
+        echo "PASS: $label"
+    else
+        fail "$label -- the verifier refused it: $out"
+    fi
+}
+
+# Assert the verifier REFUSES, and that its reason names the clause rather
+# than crashing: an unhandled traceback also exits non-zero.
+denies() {
+    local label="$1" dir="$2" pattern="$3" needle="$4" out rc=0
+    out="$(python3 "$VERIFIER" "$dir" "$pattern" 2>&1)" || rc=$?
+    if [ "$rc" = 0 ]; then
+        fail "$label -- the verifier ACCEPTED it"
+    elif ! printf '%s' "$out" | grep -qF -- "$needle"; then
+        fail "$label -- refused, but the reason did not mention '$needle': $out"
+    else
+        echo "PASS: $label"
+    fi
+}
+
+# One ingress structural summary line in the real field order, with the
+# three predicate fields supplied by the caller. A `-` thinking argument
+# OMITS the token, which is a distinct input from an empty value.
+s_line() {
+    local direction="$1" tools_len="$2" thinking="$3" cache="$4" thinking_token=""
+    [ "$thinking" = "-" ] || thinking_token="thinking_shape=$thinking "
+    printf 'structural summary direction="%s" kind="ingress" id="anthropic" ' "$direction"
+    printf 'model=claude-sonnet-4-5 max_tokens=32000 %s' "$thinking_token"
+    printf 'output_config_effort= tool_choice_shape= cache_control_count=%s ' "$cache"
+    printf 'messages_len=1 tools_len=%s anthropic_beta= provider_extras_keys= stream=true\n' "$tools_len"
+}
+
+# Stage a fixture directory holding a structural file and/or an ingress
+# body. An empty argument leaves that file ABSENT, which is the input the
+# fail-closed legs need.
+stage() {
+    local name="$1" structural="$2" body="$3"
+    local dir="$pat/$name"
+    mkdir -p "$dir"
+    [ -n "$structural" ] && printf '%s' "$structural" >"$dir/structural.txt"
+    [ -n "$body" ] && printf '%s' "$body" >"$dir/ingress_request.json"
+    printf '%s\n' "$dir"
+}
+
+# --- baseline: accept legs, then one leg per clause ---------------------
+
+exhibits "baseline accepts an explicitly disabled thinking shape" \
+    "$(stage baseline-disabled "$(s_line ingress 0 disabled 0)" "")" baseline
+exhibits "baseline accepts an absent thinking shape" \
+    "$(stage baseline-absent "$(s_line ingress 0 - 0)" "")" baseline
+denies "baseline refuses a line carrying tools" \
+    "$(stage baseline-tools "$(s_line ingress 16 disabled 0)" "")" baseline "tools_len"
+denies "baseline refuses an enabled thinking shape" \
+    "$(stage baseline-thinking "$(s_line ingress 0 enabled:31999 0)" "")" baseline "thinking_shape"
+denies "baseline refuses cache breakpoints" \
+    "$(stage baseline-cache "$(s_line ingress 0 disabled 3)" "")" baseline "cache_control_count"
+
+# An absent count token is not a zero: a summary the emitter did not write
+# describes no observed shape, and reading it as zero would let a truncated
+# capture satisfy the pattern with the easiest possible line.
+absent_count="$(s_line ingress 0 disabled 0 | sed 's/cache_control_count=0 //')"
+denies "baseline refuses a line with no cache_control_count token" \
+    "$(stage baseline-no-count "$absent_count" "")" baseline "absent"
+
+# --- thinking -----------------------------------------------------------
+
+exhibits "thinking accepts an enabled block with a budget" \
+    "$(stage thinking-enabled "$(s_line ingress 0 enabled:31999 0)" "")" thinking
+exhibits "thinking accepts an adaptive block" \
+    "$(stage thinking-adaptive "$(s_line ingress 0 adaptive:high 0)" "")" thinking
+denies "thinking refuses an explicitly disabled block" \
+    "$(stage thinking-disabled "$(s_line ingress 0 disabled 0)" "")" thinking "disabled"
+denies "thinking refuses an absent thinking token" \
+    "$(stage thinking-none "$(s_line ingress 0 - 0)" "")" thinking "absent"
+
+# --- cache-breakpoints --------------------------------------------------
+
+exhibits "cache-breakpoints accepts a single breakpoint" \
+    "$(stage cache-one "$(s_line ingress 0 disabled 1)" "")" cache-breakpoints
+denies "cache-breakpoints refuses a line with no breakpoint" \
+    "$(stage cache-zero "$(s_line ingress 0 disabled 0)" "")" cache-breakpoints "cache_control_count"
+
+# --- the ingress line is selected by its direction token ----------------
+# The outgoing summary carries the same fields with DIFFERENT values (the
+# committed baseline fixture's outgoing line already reports two cache
+# breakpoints its ingress line does not), so a predicate reading the wrong
+# line answers a question about traffic the case does not control.
+
+both_ingress_baseline="$(printf '%s\n%s\n' \
+    "$(s_line outgoing 16 enabled:31999 3)" "$(s_line ingress 0 disabled 0)")"
+exhibits "the predicate reads the ingress line past a non-baseline outgoing one" \
+    "$(stage direction-ingress-good "$both_ingress_baseline" "")" baseline
+
+both_ingress_tools="$(printf '%s\n%s\n' \
+    "$(s_line outgoing 0 disabled 0)" "$(s_line ingress 16 disabled 0)")"
+denies "the predicate does not satisfy itself from the outgoing line" \
+    "$(stage direction-ingress-bad "$both_ingress_tools" "")" baseline "tools_len"
+
+denies "a fixture whose structural file carries no ingress line is refused" \
+    "$(stage direction-none "$(s_line outgoing 0 disabled 0)" "")" baseline "no direction"
+# The needle is the UNREADABLE reason, not the filename: a predicate that
+# read a missing file as an empty one would still refuse -- for having no
+# ingress line -- and a filename-shaped needle would call that a pass.
+denies "a fixture with no structural file is refused" \
+    "$(stage no-structural "" '{}')" baseline "unreadable"
+
+# --- token parsing is exact on the name, not a substring ----------------
+# A substring search for `thinking_shape=` also matches
+# `output_thinking_shape=`, which would let an unrelated field satisfy a
+# clause about a missing one. Both directions of that mistake are asserted:
+# the substring reading would reject this line as baseline AND accept it as
+# thinking, so one leg alone would not catch it.
+
+substring_line="$(s_line ingress 0 - 0 | \
+    sed 's/output_config_effort=/output_thinking_shape=enabled:31999 output_config_effort=/')"
+exhibits "an output_thinking_shape token does not disqualify a baseline line" \
+    "$(stage exact-baseline "$substring_line" "")" baseline
+denies "an output_thinking_shape token does not satisfy the thinking pattern" \
+    "$(stage exact-thinking "$substring_line" "")" thinking "absent"
+
+# --- tool-use-multiturn: an ingress body census ------------------------
+# The census, not the offered tool list: the client offers its tools on
+# every request once they are permitted, so a tools-array check is
+# satisfied by the committed baseline fixture. Only a LATER turn replaying
+# an earlier exchange puts a tool_use block and its tool_result on the wire.
+
+tool_pair='{"tools":[{"name":"Read"}],"messages":[
+ {"role":"user","content":[{"type":"text","text":"read it"}]},
+ {"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{}}]},
+ {"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"7"}]},
+ {"role":"user","content":[{"type":"text","text":"and the next one"}]}]}'
+exhibits "tool-use-multiturn accepts a resent tool_use / tool_result pair" \
+    "$(stage tools-pair "" "$tool_pair")" tool-use-multiturn
+
+tools_only="$(printf '%s' "$tool_pair" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+body["messages"] = [t for t in body["messages"] if t["content"][0]["type"] == "text"]
+json.dump(body, sys.stdout)
+')"
+denies "an offered tools array alone does not satisfy tool-use-multiturn" \
+    "$(stage tools-array-only "" "$tools_only")" tool-use-multiturn "tool-call"
+
+call_only="$(printf '%s' "$tool_pair" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+body["messages"] = [t for t in body["messages"] if t["content"][0]["type"] != "tool_result"]
+json.dump(body, sys.stdout)
+')"
+denies "a tool call with no result turn does not satisfy tool-use-multiturn" \
+    "$(stage tools-call-only "" "$call_only")" tool-use-multiturn "tool result"
+
+# Ordering is a clause of its own: a result turn BEFORE the call it answers
+# is not the resent pair, and a census that ignored order would accept it.
+reversed_pair="$(printf '%s' "$tool_pair" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+turns = body["messages"]
+turns[1], turns[2] = turns[2], turns[1]
+json.dump(body, sys.stdout)
+')"
+denies "a tool result preceding its call does not satisfy tool-use-multiturn" \
+    "$(stage tools-reversed "" "$reversed_pair")" tool-use-multiturn "no later turn"
+
+# The needle is the ABSENCE reason, not the filename: a predicate that let
+# a missing body through to the JSON read would still refuse -- for an
+# unreadable file -- and a filename-shaped needle would call that a pass.
+denies "a fixture with no ingress body is refused for tool-use-multiturn" \
+    "$(stage tools-no-body "$(s_line ingress 0 disabled 0)" "")" \
+    tool-use-multiturn "recorded no ingress body"
+denies "a fixture with no ingress body is refused for large-context" \
+    "$pat/tools-no-body" large-context "recorded no ingress body"
+
+# --- large-context: an ingress body byte floor -------------------------
+
+floor="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import verify_pattern
+print(verify_pattern.MIN_LARGE_CONTEXT_BYTES)
+' "$DRIVERS/lib")"
+check "the large-context floor is stated as a named constant" "1" \
+    "$(grep -c '^MIN_LARGE_CONTEXT_BYTES' "$VERIFIER")"
+
+python3 -c '
+import json, os, sys
+floor = int(sys.argv[2])
+for name, size in (("large-over", floor + 4096), ("large-under", floor - 1)):
+    directory = os.path.join(sys.argv[1], name)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "ingress_request.json")
+    body = {"messages": [{"role": "user", "content": "x"}]}
+    text = json.dumps(body)
+    body["messages"][0]["content"] = "x" * (size - len(text) + 1)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(body))
+    assert os.path.getsize(path) == size, (name, os.path.getsize(path), size)
+' "$pat" "$floor"
+exhibits "large-context accepts a body above the floor" "$pat/large-over" large-context
+denies "large-context refuses a body one byte under the floor" \
+    "$pat/large-under" large-context "floor"
+
+# A byte count is not a shape. These two are OVER the floor, so a predicate
+# that only measured the file would promote both -- a truncated capture and
+# a binary blob, each claiming a wire shape neither carries.
+python3 -c '
+import json, os, sys
+floor = int(sys.argv[2])
+valid = json.dumps({"messages": [{"role": "user", "content": "x" * (floor + 4096)}]})
+for name, payload in (
+    # A capture cut off mid-write: valid UTF-8, unparseable JSON.
+    ("large-truncated", valid[: floor + 2048].encode("utf-8")),
+    # Not text at all, which fails one step earlier than the JSON parse.
+    ("large-binary", b"\xff\xfe" + b"\x00\x01" * (floor // 2)),
+):
+    directory = os.path.join(sys.argv[1], name)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "ingress_request.json")
+    with open(path, "wb") as handle:
+        handle.write(payload)
+    size = os.path.getsize(path)
+    assert size >= floor, (name, size, floor)
+' "$pat" "$floor"
+denies "large-context refuses an oversized body that is not valid JSON" \
+    "$pat/large-truncated" large-context "not valid JSON"
+denies "large-context refuses an oversized body that is not valid UTF-8" \
+    "$pat/large-binary" large-context "not valid UTF-8"
+
+# The current large-context-01 case puts its padding in FILES the client is
+# asked to read, so the request it produces carries only the prompt plus
+# the client's own preamble. Its refusal here is the EXPECTED outcome and
+# the observation the case definition is settled against -- the floor is
+# not tuned to make it pass. Built from the committed baseline fixture's
+# real captured body (the observed size of a first request) plus the case's
+# own first-turn prompt.
+lc_prompt="$(python3 "$VALIDATOR" --turns "$CASES/large-context-01.json" | head -1)"
+lc_dir="$pat/large-context-01-shape"
+mkdir -p "$lc_dir"
+python3 - "$ROOT/crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01" \
+         "$lc_dir/ingress_request.json" "$lc_prompt" <<'PY'
+import json, os, sys
+source = os.path.join(sys.argv[1], "ingress_request.json")
+if os.path.isfile(source):
+    with open(source, encoding="utf-8") as handle:
+        body = json.load(handle)
+else:
+    # No driver corpus in this checkout. The preamble size a real first
+    # request carries is the point of the leg, so stand in an explicit
+    # figure rather than skipping: the committed baseline fixture measured
+    # ~28 KB, and any value in that range is under the floor.
+    body = {"system": [{"type": "text", "text": "p" * 28000}], "messages": []}
+body["messages"] = [{"role": "user", "content": [{"type": "text", "text": sys.argv[3]}]}]
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump(body, handle)
+PY
+denies "the current large-context case shape is refused as expected" \
+    "$lc_dir" large-context "floor"
+
+# --- the table covers the closed set ----------------------------------
+# Every token in WIRE_PATTERNS resolves to a predicate. The "no predicate"
+# refusal is what a missing entry produces, so its absence here is the
+# assertion -- and its PRESENCE for the deferred token is the paired
+# control proving the check can fire at all.
+
+uncovered=0
+while IFS= read -r token; do
+    out="$(python3 "$VERIFIER" "$pat/baseline-disabled" "$token" 2>&1)" || true
+    if printf '%s' "$out" | grep -qF "no predicate"; then
+        uncovered=$((uncovered + 1))
+        echo "  uncovered wire pattern: $token"
+    fi
+done < <(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import validate_case
+print("\n".join(sorted(validate_case.WIRE_PATTERNS)))
+' "$DRIVERS/lib")
+check "every wire pattern in the closed set has a predicate" "0" "$uncovered"
+
+denies "a pattern with no predicate is refused rather than waved through" \
+    "$pat/baseline-disabled" mcp-tools "no predicate"
+
+# The refusal NAMES the token and its deferred status. A generic "no
+# predicate" reason would read the same for a typo'd pattern as for the one
+# deliberately held back, and the deferred list is the only place the
+# distinction is recorded -- a token missing from BOTH the table and that
+# list is an oversight the message must not describe as a plan.
+denies "the refusal names the token it has no predicate for" \
+    "$pat/baseline-disabled" mcp-tools "'mcp-tools'"
+denies "the refusal names the deferred set the token belongs to" \
+    "$pat/baseline-disabled" mcp-tools "deferred: mcp-tools"
+
+# --- the shared classification set ------------------------------------
+# The structural lines the three structural predicates are asserted
+# against, so an implementation of them cannot drift unnoticed from what a
+# shape means. Only the Python side reads the set today; the Rust half of
+# the cross-check is not wired up yet.
+
+# The header is the comment block ahead of the first record, read as such
+# rather than as a fixed line count: a needle pinned to `head -N` passes or
+# fails on where the sentence sits rather than on whether it is there.
+class_header="$(sed -n '/^[^#]/q;p' "$CLASSIFICATION")"
+if printf '%s' "$class_header" | grep -qF "baseline, thinking,"; then
+    echo "PASS: the classification set states its three-predicate scope"
+else
+    fail "the classification set header does not state which predicates it covers"
+fi
+# The header must not claim a cross-check that does not run yet: a reader
+# who believes the Rust side consumes this file reads an undetected
+# divergence as a checked one.
+if printf '%s' "$class_header" | grep -qF "does not exist yet"; then
+    echo "PASS: the classification set header states which side reads it today"
+else
+    fail "the classification set header does not say the Rust half is not wired up"
+fi
+
+class_records=0
+class_wrong=0
+while IFS=$'\t' read -r yes no line; do
+    case "$yes" in ''|'#'*) continue ;; esac
+    class_records=$((class_records + 1))
+    if [ "$yes" = "-" ] && [ "$no" = "-" ]; then
+        class_wrong=$((class_wrong + 1))
+        echo "  record asserts nothing: $line"
+        continue
+    fi
+    for pattern in ${yes//,/ }; do
+        [ "$pattern" = "-" ] && continue
+        if ! printf '%s' "$line" | python3 "$VERIFIER" --structural-line "$pattern" 2>/dev/null; then
+            class_wrong=$((class_wrong + 1))
+            echo "  record claims $pattern but the predicate refuses it: $line"
+        fi
+    done
+    for pattern in ${no//,/ }; do
+        [ "$pattern" = "-" ] && continue
+        if printf '%s' "$line" | python3 "$VERIFIER" --structural-line "$pattern" 2>/dev/null; then
+            class_wrong=$((class_wrong + 1))
+            echo "  record denies $pattern but the predicate accepts it: $line"
+        fi
+    done
+done <"$CLASSIFICATION"
+check "every classification record matches the predicate that reads it" "0" "$class_wrong"
+if [ "$class_records" -ge 8 ]; then
+    echo "PASS: the classification set holds $class_records records"
+else
+    fail "the classification set holds only $class_records records"
+fi
+
+# The set is scoped to the structural predicates, and the mode that reads
+# it refuses a body-census pattern rather than answering "no" -- a census
+# question a line cannot decide is the wrong question, not a rejection.
+for pattern in tool-use-multiturn large-context; do
+    if printf '%s' "$(s_line ingress 0 disabled 0)" | \
+        python3 "$VERIFIER" --structural-line "$pattern" 2>/dev/null; then
+        fail "a structural line satisfied the body-census pattern $pattern"
+    else
+        echo "PASS: a structural line cannot classify the $pattern census"
+    fi
+done
+
+rm -rf "$pat"
 
 # ---------------------------------------------------------------------
 # Part 2: driver hygiene, asserted on the committed files

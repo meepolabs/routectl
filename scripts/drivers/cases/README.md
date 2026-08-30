@@ -90,6 +90,20 @@ python3 scripts/drivers/lib/validate_case.py --field wire_pattern <case>
 python3 scripts/drivers/lib/validate_case.py --turns <case>
 ```
 
+The validator checks that a case's `wire_pattern` is IN the closed
+vocabulary, not that the capture it produces exhibits that shape -- a
+`tools: true` knob only permits a client to use tools, it cannot make it.
+That second question belongs to `scripts/drivers/lib/verify_pattern.py`,
+which reads a captured fixture directory against the pattern its
+`meta.json` claims:
+
+```
+python3 scripts/drivers/lib/verify_pattern.py <fixture-dir> <pattern>
+```
+
+A pattern in the vocabulary here needs a predicate there, or a fixture
+claiming it is refused rather than accepted unverified.
+
 ## Running a case
 
 A runner covering a whole lane derives the set of cases it expects at run

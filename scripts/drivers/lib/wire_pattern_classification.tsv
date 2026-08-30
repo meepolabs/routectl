@@ -1,0 +1,54 @@
+# Shared wire-pattern classification set.
+#
+# One record per structural summary line, paired with the patterns that
+# line DOES and does NOT satisfy. The three structural predicates exist
+# twice -- in scripts/drivers/lib/verify_pattern.py and as reference logic
+# in the routectl-cli test suite -- and a shape means whatever each
+# implementation independently says it means, so the set exists to make a
+# disagreement observable rather than silent.
+#
+# TODAY only the Python predicates read it, through
+# scripts/drivers.test.sh: every record is classified by the predicate it
+# names, both directions. The Rust side reading the same records is the
+# other half of the cross-check and does not exist yet, so a Python/Rust
+# divergence is currently UNDETECTED -- the file is the fixture that half
+# will consume, committed ahead of it so the two cannot be authored against
+# different inputs.
+#
+# SCOPE: the three STRUCTURAL predicates only -- baseline, thinking,
+# cache-breakpoints. The other two current patterns (tool-use-multiturn,
+# large-context) are ingress-BODY censuses with no Rust reference logic to
+# drift from, and a structural line carries nothing that decides them, so
+# they are deliberately absent from every record here rather than listed
+# as rejections.
+#
+# Format: three TAB-separated fields.
+#   1. patterns the line satisfies, comma-separated, or `-` for none
+#   2. patterns the line does not satisfy, comma-separated, or `-` for none
+#   3. the structural summary line itself
+# Blank lines and `#` comment lines are skipped. Every record must name at
+# least one pattern in field 1 or field 2; a record naming neither asserts
+# nothing and is a parse error on both sides.
+#
+# The lines are written in the field order the emitter actually uses, with
+# the trace-line prefix stripped: the predicates parse `key=value` tokens
+# out of whitespace, so the prefix is not load-bearing and its absence
+# keeps the records readable.
+
+baseline	thinking,cache-breakpoints	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+baseline	thinking,cache-breakpoints	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+baseline	thinking,cache-breakpoints	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape= output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+thinking	baseline	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=enabled:31999 output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+thinking	baseline	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=adaptive:high output_config_effort=high tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+cache-breakpoints	baseline,thinking	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=3 messages_len=5 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+thinking,cache-breakpoints	baseline	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=enabled:8192 output_config_effort= tool_choice_shape= cache_control_count=2 messages_len=7 tools_len=16 anthropic_beta= provider_extras_keys= stream=true
+-	baseline,thinking	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=true
+# Token parsing is EXACT on the name. A substring search for
+# `thinking_shape=` also matches `output_thinking_shape=`, which would let
+# an unrelated field satisfy the baseline clause about a missing one -- and
+# would classify this line as thinking.
+baseline	thinking	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 output_thinking_shape=enabled:31999 output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+# A count token that is absent entirely is not a zero: a summary missing
+# `cache_control_count` was not emitted by the shape this corpus pins, and
+# guessing a value for it would classify a shape nobody observed.
+-	baseline,cache-breakpoints	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
