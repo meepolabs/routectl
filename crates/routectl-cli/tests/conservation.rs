@@ -446,6 +446,122 @@ fn the_tool_loop_capture_has_every_name_divergence_explained_and_no_other() {
 /// promotion gate verifies against the captured bytes: an empty one is a
 /// fixture that reached the corpus with nothing to verify.
 ///
+/// Every committed fixture's client-minted `device_id` is DISTINCT.
+///
+/// The runner gives each driven client a fresh `HOME`, so the client mints a
+/// new machine identity per run and the value is ephemeral rather than host
+/// identity -- which is why the scrub gate has no class for it and could not
+/// have one: a 64-hex value under a neutral key matches nothing.
+///
+/// That makes this an invariant no gate defends. A rig regression that stopped
+/// resetting `HOME` would make the id STABLE across captures, silently
+/// correlating every future fixture to one machine, and the corpus is public.
+/// Measuring it by hand once proves today's state; asserting it keeps proving
+/// it. Distinctness is the observable proxy for "the reset happened".
+#[test]
+fn committed_driver_fixtures_carry_pairwise_distinct_device_ids() {
+    let root = driver_root();
+    let corpus = match discover_driver_fixtures(&root) {
+        Ok(corpus) => corpus,
+        Err(e) => panic!("the driver root {} must walk: {e}", root.display()),
+    };
+    if corpus.fixtures.is_empty() {
+        eprintln!(
+            "conservation: driver root `{}` holds no loadable fixture; the device-id \
+             distinctness assertion is SKIPPED.",
+            root.display(),
+        );
+        return;
+    }
+
+    // `metadata.user_id` is a JSON STRING holding nested JSON, not an object --
+    // reading it as an object silently yields nothing and the assertion passes
+    // on every fixture. Parse the inner document.
+    let mut seen: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut without = Vec::new();
+    for fixture in &corpus.fixtures {
+        let raw = fixture.ingress_request["metadata"]["user_id"].as_str();
+        let Some(inner) = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        else {
+            without.push(fixture.name.clone());
+            continue;
+        };
+        match inner["device_id"].as_str() {
+            Some(id) if !id.is_empty() => {
+                seen.entry(id.to_string())
+                    .or_default()
+                    .push(fixture.name.clone());
+            }
+            _ => without.push(fixture.name.clone()),
+        }
+    }
+
+    // A corpus where NO fixture carries the field would make the distinctness
+    // check vacuous, so the presence half is asserted first.
+    assert!(
+        !seen.is_empty(),
+        "no committed fixture carries a metadata.user_id.device_id, so the distinctness \
+         assertion below proves nothing; fixtures without one: {without:?}",
+    );
+
+    let shared = shared_device_ids(&seen);
+    assert!(
+        shared.is_empty(),
+        "committed driver fixtures SHARE a client device_id, so the runner stopped minting a \
+         fresh client identity per run and the corpus now correlates to one machine: {shared:?}",
+    );
+}
+
+/// The distinctness predicate, extracted so a planted control can exercise it.
+///
+/// Without this split the assertion above is VACUOUS: today's corpus holds no
+/// duplicate, so disabling the check leaves it green. Measured that directly --
+/// widening the comparison to `> 99` did not fail. A predicate that cannot be
+/// shown to fire is not a check.
+fn shared_device_ids(
+    seen: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<(String, Vec<String>)> {
+    seen.iter()
+        .filter(|(_, users)| users.len() > 1)
+        .map(|(id, users)| (id.clone(), users.clone()))
+        .collect()
+}
+
+/// PAIRED CONTROL for the distinctness assertion: two fixtures sharing one
+/// device_id must be reported, and distinct ones must not.
+#[test]
+fn the_device_id_predicate_reports_a_shared_id_and_accepts_distinct_ones() {
+    use std::collections::BTreeMap;
+
+    let mut duplicated: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    duplicated.insert("aaaa".into(), vec!["case-one".into(), "case-two".into()]);
+    duplicated.insert("bbbb".into(), vec!["case-three".into()]);
+    let flagged = shared_device_ids(&duplicated);
+    assert_eq!(
+        flagged.len(),
+        1,
+        "the shared id must be reported exactly once: {flagged:?}",
+    );
+    assert_eq!(
+        flagged[0].0, "aaaa",
+        "the reported id must be the shared one"
+    );
+    assert_eq!(
+        flagged[0].1,
+        vec!["case-one".to_string(), "case-two".to_string()],
+        "the report must name every fixture sharing the id, so a reader can act on it",
+    );
+
+    let mut all_distinct: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    all_distinct.insert("aaaa".into(), vec!["case-one".into()]);
+    all_distinct.insert("bbbb".into(), vec!["case-two".into()]);
+    assert!(
+        shared_device_ids(&all_distinct).is_empty(),
+        "a corpus of distinct ids must report nothing, or the predicate flags everything",
+    );
+}
+
 /// Stated over the whole corpus rather than against one named case: a
 /// per-fixture assertion is a special case that the general rule covers,
 /// and it would go on passing while a second fixture landed unpinned.
