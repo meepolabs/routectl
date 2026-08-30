@@ -2296,6 +2296,8 @@ tested_cc_version = "2.1.143"
 - `listen_port` -- the local TCP port the MITM listener binds. Must
   differ from `[server] port` -- the two are separate bound sockets on
   the same host; startup validation rejects a collision.
+  `serve --mitm-port <n>` overrides this value for one run without
+  touching the config file.
 - `cert_dir` -- directory holding the locally-generated MITM CA + leaf
   certificates. Defaults under the same user config dir as `usage.db`
   and `config.toml` (`XDG_CONFIG_HOME` else `$HOME/.config`).
