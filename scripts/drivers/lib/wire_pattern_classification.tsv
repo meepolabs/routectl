@@ -52,3 +52,14 @@ baseline	thinking	structural summary direction="ingress" kind="ingress" id="anth
 # `cache_control_count` was not emitted by the shape this corpus pins, and
 # guessing a value for it would classify a shape nobody observed.
 -	baseline,cache-breakpoints	structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+# `baseline` is ANTHROPIC-ONLY and scoped by the line's own `id` token. A
+# non-Anthropic client's floor request carries tools its runtime requires
+# rather than tools a case permitted, so `tools_len == 0` describes a
+# request that client cannot send; a per-dialect tool-count floor would
+# pin that client's version into the predicate. Every other baseline
+# clause is satisfied on this line, so only the scope check can refuse it.
+-	baseline	structural summary direction="ingress" kind="ingress" id="openai-responses" model=gpt-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true
+# A line naming NO ingress dialect cannot be scoped, so the claim is
+# refused rather than defaulted to the Anthropic one -- an absent token is
+# not a value, the same rule the absent count records above pin.
+-	baseline	structural summary direction="ingress" kind="ingress" model=claude-sonnet-4-5 max_tokens=32000 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=true

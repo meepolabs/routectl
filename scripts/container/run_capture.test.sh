@@ -318,11 +318,19 @@ SH
 # BOTH request-side structural summaries, which is what driver mode
 # requires before it will land a fixture. Every value is synthetic and
 # matches nothing on any real machine.
+#
+# `kind` and `id` differ per direction, as the emitter writes them: the
+# ingress call site passes the ingress dialect token, the outgoing one the
+# provider kind and configured provider id. The `baseline` predicate scopes
+# itself to the Anthropic dialect off the ingress line's `id`, so reusing
+# the outgoing spelling on both lines would be refused.
 canned_trace() {
     local id="019eab77-0000-4000-8000-0000000000e1"
     local span="request{method=POST path=/v1/messages request_id=$id}"
     local target="routectl_core::log_safe:"
-    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
+    local fields='model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
+    local structural="kind=\"ingress\" id=\"anthropic\" $fields"
+    local structural_out="kind=\"anthropic\" id=\"anthropic-api:anthropic\" $fields"
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -333,7 +341,7 @@ canned_trace() {
 2026-08-25T10:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
 2026-08-25T10:00:00.310000Z TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
 2026-08-25T10:00:00.400000Z TRACE $span: $target structural summary direction="ingress" $structural
-2026-08-25T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural
+2026-08-25T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural_out
 TRACE
 }
 

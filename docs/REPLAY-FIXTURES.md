@@ -382,6 +382,18 @@ Fields:
   absent predicate script is a hard failure in both, never an unverified
   promotion.
 
+  **Dialect scope, per pattern.** `tool-use-multiturn` is dialect-tolerant:
+  one census picks the turn list by which key the captured body carries
+  (`messages` or `input`) and matches the tool-call / result pair in each
+  dialect's own spelling, so an `openai-responses` or `openai` capture
+  promotes through the same predicate an `anthropic` one does. `baseline` is
+  ANTHROPIC-ONLY and refuses a claim on any other dialect BY NAME: another
+  client's floor request carries tools its own runtime requires, so
+  `tools_len == 0` describes a request it cannot send, and a per-dialect
+  tool-count floor would pin that client's version into the predicate. A
+  pattern not capturable on a client is a property of the client, not a gap
+  in the corpus.
+
   Run it by hand against a staged or committed fixture directory:
 
   ```

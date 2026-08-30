@@ -691,10 +691,30 @@ Every predicate keys on the INGRESS side only -- the case controls what the
 client sends, not the provider dialect the request is translated into.
 `baseline`, `thinking`, and `cache-breakpoints` read the ingress structural
 summary line from `structural.txt`; `tool-use-multiturn` and
-`large-context` read `ingress_request.json` (a resent tool_use /
-tool_result pair, and a body byte floor). A pattern token with no predicate
+`large-context` read `ingress_request.json` (a resent tool-call / result
+pair, and a body byte floor). A pattern token with no predicate
 is REFUSED rather than waved through, so extending the closed vocabulary
 without extending the table cannot promote an unverified fixture.
+
+Ingress side does not mean Anthropic side. `tool-use-multiturn` runs ONE
+census over every ingress dialect: it picks the turn list by which key the
+captured body carries (`messages` for the Anthropic and chat-completions
+shapes, `input` for the Responses shape) and matches the pair in each
+dialect's own spelling -- `tool_use` / `tool_result` blocks, a `tool_calls`
+array plus a `role: "tool"` turn, or `function_call` /
+`function_call_output` items. The turn list is selected by PRESENCE, never
+by the recorded `meta.ingress_kind`: that claim sits beside the
+`wire_pattern` claim the predicate exists to check. A body carrying neither
+key is refused naming both.
+
+`baseline` is the deliberate exception: it is ANTHROPIC-ONLY, scoped off
+the ingress line's own `id` token, and a claim on any other dialect is
+refused by name. A non-Anthropic client's floor request carries tools its
+own runtime requires rather than tools a case permitted, so `tools_len == 0`
+describes a request that client cannot send -- and a per-dialect tool-count
+floor keyed on a measured client tool count would pin that client's VERSION
+into a predicate and lie at its next release. An absent `id` token is
+refused too rather than defaulted, on the same rule as an absent count.
 
 The three structural predicates exist twice, in Python here and as
 reference logic in the Rust test suite, and
