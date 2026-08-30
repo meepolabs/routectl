@@ -1315,6 +1315,15 @@ SH
 # workspace (the runner removes that workspace on exit, and a multi-turn
 # driver invokes the client more than once).
 #
+# IT DRAINS STDIN, and that is load-bearing rather than incidental. The
+# real clients read stdin; a driver whose turn loop lets the client inherit
+# the loop's own stdin has the client swallow the remaining prompts, and a
+# 2-turn case then runs ONE turn with every prompt concatenated. A stub
+# that never read stdin could not exhibit that, so the "once per turn"
+# assertion below passed against a stub incapable of failing it -- a
+# vacuous negative. The drained byte count is recorded per invocation so
+# the assertion can also see WHETHER anything was there to drain.
+#
 # `STUB_CLIENT_RC` makes it fail on demand, which is how the driver's own
 # failure propagation is asserted. `STUB_CLIENT_VERSION` empty is how a
 # client that cannot state its version is asserted.
@@ -1328,8 +1337,10 @@ for arg in "$@"; do
         exit 0
     fi
 done
+stdin_bytes="$(cat | wc -c | tr -d ' ')"
 {
     printf 'invocation argv=%s\n' "$*"
+    printf 'invocation stdin_bytes=%s\n' "$stdin_bytes"
     printf 'invocation base_url=%s\n' "${ANTHROPIC_BASE_URL:-}"
     printf 'invocation api_key_set=%s\n' "$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo yes || echo no)"
     printf 'invocation bearer=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}"
@@ -1957,10 +1968,33 @@ work="$(make_work)"
 driver_run "$work" claude-code-print.sh tools-multiturn-01 || true
 check "a multi-turn case invokes the client once per turn" "2" \
     "$(client_get "$work" argv | wc -l)"
+# The client's stdin must be EMPTY on every invocation. The stub drains it,
+# so a driver that let the client inherit the turn loop's own stdin shows
+# up here as a non-zero byte count on turn 1 -- and as one invocation
+# instead of two above, since the drained bytes are the remaining prompts.
+# This is what makes the once-per-turn assertion non-vacuous: without a
+# draining stub it passed against a stub that could not exhibit the bug.
+turn_stdin="$(client_get "$work" stdin_bytes | tr '\n' ',')"
+check "the client sees no stdin on any turn" "0,0," "$turn_stdin"
+unset turn_stdin
 if client_get "$work" argv | sed -n '2p' | grep -q -- '--resume'; then
     echo "PASS: a multi-turn print run resumes rather than reopening"
 else
     fail "a multi-turn print run did not resume the first turn's session"
+fi
+# Each turn carries ITS OWN prompt, not the concatenation. The collapsed
+# shape put both prompts in one argv, which the count assertion above
+# catches only because the loop then ran once -- a driver that passed both
+# prompts to each of two invocations would satisfy the count.
+if client_get "$work" argv | sed -n '1p' | grep -qF 'notes-beta.txt'; then
+    fail "the first turn's argv carries the SECOND turn's prompt"
+else
+    echo "PASS: the first turn's argv carries only its own prompt"
+fi
+if client_get "$work" argv | sed -n '2p' | grep -qF 'notes-beta.txt'; then
+    echo "PASS: the second turn's argv carries the second prompt"
+else
+    fail "the second turn's argv does not carry the second turn's prompt"
 fi
 # Paired controls for the forced-off assertions below: a case whose knob is
 # TRUE must leave the knob alone, or those assertions would pass against a
@@ -1972,6 +2006,32 @@ else
 fi
 check "a no-thinking case forces the thinking budget to zero" "0" \
     "$(client_get "$work" thinking_tokens | head -1)"
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# The SECOND driver carrying the same loop shape. Its turn loop feeds the
+# client from the same pipe, so it has the same inheritance to get wrong
+# and needs its own evidence -- a fix applied to one file leaves the other
+# broken, and only this leg says so.
+work="$(make_work)"
+canned_trace_tools >"$work/canned-trace.log"
+driver_run "$work" external-agent-cli.sh tools-multiturn-01 || true
+check "the agent CLI driver invokes the client once per turn" "2" \
+    "$(client_get "$work" argv | wc -l)"
+turn_stdin="$(client_get "$work" stdin_bytes | tr '\n' ',')"
+check "the agent CLI's client sees no stdin on any turn" "0,0," "$turn_stdin"
+unset turn_stdin
+if client_get "$work" argv | sed -n '1p' | grep -qF 'notes-beta.txt'; then
+    fail "the agent CLI's first turn carries the SECOND turn's prompt"
+else
+    echo "PASS: the agent CLI's first turn carries only its own prompt"
+fi
+if client_get "$work" argv | sed -n '2p' | grep -q -- '--continue'; then
+    echo "PASS: the agent CLI's later turn continues the session"
+else
+    fail "the agent CLI's later turn did not continue the session"
+fi
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"

@@ -238,6 +238,85 @@ TRACE
     structural_line "$id" outgoing 500000
 }
 
+# One CANDIDATE of a multi-request driver trace: a complete driver-shaped
+# request with both its timestamps and its wire shape chosen by the caller.
+#
+# The two timestamps are separate parameters because they are separate
+# facts and the selector's ordering basis is the difference between them:
+# `$2` is when the request's `ingress request body` was logged (the
+# ordering key) and `$3` is when its completion marker was (what the
+# fixture records as `captured_at_ts`). Passing them in opposite orders
+# across two candidates is how the ordering control drives a trace whose
+# completion order contradicts its ingress order.
+#
+# `$4` is the shape: `baseline` (a plain body, no tools offered) or `tools`
+# (a resent tool_use / tool_result pair with a tools array on the
+# structural line). One satisfies the `baseline` claim and refuses
+# `tool-use-multiturn`; the other does the reverse. Every value is
+# synthetic.
+candidate_trace() {
+    local id="$1" ts_ing="$2" ts_comp="$3" shape="${4:-baseline}"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local body='{"model":"claude-sonnet-4-5"}'
+    local tools_len=0
+    if [ "$shape" = tools ]; then
+        body='{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"list the files"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}]}'
+        tools_len=16
+    fi
+    cat <<TRACE
+$ts_ing TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body=$body redact_prompts_enabled=false
+$ts_ing TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body=$body redact_prompts_enabled=false
+$ts_comp TRACE $span: $target upstream success body provider_kind="anthropic" provider=p body={"id":"msg_1"} redact_prompts_enabled=false
+$ts_comp TRACE $span: $target egress response body ingress="anthropic" body={"id":"msg_1"} redact_prompts_enabled=false
+$ts_ing TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"],["content-type","application/json"]]
+$ts_ing TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
+$ts_comp TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
+$ts_comp TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
+TRACE
+    structural_line "$id" ingress 400000 | sed "s/tools_len=0/tools_len=$tools_len/"
+    structural_line "$id" outgoing 500000 | sed "s/tools_len=0/tools_len=$tools_len/"
+}
+
+# The request ids and timestamps the selector controls share. Two
+# candidates, A initiated before B, both completing after both ingress
+# bodies -- the shape one agentic turn really produces.
+SEL_ID_A="019eab77-0000-4000-8000-0000000000a1"
+SEL_ID_B="019eab77-0000-4000-8000-0000000000b2"
+SEL_TS_ING_A="2026-08-25T12:00:00.100000Z"
+SEL_TS_ING_B="2026-08-25T12:00:01.100000Z"
+SEL_TS_COMP_A="2026-08-25T12:00:02.100000Z"
+SEL_TS_COMP_B="2026-08-25T12:00:03.100000Z"
+
+# A two-candidate trace: `$1` is A's shape, `$2` is B's. Written A-first,
+# which is also ingress order, so an ordering-independent selector and a
+# correctly-ordered one agree here -- control 8 is the case where they
+# cannot.
+selector_trace() {
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" "$1"
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" "$2"
+}
+
+# Body of a landed fixture's ingress capture, as one line.
+landed_ingress_body() {
+    cat "$1/ingress_request.json" 2>/dev/null | tr -d '\n'
+}
+
+# Does a landed ingress body carry the tool pair (the `tools` shape) or
+# not (the `baseline` shape)? Printed as the shape name so an assertion
+# reads as body IDENTITY rather than as a grep result.
+landed_shape() {
+    local body
+    body="$(landed_ingress_body "$1")"
+    if [ -z "$body" ]; then
+        printf 'no-body\n'
+    elif printf '%s' "$body" | grep -qF '"tool_result"'; then
+        printf 'tools\n'
+    else
+        printf 'baseline\n'
+    fi
+}
+
 # A LARGE `tool_result`-shaped ingress body, with `$1` buried deep inside
 # the padded region -- past the first few thousand bytes, so an assertion
 # on it fails the moment the scrub gate reads a prefix instead of the whole
@@ -1978,6 +2057,484 @@ else
 fi
 clear_pins
 rm -rf "$work"
+
+# --- Case 19f: the wire pattern is a SELECTOR over the turn requests --
+#
+# ONE agentic turn produces SEVERAL completed upstream requests, and the
+# case's recorded claim is the statement of which one it means. Before this
+# the rig landed the FIRST completed request and a pattern mismatch aborted
+# the run, so every tool-using case was unlandable while a single-request
+# case succeeded -- the claim read as a run gate rather than as a selector.
+#
+# PER-REQUEST FACTS MAY SKIP, PER-RUN FACTS ABORT. Nine controls, each
+# named by what would silently pass without it.
+
+# PREMISE ASSERTION for the whole block. The two candidate shapes must
+# really differ in the clause the claim turns on, and each must really
+# satisfy exactly one of the two claims -- otherwise a "skipped" candidate
+# proves nothing about the selector, and both directions of the mirror
+# could be explained by one shape satisfying everything.
+sel_premise_ok=1
+if ! printf '%s\n' "$(candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" baseline)" |
+    grep -q 'structural summary direction="ingress".*tools_len=0'; then
+    sel_premise_ok=0
+fi
+if ! printf '%s\n' "$(candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools)" |
+    grep -qF '"tool_result"'; then
+    sel_premise_ok=0
+fi
+if [ "$sel_premise_ok" = 1 ]; then
+    echo "PASS: the two candidate shapes differ in the clause each claim turns on"
+else
+    echo "FAIL: the selector candidates are not the shapes they are named for --"
+    echo "FAIL: a skip would then be asserted for something other than the claim"
+    fails=$((fails + 1))
+fi
+unset sel_premise_ok
+
+# The ingress body a `baseline` candidate carries versus a `tools` one:
+# these are the two values every body-identity assertion below reads, so
+# the mapping is asserted once here rather than restated per control.
+check "the shape reader tells a tools body from a baseline one" "tools baseline" \
+    "$(
+        d1="$(mktemp -d)" && d2="$(mktemp -d)"
+        printf '{"messages":[{"content":[{"type":"tool_result"}]}]}' >"$d1/ingress_request.json"
+        printf '{"model":"m"}' >"$d2/ingress_request.json"
+        printf '%s %s\n' "$(landed_shape "$d1")" "$(landed_shape "$d2")"
+        rm -rf "$d1" "$d2"
+    )"
+
+# CONTROL 1: first candidate FAILS the claim, second PASSES -> the run
+# succeeds AND the landed body is the SECOND request's.
+#
+# The assertion is on BODY IDENTITY, not on the exit status. An exit-only
+# assertion passes on a rig that landed the FIRST request, which is exactly
+# the bug: the whole failure was a rig landing request 1 under a case whose
+# claim only request 2 satisfies.
+set_pins select-second-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
+clear_pins
+dir="$(captured_of "$work")/anthropic-api/select-second-01"
+check "a run whose second candidate matches exits 0" "0" "$rc"
+check "the landed body is the SECOND request's, not the first's" "tools" \
+    "$(landed_shape "$dir")"
+check "meta.request_id names the candidate that matched" "$SEL_ID_B" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+check "exactly one fixture lands for the case" "1" \
+    "$(find "$(captured_of "$work")/anthropic-api" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+rm -rf "$work"
+
+# CONTROL 2: the MIRROR -- first PASSES, second FAILS -> the FIRST lands
+# and the run does not abort. Without this leg the selector could be "skip
+# until the last candidate" rather than "take the matching one", and a
+# trailing client side-request would poison every good capture.
+set_pins select-first-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace tools baseline)" --driver-mode || rc=$?
+clear_pins
+dir="$(captured_of "$work")/anthropic-api/select-first-01"
+check "a run whose FIRST candidate matches exits 0" "0" "$rc"
+check "the landed body is the FIRST request's" "tools" "$(landed_shape "$dir")"
+check "meta.request_id names the first candidate" "$SEL_ID_A" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+# A trailing non-matching request must not append a manifest line either:
+# the manifest is append-only, so a spurious entry has no rewrite path.
+check "the trailing non-matching candidate appends no manifest line" "1" \
+    "$(wc -l <"$(captured_of "$work")/manifest.jsonl" 2>/dev/null | tr -d ' ')"
+rm -rf "$work"
+
+# CONTROL 3: two candidates, NEITHER satisfies -> the REFUSAL exit, with
+# the candidate count named. Asserted in the SAME BLOCK as zero candidates
+# -> the zero-landing exit, because that boundary is the thing that could
+# collapse: `captured=0` used to mean only "no completed request", and it
+# now splits two ways with opposite retry verdicts.
+set_pins select-none-01 abc123 base-url thinking
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace baseline baseline)" --driver-mode || rc=$?
+clear_pins
+check "two candidates and no match is the REFUSAL exit 1, not the zero-landing 3" \
+    "1" "$rc"
+check_log "the refusal names how many candidates it examined" "examined 2 candidate" \
+    "$work/rig.err"
+check_log "the refusal names the claim none of them exhibited" "thinking" \
+    "$work/rig.err"
+if [ -d "$(captured_of "$work")/anthropic-api/select-none-01" ]; then
+    echo "FAIL: a run whose candidates all failed still landed a fixture"
+    fails=$((fails + 1))
+else
+    echo "PASS: a run whose candidates all failed lands no fixture"
+fi
+rm -rf "$work"
+
+# The other side of that boundary, same block: ZERO candidates stays the
+# retryable zero-landing exit 3 with its own message. Collapsed into one
+# code, the matrix runner would retry a case defect forever or refuse a
+# transient 429 permanently.
+set_pins select-zero-01 abc123 base-url thinking
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(trace_no_completion 019eab77-0000-4000-8000-0000000000c3)" \
+    --driver-mode || rc=$?
+clear_pins
+check "zero candidates stays the retryable zero-landing exit 3" "3" "$rc"
+check_log "the zero-candidate message says the trace holds no completed request" \
+    "holds no completed request" "$work/rig.err"
+if grep -qF 'examined' "$work/rig.err"; then
+    echo "FAIL: the zero-candidate run reported a candidate examination"
+    fails=$((fails + 1))
+else
+    echo "PASS: the zero-candidate run reports no candidate examination"
+fi
+rm -rf "$work"
+
+# CONTROL 4: two candidates, BOTH satisfy -> still the already-landed
+# refusal, unchanged. The skip must NOT have widened into "one case id may
+# land many requests": two requests that both satisfy the claim is genuine
+# ambiguity, and a `break` there would silently pin whichever one sorted
+# first.
+set_pins select-both-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace tools tools)" --driver-mode || rc=$?
+clear_pins
+check "two candidates that BOTH satisfy the claim still refuse with exit 1" "1" "$rc"
+check_log "the ambiguity refusal is still the already-landed one" \
+    "already landed this run" "$work/rig.log"
+rm -rf "$work"
+
+# CONTROL 5: THE SET -E HAZARD. Capturing write_fixture's status to enable
+# the skip disables errexit for that call, so "a refusal aborts the run"
+# stopped being free and became an explicit re-raise. A NON-pattern refusal
+# class must still ABORT -- get this wrong and every fail-closed class in
+# the rig silently becomes an ignored error.
+#
+# Two independent classes are driven, because the re-raise is one branch
+# and a mistake in it fails them all together:
+#
+#   * seam/mode incoherence -- a base-url claim on a trace carrying the
+#     MITM seam header;
+#   * an unclassified lane -- the scrub gate holds no credential-shape
+#     classification for it.
+#
+# Both are PER-RUN facts, so both abort rather than skip: skipping past
+# them would only reach the same verdict one candidate later while
+# reporting the wrong one. Each is driven with a SECOND candidate present
+# that WOULD satisfy the claim, which is the whole point -- a rig that
+# treated every non-zero return as skippable would sail past the refusal
+# and land the other candidate at exit 0.
+set_pins hazard-seam-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace baseline tools | with_seam_header)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a seam/mode refusal still ABORTS the run despite a matching later candidate" \
+    "1" "$rc"
+check_log "the seam refusal is the class that fired" "DID transit the MITM listener" \
+    "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/hazard-seam-01" ]; then
+    echo "FAIL: a seam-incoherent run landed a later candidate anyway"
+    fails=$((fails + 1))
+else
+    echo "PASS: a seam-incoherent run lands nothing, later candidate or not"
+fi
+rm -rf "$work"
+
+set_pins hazard-lane-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+if strip_shape_row "$work" anthropic-api; then
+    rc=0
+    rig_run "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
+    check "an unclassified-lane refusal still ABORTS despite a matching later candidate" \
+        "1" "$rc"
+    check_log "the unclassified-lane refusal is the class that fired" \
+        "has no credential-shape classification" "$work/rig.log"
+    if [ -d "$(captured_of "$work")/anthropic-api/hazard-lane-01" ]; then
+        echo "FAIL: an unclassified-lane run landed a later candidate anyway"
+        fails=$((fails + 1))
+    else
+        echo "PASS: an unclassified-lane run lands nothing, later candidate or not"
+    fi
+else
+    echo "FAIL: could not narrow the shape table for the anthropic-api lane"
+    fails=$((fails + 1))
+fi
+clear_pins
+rm -rf "$work"
+
+# The re-raise must also PRESERVE the code, not flatten every refusal onto
+# 1: the runner maps 3 to a retryable verdict and everything else to a
+# defect, so a re-raise that returned a constant would make a transient
+# zero-landing look like a case defect. Driven through the class whose code
+# is NOT 1: an out-of-vocabulary expected-ingress pin exits 2.
+set_pins hazard-code-01 abc123 base-url tool-use-multiturn anthropic
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
+clear_pins
+check "the re-raise did not turn a clean two-candidate run into a refusal" "0" "$rc"
+rm -rf "$work"
+
+# CONTROL 6: scrub residue on a candidate that WOULD otherwise be skipped
+# still aborts FATALLY. This is the ONE deliberate exception to the
+# per-request-may-skip rule, and it is the exception because silently
+# skipping past a body that carried a credential shape would turn the
+# loudest safety signal in the pipeline into a per-request footnote.
+#
+# The residue rides the FIRST candidate under a claim that candidate does
+# not satisfy -- so a rig that ran the pattern check before the scrub check,
+# or that treated the scrub refusal as skippable, would skip the dirty body
+# and land the clean second candidate at exit 0.
+set_pins hazard-scrub-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(
+    trace_driver_dirty "$SEL_ID_A"
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools
+)" --driver-mode || rc=$?
+clear_pins
+check "scrub residue on a skippable candidate is FATAL, not skipped" "1" "$rc"
+check_log "the fatal refusal is the scrub check" "scrub check refused" "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/hazard-scrub-01" ]; then
+    echo "FAIL: a run with scrub residue landed the clean candidate anyway"
+    fails=$((fails + 1))
+else
+    echo "PASS: scrub residue anywhere in the trace lands nothing"
+fi
+rm -rf "$work"
+
+# PAIRED CONTROL for control 6: the SAME two-candidate shape with the
+# residue REMOVED promotes at exit 0 and lands the tools body. Without it
+# the refusal above holds for a rig that refuses any two-candidate trace
+# whose first candidate is dirty-shaped for some unrelated reason.
+set_pins hazard-scrub-clean-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
+clear_pins
+check "the same shape without the residue promotes at exit 0" "0" "$rc"
+check "and lands the matching candidate's body" "tools" \
+    "$(landed_shape "$(captured_of "$work")/anthropic-api/hazard-scrub-clean-01")"
+rm -rf "$work"
+
+# CONTROL 7: a run ending in a REFUSAL leaves NO promoted fixture and no
+# manifest line. The pre-selector refusal was not transactional: the first
+# request was promoted and appended to the manifest before the second was
+# even examined, so the abort left the WRONG fixture in scratch. Under the
+# selector a non-matching candidate never promotes, but the property is
+# asserted rather than assumed.
+#
+# Driven through the already-landed refusal, which is the one class that
+# fires AFTER a promotion has happened -- the only shape where a promoted
+# fixture could survive a refusal at all.
+set_pins refusal-clean-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(selector_trace tools tools)" --driver-mode || rc=$?
+clear_pins
+captured="$(captured_of "$work")"
+check "a run ending in refusal exits 1" "1" "$rc"
+if [ -d "$captured/anthropic-api/refusal-clean-01" ]; then
+    echo "FAIL: a run ending in refusal left a promoted fixture behind"
+    find "$captured" -mindepth 1 -maxdepth 3 | sed -n '1,10p'
+    fails=$((fails + 1))
+else
+    echo "PASS: a run ending in refusal leaves no promoted fixture"
+fi
+check "a run ending in refusal leaves no manifest line" "0" \
+    "$([ -f "$captured/manifest.jsonl" ] && wc -l <"$captured/manifest.jsonl" | tr -d ' ' || echo 0)"
+if [ -d "$captured" ] &&
+    [ -n "$(find "$captured" -maxdepth 1 -name '.tmp.*' -print -quit)" ]; then
+    echo "FAIL: a run ending in refusal left a staged tmp directory behind"
+    fails=$((fails + 1))
+else
+    echo "PASS: a run ending in refusal leaves no staged tmp directory"
+fi
+rm -rf "$work"
+
+# CONTROL 8: THE ORDERING BASIS. Two candidates whose COMPLETION markers
+# arrive in the OPPOSITE order from their ingress bodies must be selected
+# by INGRESS order.
+#
+# `in_scope_ids` used to key each request on its completion marker's
+# timestamp and sort on that, so stream flush timing could reorder
+# candidates even under a deterministic client -- and a selector over a
+# nondeterministic order is a nondeterministic selector. Without this
+# control the ordering fix is untested, because every other trace in this
+# file has the two orders agreeing.
+#
+# A is initiated first and completes LAST; B is initiated second and
+# completes FIRST. Both satisfy the claim, so ordering is the ONLY thing
+# that can decide which one lands -- and the already-landed refusal names
+# the loser, so the winner is unambiguous.
+sel_swap_trace="$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_B" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_A" tools
+)"
+
+# PREMISE ASSERTION: the two orders must really contradict. Without this
+# the selection below could be asserted against a trace where both bases
+# agree, and the completion-keyed rig would pass it too.
+sel_ing_order="$(printf '%s\n' "$sel_swap_trace" |
+    grep 'ingress request body' | awk '{print $1}' | tr '\n' ' ')"
+sel_comp_order="$(printf '%s\n' "$sel_swap_trace" |
+    grep 'upstream success body' | awk '{print $1}' | tr '\n' ' ')"
+if [ "$sel_ing_order" = "$SEL_TS_ING_A $SEL_TS_ING_B " ] &&
+    [ "$sel_comp_order" = "$SEL_TS_COMP_B $SEL_TS_COMP_A " ]; then
+    echo "PASS: the ordering trace's ingress and completion orders really contradict"
+else
+    echo "FAIL: the ordering trace's two orders do not contradict --"
+    echo "FAIL: a completion-keyed selector would pass this case too"
+    fails=$((fails + 1))
+fi
+unset sel_ing_order sel_comp_order
+
+# Both candidates satisfy the claim, so this run REFUSES on ambiguity --
+# and the refusal names the SECOND-considered request, which is what says
+# which one was considered first. Ingress order puts A first, so B must be
+# the one refused.
+set_pins order-basis-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$sel_swap_trace" --driver-mode || rc=$?
+clear_pins
+check "the contradicting-order run refuses on ambiguity" "1" "$rc"
+check_log "candidates are ordered by INGRESS body: the later-initiated one is refused" \
+    "refusing $SEL_ID_B" "$work/rig.log"
+if grep -qF "refusing $SEL_ID_A" "$work/rig.log"; then
+    echo "FAIL: the earlier-INITIATED request was refused, so the order keyed on completion"
+    fails=$((fails + 1))
+else
+    echo "PASS: the earlier-initiated request was considered first"
+fi
+rm -rf "$work"
+
+# And the same ordering read through a LANDING rather than a refusal: with
+# only the earlier-initiated candidate satisfying the claim, the run must
+# land THAT body even though the other one completed first. The refusal leg
+# above says which was considered first; this one says the selection
+# actually follows it.
+set_pins order-landing-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_B" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_A" baseline
+)" --driver-mode || rc=$?
+clear_pins
+dir="$(captured_of "$work")/anthropic-api/order-landing-01"
+check "the earlier-initiated candidate lands though the other completed first" "0" "$rc"
+check "and the landed request is the earlier-INITIATED one" "$SEL_ID_A" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+# `captured_at_ts` stays the COMPLETION timestamp: the ordering key is the
+# ingress body, but what the fixture records about itself is when the
+# request finished. Conflating the two would rewrite every fixture's clock.
+check "captured_at_ts is still the completion timestamp, not the ordering key" \
+    "$SEL_TS_COMP_B" "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" captured_at_ts)"
+rm -rf "$work"
+unset sel_swap_trace
+
+# THE SELECTION LINE. A reviewer reading a committed fixture cannot
+# otherwise tell WHICH request of an agentic turn they are looking at, and
+# the run is the only place that fact exists. One structured line, and it
+# carries NO body content -- a rig log is a CI artifact.
+set_pins selection-line-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
+clear_pins
+check "the selection-line run promotes" "0" "$rc"
+sel_line="$(grep -h 'capture_fixtures: selection ' "$work/rig.out" "$work/rig.err" 2>/dev/null)"
+check "exactly ONE selection line is emitted" "1" \
+    "$(printf '%s\n' "$sel_line" | grep -c 'selection ' || true)"
+for field in "case=selection-line-01" "selected_request_id=$SEL_ID_B" \
+    "candidates_examined=2" "candidates_skipped=1" \
+    "ordering_basis=first-ingress-body"; do
+    if printf '%s' "$sel_line" | grep -qF -- "$field"; then
+        echo "PASS: the selection line carries $field"
+    else
+        echo "FAIL: the selection line does not carry $field -- '$sel_line'"
+        fails=$((fails + 1))
+    fi
+done
+# NO BODY CONTENT, in either stream. The bodies are unscrubbed at the point
+# a candidate is examined, and the model id is the shortest string every
+# candidate body in this suite carries.
+for stream in rig.out rig.err; do
+    if grep -qF 'tool_result' "$work/$stream" 2>/dev/null ||
+        grep -qF '"messages"' "$work/$stream" 2>/dev/null; then
+        echo "FAIL: the rig's $stream carries fixture body content"
+        fails=$((fails + 1))
+    else
+        echo "PASS: the rig's $stream carries no fixture body content"
+    fi
+done
+unset sel_line
+rm -rf "$work"
+
+# The selection line is DRIVER MODE ONLY: a live-box capture has no case
+# claim to select on, so a line reporting a selection would name a decision
+# nothing made.
+clear_pins
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace baseline tools)" || rc=$?
+check "a live-box run over the same trace exits 0" "0" "$rc"
+if grep -qh 'capture_fixtures: selection ' "$work/rig.out" "$work/rig.err" 2>/dev/null; then
+    echo "FAIL: live-box mode emitted a selection line"
+    fails=$((fails + 1))
+else
+    echo "PASS: live-box mode emits no selection line"
+fi
+# And live-box mode still captures BOTH requests: it keys on request_id, so
+# the selector's one-of-several logic must not have narrowed it.
+check "live-box mode still captures every completed request" "2" \
+    "$(find "$(captured_of "$work")" -mindepth 1 -maxdepth 1 -type d ! -name '.tmp.*' | wc -l | tr -d ' ')"
+rm -rf "$work"
+
+# CONTROL 9: the committed `plain-turn-01` -- ONE candidate, one claim --
+# is byte-unaffected. The selector changed which BODY fills a landing
+# directory when several candidates exist; with one candidate there is
+# nothing to select, and the committed fixture must still adjudicate PASS
+# against its own recorded claim.
+#
+# Guarded on the fixture's presence: this suite also runs from a
+# scripts-only tree.
+committed_fixture="$HERE/../crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01"
+if [ -d "$committed_fixture" ]; then
+    committed_pattern="$(meta_get "$committed_fixture/meta.json" wire_pattern)"
+    check "the committed fixture records a claim to adjudicate" "1" \
+        "$([ -n "$committed_pattern" ] && echo 1 || echo 0)"
+    if python3 "$VERIFY_PATTERN" "$committed_fixture" "$committed_pattern" 2>"$HERE/.sel-verify.err"; then
+        echo "PASS: the committed plain-turn-01 still adjudicates PASS on its own claim"
+    else
+        echo "FAIL: the committed plain-turn-01 no longer exhibits its recorded claim"
+        sed -n '1,5p' "$HERE/.sel-verify.err"
+        fails=$((fails + 1))
+    fi
+    rm -f "$HERE/.sel-verify.err"
+    # A single-candidate driver run still lands, still counts ONE candidate,
+    # and still reports zero skipped -- the selector adds no skip where
+    # there is nothing to skip.
+    set_pins plain-turn-01 abc123 base-url baseline
+    work="$(make_repo)"
+    rc=0
+    rig_run_split "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000c9)" \
+        --driver-mode || rc=$?
+    clear_pins
+    check "a single-candidate driver run still promotes at exit 0" "0" "$rc"
+    check_log "the single-candidate run examined exactly one candidate" \
+        "candidates_examined=1 candidates_skipped=0" "$work/rig.out"
+    rm -rf "$work"
+    unset committed_pattern
+else
+    echo "PASS: no committed driver fixture in this checkout; control 9 is not asserted"
+fi
+unset committed_fixture
 
 # --- Case 20: --out confinement, both directions ---------------------
 # The confinement lives in scripts/drivers/lib/confine.sh, sourced by the

@@ -104,13 +104,28 @@
 #   * `scrub-fixture.sh --check` runs after `--write` and a non-zero
 #     exit refuses the promotion. A driver fixture is canonical by
 #     construction or it is not landed.
-#   * The recorded wire-pattern claim is ENFORCED against the captured
-#     bytes by `scripts/drivers/lib/verify_pattern.py`, and the recorded
-#     connection mode is enforced against the captured ingress headers:
-#     a `front-proxy` fixture whose headers do not carry the MITM seam
-#     header name never transited the seam whatever its environment
-#     said, and a `base-url` fixture that carries it did. Either
-#     mismatch refuses the promotion.
+#   * The recorded wire-pattern claim is a SELECTOR, not a run gate. One
+#     agentic turn produces SEVERAL completed upstream requests, and the
+#     case's claim is the statement of WHICH of them the case means. A
+#     candidate whose captured bytes do not exhibit the claim is SKIPPED
+#     and counted; the next candidate is considered. Candidates are
+#     examined in first-`ingress request body` order (see in_scope_ids).
+#     The recorded connection mode is still enforced against the captured
+#     ingress headers: a `front-proxy` fixture whose headers do not carry
+#     the MITM seam header name never transited the seam whatever its
+#     environment said, and a `base-url` fixture that carries it did.
+#     Either mismatch REFUSES THE RUN -- the seam is a property of the run,
+#     identical for every request in the trace, so skipping past it would
+#     only reach the same verdict one candidate later.
+#
+#     PER-REQUEST FACTS MAY SKIP, PER-RUN FACTS ABORT. The wire pattern is
+#     the only per-request fact among the gates: a missing structural
+#     summary, an unclassified lane, seam/mode incoherence, an
+#     unexpected ingress dialect and an empty lane are properties of the
+#     RUN. ONE deliberate exception, named as one: scrub `--check` residue
+#     is per-request and stays FATAL, because silently skipping past a
+#     body that carried a credential shape would turn the loudest safety
+#     signal in the pipeline into a per-request footnote.
 #   * The two independent statements of the CLIENT VERSION -- the wire
 #     value parsed from the client-controlled `user-agent` and the
 #     binary-side value the driver read off the running client -- are
@@ -129,13 +144,18 @@
 #   0  the run completed; `captured=<n>` on stdout
 #   1  a pin was unset (driver mode), the trace log was unreadable, or a
 #      fixture was refused -- a refusal aborts the RUN, so a driver
-#      runner reads any non-zero exit as "this case produced no fixture"
+#      runner reads any non-zero exit as "this case produced no fixture".
+#      In driver mode this also covers "candidates existed but NONE
+#      exhibited the claim": the case describes a shape its own run did
+#      not produce, which is a case defect and never retryable.
 #   2  usage error, or an --out outside the captured tree
 #   3  DRIVER MODE ONLY: the run completed, refused nothing, and landed
-#      zero fixtures -- the driven case produced no completed request (a
-#      429, an upstream that returned no success body, a client that died
-#      before sending). Deliberately NOT folded into 1: this is retryable,
-#      while "we refused a fixture we produced" never is. In LIVE-BOX mode
+#      zero fixtures because there was NO candidate at all -- the driven
+#      case produced no completed request (a 429, an upstream that
+#      returned no success body, a client that died before sending).
+#      Deliberately NOT folded into 1: this is retryable, while "we
+#      refused a fixture we produced" never is, and neither is "the case
+#      claims a shape none of its requests carried". In LIVE-BOX mode
 #      zero captures is the normal quiet-window answer and exits 0.
 # --- END USAGE ---
 
@@ -160,6 +180,63 @@ DRIVER_MODE=0
 # reads it: two requests in one driver trace share the run's single case
 # id, so without this the second would overwrite the first.
 DRIVER_LANDED=""
+
+# write_fixture's return code for "this candidate does not exhibit the
+# claimed wire pattern". Distinguished from every other non-zero return so
+# the capture loop can SKIP the candidate and consider the next one, while
+# re-raising anything else. Every other refusal in write_fixture is a
+# property of the RUN and returns 1, which the loop propagates.
+#
+# 90 rather than a low number: the loop re-raises an unrecognized code as
+# the script's own exit status, and the low range is spoken for by the
+# documented exit codes above.
+PATTERN_MISMATCH_RC=90
+
+# Selector accounting, driver mode only. Every completed request in the
+# trace is a CANDIDATE for the run's single case id; the recorded wire
+# pattern decides which one the case means. Reported as one structured
+# line at the end of the run.
+CANDIDATES_EXAMINED=0
+CANDIDATES_SKIPPED=0
+SELECTED_REQUEST_ID=""
+
+# Byte length of manifest.jsonl before this run appended anything, so a
+# driver run ending in a refusal can put the append-only file back. Set
+# once the landing root exists.
+MANIFEST_BYTES_BEFORE=0
+
+# A driver run that ends in a refusal must leave NO promoted fixture and no
+# manifest line. The refusal was not transactional: the already-landed
+# refusal is raised only when a SECOND request keys on the same landing
+# path, by which point the first is promoted and manifested -- so the abort
+# used to leave the WRONG fixture in the landing root for a later reader to
+# mistake for the case's evidence.
+#
+# The unwind is driver mode only. Live-box mode keys on request_id, so each
+# of its captures is independent evidence and a later refusal says nothing
+# about an earlier one.
+#
+# The previous directory a rerun replaced is NOT restored: replace-not-merge
+# already deletes it on a successful rerun, so a reader never had a
+# guarantee it survived one. What this promises is only that the run leaves
+# nothing it promoted itself.
+unwind_driver_promotions() {
+  [ "$DRIVER_MODE" = 1 ] || return 0
+  local dst
+  for dst in $DRIVER_LANDED; do
+    rm -rf "$dst"
+  done
+  DRIVER_LANDED=""
+  if [ -f "$OUT/manifest.jsonl" ]; then
+    # truncate(1) is not assumed present: the manifest is append-only, so
+    # the prefix is copied forward and renamed over, the same shape the
+    # resume marker uses.
+    local keep
+    keep="$(mktemp "$OUT/.tmp.manifest.XXXXXX")" || return 0
+    head -c "$MANIFEST_BYTES_BEFORE" "$OUT/manifest.jsonl" > "$keep" 2>/dev/null || :
+    mv "$keep" "$OUT/manifest.jsonl" || rm -f "$keep"
+  fi
+}
 
 # Print the header block as usage. Delimited by a sentinel rather than a
 # line count: a magic `1,NNp` range silently starts cutting content the
@@ -475,6 +552,12 @@ fi
 mkdir -p "$OUT"
 MARKER="$OUT/.last_capture_ts"
 
+# The manifest length this run inherited, read before anything appends, so
+# a driver run ending in a refusal can restore it exactly.
+if [ -f "$OUT/manifest.jsonl" ]; then
+  MANIFEST_BYTES_BEFORE="$(wc -c <"$OUT/manifest.jsonl" | tr -d ' ')"
+fi
+
 # Sweep any stale per-request tmp dirs from a prior crashed run.
 # We rename atomically (mv tmp -> $OUT/$id) at the end of each
 # write_fixture, so any `.tmp.*` left behind here is poison from
@@ -508,12 +591,34 @@ strip_ansi < "$LOG" > "$stripped"
 # `provider_kind=` field. Any ingress dialect and any provider_kind
 # value is in scope. The completion line carries `request_id=...` and
 # a timestamp at the start of the line.
+#
+# EACH ROW CARRIES TWO TIMESTAMPS, and the distinction is load-bearing:
+#
+#   * the ORDERING key is the FIRST `ingress request body` occurrence for
+#     the id -- the beginning of the request itself. Keying the order on
+#     the COMPLETION marker instead made the order depend on stream flush
+#     timing, so two requests initiated in a fixed order could sort either
+#     way under a deterministic client. One case id selects one of several
+#     candidates, and a selector over a nondeterministic order is a
+#     nondeterministic selector.
+#   * the COMPLETION timestamp stays the fixture's `captured_at_ts` and
+#     the resume marker's value, and it is what `since` filters on: a
+#     request is in scope when it COMPLETED after the last capture.
+#
+# A request whose completion marker is in scope but whose ingress body
+# line is absent is not a candidate at all (`ingress_seen`), so the
+# ordering key is never empty for a row this prints.
 in_scope_ids() {
   awk -v since="$since" '
     /ingress request body ingress="[^"]+"/ {
       if (match($0, /request_id=[0-9a-f-]+/)) {
         id = substr($0, RSTART+11, RLENGTH-11)
         ingress_seen[id] = 1
+        # FIRST occurrence only: a retried or re-logged body line must not
+        # move a request later in the order.
+        if (!(id in ingress_ts)) {
+          ingress_ts[id] = substr($0, 1, 27)
+        }
         if (match($0, /ingress="[^"]+"/)) {
           ingress_kind[id] = substr($0, RSTART+9, RLENGTH-10)
         }
@@ -551,11 +656,15 @@ in_scope_ids() {
           # neither the IngressAdapter::id() vocabulary nor the match
           # arms of any consumer. No apostrophes in this comment: the
           # awk program is single-quoted.
-          print completed[id] "\t" id "\t" provider_kind[id] "\t" ingress_kind[id]
+          #
+          # Field 1 is the ORDERING key (first ingress body) and is
+          # dropped by the reader after the sort; field 2 is the
+          # completion timestamp the fixture records.
+          print ingress_ts[id] "\t" completed[id] "\t" id "\t" provider_kind[id] "\t" ingress_kind[id]
         }
       }
     }
-  ' "$stripped" | sort -k1,1
+  ' "$stripped" | sort -k1,1 | cut -f2-
 }
 
 # For one request_id, write its fixture directory.
@@ -574,10 +683,20 @@ in_scope_ids() {
 # capture, `$OUT/<lane>/<case_id>` in driver mode (see the header). It is
 # resolved late, after the lane is normalized, because the lane is
 # derived from the trace rather than passed in.
+#
+# ERREXIT IS NOT ARMED IN THIS BODY. The caller captures the return status
+# so it can skip a non-matching candidate, and bash disables errexit for
+# the whole dynamic extent of a status-tested call -- `set -e` here or a
+# subshell around the call does not restore it (measured, bash 5.3). So
+# every step whose failure would leave a partial or wrongly-promoted
+# fixture carries its own `|| return 1`; the caller re-raises that 1 as
+# the run's exit status.
 write_fixture() {
   local id="$1" ts="$2" pkind="$3" ikind="${4:-}"
   local tmp
-  tmp="$(mktemp -d "$OUT/.tmp.$id.XXXXXX")"
+  # An unguarded mktemp would leave $tmp empty and send every write below
+  # to an absolute path at the filesystem root.
+  tmp="$(mktemp -d "$OUT/.tmp.$id.XXXXXX")" || return 1
 
   # Pull every line for this request.
   local lines
@@ -883,17 +1002,22 @@ META
   # Driver mode enforces the CLAIMS the fixture records about itself, in
   # the slot the ordering contract reserves: after `--check` on the full
   # bytes, before the promotion. Every refusal discards the staged
-  # directory and `return 1` so `set -e` cannot promote it, which the
-  # runner reports as a rig refusal -- a defect, never retryable.
+  # directory and returns non-zero so `set -e` cannot promote it.
+  #
+  # The wire-pattern claim is the SELECTOR and returns
+  # $PATTERN_MISMATCH_RC, which the loop reads as "not this request, try
+  # the next". Every other refusal here is a property of the RUN and
+  # returns 1, which the loop propagates as a rig refusal -- a defect,
+  # never retryable.
   if [ "$DRIVER_MODE" = 1 ]; then
     # The claimed pattern comes from the recorded pin, never from argv: a
     # flag would let a caller declare a pattern the case does not claim,
     # which is the unverified claim arriving one layer earlier.
     if ! python3 "$VERIFY_PATTERN" "$tmp" "$ROUTECTL_FIXTURE_WIRE_PATTERN"; then
-      echo "capture_fixtures: $id does not exhibit the wire pattern it claims" >&2
-      echo "('$ROUTECTL_FIXTURE_WIRE_PATTERN'); not promoting the fixture." >&2
+      echo "capture_fixtures: $id does not exhibit the wire pattern its case claims" >&2
+      echo "('$ROUTECTL_FIXTURE_WIRE_PATTERN'); skipping this candidate." >&2
       rm -rf "$tmp"
-      return 1
+      return "$PATTERN_MISMATCH_RC"
     fi
 
     if ! assert_mode_seam_coherent "$tmp" "$id"; then
@@ -979,7 +1103,7 @@ META
         return 1
         ;;
     esac
-    mkdir -p "$OUT/$lane"
+    mkdir -p "$OUT/$lane" || { rm -rf "$tmp"; return 1; }
   else
     dst="$OUT/$id"
   fi
@@ -997,13 +1121,21 @@ META
   # non-stream run surviving into a stream rerun -- and file presence IS
   # the schema, so the drift signal would be read off a directory no
   # single capture ever produced.
+  # Each mv is guarded: with errexit unarmed in this body a failed rename
+  # would fall through to the manifest append and record a fixture that
+  # never landed. The stale-aside case restores the previous directory
+  # rather than leaving the case with none.
   if [ -d "$dst" ]; then
     local stale="$OUT/.tmp.stale.$id.$$"
-    mv "$dst" "$stale"
-    mv "$tmp" "$dst"
+    mv "$dst" "$stale" || { rm -rf "$tmp"; return 1; }
+    if ! mv "$tmp" "$dst"; then
+      mv "$stale" "$dst" || true
+      rm -rf "$tmp"
+      return 1
+    fi
     rm -rf "$stale"
   else
-    mv "$tmp" "$dst"
+    mv "$tmp" "$dst" || { rm -rf "$tmp"; return 1; }
   fi
   DRIVER_LANDED="$DRIVER_LANDED $dst"
 
@@ -1019,13 +1151,47 @@ MANIFEST_LINE
   echo "$id"
 }
 
-# Iterate over completions in chronological order, apply --limit if set.
+# Iterate over candidates in first-ingress-body order, apply --limit if set.
+#
+# THE SET -E HAZARD, NAMED. Capturing write_fixture's status disables
+# errexit for the ENTIRE dynamic extent of the call, function body
+# included, and neither `set -e` inside the function nor a subshell around
+# it restores that (measured, bash 5.3). Two consequences, both handled:
+#
+#   * "a refusal aborts the run" was free under errexit and is now an
+#     EXPLICIT re-raise below. Every fail-closed class in write_fixture
+#     other than the pattern selector returns 1, and that 1 leaves this
+#     loop as the script's exit status. Without the re-raise each of them
+#     would become a status nothing reads.
+#   * write_fixture's own mutating steps can no longer rely on errexit
+#     to abort a half-written fixture, so each one that would leave a
+#     partial or wrongly-promoted directory carries its own
+#     `|| return 1`.
 captured=0
 latest_ts=""
 while IFS=$'\t' read -r ts id pkind ikind; do
   [ -z "$id" ] && continue
   [ -d "$OUT/$id" ] && continue          # already captured (defensive idempotency)
-  write_fixture "$id" "$ts" "$pkind" "$ikind" >/dev/null
+  CANDIDATES_EXAMINED=$((CANDIDATES_EXAMINED + 1))
+  write_rc=0
+  write_fixture "$id" "$ts" "$pkind" "$ikind" >/dev/null || write_rc=$?
+  # The selector: this candidate is not the request the case claims. Count
+  # it and consider the next one. Scoped to driver mode because that is
+  # the only mode with a claim to select on.
+  if [ "$DRIVER_MODE" = 1 ] && [ "$write_rc" = "$PATTERN_MISMATCH_RC" ]; then
+    CANDIDATES_SKIPPED=$((CANDIDATES_SKIPPED + 1))
+    continue
+  fi
+  # THE RE-RAISE. Anything else non-zero is a run-level refusal and ends
+  # the run with its own status, which is what errexit used to do for free.
+  # A driver run that ends in a refusal leaves nothing it promoted: the
+  # already-landed refusal fires only after a first fixture landed, and that
+  # fixture is not the case's evidence.
+  if [ "$write_rc" != 0 ]; then
+    unwind_driver_promotions
+    exit "$write_rc"
+  fi
+  SELECTED_REQUEST_ID="$id"
   captured=$((captured + 1))
   latest_ts="$ts"
   if [ "$LIMIT" -gt 0 ] && [ "$captured" -ge "$LIMIT" ]; then
@@ -1045,15 +1211,48 @@ fi
 
 echo "captured=$captured since=$since latest=$latest_ts out=$OUT"
 
-# Driver mode only: landing zero is a failed run, not a quiet window.
-# Reaching this line already proves NO fixture was refused -- the script
-# runs under `set -e` and write_fixture's refusal `return 1` inside the
-# loop body aborts before here -- so `captured=0` here means unambiguously
-# that the trace held no completed request. Exit 3 keeps that retryable
-# verdict distinct from exit 1 ("we refused a fixture"), which never is.
+# ONE structured selection line per driver run. A reviewer reading a
+# committed fixture cannot otherwise tell WHICH request of an agentic turn
+# they are looking at, and the run is where that fact exists.
+#
+# This is OBSERVABILITY, not identity: it is a log line and deliberately
+# not a meta.json field, because under the selector the ordinal is not the
+# selection basis and a recorded one would preserve a number nothing reads.
+#
+# NO BODY CONTENT. Everything on the line is an id, a count, or the fixed
+# ordering-basis token -- a rig log is a CI artifact, and a body is
+# unscrubbed at the point this prints.
+if [ "$DRIVER_MODE" = 1 ]; then
+  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED ordering_basis=first-ingress-body"
+fi
+
+# Driver mode only: landing zero is a failed run, not a quiet window, and
+# the two ways to land zero carry OPPOSITE verdicts.
+#
+# The loop re-raises every run-level refusal, so reaching this line proves
+# no fixture was refused for a per-run reason. What remains splits on the
+# candidate count:
+#
+#   * candidates existed and every one was SKIPPED -- the case claims a
+#     wire shape none of the requests its own run produced carried. That
+#     is a defect in the case (or in the client's behavior under it) and
+#     retrying spends tokens to reach the same verdict, so it is the
+#     REFUSAL exit, exit 1, the same verdict a per-request refusal gets.
+#   * zero candidates -- the trace held no completed request at all (a
+#     429, an upstream that returned no success body, a client that died
+#     before sending). Retryable, and unchanged: exit 3.
+#
+# No new exit code, deliberately: the f4 matrix runner reads the rig's
+# retryable / not-retryable distinction off exactly these two, and a third
+# code would be a third case for every caller to learn.
+#
 # Only the case id is nameable here: `lane` is local to write_fixture and
 # there is no traced provider_kind to normalize when nothing landed.
 if [ "$DRIVER_MODE" = 1 ] && [ "$captured" -eq 0 ]; then
+  if [ "$CANDIDATES_SKIPPED" -gt 0 ]; then
+    echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' examined $CANDIDATES_EXAMINED candidate request(s) and none exhibited the wire pattern it claims ('$ROUTECTL_FIXTURE_WIRE_PATTERN'); refusing the run" >&2
+    exit 1
+  fi
   echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' landed no fixture; the trace at $LOG holds no completed request" >&2
   exit 3
 fi
