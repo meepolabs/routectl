@@ -833,7 +833,7 @@ canned_trace() {
     local id="019eab77-0000-4000-8000-0000000000e2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
     local target="routectl_core::log_safe:"
-    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false'
+    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
     cat <<TRACE
 2026-08-26T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-26T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -846,6 +846,41 @@ canned_trace() {
 2026-08-26T10:00:00.400000Z TRACE $span: $target structural summary direction="ingress" $structural
 2026-08-26T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural
 TRACE
+}
+
+# A canned trace whose ingress body carries a tool-call turn AND a later
+# turn carrying its result, with a tools array on the structural line: the
+# shape a `tool-use-multiturn` case claims, which the rig's promotion gate
+# now verifies against the recorded claim.
+canned_trace_tools() {
+    local body='{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"list the files"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}]}'
+    canned_trace |
+        sed "s|ingress request body ingress=\"anthropic\" body={\"model\":\"claude-sonnet-4-5\"}|ingress request body ingress=\"anthropic\" body=$body|" |
+        sed 's/tools_len=0/tools_len=16/'
+}
+
+# A canned trace whose ingress structural line carries an ACTIVE thinking
+# block: the shape a `thinking` case claims.
+canned_trace_thinking() {
+    canned_trace | sed 's/thinking_shape=disabled/thinking_shape=enabled:8192/'
+}
+
+# A canned trace whose ingress structural line carries cache breakpoints:
+# the shape a `cache-breakpoints` case claims.
+canned_trace_cache_breakpoints() {
+    canned_trace | sed 's/cache_control_count=0/cache_control_count=2/'
+}
+
+# The MITM seam header name, read out of the rig rather than restated so
+# the two spellings cannot drift. The rig refuses to promote a front-proxy
+# fixture whose captured ingress headers do not carry it -- an environment
+# carrier states intent, this header is the evidence of transit.
+SEAM_HEADER="$(sed -n 's/^MITM_SEAM_HEADER="\(.*\)"$/\1/p' "$RIG")"
+
+# Add the seam header to a canned trace's captured ingress headers, so a
+# front-proxy run in this suite lands the fixture it drove.
+with_seam_header() {
+    sed 's/\(ingress request headers direction="ingress" headers=\[\)/\1["'"$SEAM_HEADER"'","d41d8cd98f00b204e9800998ecf8427e"],/'
 }
 
 write_listener() {
@@ -1073,6 +1108,9 @@ landed_meta() {
 
 for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
     work="$(make_work)"
+    # The case claims `tool-use-multiturn`, and the rig refuses to promote a
+    # fixture that does not exhibit the pattern its case claims.
+    canned_trace_tools >"$work/canned-trace.log"
     rc=0
     driver_run "$work" "$driver" tools-multiturn-01 || rc=$?
     check "$driver: a run against the stub daemon exits 0" "0" "$rc"
@@ -1259,6 +1297,9 @@ rm -rf "$work"
 # would read as client drift.
 
 work="$(make_work)"
+# The case claims `thinking`, and the rig refuses to promote a fixture whose
+# captured structural line shows no active thinking block.
+canned_trace_thinking >"$work/canned-trace.log"
 rc=0
 # The inherited bearer is what makes the two "no bearer" assertions below
 # non-vacuous: base-url mode must CLEAR a carrier the caller's environment
@@ -1284,6 +1325,10 @@ kept="$(kept_run "$work")"
 rm -rf "$work"
 
 work="$(make_work)"
+# A front-proxy fixture must prove TRANSIT, not just intent: the rig refuses
+# one whose captured ingress headers carry no seam header. The case also
+# claims `thinking`, so the trace carries both.
+canned_trace_thinking | with_seam_header >"$work/canned-trace.log"
 rc=0
 # The runner owns both proxy carriers now: it probes the MITM port and
 # points the CA at the path the daemon mints under the run's XDG root.
@@ -1338,6 +1383,7 @@ rm -rf "$work"
 # value through. Without this leg the placeholder assertion above would
 # hold equally against an arm that hardcoded the constant.
 work="$(make_work)"
+canned_trace_thinking | with_seam_header >"$work/canned-trace.log"
 rc=0
 DRIVER_LANE=anthropic-api.front-proxy \
 ROUTECTL_DRIVER_CLIENT_BEARER="caller-supplied-placeholder" \

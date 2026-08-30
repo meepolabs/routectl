@@ -30,6 +30,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMOTE="$HERE/promote_fixture.sh"
 SCRUB="$HERE/scrub-fixture.sh"
 CONFINE="$HERE/drivers/lib/confine.sh"
+VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
 
 fails=0
 
@@ -86,6 +87,7 @@ make_work() {
     cp "$PROMOTE" "$work/repo/scripts/promote_fixture.sh"
     cp "$CONFINE" "$work/repo/scripts/drivers/lib/confine.sh"
     cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
+    cp "$VERIFY_PATTERN" "$work/repo/scripts/drivers/lib/verify_pattern.py"
     printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$FAKE_HOSTNAME" >"$work/stubbin/hostname"
     chmod +x "$work/stubbin/hostname"
     (
@@ -128,6 +130,33 @@ mk_fixture() {
     done
 }
 
+# The MITM seam header, read out of the promotion script rather than
+# restated so the two spellings cannot drift apart.
+SEAM_HEADER="$(sed -n 's/^MITM_SEAM_HEADER="\(.*\)"$/\1/p' "$PROMOTE")"
+
+# An ingress structural summary line exhibiting the `baseline` wire shape:
+# no tools, no active thinking block, no cache breakpoints. In the field
+# layout log_safe.rs emits, because the predicate parses it as such.
+baseline_structural_line() {
+    printf 'structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n'
+}
+
+# Write a fixture the landing gates ACCEPT: a `baseline` structural line,
+# an ingress body, ingress headers with no seam header, and a meta.json
+# claiming `baseline` on `base-url`. Extra NAME=CONTENT pairs are appended,
+# and a pair naming one of these files replaces it -- which is how a case
+# drives a claim the staged bytes contradict.
+mk_promotable_fixture() {
+    local dir="$1"
+    shift
+    mk_fixture "$dir" \
+        'meta.json={"case_id":"plain-turn-01","wire_pattern":"baseline","client":{"connection_mode":"base-url"}}' \
+        'ingress_request.json={"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}' \
+        'ingress_request.headers.json=[["content-type","application/json"]]' \
+        "structural.txt=$(baseline_structural_line)" \
+        "$@"
+}
+
 # A stable manifest of a directory tree: every file's relative path and a
 # checksum of its bytes, sorted. Two trees with the same manifest hold the
 # same file set with the same content, which is what "byte-identical" and
@@ -167,9 +196,7 @@ tmp_dirs_in() {
 work="$(make_work)"
 scratch="$work/scratch"
 corpus="$work/repo/$CORPUS_REL"
-mk_fixture "$scratch/anthropic-api/plain-turn-01" \
-    'meta.json={"case_id":"plain-turn-01"}' \
-    'ingress_request.json={"model":"claude-sonnet-4-5"}' \
+mk_promotable_fixture "$scratch/anthropic-api/plain-turn-01" \
     'egress_response.json={"id":"msg_new"}'
 mk_fixture "$corpus/anthropic-api/plain-turn-01" \
     'meta.json={"case_id":"plain-turn-01","stale":true}' \
@@ -183,7 +210,7 @@ check "promotion over an existing fixture exits 0" "0" "$rc"
 check "a file present only in the OLD fixture is gone after promotion" "0" \
     "$([ -e "$corpus/anthropic-api/plain-turn-01/only_in_old.json" ] && echo 1 || echo 0)"
 check "the destination holds exactly the source's file set" \
-    "egress_response.json ingress_request.json meta.json " \
+    "egress_response.json ingress_request.headers.json ingress_request.json meta.json structural.txt " \
     "$(tree_files "$corpus/anthropic-api/plain-turn-01")"
 check "the destination content matches the source byte for byte" \
     "$src_manifest" "$(tree_manifest "$corpus/anthropic-api/plain-turn-01")"
@@ -198,9 +225,7 @@ rm -rf "$work"
 work="$(make_work)"
 scratch="$work/scratch"
 corpus="$work/repo/$CORPUS_REL"
-mk_fixture "$scratch/anthropic-api/plain-turn-01" \
-    'meta.json={"case_id":"plain-turn-01"}' \
-    'ingress_request.headers.json=[["content-type","application/json"]]'
+mk_promotable_fixture "$scratch/anthropic-api/plain-turn-01"
 src_manifest="$(tree_manifest "$scratch/anthropic-api/plain-turn-01")"
 rc=0
 promote "$work" --from "$scratch/anthropic-api/plain-turn-01" \
@@ -275,6 +300,172 @@ promote "$work" --from "$scratch/anthropic-api/plain-turn-01" \
 check "a fixture the gate cannot scan at all is refused with exit 2, not 1" "2" "$rc"
 check_log "the unscannable fixture refusal comes from the gate" \
     "refusing a vacuous scan" "$work/promote.log"
+rm -rf "$work"
+
+# --- Case 5b: the wire-pattern claim is re-verified on the staged bytes ---
+# A scratch fixture is hand-editable between capture and promotion -- that
+# is what the scratch root is FOR -- so the rig's capture-time verdict is
+# not evidence about the bytes being promoted. Case 2's clean control is the
+# paired positive: it promotes a fixture whose bytes DO exhibit its claim.
+work="$(make_work)"
+scratch="$work/scratch"
+corpus="$work/repo/$CORPUS_REL"
+# PREMISE: only the structural line differs from the promotable fixture, so
+# a refusal here is about the claim and not about some other missing file.
+mk_promotable_fixture "$scratch/anthropic-api/plain-turn-01" \
+    "structural.txt=$(baseline_structural_line | sed 's/tools_len=0/tools_len=16/')"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/plain-turn-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a staged fixture contradicting its recorded pattern is refused with exit 1" \
+    "1" "$rc"
+check_log "the refusal names the claimed pattern" "wire pattern" "$work/promote.log"
+check_log "the refusal names the clause that failed" "tools_len" "$work/promote.log"
+check "the destination stays absent after a pattern refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/plain-turn-01")"
+check "no staging directory survives a pattern refusal" "0" "$(tmp_dirs_in "$corpus")"
+
+# A fixture recording NO pattern at all cannot be verified, and the corpus
+# this script promotes into is never the live-box one that legitimately has
+# an empty pin. Refused rather than waved through.
+mk_promotable_fixture "$scratch/anthropic-api/no-claim-01" \
+    'meta.json={"case_id":"no-claim-01","client":{"connection_mode":"base-url"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/no-claim-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a staged fixture recording no wire pattern is refused with exit 1" "1" "$rc"
+check_log "the refusal says there is no claim to verify" "records no wire_pattern" \
+    "$work/promote.log"
+
+# A meta.json the gates cannot read is exit 2, not 1: "could not check" is
+# never "checked and clean", and a caller that saw 1 would go hunting for a
+# shape problem in a fixture whose claims were never read.
+mk_promotable_fixture "$scratch/anthropic-api/broken-meta-01" \
+    'meta.json={"case_id": '
+rc=0
+promote "$work" --from "$scratch/anthropic-api/broken-meta-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a staged fixture with an unparseable meta.json is refused with exit 2" "2" "$rc"
+check_log "the refusal says the claims cannot be read" "claims cannot be read" \
+    "$work/promote.log"
+rm -rf "$work"
+
+# --- Case 5c: the seam header must agree with the recorded mode ---------
+# An environment carrier proves INTENT, not TRANSIT. A hand-edited
+# `connection_mode` is exactly the drift this gate exists to catch, and both
+# directions are asserted: a check that only looked at front-proxy fixtures
+# would be satisfiable by one that never fires.
+work="$(make_work)"
+scratch="$work/scratch"
+corpus="$work/repo/$CORPUS_REL"
+
+check "the promotion script carries a seam header name at all" "1" \
+    "$([ -n "$SEAM_HEADER" ] && echo 1 || echo 0)"
+# The name is a REPLICA of the Rust redaction list's spelling -- that list is
+# WHY a captured header set retains the name -- so a drifted copy would gate
+# on a header no capture carries. Guarded on the crates tree's presence: this
+# suite also runs from a scripts-only checkout.
+redact_list="$HERE/../crates/routectl-core/src/log_safe.rs"
+if [ -f "$redact_list" ]; then
+    if grep -qF "\"$SEAM_HEADER\"" "$redact_list"; then
+        echo "PASS: the seam header name matches the redaction list's spelling"
+    else
+        echo "FAIL: the seam header '$SEAM_HEADER' is not in the redaction list"
+        fails=$((fails + 1))
+    fi
+else
+    echo "PASS: no crates tree in this checkout; the seam-name weld is not asserted"
+fi
+unset redact_list
+
+# front-proxy WITHOUT the seam header: refused.
+mk_promotable_fixture "$scratch/anthropic-api/fp-no-seam-01" \
+    'meta.json={"case_id":"fp-no-seam-01","wire_pattern":"baseline","client":{"connection_mode":"front-proxy"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/fp-no-seam-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a front-proxy fixture with no seam header is refused with exit 1" "1" "$rc"
+check_log "the refusal says the run did not transit the MITM listener" \
+    "did not" "$work/promote.log"
+check "the destination stays absent after a seam refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/fp-no-seam-01")"
+check "no staging directory survives a seam refusal" "0" "$(tmp_dirs_in "$corpus")"
+
+# PAIRED CONTROL: front-proxy WITH the seam header promotes.
+mk_promotable_fixture "$scratch/anthropic-api/fp-seam-01" \
+    'meta.json={"case_id":"fp-seam-01","wire_pattern":"baseline","client":{"connection_mode":"front-proxy"}}' \
+    "ingress_request.headers.json=[[\"$SEAM_HEADER\",\"[REDACTED]\"],[\"content-type\",\"application/json\"]]"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/fp-seam-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a front-proxy fixture carrying the seam header promotes at exit 0" "0" "$rc"
+check "the front-proxy fixture landed in the corpus" "1" \
+    "$([ -f "$corpus/anthropic-api/fp-seam-01/meta.json" ] && echo 1 || echo 0)"
+
+# The REVERSE: base-url WITH the seam header is refused. (Case 2's control
+# is the base-url-without-it positive.)
+mk_promotable_fixture "$scratch/anthropic-api/bu-seam-01" \
+    'meta.json={"case_id":"bu-seam-01","wire_pattern":"baseline","client":{"connection_mode":"base-url"}}' \
+    "ingress_request.headers.json=[[\"$SEAM_HEADER\",\"[REDACTED]\"]]"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/bu-seam-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a base-url fixture carrying the seam header is refused with exit 1" "1" "$rc"
+check_log "the refusal says the run DID transit the MITM listener" \
+    "DID transit" "$work/promote.log"
+check "the base-url destination stays absent after a seam refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/bu-seam-01")"
+
+# The match is on the NAME, case-insensitively: HTTP header names are
+# case-insensitive on the wire, so a case-sensitive gate would refuse a real
+# front-proxy capture whose proxy hop spelled the header differently.
+mk_promotable_fixture "$scratch/anthropic-api/fp-upper-01" \
+    'meta.json={"case_id":"fp-upper-01","wire_pattern":"baseline","client":{"connection_mode":"front-proxy"}}' \
+    "ingress_request.headers.json=[[\"$(printf '%s' "$SEAM_HEADER" | tr '[:lower:]' '[:upper:]')\",\"[REDACTED]\"]]"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/fp-upper-01" \
+    --scratch-root "$scratch" || rc=$?
+check "an upper-cased seam header name still satisfies a front-proxy claim" "0" "$rc"
+
+# A fixture with NO captured ingress headers makes the mode claim
+# unprovable, which is exit 2 (the gate could not run), never a promotion.
+# The absence -- rather than a malformed array -- is what this leg drives:
+# the scrub gate refuses unparseable header JSON before these gates run, so
+# a malformed file would assert the scrub verdict under this label.
+mk_promotable_fixture "$scratch/anthropic-api/fp-headerless-01" \
+    'meta.json={"case_id":"fp-headerless-01","wire_pattern":"baseline","client":{"connection_mode":"front-proxy"}}'
+rm -f "$scratch/anthropic-api/fp-headerless-01/ingress_request.headers.json"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/fp-headerless-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture with no captured ingress headers is refused with exit 2" "2" "$rc"
+check_log "the refusal says the connection mode is unprovable" "unprovable" \
+    "$work/promote.log"
+rm -rf "$work"
+
+# --- Case 5d: an absent predicate is a hard failure --------------------
+# The same fail-closed shape the confinement library and the scrub gate
+# have: an absent prerequisite is never an unverified promotion. The
+# removal is verified before the run, or the assertion would hold against
+# the present-predicate path.
+work="$(make_work)"
+scratch="$work/scratch"
+mk_promotable_fixture "$scratch/anthropic-api/plain-turn-01"
+if [ -f "$work/repo/scripts/drivers/lib/verify_pattern.py" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/verify_pattern.py" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/verify_pattern.py" ]; then
+    rc=0
+    promote "$work" --from "$scratch/anthropic-api/plain-turn-01" \
+        --scratch-root "$scratch" || rc=$?
+    check "an absent wire-pattern predicate refuses the promotion" "2" "$rc"
+    check_log "the refusal names the missing predicate" \
+        "wire-pattern predicate not found" "$work/promote.log"
+    check "nothing landed with no predicate to verify the claim" "ABSENT" \
+        "$(tree_manifest "$work/repo/$CORPUS_REL/anthropic-api/plain-turn-01")"
+else
+    echo "FAIL: could not remove the predicate from the throwaway repo"
+    fails=$((fails + 1))
+fi
 rm -rf "$work"
 
 # --- Case 6: confinement of --from, delegated to the shared library ----

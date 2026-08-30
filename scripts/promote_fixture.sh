@@ -33,15 +33,22 @@
 # place, and only then is the old one deleted. A reader sees the whole
 # old fixture or the whole new one, never a union of both.
 #
-# WHY IT RE-RUNS THE SCRUB GATE. The rig already ran
-# `scrub-fixture.sh --check` when it captured, but a scratch fixture is
+# WHY IT RE-RUNS THE LANDING GATES. The rig already ran
+# `scrub-fixture.sh --check`, the wire-pattern predicate, and the
+# mode/seam coherence check when it captured, but a scratch fixture is
 # by design hand-inspectable and hand-editable between capture and
-# promotion -- that is what the scratch root is FOR. This re-check is the
-# only thing standing between an edited scratch fixture and the committed
-# corpus, so a non-zero `--check` is a REFUSAL that promotes nothing and
-# leaves the destination exactly as it was.
+# promotion -- that is what the scratch root is FOR. These re-checks are
+# the only thing standing between an edited scratch fixture and the
+# committed corpus, so a non-zero verdict from any of them is a REFUSAL
+# that promotes nothing and leaves the destination exactly as it was.
 #
-# The check runs on the STAGED COPY, before any rename: what gets scanned
+# The claims are read from the STAGED `meta.json`, which is where the rig
+# recorded them and the only on-disk statement of what the fixture claims
+# to be. An edit that flips `wire_pattern` or `client.connection_mode` is
+# exactly what these gates exist to catch, so an unreadable meta.json is a
+# refusal rather than a skip.
+#
+# The checks run on the STAGED COPY, before any rename: what gets scanned
 # is byte-for-byte what would land, and a refusal has nothing to undo.
 #
 # Path confinement is NOT implemented here. Both paths go through
@@ -52,8 +59,10 @@
 #
 # Exit codes:
 #   0  promoted; the destination now holds exactly the source's file set
-#   1  the staged content failed `scrub-fixture.sh --check` -- residual
-#      personal data. Nothing was promoted.
+#   1  the staged content failed a landing gate -- residual personal data,
+#      a body that does not exhibit the wire pattern its `meta.json`
+#      claims, or captured ingress headers that contradict its recorded
+#      connection mode. Nothing was promoted.
 #   2  usage error, a confinement refusal, a fixture path that is not
 #      `<scratch-root>/<lane>/<case-id>`, or a missing prerequisite
 #      (this is also what a scrub gate that could not run at all reports)
@@ -91,6 +100,19 @@ CONFINE_LIB="$ROOT/scripts/drivers/lib/confine.sh"
 SCRUB="$ROOT/scripts/scrub-fixture.sh"
 [ -r "$SCRUB" ] ||
   fatal "scrub gate not found at $SCRUB; refusing to promote"
+
+# The single owner of the wire-pattern predicates. Absent is a hard
+# failure, never an unverified promotion -- the same fail-closed shape the
+# capture rig uses.
+VERIFY_PATTERN="$ROOT/scripts/drivers/lib/verify_pattern.py"
+[ -r "$VERIFY_PATTERN" ] ||
+  fatal "wire-pattern predicate not found at $VERIFY_PATTERN; refusing to promote"
+
+# Name of the MITM front-proxy seam header, as spelled in
+# REDACT_HEADER_NAMES in crates/routectl-core/src/log_safe.rs -- which is
+# why a captured ingress header set retains the NAME while its value is
+# redacted.
+MITM_SEAM_HEADER="x-routectl-mitm-proxied"
 
 DEFAULT_CORPUS="$ROOT/crates/routectl-cli/tests/fixtures/driver"
 
@@ -196,6 +218,109 @@ if [ "$scrub_rc" -ne 0 ]; then
   echo "the destination '$DST' is untouched. Fix the fixture in scratch and retry." >&2
   exit "$scrub_rc"
 fi
+
+# The two CLAIMS the staged meta.json makes about itself, read back with a
+# real JSON parser: a grep would accept a value from any nesting level, and
+# `connection_mode` is nested under `client`.
+#
+# An unreadable or malformed meta.json is a refusal at exit 2: the gates
+# below cannot run, and "could not check" is never "checked and clean".
+#
+# The reader's exit status is captured OUTSIDE the command substitution: an
+# assignment inside one runs in a subshell and its value never reaches this
+# scope, which would read every failure as a clean empty claim.
+claim_read_rc=0
+CLAIMS="$(python3 - "$STAGED/meta.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        meta = json.load(handle)
+    if not isinstance(meta, dict):
+        raise ValueError("meta.json is not a JSON object")
+    client = meta.get("client")
+    print(meta.get("wire_pattern", ""))
+    print(client.get("connection_mode", "") if isinstance(client, dict) else "")
+except (OSError, UnicodeDecodeError, ValueError) as exc:
+    print(f"promote_fixture: unreadable staged meta.json: {exc}", file=sys.stderr)
+    sys.exit(2)
+PY
+)" || claim_read_rc=$?
+if [ "$claim_read_rc" -ne 0 ]; then
+  echo "promote_fixture: refusing to promote '$SRC': its claims cannot be read." >&2
+  echo "the destination '$DST' is untouched." >&2
+  exit 2
+fi
+CLAIMED_PATTERN="$(printf '%s\n' "$CLAIMS" | sed -n 1p)"
+CLAIMED_MODE="$(printf '%s\n' "$CLAIMS" | sed -n 2p)"
+
+# The wire-pattern claim, enforced against the staged bytes. An EMPTY claim
+# is a live-box capture, which genuinely could not observe the pin; the
+# driver corpus this script promotes into is never that, so an empty
+# pattern here is a fixture nothing can gate and it does not land.
+if [ -z "$CLAIMED_PATTERN" ]; then
+  echo "promote_fixture: refusing to promote '$SRC': its meta.json records no wire_pattern," >&2
+  echo "so there is no claim to verify. the destination '$DST' is untouched." >&2
+  exit 1
+fi
+if ! python3 "$VERIFY_PATTERN" "$STAGED" "$CLAIMED_PATTERN"; then
+  echo "promote_fixture: refusing to promote '$SRC': it does not exhibit the wire pattern" >&2
+  echo "its meta.json claims ('$CLAIMED_PATTERN'). the destination '$DST' is untouched." >&2
+  exit 1
+fi
+
+# The connection-mode claim, enforced against the staged ingress headers.
+# An environment carrier proves INTENT; the seam header is the only
+# evidence of TRANSIT, so a fixture labelled front-proxy that never
+# transited the seam is caught here rather than read as client drift later.
+# Both directions, because a check that only looked at front-proxy runs
+# would be satisfiable by one that never fires.
+seam_rc=0
+python3 - "$STAGED/ingress_request.headers.json" "$MITM_SEAM_HEADER" <<'PY' || seam_rc=$?
+import json
+import sys
+
+path, needle = sys.argv[1], sys.argv[2].lower()
+shape = "captured ingress headers are not a JSON array of [name, value] pairs"
+try:
+    with open(path, encoding="utf-8") as handle:
+        pairs = json.load(handle)
+except (OSError, UnicodeDecodeError, ValueError) as exc:
+    print(f"promote_fixture: unreadable {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+if not isinstance(pairs, list):
+    print(f"promote_fixture: {shape}: {path}", file=sys.stderr)
+    sys.exit(2)
+for pair in pairs:
+    if not isinstance(pair, list) or not pair:
+        print(f"promote_fixture: {shape}: {path}", file=sys.stderr)
+        sys.exit(2)
+    if str(pair[0]).lower() == needle:
+        sys.exit(0)
+sys.exit(1)
+PY
+case "$CLAIMED_MODE:$seam_rc" in
+  front-proxy:1)
+    echo "promote_fixture: refusing to promote '$SRC': it records connection mode 'front-proxy'" >&2
+    echo "but its captured ingress headers carry no $MITM_SEAM_HEADER, so the run did not" >&2
+    echo "transit the MITM listener. the destination '$DST' is untouched." >&2
+    exit 1
+    ;;
+  base-url:0)
+    echo "promote_fixture: refusing to promote '$SRC': it records connection mode 'base-url'" >&2
+    echo "but its captured ingress headers carry $MITM_SEAM_HEADER, so the run DID transit" >&2
+    echo "the MITM listener. the destination '$DST' is untouched." >&2
+    exit 1
+    ;;
+  front-proxy:*|base-url:*)
+    if [ "$seam_rc" -ne 0 ] && [ "$seam_rc" -ne 1 ]; then
+      echo "promote_fixture: refusing to promote '$SRC': its captured ingress headers cannot be" >&2
+      echo "read, so connection mode '$CLAIMED_MODE' is unprovable. the destination is untouched." >&2
+      exit 2
+    fi
+    ;;
+esac
 
 # Rename-aside-then-delete. Both operands are absolute (a
 # `cd <dir> && rm` compound short-circuits into a no-op when cwd already

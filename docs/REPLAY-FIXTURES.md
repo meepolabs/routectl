@@ -108,10 +108,14 @@ a small, secret-free body -- a rejection envelope, not a full response.
 
 The COMMITTED driver corpus is the exception: it ships in the repo, so a
 named test may assert directly against a driver fixture and that
-assertion runs on every checkout. Such a
-test must SKIP BY NAME when the corpus is absent (print a NOT RUN line
-naming the missing fixture and return) rather than fail: a checkout
-without the corpus is missing evidence, not exhibiting a regression.
+assertion runs on every checkout -- the pinned-metadata assertion in
+`tests/conservation.rs` does exactly this over every fixture under
+`driver/`. Such a test must SKIP BY NAME when the corpus is absent (print
+a NOT RUN line naming what is missing and return) rather than fail: a
+checkout without the corpus is missing evidence, not exhibiting a
+regression. State it over the corpus rather than against one named
+fixture: a per-fixture assertion goes on passing while a second fixture
+lands unpinned.
 
 Current inline captures:
 
@@ -365,23 +369,32 @@ Fields:
   the other environment pins; EMPTY on a live-box capture, which cannot
   observe it, and on any fixture predating the key.
 
-  **In this release the claim is RECORDED, not yet ENFORCED AT
-  PROMOTION.** The predicate that decides it exists --
-  `scripts/drivers/lib/verify_pattern.py`, one predicate per pattern in
-  the closed vocabulary, reading the fixture's own ingress structural
-  line or ingress body -- and can be run against a staged or committed
-  fixture directory by hand:
+  **The claim is ENFORCED AT PROMOTION.** `scripts/drivers/lib/verify_pattern.py`
+  holds one predicate per pattern in the closed vocabulary, read off the
+  fixture's own ingress structural line or ingress body, and the capture
+  rig invokes it in driver mode after `scrub-fixture.sh --check` and before
+  the promotion `mv`. A fixture whose captured bytes do not exhibit the
+  pattern its pin records is DISCARDED, and the rig exits non-zero -- which
+  the driver runner reports as a rig refusal, a defect that is never
+  retryable. `scripts/promote_fixture.sh` re-runs the same predicate on the
+  staged bytes, against the pattern the staged `meta.json` records, because
+  a scratch fixture is hand-editable between capture and promotion. An
+  absent predicate script is a hard failure in both, never an unverified
+  promotion.
+
+  Run it by hand against a staged or committed fixture directory:
 
   ```
   python3 scripts/drivers/lib/verify_pattern.py \
     crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01 baseline
   ```
 
-  What does not exist yet is the automatic refusal: the capture rig does
-  not invoke it and the loader stores the string and compares nothing. So
-  a mismatched claim on a committed fixture goes unnoticed unless someone
-  runs the predicate. What IS executed on every checkout is the weld
-  between the predicates and the vocabulary they answer for
+  What the LOADER does with the value is unchanged: it stores the string
+  and compares nothing. The enforcement is at the promotion boundary, which
+  is the only point at which a fixture can still be refused.
+
+  Also executed on every checkout: the weld between the predicates and the
+  vocabulary they answer for
   (`crates/routectl-cli/tests/wire_pattern_weld.rs`): every pattern token
   has a predicate or an explicit deferral, and the Python and Rust
   implementations of the three structural predicates classify the shared
@@ -394,6 +407,19 @@ Fields:
   content as system-reminder text with zero system turns in base-url
   mode, so an unpinned mode makes a cross-mode comparison read as
   drift.
+
+  The mode is ENFORCED AT PROMOTION too, against evidence no environment
+  carrier can provide. An env var states the client's INTENT; the MITM seam
+  header (`x-routectl-mitm-proxied`, retained by name in captured ingress
+  headers because it is in the redaction list in
+  `crates/routectl-core/src/log_safe.rs`) is the only proof of TRANSIT. So
+  a `front-proxy` fixture whose captured ingress headers lack the seam
+  header name is refused -- a client that silently fell back to a direct
+  connection cannot produce it, whatever its environment said -- and a
+  `base-url` fixture that carries it is refused as well. Both directions,
+  in the capture rig and again in `scripts/promote_fixture.sh`. The
+  comparison is on the header NAME, case-insensitively; the value is a
+  redaction placeholder by the time the gate runs.
 
   All four environment-sourced pins (`case_id`, `config_sha`,
   `client.connection_mode`, `wire_pattern`) are EMPTY when unset on the

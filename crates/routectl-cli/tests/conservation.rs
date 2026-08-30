@@ -353,6 +353,60 @@ fn conservation_over_both_fixture_roots() {
     );
 }
 
+/// Every fixture in the COMMITTED driver corpus pins a non-empty
+/// `ingress_kind` and a non-empty `wire_pattern`.
+///
+/// `ingress_kind` matters because this harness SKIPS a fixture whose
+/// value is empty, and on a gated lane a skip turns the gate red for zero
+/// coverage -- a symptom that reads as unrelated to the lost token.
+/// `wire_pattern` matters because it is the claim the capture rig's
+/// promotion gate verifies against the captured bytes: an empty one is a
+/// fixture that reached the corpus with nothing to verify.
+///
+/// Stated over the whole corpus rather than against one named case: a
+/// per-fixture assertion is a special case that the general rule covers,
+/// and it would go on passing while a second fixture landed unpinned.
+#[test]
+fn every_committed_driver_fixture_pins_its_ingress_kind_and_wire_pattern() {
+    let root = driver_root();
+    let corpus = match discover_driver_fixtures(&root) {
+        Ok(corpus) => corpus,
+        Err(e) => panic!("the driver root {} must walk: {e}", root.display()),
+    };
+    if corpus.fixtures.is_empty() {
+        eprintln!(
+            "conservation: driver root `{}` holds no loadable fixture; the pinned-metadata \
+             assertion is SKIPPED.",
+            root.display(),
+        );
+        return;
+    }
+
+    let unpinned: Vec<String> = corpus
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.meta.ingress_kind.is_empty())
+        .map(|fixture| fixture.name.clone())
+        .collect();
+    assert!(
+        unpinned.is_empty(),
+        "committed driver fixture(s) pin no ingress_kind, so this harness skips them and a \
+         gated lane goes red for zero coverage: {unpinned:?}",
+    );
+
+    let unclaimed: Vec<String> = corpus
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.meta.wire_pattern.is_empty())
+        .map(|fixture| fixture.name.clone())
+        .collect();
+    assert!(
+        unclaimed.is_empty(),
+        "committed driver fixture(s) record no wire_pattern, so nothing verified what shape \
+         they carry: {unclaimed:?}",
+    );
+}
+
 /// The measured baseline of the live-box corpus, asserted only WHEN THAT
 /// CORPUS IS PRESENT.
 ///

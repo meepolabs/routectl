@@ -78,6 +78,13 @@
 #   * `scrub-fixture.sh --check` runs after `--write` and a non-zero
 #     exit refuses the promotion. A driver fixture is canonical by
 #     construction or it is not landed.
+#   * The recorded wire-pattern claim is ENFORCED against the captured
+#     bytes by `scripts/drivers/lib/verify_pattern.py`, and the recorded
+#     connection mode is enforced against the captured ingress headers:
+#     a `front-proxy` fixture whose headers do not carry the MITM seam
+#     header name never transited the seam whatever its environment
+#     said, and a `base-url` fixture that carries it did. Either
+#     mismatch refuses the promotion.
 #   * The lane must be CLASSIFIED by the scrub gate --
 #     `scrub-fixture.sh --lane-known <lane>` exits non-zero and the
 #     fixture does not land. A `--check` pass on a lane whose credential
@@ -152,6 +159,17 @@ if [ ! -r "$SCRUB" ]; then
   exit 1
 fi
 
+# The predicate side of the recorded wire-pattern claim: one predicate per
+# token in the closed vocabulary, read off the fixture's own captured
+# bytes. Only driver mode runs it, but the prerequisite is checked here
+# with the others -- an absent predicate is a hard failure, never an
+# unverified promotion, for the same reason the scrub script is.
+VERIFY_PATTERN="$ROOT/scripts/drivers/lib/verify_pattern.py"
+if [ ! -r "$VERIFY_PATTERN" ]; then
+  echo "capture_fixtures: wire-pattern predicate not found at $VERIFY_PATTERN; refusing to capture" >&2
+  exit 1
+fi
+
 # The single owner of --out path confinement, shared with every other
 # script that writes capture output to a caller-supplied directory.
 # Absent library is a hard failure, never an unconfined write.
@@ -212,6 +230,95 @@ normalize_lane() {
       printf '\n'
       ;;
   esac
+}
+
+# Name of the MITM front-proxy seam header, as spelled in
+# REDACT_HEADER_NAMES in crates/routectl-core/src/log_safe.rs -- which is
+# why a captured ingress header set retains the NAME while its value is
+# redacted. A REPLICA, because the rig runs in throwaway trees that carry
+# scripts/ and no crates/ (the self-test asserts the two spellings agree).
+MITM_SEAM_HEADER="x-routectl-mitm-proxied"
+
+# Captured ingress headers of a fixture directory. The header files hold a
+# JSON ARRAY of [name, value] pairs, so they are PARSED rather than
+# grepped: a substring hit anywhere in a value would answer a question
+# about names.
+INGRESS_HEADERS_FILE="ingress_request.headers.json"
+
+# Does the fixture's captured ingress header set carry $MITM_SEAM_HEADER?
+# 0 yes, 1 no, 2 the question could not be answered from the file.
+#
+# The match is on the NAME, case-insensitively: by the time this runs the
+# value is a redaction placeholder, so a value comparison would test the
+# scrub gate rather than the fixture's provenance.
+ingress_carries_seam_header() {
+  python3 - "$1" "$MITM_SEAM_HEADER" <<'PY'
+import json
+import sys
+
+path, needle = sys.argv[1], sys.argv[2].lower()
+shape = "captured ingress headers are not a JSON array of [name, value] pairs"
+try:
+    with open(path, encoding="utf-8") as handle:
+        pairs = json.load(handle)
+except (OSError, UnicodeDecodeError, ValueError) as exc:
+    print(f"capture_fixtures: unreadable {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+if not isinstance(pairs, list):
+    print(f"capture_fixtures: {shape}: {path}", file=sys.stderr)
+    sys.exit(2)
+for pair in pairs:
+    if not isinstance(pair, list) or not pair:
+        print(f"capture_fixtures: {shape}: {path}", file=sys.stderr)
+        sys.exit(2)
+    if str(pair[0]).lower() == needle:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# Refuse a staged fixture whose captured ingress headers contradict the
+# connection mode it records. An environment carrier proves INTENT; the
+# seam header is the only evidence of TRANSIT, so a client that silently
+# fell back to a direct connection is caught here rather than landing as a
+# front-proxy fixture whose shape is base-url.
+#
+# Both directions, and the reverse one is what stops the gate being
+# satisfiable by a check that only ever looks at front-proxy runs. A mode
+# outside these two is refused upstream by the driver, so there is
+# deliberately no third arm here.
+assert_mode_seam_coherent() {
+  local tmp="$1" id="$2"
+  case "$ROUTECTL_FIXTURE_CONNECTION_MODE" in
+    front-proxy|base-url) : ;;
+    *) return 0 ;;
+  esac
+
+  local seam_rc=0
+  ingress_carries_seam_header "$tmp/$INGRESS_HEADERS_FILE" || seam_rc=$?
+  case "$seam_rc" in
+    0)
+      if [ "$ROUTECTL_FIXTURE_CONNECTION_MODE" = base-url ]; then
+        echo "capture_fixtures: $id records connection mode 'base-url' but its captured ingress" >&2
+        echo "headers carry $MITM_SEAM_HEADER: the run DID transit the MITM listener; not promoting." >&2
+        return 1
+      fi
+      ;;
+    1)
+      if [ "$ROUTECTL_FIXTURE_CONNECTION_MODE" = front-proxy ]; then
+        echo "capture_fixtures: $id records connection mode 'front-proxy' but its captured ingress" >&2
+        echo "headers carry no $MITM_SEAM_HEADER: the run did not transit the MITM listener," >&2
+        echo "whatever its environment said; not promoting." >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "capture_fixtures: cannot read $id's captured ingress headers, so its connection mode" >&2
+      echo "'$ROUTECTL_FIXTURE_CONNECTION_MODE' is unprovable; not promoting." >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 while [ $# -gt 0 ]; do
@@ -663,6 +770,28 @@ META
   # The order is load-bearing in the other direction too: `--write`
   # neutralizes the contributor's own home path, so `--check` verifies the
   # rewritten bytes rather than the raw capture.
+
+  # Driver mode enforces the two CLAIMS the fixture records about itself,
+  # in the slot the ordering contract reserves: after `--check` on the full
+  # bytes, before the promotion. Both refusals discard the staged directory
+  # and `return 1` so `set -e` cannot promote it, which the runner reports
+  # as a rig refusal -- a defect, never retryable.
+  if [ "$DRIVER_MODE" = 1 ]; then
+    # The claimed pattern comes from the recorded pin, never from argv: a
+    # flag would let a caller declare a pattern the case does not claim,
+    # which is the unverified claim arriving one layer earlier.
+    if ! python3 "$VERIFY_PATTERN" "$tmp" "$ROUTECTL_FIXTURE_WIRE_PATTERN"; then
+      echo "capture_fixtures: $id does not exhibit the wire pattern it claims" >&2
+      echo "('$ROUTECTL_FIXTURE_WIRE_PATTERN'); not promoting the fixture." >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+
+    if ! assert_mode_seam_coherent "$tmp" "$id"; then
+      rm -rf "$tmp"
+      return 1
+    fi
+  fi
 
   # Resolve the landing path. Driver mode keys on `(lane, case_id)` so a
   # rerun of the same case re-lands on the same path and diffs; live-box
