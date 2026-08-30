@@ -1290,6 +1290,32 @@ else
 fi
 rm -rf "$work"
 
+# The third driver refuses front-proxy mode OUTRIGHT: its client is
+# arbitrary, so there is no verified trust path for the MITM CA, and a
+# client that ignored NODE_EXTRA_CA_CERTS would silently fall back to a
+# direct connection rather than fail. The refusal fires before the daemon
+# precondition (a dead port here is what proves that), and the message
+# grep is what attributes the failure to the mode rather than to the
+# missing daemon. Part 3's base-url pass through this driver is the
+# paired control: a driver that refused every run would fail there.
+work="$(make_work)"
+rc=0
+DIRECT_MODE=front-proxy DIRECT_CASE=plain-turn-01 \
+    direct_run "$work" external-agent-cli.sh "http://127.0.0.1:1" || rc=$?
+check "the third driver refuses front-proxy mode with exit 2" "2" "$rc"
+if grep -qF 'no verified trust path' "$work/direct.log"; then
+    echo "PASS: the front-proxy refusal names the missing trust path"
+else
+    fail "the front-proxy refusal did not name the missing trust path"
+    sed -n '1,10p' "$work/direct.log"
+fi
+if grep -qF 'NODE_EXTRA_CA_CERTS' "$work/direct.log"; then
+    echo "PASS: the front-proxy refusal names the silent-fallback carrier"
+else
+    fail "the front-proxy refusal did not name the silent-fallback carrier"
+fi
+rm -rf "$work"
+
 # ---------------------------------------------------------------------
 # Part 5: the claude-code driver honors BOTH connection modes
 # ---------------------------------------------------------------------

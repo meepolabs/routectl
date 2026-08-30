@@ -53,6 +53,19 @@ VERSION_FLAG="${ROUTECTL_DRIVER_AGENT_VERSION_FLAG:---version}"
 REASONING_LEVEL="${ROUTECTL_DRIVER_AGENT_REASONING_LEVEL:-high}"
 
 driver_require_runner_env
+
+# front-proxy is REFUSED here, before any daemon probe or client run: the
+# trust path for the MITM CA is `NODE_EXTRA_CA_CERTS`, which only a Node
+# client honors, and this driver's client is arbitrary by design. A client
+# that ignored the carrier would not fail -- it would silently fall back
+# to a direct connection and land a fixture labelled front-proxy whose
+# shape is base-url. Fail closed in the one layer that knows the client
+# is unverified; a driver written FOR a specific non-Node client carries
+# its own trust path instead.
+if [ "$ROUTECTL_FIXTURE_CONNECTION_MODE" = front-proxy ]; then
+  driver_die "connection mode front-proxy is refused: this driver names no verified trust path for an arbitrary client, and one that ignores NODE_EXTRA_CA_CERTS would silently fall back to a direct connection" 2
+fi
+
 driver_require_daemon
 CASE_FILE="$(driver_case_file)"
 driver_seed_workspace "$CASE_FILE"

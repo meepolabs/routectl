@@ -441,6 +441,34 @@ promote "$work" --from "$scratch/anthropic-api/fp-headerless-01" \
 check "a fixture with no captured ingress headers is refused with exit 2" "2" "$rc"
 check_log "the refusal says the connection mode is unprovable" "unprovable" \
     "$work/promote.log"
+
+# The mode claim is a CLOSED SET. A scratch fixture is hand-editable, and
+# an edit that empties or misspells `connection_mode` would otherwise slip
+# past a seam gate that only has arms for the two real modes -- promoted
+# because NO check fired, not because one passed. The two seam-coherent
+# promotions above are the paired controls proving the closed set still
+# admits both real modes.
+mk_promotable_fixture "$scratch/anthropic-api/empty-mode-01" \
+    'meta.json={"case_id":"empty-mode-01","wire_pattern":"baseline","client":{"connection_mode":""}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/empty-mode-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture recording an empty connection mode is refused with exit 1" "1" "$rc"
+check_log "the refusal says there is no mode claim to check" \
+    "records no connection mode" "$work/promote.log"
+check "the destination stays absent after an empty-mode refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/empty-mode-01")"
+
+mk_promotable_fixture "$scratch/anthropic-api/odd-mode-01" \
+    'meta.json={"case_id":"odd-mode-01","wire_pattern":"baseline","client":{"connection_mode":"sidecar"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/odd-mode-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture recording an unsupported connection mode is refused with exit 1" "1" "$rc"
+check_log "the refusal names the unsupported mode" "sidecar" "$work/promote.log"
+check "the destination stays absent after an unsupported-mode refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/odd-mode-01")"
+check "no staging directory survives a mode refusal" "0" "$(tmp_dirs_in "$corpus")"
 rm -rf "$work"
 
 # --- Case 5d: an absent predicate is a hard failure --------------------
