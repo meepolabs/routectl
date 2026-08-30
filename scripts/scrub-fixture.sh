@@ -80,6 +80,13 @@
 #                      others, a public auditor cannot tell the two apart
 #                      from the committed file, so the committed form is
 #                      always the placeholder.
+#   chatgpt-account-id  a `chatgpt-account-id` header whose value is not a
+#                      redaction placeholder. The openai-responses egress
+#                      stamps it from the seat's account id, so it names the
+#                      operator's ChatGPT account. Denied by NAME for the
+#                      same reason as the session header: the value is a
+#                      plain uuid, so a value-shaped rule would refuse every
+#                      uuid in a body.
 #   bearer-token       a `bearer <opaque>` value anywhere in the fixture,
 #                      scheme word matched case-insensitively
 #   provider-key       a raw vendor credential carrying no scheme word at
@@ -816,6 +823,7 @@ ACCOUNT_SCOPED_NAMES = {
     "anthropic-organization-id": "anthropic-account-id",
     "anthropic-workspace-id": "anthropic-account-id",
     "x-claude-code-session-id": "claude-session-header",
+    "chatgpt-account-id": "chatgpt-account-id",
 }
 
 def account_scoped_class(name):
