@@ -730,13 +730,15 @@ denies "large-context refuses an oversized body that is not valid JSON" \
 denies "large-context refuses an oversized body that is not valid UTF-8" \
     "$pat/large-binary" large-context "not valid UTF-8"
 
-# The current large-context-01 case puts its padding in FILES the client is
-# asked to read, so the request it produces carries only the prompt plus
-# the client's own preamble. Its refusal here is the EXPECTED outcome and
-# the observation the case definition is settled against -- the floor is
-# not tuned to make it pass. Built from the committed baseline fixture's
-# real captured body (the observed size of a first request) plus the case's
-# own first-turn prompt.
+# A body carrying ONLY the case's prompt plus the client's own preamble is
+# under the floor. That is what a large-context case produces when nothing
+# draws the padding INTO the body -- the shape a counting prompt yielded,
+# measured at 121-125 KB against the 262144 floor, and the reason the case
+# now asks for the filler to be quoted rather than counted. Kept as the
+# paired control for the floor: it fixes what "not large" looks like from
+# this client, so the floor cannot be lowered to meet it. Built from the
+# committed baseline fixture's real captured body plus the case's own
+# first-turn prompt.
 lc_prompt="$(python3 "$VALIDATOR" --turns "$CASES/large-context-01.json" | head -1)"
 lc_dir="$pat/large-context-01-shape"
 mkdir -p "$lc_dir"
@@ -757,7 +759,7 @@ body["messages"] = [{"role": "user", "content": [{"type": "text", "text": sys.ar
 with open(sys.argv[2], "w", encoding="utf-8") as handle:
     json.dump(body, handle)
 PY
-denies "the current large-context case shape is refused as expected" \
+denies "a body carrying only the prompt and the client preamble is refused" \
     "$lc_dir" large-context "floor"
 
 # --- the table covers the closed set ----------------------------------
@@ -1352,6 +1354,10 @@ stdin_bytes="$(cat | wc -c | tr -d ' ')"
     printf 'invocation home=%s\n' "$HOME"
     printf 'invocation notes_alpha=%s\n' "$([ -f notes-alpha.txt ] && echo yes || echo no)"
     printf 'invocation filler=%s\n' "$(ls filler-*.txt 2>/dev/null | wc -l)"
+    printf 'invocation filler_max_bytes=%s\n' \
+        "$(wc -c filler-*.txt 2>/dev/null | awk '$2!="total"{if($1>m)m=$1}END{print m+0}')"
+    printf 'invocation filler_max_lines=%s\n' \
+        "$(wc -l filler-*.txt 2>/dev/null | awk '$2!="total"{if($1>m)m=$1}END{print m+0}')"
     printf 'invocation table=%s\n' "$([ -f reference-table.txt ] && echo yes || echo no)"
 } >>"$CLIENT_OUT"
 exit "${STUB_CLIENT_RC:-0}"
@@ -2066,6 +2072,36 @@ if [ -n "$padding_files" ] && [ "$padding_files" -gt 0 ]; then
     echo "PASS: a large-context case materializes its filler in the throwaway cwd"
 else
     echo "FAIL: a large-context case left the client nothing large to read"
+    fails=$((fails + 1))
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# The filler only reaches the wire as a TOOL RESULT, so every generated file
+# must be one the client will return IN FULL. A driven Claude Code refuses a
+# file over its own read caps and returns nothing, which is how a padded case
+# produced an UNDER-floor body: the observed caps are 262144 bytes, 25000
+# content tokens, and a 2000-line default read window. These bounds are
+# asserted rather than trusted because a chunk size raised past them
+# materializes bytes that cannot leave the disk, and the only symptom is a
+# refused capture after real spend.
+work="$(make_work)"
+driver_run "$work" claude-code-print.sh large-context-01 || true
+filler_max_bytes="$(client_get "$work" filler_max_bytes | head -1)"
+filler_max_lines="$(client_get "$work" filler_max_lines | head -1)"
+if [ -n "$filler_max_bytes" ] && [ "$filler_max_bytes" -gt 0 ] &&
+   [ "$filler_max_bytes" -lt 262144 ]; then
+    echo "PASS: every generated filler file is under the client's read size cap"
+else
+    echo "FAIL: a filler file at $filler_max_bytes bytes is not under the 262144 read cap"
+    fails=$((fails + 1))
+fi
+if [ -n "$filler_max_lines" ] && [ "$filler_max_lines" -gt 0 ] &&
+   [ "$filler_max_lines" -lt 2000 ]; then
+    echo "PASS: every generated filler file is under the client's default read window"
+else
+    echo "FAIL: a filler file at $filler_max_lines lines is not under the 2000-line window"
     fails=$((fails + 1))
 fi
 kept="$(kept_run "$work")"

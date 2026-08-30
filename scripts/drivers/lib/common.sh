@@ -164,7 +164,14 @@ driver_seed_workspace() {
 
   padding="$(driver_case_field "$case_file" context_padding_bytes)"
   if [ "$padding" -gt 0 ]; then
-    local remaining="$padding" chunk=262144 index=0
+    # The chunk is sized to what the CLIENT will read back in FULL, because
+    # padding only reaches the wire as a tool result. A driven client refuses
+    # a file over its own read caps outright and returns nothing, so a chunk
+    # at or above them materializes bytes that can never leave the disk: the
+    # observed caps are a 262144-byte size ceiling, a 25000-token content
+    # ceiling, and a 2000-line default read window. At 64 KiB one file is
+    # ~1237 lines and ~16k tokens, inside all three.
+    local remaining="$padding" chunk=65536 index=0
     while [ "$remaining" -gt 0 ]; do
       [ "$remaining" -lt "$chunk" ] && chunk="$remaining"
       index=$((index + 1))
