@@ -92,6 +92,42 @@ pub fn plant_driver_case(root: &Path, lane: &str, case_id: &str) -> PathBuf {
     dir
 }
 
+/// Plant a driver-corpus case whose INGRESS half is caller-supplied:
+/// the whole `meta.json`, the ingress header pairs, and the ingress body.
+/// Returns the case path.
+///
+/// The outgoing half stays the minimal one [`write_required_files`]
+/// writes, because a consumer of this variant is comparing captured
+/// ingress evidence across two cases rather than ingress against
+/// outgoing.
+pub fn plant_driver_case_with_ingress(
+    root: &Path,
+    lane: &str,
+    case_id: &str,
+    meta: &Value,
+    ingress_headers: &[(&str, &str)],
+    ingress_body: &Value,
+) -> PathBuf {
+    let dir = root.join(lane).join(case_id);
+    fs::create_dir_all(&dir).unwrap();
+    write_required_files(&dir, meta);
+    let pairs: Vec<Value> = ingress_headers
+        .iter()
+        .map(|(name, value)| json!([name, value]))
+        .collect();
+    fs::write(
+        dir.join(INGRESS_HEADERS),
+        serde_json::to_vec(&Value::Array(pairs)).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join(INGRESS_BODY),
+        serde_json::to_vec(ingress_body).unwrap(),
+    )
+    .unwrap();
+    dir
+}
+
 /// Plant a driver-corpus case that is PRESENT but unloadable: every
 /// required file except `meta.json`, which is what the loader refuses on
 /// first. The distinction this exists to draw is present-but-broken vs
