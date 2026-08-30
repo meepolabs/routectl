@@ -3,7 +3,6 @@
   "case_id": "large-context-01",
   "title": "One turn over generated filler large enough to change the client's own framing",
   "wire_pattern": "large-context",
-  "lane": "anthropic-api",
   "turns": [
     {
       "prompt": "Read every generated .txt file in the current directory and report how many lines they hold in total."

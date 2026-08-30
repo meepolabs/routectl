@@ -3,7 +3,6 @@
   "case_id": "tools-multiturn-01",
   "title": "Two-turn tool loop over files the driver creates in the throwaway cwd",
   "wire_pattern": "tool-use-multiturn",
-  "lane": "anthropic-api",
   "turns": [
     {
       "prompt": "List the files in the current directory, then read notes-alpha.txt and tell me the number written in it."

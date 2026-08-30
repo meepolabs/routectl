@@ -3,7 +3,6 @@
   "case_id": "cache-breakpoints-01",
   "title": "Stable long prefix reused across turns so the client sets cache control",
   "wire_pattern": "cache-breakpoints",
-  "lane": "anthropic-api",
   "turns": [
     {
       "prompt": "Read reference-table.txt in full and summarize what kind of records it holds."

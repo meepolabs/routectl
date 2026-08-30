@@ -42,7 +42,6 @@ separator.
 | `case_id` | string | `^[a-z0-9]+(-[a-z0-9]+)*$`, and equal to the filename stem |
 | `title` | string | non-empty, single-line; a human summary of the interaction |
 | `wire_pattern` | string | one of `baseline`, `tool-use-multiturn`, `cache-breakpoints`, `thinking`, `large-context` |
-| `lane` | string | `^[a-z0-9]+(-[a-z0-9]+)*$`, and `scripts/drivers/config/<lane>.toml` must exist |
 | `turns` | array | at least one object, each with exactly one key `prompt`: a non-empty single-line string |
 | `knobs` | object | exactly the four keys below |
 | `notes` | string | OPTIONAL, single-line |
@@ -107,8 +106,10 @@ claiming it is refused rather than accepted unverified.
 ## Running a case
 
 A runner covering a whole lane derives the set of cases it expects at run
-time -- `cases/*.json` filtered on `lane` -- rather than reading a
+time -- every `cases/*.json` -- rather than reading a
 committed manifest, so adding or moving a case needs no second file kept
-in step with this directory.
+in step with this directory. A case names no lane: the lane comes from the
+runner's own `--lane`, which is also where the lane config's existence is
+checked, so one case set replays across every lane.
 
 See the driver-mode section of [../../../docs/DEVELOPMENT.md](../../../docs/DEVELOPMENT.md).

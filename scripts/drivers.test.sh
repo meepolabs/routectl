@@ -243,12 +243,15 @@ refuses "a case missing a required key is refused" \
     "$(mutate 'no-knobs' 'del case["knobs"]')" "missing keys"
 refuses "a case carrying an unknown key is refused" \
     "$(mutate 'extra-key' 'case["harness"] = "some-cli"')" "unknown keys"
+# A case still carrying the retired `lane` key must fail LOUDLY rather than
+# be tolerated: the lane now comes from the runner's `--lane` alone, so a
+# case that still names one would silently disagree with the run it drives.
+refuses "a case still carrying a lane key is refused" \
+    "$(mutate 'stale-lane' 'case["lane"] = "anthropic-api"')" "unknown keys"
 refuses "a case on an unknown schema version is refused" \
     "$(mutate 'wrong-version' 'case["schema_version"] = 2')" "schema_version"
 refuses "a case with an unknown wire pattern is refused" \
     "$(mutate 'unknown-pattern' 'case["wire_pattern"] = "freeform"')" "wire_pattern"
-refuses "a case naming a lane with no committed config is refused" \
-    "$(mutate 'no-lane' 'case["lane"] = "no-such-lane"')" "no committed config"
 refuses "a case with an empty turn list is refused" \
     "$(mutate 'no-turns' 'case["turns"] = []')" "turns"
 refuses "a turn carrying a key other than prompt is refused" \

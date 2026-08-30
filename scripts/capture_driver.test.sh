@@ -244,7 +244,6 @@ write_case() {
   "case_id": "$case_id",
   "title": "Throwaway case for the runner self-test",
   "wire_pattern": "$pattern",
-  "lane": "anthropic-api",
   "turns": [
     {
       "prompt": "Say hello."
