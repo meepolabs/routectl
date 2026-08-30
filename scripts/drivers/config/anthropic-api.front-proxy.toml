@@ -1,0 +1,86 @@
+# Hermetic driver config for the `anthropic-api` lane, front-proxy variant:
+# the base `anthropic-api.toml` plus a `[mitm]` block, and NOTHING else
+# different.
+#
+# COMMITTED ON PURPOSE. `scripts/capture_driver.sh` hashes THIS FILE and
+# records the digest as `meta.config_sha` on every fixture the lane
+# produces, so a rerun of a case under a drifted config reads as a config
+# change rather than as client drift. Editing this file therefore
+# invalidates every prior fixture's comparability -- that is the intent,
+# not a hazard, but it means an edit is a deliberate act.
+#
+# It is a TWIN of `anthropic-api.toml`, not a fork: the two files must
+# differ by only the `[mitm]` table and this header, or provider and
+# routing drift between them silently confounds every comparison between a
+# base-url fixture and a front-proxy one. `scripts/capture_driver.test.sh`
+# asserts that, so a divergence anywhere else is a test failure. Change a
+# provider, model, or alias here only by changing it in BOTH files.
+#
+# Nothing here is environment-derived: no real path, no account, no
+# credential. The only credential is a REFERENCE to an env var the runner
+# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
+# namespace); an unset one keeps the daemon from starting rather than
+# silently routing somewhere else.
+#
+# The daemon's state (usage database, catalog state) lands under
+# `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
+# directory. That default resolution is what keeps a driven run off the
+# operator's own state -- no path in this file names it. The MITM CA is
+# minted under that same throwaway root at listener start, so no cert
+# material is committed and none outlives the run.
+
+version = 4
+
+# Placeholder only. The runner ALWAYS overrides the bind port on the
+# command line (`serve --port`), because it selects a free port at boot
+# time. Overriding rather than rewriting this file keeps the hashed bytes
+# identical across runs: a port-patched copy would hash differently every
+# run and `meta.config_sha` would stop distinguishing config drift from
+# noise.
+[server]
+host = "127.0.0.1"
+port = 8787
+
+# `auth_kind` is a WIRE-SHAPE declaration here, not a credential detail.
+# `oauth-bearer` against `api.anthropic.com` is what gates the whole cloak
+# surface -- signature re-signing, the pinned beta floor, the
+# `x-claude-code-session-id` header, user-agent resolution -- so it decides
+# what the captured EGRESS looks like. It is not defaultable: the default
+# is `api-key`, under which a subscription `oat01` token ships as
+# `x-api-key` and the upstream answers 401. The ref stays `env://`: the
+# token arrives already extracted, so no seat file and no refresh path
+# exist inside a driven run.
+[providers.anthropic]
+kind        = "anthropic-api"
+api_key_ref = "env://ROUTECTL_DRIVER_ANTHROPIC_API_KEY"
+auth_kind   = "oauth-bearer"
+
+[models.fixture-sonnet]
+provider = "anthropic"
+upstream = "claude-sonnet-4-5"
+
+# `claude-*` catches the model ids the installed Anthropic clients ask for
+# by name, so a driver does not have to know routectl's alias vocabulary.
+[aliases]
+"claude-*" = "fixture-sonnet"
+default    = "fixture-sonnet"
+
+# The block that makes this a front-proxy lane: the client is pointed at
+# the MITM listener instead of at `[server] port`, so its own base URL
+# stays `api.anthropic.com` and the captured egress carries whatever a
+# CONNECT-tunnelled client actually sends.
+#
+# `upstream_origin` and `mitm_host` are PINNED, not configurable: config
+# validation refuses any other origin or host, because the proxy forwards
+# the client's full-scope token and it must never reach a non-Anthropic
+# egress.
+#
+# `listen_port` is a placeholder only, exactly like `[server] port` above.
+# The runner ALWAYS overrides it on the command line (`serve --mitm-port`)
+# from a free port it probes at boot time, so the hashed bytes stay
+# identical across runs and `meta.config_sha` keeps distinguishing config
+# drift from noise.
+[mitm]
+upstream_origin = "https://api.anthropic.com"
+mitm_host       = "api.anthropic.com"
+listen_port     = 8443
