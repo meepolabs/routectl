@@ -52,6 +52,14 @@ fails=0
 # The ingress token is a parameter so a case can drive a value OTHER than
 # the default: with every trace saying `anthropic`, a rig that hardcoded
 # the ingress kind would be indistinguishable from one that extracts it.
+#
+# `provider_kind` rides the OUTGOING and UPSTREAM header lines as well as
+# the two body lines, and rides NEITHER ingress-side header line, because
+# that is which log_safe call sites pass the field: the two egress-direction
+# header traces take a provider kind, the two ingress-direction ones take
+# the dialect. The rig's provider-vocabulary harvest is anchored to exactly
+# that emitter set, so a replica that carried the field on all four or on
+# none would leave half the anchor unexercised.
 trace_non_stream() {
     local id="$1" kind="$2" ingress="${3:-anthropic}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
@@ -62,8 +70,8 @@ trace_non_stream() {
 2026-08-25T10:00:00.200000Z TRACE $span: $target upstream success body provider_kind="$kind" provider=p body={"id":"msg_1"} redact_prompts_enabled=false
 2026-08-25T10:00:00.300000Z TRACE $span: $target egress response body ingress="$ingress" body={"id":"msg_1"} redact_prompts_enabled=false
 2026-08-25T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"],["content-type","application/json"]]
-2026-08-25T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
-2026-08-25T10:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
+2026-08-25T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" provider_kind="$kind" provider=p headers=[["content-type","application/json"]]
+2026-08-25T10:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" provider_kind="$kind" provider=p headers=[["content-type","application/json"]]
 2026-08-25T10:00:00.310000Z TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
 TRACE
 }
@@ -72,6 +80,10 @@ TRACE
 # there is NO `upstream success body`, so the fixture lands with upstream
 # response HEADERS and no upstream response BODY -- the combination the
 # deleted `has_*` flags rejected.
+#
+# Same `provider_kind` placement as trace_non_stream, for the same reason:
+# the field rides the two egress-direction header lines because that is
+# which log_safe call sites pass it.
 trace_stream() {
     local id="$1" kind="$2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
@@ -81,8 +93,8 @@ trace_stream() {
 2026-08-25T11:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:stream{provider=$kind:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="$kind" provider=p body={"model":"claude-sonnet-4-5","stream":true} redact_prompts_enabled=false
 2026-08-25T11:00:00.200000Z TRACE $span: $target stream summary direction="upstream" finish_reason="end_turn" prompt_tokens=11 completion_tokens=22 total_tokens=33
 2026-08-25T11:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"]]
-2026-08-25T11:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
-2026-08-25T11:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","text/event-stream"]]
+2026-08-25T11:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" provider_kind="$kind" provider=p headers=[["content-type","application/json"]]
+2026-08-25T11:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" provider_kind="$kind" provider=p headers=[["content-type","text/event-stream"]]
 TRACE
 }
 
@@ -182,6 +194,47 @@ with_seam_header() {
     sed 's/\(ingress request headers direction="ingress" headers=\[\)/\1["'"$SEAM_HEADER"'","d41d8cd98f00b204e9800998ecf8427e"],/'
 }
 
+# The ROUTER's capability-observation WARN for one request: a line carrying
+# a `provider_kind` field spelled in the CONFIG ENTRY vocabulary
+# (`ProviderEntry::kind_str()`), from a different emitter than the log_safe
+# traces that carry the PROVIDER vocabulary. Both spellings are correct at
+# their own site -- `PROVIDER_KIND` names the egress implementation,
+# `kind_str()` names the config variant that selected it -- and the field
+# name being shared is exactly what made an unqualified harvest read two
+# vocabularies as one.
+#
+# The line shape is derived from the emitter, not copied from any capture:
+# a WARN, the router target, the observation message, and the observation's
+# own fields. Every value is synthetic. `$2` is the config spelling the
+# WARN carries; `$3` is the capability key, so a caller can drive the
+# measured shape of two acting observations per request.
+capability_observe_line() {
+    local id="$1" config_kind="${2:-anthropic-api}" key="${3:-prompt_caching}"
+    local frac="${4:-250000}"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    printf '%s WARN %s:messages{ingress="anthropic"}:complete_with_options{alias=my-alias}: routectl_router::router::capability_observe: response-evidence capability observation acted event="observe" state_key=synthetic-state capability_key="%s" provider_kind="%s" evidence_class="cache_hit" direction="verified" signal_tier="self-identifying" source="live"\n' \
+        "2026-08-25T10:00:00.${frac}Z" "$span" "$key" "$config_kind"
+}
+
+# Append the capability WARN AFTER the trace it is given -- the measured
+# ordering of the run this fixes, where the WARN follows every log_safe
+# body line and an unqualified last-wins harvest took its spelling.
+after_capability_observe() {
+    cat
+    capability_observe_line "$1" "${2:-anthropic-api}" prompt_caching 250000
+    capability_observe_line "$1" "${2:-anthropic-api}" thinking 250001
+}
+
+# The MIRROR ordering: the capability WARN comes FIRST, before any log_safe
+# line. This is the ordering a first-wins harvest would resolve correctly by
+# accident, so it is what proves the fix is an emitter anchor rather than a
+# reordering.
+before_capability_observe() {
+    capability_observe_line "$1" "${2:-anthropic-api}" prompt_caching 250000
+    capability_observe_line "$1" "${2:-anthropic-api}" thinking 250001
+    cat
+}
+
 # A driver trace whose ingress body carries a SYNTHETIC third-party home
 # prefix. `scrub-fixture.sh --write` has no safe automatic rewrite for
 # another account's home path, so the residue survives into `--check`,
@@ -232,7 +285,7 @@ trace_no_completion() {
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=$kind:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="$kind" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"]]
-2026-08-25T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
+2026-08-25T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" provider_kind="$kind" provider=p headers=[["content-type","application/json"]]
 TRACE
     structural_line "$id" ingress 400000
     structural_line "$id" outgoing 500000
@@ -301,8 +354,8 @@ $ts_ing TRACE $span:complete_with_options{alias=my-alias}:complete{provider=$kin
 $ts_comp TRACE $span: $target upstream success body provider_kind="$kind" provider=p body={"id":"msg_1"} redact_prompts_enabled=false
 $ts_comp TRACE $span: $target egress response body ingress="anthropic" body={"id":"msg_1"} redact_prompts_enabled=false
 $ts_ing TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","claude-cli/2.1.167 (external, cli)"],["content-type","application/json"]]
-$ts_ing TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
-$ts_comp TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
+$ts_ing TRACE $span: $target outgoing request headers direction="outgoing" provider_kind="$kind" provider=p headers=[["content-type","application/json"]]
+$ts_comp TRACE $span: $target upstream response headers direction="upstream" provider_kind="$kind" provider=p headers=[["content-type","application/json"]]
 $ts_comp TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
 TRACE
     structural_line "$id" ingress 400000 |
@@ -660,6 +713,209 @@ else
     fails=$((fails + 1))
 fi
 rm -rf "$work"
+
+# --- Case 2b: the provider_kind harvest is scoped to its own emitter ---
+#
+# TWO EMITTERS SPELL A FIELD OF THE SAME NAME IN TWO VOCABULARIES. The
+# log_safe traces carry the providers-crate `PROVIDER_KIND` const
+# (`anthropic`); the router's capability-observation WARN carries the config
+# entry's `kind_str()` (`anthropic-api`). Neither is wrong at its own site,
+# and `normalize_lane` maps only the first. An unqualified scan on the bare
+# field name read both as one vocabulary, assigned unconditionally, and
+# therefore took whichever line came LAST -- which handed the config
+# spelling to `normalize_lane`, emptied the lane, and refused the run on
+# every request where a capability observation acted.
+#
+# The fix is the anchor the ingress arm already had: harvest only from the
+# emitter that owns the vocabulary. BOTH ORDERINGS are asserted, because
+# first-wins would resolve one of them correctly by accident and is
+# explicitly not the mechanism.
+
+# PREMISE ASSERTION for the whole case. The two line kinds must really
+# carry the two different spellings under the one field name, and the
+# WARN must really come from a different emitter -- otherwise every
+# assertion below is about a trace with only one vocabulary in it, which
+# the unqualified scan would also pass.
+pk_premise="$(
+    pk_ls="$(trace_non_stream 019eab77-0000-4000-8000-00000000002a anthropic |
+        grep -c 'routectl_core::log_safe:.*provider_kind="anthropic"')"
+    pk_warn="$(capability_observe_line 019eab77-0000-4000-8000-00000000002a |
+        grep -c 'routectl_router::router::capability_observe:.*provider_kind="anthropic-api"')"
+    pk_warn_ls="$(capability_observe_line 019eab77-0000-4000-8000-00000000002a |
+        grep -c 'routectl_core::log_safe:')"
+    printf '%s %s %s\n' "$pk_ls" "$pk_warn" "$pk_warn_ls"
+)"
+check "the two emitters really carry two spellings of one field name" "4 1 0" \
+    "$pk_premise"
+unset pk_premise
+
+# And `normalize_lane` must really have NO arm for the config spelling --
+# the whole finding is that the two vocabularies are distinct, so an added
+# arm would be the conflation rather than the fix. Driven through the real
+# rig: a trace whose log_safe lines spell the CONFIG token leaves the lane
+# empty and warns.
+work="$(run_rig "$(trace_non_stream 019eab77-0000-4000-8000-00000000002b anthropic-api)")"
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-00000000002b/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "the config spelling is still UNMAPPED by normalize_lane" "" \
+        "$(meta_get "$meta" lane)"
+    check_log "and the rig says so rather than accepting it as a lane" \
+        "unmapped provider_kind 'anthropic-api'" "$work/rig.log"
+else
+    echo "FAIL: the config-spelling capture produced no parseable meta.json"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# THE MEASURED ORDERING: the capability WARN FOLLOWS every log_safe line.
+# This is the ordering the real refused run carried, and the one an
+# unconditional last-wins assignment gets wrong.
+work="$(run_rig "$(trace_non_stream 019eab77-0000-4000-8000-00000000002c anthropic |
+    after_capability_observe 019eab77-0000-4000-8000-00000000002c)")"
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-00000000002c/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "a capability WARN AFTER the body lines does not displace the provider spelling" \
+        "anthropic" "$(meta_get "$meta" provider_kind)"
+    check "and the lane still resolves from the provider vocabulary" "anthropic-api" \
+        "$(meta_get "$meta" lane)"
+    if grep -q "unmapped provider_kind" "$work/rig.log"; then
+        echo "FAIL: the capability WARN's spelling still reached normalize_lane"
+        fails=$((fails + 1))
+    else
+        echo "PASS: the capability WARN's spelling never reached normalize_lane"
+    fi
+else
+    echo "FAIL: the WARN-after capture produced no parseable meta.json"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# THE MIRROR ORDERING: the capability WARN comes FIRST. A first-wins
+# harvest resolves this leg by accident, so this is the leg that says the
+# fix is an emitter anchor and not a reordering -- and the leg that keeps
+# holding the day an emitter moves.
+work="$(run_rig "$(trace_non_stream 019eab77-0000-4000-8000-00000000002d anthropic |
+    before_capability_observe 019eab77-0000-4000-8000-00000000002d)")"
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-00000000002d/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "a capability WARN BEFORE the body lines does not set the provider spelling either" \
+        "anthropic" "$(meta_get "$meta" provider_kind)"
+    check "and that lane resolves too" "anthropic-api" "$(meta_get "$meta" lane)"
+else
+    echo "FAIL: the WARN-before capture produced no parseable meta.json"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# PAIRED POSITIVE CONTROL: the SAME trace with no capability WARN at all
+# harvests the same value. Without it both legs above pass on a rig that
+# harvests nothing and reports an empty provider_kind -- and `anthropic` is
+# not a value an empty harvest could produce, but the lane assertion would
+# still need the control to be non-vacuous.
+work="$(run_rig "$(trace_non_stream 019eab77-0000-4000-8000-00000000002e anthropic)")"
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-00000000002e/meta.json"
+if [ -f "$meta" ] && is_valid_json "$meta"; then
+    check "the WARN-free trace harvests the same provider spelling" "anthropic" \
+        "$(meta_get "$meta" provider_kind)"
+    check "and the same lane" "anthropic-api" "$(meta_get "$meta" lane)"
+else
+    echo "FAIL: the WARN-free capture produced no parseable meta.json"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# THE ANCHOR IS A REAL FILTER, not merely a precedence. With the field
+# REMOVED from every log_safe line, the capability WARN is the only line in
+# the trace carrying it -- and the request must then not be a candidate at
+# all, because in-scope selection requires a harvested provider kind. A rig
+# whose arm still read the WARN would capture this request and lane it from
+# the config spelling.
+pk_warn_only="$(trace_non_stream 019eab77-0000-4000-8000-00000000002f anthropic |
+    sed 's/ provider_kind="anthropic"//' |
+    after_capability_observe 019eab77-0000-4000-8000-00000000002f)"
+work="$(run_rig "$pk_warn_only")"
+if [ -d "$(captured_of "$work")/019eab77-0000-4000-8000-00000000002f" ]; then
+    echo "FAIL: a request whose only provider_kind is on the capability WARN was captured"
+    fails=$((fails + 1))
+else
+    echo "PASS: a request whose only provider_kind is on the capability WARN is no candidate"
+fi
+rm -rf "$work"
+
+# PREMISE ASSERTION for that filter leg: the stripped trace must really
+# have lost the field from the log_safe lines and really still carry it on
+# the WARN. Without it "no candidate" would pass on a trace that lost the
+# field everywhere, which says nothing about the anchor.
+check "the filter leg's trace carries the field ONLY on the capability WARN" "0 2" \
+    "$(printf '%s\n' "$pk_warn_only" |
+        awk '/routectl_core::log_safe:.*provider_kind=/ {ls++}
+             /capability_observe:.*provider_kind=/ {w++}
+             END {printf "%d %d\n", ls+0, w+0}')"
+unset pk_warn_only
+
+# THE EMITTER SET IS A REPLICA and must equal the log_safe call sites that
+# really pass a `provider_kind` field. A replica naming a message the
+# emitter does not write would silently harvest nothing; one MISSING a
+# message the emitter does write would leave a real capture laneless.
+# Guarded on the crates tree -- this suite also runs from a scripts-only
+# checkout.
+#
+# `upstream error body` is deliberately excluded from the rig's set: it is
+# a DEBUG line on the failure path, and a request whose upstream errored
+# carries no completion marker, so it is never a candidate. It is asserted
+# as an exclusion rather than left unmentioned, so the comparison below is
+# an equality against a stated set.
+pk_msgs_rig="$(sed -n '/^PROVIDER_KIND_MESSAGES="/,/"$/p' "$RIG" |
+    sed -e 's/^PROVIDER_KIND_MESSAGES="//' -e 's/"$//' | sort | tr '\n' '|')"
+check "the rig declares a non-empty provider-vocabulary message set" "1" \
+    "$([ -n "$pk_msgs_rig" ] && echo 1 || echo 0)"
+pk_target_rig="$(sed -n 's/^PROVIDER_KIND_TARGET="\(.*\)"$/\1/p' "$RIG")"
+check "the rig's provider-vocabulary target is the log_safe module target" \
+    "routectl_core::log_safe: " "$pk_target_rig"
+log_safe_src="$HERE/../crates/routectl-core/src/log_safe.rs"
+if [ -f "$log_safe_src" ]; then
+    # Every tracing macro invocation in log_safe.rs that passes a
+    # `provider_kind` field, reduced to the message it writes: the trailing
+    # string literal of a `trace!`/`debug!` block, or the `message =`
+    # HDR_MSG_* const the header traces name. Derived from the source rather
+    # than listed, so a new emitter of the field shows up here.
+    pk_msgs_rust="$(python3 - "$log_safe_src" <<'PY'
+import re
+import sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+consts = dict(re.findall(r'const (HDR_MSG_\w+): &str = "([^"]+)"', src))
+found = set()
+for block in re.findall(r'tracing::(?:trace|debug)!\((.*?)\n    \);', src, re.S):
+    if not re.search(r'^\s*provider_kind\b', block, re.M):
+        continue
+    named = re.search(r'message = (HDR_MSG_\w+)', block)
+    if named:
+        found.add(consts[named.group(1)])
+        continue
+    literal = re.findall(r'"([^"]+)"\s*$', block.strip())
+    if literal:
+        found.add(literal[-1])
+print("|".join(sorted(found - {"upstream error body"})) + "|")
+PY
+)"
+    check "the rig's message replica equals the log_safe provider_kind call sites" \
+        "$pk_msgs_rust" "$pk_msgs_rig"
+    # And the exclusion is real: the DEBUG error-body emitter DOES pass the
+    # field, so leaving it out is a decision this assertion pins rather than
+    # an omission the equality above would hide.
+    if grep -qF '"upstream error body"' "$log_safe_src"; then
+        echo "PASS: the excluded error-body emitter really exists in log_safe"
+    else
+        echo "FAIL: the excluded error-body emitter is not in log_safe -- the exclusion is stale"
+        fails=$((fails + 1))
+    fi
+    unset pk_msgs_rust
+else
+    echo "PASS: no crates tree in this checkout; the emitter-set weld is not asserted"
+fi
+unset pk_msgs_rig pk_target_rig log_safe_src
+
 
 # --- Case 3: a stream capture lands headers without a body -----------
 # The 96%-of-corpus shape. The rig must write the upstream response
@@ -2463,12 +2719,13 @@ unset redundant_dirty_position
 # promoted earlier in the run, because promote-once means none was.
 #
 # This is the class the amendment found, not one instance of it. The gates
-# the earlier ruling called per-run are all computed PER CANDIDATE: the lane
-# from each request's traced `provider_kind`, the seam check from that
+# the earlier ruling called per-run are all computed PER CANDIDATE: the seam
+# check from that
 # request's header capture, the expected-ingress pin from that request's
 # traced dialect. So a LATER candidate can refuse for a reason the selected
 # candidate passed. Driven through the expected-ingress pin, whose refusal
-# code is 1 and whose input differs per candidate.
+# code is 1 and whose input differs per candidate. (The lane was in this
+# list until control 4g reclassified it as the per-request fact it is.)
 #
 # The structural claim is asserted directly: no `.tmp.` staging survives
 # either, so the run left the landing root exactly as it found it rather
@@ -2529,6 +2786,131 @@ else
     echo "FAIL: the clean run landed nothing, so 4e's lane assertion is vacuous"
     fails=$((fails + 1))
 fi
+rm -rf "$work"
+
+# CONTROL 4g: A LANE-RESOLUTION FAILURE IS A PER-REQUEST FACT. The lane
+# comes from THIS request's own traced `provider_kind`, so a candidate whose
+# lane will not resolve says nothing about a candidate already selected off
+# its own lines. Under the earlier rig it returned a run-level code, so a
+# LATER candidate's laneless kind discarded an already-gated selection: the
+# stage-all/promote-once transaction meant nothing was corrupted, but the run
+# still ended with no fixture when a valid one had been chosen.
+#
+# BOTH SIDES, because the split is the whole decision: with a selection held
+# it is a SKIP and the selection promotes; with none held the laneless
+# candidate IS the request the case would pin, and a fixture nothing can gate
+# still fails closed.
+#
+# Driven through the candidate's own traced provider kind -- the CONFIG-entry
+# spelling, which `normalize_lane` deliberately has no arm for -- because
+# that is the input the real run carried and it differs per candidate.
+
+# PREMISE ASSERTION: the laneless candidate must really satisfy the claim,
+# so it really reaches the lane gate rather than being skipped one gate
+# earlier as a pattern mismatch. Without it "the selection promoted" is
+# asserted against a run where the lane gate was never reached.
+lane_skip_premise="$(
+    d="$(mktemp -d)"
+    printf '%s\n' "$(candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" \
+        tools-long claude-sonnet-4-5 anthropic-api)" |
+        sed -n 's/.*ingress request body ingress="anthropic" body=\(.*\) redact_prompts_enabled=false$/\1/p' \
+        >"$d/ingress_request.json"
+    printf '%s\n' "$(structural_line "$SEL_ID_B" ingress 400000 | sed 's/tools_len=0/tools_len=16/')" \
+        >"$d/structural.txt"
+    v=refused
+    python3 "$VERIFY_PATTERN" "$d" tool-use-multiturn 2>/dev/null && v=satisfied
+    printf '%s\n' "$v"
+    rm -rf "$d"
+)"
+check "the laneless candidate really satisfies the claim, so it reaches the lane gate" \
+    "satisfied" "$lane_skip_premise"
+unset lane_skip_premise
+
+# THE SKIP LEG: the laneless candidate is the LATER one, so a selection is
+# already held. Asserted on BODY IDENTITY, not exit status: an exit-only
+# assertion passes on a rig that landed the laneless candidate.
+set_pins lane-skip-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long \
+        claude-sonnet-4-5 anthropic-api
+)" --driver-mode || rc=$?
+clear_pins
+captured="$(captured_of "$work")"
+dir="$captured/anthropic-api/lane-skip-01"
+check "a laneless LATER candidate does not discard the selection" "0" "$rc"
+check "the selected candidate's body is what landed" "3" "$(landed_turn_count "$dir")"
+check "meta.request_id names the selected candidate" "$SEL_ID_A" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+check "the promotion appended exactly one manifest line" "1" \
+    "$(wc -l <"$captured/manifest.jsonl" 2>/dev/null | tr -d ' ')"
+check_log "the skip names the candidate and why its lane is a per-request fact" \
+    "skipping this" "$work/rig.err"
+check_log "and the selection line counts it as a skip" \
+    "candidates_examined=2 candidates_skipped=1 candidates_redundant=0" "$work/rig.out"
+rm -rf "$work"
+
+# THE REFUSAL LEG: the SAME laneless kind on the candidate that WOULD be the
+# selection. Nothing is held, so the request the case would pin is the one
+# that cannot be gated, and the run still refuses. A later clean candidate
+# that also satisfies the claim is present, which is the point -- a rig that
+# made every lane failure skippable would sail past this and land it.
+set_pins lane-refuse-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools \
+        claude-sonnet-4-5 anthropic-api
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long
+)" --driver-mode || rc=$?
+clear_pins
+captured="$(captured_of "$work")"
+check "a laneless SELECTED candidate still REFUSES the run" "1" "$rc"
+check_log "the refusal names the candidate and does not promote" \
+    "not promoting the fixture" "$work/rig.err"
+if [ -d "$captured/anthropic-api/lane-refuse-01" ]; then
+    echo "FAIL: a laneless selected candidate promoted anyway"
+    fails=$((fails + 1))
+else
+    echo "PASS: a laneless selected candidate promotes nothing"
+fi
+check "the laneless-selection refusal appends no manifest line" "0" \
+    "$([ -f "$captured/manifest.jsonl" ] && wc -l <"$captured/manifest.jsonl" | tr -d ' ' || echo 0)"
+rm -rf "$work"
+
+# PREMISE ASSERTION for both legs: the driven kind must really be the one
+# `normalize_lane` leaves unmapped, and the rig must really say so. Without
+# it either leg could be about a kind that resolves fine, and the skip leg
+# would then be asserting nothing.
+set_pins lane-premise-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rig_run_split "$work" "$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" tools
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools-long \
+        claude-sonnet-4-5 anthropic-api
+)" --driver-mode || true
+clear_pins
+check_log "the driven kind is really the one normalize_lane leaves unmapped" \
+    "unmapped provider_kind 'anthropic-api'" "$work/rig.err"
+rm -rf "$work"
+
+# PAIRED CONTROL for 4g: the SAME two-candidate shape with the later
+# candidate's kind LANEABLE promotes the same selection at exit 0 and counts
+# the later one REDUNDANT rather than skipped. Without it the skip leg holds
+# for a rig that skips every second candidate, and "the selection promoted"
+# would say nothing about the lane.
+set_pins lane-skip-clean-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$?
+clear_pins
+check "the same shape with a LANEABLE later candidate also exits 0" "0" "$rc"
+check "and lands the same selected body" "3" \
+    "$(landed_turn_count "$(captured_of "$work")/anthropic-api/lane-skip-clean-01")"
+check_log "but counts the later candidate REDUNDANT, not skipped" \
+    "candidates_skipped=0 candidates_redundant=1" "$work/rig.out"
 rm -rf "$work"
 
 # CONTROL 4f: the selection line carries `candidates_redundant` on BOTH the
