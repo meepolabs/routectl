@@ -810,20 +810,30 @@ PY
 # The stub `routectl`, same shape as the runner's own self-test uses:
 # records its pid, emits the canned trace on stderr, then EXECs the
 # listener so the pid the runner captured stays the pid holding the port.
+# When the runner passes `--mitm-port` (front-proxy mode), the stub mints
+# the CA under the run's XDG root exactly where the real daemon does at
+# listener start, so the CA path the runner exports names a readable file.
 write_stub_routectl() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
 set -u
 port=""
+mitm_port=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --port) port="$2"; shift 2 ;;
+        --mitm-port) mitm_port="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
 printf '%s\n' "$$" >"$STUB_PID_FILE"
 if [ -r "${STUB_TRACE_FILE:-}" ]; then
     cat "$STUB_TRACE_FILE" >&2
+fi
+if [ -n "$mitm_port" ]; then
+    mkdir -p "$XDG_CONFIG_HOME/routectl/mitm-certs/current"
+    printf -- '-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n' \
+        >"$XDG_CONFIG_HOME/routectl/mitm-certs/current/mitm-ca-cert.pem"
 fi
 exec python3 "$STUB_LISTENER" "$port"
 SH
@@ -883,7 +893,6 @@ make_work() {
     write_stub_routectl "$work/bin/routectl-stub"
     write_stub_client "$work/bin/client-stub"
     canned_trace >"$work/canned-trace.log"
-    printf -- "-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n" >"$work/ca.pem"
     printf '%s\n' "$work"
 }
 
@@ -892,6 +901,24 @@ free_port() {
     while [ "$i" -lt 200 ]; do
         candidate=$((25000 + RANDOM % 4000))
         if ! ss -ltn 2>/dev/null | awk -v p=":$candidate" \
+            'NR > 1 && index($4, p) == length($4) - length(p) + 1 { found = 1 } END { exit !found }'; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Two CONSECUTIVE free ports, printed as the lower one. The runner's
+# front-proxy mode draws TWO distinct ports from its window, so a
+# single-port window would exhaust; every driver_run gets the pair so the
+# same invocation shape covers both modes.
+free_port_pair() {
+    local candidate i=0
+    while [ "$i" -lt 200 ]; do
+        candidate="$(free_port)" || return 1
+        if ! ss -ltn 2>/dev/null | awk -v p=":$((candidate + 1))" \
             'NR > 1 && index($4, p) == length($4) - length(p) + 1 { found = 1 } END { exit !found }'; then
             printf '%s\n' "$candidate"
             return 0
@@ -915,7 +942,7 @@ driver_run() {
     local work="$1" driver="$2" case_id="$3"
     shift 3
     local port rc=0
-    port="$(free_port)"
+    port="$(free_port_pair)"
     (
         cd "$work/repo" || exit 2
         ROUTECTL_BIN="$work/bin/routectl-stub" \
@@ -933,9 +960,9 @@ driver_run() {
         ROUTECTL_DRIVER_TURN_SECONDS=0 \
         ROUTECTL_DRIVER_EXIT_SECONDS=0 \
         ROUTECTL_DRIVER_PORT_MIN="$port" \
-        ROUTECTL_DRIVER_PORT_MAX="$port" \
+        ROUTECTL_DRIVER_PORT_MAX="$((port + 1))" \
             bash scripts/capture_driver.sh --work "$work/runs" --keep \
-            --case "$case_id" --lane anthropic-api "$@" \
+            --case "$case_id" --lane "${DRIVER_LANE:-anthropic-api}" "$@" \
             -- "$work/repo/scripts/drivers/$driver"
     ) >"$work/runner.log" 2>&1 || rc=$?
     return "$rc"
@@ -1186,15 +1213,30 @@ rm -rf "$work"
 
 work="$(make_work)"
 rc=0
-ROUTECTL_DRIVER_PROXY_URL="http://127.0.0.1:18443" \
-ROUTECTL_DRIVER_PROXY_CA="$work/ca.pem" \
+# The runner owns both proxy carriers now: it probes the MITM port and
+# points the CA at the path the daemon mints under the run's XDG root.
+# The inherited bearer is what makes the placeholder assertion below
+# non-vacuous, and the front-proxy LANE is what the mode/config coherence
+# check requires.
+DRIVER_LANE=anthropic-api.front-proxy \
 ANTHROPIC_AUTH_TOKEN="inherited-carrier-must-not-survive" \
     driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
 check "claude-code: a front-proxy run exits 0" "0" "$rc"
-check "claude-code: front-proxy reaches the client as HTTPS_PROXY" \
-    "http://127.0.0.1:18443" "$(client_get "$work" https_proxy | head -1)"
-check "claude-code: front-proxy points the client at the CA it must trust" \
-    "$work/ca.pem" "$(client_get "$work" node_ca | head -1)"
+proxy_url="$(client_get "$work" https_proxy | head -1)"
+case "$proxy_url" in
+    http://127.0.0.1:[0-9]*)
+        echo "PASS: claude-code: front-proxy reaches the client as HTTPS_PROXY" ;;
+    *)
+        fail "claude-code: HTTPS_PROXY is '$proxy_url', not the runner's MITM listener"
+        ;;
+esac
+case "$(client_get "$work" node_ca | head -1)" in
+    */xdg/routectl/mitm-certs/current/mitm-ca-cert.pem)
+        echo "PASS: claude-code: front-proxy points the client at the run-minted CA" ;;
+    *)
+        fail "claude-code: NODE_EXTRA_CA_CERTS is '$(client_get "$work" node_ca | head -1)'"
+        ;;
+esac
 check "claude-code: front-proxy does not also set a direct base url" \
     "" "$(client_get "$work" base_url | head -1)"
 # The seam's admission gate rejects an x-api-key-only request before body
@@ -1206,6 +1248,9 @@ check "claude-code: front-proxy exports the bearer carrier the seam admits on" \
     "$(client_get "$work" bearer | head -1)"
 check "claude-code: front-proxy still exports the client's api key too" \
     "yes" "$(client_get "$work" api_key_set | head -1)"
+# The landing lane is NORMALIZED by the rig from the trace's
+# provider_kind, not copied from the runner's --lane, so the front-proxy
+# lane's fixture still lands under the provider lane.
 meta="$(landed_meta "$work" thinking-01)"
 if [ -f "$meta" ]; then
     check "claude-code: front-proxy reaches the fixture pin" "front-proxy" \
@@ -1222,8 +1267,7 @@ rm -rf "$work"
 # hold equally against an arm that hardcoded the constant.
 work="$(make_work)"
 rc=0
-ROUTECTL_DRIVER_PROXY_URL="http://127.0.0.1:18443" \
-ROUTECTL_DRIVER_PROXY_CA="$work/ca.pem" \
+DRIVER_LANE=anthropic-api.front-proxy \
 ROUTECTL_DRIVER_CLIENT_BEARER="caller-supplied-placeholder" \
     driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
 check "claude-code: a front-proxy run with a caller-supplied bearer exits 0" "0" "$rc"
@@ -1233,21 +1277,36 @@ kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
 
-# Paired refusal: front-proxy with no proxy configured must FAIL rather
-# than fall back to base-url. The success case above is what keeps this
-# from passing against a driver that refuses front-proxy outright.
+# Paired refusal: a DRIVER given front-proxy mode without the carriers
+# must FAIL rather than fall back to base-url. The runner always supplies
+# both now, so the only honest way to reach this arm is a direct driver
+# invocation with the runner's contract hand-set minus the carriers --
+# which is also the shape of the real failure it guards (a driver run
+# outside the runner). A live listener is required, because the driver's
+# own daemon precondition fires before its mode check. The success case
+# above is what keeps this from passing against a driver that refuses
+# front-proxy outright.
 work="$(make_work)"
+fp_port="$(free_port)"
+python3 "$work/bin/listener.py" "$fp_port" >/dev/null 2>&1 &
+fp_listener=$!
+i=0
+while [ "$i" -lt 40 ] && ! curl -fsS -m 1 "http://127.0.0.1:$fp_port/health" >/dev/null 2>&1; do
+    sleep 0.1
+    i=$((i + 1))
+done
 rc=0
-driver_run "$work" claude-code.sh thinking-01 --connection-mode front-proxy || rc=$?
+DIRECT_MODE=front-proxy DIRECT_CASE=thinking-01 \
+    direct_run "$work" claude-code.sh "http://127.0.0.1:$fp_port" || rc=$?
 check_ne "claude-code: front-proxy with no proxy url aborts" "0" "$rc"
-if grep -qF 'ROUTECTL_DRIVER_PROXY_URL' "$work/runner.log"; then
+if grep -qF 'ROUTECTL_DRIVER_PROXY_URL' "$work/direct.log"; then
     echo "PASS: claude-code: the refusal names the missing proxy url"
 else
     fail "claude-code: the refusal did not name the missing proxy url"
-    sed -n '1,15p' "$work/runner.log"
+    sed -n '1,15p' "$work/direct.log"
 fi
-kept="$(kept_run "$work")"
-[ -n "$kept" ] && rm -rf "$kept"
+kill "$fp_listener" 2>/dev/null
+wait "$fp_listener" 2>/dev/null
 rm -rf "$work"
 
 # An unsupported mode is a refusal, not a silent base-url run.

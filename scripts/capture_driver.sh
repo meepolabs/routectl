@@ -25,6 +25,12 @@
 #                      personal data the scrub gate refuses).
 #   --connection-mode  how the driver reaches routectl. Default
 #                      `base-url`; pass `front-proxy` for a MITM run.
+#                      The mode and the lane config must agree, both
+#                      directions, before any daemon boots: front-proxy
+#                      requires the lane config to carry a `[mitm]`
+#                      block, and base-url refuses a config that carries
+#                      one -- a `[mitm]` block on a base-url boot binds a
+#                      listener nobody drives, on a port nobody probed.
 #   --out              where the fixture lands. Default:
 #                      `.routectl-driver-scratch/` at the repo root,
 #                      which is gitignored. Deliberately NOT the
@@ -62,6 +68,18 @@
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  logs and read them back
 #   ROUTECTL_FIXTURE_WIRE_PATTERN
 #
+# In front-proxy mode only, two more:
+#
+#   ROUTECTL_DRIVER_PROXY_URL         http://127.0.0.1:<mitm-port>
+#   ROUTECTL_DRIVER_PROXY_CA          the CA pem the client must trust
+#
+# The MITM port is a SECOND probed port, distinct from the HTTP one
+# (`validate_mitm_config` refuses a collision at startup), passed as
+# `serve --mitm-port` so the committed config bytes -- and their sha --
+# stay untouched. The CA path points into the run's throwaway XDG root:
+# the daemon mints that CA itself at listener start, so no pre-mint step
+# exists and no host CA is ever consumed.
+#
 # The wire pattern is DERIVED from the case file, never taken on argv: a
 # flag would let a caller declare a pattern the case does not claim, and
 # the recorded claim is the only on-disk evidence of which wire shape a
@@ -85,7 +103,8 @@
 # Exit codes:
 #   0  the driver ran and the rig landed the fixture
 #   2  usage error (unknown flag, missing lane config, no driver command,
-#      or a `--out` this script refuses to write to)
+#      a mode/config mismatch, or a `--out` this script refuses to write
+#      to)
 #   3  the hermetic daemon never became healthy
 #   4  the driver command exited non-zero
 #   5  the capture rig refused the fixture (see its own message)
@@ -230,6 +249,29 @@ done
 
 LANE_CONFIG="$CONFIG_DIR/$LANE.toml"
 [ -r "$LANE_CONFIG" ] || die "no committed config for lane '$LANE' at $LANE_CONFIG" 2
+
+# MODE/CONFIG COHERENCE, both directions, before any daemon boots. Each
+# committed config means exactly one mode: front-proxy without `[mitm]`
+# has no listener for the client's CONNECT, and base-url WITH `[mitm]`
+# binds a listener nobody drives on the config's placeholder port --
+# which this script never probed, so it can collide with anything. The
+# match is anchored to the table header alone; the twin configs are
+# hand-reviewed TOML where `[mitm]` starts its own line.
+lane_has_mitm=0
+grep -q '^\[mitm\]$' "$LANE_CONFIG" && lane_has_mitm=1
+case "$CONNECTION_MODE" in
+  front-proxy)
+    [ "$lane_has_mitm" = 1 ] ||
+      die "connection mode front-proxy requires a [mitm] block in $LANE_CONFIG, which has none" 2
+    ;;
+  base-url)
+    [ "$lane_has_mitm" = 0 ] ||
+      die "connection mode base-url refuses $LANE_CONFIG: it carries a [mitm] block, so it is a front-proxy lane" 2
+    ;;
+  *)
+    die "unsupported --connection-mode '$CONNECTION_MODE' (base-url or front-proxy)" 2
+    ;;
+esac
 
 # The sha is of the COMMITTED lane config, not of the copy the run boots
 # from. The two differ only by the port the run selected, and hashing the
@@ -400,6 +442,40 @@ pick_port() {
 PORT="$(pick_port)" || die "no free port found in $PORT_MIN-$PORT_MAX after $PORT_TRIES tries" 6
 BASE_URL="http://127.0.0.1:$PORT"
 
+# front-proxy needs a SECOND port for the MITM listener, drawn through
+# the same probe and additionally rejecting equality with the first:
+# `validate_mitm_config` refuses a listen_port that collides with the
+# HTTP port, so handing it a collision would turn a random draw into a
+# startup failure. Exhausting the window stays the same exit code as the
+# first draw -- it is the same scarcity.
+MITM_PORT=""
+PROXY_URL=""
+PROXY_CA=""
+if [ "$CONNECTION_MODE" = "front-proxy" ]; then
+  pick_distinct_port() {
+    local i=0 candidate
+    while [ "$i" -lt "$PORT_TRIES" ]; do
+      candidate="$(pick_port)" || return 1
+      if [ "$candidate" != "$PORT" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      i=$((i + 1))
+    done
+    return 1
+  }
+  MITM_PORT="$(pick_distinct_port)" ||
+    die "no free MITM port distinct from $PORT found in $PORT_MIN-$PORT_MAX after $PORT_TRIES tries" 6
+  [ "$MITM_PORT" != "$PORT" ] ||
+    die "internal error: MITM port draw returned the HTTP port $PORT" 6
+  PROXY_URL="http://127.0.0.1:$MITM_PORT"
+  # The daemon mints this CA itself at listener start, under the run's
+  # fresh XDG root -- there is no pre-mint step and no host CA is ever
+  # consumed. The `current` segment is the generation symlink the cert
+  # store swaps atomically on re-mint.
+  PROXY_CA="$RUN_XDG/routectl/mitm-certs/current/mitm-ca-cert.pem"
+fi
+
 # ---------------------------------------------------------------------
 # Boot
 # ---------------------------------------------------------------------
@@ -409,9 +485,13 @@ BASE_URL="http://127.0.0.1:$PORT"
 # multi-turn body is not truncated mid-escape (the replay loader refuses
 # a cap-truncated body).
 #
-# The port arrives on the command line rather than as a rewrite of the
+# Both ports arrive on the command line rather than as a rewrite of the
 # copied config: the committed bytes stay the identity the sha names, and
 # there is one less file mutation between the hash and the boot.
+serve_args=(serve --host 127.0.0.1 --port "$PORT")
+if [ -n "$MITM_PORT" ]; then
+  serve_args+=(--mitm-port "$MITM_PORT")
+fi
 (
   cd "$RUN_WORK"
   HOME="$RUN_HOME" \
@@ -419,7 +499,7 @@ BASE_URL="http://127.0.0.1:$PORT"
   ROUTECTL_LOG="routectl=info,routectl_core::log_safe=trace" \
   ROUTECTL_TRACE_HEADERS=1 \
   ROUTECTL_TRACE_BODY_BYTES=2097152 \
-    exec "$ROUTECTL_BIN" serve --host 127.0.0.1 --port "$PORT"
+    exec "$ROUTECTL_BIN" "${serve_args[@]}"
 ) 2> "$TRACE" &
 DAEMON_PID=$!
 
@@ -458,6 +538,18 @@ fi
 driver_rc=0
 (
   cd "$RUN_WORK"
+  # The proxy carriers exist only in front-proxy mode: a base-url driver
+  # that saw them could route through a listener this run never started,
+  # and the drivers' own mode check treats their presence as intent. The
+  # unset side matters as much as the export side -- the runner forwards
+  # the caller's environment, so an inherited carrier would survive a
+  # base-url run without it.
+  if [ "$CONNECTION_MODE" = "front-proxy" ]; then
+    export ROUTECTL_DRIVER_PROXY_URL="$PROXY_URL"
+    export ROUTECTL_DRIVER_PROXY_CA="$PROXY_CA"
+  else
+    unset ROUTECTL_DRIVER_PROXY_URL ROUTECTL_DRIVER_PROXY_CA
+  fi
   HOME="$RUN_HOME" \
   XDG_CONFIG_HOME="$RUN_XDG" \
   ROUTECTL_BASE_URL="$BASE_URL" \
@@ -527,4 +619,4 @@ if [ "$rig_rc" != 0 ]; then
   exit 5
 fi
 
-echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT config_sha=$CONFIG_SHA out=$DRIVER_OUT"
+echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT${MITM_PORT:+ mitm_port=$MITM_PORT} config_sha=$CONFIG_SHA out=$DRIVER_OUT"
