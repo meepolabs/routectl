@@ -305,12 +305,27 @@ jobs:
       - name: fixture capture rig self-test
         run: bash scripts/capture_fixtures.test.sh
 
-      # Same reason as the rig self-test above: the corpus is gitignored,
-      # so CI has no fixture to scrub. The self-test drives the real scrub
-      # script over throwaway fixtures in a throwaway environment whose
-      # HOME, git identity, and hostname ARE the deny set.
+      # The self-test drives the real scrub script over throwaway fixtures in
+      # a throwaway environment whose HOME, git identity, and hostname ARE the
+      # deny set -- coverage no committed fixture can provide, since a real
+      # capture must contain none of those values.
       - name: fixture scrub gate self-test
         run: bash scripts/scrub-fixture.test.sh
+
+      # The DRIVER corpus is committed (it stopped being gitignored when the
+      # first fixture landed), so the gate must also run over the real thing.
+      # Capture and promotion both invoke it, but neither is on the path a
+      # contributor actually takes: edit a fixture, `git add`, open a PR. On
+      # that path the only gates are secret scanning and the internal-id scan,
+      # and neither models this gate's personal-data classes -- a home path, a
+      # git identity, a hostname, a seat session id, an ls owner column. This
+      # step is what protects a contributor who has never read the gate.
+      #
+      # Needs no credential and no daemon. On CI the identity-derived classes
+      # WARN-skip (there is no seat and no operator identity to derive), which
+      # the gate reports on its own line; the structural classes stay active.
+      - name: committed driver corpus is scrub-clean
+        run: bash scripts/scrub-fixture.sh --check crates/routectl-cli/tests/fixtures/driver
 
       # Promotion moves a fixture from a scratch root into the committed
       # corpus. It needs no credential and no daemon -- it copies, re-runs
