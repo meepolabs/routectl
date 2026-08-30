@@ -1432,6 +1432,7 @@ DRIVER_ENV_SOURCES=(
     "$HERE/drivers/claude-code.sh"
     "$HERE/drivers/claude-code-print.sh"
     "$HERE/drivers/external-agent-cli.sh"
+    "$HERE/drivers/codex.sh"
     "$HERE/drivers/lib/common.sh"
     "$HERE/drivers/config/anthropic-api.toml"
     "$HERE/drivers/config/anthropic-api.front-proxy.toml"

@@ -221,6 +221,7 @@
 #   ROUTECTL_DRIVER_PROXY_URL             driver maps onto its client
 #   ROUTECTL_DRIVER_PROXY_CA
 #   ROUTECTL_DRIVER_CLAUDE_BIN            which binary a driver drives
+#   ROUTECTL_DRIVER_CODEX_BIN
 #   ROUTECTL_DRIVER_AGENT_BIN
 #   ROUTECTL_DRIVER_AGENT_ONESHOT_FLAG    the generic-agent argv mapping:
 #   ROUTECTL_DRIVER_AGENT_VERSION_FLAG    a third-party CLI is drivable

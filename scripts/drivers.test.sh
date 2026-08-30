@@ -48,6 +48,7 @@ DRIVER_FILES=(
     "$DRIVERS/claude-code.sh"
     "$DRIVERS/claude-code-print.sh"
     "$DRIVERS/external-agent-cli.sh"
+    "$DRIVERS/codex.sh"
 )
 
 fails=0
@@ -1206,10 +1207,9 @@ check "no driver or case references a real home path" "0" "$home_hits"
 # a driver corpus -- and the drivers legitimately curl /health, so the
 # assertion is about a POSTED body, not about curl.
 if grep -qE 'curl[^|]*(-X[[:space:]]*POST|--data|-d[[:space:]])' \
-    <(cat <(code_lines "${DRIVER_FILES[0]}") \
-          <(code_lines "${DRIVER_FILES[1]}") \
-          <(code_lines "${DRIVER_FILES[2]}") \
-          <(code_lines "$DRIVERS/lib/common.sh")); then
+    <(for f in "${DRIVER_FILES[@]}" "$DRIVERS/lib/common.sh"; do
+          code_lines "$f"
+      done); then
     fail "a driver posts a hand-built request instead of driving a client"
 else
     echo "PASS: no driver posts a synthetic stand-in request"
@@ -1336,6 +1336,36 @@ canned_trace_tools() {
     canned_trace |
         sed "s|ingress request body ingress=\"anthropic\" body={\"model\":\"claude-sonnet-4-5\"}|ingress request body ingress=\"anthropic\" body=$body|" |
         sed 's/tools_len=0/tools_len=16/'
+}
+
+# A canned trace shaped like the Responses ingress dialect codex.sh drives:
+# a `/v1/responses` ingress body carrying an `input` array with a
+# `function_call` item and a LATER `function_call_output` item -- the
+# Responses spelling of the same `tool-use-multiturn` census as
+# canned_trace_tools() above, per verify_pattern.py's `_turn_list()`/
+# `_tool_use_multiturn()`. The user-agent's bare version token (9.9.9)
+# matches write_stub_client()'s default `--version` output so the landed
+# fixture's wire-parsed and binary-recorded client versions agree.
+canned_trace_openai_responses_tools() {
+    local id="019eab77-0000-4000-8000-0000000000f3"
+    local span="request{method=POST path=/v1/responses request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local body='{"model":"gpt-5","input":[{"role":"user","content":"list the files"},{"type":"function_call","call_id":"call_01","name":"Bash","arguments":"{\"command\":\"ls\"}"},{"type":"function_call_output","call_id":"call_01","output":"notes.txt"}]}'
+    local fields='model=gpt-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=false'
+    local structural="kind=\"ingress\" id=\"openai-responses\" $fields"
+    local structural_out="kind=\"openai-responses\" id=\"anthropic-api:routectl\" $fields"
+    cat <<TRACE
+2026-08-26T10:00:00.000000Z TRACE $span:messages{ingress="openai-responses"}: $target ingress request body ingress="openai-responses" body=$body redact_prompts_enabled=false
+2026-08-26T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=routectl:p model=gpt-5}: $target outgoing request body provider_kind="openai-responses" provider=p body={"model":"gpt-5"} redact_prompts_enabled=false
+2026-08-26T10:00:00.200000Z TRACE $span: $target upstream success body provider_kind="openai-responses" provider=p body={"id":"resp_1"} redact_prompts_enabled=false
+2026-08-26T10:00:00.300000Z TRACE $span: $target egress response body ingress="openai-responses" body={"id":"resp_1"} redact_prompts_enabled=false
+2026-08-26T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","codex_cli_rs/9.9.9"],["content-type","application/json"]]
+2026-08-26T10:00:00.110000Z TRACE $span: $target outgoing request headers direction="outgoing" headers=[["content-type","application/json"]]
+2026-08-26T10:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
+2026-08-26T10:00:00.310000Z TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
+2026-08-26T10:00:00.400000Z TRACE $span: $target structural summary direction="ingress" $structural
+2026-08-26T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural_out
+TRACE
 }
 
 # A canned trace whose ingress structural line carries an ACTIVE thinking
@@ -1585,6 +1615,7 @@ driver_run() {
         STUB_CLIENT_RC="${STUB_CLIENT_RC:-0}" \
         ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
+        ROUTECTL_DRIVER_CODEX_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG="--continue" \
         ROUTECTL_DRIVER_AGENT_MODEL_FLAG="-m" \
         ROUTECTL_DRIVER_AGENT_REASONING_FLAG="--reasoning" \
@@ -1713,6 +1744,75 @@ for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
     rm -rf "$work"
 done
 
+# codex gets its own block rather than joining the loop above: it drives
+# the Responses dialect, so its canned trace, expected-ingress pin, and
+# landed ingress_kind all differ from the Anthropic-shaped assumptions the
+# other three drivers share.
+work="$(make_work)"
+canned_trace_openai_responses_tools >"$work/canned-trace.log"
+rc=0
+DRIVER_EXPECTED_INGRESS=openai-responses driver_run "$work" codex.sh tools-multiturn-01 || rc=$?
+check "codex: a run against the stub daemon exits 0" "0" "$rc"
+
+if [ -f "$work/client.txt" ]; then
+    echo "PASS: codex: the client was actually invoked"
+    # codex has no base-url ENV carrier: it is pointed at the daemon through
+    # its own `-c model_providers.*` config override, passed as argv, so
+    # the assertion reads the recorded argv rather than an env field.
+    check "codex: the client's argv carries the routectl base url via config override" \
+        "yes" "$(grep -qF 'model_providers.routectl.base_url="http://127.0.0.1:' "$work/client.txt" && echo yes || echo no)"
+    check "codex: the client's argv pins wire_api to responses" \
+        "yes" "$(grep -qF 'model_providers.routectl.wire_api="responses"' "$work/client.txt" && echo yes || echo no)"
+    check "codex: the client's argv names its own credential-carrier env var" \
+        "yes" "$(grep -qF 'model_providers.routectl.env_key="CODEX_ROUTECTL_LOCAL_API_KEY"' "$work/client.txt" && echo yes || echo no)"
+    check "codex: the throwaway cwd was seeded for the case" \
+        "yes" "$(client_get "$work" notes_alpha | head -1)"
+    check_ne "codex: the client ran outside the invoking HOME" \
+        "$HOME" "$(client_get "$work" home | head -1)"
+else
+    fail "codex: the client never ran (runner log: $work/runner.log)"
+    sed -n '1,25p' "$work/runner.log"
+    fails=$((fails + 3))
+fi
+
+kept="$(kept_run "$work")"
+if [ -n "$kept" ] && [ -f "$kept/client.txt" ]; then
+    check "codex: the driver recorded the client version from the binary" \
+        "9.9.9 (Stub Client)" "$(sed -n 's/^version=//p' "$kept/client.txt")"
+    check "codex: the run record names the case" \
+        "tools-multiturn-01" "$(sed -n 's/^case_id=//p' "$kept/client.txt")"
+else
+    fail "codex: no client record in the kept run workspace"
+    fails=$((fails + 1))
+fi
+
+meta="$(printf '%s\n' "$work/repo/.routectl-driver-scratch/openai-responses/tools-multiturn-01/meta.json")"
+if [ -f "$meta" ]; then
+    echo "PASS: codex: the rig landed a fixture at <lane>/<case_id>"
+    check "codex: meta.case_id carries the case" "tools-multiturn-01" \
+        "$(meta_get "$meta" case_id)"
+    check "codex: meta.client.version is populated" "9.9.9" \
+        "$(meta_get "$meta" client.version)"
+    check "codex: meta.client.binary_version carries the driver's read" \
+        "9.9.9 (Stub Client)" "$(meta_get "$meta" client.binary_version)"
+    check "codex: meta.client.connection_mode is populated" "base-url" \
+        "$(meta_get "$meta" client.connection_mode)"
+    check "codex: meta.ingress_kind carries the traced Responses dialect the pin was checked against" \
+        "openai-responses" "$(meta_get "$meta" ingress_kind)"
+    if grep -q 'expected_ingress' "$meta"; then
+        fail "codex: meta.json records the expected-ingress pin beside the traced dialect"
+    else
+        echo "PASS: codex: meta.json records no second copy of the traced dialect"
+    fi
+else
+    fail "codex: no fixture landed at $meta"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 5))
+fi
+
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
 # ---------------------------------------------------------------------
 # Part 3b: the client version crosses the workspace's removal
 # ---------------------------------------------------------------------
@@ -1829,6 +1929,7 @@ direct_run() {
         CLIENT_OUT="$work/client.txt" \
         ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
+        ROUTECTL_DRIVER_CODEX_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG="--continue" \
         ROUTECTL_DRIVER_SETTLE_SECONDS=0 \
         ROUTECTL_DRIVER_TURN_SECONDS=0 \
@@ -1856,7 +1957,7 @@ done
 
 if curl -fsS -m 1 "http://127.0.0.1:$live_port/health" >/dev/null 2>&1; then
     echo "PASS: the paired reachable-daemon control has a live listener"
-    for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
+    for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh codex.sh; do
         rc=0
         direct_run "$work" "$driver" "http://127.0.0.1:$live_port" || rc=$?
         check "$driver: exits 0 against a reachable daemon" "0" "$rc"
@@ -1949,6 +2050,23 @@ if grep -qF 'NODE_EXTRA_CA_CERTS' "$work/direct.log"; then
     echo "PASS: the front-proxy refusal names the silent-fallback carrier"
 else
     fail "the front-proxy refusal did not name the silent-fallback carrier"
+fi
+rm -rf "$work"
+
+# codex refuses front-proxy mode too, for the same reason: it names no
+# documented MITM trust-path carrier, so a silent direct fallback would
+# land a mislabeled fixture. The refusal fires before the daemon
+# precondition, same proof shape as the check above.
+work="$(make_work)"
+rc=0
+DIRECT_MODE=front-proxy DIRECT_CASE=tools-multiturn-01 \
+    direct_run "$work" codex.sh "http://127.0.0.1:1" || rc=$?
+check "codex: refuses front-proxy mode with exit 2" "2" "$rc"
+if grep -qF 'no verified trust path' "$work/direct.log"; then
+    echo "PASS: codex's front-proxy refusal names the missing trust path"
+else
+    fail "codex's front-proxy refusal did not name the missing trust path"
+    sed -n '1,10p' "$work/direct.log"
 fi
 rm -rf "$work"
 

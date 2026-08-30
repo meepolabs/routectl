@@ -5715,8 +5715,9 @@ rig, the scrub gate, the repo-hygiene checks) is not mapped here -- reach
 it through [DEVELOPMENT.md](DEVELOPMENT.md). Shell self-tests ARE listed
 because no cargo target runs them, so nothing else names their paths.
 
-- `container/Dockerfile` -- the capture-cell image: a digest-pinned base, a
-  client installer, and the runtime deps the shipped drivers invoke
+- `container/Dockerfile` -- the capture-cell image: a digest-pinned base,
+  pinned installers for each shipped client (claude, codex), and the
+  runtime deps the shipped drivers invoke
 - `container/build.sh` -- local build of that image (`--version`, `--tag`)
 - `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
   image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` /
