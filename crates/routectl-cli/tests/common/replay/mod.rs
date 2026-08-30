@@ -20,6 +20,8 @@
 //! - [`conservation`] -- captured-ingress vs captured-outgoing
 //!   adjudication over the lane class and the exception table, plus the
 //!   translation-lane divergence baseline.
+//! - [`front_proxy`] -- front-proxy reachability per ingress, derived
+//!   from the MITM host pin read out of the router's source.
 //! - [`json_diff`] -- structural JSON comparator + header comparator.
 //! - [`lane`] -- derived lane class + the wire-conservation exception
 //!   table (which ingress-vs-outgoing divergences are explained
@@ -35,6 +37,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod conservation;
+pub mod front_proxy;
 pub mod gated_lanes;
 pub mod harness;
 pub mod json_diff;
@@ -48,6 +51,11 @@ pub use conservation::{
     LaneSummary, TRANSLATION_BASELINE_FILE, UNPINNED_INGRESS_LABEL, Verdict, adjudicate,
     parse_translation_baseline, read_translation_baseline, read_translation_baseline_at,
     resolve_gated_lanes, resolve_gated_lanes_at, translation_baseline_path,
+};
+pub use front_proxy::{
+    MITM_PIN_CONST, MITM_PIN_SITE_PATH, MITM_VALIDATOR_SYMBOL, PinError, Reachability, SETTLED_PIN,
+    front_proxy_reachability, mitm_pin_site_path, mitm_pinned_host, mitm_pinned_host_at,
+    parse_mitm_pinned_host, reachability_for_pin,
 };
 pub use gated_lanes::{
     GATED_LANES_FILE, GatedLaneError, gated_lanes_path, is_lane_gated, parse_gated_lanes,

@@ -5467,6 +5467,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `plant_unloadable_driver_case`, `current_meta`, `write_required_files`)
 - `tests/common/replay/gated_lanes.rs` -- the `gated_lanes.txt` reader:
   `read_gated_lanes`, `parse_gated_lanes`, `is_lane_gated`, `GatedLaneError`
+- `tests/common/replay/front_proxy.rs` -- front-proxy reachability per ingress
+  (`front_proxy_reachability`, `Reachability`, `reachability_for_pin`,
+  `SETTLED_PIN`), keyed on the MITM host pin parsed out of the router's
+  `validate.rs` by a comment-and-literal-stripped top-level-item scan
+  (`mitm_pinned_host`, `parse_mitm_pinned_host`, `PinError`)
 - `tests/common/replay/harness.rs` -- the two fixture roots (`local_root`,
   `driver_root`), `headers_from_pairs`, `FixtureOutcome`, the
   `meta.ingress_kind` adapter lookup (`ingress_for_kind`,
