@@ -29,6 +29,22 @@ fixture previously captured for that case, exactly as editing a lane
 config does. Add a new case id instead of redefining an old one whenever
 the old shape is still worth keeping.
 
+### A paired case is two files, welded by a test
+
+Comparing one interaction across two connection modes needs the SAME
+interaction captured under both, and the landing key is `(lane, case_id)`
+-- so a second mode needs a second id, not a second run of one id.
+`plain-turn-01` and `plain-turn-01-fp` are that pair: a full copy with the
+id suffixed `-fp`. Not a symlink, because `case_id` is welded to the
+filename stem; not a suffix applied by the runner, which would split the
+case identity between the run record and `meta.json`.
+
+The cost of a copy is drift, and a drifted twin turns a mode comparison
+into an unattributable diff. `scripts/drivers.test.sh` therefore asserts
+that the two files' `turns`, `knobs` and `wire_pattern` are equal as
+parsed JSON, with only `case_id`, `title` and `notes` allowed to differ.
+Change the interaction in one half only by changing it in BOTH.
+
 ## Schema (version 1)
 
 No key outside this list is accepted. Every string value is single-line:
