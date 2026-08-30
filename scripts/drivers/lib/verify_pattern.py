@@ -287,7 +287,20 @@ def _turn_list(body):
     claim: `meta.ingress_kind` sits beside the `wire_pattern` claim this
     module exists to check, so reading one to decide the other would
     verify a body against its own label.
+
+    A body carrying MORE THAN ONE turn-list key is refused rather than
+    resolved by precedence. No dialect emits two, so such a body is
+    hand-edited or hybrid, and picking one list would let the pattern be
+    satisfied by turns the other key contradicts -- a gate that reads
+    around ambiguity instead of failing closed on it.
     """
+    present = [key for key in TURNS_KEYS if key in body]
+    if len(present) > 1:
+        raise PatternError(
+            "the ingress body carries more than one turn list "
+            f"({', '.join(present)}); no dialect emits two, so which one "
+            "the claim refers to is ambiguous"
+        )
     for key in TURNS_KEYS:
         turns = body.get(key)
         if isinstance(turns, list) and turns:
