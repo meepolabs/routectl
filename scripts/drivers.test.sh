@@ -188,6 +188,72 @@ else
     echo "PASS: no case file embeds a harness invocation"
 fi
 
+# --- The front-proxy twin is welded to its base case --------------------
+# The cross-mode comparison needs the SAME interaction captured in both
+# connection modes, so `plain-turn-01-fp` is a full copy of
+# `plain-turn-01`: a symlink would break the filename-stem weld on
+# `case_id`, and suffixing at the runner would split the case identity
+# between the run record and `meta.json`. The cost of a copy is drift, and
+# a drifted twin turns a mode comparison into an unattributable diff --
+# the difference could be the mode or could be the case. Welded here, as a
+# test rather than a mechanism, so a divergence in `turns`, `knobs` or
+# `wire_pattern` is a failure instead of a silently wrong comparison.
+BASE_PAIR="$CASES/plain-turn-01.json"
+TWIN_PAIR="$CASES/plain-turn-01-fp.json"
+
+# Only the three identity/prose fields may differ; everything else is
+# compared as PARSED JSON, so key order and whitespace cannot mask a
+# difference and cannot manufacture one either.
+twin_matches_base() {
+    if python3 - "$1" "$2" <<'PY'
+import json, sys
+
+IDENTITY = ("case_id", "title", "notes")
+
+
+def interaction(path):
+    with open(path, encoding="utf-8") as handle:
+        case = json.load(handle)
+    return {key: value for key, value in case.items() if key not in IDENTITY}
+
+
+sys.exit(0 if interaction(sys.argv[1]) == interaction(sys.argv[2]) else 1)
+PY
+    then
+        printf 'yes\n'
+    else
+        printf 'no\n'
+    fi
+}
+
+check "the front-proxy twin carries the base case's interaction" "yes" \
+    "$(twin_matches_base "$BASE_PAIR" "$TWIN_PAIR")"
+check_ne "the twin's case_id differs from the base's" \
+    "$(python3 "$VALIDATOR" --field case_id "$BASE_PAIR")" \
+    "$(python3 "$VALIDATOR" --field case_id "$TWIN_PAIR")"
+
+# PAIRED CONTROL: the same comparison against a twin whose knob was
+# flipped MUST report a difference. Without it the weld above is
+# satisfiable by a comparison that always agrees -- a field filter that
+# drops everything, or an exit status nobody reads.
+twin_mut="$(mktemp -d)"
+drifted="$twin_mut/plain-turn-01-fp.json"
+python3 - "$TWIN_PAIR" "$drifted" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    case = json.load(handle)
+case["knobs"]["thinking"] = not case["knobs"]["thinking"]
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump(case, handle)
+PY
+check_ne "the mutation actually altered the twin" \
+    "$(sha256sum <"$TWIN_PAIR" | cut -d' ' -f1)" \
+    "$(sha256sum <"$drifted" | cut -d' ' -f1)"
+check "the weld reports a difference when a twin knob drifts" "no" \
+    "$(twin_matches_base "$BASE_PAIR" "$drifted")"
+rm -rf "$twin_mut"
+
 # --- The rejection half, each paired against the accepted original ------
 # A malformed case that reached a driver would be caught only after a
 # daemon was booted and a client was mid-session.

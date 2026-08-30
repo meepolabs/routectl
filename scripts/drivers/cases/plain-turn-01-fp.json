@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "case_id": "plain-turn-01-fp",
+  "title": "Single plain turn with every capability knob off, captured through the front proxy",
+  "wire_pattern": "baseline",
+  "turns": [
+    {
+      "prompt": "Reply with the single word acknowledged and nothing else."
+    }
+  ],
+  "knobs": {
+    "tools": false,
+    "thinking": false,
+    "cache_breakpoints": false,
+    "context_padding_bytes": 0
+  },
+  "notes": "The front-proxy half of the plain-turn-01 pair: the same interaction under a CONNECT-tunnelled client, so a cross-mode diff is attributable to the connection mode alone. A full copy rather than a symlink, because case_id is welded to the filename stem; the interaction must stay identical to plain-turn-01 and scripts/drivers.test.sh welds it."
+}
