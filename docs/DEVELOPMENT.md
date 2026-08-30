@@ -822,9 +822,10 @@ python3 scripts/drivers/lib/verify_pattern.py \
 Every predicate keys on the INGRESS side only -- the case controls what the
 client sends, not the provider dialect the request is translated into.
 `baseline`, `thinking`, and `cache-breakpoints` read the ingress structural
-summary line from `structural.txt`; `tool-use-multiturn` and
-`large-context` read `ingress_request.json` (a resent tool-call / result
-pair, and a body byte floor). A pattern token with no predicate
+summary line from `structural.txt`; `tool-use-multiturn`, `large-context`,
+and `mcp-tools` read `ingress_request.json` (a resent tool-call / result
+pair, a body byte floor, and an offered tool name in the server-namespaced
+`mcp__<server>__<tool>` shape). A pattern token with no predicate
 is REFUSED rather than waved through, so extending the closed vocabulary
 without extending the table cannot promote an unverified fixture.
 
@@ -858,14 +859,15 @@ the Rust reference logic through
 `crates/routectl-cli/tests/wire_pattern_weld.rs` -- so agreement with one
 recorded verdict on both sides is the two implementations agreeing with
 each other, and a divergence is red rather than silent. Scoped to those
-three predicates -- the two body-census predicates have no Rust counterpart
-to drift from, and a structural line carries nothing that decides them.
+three predicates -- the body-census predicates (`tool-use-multiturn`,
+`large-context`, `mcp-tools`) have no Rust counterpart to drift from, and a
+structural line carries nothing that decides them.
 
 That same Rust test carries the other weld: it parses `WIRE_PATTERNS` out
 of `validate_case.py` and the predicate table out of `verify_pattern.py`,
 both as text from sentinel-delimited blocks, and asserts the covered set is
-exactly the vocabulary minus an explicit deferred list (`mcp-tools` today,
-the one token with a closed-set entry and no case). Extending the
+exactly the vocabulary minus an explicit deferred list (empty today -- every
+token in the vocabulary has a predicate). Extending the
 vocabulary therefore turns it red until a predicate or a recorded deferral
 lands -- the review moment each addition deserves. Renaming a sentinel
 without updating the test makes the parse fail loudly; an empty parse is a

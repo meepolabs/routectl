@@ -57,7 +57,7 @@ separator.
 | `schema_version` | integer | must be `1` |
 | `case_id` | string | `^[a-z0-9]+(-[a-z0-9]+)*$`, and equal to the filename stem |
 | `title` | string | non-empty, single-line; a human summary of the interaction |
-| `wire_pattern` | string | one of `baseline`, `tool-use-multiturn`, `cache-breakpoints`, `thinking`, `large-context` |
+| `wire_pattern` | string | one of `baseline`, `tool-use-multiturn`, `cache-breakpoints`, `thinking`, `large-context`, `mcp-tools` |
 | `turns` | array | at least one object, each with exactly one key `prompt`: a non-empty single-line string |
 | `knobs` | object | exactly the four keys below |
 | `notes` | string | OPTIONAL, single-line |

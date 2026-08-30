@@ -84,6 +84,22 @@ if [ "$(driver_case_field "$CASE_FILE" cache_breakpoints)" != true ]; then
   export DISABLE_PROMPT_CACHING=1
 fi
 
+# The mcp-tools case hands the client a stdio MCP server, generated fresh
+# per run rather than baked into the image: `python3` is already an image
+# dependency, so a committed stub script needs no image change, and the
+# server list itself is a driver concern, not a case knob (each client
+# configures MCP differently). `--strict-mcp-config` keeps any ambient MCP
+# config on the run's HOME out of this request entirely.
+MCP_STUB_SCRIPT=""
+if [ "$(driver_case_field "$CASE_FILE" wire_pattern)" = mcp-tools ]; then
+  MCP_STUB_SCRIPT="$DRIVERS_DIR/stub_mcp.py"
+  MCP_CONFIG_PATH="$ROUTECTL_DRIVER_RUN/mcp-config.json"
+  cat >"$MCP_CONFIG_PATH" <<MCPCONFIG
+{"mcpServers":{"fixture":{"command":"python3","args":["$MCP_STUB_SCRIPT"]}}}
+MCPCONFIG
+  common_argv+=(--mcp-config "$MCP_CONFIG_PATH" --strict-mcp-config)
+fi
+
 turn=0
 while IFS= read -r prompt; do
   turn=$((turn + 1))
@@ -112,5 +128,17 @@ done < <(driver_case_turns "$CASE_FILE")
 # rig would run against a trace holding no dialogue and either refuse or,
 # worse, land whatever else the daemon logged.
 [ "$turn" -gt 0 ] || driver_die "case '$ROUTECTL_FIXTURE_CASE_ID' yielded no turns" 1
+
+# The client owns the MCP stub's stdio child, so it dies with the client
+# rather than needing this driver to spawn or track it directly. Asserted
+# here rather than assumed: a client that leaks the child leaves it running
+# past this point, discoverable by the one thing that identifies it -- the
+# stub script's own path -- without sending it any signal.
+if [ -n "$MCP_STUB_SCRIPT" ]; then
+  mcp_leftover="$(driver_processes_matching "$MCP_STUB_SCRIPT")"
+  if [ -n "$mcp_leftover" ]; then
+    driver_die "the MCP stub process outlived the client that spawned it (pid(s): $(printf '%s' "$mcp_leftover" | tr '\n' ' '))" 1
+  fi
+fi
 
 echo "driver: claude-code-print case=$ROUTECTL_FIXTURE_CASE_ID mode=$ROUTECTL_FIXTURE_CONNECTION_MODE turns=$turn"
