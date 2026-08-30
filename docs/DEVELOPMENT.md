@@ -695,13 +695,24 @@ The three structural predicates exist twice, in Python here and as
 reference logic in the Rust test suite, and
 `scripts/drivers/lib/wire_pattern_classification.tsv` is the shared
 classification set that keeps them honest: one structural line per record,
-paired with the patterns it does and does not satisfy. Today only the
-Python predicates are asserted against it (through
-`scripts/drivers.test.sh`); the Rust half of the cross-check is not wired
-up yet, so the file is committed ahead of it rather than being a live
-two-language gate. Scoped to those three predicates -- the two body-census
-predicates have no Rust counterpart to drift from, and a structural line
-carries nothing that decides them.
+paired with the patterns it does and does not satisfy. BOTH sides assert
+against it -- the Python predicates through `scripts/drivers.test.sh` and
+the Rust reference logic through
+`crates/routectl-cli/tests/wire_pattern_weld.rs` -- so agreement with one
+recorded verdict on both sides is the two implementations agreeing with
+each other, and a divergence is red rather than silent. Scoped to those
+three predicates -- the two body-census predicates have no Rust counterpart
+to drift from, and a structural line carries nothing that decides them.
+
+That same Rust test carries the other weld: it parses `WIRE_PATTERNS` out
+of `validate_case.py` and the predicate table out of `verify_pattern.py`,
+both as text from sentinel-delimited blocks, and asserts the covered set is
+exactly the vocabulary minus an explicit deferred list (`mcp-tools` today,
+the one token with a closed-set entry and no case). Extending the
+vocabulary therefore turns it red until a predicate or a recorded deferral
+lands -- the review moment each addition deserves. Renaming a sentinel
+without updating the test makes the parse fail loudly; an empty parse is a
+failure, never a coverage claim over nothing.
 
 ### The harness drivers
 

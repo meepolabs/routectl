@@ -108,8 +108,7 @@ a small, secret-free body -- a rejection envelope, not a full response.
 
 The COMMITTED driver corpus is the exception: it ships in the repo, so a
 named test may assert directly against a driver fixture and that
-assertion runs on every checkout -- `tests/wire_pattern_baseline.rs`
-does exactly this against `driver/anthropic-api/plain-turn-01`. Such a
+assertion runs on every checkout. Such a
 test must SKIP BY NAME when the corpus is absent (print a NOT RUN line
 naming the missing fixture and return) rather than fail: a checkout
 without the corpus is missing evidence, not exhibiting a regression.
@@ -379,12 +378,14 @@ Fields:
   ```
 
   What does not exist yet is the automatic refusal: the capture rig does
-  not invoke it, the loader stores the string and compares nothing, and
-  the one executed shape check
-  (`crates/routectl-cli/tests/wire_pattern_baseline.rs`) verifies the
-  `baseline` predicate against exactly ONE committed fixture, by name. So
-  a mismatched claim on any other fixture still goes unnoticed unless
-  someone runs the predicate.
+  not invoke it and the loader stores the string and compares nothing. So
+  a mismatched claim on a committed fixture goes unnoticed unless someone
+  runs the predicate. What IS executed on every checkout is the weld
+  between the predicates and the vocabulary they answer for
+  (`crates/routectl-cli/tests/wire_pattern_weld.rs`): every pattern token
+  has a predicate or an explicit deferral, and the Python and Rust
+  implementations of the three structural predicates classify the shared
+  record set identically.
 - `client` -- which client produced the request. `name` / `version`
   come from the captured ingress `user-agent`; `connection_mode` comes
   from `ROUTECTL_FIXTURE_CONNECTION_MODE`, because the trace cannot

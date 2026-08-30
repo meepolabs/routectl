@@ -663,8 +663,8 @@ denies "the refusal names the deferred set the token belongs to" \
 # --- the shared classification set ------------------------------------
 # The structural lines the three structural predicates are asserted
 # against, so an implementation of them cannot drift unnoticed from what a
-# shape means. Only the Python side reads the set today; the Rust half of
-# the cross-check is not wired up yet.
+# shape means. Both sides read the set: the Python predicates here, and the
+# Rust reference logic in the routectl-cli test suite.
 
 # The header is the comment block ahead of the first record, read as such
 # rather than as a fixed line count: a needle pinned to `head -N` passes or
@@ -675,13 +675,19 @@ if printf '%s' "$class_header" | grep -qF "baseline, thinking,"; then
 else
     fail "the classification set header does not state which predicates it covers"
 fi
-# The header must not claim a cross-check that does not run yet: a reader
-# who believes the Rust side consumes this file reads an undetected
-# divergence as a checked one.
-if printf '%s' "$class_header" | grep -qF "does not exist yet"; then
-    echo "PASS: the classification set header states which side reads it today"
+# The header must NAME both consumers. A reader who cannot tell which side
+# reads the file cannot tell a checked divergence from an undetected one,
+# and the Rust half is the only thing that makes this set a cross-check
+# rather than a Python self-test.
+if printf '%s' "$class_header" | grep -qF "wire_pattern_weld.rs"; then
+    echo "PASS: the classification set header names its Rust consumer"
 else
-    fail "the classification set header does not say the Rust half is not wired up"
+    fail "the classification set header does not name the Rust consumer"
+fi
+if printf '%s' "$class_header" | grep -qF "drivers.test.sh"; then
+    echo "PASS: the classification set header names its Python consumer"
+else
+    fail "the classification set header does not name the Python consumer"
 fi
 
 class_records=0

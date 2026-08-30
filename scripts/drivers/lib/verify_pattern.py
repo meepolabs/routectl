@@ -21,7 +21,7 @@ Two evidence sources, and no others:
                       large-context)
 
 The structural-line predicates are a port of the Rust reference logic in
-crates/routectl-cli/tests/wire_pattern_baseline.rs. Two properties of that
+crates/routectl-cli/tests/wire_pattern_weld.rs. Two properties of that
 port are load-bearing and are asserted in scripts/drivers.test.sh: token
 parsing is exact on the `key=value` name, and the ingress line is selected
 by its `direction` token rather than by position.
@@ -71,7 +71,11 @@ MIN_LARGE_CONTEXT_BYTES = 256 * 1024
 # closed-set entry and no case, so no fixture can claim one yet. Listed
 # rather than silently missing, because a missing predicate is what this
 # module exists to prevent.
-DEFERRED_PATTERNS = ("mcp-tools",)
+# --- BEGIN DEFERRED_PATTERNS ---
+DEFERRED_PATTERNS = (
+    "mcp-tools",
+)
+# --- END DEFERRED_PATTERNS ---
 
 
 class PatternError(Exception):
@@ -273,6 +277,11 @@ def _on_ingress_line(line_predicate):
 # One entry per token in validate_case.py's WIRE_PATTERNS. A token with no
 # entry here is refused rather than waved through, so adding a pattern to
 # the closed set without a predicate cannot promote an unverified fixture.
+#
+# The sentinels bound the block that the cross-language weld in
+# crates/routectl-cli/tests/wire_pattern_weld.rs parses as text; that weld
+# is what makes an omission here red rather than merely unverified.
+# --- BEGIN PREDICATES ---
 PREDICATES = {
     "baseline": _on_ingress_line(line_is_baseline),
     "thinking": _on_ingress_line(line_is_thinking),
@@ -280,6 +289,7 @@ PREDICATES = {
     "tool-use-multiturn": _tool_use_multiturn,
     "large-context": _large_context,
 }
+# --- END PREDICATES ---
 
 
 def verify(fixture_dir, pattern):
