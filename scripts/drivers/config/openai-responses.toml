@@ -1,0 +1,59 @@
+# Hermetic driver config for the `openai-responses` lane (codex).
+#
+# COMMITTED ON PURPOSE. `scripts/capture_driver.sh` hashes THIS FILE and
+# records the digest as `meta.config_sha` on every fixture the lane
+# produces, so a rerun of a case under a drifted config reads as a config
+# change rather than as client drift. Editing this file therefore
+# invalidates every prior fixture's comparability -- that is the intent,
+# not a hazard, but it means an edit is a deliberate act.
+#
+# Nothing here is environment-derived: no real path, no account, no
+# credential. The only credential is a REFERENCE to an env var the runner
+# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
+# namespace); an unset one keeps the daemon from starting rather than
+# silently routing somewhere else.
+#
+# The daemon's state (usage database, catalog state) lands under
+# `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
+# directory. That default resolution is what keeps a driven run off the
+# operator's own state -- no path in this file names it.
+
+version = 4
+
+# Placeholder only. The runner ALWAYS overrides the bind port on the
+# command line (`serve --port`), because it selects a free port at boot
+# time. Overriding rather than rewriting this file keeps the hashed bytes
+# identical across runs: a port-patched copy would hash differently every
+# run and `meta.config_sha` would stop distinguishing config drift from
+# noise.
+[server]
+host = "127.0.0.1"
+port = 8787
+
+# `auth_kind` is a WIRE-SHAPE declaration here, not a credential detail.
+# The codex seat is OAuth, not a static key -- `chatgpt-oauth` is what
+# points the base URL at `chatgpt.com/backend-api/codex` instead of
+# `api.openai.com`, and what makes `account_id_ref` required rather than
+# rejected. It happens to be this provider's default, but it is spelled
+# out here anyway: the wire shape this config produces should be legible
+# from the file, not from knowledge of what the factory defaults to.
+# `account_id_ref` carries the seat's ChatGPT account id -- the runner's
+# `run_capture.sh` extracts it from the same seat the bearer token comes
+# from and forwards it under this name. Both refs stay `env://`: the
+# values arrive already extracted, so no seat file and no refresh path
+# exist inside a driven run.
+[providers.codex]
+kind           = "openai-responses"
+api_key_ref    = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"
+account_id_ref = "env://ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID"
+auth_kind      = "chatgpt-oauth"
+
+[models.fixture-codex]
+provider = "codex"
+upstream = "gpt-5-codex"
+
+# `gpt-5*` catches the model ids the codex CLI asks for by name, so a
+# driver does not have to know routectl's alias vocabulary.
+[aliases]
+"gpt-5*" = "fixture-codex"
+default  = "fixture-codex"

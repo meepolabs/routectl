@@ -94,3 +94,20 @@ See the driver-mode section of
 [../../docs/DEVELOPMENT.md](../../docs/DEVELOPMENT.md).
 `scripts/drivers.test.sh` covers the case set and every driver against a
 STUB daemon and a STUB client -- a real run needs a credential.
+
+## The credential-resolution probe
+
+`routectl config check` exiting 0 is not evidence a lane can serve: an
+unresolvable `env://` ref is a WARNING there, not an error, so a
+misconfigured credential still checks clean and only fails later, as a
+401 at the upstream. Before a lane's config is trusted for a paid
+capture, [config/credential_probe.sh](config/credential_probe.sh) boots
+the real `routectl` binary against it -- hermetically, no network call,
+no real credential -- and confirms every `env://` ref it declares
+actually resolves, with a deliberately-unset run as the paired control
+proving the probe can detect a ref that doesn't. Each committed lane
+config that declares a credential ref gets a probe invocation recorded
+in [config/credential_probe.test.sh](config/credential_probe.test.sh),
+which is the living record of the outcome -- re-verified on every run
+rather than a point-in-time note that drifts the moment a config
+changes.

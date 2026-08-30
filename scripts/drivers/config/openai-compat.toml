@@ -1,0 +1,60 @@
+# Hermetic driver config for the `openai-compat` lane, driven by
+# claude-code -- the dialect-translation cell: an Anthropic-shaped client
+# routed to an OpenAI Chat Completions-shaped upstream.
+#
+# COMMITTED ON PURPOSE. `scripts/capture_driver.sh` hashes THIS FILE and
+# records the digest as `meta.config_sha` on every fixture the lane
+# produces, so a rerun of a case under a drifted config reads as a config
+# change rather than as client drift. Editing this file therefore
+# invalidates every prior fixture's comparability -- that is the intent,
+# not a hazard, but it means an edit is a deliberate act.
+#
+# Nothing here is environment-derived: no real path, no account, no
+# credential. The only credential is a REFERENCE to an env var the runner
+# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
+# namespace); an unset one keeps the daemon from starting rather than
+# silently routing somewhere else.
+#
+# The daemon's state (usage database, catalog state) lands under
+# `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
+# directory. That default resolution is what keeps a driven run off the
+# operator's own state -- no path in this file names it.
+
+version = 4
+
+# Placeholder only. The runner ALWAYS overrides the bind port on the
+# command line (`serve --port`), because it selects a free port at boot
+# time. Overriding rather than rewriting this file keeps the hashed bytes
+# identical across runs: a port-patched copy would hash differently every
+# run and `meta.config_sha` would stop distinguishing config drift from
+# noise.
+[server]
+host = "127.0.0.1"
+port = 8787
+
+# `base_url` has no factory default for this kind -- it must be spelled
+# out, and it is what makes this the OpenAI Chat Completions wire shape
+# rather than any other `openai-compat` host. `api_key_ref` names the
+# SAME env var as the codex lane's `openai-responses.toml`: both configs
+# hold a credential for the `openai` provider (per the
+# `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` convention, keyed on provider
+# name, not on lane), so a seat that can drive codex can drive this lane
+# without a second credential. There is no `account_id_ref` here -- that
+# field belongs only to the `chatgpt-oauth` auth kind, and this provider
+# authenticates with a plain API key.
+[providers.openai]
+kind        = "openai-compat"
+base_url    = "https://api.openai.com/v1"
+api_key_ref = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"
+
+[models.fixture-gpt]
+provider = "openai"
+upstream = "gpt-4o"
+
+# `claude-*` catches the model ids claude-code asks for by name -- the
+# client speaks Anthropic Messages to routectl regardless of which
+# provider kind serves it, so this alias is identical to the
+# `anthropic-api` lane's.
+[aliases]
+"claude-*" = "fixture-gpt"
+default    = "fixture-gpt"
