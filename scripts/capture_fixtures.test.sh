@@ -2242,6 +2242,22 @@ if [ -d "$(captured_of "$work")/anthropic-api/hazard-seam-01" ]; then
 else
     echo "PASS: a seam-incoherent run lands nothing, later candidate or not"
 fi
+# THE SELECTION LINE ON THE REFUSAL PATH. This is the run where a reader
+# most needs it -- the success path's line is useless for diagnosing a
+# refusal, and reconstructing which candidate was reached by correlating
+# request ids across a log is the work the line exists to remove. It must
+# report the SKIP that happened before the refusal, so a line printing
+# zeroes would pass a weaker assertion.
+sel_line="$(grep -h 'capture_fixtures: selection ' "$work/rig.log" 2>/dev/null)"
+for field in "case=hazard-seam-01" "candidates_examined=2" \
+    "candidates_skipped=1" "ordering_basis=first-ingress-body"; do
+    if printf '%s' "$sel_line" | grep -qF -- "$field"; then
+        echo "PASS: the refusal-path selection line carries $field"
+    else
+        echo "FAIL: the refusal-path selection line lacks $field -- '$sel_line'"
+        fails=$((fails + 1))
+    fi
+done
 rm -rf "$work"
 
 set_pins hazard-lane-01 abc123 base-url tool-use-multiturn
