@@ -32,50 +32,46 @@ REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 
 fails=0
 
+# mktemp rather than a PID-derived name: a predictable path under a shared
+# /tmp is pre-placeable by another local user, and the cleanup trap fires
+# on the error paths too.
+OUT="$(mktemp)"
+trap 'rm -f "$OUT"' EXIT
+
 check_exit0() {
     local label="$1"
     shift
-    if "$@" >/tmp/credential_probe_test.$$ 2>&1; then
+    if "$@" >"$OUT" 2>&1; then
         echo "PASS: $label"
     else
         echo "FAIL: $label"
-        sed -n '1,40p' "/tmp/credential_probe_test.$$"
+        sed -n '1,40p' "$OUT"
         fails=$((fails + 1))
     fi
-    rm -f "/tmp/credential_probe_test.$$"
 }
 
 check_nonzero() {
     local label="$1"
     shift
-    if "$@" >/tmp/credential_probe_test.$$ 2>&1; then
+    if "$@" >"$OUT" 2>&1; then
         echo "FAIL: $label -- expected a non-zero exit, got 0"
-        sed -n '1,40p' "/tmp/credential_probe_test.$$"
+        sed -n '1,40p' "$OUT"
         fails=$((fails + 1))
     else
         echo "PASS: $label"
     fi
-    rm -f "/tmp/credential_probe_test.$$"
 }
 
-resolve_bin() {
-    if [ -n "${ROUTECTL_BIN:-}" ]; then
-        printf '%s\n' "$ROUTECTL_BIN"
-        return 0
-    fi
-    if command -v routectl >/dev/null 2>&1; then
-        command -v routectl
-        return 0
-    fi
-    local target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-    for profile in debug release; do
-        if [ -x "$target_dir/$profile/routectl" ]; then
-            printf '%s\n' "$target_dir/$profile/routectl"
-            return 0
-        fi
-    done
-    return 1
+# The same binary resolution the probe itself uses, sourced from its one
+# owner: a self-test resolving differently from the script under test
+# would verify a binary the probe never runs.
+RESOLVE_BIN_LIB="$REPO_ROOT/scripts/drivers/lib/resolve_bin.sh"
+[ -r "$RESOLVE_BIN_LIB" ] || {
+    echo "FAIL: binary-resolution library not found at $RESOLVE_BIN_LIB"
+    exit 1
 }
+# shellcheck source=scripts/drivers/lib/resolve_bin.sh
+. "$RESOLVE_BIN_LIB"
 
 BIN="$(resolve_bin)" || {
     echo "FAIL: no routectl binary found -- set ROUTECTL_BIN or build one (cargo build --bin routectl) before running this self-test"
@@ -83,8 +79,9 @@ BIN="$(resolve_bin)" || {
 }
 export ROUTECTL_BIN="$BIN"
 
-# The two committed lane configs this feature adds -- the actual probe
-# the acceptance criteria require, run against the actual files.
+# Run against the committed config files themselves, not against copies:
+# an edit that breaks credential resolution on a real lane is caught here
+# rather than at the first paid capture on it.
 check_exit0 "openai-responses.toml resolves ROUTECTL_DRIVER_OPENAI_API_KEY and ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID (with the unset control)" \
     bash "$PROBE" "$HERE/openai-responses.toml" ROUTECTL_DRIVER_OPENAI_API_KEY ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID
 
