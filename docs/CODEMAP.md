@@ -5568,7 +5568,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `conservation: NOT RUN ...` named skip) whenever zero driver fixtures
   loaded; the driver corpus is tracked, so CI's conservation step asserts
   the run verdict and fails if that line appears or if the gated lane
-  asserted zero fixtures
+  asserted zero fixtures. Also pins that every fixture in the committed
+  driver corpus records a non-empty `ingress_kind` (an empty one makes this
+  harness skip, which turns a gated lane red for zero coverage) and a
+  non-empty `wire_pattern`
 - `tests/replay_ingress.rs` -- replay-driven ingress contract test; walks
   captured fixtures, mounts the upstream response in wiremock, drives egress
   `complete()`, renders the canonical `ChatResponse` via
@@ -5718,5 +5721,8 @@ because no cargo target runs them, so nothing else names their paths.
   the resolution pair and containment test every script taking a
   caller-supplied output directory uses
 - `promote_fixture.sh` -- promotion of one captured fixture from a scratch
-  root into the committed driver corpus (`--from`, `--scratch-root`, `--to`)
+  root into the committed driver corpus (`--from`, `--scratch-root`, `--to`);
+  re-runs the landing gates on the staged copy (scrub `--check`, the
+  wire-pattern predicate, and the connection-mode / MITM-seam-header
+  coherence check) because a scratch fixture is hand-editable
 - `promote_fixture.test.sh` -- self-test for the promotion script

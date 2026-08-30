@@ -27,6 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIG="$HERE/capture_fixtures.sh"
 SCRUB="$HERE/scrub-fixture.sh"
 CONFINE="$HERE/drivers/lib/confine.sh"
+VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
 
 fails=0
 
@@ -78,10 +79,16 @@ TRACE
 # the `routectl_core::log_safe: ` target, and `direction=` is a field of
 # the same line. `$3` is the sub-second part of the timestamp so a caller
 # can order the two directions.
+#
+# `thinking_shape=disabled` is the spelling the real client's explicit
+# `{"type":"disabled"}` block produces, and the three predicate fields
+# (`tools_len`, `thinking_shape`, `cache_control_count`) make this line
+# `baseline` -- which is what the driver cases below claim, and what the
+# rig's promotion gate now reads.
 structural_line() {
     local id="$1" direction="$2" frac="${3:-400000}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    printf '%s TRACE %s: routectl_core::log_safe: structural summary direction="%s" kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false\n' \
+    printf '%s TRACE %s: routectl_core::log_safe: structural summary direction="%s" kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n' \
         "2026-08-25T10:00:00.${frac}Z" "$span" "$direction"
 }
 
@@ -103,6 +110,48 @@ trace_driver_stream() {
     trace_stream "$id" "$kind"
     structural_line "$id" ingress 400000
     structural_line "$id" outgoing 500000
+}
+
+# A driver trace whose ingress body carries a tool-call turn AND a later
+# turn carrying its result -- the RESENT pair no single-turn capture can
+# produce, and the census the `tool-use-multiturn` predicate reads. Its
+# structural line offers a tools array, as a real permitted-tools request
+# does, so this capture is NOT baseline and a mislabelled claim is
+# refusable on the same bytes.
+trace_driver_tools() {
+    local id="$1"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    local body='{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"list the files"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}]}'
+    printf '2026-08-25T10:00:00.000000Z TRACE %s:messages{ingress="anthropic"}: %s ingress request body ingress="anthropic" body=%s redact_prompts_enabled=false\n' \
+        "$span" "$target" "$body"
+    trace_non_stream "$id" anthropic | tail -n +2
+    structural_line "$id" ingress 400000 | sed 's/tools_len=0/tools_len=16/'
+    structural_line "$id" outgoing 500000 | sed 's/tools_len=0/tools_len=16/'
+}
+
+# A driver trace whose ingress structural line claims MORE than the
+# `baseline` shape: an active thinking block and cache breakpoints. Used
+# as the body of the pattern-gate refusal cases, where the recorded claim
+# is `baseline` and the captured line contradicts it.
+trace_driver_not_baseline() {
+    local id="$1"
+    trace_driver "$id" | sed \
+        -e 's/thinking_shape=disabled/thinking_shape=enabled:31999/' \
+        -e 's/cache_control_count=0/cache_control_count=3/'
+}
+
+# The MITM front-proxy seam header, as the rig spells it. Read out of the
+# rig rather than restated, so the two cannot drift apart -- and the rig's
+# own spelling is asserted against the Rust redaction list below.
+SEAM_HEADER="$(sed -n 's/^MITM_SEAM_HEADER="\(.*\)"$/\1/p' "$RIG")"
+
+# The same trace with the seam header ADDED to the captured ingress
+# headers -- what a request that really transited the MITM listener leaves
+# in the trace. The value is a synthetic nonce; the scrub gate redacts it
+# by header-name class and keeps the NAME, which is what the gate reads.
+with_seam_header() {
+    sed 's/\(ingress request headers direction="ingress" headers=\[\)/\1["'"$SEAM_HEADER"'","d41d8cd98f00b204e9800998ecf8427e"],/'
 }
 
 # A driver trace whose ingress body carries a SYNTHETIC third-party home
@@ -210,6 +259,9 @@ make_repo() {
     # The rig delegates scrubbing to scrub-fixture.sh and refuses to run
     # without it, so the throwaway repo carries the real script too.
     cp "$SCRUB" "$tmp/repo/scripts/scrub-fixture.sh"
+    # Same for the wire-pattern predicate: the rig refuses to run without
+    # it rather than promote an unverified claim.
+    cp "$VERIFY_PATTERN" "$tmp/repo/scripts/drivers/lib/verify_pattern.py"
     # The rig reads the workspace version from the repo-root Cargo.toml.
     printf '[workspace.package]\nversion = "9.9.9"\n' >"$tmp/repo/Cargo.toml"
     printf '%s\n' "$tmp"
@@ -601,10 +653,15 @@ rm -rf "$work"
 # diff against. The lane directory comes from the NORMALIZED lane
 # (`anthropic` -> `anthropic-api`), so this also pins that the landing
 # path uses the kind_str() vocabulary rather than the traced token.
+#
+# The trace is the tool-loop one because the pin this case reads back is
+# `tool-use-multiturn`, and the promotion gate now checks the captured
+# bytes against the recorded claim.
 set_pins tools-multiturn-01 abc123 base-url tool-use-multiturn
 work="$(make_repo)"
 rc=0
-rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000008)" --driver-mode || rc=$?
+rig_run "$work" "$(trace_driver_tools 019eab77-0000-4000-8000-000000000008)" \
+    --driver-mode || rc=$?
 captured="$(captured_of "$work")"
 clear_pins
 check "a driver capture exits 0" "0" "$rc"
@@ -944,7 +1001,7 @@ assert_runner_holds_no_shape_table
 # config_sha and connection_mode while the case id stays path-safe -- the
 # escaping contract is per-value, and these are the two whose values a
 # driver sets programmatically without a path constraint.
-set_pins quote-case-01 'sha"with\quote' 'mode"x' 'wire"y'
+set_pins quote-case-01 'sha"with\quote' 'mode"x' baseline
 work="$(make_repo)"
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000013)" --driver-mode || true
 clear_pins
@@ -957,8 +1014,6 @@ if [ -f "$meta" ]; then
             'sha"with\quote' "$(meta_get "$meta" config_sha)"
         check "an embedded quote round-trips through connection_mode" \
             'mode"x' "$(meta_get "$meta" client.connection_mode)"
-        check "an embedded quote round-trips through wire_pattern" \
-            'wire"y' "$(meta_get "$meta" wire_pattern)"
     else
         echo "FAIL: a driver meta.json is invalid JSON when a pin carries a quote"
         cat "$meta"
@@ -969,6 +1024,21 @@ else
     cat "$work/rig.log"
     fails=$((fails + 1))
 fi
+rm -rf "$work"
+
+# The wire pattern carries no hostile value here because it can no longer
+# hold one: the promotion gate resolves the recorded pin against the closed
+# predicate table, so an out-of-vocabulary spelling never reaches a landed
+# meta.json at all. Asserted as the refusal it is, rather than dropped.
+set_pins quote-pattern-01 abc123 base-url 'wire"y'
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000001b)" --driver-mode || rc=$?
+clear_pins
+check "an out-of-vocabulary wire pattern is refused, not escaped into meta.json" \
+    "1" "$rc"
+check_log "the refusal names the unknown pattern" "no predicate for wire_pattern" \
+    "$work/rig.log"
 rm -rf "$work"
 
 # --- Case 16: a case id that is not a single path segment is refused --
@@ -1223,6 +1293,296 @@ else
     fails=$((fails + 1))
 fi
 unset own_home placeholder_home
+
+# --- Case 19b: the recorded wire pattern is ENFORCED at promotion ------
+# `meta.wire_pattern` is otherwise a claim nothing reads: a case asking for
+# tools only passes a permission flag to the client, so a fixture with zero
+# tool calls lands, scrubs clean, and is later asserted by the replay
+# harness as evidence of a shape it never carried.
+#
+# PREMISE ASSERTION: the refusing trace's ingress structural line must
+# really contradict `baseline` and the promoting one must really exhibit
+# it. Without this both legs hold for a predicate that reads neither line.
+not_baseline_trace="$(trace_driver_not_baseline 019eab77-0000-4000-8000-000000000030)"
+if printf '%s\n' "$not_baseline_trace" |
+    grep -q 'structural summary direction="ingress".*thinking_shape=enabled:31999' &&
+    printf '%s\n' "$(trace_driver 019eab77-0000-4000-8000-000000000031)" |
+    grep -q 'structural summary direction="ingress".*thinking_shape=disabled'; then
+    echo "PASS: the pattern-gate traces differ in the clause the claim turns on"
+else
+    echo "FAIL: the pattern-gate traces are not the shapes they are named for --"
+    echo "FAIL: a refusal would then be asserted for something other than the claim"
+    fails=$((fails + 1))
+fi
+
+set_pins pattern-mismatch-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$not_baseline_trace" --driver-mode || rc=$?
+clear_pins
+check "a fixture contradicting its claimed pattern refuses with exit 1" "1" "$rc"
+# The message must name the PATTERN and the reason: a runner reading only
+# "not promoting" cannot tell this refusal from the scrub-residue one.
+check_log "the pattern refusal names the claimed pattern" "baseline" "$work/rig.log"
+check_log "the pattern refusal names the clause that failed" "thinking_shape" \
+    "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/pattern-mismatch-01" ]; then
+    echo "FAIL: a fixture contradicting its claimed pattern reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a fixture contradicting its claimed pattern does not reach the corpus"
+fi
+# The staged directory is DISCARDED, not abandoned under the corpus root
+# for a later run to promote.
+if [ -d "$(captured_of "$work")" ] &&
+    [ -n "$(find "$(captured_of "$work")" -maxdepth 1 -name '.tmp.*' -print -quit)" ]; then
+    echo "FAIL: the pattern refusal left a staged tmp directory behind"
+    fails=$((fails + 1))
+else
+    echo "PASS: the pattern refusal leaves no staged tmp directory"
+fi
+rm -rf "$work"
+unset not_baseline_trace
+
+# PAIRED CONTROL, mandatory: a fixture that DOES exhibit its claimed
+# pattern promotes. Without it the gate is satisfiable by a predicate that
+# refuses everything.
+set_pins pattern-match-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000031)" --driver-mode || rc=$?
+clear_pins
+check "a fixture exhibiting its claimed pattern still promotes at exit 0" "0" "$rc"
+if [ -f "$(captured_of "$work")/anthropic-api/pattern-match-01/meta.json" ]; then
+    echo "PASS: a fixture exhibiting its claimed pattern is promoted"
+else
+    echo "FAIL: a matching fixture was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# A SECOND accepted pattern, on the body-census side. The baseline control
+# above rides the structural line alone, so on its own it cannot tell the
+# gate apart from one that hardcodes a single predicate -- and the corpus
+# commits tool fixtures next.
+set_pins tools-pattern-01 abc123 base-url tool-use-multiturn
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver_tools 019eab77-0000-4000-8000-000000000032)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a tool-loop fixture claiming tool-use-multiturn promotes at exit 0" "0" "$rc"
+if [ -f "$(captured_of "$work")/anthropic-api/tools-pattern-01/meta.json" ]; then
+    echo "PASS: a body-census pattern is verified off the captured body"
+else
+    echo "FAIL: a tool-loop fixture was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# The same tool-loop trace claiming `baseline` is REFUSED: the pattern the
+# gate reads is the recorded one, so the two legs above cannot both be
+# explained by the trace alone.
+set_pins tools-mislabelled-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver_tools 019eab77-0000-4000-8000-000000000033)" \
+    --driver-mode || rc=$?
+clear_pins
+check "the SAME capture under a different claim is refused" "1" "$rc"
+rm -rf "$work"
+
+# An absent or unrunnable predicate is a HARD failure, never an unverified
+# promotion -- the same fail-closed shape the rig uses for the scrub
+# script. The removal is verified before the run: a delete that matched
+# nothing would assert against the present-predicate path.
+set_pins no-predicate-01 abc123 base-url baseline
+work="$(make_repo)"
+if [ -f "$work/repo/scripts/drivers/lib/verify_pattern.py" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/verify_pattern.py" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/verify_pattern.py" ]; then
+    rc=0
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000034)" \
+        --driver-mode || rc=$?
+    check "an absent wire-pattern predicate refuses the run with exit 1" "1" "$rc"
+    check_log "the refusal names the missing predicate" \
+        "wire-pattern predicate not found" "$work/rig.log"
+    if [ -d "$(captured_of "$work")/anthropic-api" ]; then
+        echo "FAIL: a fixture landed with no predicate to verify its claim"
+        fails=$((fails + 1))
+    else
+        echo "PASS: nothing lands when the predicate is absent"
+    fi
+else
+    echo "FAIL: could not remove the predicate from the throwaway repo"
+    fails=$((fails + 1))
+fi
+clear_pins
+rm -rf "$work"
+
+# --- Case 19c: the seam header must agree with the connection mode -----
+# An environment carrier proves INTENT, not TRANSIT: a client that
+# silently fell back to a direct connection would land a fixture labelled
+# front-proxy whose shape is base-url, and every later cross-mode diff
+# would read as client drift. The seam header is the only evidence of
+# transit that no env check can provide.
+#
+# The rig's copy of the header name must equal the Rust redaction list's
+# spelling: that list is WHY a captured header set retains the name, so a
+# drifted replica would gate on a header no capture carries. Guarded on the
+# Rust file's presence -- this suite also runs from a scripts-only tree.
+check "the rig carries a seam header name at all" "1" \
+    "$([ -n "$SEAM_HEADER" ] && echo 1 || echo 0)"
+redact_list="$HERE/../crates/routectl-core/src/log_safe.rs"
+if [ -f "$redact_list" ]; then
+    if grep -qF "\"$SEAM_HEADER\"" "$redact_list"; then
+        echo "PASS: the rig's seam header name matches the redaction list's spelling"
+    else
+        echo "FAIL: the rig's seam header '$SEAM_HEADER' is not in the redaction list"
+        fails=$((fails + 1))
+    fi
+else
+    echo "PASS: no crates tree in this checkout; the seam-name weld is not asserted"
+fi
+unset redact_list
+
+# PREMISE ASSERTION: the seam-bearing trace must really carry the header
+# NAME in its ingress header line and the plain one must really not.
+seam_trace="$(trace_driver 019eab77-0000-4000-8000-000000000035 | with_seam_header)"
+if printf '%s\n' "$seam_trace" |
+    grep -q "ingress request headers.*\[\"$SEAM_HEADER\"" &&
+    ! printf '%s\n' "$(trace_driver 019eab77-0000-4000-8000-000000000036)" |
+        grep -qF "$SEAM_HEADER"; then
+    echo "PASS: the seam traces differ in exactly the header the gate reads"
+else
+    echo "FAIL: the seam traces are not the shapes they are named for --"
+    echo "FAIL: a refusal would then be asserted for something other than the seam"
+    fails=$((fails + 1))
+fi
+
+# A front-proxy fixture with NO seam header is refused.
+set_pins fp-no-seam-01 abc123 front-proxy baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000036)" --driver-mode || rc=$?
+clear_pins
+check "a front-proxy fixture with no seam header refuses with exit 1" "1" "$rc"
+check_log "the refusal says the run did not transit the MITM listener" \
+    "did not transit the MITM listener" "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/fp-no-seam-01" ]; then
+    echo "FAIL: a front-proxy fixture with no seam header reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a front-proxy fixture with no seam header does not reach the corpus"
+fi
+if [ -d "$(captured_of "$work")" ] &&
+    [ -n "$(find "$(captured_of "$work")" -maxdepth 1 -name '.tmp.*' -print -quit)" ]; then
+    echo "FAIL: the seam-absent refusal left a staged tmp directory behind"
+    fails=$((fails + 1))
+else
+    echo "PASS: the seam-absent refusal leaves no staged tmp directory"
+fi
+rm -rf "$work"
+
+# PAIRED CONTROL: the same case WITH the seam header promotes.
+set_pins fp-seam-01 abc123 front-proxy baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$seam_trace" --driver-mode || rc=$?
+clear_pins
+check "a front-proxy fixture carrying the seam header promotes at exit 0" "0" "$rc"
+seam_headers="$(captured_of "$work")/anthropic-api/fp-seam-01/ingress_request.headers.json"
+if [ -f "$seam_headers" ] && grep -qF "$SEAM_HEADER" "$seam_headers"; then
+    echo "PASS: the promoted front-proxy fixture retains the seam header name"
+else
+    echo "FAIL: the front-proxy fixture did not promote with its seam header"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+# The gate reads the NAME, never the value: by promotion time the scrub
+# gate has replaced the nonce with its placeholder, so a value comparison
+# would be testing the scrub gate instead of the fixture's provenance.
+if [ -f "$seam_headers" ] && ! grep -qF "d41d8cd98f00b204e9800998ecf8427e" "$seam_headers"; then
+    echo "PASS: the seam header's VALUE is redacted in the promoted fixture"
+else
+    echo "FAIL: the seam nonce survived into the promoted fixture"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+unset seam_headers
+
+# The REVERSE direction: a base-url fixture that DOES carry the seam
+# header is refused. Without it the gate is satisfiable by one that only
+# ever looks at front-proxy runs.
+set_pins bu-seam-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$seam_trace" --driver-mode || rc=$?
+clear_pins
+check "a base-url fixture carrying the seam header refuses with exit 1" "1" "$rc"
+check_log "the refusal says the run DID transit the MITM listener" \
+    "DID transit the MITM listener" "$work/rig.log"
+if [ -d "$(captured_of "$work")/anthropic-api/bu-seam-01" ]; then
+    echo "FAIL: a base-url fixture carrying the seam header reached the corpus"
+    fails=$((fails + 1))
+else
+    echo "PASS: a base-url fixture carrying the seam header does not reach the corpus"
+fi
+rm -rf "$work"
+
+# PAIRED CONTROL for the reverse: base-url WITHOUT the header promotes.
+# (Case 8's landing is the same shape; this one is the seam gate's own
+# control, so a gate that refused every base-url run would still fail here.)
+set_pins bu-no-seam-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000037)" --driver-mode || rc=$?
+clear_pins
+check "a base-url fixture with no seam header promotes at exit 0" "0" "$rc"
+if [ -f "$(captured_of "$work")/anthropic-api/bu-no-seam-01/meta.json" ]; then
+    echo "PASS: a base-url fixture with no seam header is promoted"
+else
+    echo "FAIL: a clean base-url fixture was not promoted (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# The match is CASE-INSENSITIVE on the name: HTTP header names are
+# case-insensitive on the wire, and a client or a proxy hop may spell the
+# seam header in any case. A case-sensitive gate would refuse a real
+# front-proxy capture.
+set_pins fp-seam-upper-01 abc123 front-proxy baseline
+work="$(make_repo)"
+upper_seam="$(printf '%s' "$SEAM_HEADER" | tr '[:lower:]' '[:upper:]')"
+rc=0
+rig_run "$work" \
+    "$(trace_driver 019eab77-0000-4000-8000-000000000038 |
+        sed "s/\(ingress request headers direction=\"ingress\" headers=\[\)/\1[\"$upper_seam\",\"nonce\"],/")" \
+    --driver-mode || rc=$?
+clear_pins
+check "an upper-cased seam header name still satisfies a front-proxy claim" "0" "$rc"
+rm -rf "$work"
+unset upper_seam
+
+# Unreadable captured ingress headers are a REFUSAL, not a pass: the mode
+# claim is unprovable, and the fail-open answer would promote exactly the
+# fixture whose provenance nothing could check. The trace omits the ingress
+# header line entirely, so the rig writes no header file.
+set_pins fp-headerless-01 abc123 front-proxy baseline
+work="$(make_repo)"
+rc=0
+rig_run "$work" \
+    "$(trace_driver 019eab77-0000-4000-8000-000000000039 |
+        grep -vF 'ingress request headers')" --driver-mode || rc=$?
+clear_pins
+check "a fixture whose ingress headers cannot be read is refused" "1" "$rc"
+check_log "the refusal says the connection mode is unprovable" "unprovable" \
+    "$work/rig.log"
+rm -rf "$work"
+unset seam_trace
 
 # --- Case 20: --out confinement, both directions ---------------------
 # The confinement lives in scripts/drivers/lib/confine.sh, sourced by the

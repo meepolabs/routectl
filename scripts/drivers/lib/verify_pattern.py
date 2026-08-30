@@ -9,6 +9,11 @@ the predicate side of that claim -- one predicate per pattern token in
 `validate_case.py`'s `WIRE_PATTERNS`, read off the fixture's own captured
 bytes.
 
+Invoked at the two promotion boundaries: `capture_fixtures.sh`'s
+`write_fixture` in driver mode (after the scrub `--check`, before the
+promoting `mv`) and `promote_fixture.sh` on the staged copy. A refusal
+discards the fixture rather than landing it.
+
 Every predicate keys on the INGRESS side only. That is what stops it
 becoming a per-provider shape parser: the case controls what the client
 sends, not what any provider dialect the request is translated into looks

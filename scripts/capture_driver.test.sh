@@ -90,7 +90,7 @@ canned_trace() {
     local id="019eab77-0000-4000-8000-0000000000d1"
     local span="request{method=POST path=/v1/messages request_id=$id}"
     local target="routectl_core::log_safe:"
-    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false'
+    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -105,6 +105,26 @@ canned_trace() {
 TRACE
 }
 
+# A canned trace whose ingress structural line carries cache breakpoints.
+# The rig now refuses to promote a fixture that does not exhibit the wire
+# pattern its case claims, so a case claiming `cache-breakpoints` needs a
+# trace that shows them -- the default trace above is `baseline`, which is
+# what every other case in this suite claims.
+canned_trace_cache_breakpoints() {
+    canned_trace | sed 's/cache_control_count=0/cache_control_count=2/'
+}
+
+# A canned trace whose captured ingress headers carry the MITM seam header
+# -- what a request that really transited the front proxy leaves in the
+# trace. The rig refuses to promote a `front-proxy` fixture without it, so
+# a front-proxy case in this suite needs this trace and not the default.
+# The name is read out of the rig rather than restated, so the two spellings
+# cannot drift apart.
+SEAM_HEADER="$(sed -n 's/^MITM_SEAM_HEADER="\(.*\)"$/\1/p' "$RIG")"
+canned_trace_front_proxy() {
+    canned_trace | sed 's/\(ingress request headers direction="ingress" headers=\[\)/\1["'"$SEAM_HEADER"'","d41d8cd98f00b204e9800998ecf8427e"],/'
+}
+
 # A canned trace holding a SENT request that never completed: no
 # `upstream success body` and no `stream summary` line, so the rig finds
 # nothing to capture and refuses nothing. The runner must surface that as
@@ -113,7 +133,7 @@ canned_trace_no_completion() {
     local id="019eab77-0000-4000-8000-0000000000d2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
     local target="routectl_core::log_safe:"
-    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape="" output_config_effort="" tool_choice_shape="" cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta="" provider_extras_keys="" stream=false'
+    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -296,6 +316,7 @@ make_work() {
     cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
     cp "$HERE/drivers/lib/confine.sh" "$work/repo/scripts/drivers/lib/confine.sh"
     cp "$HERE/drivers/lib/validate_case.py" "$work/repo/scripts/drivers/lib/validate_case.py"
+    cp "$HERE/drivers/lib/verify_pattern.py" "$work/repo/scripts/drivers/lib/verify_pattern.py"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
     cp "$HERE/drivers/config/anthropic-api.front-proxy.toml" \
         "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml"
@@ -428,7 +449,13 @@ EXPECTED_SHA="$(sha256sum "$LANE_CONFIG" | cut -d' ' -f1)"
 # One healthy run carries most of the contract: the workspace the driver
 # sees, the pins it sees, and the fixture the rig lands from the trace the
 # runner captured off the daemon's stderr.
+#
+# Case 1's case file claims `cache-breakpoints` (a pattern no default
+# anywhere uses, so its assertions are about the derivation), so the canned
+# trace is the one that EXHIBITS breakpoints -- the rig's promotion gate
+# reads the recorded claim against the captured bytes.
 work="$(make_work)"
+canned_trace_cache_breakpoints >"$work/canned-trace.log"
 port_a="$(free_port)"
 rc=0
 # The inherited proxy carriers are what make the two no-carrier
@@ -570,6 +597,10 @@ free_port_pair() {
 }
 
 work="$(make_work)"
+# The trace carries the MITM seam header because the rig refuses to promote
+# a front-proxy fixture whose captured headers do not prove transit -- an
+# environment carrier states intent, the seam header is the evidence.
+canned_trace_front_proxy >"$work/canned-trace.log"
 pair_lo="$(free_port_pair)"
 pair_hi=$((pair_lo + 1))
 rc=0
