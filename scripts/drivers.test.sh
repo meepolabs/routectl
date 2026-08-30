@@ -650,6 +650,21 @@ denies "a body carrying neither turn list is refused naming both keys" \
     "$(stage no-turn-list "" '{"model":"gpt-5","tools":[{"name":"read"}]}')" \
     tool-use-multiturn "no turn list under any of messages, input"
 
+# A body carrying BOTH turn-list keys is refused as AMBIGUOUS rather than
+# resolved by precedence. No dialect emits two, so such a body is
+# hand-edited or hybrid, and satisfying the claim from one list while the
+# other contradicts it is the lie this gate exists to refuse. Both legs
+# matter: the second proves an EMPTY sibling key still counts as present,
+# which a presence check written as "non-empty" would miss.
+both_keys_populated='{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}],"input":[{"type":"function_call","call_id":"c1","name":"read"}]}'
+denies "a body carrying both turn lists is refused as ambiguous" \
+    "$(stage both-turn-lists "" "$both_keys_populated")" \
+    tool-use-multiturn "more than one turn list"
+both_keys_one_empty='{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}],"input":[]}'
+denies "an empty sibling turn-list key still counts as present" \
+    "$(stage both-turn-lists-one-empty "" "$both_keys_one_empty")" \
+    tool-use-multiturn "more than one turn list"
+
 # An EMPTY turn list under either key is the same refusal: an empty list
 # carries no census, and treating it as present would make the reason
 # point at an ordering clause no turn could have failed.
