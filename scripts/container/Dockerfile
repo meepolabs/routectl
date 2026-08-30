@@ -101,3 +101,33 @@ RUN mkdir -p /opt/claude \
     && rm -rf /opt/claude/.claude.json /opt/claude/.claude /opt/claude/.cache \
     && chmod -R a+rX /opt/claude \
     && su -s /bin/sh -c 'claude --version' nobody
+
+# Codex ships a single static-musl binary with no install script, so there is
+# no per-build machine-identity state to remove: unlike the Claude installer
+# above, nothing here ever runs as root except `curl`/`tar`, so nothing
+# root-owned lands in the layer either.
+#
+# Same shape as CLAUDE_VERSION otherwise: build ARG for convenience only (the
+# fixture record is `meta.client.version` off the running binary), 0755 on
+# the install root so the unprivileged run-time uid can traverse and execute,
+# and an absolute symlink into /usr/local/bin so the binary is reachable
+# regardless of HOME.
+ARG CODEX_VERSION=0.151.0
+
+# The release asset name encodes the arch, matching this Dockerfile's
+# existing single-arch (x86_64) assumption -- no TARGETARCH here either.
+# tar/gunzip are already present in the base image; no new apt dependency.
+#
+# The smoke test runs as the UNPRIVILEGED uid, same rationale as claude's:
+# root ignores mode bits, so a root-only check would pass even if the mode
+# bits were wrong. `nobody` has no writable passwd HOME, so codex's own
+# best-effort PATH-alias write on startup fails harmlessly (a warning on
+# stderr, not a build failure) rather than leaving state in the layer.
+RUN mkdir -p /opt/codex \
+    && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
+        -o /tmp/codex.tar.gz \
+    && tar -xzf /tmp/codex.tar.gz -C /opt/codex \
+    && rm -f /tmp/codex.tar.gz \
+    && ln -s /opt/codex/codex-x86_64-unknown-linux-musl /usr/local/bin/codex \
+    && chmod -R a+rX /opt/codex \
+    && su -s /bin/sh -c 'codex --version' nobody
