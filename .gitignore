@@ -68,3 +68,9 @@ bench-results/
 # here is a tmpfs a cold build already fills. Removed by the self-test's
 # own exit trap; the ignore rule covers a run killed mid-scan.
 .routectl-image-scan-work/
+
+# Bytecode cache for the driver-side python libraries. The self-test
+# IMPORTS them (to read the closed pattern vocabulary out of its one
+# definition rather than restating it), and an import writes this tree
+# next to the source.
+__pycache__/

@@ -672,6 +672,37 @@ session:
 python3 scripts/drivers/lib/validate_case.py --check scripts/drivers/cases/thinking-01.json
 ```
 
+A case DECLARES a wire pattern; whether the captured bytes exhibit it is a
+separate question, answered by `scripts/drivers/lib/verify_pattern.py`. It
+takes a fixture directory plus the pattern it claims and exits non-zero
+with the failing clause on stderr:
+
+```
+python3 scripts/drivers/lib/verify_pattern.py \
+  crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01 baseline
+```
+
+Every predicate keys on the INGRESS side only -- the case controls what the
+client sends, not the provider dialect the request is translated into.
+`baseline`, `thinking`, and `cache-breakpoints` read the ingress structural
+summary line from `structural.txt`; `tool-use-multiturn` and
+`large-context` read `ingress_request.json` (a resent tool_use /
+tool_result pair, and a body byte floor). A pattern token with no predicate
+is REFUSED rather than waved through, so extending the closed vocabulary
+without extending the table cannot promote an unverified fixture.
+
+The three structural predicates exist twice, in Python here and as
+reference logic in the Rust test suite, and
+`scripts/drivers/lib/wire_pattern_classification.tsv` is the shared
+classification set that keeps them honest: one structural line per record,
+paired with the patterns it does and does not satisfy. Today only the
+Python predicates are asserted against it (through
+`scripts/drivers.test.sh`); the Rust half of the cross-check is not wired
+up yet, so the file is committed ahead of it rather than being a live
+two-language gate. Scoped to those three predicates -- the two body-census
+predicates have no Rust counterpart to drift from, and a structural line
+carries nothing that decides them.
+
 ### The harness drivers
 
 One FILE per harness under `scripts/drivers/`, never a dispatch statement:

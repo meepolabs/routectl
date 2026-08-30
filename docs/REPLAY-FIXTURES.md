@@ -366,13 +366,25 @@ Fields:
   the other environment pins; EMPTY on a live-box capture, which cannot
   observe it, and on any fixture predating the key.
 
-  **In this release the claim is RECORDED, not ENFORCED.** No predicate
-  refuses a fixture whose body does not exhibit the shape it claims: the
-  loader stores the string and compares nothing, and the one executed
-  shape check (`crates/routectl-cli/tests/wire_pattern_baseline.rs`)
-  verifies the `baseline` predicate against exactly ONE committed
-  fixture, by name. A corpus-wide claim-vs-body gate does not exist yet,
-  so a mismatched claim on any other fixture goes unnoticed.
+  **In this release the claim is RECORDED, not yet ENFORCED AT
+  PROMOTION.** The predicate that decides it exists --
+  `scripts/drivers/lib/verify_pattern.py`, one predicate per pattern in
+  the closed vocabulary, reading the fixture's own ingress structural
+  line or ingress body -- and can be run against a staged or committed
+  fixture directory by hand:
+
+  ```
+  python3 scripts/drivers/lib/verify_pattern.py \
+    crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01 baseline
+  ```
+
+  What does not exist yet is the automatic refusal: the capture rig does
+  not invoke it, the loader stores the string and compares nothing, and
+  the one executed shape check
+  (`crates/routectl-cli/tests/wire_pattern_baseline.rs`) verifies the
+  `baseline` predicate against exactly ONE committed fixture, by name. So
+  a mismatched claim on any other fixture still goes unnoticed unless
+  someone runs the predicate.
 - `client` -- which client produced the request. `name` / `version`
   come from the captured ingress `user-agent`; `connection_mode` comes
   from `ROUTECTL_FIXTURE_CONNECTION_MODE`, because the trace cannot
