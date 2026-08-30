@@ -4,9 +4,10 @@
 # Sourced, never executed. It owns the parts of the driver contract that
 # are identical for every harness -- reading the case through the single
 # validator, seeding the throwaway cwd with the files the prompts name,
-# proving the daemon is reachable before a client is launched, and
-# recording the client version -- so a per-harness driver holds only the
-# argv and env mapping that is genuinely specific to its client.
+# proving the daemon is reachable before a client is launched, recording
+# the client version, and loading a committed client profile in the one
+# order that is safe -- so a per-harness driver holds only the argv and env
+# mapping that is genuinely specific to its client.
 #
 # ONE FILE PER HARNESS is the layout rule this library exists to keep
 # affordable: without shared scaffolding each driver would carry a copy of
@@ -20,6 +21,7 @@
 
 DRIVERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CASES_DIR="$DRIVERS_DIR/cases"
+PROFILES_DIR="$DRIVERS_DIR/profiles"
 VALIDATE_CASE="$DRIVERS_DIR/lib/validate_case.py"
 
 driver_die() {
@@ -204,6 +206,84 @@ driver_local_bearer() {
   printf '%s\n' "${ROUTECTL_DRIVER_CLIENT_BEARER:-$DRIVER_LOCAL_BEARER_PLACEHOLDER}"
 }
 
+# The carriers that DECIDE which daemon a client reaches. Named once,
+# because two consumers must agree on the set: the connection-mode apply
+# below unsets every one of them before setting its own, and the client
+# profile loader REFUSES a profile that names any of them. A carrier added
+# here is therefore forbidden in a profile the moment it becomes a
+# carrier, with no second list to remember.
+DRIVER_CONNECTION_CARRIERS="ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NODE_EXTRA_CA_CERTS"
+
+# The ORDERING LATCH. Set by the connection-mode apply, read by the
+# profile loader, and the reason the loader can refuse a late load at all.
+DRIVER_CONNECTION_MODE_APPLIED=0
+
+# Load one committed client profile from scripts/drivers/profiles/ (see
+# that directory's README for the closed-set rule and the forbidden keys).
+#
+# BEFORE the connection-mode apply, never after. A profile sourced late
+# could re-set ANTHROPIC_BASE_URL -- which the apply had just cleared --
+# and the run would silently capture the OPERATOR'S LIVE DAEMON instead of
+# the hermetic one. That is not hypothetical: this project caught exactly
+# that fault once, which is why the ordering is a refusal in code rather
+# than a sentence in a README.
+#
+# The file is PARSED, not sourced: `key=value` lines only, so a profile
+# cannot run a command, and the forbidden classes below are checkable
+# rather than a convention. Values are taken literally -- no expansion,
+# no quote stripping.
+#
+# args: <profile-name>, resolving scripts/drivers/profiles/<name>.env
+driver_load_client_profile() {
+  local name="$1" path line key value carrier
+
+  [ "$DRIVER_CONNECTION_MODE_APPLIED" = 0 ] ||
+    driver_die "client profile '$name' was loaded AFTER the connection-mode apply; a profile that re-sets a connection carrier would point the client at the operator's live daemon" 2
+
+  case "$name" in
+    ''|*/*|*..*)
+      driver_die "client profile name '$name' is not a committed profile in the closed set" 2 ;;
+  esac
+  path="$PROFILES_DIR/$name.env"
+  [ -r "$path" ] ||
+    driver_die "no committed client profile '$name' at $path" 2
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+      *=*) ;;
+      *) driver_die "client profile '$name' carries a non-key=value line: $line" 2 ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+
+    case "$key" in
+      *[!A-Za-z0-9_]*|[0-9]*|'')
+        driver_die "client profile '$name' names an invalid key '$key'" 2 ;;
+    esac
+    case "$value" in
+      *'$'*|*'`'*)
+        driver_die "client profile '$name' key '$key' carries a shell substitution; a profile is literal key=value" 2 ;;
+    esac
+    for carrier in $DRIVER_CONNECTION_CARRIERS; do
+      [ "$key" != "$carrier" ] ||
+        driver_die "client profile '$name' names the connection carrier '$key'; the connection mode owns those, not a profile" 2
+    done
+    # Credential-shaped keys, matched on the SUFFIX rather than anywhere in
+    # the name: a substring test on `TOKEN` refuses `MAX_THINKING_TOKENS`,
+    # which is one of the few keys a profile legitimately carries (the
+    # thinking tier is a body-shape axis). Refusing it would make the whole
+    # seam unusable for its first real profile.
+    case "$key" in
+      *_API_KEY|API_KEY|*_TOKEN|*_SECRET|*_BEARER|*_PASSWORD|*_CREDENTIALS)
+        driver_die "client profile '$name' names the credential '$key'; a provider credential reaches routectl through the lane config's api_key_ref, never a committed profile" 2 ;;
+    esac
+
+    export "$key=$value"
+  done <"$path"
+}
+
 # Export the environment an Anthropic-dialect client needs to reach the
 # runner's daemon in the run's connection mode. THE TWO MODES EMIT
 # DIFFERENT WIRE SHAPES -- a MITM front proxy carries `role:"system"`
@@ -243,8 +323,13 @@ driver_apply_anthropic_connection_mode() {
   # its proxy variables would leave an inherited ANTHROPIC_BASE_URL
   # pointing the client at whatever daemon the operator runs, and the
   # capture would be of that daemon rather than of the hermetic one.
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
-  unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NODE_EXTRA_CA_CERTS
+  #
+  # The same reason is why the latch closes here: from this point on, a
+  # client profile load is refused, because a profile could re-set exactly
+  # what this line clears.
+  # shellcheck disable=SC2086 # the carrier list is a deliberate word split
+  unset $DRIVER_CONNECTION_CARRIERS
+  DRIVER_CONNECTION_MODE_APPLIED=1
 
   case "$ROUTECTL_FIXTURE_CONNECTION_MODE" in
     base-url)
