@@ -689,7 +689,7 @@ GEMINI_NO_CRED_ROOT="$(new_scratch)"
 rc=0
 provider_run "$GEMINI_NO_CRED_ROOT" -- \
     --scratch "$GEMINI_NO_CRED_ROOT/land" --provider gemini -- \
-    --lane anthropic-api --case plain-turn-01 \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
     -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
 check "a provider with no seat entry and no env var is refused with exit 20" \
     "20" "$rc"
@@ -707,7 +707,8 @@ rc=0
 provider_run "$GEMINI_OK_ROOT" \
     "ROUTECTL_DRIVER_GEMINI_API_KEY=$FAKE_GEMINI_KEY" -- \
     --scratch "$GEMINI_OK_ROOT/land" --provider gemini -- \
-    --lane anthropic-api --case plain-turn-01 --timeout 20 \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+    --timeout 20 \
     -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
 if container_available; then
     check "the SAME provider with its env var set is not refused" "0" "$rc"
@@ -729,11 +730,18 @@ fi
 # An unknown provider is a USAGE error (2), not a missing credential (20).
 # The distinction is what sends the operator to their own typo instead of
 # to their seat store.
+#
+# The runner's own usage code is ALSO 2, so the exit code alone cannot say
+# which script refused. `check_refusal` is what makes this leg honest: it
+# requires a `run_capture:` line naming the fault, and the runner's usage
+# errors carry a `capture_driver:` prefix. The argv is otherwise complete
+# for the same reason -- a leg missing a required runner flag would exit 2
+# from the runner and read as a pass.
 BAD_PROVIDER_ROOT="$(new_scratch)"
 rc=0
 provider_run "$BAD_PROVIDER_ROOT" -- \
     --scratch "$BAD_PROVIDER_ROOT/land" --provider anthropic-api -- \
-    --lane anthropic-api --case plain-turn-01 \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
     -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
 check "an unknown --provider is a usage error, not a missing credential" "2" "$rc"
 check_refusal "the unknown-provider refusal says a lane name is not a provider" \
@@ -767,7 +775,7 @@ NO_ACCOUNT_ROOT="$(new_scratch)"
 rc=0
 LEG_SEAT="$NO_ACCOUNT_SEAT" provider_run "$NO_ACCOUNT_ROOT" -- \
     --scratch "$NO_ACCOUNT_ROOT/land" --provider openai -- \
-    --lane anthropic-api --case plain-turn-01 \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
     -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
 check "a codex seat token with no account id is refused with exit 20" "20" "$rc"
 check_refusal "the missing-account-id refusal says chatgpt-oauth requires it" \
@@ -994,7 +1002,8 @@ run_container_legs() {
     root="$(new_scratch healthy)"
     rc=0
     provider_run "$root" -- --scratch "$root/land" --provider openai -- \
-        --lane anthropic-api --case plain-turn-01 --timeout 20 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        --timeout 20 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "a run asking for openai alone exits 0" "0" "$rc"
 
@@ -1026,7 +1035,8 @@ run_container_legs() {
     provider_run "$root" \
         "ROUTECTL_DRIVER_OPENAI_API_KEY=$FAKE_GEMINI_KEY" -- \
         --scratch "$root/land" --provider openai -- \
-        --lane anthropic-api --case plain-turn-01 --timeout 20 \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        --timeout 20 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "an env-sourced openai token is not refused for want of an account id" \
         "0" "$rc"
