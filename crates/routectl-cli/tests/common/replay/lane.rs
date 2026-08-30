@@ -72,6 +72,26 @@
 //! [`unexplained_for_fixture`] -- [`unexplained`] is the weaker
 //! fixture-less form and treats every entry as eligible.
 //!
+//! # What a NORMALIZER cannot see, and where its gate lives instead
+//!
+//! Neither hook above serves a normalizer: its seam takes a BODY rather
+//! than a fixture, so an [`Exception::applies_to`] declared on one would be
+//! silently ignored (`only_matchers_carry_a_fixture_gate` pins that).
+//!
+//! `system-turn-lift` still needs a gate, because whether the production
+//! lift ran is a property of the PAIR and not of either body: under the
+//! Forward system-turn policy the `role:"system"` turns ride the wire IN
+//! PLACE, and removing them from the ingress side then MANUFACTURES a
+//! misalignment the wire never carried -- one divergence per surviving
+//! index, on exactly the fixtures where nothing was lifted. So the gate
+//! lives at the CALL SITE: [`normalize_ingress_for_pair`] reads both
+//! bodies' system-turn counts through [`system_turns_were_lifted`] and
+//! consults the entry only when the pair evidences a lift.
+//!
+//! PARTIAL loss is deliberately not a lift. The production lift takes
+//! every `Role::System` turn or none, so turns that are partly gone went
+//! to some other transform or to real wire loss and must stay a finding.
+//!
 //! # Path-string ambiguity: the decision taken here
 //!
 //! `diff_all` joins object keys with `.`, so a literal key containing a
@@ -704,6 +724,44 @@ impl Exception {
     }
 }
 
+/// The id of the entry whose ingress-side rewrite mirrors the system-turn
+/// lift. Named once so the entry and the gate that selects it cannot
+/// drift apart.
+const SYSTEM_TURN_LIFT_ID: &str = "system-turn-lift";
+
+/// How many `role: "system"` turns `.messages` carries. Zero for a body
+/// with no `messages` array, which is the same stance
+/// [`without_system_turns`] takes on that shape.
+pub fn in_band_system_turns(body: &Value) -> usize {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .map_or(0, |messages| {
+            messages
+                .iter()
+                .filter(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+                .count()
+        })
+}
+
+/// Whether a fixture pair evidences the system-turn lift: the ingress
+/// carried in-band system turns and the wire carried none.
+///
+/// Two non-lifts this must keep distinguishing, because the ingress-side
+/// rewrite would MANUFACTURE a misalignment that was never on the wire in
+/// either:
+///
+/// - EQUAL nonzero counts -- the Forward system-turn policy, where the
+///   turns ride the wire in place. Nothing was lifted, so nothing may be
+///   removed from the comparison's ingress side.
+/// - PARTIAL loss -- some turns gone, some still on the wire. The lift
+///   takes every `Role::System` turn or none, so a partial loss is some
+///   OTHER transform (or real wire loss) and has to stay a finding.
+///   Treating it as a lift is how this normalizer would absorb the class
+///   the harness exists to surface.
+pub fn system_turns_were_lifted(ingress: &Value, outgoing: &Value) -> bool {
+    in_band_system_turns(ingress) > 0 && in_band_system_turns(outgoing) == 0
+}
+
 /// Drop every `role: "system"` turn from `.messages`, the ingress-side
 /// mirror of the system-turn lift. Immutable: returns a new body.
 ///
@@ -922,7 +980,9 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 7] = [
                  array. Reachability caveat, re-derive before trusting it: the lift runs \
                  under the Lift system-turn policy only -- under Forward the turns ride the \
                  wire in place and removing them from the ingress side would INTRODUCE a \
-                 misalignment.",
+                 misalignment. That is why the rewrite is selected PER PAIR by \
+                 `system_turns_were_lifted` rather than per lane: it is consulted only when \
+                 the ingress carried in-band system turns and the wire carried none.",
         site_symbol: "lift_legacy_system_stripped",
         site_path: "crates/routectl-providers/src/anthropic_api/system.rs",
         path_predicate: is_messages_path,
@@ -1173,12 +1233,47 @@ pub fn exceptions_for_lane(lane: &LaneKey) -> Vec<&'static Exception> {
 /// Apply every normalizer registered for `lane` to an ingress body, in
 /// table order, and return the body to pass as `expected`. Each
 /// application that changed something counts against its entry.
+///
+/// For a caller that holds only ONE body. A corpus walk holds both and
+/// uses [`normalize_ingress_for_pair`], which additionally decides whether
+/// the system-turn lift actually happened for this capture -- the same
+/// weaker-form / fixture-aware-form split as [`unexplained`] vs
+/// [`unexplained_for_fixture`], and for the same reason: this form applies
+/// `system-turn-lift`'s rewrite unconditionally, which on a pair whose
+/// turns rode the wire in place MANUFACTURES a misalignment that was never
+/// transmitted.
 pub fn normalize_ingress_for_lane(lane: &LaneKey, ingress: &Value) -> Value {
-    exceptions_for_lane(lane)
+    fold_normalizers(&exceptions_for_lane(lane), ingress)
+}
+
+/// Apply the normalizers registered for `lane` that this fixture PAIR
+/// evidences, and return the body to pass as `expected`.
+///
+/// `system-turn-lift` is length-changing on `.messages` and is the one
+/// entry whose applicability a single body cannot settle: whether the
+/// production lift ran is a property of the PAIR (see
+/// [`system_turns_were_lifted`]). Under the Forward system-turn policy the
+/// turns ride the wire in place, and rewriting the ingress side then
+/// injects a misalignment the wire never carried -- inflating a handful of
+/// real differences into one per surviving index. So the entry is consulted
+/// only when the pair evidences a lift; where it does fire, its rewrite and
+/// its hit counting are exactly as before.
+pub fn normalize_ingress_for_pair(lane: &LaneKey, ingress: &Value, outgoing: &Value) -> Value {
+    let lifted = system_turns_were_lifted(ingress, outgoing);
+    let eligible: Vec<&'static Exception> = exceptions_for_lane(lane)
         .into_iter()
-        .fold(ingress.clone(), |body, entry| {
-            entry.normalize(&body).unwrap_or(body)
-        })
+        .filter(|entry| lifted || entry.id != SYSTEM_TURN_LIFT_ID)
+        .collect();
+    fold_normalizers(&eligible, ingress)
+}
+
+/// The shared fold: apply each entry's pre-diff rewrite in table order.
+/// Order matters -- the two normalizers touch different subtrees today,
+/// but a future pair that touch one must compose deterministically.
+fn fold_normalizers(entries: &[&'static Exception], ingress: &Value) -> Value {
+    entries.iter().fold(ingress.clone(), |body, entry| {
+        entry.normalize(&body).unwrap_or(body)
+    })
 }
 
 /// The divergences on `lane` that no exception explains, with every entry

@@ -27,9 +27,20 @@
 //! index, and the only exception broad enough to absorb it would cover
 //! essentially the whole message array. So the lane's NORMALIZER entries
 //! rewrite the ingress side first
-//! ([`normalize_ingress_for_lane`]), and only the realigned pair is
+//! ([`normalize_ingress_for_pair`]), and only the realigned pair is
 //! diffed. Matcher entries stay post-hoc predicates over the returned
 //! divergence set.
+//!
+//! The `_for_pair` form, not the lane-only one, is what this harness calls,
+//! and the difference is load-bearing: the system-turn rewrite is applied
+//! ONLY to a pair that evidences a lift (ingress carries in-band
+//! `role:"system"` turns, the wire carries none). Applied unconditionally it
+//! would manufacture the very misalignment it exists to remove on every
+//! capture whose turns rode the wire in place -- the Forward policy, which
+//! is what a top-level `system` from the client selects. Equal nonzero
+//! counts are diffed raw and adjudicate clean; a PARTIAL loss is diffed raw
+//! too and stays a finding, because the production lift takes every system
+//! turn or none.
 //!
 //! # Verdicts
 //!
@@ -117,7 +128,7 @@ use super::json_diff::{Divergence, DivergenceKind, diff_all};
 use super::lane::{
     INGRESS_IDS, LaneClass, LaneKey, all_exceptions, class_for_dialects,
     egress_lane_from_fixture_kind, exceptions_for_lane, ingress_dialect,
-    normalize_ingress_for_lane, unexplained_for_fixture,
+    normalize_ingress_for_pair, unexplained_for_fixture,
 };
 use super::loader::Fixture;
 
@@ -566,7 +577,11 @@ fn compare_fixture(
     class: LaneClass,
     baseline: &[BaselineEntry],
 ) -> FixtureOutcome {
-    let normalized_ingress = normalize_ingress_for_lane(lane_key, &fixture.ingress_request);
+    let normalized_ingress = normalize_ingress_for_pair(
+        lane_key,
+        &fixture.ingress_request,
+        &fixture.outgoing_request,
+    );
     let normalized = normalized_ingress != fixture.ingress_request;
     let divergences = diff_all(
         &fixture.outgoing_request,
@@ -846,6 +861,7 @@ fn degradations(run: &ConservationRun) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::lane::{in_band_system_turns, system_turns_were_lifted};
     use super::super::loader::{FIXTURE_SCHEMA_VERSION, FixtureClient, FixtureMeta};
     use super::*;
     use serde_json::json;
@@ -1225,6 +1241,222 @@ mod tests {
             normalized.failures,
         );
         assert!(hits(&normalized, "system-turn-lift") > 0);
+    }
+
+    // ---------- the system-turn rewrite fires only on an actual lift ----------
+
+    /// A pair whose only interesting property is its `messages[]` shape.
+    /// Everything else is conserved, so any divergence the walk reports is
+    /// attributable to the system turns.
+    fn system_turn_pair(name: &str, ingress: Value, outgoing: Value) -> Fixture {
+        fixture(
+            name,
+            "anthropic",
+            "anthropic",
+            json!({"model": "m", "max_tokens": 1024, "messages": ingress}),
+            json!({"model": "m", "max_tokens": 1024, "messages": outgoing}),
+        )
+    }
+
+    fn user(text: &str) -> Value {
+        json!({"role": "user", "content": text})
+    }
+
+    fn system(text: &str) -> Value {
+        json!({"role": "system", "content": text})
+    }
+
+    fn assistant(text: &str) -> Value {
+        json!({"role": "assistant", "content": text})
+    }
+
+    /// CONTROL 1: the pair that DID experience the lift -- ingress carries
+    /// system turns, the wire carries none -- still normalizes, realigns,
+    /// and counts its hit.
+    #[test]
+    fn a_lifted_pair_is_normalized_and_realigns() {
+        let lifted = system_turn_pair(
+            "lifted",
+            json!([
+                user("one"),
+                system("lifted out of the array"),
+                assistant("two"),
+                system("also lifted"),
+                user("three"),
+            ]),
+            json!([user("one"), assistant("two"), user("three")]),
+        );
+
+        // POSITIVE CONTROL: diffed RAW the removal shifts every later
+        // element, so the clean verdict below is the rewrite working and
+        // not a pair that was already aligned.
+        let raw = diff_all(&lifted.outgoing_request, &lifted.ingress_request, &[]);
+        assert!(
+            raw.iter().any(|d| d.path.starts_with("messages")),
+            "got: {raw:?}",
+        );
+
+        let lifted_run = run(&[lifted]);
+
+        assert_eq!(lifted_run.lanes[0].normalized, 1);
+        assert_eq!(
+            lifted_run.lanes[0].unexplained, 0,
+            "a real lift must realign: {:?}",
+            lifted_run.failures,
+        );
+        assert_eq!(lifted_run.lanes[0].failed, 0, "{:?}", lifted_run.failures);
+        assert_eq!(
+            hits(&lifted_run, "system-turn-lift"),
+            1,
+            "where the lift fires the hit counting is unchanged: one rewritten body",
+        );
+    }
+
+    /// CONTROL 2: the Forward-policy pair -- equal NONZERO counts, the turns
+    /// rode the wire in place. The rewrite must not fire, because removing
+    /// them from the ingress side would manufacture a misalignment the wire
+    /// never carried.
+    #[test]
+    fn a_preserved_pair_is_not_normalized_and_adjudicates_clean() {
+        let messages = json!([user("one"), system("rode the wire"), assistant("two")]);
+        let preserved = system_turn_pair("preserved", messages.clone(), messages);
+
+        let preserved_run = run(&[preserved]);
+
+        assert_eq!(
+            preserved_run.lanes[0].normalized, 0,
+            "no lift occurred, so no body may be rewritten",
+        );
+        assert_eq!(
+            hits(&preserved_run, "system-turn-lift"),
+            0,
+            "an entry that did not fire must not be credited with a hit",
+        );
+        assert_eq!(
+            preserved_run.lanes[0].unexplained, 0,
+            "the turns are conserved, so the pair adjudicates clean: {:?}",
+            preserved_run.failures,
+        );
+        assert_eq!(
+            preserved_run.lanes[0].failed, 0,
+            "{:?}",
+            preserved_run.failures,
+        );
+    }
+
+    /// CONTROL 3: a PARTIAL loss is not a lift. The production lift takes
+    /// every `Role::System` turn or none, so turns that are partly gone went
+    /// somewhere else and must stay a finding -- this is what keeps the
+    /// thinking-drop class visible instead of absorbed.
+    #[test]
+    fn a_partial_loss_pair_is_not_normalized_and_fails() {
+        let partial = system_turn_pair(
+            "partial-loss",
+            json!([
+                user("one"),
+                system("survives"),
+                assistant("two"),
+                system("vanishes"),
+                user("three"),
+            ]),
+            json!([
+                user("one"),
+                system("survives"),
+                assistant("two"),
+                user("three"),
+            ]),
+        );
+
+        let partial_run = run(&[partial]);
+
+        assert_eq!(
+            partial_run.lanes[0].normalized, 0,
+            "a partial loss must not be absorbed by the lift rewrite",
+        );
+        assert_eq!(hits(&partial_run, "system-turn-lift"), 0);
+        assert!(
+            partial_run.lanes[0].unexplained > 0,
+            "the lost turn must stay a finding: {:?}",
+            partial_run.failures,
+        );
+        assert_eq!(partial_run.lanes[0].failed, 1);
+        assert!(
+            partial_run
+                .failures
+                .iter()
+                .any(|f| f.contains("partial-loss") && f.contains("messages")),
+            "the failure must name the fixture and the subtree: {:?}",
+            partial_run.failures,
+        );
+    }
+
+    /// CONTROL 4: the guard that makes the three above mean something. On a
+    /// pair that DOES evidence a lift, a divergence OUTSIDE the system turns
+    /// still fails -- so the conditional rewrite cannot be satisfied by one
+    /// that excuses whatever it is handed.
+    #[test]
+    fn a_divergence_outside_the_system_turns_still_fails_on_a_lifted_pair() {
+        let mut lossy = system_turn_pair(
+            "lifted-and-lossy",
+            json!([user("one"), system("lifted"), assistant("two")]),
+            json!([user("one"), assistant("two")]),
+        );
+        lossy.outgoing_request["max_tokens"] = json!(512);
+
+        let lossy_run = run(&[lossy]);
+
+        assert_eq!(
+            lossy_run.lanes[0].normalized, 1,
+            "the lift did occur here, so the rewrite fires",
+        );
+        assert_eq!(
+            lossy_run.lanes[0].unexplained, 1,
+            "the halved token budget is nobody's transform: {:?}",
+            lossy_run.failures,
+        );
+        assert_eq!(lossy_run.lanes[0].failed, 1);
+        assert!(
+            lossy_run.failures.iter().any(|f| f.contains("max_tokens")),
+            "got: {:?}",
+            lossy_run.failures,
+        );
+    }
+
+    /// The counts the gate reads, over the four shapes it distinguishes,
+    /// asserted directly on the predicate rather than through a walk.
+    #[test]
+    fn the_lift_gate_reads_both_sides_and_treats_partial_loss_as_no_lift() {
+        let with_turns = json!({"messages": [user("one"), system("s"), assistant("two")]});
+        let two_turns = json!({"messages": [system("a"), user("one"), system("b")]});
+        let no_turns = json!({"messages": [user("one"), assistant("two")]});
+        let one_turn = json!({"messages": [system("a"), user("one")]});
+        let no_array = json!({"model": "m"});
+
+        assert_eq!(in_band_system_turns(&with_turns), 1);
+        assert_eq!(in_band_system_turns(&two_turns), 2);
+        assert_eq!(in_band_system_turns(&no_turns), 0);
+        assert_eq!(in_band_system_turns(&no_array), 0);
+
+        assert!(
+            system_turns_were_lifted(&with_turns, &no_turns),
+            "ingress turns plus a wire with none is the lift",
+        );
+        assert!(
+            !system_turns_were_lifted(&with_turns, &with_turns),
+            "equal nonzero counts are the Forward policy, not a lift",
+        );
+        assert!(
+            !system_turns_were_lifted(&two_turns, &one_turn),
+            "a partial loss is not a lift",
+        );
+        assert!(
+            !system_turns_were_lifted(&no_turns, &no_turns),
+            "no turns on either side is nothing to lift",
+        );
+        assert!(
+            !system_turns_were_lifted(&no_array, &no_array),
+            "a body with no messages array carries no turns to lift",
+        );
     }
 
     // ---------- the unexercised-exception control ----------
