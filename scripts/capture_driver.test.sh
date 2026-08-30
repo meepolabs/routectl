@@ -168,22 +168,29 @@ PY
 }
 
 # The stub `routectl`. Parses just enough of the real `serve` argv to find
-# `--port`, records its own pid, emits the canned trace on stderr, then
-# EXECs the listener -- so the pid the runner captured from `$!` stays the
-# pid of the process actually holding the port, exactly as it does with
-# the real daemon.
+# `--port` and `--mitm-port`, records its own pid, emits the canned trace
+# on stderr, then EXECs the listener -- so the pid the runner captured
+# from `$!` stays the pid of the process actually holding the port,
+# exactly as it does with the real daemon.
 #
 # `STUB_MODE=healthy` serves /health; `STUB_MODE=deaf` holds the process
 # open without ever binding, which is the "daemon came up but never became
 # ready" shape the health precondition exists to catch.
+#
+# When `--mitm-port` arrives, the stub records it and mints the CA under
+# the run's XDG root exactly where the real daemon does at listener start
+# -- so the CA path the runner exports names a readable file, the same
+# property a real front-proxy boot provides.
 write_stub_routectl() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
 set -u
 port=""
+mitm_port=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --port) port="$2"; shift 2 ;;
+        --mitm-port) mitm_port="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
@@ -191,6 +198,12 @@ printf '%s\n' "$$" >"$STUB_PID_FILE"
 printf '%s\n' "$port" >"$STUB_PORT_FILE"
 if [ -r "${STUB_TRACE_FILE:-}" ]; then
     cat "$STUB_TRACE_FILE" >&2
+fi
+if [ -n "$mitm_port" ]; then
+    printf '%s\n' "$mitm_port" >"${STUB_MITM_PORT_FILE:-$STUB_PORT_FILE.mitm}"
+    mkdir -p "$XDG_CONFIG_HOME/routectl/mitm-certs/current"
+    printf -- '-----BEGIN CERTIFICATE-----\nc3R1Yg==\n-----END CERTIFICATE-----\n' \
+        >"$XDG_CONFIG_HOME/routectl/mitm-certs/current/mitm-ca-cert.pem"
 fi
 if [ "${STUB_MODE:-healthy}" = "deaf" ]; then
     exec sleep 600
@@ -223,6 +236,10 @@ set -u
     printf 'config_sha=%s\n' "$ROUTECTL_FIXTURE_CONFIG_SHA"
     printf 'connection_mode=%s\n' "$ROUTECTL_FIXTURE_CONNECTION_MODE"
     printf 'wire_pattern=%s\n' "$ROUTECTL_FIXTURE_WIRE_PATTERN"
+    printf 'proxy_url=%s\n' "${ROUTECTL_DRIVER_PROXY_URL:-}"
+    printf 'proxy_ca=%s\n' "${ROUTECTL_DRIVER_PROXY_CA:-}"
+    printf 'proxy_ca_readable=%s\n' \
+        "$([ -n "${ROUTECTL_DRIVER_PROXY_CA:-}" ] && [ -r "$ROUTECTL_DRIVER_PROXY_CA" ] && echo yes || echo no)"
     printf 'health=%s\n' "$(curl -fsS -m 2 "$ROUTECTL_BASE_URL/health" || echo unreachable)"
 } >"$PROBE_OUT"
 SH
@@ -280,6 +297,8 @@ make_work() {
     cp "$HERE/drivers/lib/confine.sh" "$work/repo/scripts/drivers/lib/confine.sh"
     cp "$HERE/drivers/lib/validate_case.py" "$work/repo/scripts/drivers/lib/validate_case.py"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
+    cp "$HERE/drivers/config/anthropic-api.front-proxy.toml" \
+        "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml"
     write_case "$work/repo/scripts/drivers/cases" driver-selftest-01 \
         "$SELFTEST_CASE_PATTERN_01"
     local case_id
@@ -321,6 +340,7 @@ runner_run() {
         ROUTECTL_BIN="$work/bin/routectl-stub" \
         STUB_PID_FILE="$work/stub.pid" \
         STUB_PORT_FILE="$work/stub.port" \
+        STUB_MITM_PORT_FILE="$work/stub.mitm-port" \
         STUB_TRACE_FILE="$work/canned-trace.log" \
         STUB_LISTENER="$work/bin/listener.py" \
         STUB_MODE="${STUB_MODE:-healthy}" \
@@ -411,6 +431,11 @@ EXPECTED_SHA="$(sha256sum "$LANE_CONFIG" | cut -d' ' -f1)"
 work="$(make_work)"
 port_a="$(free_port)"
 rc=0
+# The inherited proxy carriers are what make the two no-carrier
+# assertions below non-vacuous: a base-url run must CLEAR carriers the
+# caller's environment already holds, not merely decline to add them.
+ROUTECTL_DRIVER_PROXY_URL="http://127.0.0.1:1" \
+ROUTECTL_DRIVER_PROXY_CA="/inherited/must-not-survive.pem" \
 ROUTECTL_DRIVER_PORT_MIN="$port_a" ROUTECTL_DRIVER_PORT_MAX="$port_a" \
     runner_run "$work" --lane anthropic-api --case driver-selftest-01 || rc=$?
 check "a healthy run exits 0" "0" "$rc"
@@ -459,6 +484,12 @@ if [ -f "$work/probe.txt" ]; then
         "$(probe_get "$work" base_url)"
     check "the daemon answered the driver's own health probe" \
         '{"status":"ok","version":"stub"}' "$(probe_get "$work" health)"
+
+    # base-url exports NO proxy carrier: a driver treats the carriers'
+    # presence as front-proxy intent, so a base-url run that leaked them
+    # would point a client at a listener this run never started.
+    check "a base-url run exports no proxy url" "" "$(probe_get "$work" proxy_url)"
+    check "a base-url run exports no proxy ca" "" "$(probe_get "$work" proxy_ca)"
 else
     echo "FAIL: the driver command never ran (runner log: $work/runner.log)"
     sed -n '1,20p' "$work/runner.log"
@@ -506,22 +537,81 @@ if [ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null; then
 else
     echo "PASS: a completed run leaves no daemon behind"
 fi
+# The stub records the MITM port only when `--mitm-port` arrived on its
+# argv, so an absent record is the assertion that a base-url boot passed
+# none.
+check "a base-url run passes no --mitm-port to serve" "no" \
+    "$([ -e "$work/stub.mitm-port" ] && echo yes || echo no)"
 run_dir_count="$(find "$work/runs" -maxdepth 1 -name 'routectl-driver.*' | wc -l)"
 check "a completed run removes its workspace" "0" "$run_dir_count"
 rm -rf "$work"
 
-# --- Case 2: the connection mode is caller-selectable -----------------
+# --- Case 2: front-proxy wires two ports and both carriers ------------
 # With the mode hardcoded, a front-proxy capture would land labelled
-# base-url and a cross-mode comparison would read as client drift.
+# base-url and a cross-mode comparison would read as client drift. And
+# with ONE port, the MITM listener would collide with the HTTP listener
+# -- the exact collision `validate_mitm_config` refuses at startup -- so
+# the run draws two distinct ports and passes both on argv.
+
+# Two CONSECUTIVE free ports, so the runner's window contains exactly the
+# two ports the assertions below expect.
+free_port_pair() {
+    local candidate i=0
+    while [ "$i" -lt 200 ]; do
+        candidate="$(free_port)" || return 1
+        if ! ss -ltn 2>/dev/null | awk -v p=":$((candidate + 1))" \
+            'NR > 1 && index($4, p) == length($4) - length(p) + 1 { found = 1 } END { exit !found }'; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
 work="$(make_work)"
-port_b="$(free_port)"
+pair_lo="$(free_port_pair)"
+pair_hi=$((pair_lo + 1))
 rc=0
-ROUTECTL_DRIVER_PORT_MIN="$port_b" ROUTECTL_DRIVER_PORT_MAX="$port_b" \
-    runner_run "$work" --lane anthropic-api --case driver-selftest-02 \
+ROUTECTL_DRIVER_PORT_MIN="$pair_lo" ROUTECTL_DRIVER_PORT_MAX="$pair_hi" \
+    runner_run "$work" --lane anthropic-api.front-proxy --case driver-selftest-02 \
     --connection-mode front-proxy || rc=$?
-check "a run with an explicit connection mode exits 0" "0" "$rc"
+check "a front-proxy run against the front-proxy lane exits 0" "0" "$rc"
 check "the explicit connection mode reaches the driver" "front-proxy" \
     "$(probe_get "$work" connection_mode)"
+
+# Two DISTINCT ports, both read back off the stub's own argv record: the
+# HTTP port and the MITM port are what the daemon actually received, not
+# what the runner logged.
+http_port="$(cat "$work/stub.port" 2>/dev/null || true)"
+mitm_port="$(cat "$work/stub.mitm-port" 2>/dev/null || true)"
+check "a front-proxy run passes --mitm-port to serve" "yes" \
+    "$([ -n "$mitm_port" ] && echo yes || echo no)"
+check_ne "the two selected ports are never equal" "$http_port" "$mitm_port"
+if [ -n "$mitm_port" ] && [ "$mitm_port" -ge "$pair_lo" ] && [ "$mitm_port" -le "$pair_hi" ]; then
+    echo "PASS: the MITM port came out of the probe window"
+else
+    echo "FAIL: the MITM port '$mitm_port' is outside [$pair_lo,$pair_hi]"
+    fails=$((fails + 1))
+fi
+
+# The two proxy carriers reach the driver environment: the URL names the
+# MITM port the stub received, and the CA path points into the run's XDG
+# root at the path the daemon mints -- readable, because the stub minted
+# it exactly there.
+check "the proxy url carrier names the MITM port" \
+    "http://127.0.0.1:$mitm_port" "$(probe_get "$work" proxy_url)"
+case "$(probe_get "$work" proxy_ca)" in
+    */xdg/routectl/mitm-certs/current/mitm-ca-cert.pem)
+        echo "PASS: the proxy ca carrier names the run-XDG minted CA path" ;;
+    *)
+        echo "FAIL: the proxy ca carrier is '$(probe_get "$work" proxy_ca)'"
+        fails=$((fails + 1))
+        ;;
+esac
+check "the CA the carrier names is readable from the driver" "yes" \
+    "$(probe_get "$work" proxy_ca_readable)"
+
 meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-02/meta.json"
 if [ -f "$meta" ]; then
     check "the explicit connection mode reaches meta.json" "front-proxy" \
@@ -530,6 +620,44 @@ else
     echo "FAIL: no fixture landed for the front-proxy case"
     fails=$((fails + 1))
 fi
+# The sha pins the FRONT-PROXY lane's committed bytes, not the base
+# lane's: the two configs hash differently by exactly the [mitm] block.
+check "the front-proxy run hashes the front-proxy lane config" \
+    "$(sha256sum "$HERE/drivers/config/anthropic-api.front-proxy.toml" | cut -d' ' -f1)" \
+    "$(probe_get "$work" config_sha)"
+rm -rf "$work"
+
+# --- Case 2b: mode/config coherence refuses BOTH mismatches ------------
+# Each committed config means exactly one mode. front-proxy against the
+# base lane has no [mitm] block to bind a listener from; base-url against
+# the front-proxy lane binds a listener nobody drives on a port nobody
+# probed. Both refusals fire before any daemon boots.
+work="$(make_work)"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-02 \
+    --connection-mode front-proxy || rc=$?
+check "front-proxy against a lane with no [mitm] block is a usage error" "2" "$rc"
+check_log "the refusal names the missing [mitm] block" "requires a [mitm] block" \
+    "$work/runner.log"
+check "the front-proxy mismatch refusal precedes any daemon boot" "no" \
+    "$([ -f "$work/stub.pid" ] && echo yes || echo no)"
+
+rc=0
+runner_run "$work" --lane anthropic-api.front-proxy --case driver-selftest-02 \
+    --connection-mode base-url || rc=$?
+check "base-url against a lane carrying [mitm] is a usage error" "2" "$rc"
+check_log "the refusal names the [mitm]-carrying config" "carries a [mitm] block" \
+    "$work/runner.log"
+check "the base-url mismatch refusal precedes any daemon boot" "no" \
+    "$([ -f "$work/stub.pid" ] && echo yes || echo no)"
+
+# An unknown mode is refused in the same place, before any boot.
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-02 \
+    --connection-mode sidecar || rc=$?
+check "an unsupported connection mode is a usage error" "2" "$rc"
+check_log "the refusal names the unsupported mode" "unsupported --connection-mode" \
+    "$work/runner.log"
 rm -rf "$work"
 
 # --- Case 3: the port probe skips an occupied port ---------------------
