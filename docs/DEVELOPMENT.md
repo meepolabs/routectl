@@ -990,8 +990,15 @@ real credential on the host, exactly like a host-path run:
 ```
 bash scripts/container/run_capture.sh --scratch /var/tmp/routectl-cell -- \
   --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
-  -- scripts/drivers/claude-code-print.sh
+  -- /workspace/scripts/drivers/claude-code-print.sh
 ```
+
+The driver path is ABSOLUTE here and repo-relative in the host-path example
+above, because the runner `cd`s into the run's throwaway repo before it
+`exec`s the driver: on the host that repo sits beside the checkout the
+relative path still resolves against, while in the cell the repo mounts at
+`/workspace` and a slashed relative path is not PATH-searched, so it dies
+with the runner's driver-failure exit before the client ever runs.
 
 Two `--` separators, and that is deliberate: the wrapper's own flags stop at
 the first one, everything after it is the runner's argv verbatim, and the

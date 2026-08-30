@@ -20,7 +20,12 @@
 #   e.g.
 #   run_capture.sh --scratch /var/tmp/routectl-cell -- \
 #     --lane anthropic-api --case plain-turn-01 \
-#     -- scripts/drivers/claude-code-print.sh
+#     -- /workspace/scripts/drivers/claude-code-print.sh
+#
+#   The driver path must be ABSOLUTE (the repo mounts at /workspace in
+#   the cell). The runner cds into the run's throwaway repo before it
+#   execs the driver, and a path containing a slash is not PATH-searched,
+#   so a repo-relative path dies with exit 4 before the client runs.
 #
 #   --scratch   Host directory the fixture lands in. REQUIRED, and
 #               deliberately so: a fixture carries RAW headers, and a
