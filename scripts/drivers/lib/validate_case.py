@@ -45,7 +45,6 @@ TOP_KEYS = frozenset(
         "case_id",
         "title",
         "wire_pattern",
-        "lane",
         "turns",
         "knobs",
         "notes",
@@ -115,10 +114,6 @@ def _validate_turns(turns):
         _require_clean_str(turn["prompt"], f"turns[{index}].prompt")
 
 
-def _lane_config_dir():
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
-
-
 def validate(path):
     """Return the parsed case at `path`, or raise CaseError."""
     try:
@@ -159,13 +154,6 @@ def validate(path):
         raise CaseError(
             f"wire_pattern must be one of: {', '.join(sorted(WIRE_PATTERNS))}"
         )
-
-    lane = case["lane"]
-    if not isinstance(lane, str) or not ID_RE.match(lane):
-        raise CaseError(f"lane {lane!r} must match {ID_RE.pattern}")
-    lane_config = os.path.join(_lane_config_dir(), lane + ".toml")
-    if not os.path.isfile(lane_config):
-        raise CaseError(f"lane {lane!r} has no committed config at {lane_config}")
 
     _validate_turns(case["turns"])
     _validate_knobs(case["knobs"])

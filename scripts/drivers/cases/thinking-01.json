@@ -3,7 +3,6 @@
   "case_id": "thinking-01",
   "title": "Single reasoning-heavy turn with extended thinking requested and no tools",
   "wire_pattern": "thinking",
-  "lane": "anthropic-api",
   "turns": [
     {
       "prompt": "Three switches control three lamps in a room you can enter only once. Work out a procedure that identifies every switch, and explain why it is correct."

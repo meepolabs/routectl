@@ -3,7 +3,6 @@
   "case_id": "plain-turn-01",
   "title": "Single plain turn with every capability knob off",
   "wire_pattern": "baseline",
-  "lane": "anthropic-api",
   "turns": [
     {
       "prompt": "Reply with the single word acknowledged and nothing else."
