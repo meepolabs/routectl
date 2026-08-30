@@ -7,13 +7,13 @@
 # implementation independently says it means, so the set exists to make a
 # disagreement observable rather than silent.
 #
-# TODAY only the Python predicates read it, through
-# scripts/drivers.test.sh: every record is classified by the predicate it
-# names, both directions. The Rust side reading the same records is the
-# other half of the cross-check and does not exist yet, so a Python/Rust
-# divergence is currently UNDETECTED -- the file is the fixture that half
-# will consume, committed ahead of it so the two cannot be authored against
-# different inputs.
+# BOTH sides read it. Python: scripts/drivers.test.sh runs every record
+# through the predicate it names, in both directions. Rust:
+# crates/routectl-cli/tests/wire_pattern_weld.rs runs the same records
+# through the reference logic and asserts the same recorded verdict. Two
+# implementations agreeing with one recorded verdict is the two agreeing
+# with each other, so a divergence is a red test on whichever side moved
+# rather than a silent difference of opinion.
 #
 # SCOPE: the three STRUCTURAL predicates only -- baseline, thinking,
 # cache-breakpoints. The other two current patterns (tool-use-multiturn,

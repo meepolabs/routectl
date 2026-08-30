@@ -5593,10 +5593,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   against representative FILE paths because that is what gitleaks evaluates,
   with a positive control that the same matcher fires on the allowlisted
   live-capture root
-- `tests/wire_pattern_baseline.rs` -- single-fixture assertion that the
-  `plain-turn-01` driver case exhibits the baseline wire shape its `meta.json`
-  claims, plus falsifying controls over the predicate; deleted when the general
-  wire-pattern check lands
+- `tests/wire_pattern_weld.rs` -- cross-language weld over the wire-pattern
+  vocabulary: parses `WIRE_PATTERNS` from `scripts/drivers/lib/validate_case.py`
+  and the predicate table from `scripts/drivers/lib/verify_pattern.py` as text
+  and pins the covered set exactly (plus the deferred list), and runs
+  `scripts/drivers/lib/wire_pattern_classification.tsv` through the Rust
+  reference logic for the three structural predicates -- the other half of the
+  cross-check `scripts/drivers.test.sh` runs in Python
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor

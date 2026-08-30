@@ -29,6 +29,12 @@ SCHEMA_VERSION = 1
 # under the corpus root.
 ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
+# The pattern vocabulary is read as TEXT by the cross-language weld in
+# crates/routectl-cli/tests/wire_pattern_weld.rs, which asserts that
+# verify_pattern.py carries a predicate for every token here. The sentinels
+# bound the block that parse reads: renaming or dropping one turns the parse
+# into a loud failure rather than a silently empty vocabulary.
+# --- BEGIN WIRE_PATTERNS ---
 WIRE_PATTERNS = frozenset(
     {
         "baseline",
@@ -38,6 +44,7 @@ WIRE_PATTERNS = frozenset(
         "large-context",
     }
 )
+# --- END WIRE_PATTERNS ---
 
 TOP_KEYS = frozenset(
     {
