@@ -55,9 +55,6 @@ TOOLS = [
     },
 ]
 
-TOOL_NAMES = frozenset(tool["name"] for tool in TOOLS)
-
-
 def _text_result(text):
     return {"content": [{"type": "text", "text": text}], "isError": False}
 

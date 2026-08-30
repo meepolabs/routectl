@@ -1353,10 +1353,10 @@ canned_trace_openai_responses_tools() {
     local body='{"model":"gpt-5","input":[{"role":"user","content":"list the files"},{"type":"function_call","call_id":"call_01","name":"Bash","arguments":"{\"command\":\"ls\"}"},{"type":"function_call_output","call_id":"call_01","output":"notes.txt"}]}'
     local fields='model=gpt-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=false'
     local structural="kind=\"ingress\" id=\"openai-responses\" $fields"
-    local structural_out="kind=\"openai-responses\" id=\"anthropic-api:routectl\" $fields"
+    local structural_out="kind=\"openai-responses\" id=\"openai-responses:codex\" $fields"
     cat <<TRACE
 2026-08-26T10:00:00.000000Z TRACE $span:messages{ingress="openai-responses"}: $target ingress request body ingress="openai-responses" body=$body redact_prompts_enabled=false
-2026-08-26T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=routectl:p model=gpt-5}: $target outgoing request body provider_kind="openai-responses" provider=p body={"model":"gpt-5"} redact_prompts_enabled=false
+2026-08-26T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=codex:p model=gpt-5}: $target outgoing request body provider_kind="openai-responses" provider=p body={"model":"gpt-5"} redact_prompts_enabled=false
 2026-08-26T10:00:00.200000Z TRACE $span: $target upstream success body provider_kind="openai-responses" provider=p body={"id":"resp_1"} redact_prompts_enabled=false
 2026-08-26T10:00:00.300000Z TRACE $span: $target egress response body ingress="openai-responses" body={"id":"resp_1"} redact_prompts_enabled=false
 2026-08-26T10:00:00.010000Z TRACE $span: $target ingress request headers direction="ingress" headers=[["user-agent","codex_cli_rs/9.9.9"],["content-type","application/json"]]

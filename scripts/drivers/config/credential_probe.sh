@@ -49,24 +49,15 @@ VARS=("$@")
 
 [ -f "$CONFIG_FILE" ] || die "config file not found: $CONFIG_FILE"
 
-resolve_bin() {
-    if [ -n "${ROUTECTL_BIN:-}" ]; then
-        printf '%s\n' "$ROUTECTL_BIN"
-        return 0
-    fi
-    if command -v routectl >/dev/null 2>&1; then
-        command -v routectl
-        return 0
-    fi
-    local target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-    for profile in debug release; do
-        if [ -x "$target_dir/$profile/routectl" ]; then
-            printf '%s\n' "$target_dir/$profile/routectl"
-            return 0
-        fi
-    done
-    return 1
-}
+# The single owner of binary resolution, shared with this script's
+# self-test. Absent library is a hard failure rather than a silently
+# skipped probe: a probe that cannot find a binary proves nothing about
+# whether a lane resolves its credential.
+RESOLVE_BIN_LIB="$REPO_ROOT/scripts/drivers/lib/resolve_bin.sh"
+[ -r "$RESOLVE_BIN_LIB" ] ||
+    die "binary-resolution library not found at $RESOLVE_BIN_LIB"
+# shellcheck source=scripts/drivers/lib/resolve_bin.sh
+. "$RESOLVE_BIN_LIB"
 
 BIN="$(resolve_bin)" || die "no routectl binary found; set ROUTECTL_BIN or build one (cargo build --bin routectl)"
 
