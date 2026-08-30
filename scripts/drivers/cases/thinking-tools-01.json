@@ -17,5 +17,5 @@
     "cache_breakpoints": false,
     "context_padding_bytes": 0
   },
-  "notes": "Thinking plus tools is a distinct shape from either alone: the resent assistant turn carries a thinking block next to a tool_use block."
+  "notes": "Thinking plus tools is a distinct shape from either alone: the resent assistant turn carries a thinking block next to a tool_use block. LIMIT, measured 2026-08-30: the wire-pattern claim selects the FIRST request that satisfies it, and this case's `thinking` claim is already satisfied by turn 1 on the top-level thinking config alone -- so the fixture that lands carries NO thinking or tool_use block, and the interleaved shape this case describes lives in the later candidates the rig counts redundant. A case whose distinguishing shape appears only after turn 1 needs a narrower claim (a body census) if the fixture must exhibit it. See bl-case-claim-vs-pinned-fixture-shape-gap."
 }
