@@ -153,14 +153,14 @@ for path in "${case_files[@]}"; do
     check "case id '$id' matches its filename stem" "$(basename "$path" .json)" "$id"
 done
 
-# The set covers the four PATTERNS the corpus exists to pin. A set missing
+# The set covers the five PATTERNS the corpus exists to pin. A set missing
 # one is a corpus that cannot detect drift in that shape at all.
 patterns="$(
     for path in "${case_files[@]}"; do
         python3 "$VALIDATOR" --field wire_pattern "$path"
     done | sort -u
 )"
-for pattern in tool-use-multiturn cache-breakpoints thinking large-context; do
+for pattern in tool-use-multiturn cache-breakpoints thinking large-context mcp-tools; do
     if printf '%s\n' "$patterns" | grep -qx "$pattern"; then
         echo "PASS: the set covers the $pattern wire pattern"
     else
@@ -783,18 +783,34 @@ print("\n".join(sorted(validate_case.WIRE_PATTERNS)))
 ' "$DRIVERS/lib")
 check "every wire pattern in the closed set has a predicate" "0" "$uncovered"
 
-denies "a pattern with no predicate is refused rather than waved through" \
-    "$pat/baseline-disabled" mcp-tools "no predicate"
+# --- mcp-tools: a namespaced tool name, never a count -------------------
+# A tools-enabled request carries its built-ins on every request once tools
+# are permitted at all, and the declaration block alone runs well over
+# 100KB before any content -- so neither a bare tools-array presence nor a
+# body-size check is evidence of an MCP server. The one shape that can only
+# come from `--mcp-config`, the offered name being server-namespaced
+# (`mcp__<server>__<tool>`), is what the predicate keys on.
 
-# The refusal NAMES the token and its deferred status. A generic "no
-# predicate" reason would read the same for a typo'd pattern as for the one
-# deliberately held back, and the deferred list is the only place the
-# distinction is recorded -- a token missing from BOTH the table and that
-# list is an oversight the message must not describe as a plan.
-denies "the refusal names the token it has no predicate for" \
-    "$pat/baseline-disabled" mcp-tools "'mcp-tools'"
-denies "the refusal names the deferred set the token belongs to" \
-    "$pat/baseline-disabled" mcp-tools "deferred: mcp-tools"
+mcp_pair='{"tools":[{"name":"Bash"},{"name":"mcp__fixture__add"}],"messages":[
+ {"role":"user","content":[{"type":"text","text":"add them"}]}]}'
+exhibits "mcp-tools accepts a body offering a server-namespaced tool name" \
+    "$(stage mcp-namespaced "" "$mcp_pair")" mcp-tools
+
+# MANDATORY PAIRED CONTROL: a body whose tools are ALL built-ins, offered
+# under the exact same tools-enabled shape, must fail the same claim -- the
+# positive leg above proves nothing about the predicate's selectivity
+# without this one.
+builtins_only='{"tools":[{"name":"Bash"},{"name":"Read"},{"name":"str_replace_editor"}],"messages":[
+ {"role":"user","content":[{"type":"text","text":"add them"}]}]}'
+denies "mcp-tools refuses a body whose tools are all built-ins" \
+    "$(stage mcp-builtins-only "" "$builtins_only")" mcp-tools "no offered tool name is server-namespaced"
+
+no_tools='{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}'
+denies "mcp-tools refuses a body that offers no tools at all" \
+    "$(stage mcp-no-tools "" "$no_tools")" mcp-tools "offers no tools"
+
+denies "a fixture with no ingress body is refused for mcp-tools" \
+    "$pat/tools-no-body" mcp-tools "recorded no ingress body"
 
 # --- the shared classification set ------------------------------------
 # The structural lines the three structural predicates are asserted
@@ -861,7 +877,7 @@ fi
 # The set is scoped to the structural predicates, and the mode that reads
 # it refuses a body-census pattern rather than answering "no" -- a census
 # question a line cannot decide is the wrong question, not a rejection.
-for pattern in tool-use-multiturn large-context; do
+for pattern in tool-use-multiturn large-context mcp-tools; do
     if printf '%s' "$(s_line ingress 0 disabled 0)" | \
         python3 "$VERIFIER" --structural-line "$pattern" 2>/dev/null; then
         fail "a structural line satisfied the body-census pattern $pattern"
@@ -1036,6 +1052,108 @@ done
 cv_usage_rc=0
 python3 "$CLIENT_VERSION" 2.1.246 2.1.246 >/dev/null 2>&1 || cv_usage_rc=$?
 check "a missing --compare is a usage error, not a verdict" "2" "$cv_usage_rc"
+
+# ---------------------------------------------------------------------
+# Part 1e: the stub MCP server
+# ---------------------------------------------------------------------
+# stub_mcp.py is what makes the mcp-tools wire pattern an image-change-free
+# addition: it must stay stdlib-only, offline, and byte-for-byte
+# deterministic, or a capture built on it would carry the same evidence
+# problems this suite exists to keep out of the corpus.
+
+STUB_MCP="$DRIVERS/stub_mcp.py"
+
+stray_imports="$(grep -E '^(import|from) ' "$STUB_MCP" | grep -vE '^import (json|sys)$' || true)"
+if [ -z "$stray_imports" ]; then
+    echo "PASS: stub_mcp.py imports only the standard library"
+else
+    fail "stub_mcp.py imports something beyond json/sys: $stray_imports"
+fi
+
+if grep -qE 'socket|urllib|http\.client|requests' "$STUB_MCP"; then
+    fail "stub_mcp.py references a networking module by name"
+else
+    echo "PASS: stub_mcp.py names no networking module"
+fi
+
+# One JSON-RPC line per request, fed and drained over a real pipe -- the
+# actual transport a client uses, not a function call into the module.
+mcp_probe() {
+    python3 - "$STUB_MCP" <<'PY'
+import json
+import subprocess
+import sys
+
+proc = subprocess.Popen(
+    [sys.executable, sys.argv[1]],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    text=True,
+)
+
+
+def send(msg):
+    proc.stdin.write(json.dumps(msg) + "\n")
+    proc.stdin.flush()
+
+
+def recv():
+    return json.loads(proc.stdout.readline())
+
+
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+init = recv()
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+listed = recv()
+send(
+    {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": "add", "arguments": {"a": 17, "b": 25}},
+    }
+)
+called = recv()
+proc.stdin.close()
+rc = proc.wait(timeout=5)
+
+print(json.dumps({"init": init, "listed": listed, "called": called, "rc": rc}))
+PY
+}
+
+mcp_run_a="$(mcp_probe)"
+mcp_run_b="$(mcp_probe)"
+check "two independent stub MCP runs answer byte-for-byte identically" \
+    "$mcp_run_a" "$mcp_run_b"
+
+if [ -z "$mcp_run_a" ]; then
+    fail "the stub MCP server produced no output to check"
+else
+    if printf '%s' "$mcp_run_a" | grep -qF '"protocolVersion"'; then
+        echo "PASS: initialize answers with a protocol version"
+    else
+        fail "initialize did not answer with a protocol version"
+    fi
+    offered="$(printf '%s' "$mcp_run_a" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+names = sorted(t["name"] for t in doc["listed"]["result"]["tools"])
+print(",".join(names))
+')"
+    check "tools/list offers exactly the two static tools" "add,echo" "$offered"
+    sum_text="$(printf '%s' "$mcp_run_a" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+print(doc["called"]["result"]["content"][0]["text"])
+')"
+    check "tools/call add(17, 25) answers deterministically" "42" "$sum_text"
+    exit_code="$(printf '%s' "$mcp_run_a" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["rc"])
+')"
+    check "the stub exits on its own once the client closes stdin" "0" "$exit_code"
+fi
 
 # ---------------------------------------------------------------------
 # Part 2: driver hygiene, asserted on the committed files
@@ -1226,6 +1344,18 @@ canned_trace_thinking() {
     canned_trace | sed 's/thinking_shape=disabled/thinking_shape=enabled:8192/'
 }
 
+# A canned trace whose ingress body offers a server-namespaced tool name
+# alongside a built-in: the shape an `mcp-tools` case claims. The stub
+# client used by driver_run never actually talks to an MCP server, so
+# without this the rig's promotion gate would refuse every mcp-tools run
+# regardless of what the driver wired up on argv.
+canned_trace_mcp_tools() {
+    local body='{"model":"claude-sonnet-4-5","tools":[{"name":"Bash"},{"name":"mcp__fixture__add"}],"messages":[{"role":"user","content":"add them"}]}'
+    canned_trace |
+        sed "s|ingress request body ingress=\"anthropic\" body={\"model\":\"claude-sonnet-4-5\"}|ingress request body ingress=\"anthropic\" body=$body|" |
+        sed 's/tools_len=0/tools_len=2/'
+}
+
 # A canned trace whose ingress structural line carries cache breakpoints:
 # the shape a `cache-breakpoints` case claims.
 canned_trace_cache_breakpoints() {
@@ -1328,7 +1458,11 @@ SH
 #
 # `STUB_CLIENT_RC` makes it fail on demand, which is how the driver's own
 # failure propagation is asserted. `STUB_CLIENT_VERSION` empty is how a
-# client that cannot state its version is asserted.
+# client that cannot state its version is asserted. `STUB_CLIENT_LEAK_MCP`,
+# when set to a needle, spawns a background process whose cmdline carries
+# that needle and does NOT wait for it -- modeling a client that leaks its
+# MCP stdio child instead of letting it die on exit, which is the one
+# misbehavior the driver's post-run leak check exists to catch.
 write_stub_client() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -1339,6 +1473,10 @@ for arg in "$@"; do
         exit 0
     fi
 done
+if [ -n "${STUB_CLIENT_LEAK_MCP:-}" ]; then
+    ( exec -a "$STUB_CLIENT_LEAK_MCP" sleep 30 ) &
+    disown
+fi
 stdin_bytes="$(cat | wc -c | tr -d ' ')"
 {
     printf 'invocation argv=%s\n' "$*"
@@ -2077,6 +2215,111 @@ fi
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
+
+# --- mcp-tools: the stdio server reaches the client, and its death is
+# checked rather than assumed ---------------------------------------------
+
+work="$(make_work)"
+canned_trace_mcp_tools >"$work/canned-trace.log"
+driver_run "$work" claude-code-print.sh mcp-tools-01 || true
+if client_get "$work" argv | head -1 | grep -q -- '--mcp-config'; then
+    echo "PASS: an mcp-tools case hands the client an mcp-config path"
+else
+    fail "an mcp-tools case did not pass --mcp-config to the client"
+fi
+if client_get "$work" argv | head -1 | grep -q -- '--strict-mcp-config'; then
+    echo "PASS: an mcp-tools case asks the client to ignore ambient MCP config"
+else
+    fail "an mcp-tools case did not pass --strict-mcp-config to the client"
+fi
+mcp_config_path="$(client_get "$work" argv | head -1 |
+    sed 's/.*--mcp-config \([^ ]*\).*/\1/')"
+if [ -n "$mcp_config_path" ] && [ -f "$mcp_config_path" ] &&
+   grep -qF '"command":"python3"' "$mcp_config_path" &&
+   grep -qF 'stub_mcp.py' "$mcp_config_path"; then
+    echo "PASS: the mcp-config file hands the client the committed stub script"
+else
+    fail "the mcp-config file does not point the client at the committed stub"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# The well-behaved leg: the stub client here spawns no MCP child at all, so
+# the driver's leak check must find nothing and let the run finish clean --
+# the paired control for the leak leg below, without which a check that
+# always fires (or never runs) would read the same as one that works.
+work="$(make_work)"
+canned_trace_mcp_tools >"$work/canned-trace.log"
+rc=0
+driver_run "$work" claude-code-print.sh mcp-tools-01 || rc=$?
+if [ "$rc" = 0 ]; then
+    echo "PASS: a well-behaved client leaves no mcp stub process behind"
+else
+    fail "a well-behaved run failed the leak check ($rc): $(tail -n 5 "$work/runner.log")"
+fi
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# The leak leg: the stub client models a misbehaving one by spawning a
+# detached process whose cmdline carries the stub script's own path, and
+# not waiting for it -- exactly what a client that failed to reap its MCP
+# child would leave behind. The driver must catch this itself rather than
+# trust the client's exit code, since the client here exits 0.
+work="$(make_work)"
+canned_trace_mcp_tools >"$work/canned-trace.log"
+leak_needle="$work/repo/scripts/drivers/stub_mcp.py"
+rc=0
+STUB_CLIENT_LEAK_MCP="$leak_needle" \
+    driver_run "$work" claude-code-print.sh mcp-tools-01 || rc=$?
+if [ "$rc" != 0 ] &&
+   grep -qF "outlived the client that spawned it" "$work/runner.log"; then
+    echo "PASS: a leaked mcp stub process is caught rather than assumed gone"
+else
+    fail "the driver did not catch a leaked mcp stub process: $(tail -n 5 "$work/runner.log")"
+fi
+# Clean up the leaked process by the exact PID this probe finds -- never a
+# pattern kill, per the same rule the driver's own check follows.
+leaked_pid=""
+for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    [ -r "$dir/cmdline" ] || continue
+    if tr '\0' ' ' <"$dir/cmdline" 2>/dev/null | grep -qF -- "$leak_needle"; then
+        leaked_pid="$pid"
+        break
+    fi
+done
+[ -n "$leaked_pid" ] && kill "$leaked_pid" 2>/dev/null || true
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# --- driver_processes_matching itself: found while alive, gone once dead --
+
+(
+    . "$DRIVERS/lib/common.sh"
+    unique_needle="drivers-test-probe-$$"
+    ( exec -a "$unique_needle" sleep 5 ) &
+    probe_pid=$!
+    sleep 0.2
+    found="$(driver_processes_matching "$unique_needle")"
+    if [ "$found" = "$probe_pid" ]; then
+        echo "PASS: driver_processes_matching finds a running process by cmdline"
+    else
+        echo "FAIL: driver_processes_matching found '$found', expected '$probe_pid'"
+        exit 1
+    fi
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    found="$(driver_processes_matching "$unique_needle")"
+    if [ -z "$found" ]; then
+        echo "PASS: driver_processes_matching finds nothing once the process is gone"
+    else
+        echo "FAIL: driver_processes_matching still reports '$found' after the process exited"
+        exit 1
+    fi
+) || fails=$((fails + 1))
 
 # The filler only reaches the wire as a TOOL RESULT, so every generated file
 # must be one the client will return IN FULL. A driven Claude Code refuses a

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "case_id": "mcp-tools-01",
+  "title": "A tool loop where the client is offered a server-namespaced MCP tool alongside its built-ins",
+  "wire_pattern": "mcp-tools",
+  "turns": [
+    {"prompt": "Use the fixture add tool to add 17 and 25, then tell me the result."},
+    {"prompt": "Now use the fixture echo tool to repeat that result back to me."}
+  ],
+  "knobs": {
+    "tools": true,
+    "thinking": false,
+    "cache_breakpoints": false,
+    "context_padding_bytes": 0
+  },
+  "notes": "MCP server configuration is a driver concern, not a case knob: which servers a case's client is handed lives in the driver script (scripts/drivers/stub_mcp.py), not in a fifth knob here. The `tools` knob stays true because the client's own built-ins are still offered alongside the MCP tool; the wire_pattern claim is what distinguishes this case from a plain tool-use-multiturn one."
+}

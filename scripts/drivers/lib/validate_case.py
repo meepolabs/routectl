@@ -42,6 +42,7 @@ WIRE_PATTERNS = frozenset(
         "cache-breakpoints",
         "thinking",
         "large-context",
+        "mcp-tools",
     }
 )
 # --- END WIRE_PATTERNS ---

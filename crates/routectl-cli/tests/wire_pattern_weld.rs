@@ -21,10 +21,10 @@
 //!    the reference logic, so a divergence between the two is a red test on one
 //!    side or the other rather than a silent difference of opinion.
 //!
-//! The two body-census patterns (`tool-use-multiturn`, `large-context`) are out
-//! of scope for weld 2: they read the captured ingress body, have no Rust
-//! counterpart to drift from, and a structural line carries nothing that
-//! decides them.
+//! The body-census patterns (`tool-use-multiturn`, `large-context`,
+//! `mcp-tools`) are out of scope for weld 2: they read the captured ingress
+//! body, have no Rust counterpart to drift from, and a structural line
+//! carries nothing that decides them.
 //!
 //! Every parse fails LOUDLY. An absent or unparseable source produces an error,
 //! never an empty set that satisfies every assertion below by classifying
@@ -51,10 +51,11 @@ const DEFERRED_SENTINELS: (&str, &str) = (
     "# --- END DEFERRED_PATTERNS ---",
 );
 
-/// The one token the predicate table is allowed to omit: it has no case and no
-/// fixture can claim it yet. Pinned as the exact deferred set, so extending the
-/// vocabulary with it (or deferring anything else) is a review moment.
-const EXPECTED_DEFERRED: &[&str] = &["mcp-tools"];
+/// The deferred set, pinned as exactly empty: every token in the vocabulary
+/// has a predicate today. Pinned rather than left unchecked, so the next
+/// pattern added without a predicate is a review moment instead of a silent
+/// widening of the omission.
+const EXPECTED_DEFERRED: &[&str] = &[];
 
 /// The patterns a structural summary line alone decides.
 const STRUCTURAL_PATTERNS: &[&str] = &["baseline", "thinking", "cache-breakpoints"];
@@ -97,7 +98,14 @@ fn sentinel_block<'a>(
 /// Tokens declared one double-quoted entry per line inside `block`. A line
 /// carrying a quote in any other shape is a parse failure rather than something
 /// to skip past; a line with no quote at all is Python punctuation (`{`, `)`).
-fn quoted_tokens(block: &str, label: &str) -> Result<BTreeSet<String>, String> {
+///
+/// `allow_empty` distinguishes DEFERRED_PATTERNS, which is legitimately empty
+/// once every vocabulary token has a predicate, from WIRE_PATTERNS and
+/// PREDICATES, where an empty parse result is always a failed parse -- a
+/// vocabulary or predicate table of zero tokens satisfies every assertion
+/// below by classifying nothing, and that is the failure mode this module
+/// exists to catch.
+fn quoted_tokens(block: &str, label: &str, allow_empty: bool) -> Result<BTreeSet<String>, String> {
     let mut tokens = BTreeSet::new();
     for line in block.lines() {
         let line = line.trim();
@@ -118,7 +126,7 @@ fn quoted_tokens(block: &str, label: &str) -> Result<BTreeSet<String>, String> {
             return Err(format!("token {entry:?} declared twice inside {label}"));
         }
     }
-    if tokens.is_empty() {
+    if tokens.is_empty() && !allow_empty {
         return Err(format!(
             "{label} declared no tokens; an empty parse is a failed parse, not a safe answer"
         ));
@@ -131,17 +139,17 @@ fn parse_vocabulary(source: &str) -> Result<BTreeSet<String>, String> {
     if !block.contains("WIRE_PATTERNS") {
         return Err("the WIRE_PATTERNS block declares no such name".to_string());
     }
-    quoted_tokens(block, "WIRE_PATTERNS")
+    quoted_tokens(block, "WIRE_PATTERNS", false)
 }
 
 fn parse_deferred(source: &str) -> Result<BTreeSet<String>, String> {
     let block = sentinel_block(source, "DEFERRED_PATTERNS", DEFERRED_SENTINELS)?;
-    quoted_tokens(block, "DEFERRED_PATTERNS")
+    quoted_tokens(block, "DEFERRED_PATTERNS", true)
 }
 
 fn parse_covered(source: &str) -> Result<BTreeSet<String>, String> {
     let block = sentinel_block(source, "PREDICATES", PREDICATE_SENTINELS)?;
-    quoted_tokens(block, "PREDICATES")
+    quoted_tokens(block, "PREDICATES", false)
 }
 
 fn expect<T>(parsed: Result<T, String>) -> T {
@@ -186,11 +194,11 @@ fn every_vocabulary_token_has_a_predicate_or_is_explicitly_deferred() {
 }
 
 #[test]
-fn the_deferred_list_holds_exactly_the_one_reviewed_token() {
+fn the_deferred_list_holds_exactly_the_reviewed_set() {
     // The deferred list is the only place "no predicate on purpose" is
     // recorded, so its contents are pinned rather than merely consulted:
-    // supplying a predicate for `mcp-tools`, or deferring a second token, both
-    // turn this red instead of widening the omission unreviewed.
+    // deferring any token turns this red instead of widening the omission
+    // unreviewed.
     let deferred = expect(parse_deferred(&expect(read_source(PREDICATE_PATH))));
     let expected: BTreeSet<String> = EXPECTED_DEFERRED.iter().map(|t| (*t).to_string()).collect();
 
@@ -256,10 +264,10 @@ fn coverage_check_rejects_a_predicate_for_an_unknown_token() {
 }
 
 #[test]
-fn coverage_check_accepts_the_deferred_token_once_the_vocabulary_names_it() {
+fn coverage_check_accepts_a_deferred_token_the_vocabulary_names() {
     // Forward-looking control: the deferral is what a token in the vocabulary
     // with no predicate is allowed to rely on, so the contract must credit it
-    // rather than pass only because `mcp-tools` is absent upstream today.
+    // rather than pass only because nothing is deferred today.
     let vocabulary = token_set(&["baseline", "mcp-tools"]);
     let covered = token_set(&["baseline"]);
     let deferred = token_set(&["mcp-tools"]);
@@ -305,6 +313,36 @@ fn an_empty_vocabulary_block_is_a_failed_parse() {
         VOCABULARY_SENTINELS.0, VOCABULARY_SENTINELS.1
     );
     let why = parse_vocabulary(&stub).expect_err("a vocabulary of zero tokens asserts nothing");
+    assert!(why.contains("no tokens"), "unexpected reason: {why}");
+}
+
+#[test]
+fn an_empty_deferred_block_is_not_a_failed_parse() {
+    // DEFERRED_PATTERNS legitimately reaches zero tokens once every
+    // vocabulary token has a predicate -- unlike WIRE_PATTERNS and
+    // PREDICATES above, an empty parse here is the expected steady state,
+    // not a sign the declaration moved.
+    let stub = format!(
+        "{}\nDEFERRED_PATTERNS = (\n)\n{}\n",
+        DEFERRED_SENTINELS.0, DEFERRED_SENTINELS.1
+    );
+    let deferred = expect(parse_deferred(&stub));
+    assert!(
+        deferred.is_empty(),
+        "expected an empty deferred set, got {deferred:?}"
+    );
+}
+
+#[test]
+fn an_empty_predicate_block_is_still_a_failed_parse() {
+    // PREDICATES never legitimately reaches zero: the coverage weld exists
+    // to catch a vocabulary token with no predicate, and an empty table
+    // would make every token look deferred instead.
+    let stub = format!(
+        "{}\nPREDICATES = {{\n}}\n{}\n",
+        PREDICATE_SENTINELS.0, PREDICATE_SENTINELS.1
+    );
+    let why = parse_covered(&stub).expect_err("a predicate table of zero tokens asserts nothing");
     assert!(why.contains("no tokens"), "unexpected reason: {why}");
 }
 

@@ -32,7 +32,7 @@ Two evidence sources, and no others:
   structural.txt      the ingress structural summary line (baseline,
                       thinking, cache-breakpoints)
   ingress_request.json  the captured inbound body (tool-use-multiturn,
-                      large-context)
+                      large-context, mcp-tools)
 
 The structural-line predicates are a port of the Rust reference logic in
 crates/routectl-cli/tests/wire_pattern_weld.rs. Two properties of that
@@ -106,11 +106,12 @@ MIN_LARGE_CONTEXT_BYTES = 256 * 1024
 # Pattern tokens deliberately absent from the predicate table: they have a
 # closed-set entry and no case, so no fixture can claim one yet. Listed
 # rather than silently missing, because a missing predicate is what this
-# module exists to prevent.
+# module exists to prevent. Empty today -- every token in the vocabulary
+# has a predicate -- but kept as a real tuple rather than deleted, since
+# the next pattern added to the vocabulary needs somewhere to land while
+# its predicate is still being written.
 # --- BEGIN DEFERRED_PATTERNS ---
-DEFERRED_PATTERNS = (
-    "mcp-tools",
-)
+DEFERRED_PATTERNS = ()
 # --- END DEFERRED_PATTERNS ---
 
 
@@ -238,7 +239,7 @@ def line_is_cache_breakpoints(line):
         raise PatternError(f"cache_control_count={count}, want at least 1")
 
 
-# The three predicates a structural line alone decides. The two body-census
+# The three predicates a structural line alone decides. The body-census
 # predicates below need the captured body and so are absent here -- and from
 # the shared classification set.
 STRUCTURAL_PREDICATES = {
@@ -345,6 +346,60 @@ def _tool_use_multiturn(fixture_dir):
     raise PatternError(f"no {turns_key} turn carries a tool-call")
 
 
+def _offered_tool_names(body):
+    """Every tool name the ingress body offers, across dialects.
+
+    The Anthropic and Responses shapes spell an offered tool as
+    `{"name": ...}` directly; the chat-completions shape nests it under
+    `{"type": "function", "function": {"name": ...}}`. Reads whichever
+    shape is present rather than gating on a recorded dialect claim, for
+    the same reason `_turn_list` does.
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return []
+    names = []
+    for entry in tools:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str):
+            names.append(name)
+            continue
+        function = entry.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.append(function["name"])
+    return names
+
+
+def _is_namespaced_mcp_tool_name(name):
+    """Whether `name` is in the server-namespaced MCP shape
+    `mcp__<server>__<tool>`, as observed on the wire for a client
+    configured with `--mcp-config`.
+
+    Keyed on SHAPE, never on a count: a tools-enabled request offers its
+    built-ins on every request once tools are permitted, so a count or a
+    bare presence-of-tools check would be satisfied by a fixture that never
+    configured an MCP server at all.
+    """
+    if not isinstance(name, str):
+        return False
+    parts = name.split("__")
+    return len(parts) >= 3 and parts[0] == "mcp" and all(parts[1:])
+
+
+def _mcp_tools(fixture_dir):
+    names = _offered_tool_names(_read_ingress_body(fixture_dir))
+    if not names:
+        raise PatternError("the ingress body offers no tools")
+    if any(_is_namespaced_mcp_tool_name(name) for name in names):
+        return
+    raise PatternError(
+        "no offered tool name is server-namespaced (mcp__<server>__<tool>); "
+        f"offered names: {names!r}"
+    )
+
+
 def _large_context(fixture_dir):
     # The body is PARSED before it is measured. A byte count alone would
     # let a truncated or non-JSON capture above the floor satisfy the
@@ -382,6 +437,7 @@ PREDICATES = {
     "cache-breakpoints": _on_ingress_line(line_is_cache_breakpoints),
     "tool-use-multiturn": _tool_use_multiturn,
     "large-context": _large_context,
+    "mcp-tools": _mcp_tools,
 }
 # --- END PREDICATES ---
 

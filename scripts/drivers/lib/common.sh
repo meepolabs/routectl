@@ -36,6 +36,24 @@ driver_die() {
   exit "${2:-1}"
 }
 
+# PIDs of processes whose command line contains `needle` (e.g. an absolute
+# script path), one per line. A READ-ONLY existence probe over /proc rather
+# than a `pgrep` call: the image carries no process-utilities package, and
+# this needs none. Never sends a signal -- the caller decides what a match
+# means, and a broad kill on a pattern match is exactly the footgun this
+# avoids (a live routectl instance elsewhere on the host must never be
+# touched by a driver's own hygiene check).
+driver_processes_matching() {
+  local needle="$1" dir pid
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    [ -r "$dir/cmdline" ] || continue
+    if tr '\0' ' ' <"$dir/cmdline" 2>/dev/null | grep -qF -- "$needle"; then
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
 # Fail closed on the runner's contract rather than on a downstream
 # symptom. A driver launched outside the runner would otherwise reach a
 # client with an empty base URL and produce a capture of nothing.
