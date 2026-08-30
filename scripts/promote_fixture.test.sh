@@ -41,6 +41,7 @@ mapfile -t KNOWN_INGRESS_KINDS < <(
     sed -n '/^# --- BEGIN INGRESS_KINDS ---$/,/^# --- END INGRESS_KINDS ---$/p' \
         "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
 )
+CLIENT_VERSION="$HERE/drivers/lib/client_version.py"
 
 fails=0
 
@@ -99,6 +100,7 @@ make_work() {
     cp "$SCRUB" "$work/repo/scripts/scrub-fixture.sh"
     cp "$VERIFY_PATTERN" "$work/repo/scripts/drivers/lib/verify_pattern.py"
     cp "$INGRESS_KINDS" "$work/repo/scripts/drivers/lib/ingress_kinds.sh"
+    cp "$CLIENT_VERSION" "$work/repo/scripts/drivers/lib/client_version.py"
     printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$FAKE_HOSTNAME" >"$work/stubbin/hostname"
     chmod +x "$work/stubbin/hostname"
     (
@@ -662,6 +664,117 @@ if [ -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ] &&
         "$(tree_manifest "$corpus/anthropic-api/plain-turn-01")"
 else
     echo "FAIL: could not remove the ingress vocabulary from the throwaway repo"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 5f: the two client-version statements must agree -------------
+# `client.version` came from the client-controlled ingress user-agent;
+# `client.binary_version` was read off the running binary by the driver.
+# Both are hand-editable in scratch, which is what this boundary re-checks:
+# a disagreement means the fixture is evidence about neither version.
+#
+# Every leg drives ONLY the two version fields, so a verdict is
+# attributable to the pair and to nothing else in the fixture.
+work="$(make_work)"
+scratch="$work/scratch"
+corpus="$work/repo/$CORPUS_REL"
+
+# A promotable fixture whose meta carries both version fields. The binary
+# side keeps the DECORATED spelling a real binary prints while the wire side
+# carries the bare token, so the accepting leg also proves the comparison is
+# on tokens rather than on strings.
+mk_versioned_fixture() {
+    local dir="$1" case_id="$2" wire="$3" binary="$4"
+    mk_promotable_fixture "$dir" \
+        "meta.json={\"case_id\":\"$case_id\",\"wire_pattern\":\"baseline\",\"ingress_kind\":\"anthropic\",\"client\":{\"connection_mode\":\"base-url\",\"version\":\"$wire\",\"binary_version\":\"$binary\"}}"
+}
+
+mk_versioned_fixture "$scratch/anthropic-api/cv-agree-01" cv-agree-01 \
+    "2.1.167" "2.1.167 (Claude Code)"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/cv-agree-01" \
+    --scratch-root "$scratch" || rc=$?
+check "agreeing client versions promote at exit 0" "0" "$rc"
+check "the agreeing fixture landed in the corpus" "1" \
+    "$([ -f "$corpus/anthropic-api/cv-agree-01/meta.json" ] && echo 1 || echo 0)"
+
+# The refusal, with only the binary-side value moved off the wire's.
+mk_versioned_fixture "$scratch/anthropic-api/cv-disagree-01" cv-disagree-01 \
+    "2.1.167" "2.1.246 (Claude Code)"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/cv-disagree-01" \
+    --scratch-root "$scratch" || rc=$?
+check "disagreeing client versions are refused with exit 1" "1" "$rc"
+check_log "the refusal names the wire reading" "2.1.167" "$work/promote.log"
+check_log "the refusal names the binary reading" "2.1.246" "$work/promote.log"
+check "the destination stays absent after a version refusal" "ABSENT" \
+    "$(tree_manifest "$corpus/anthropic-api/cv-disagree-01")"
+check "no staging directory survives a version refusal" "0" "$(tmp_dirs_in "$corpus")"
+
+# Either side ABSENT promotes: the pair is unprovable, not contradicted.
+# Both directions, because a gate that only handled one empty side would
+# read the other as a disagreement -- and the binary-absent case is EVERY
+# fixture captured before the key existed, which is what keeps it additive.
+mk_versioned_fixture "$scratch/anthropic-api/cv-no-binary-01" cv-no-binary-01 \
+    "2.1.167" ""
+rc=0
+promote "$work" --from "$scratch/anthropic-api/cv-no-binary-01" \
+    --scratch-root "$scratch" || rc=$?
+check "an absent binary-side version promotes at exit 0" "0" "$rc"
+
+mk_versioned_fixture "$scratch/anthropic-api/cv-no-wire-01" cv-no-wire-01 \
+    "" "2.1.167 (Claude Code)"
+rc=0
+promote "$work" --from "$scratch/anthropic-api/cv-no-wire-01" \
+    --scratch-root "$scratch" || rc=$?
+check "an absent wire version promotes at exit 0" "0" "$rc"
+
+# A meta.json whose `client` object carries NEITHER version field still
+# promotes: that is the shape of every fixture written before the keys
+# existed, and the reader must treat both as absent rather than crash into
+# the exit-2 unreadable arm. (The object itself has to carry
+# `connection_mode`, which the closed-set mode gate above requires.)
+mk_promotable_fixture "$scratch/anthropic-api/cv-no-client-01" \
+    'meta.json={"case_id":"cv-no-client-01","wire_pattern":"baseline","ingress_kind":"anthropic","client":{"connection_mode":"base-url"}}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/cv-no-client-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture recording neither client version promotes at exit 0" "0" "$rc"
+
+# A meta.json carrying NO `client` object at all is refused by the CLOSED-SET
+# MODE gate at exit 1 -- not by a crash in the claim reader at exit 2. The
+# distinction is the whole point: the reader treats a missing object as
+# absent fields, so the fixture reaches a gate that states a verdict instead
+# of a traceback that states a bug.
+mk_promotable_fixture "$scratch/anthropic-api/cv-no-object-01" \
+    'meta.json={"case_id":"cv-no-object-01","wire_pattern":"baseline","ingress_kind":"anthropic"}'
+rc=0
+promote "$work" --from "$scratch/anthropic-api/cv-no-object-01" \
+    --scratch-root "$scratch" || rc=$?
+check "a fixture with no client object is refused by the mode gate, not a crash" \
+    "1" "$rc"
+check_log "the refusal is the mode gate's, naming the absent mode claim" \
+    "records no connection mode" "$work/promote.log"
+rm -rf "$work"
+
+# An absent comparator is a hard failure, same shape as the predicate above.
+work="$(make_work)"
+scratch="$work/scratch"
+mk_promotable_fixture "$scratch/anthropic-api/plain-turn-01"
+if [ -f "$work/repo/scripts/drivers/lib/client_version.py" ] &&
+    rm -f "$work/repo/scripts/drivers/lib/client_version.py" &&
+    [ ! -e "$work/repo/scripts/drivers/lib/client_version.py" ]; then
+    rc=0
+    promote "$work" --from "$scratch/anthropic-api/plain-turn-01" \
+        --scratch-root "$scratch" || rc=$?
+    check "an absent client-version comparator refuses the promotion" "2" "$rc"
+    check_log "the refusal names the missing comparator" \
+        "client-version comparator not found" "$work/promote.log"
+    check "nothing landed with no comparator to check the versions" "ABSENT" \
+        "$(tree_manifest "$work/repo/$CORPUS_REL/anthropic-api/plain-turn-01")"
+else
+    echo "FAIL: could not remove the comparator from the throwaway repo"
     fails=$((fails + 1))
 fi
 rm -rf "$work"

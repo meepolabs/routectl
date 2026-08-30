@@ -304,6 +304,15 @@ set -u
         "$([ -n "${ROUTECTL_DRIVER_PROXY_CA:-}" ] && [ -r "$ROUTECTL_DRIVER_PROXY_CA" ] && echo yes || echo no)"
     printf 'health=%s\n' "$(curl -fsS -m 2 "$ROUTECTL_BASE_URL/health" || echo unreachable)"
 } >"$PROBE_OUT"
+
+# The run record a real driver writes through `driver_record_client`. The
+# probe does not source the driver library -- it is the RUNNER under test
+# here -- so it writes the record by hand, which is what lets a case drive
+# the recorded version (or its absence) independently of any client.
+if [ -n "${PROBE_CLIENT_VERSION:-}" ]; then
+    printf 'name=probe\nversion=%s\n' "$PROBE_CLIENT_VERSION" \
+        >"$ROUTECTL_DRIVER_RUN/client.txt"
+fi
 SH
     chmod +x "$1"
 }
@@ -360,6 +369,7 @@ make_work() {
     cp "$HERE/drivers/lib/validate_case.py" "$work/repo/scripts/drivers/lib/validate_case.py"
     cp "$HERE/drivers/lib/verify_pattern.py" "$work/repo/scripts/drivers/lib/verify_pattern.py"
     cp "$INGRESS_KINDS" "$work/repo/scripts/drivers/lib/ingress_kinds.sh"
+    cp "$HERE/drivers/lib/client_version.py" "$work/repo/scripts/drivers/lib/client_version.py"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
     cp "$HERE/drivers/config/anthropic-api.front-proxy.toml" \
         "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml"
@@ -423,6 +433,7 @@ runner_run() {
         STUB_MODE="${STUB_MODE:-healthy}" \
         STUB_MITM_MODE="${STUB_MITM_MODE:-ready}" \
         PROBE_OUT="$work/probe.txt" \
+        PROBE_CLIENT_VERSION="${PROBE_CLIENT_VERSION-}" \
         ROUTECTL_DRIVER_OUT_ROOT="${ROUTECTL_DRIVER_OUT_ROOT-$work
 $work/scratch}" \
             bash scripts/capture_driver.sh --work "$work/runs" \
@@ -1664,6 +1675,69 @@ if [ -f "$work/repo/scripts/drivers/lib/ingress_kinds.sh" ] &&
 else
     echo "FAIL: could not remove the ingress vocabulary from the throwaway repo"
     fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 13c: the driver's binary-version read crosses back to the rig -
+# A driver writes the version it read off the running client binary into
+# `<run>/client.txt`; the runner reads it back and forwards it to the rig.
+# The read has to happen while the run workspace still exists -- `cleanup`
+# removes it on exit unless `--keep` -- which is the whole defect this
+# closes: the value used to die with the workspace, leaving the
+# CLIENT-CONTROLLED user-agent as the only statement about the client.
+#
+# `runner_run` passes no `--keep`, so every leg here runs the production
+# shape and the crossing is the only way the value can reach meta.json.
+#
+# The recorded version is the canned trace's own token under a DIFFERENT
+# decoration -- the real asymmetry, a human binary line against a bare token
+# out of `claude-cli/<v> (external, cli)`. So this leg proves the crossing
+# and clears the promotion gate for the same reason a real capture does.
+work="$(make_work)"
+port_v="$(free_port)"
+rc=0
+PROBE_CLIENT_VERSION="2.1.167 (Probe Client)" \
+ROUTECTL_DRIVER_PORT_MIN="$port_v" ROUTECTL_DRIVER_PORT_MAX="$port_v" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
+check "a run whose driver recorded a client version exits 0" "0" "$rc"
+# The precondition: the workspace the record lived in is gone, so the value
+# below cannot have been read from it after the fact.
+check "the run workspace was removed" "no" \
+    "$([ -n "$(ls -A "$work/runs" 2>/dev/null)" ] && echo yes || echo no)"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15/meta.json"
+if [ -f "$meta" ]; then
+    check "meta.client.binary_version carries the driver's own read" \
+        "2.1.167 (Probe Client)" "$(meta_get "$meta" client.binary_version)"
+else
+    echo "FAIL: no fixture landed at $meta (runner log: $work/runner.log)"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# PAIRED NEGATIVE: a driver that recorded NOTHING forwards an empty pin, and
+# the fixture lands with the field empty rather than with a value nothing
+# read. Without this leg the assertion above could pass against a runner
+# that substituted the wire version whenever the record was missing.
+work="$(make_work)"
+port_v="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_v" ROUTECTL_DRIVER_PORT_MAX="$port_v" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
+check "a run whose driver recorded no client version still exits 0" "0" "$rc"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15/meta.json"
+if [ -f "$meta" ]; then
+    check "an unrecorded binary version lands as empty, not invented" "" \
+        "$(meta_get "$meta" client.binary_version)"
+    # The wire value IS present in this fixture, which is what makes the
+    # emptiness above a statement about the forwarded pin rather than about
+    # a rig that wrote no client block at all.
+    check "the wire version is populated beside the empty binary version" \
+        "2.1.167" "$(meta_get "$meta" client.version)"
+else
+    echo "FAIL: no fixture landed at $meta (runner log: $work/runner.log)"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 2))
 fi
 rm -rf "$work"
 

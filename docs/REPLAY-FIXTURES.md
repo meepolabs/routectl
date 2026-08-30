@@ -299,6 +299,7 @@ broke the corpus.)
       "client": {
         "name": String,
         "version": String,
+        "binary_version": String,
         "connection_mode": String
       },
       "ingress_kind": "anthropic" | "openai" | "openai-responses",
@@ -447,6 +448,30 @@ Fields:
   content as system-reminder text with zero system turns in base-url
   mode, so an unpinned mode makes a cross-mode comparison read as
   drift.
+
+  `binary_version` is the SECOND, independent statement of the same
+  version: the driver reads it off the RUNNING client binary before any
+  session opens, and the runner forwards it to the rig as
+  `ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION` -- which is why the read has to
+  cross back out of the run workspace, since that workspace is removed on
+  exit unless `--keep`. `version` is the client's own self-report on the
+  WIRE and is therefore CLIENT-CONTROLLED; `binary_version` is not.
+
+  A DISAGREEMENT between the two REFUSES PROMOTION at both boundaries
+  (`scripts/drivers/lib/client_version.py`, invoked from the capture rig
+  and again from `scripts/promote_fixture.sh`): a client whose binary and
+  user-agent report different versions is not evidence about either, and a
+  mid-run auto-update is exactly what produces one. The comparison is on
+  DOTTED-NUMERIC VERSION TOKENS, not on strings, because the two sources
+  spell one version differently by construction (`2.1.246 (Claude Code)`
+  from a binary against a bare `2.1.246` extracted from
+  `claude-cli/2.1.246 (external, cli)`); the reduction is applied to both
+  sides by the same code, so neither side's decoration decides the outcome.
+  EITHER SIDE ABSENT is NOT COMPARABLE and promotes with the absence
+  recorded as an empty field -- a live-box capture has no binary to read,
+  and a fixture predating the key reaches the same arm, which is what keeps
+  it additive. Nothing ever backfills one field from the other: a field
+  that mirrored its counterpart could not contradict it.
 
   The mode is ENFORCED AT PROMOTION too, against evidence no environment
   carrier can provide. An env var states the client's INTENT; the MITM seam

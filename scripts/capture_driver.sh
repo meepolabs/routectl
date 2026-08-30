@@ -141,6 +141,18 @@
 # for exactly the non-Anthropic client this check exists to catch, which
 # is the empty claim wearing a plausible value.
 #
+# THE CLIENT VERSION CROSSES BACK, in the other direction: a driver DOES
+# hold this one, and it reaches the rig through the run workspace rather
+# than through argv. A driver writes the version it read off the running
+# BINARY into `<run>/client.txt`, and this script reads it back after the
+# driver exits and forwards it to the rig as
+# `ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION`. That read has to happen here
+# and not later: the run workspace is removed on exit unless `--keep`, so a
+# version left in it would die with it -- which is exactly what used to
+# happen, leaving `meta.client.version` (parsed from the CLIENT-CONTROLLED
+# user-agent) as the only statement about the client, with nothing to check
+# it against. An absent record forwards an EMPTY value; nothing invents one.
+#
 # A driver maps ROUTECTL_BASE_URL onto whatever variable its client
 # reads; this script stays client-agnostic on purpose.
 #
@@ -513,6 +525,19 @@ RUN_XDG="$RUN/xdg"
 RUN_WORK="$RUN/work"
 TRACE="$RUN/trace.log"
 
+# The run record `driver_record_client` writes: the client name, the
+# version READ OFF THE BINARY, and the case and mode pins. A REPLICA of
+# `DRIVER_CLIENT_RECORD` in scripts/drivers/lib/common.sh, because the
+# runner does not source the driver library; the drivers self-test asserts
+# the two spellings agree.
+#
+# It lives inside the run workspace, which `cleanup` removes unless
+# `--keep`, so the binary-side version has to be read back out of it
+# BEFORE the capture step -- otherwise the read dies with the workspace and
+# `meta.client.version` is left as the client's own user-agent claim with
+# nothing to check it against.
+CLIENT_RECORD="$RUN/client.txt"
+
 DAEMON_PID=""
 
 # Kill ONLY the pid this run captured, then take the workspace down.
@@ -793,6 +818,19 @@ fi
 # Capture
 # ---------------------------------------------------------------------
 
+# The client version the driver read OFF THE BINARY, recovered from the run
+# record before `cleanup` removes the workspace. Empty when the driver
+# wrote no record or recorded no version: the pin is forwarded as absent
+# rather than substituted, because a value invented here would be a third
+# statement about the client that no read produced.
+#
+# `head -1` bounds the read to one line; the record is written one
+# `key=value` per line by the driver library.
+CLIENT_BINARY_VERSION=""
+if [ -r "$CLIENT_RECORD" ]; then
+  CLIENT_BINARY_VERSION="$(sed -n 's/^version=//p' "$CLIENT_RECORD" | head -1)"
+fi
+
 # Stop the daemon BEFORE the rig reads the trace: a still-running daemon
 # can append mid-read, and the shutdown path is also where the last
 # response's trace lines are flushed.
@@ -820,6 +858,7 @@ ROUTECTL_FIXTURE_CONFIG_SHA="$CONFIG_SHA" \
 ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
 ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
 ROUTECTL_FIXTURE_EXPECTED_INGRESS="$EXPECTED_INGRESS" \
+ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION="$CLIENT_BINARY_VERSION" \
   bash "$RIG" --driver-mode --force \
     --log "$TRACE" \
     --out "$DRIVER_OUT" \

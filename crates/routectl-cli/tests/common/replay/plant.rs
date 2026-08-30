@@ -34,6 +34,7 @@ pub fn current_meta() -> Value {
         "client": {
             "name": "claude-code",
             "version": "2.1.167",
+            "binary_version": "2.1.167 (Claude Code)",
             "connection_mode": "base-url",
         },
         "stream": false,

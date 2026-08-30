@@ -119,8 +119,24 @@ const fn default_schema_version() -> u32 {
 pub struct FixtureClient {
     #[serde(default)]
     pub name: String,
+    /// Version the client SELF-REPORTED on the wire, parsed by the
+    /// capture rig out of the ingress `user-agent`. Client-controlled,
+    /// which is why [`FixtureClient::binary_version`] exists beside it.
     #[serde(default)]
     pub version: String,
+    /// Version the DRIVER read off the running client binary, forwarded
+    /// through the runner before the run workspace was removed. Empty on a
+    /// live-box capture (no binary to interrogate) and on any fixture
+    /// predating the key -- additive, so absence loads rather than
+    /// refusing.
+    ///
+    /// Two independent reads of one client's version. A DISAGREEMENT is
+    /// refused at the promotion boundaries
+    /// (`scripts/drivers/lib/client_version.py`), so a committed fixture
+    /// carrying both has had them reconciled; the loader stores the string
+    /// and compares nothing, the same posture it holds on `wire_pattern`.
+    #[serde(default)]
+    pub binary_version: String,
     #[serde(default)]
     pub connection_mode: String,
 }
@@ -731,6 +747,52 @@ mod tests {
 
         assert_eq!(f.meta.wire_pattern, "");
         assert_eq!(f.meta.case_id, "smoke");
+    }
+
+    /// The driver-side version read survives the load. It is the ONE
+    /// statement about the client that the client does not control, so a
+    /// load that dropped it would leave the user-agent unchecked again --
+    /// which is the state this field exists to end.
+    #[test]
+    fn loader_round_trips_the_binary_side_client_version() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        meta["client"]["binary_version"] = json!("2.1.246 (Claude Code)");
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.client.binary_version, "2.1.246 (Claude Code)");
+        assert_eq!(f.meta.client.version, "2.1.167");
+    }
+
+    /// Paired negative for the round-trip above: the key is ADDITIVE, so a
+    /// fixture written before it existed loads with the binary-side value
+    /// EMPTY rather than refused -- and empty rather than backfilled from
+    /// the wire value, which would make the two unable to disagree.
+    #[test]
+    fn loader_accepts_a_fixture_with_no_binary_client_version_key() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        assert!(
+            meta["client"]
+                .as_object_mut()
+                .unwrap()
+                .remove("binary_version")
+                .is_some(),
+            "the planted meta must CARRY client.binary_version for its removal \
+             to be the condition under test",
+        );
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.client.binary_version, "");
+        assert_eq!(f.meta.client.version, "2.1.167");
     }
 
     #[test]

@@ -47,19 +47,20 @@
 # old fixture or the whole new one, never a union of both.
 #
 # WHY IT RE-RUNS THE LANDING GATES. The rig already ran
-# `scrub-fixture.sh --check`, the wire-pattern predicate, and the
-# mode/seam coherence check when it captured, but a scratch fixture is
-# by design hand-inspectable and hand-editable between capture and
-# promotion -- that is what the scratch root is FOR. These re-checks are
+# `scrub-fixture.sh --check`, the wire-pattern predicate, the mode/seam
+# coherence check, the expected-ingress comparison, and the client-version
+# comparison when it captured, but a scratch fixture is by design
+# hand-inspectable and hand-editable between capture and promotion -- that is
+# what the scratch root is FOR. These re-checks are
 # the only thing standing between an edited scratch fixture and the
 # committed corpus, so a non-zero verdict from any of them is a REFUSAL
 # that promotes nothing and leaves the destination exactly as it was.
 #
 # The claims are read from the STAGED `meta.json`, which is where the rig
 # recorded them and the only on-disk statement of what the fixture claims
-# to be. An edit that flips `wire_pattern` or `client.connection_mode` is
-# exactly what these gates exist to catch, so an unreadable meta.json is a
-# refusal rather than a skip.
+# to be. An edit that flips `wire_pattern`, `client.connection_mode`, or
+# either client-version field is exactly what these gates exist to catch, so
+# an unreadable meta.json is a refusal rather than a skip.
 #
 # `ingress_kind` is the one field read from meta.json that is NOT a claim:
 # the rig parsed it out of the daemon's own trace, so it is a traced fact.
@@ -83,8 +84,9 @@
 #      a body that does not exhibit the wire pattern its `meta.json`
 #      claims, a connection-mode claim outside the two the corpus holds,
 #      captured ingress headers that contradict its recorded connection
-#      mode, or a traced `ingress_kind` that is not the dialect
-#      `--expected-ingress` names. Nothing was promoted.
+#      mode, a traced `ingress_kind` that is not the dialect
+#      `--expected-ingress` names, or two client-version statements that
+#      contradict each other. Nothing was promoted.
 #   2  usage error, a confinement refusal, a fixture path that is not
 #      `<scratch-root>/<lane>/<case-id>`, or a missing prerequisite
 #      (this is also what a scrub gate that could not run at all reports)
@@ -141,6 +143,15 @@ SCRUB="$ROOT/scripts/scrub-fixture.sh"
 VERIFY_PATTERN="$ROOT/scripts/drivers/lib/verify_pattern.py"
 [ -r "$VERIFY_PATTERN" ] ||
   fatal "wire-pattern predicate not found at $VERIFY_PATTERN; refusing to promote"
+
+# The single owner of the binary-vs-wire client-version comparison, shared
+# with the capture rig. Absent is a hard failure for the same reason: a
+# staged fixture is hand-editable, and the wire version is the one a client
+# controls, so promoting without the comparison is promoting an unchecked
+# claim.
+CLIENT_VERSION="$ROOT/scripts/drivers/lib/client_version.py"
+[ -r "$CLIENT_VERSION" ] ||
+  fatal "client-version comparator not found at $CLIENT_VERSION; refusing to promote"
 
 # Name of the MITM front-proxy seam header, as spelled in
 # REDACT_HEADER_NAMES in crates/routectl-core/src/log_safe.rs -- which is
@@ -261,9 +272,9 @@ if [ "$scrub_rc" -ne 0 ]; then
   exit "$scrub_rc"
 fi
 
-# The two CLAIMS the staged meta.json makes about itself, read back with a
-# real JSON parser: a grep would accept a value from any nesting level, and
-# `connection_mode` is nested under `client`.
+# The CLAIMS the staged meta.json makes about itself, read back with a real
+# JSON parser: a grep would accept a value from any nesting level, and three
+# of the four live under `client`.
 #
 # An unreadable or malformed meta.json is a refusal at exit 2: the gates
 # below cannot run, and "could not check" is never "checked and clean".
@@ -282,9 +293,13 @@ try:
     if not isinstance(meta, dict):
         raise ValueError("meta.json is not a JSON object")
     client = meta.get("client")
+    if not isinstance(client, dict):
+        client = {}
     print(meta.get("wire_pattern", ""))
-    print(client.get("connection_mode", "") if isinstance(client, dict) else "")
+    print(client.get("connection_mode", ""))
     print(meta.get("ingress_kind", ""))
+    print(client.get("version", ""))
+    print(client.get("binary_version", ""))
 except (OSError, UnicodeDecodeError, ValueError) as exc:
     print(f"promote_fixture: unreadable staged meta.json: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -298,6 +313,8 @@ fi
 CLAIMED_PATTERN="$(printf '%s\n' "$CLAIMS" | sed -n 1p)"
 CLAIMED_MODE="$(printf '%s\n' "$CLAIMS" | sed -n 2p)"
 TRACED_INGRESS="$(printf '%s\n' "$CLAIMS" | sed -n 3p)"
+CLAIMED_WIRE_VERSION="$(printf '%s\n' "$CLAIMS" | sed -n 4p)"
+CLAIMED_BINARY_VERSION="$(printf '%s\n' "$CLAIMS" | sed -n 5p)"
 
 # The wire-pattern claim, enforced against the staged bytes. An EMPTY claim
 # is a live-box capture, which genuinely could not observe the pin; the
@@ -404,6 +421,40 @@ if [ "$TRACED_INGRESS" != "$EXPECTED_INGRESS" ]; then
   echo "the destination '$DST' is untouched." >&2
   exit 1
 fi
+
+# The two statements of the CLIENT VERSION, compared against each other.
+# `client.version` came from the client-controlled ingress `user-agent`;
+# `client.binary_version` was read off the running binary by the driver.
+# Two reads of one client, so a DISAGREEMENT means the fixture is evidence
+# about neither version -- the shape an auto-updater mid-run produces.
+#
+# Ordered LAST, after the expected-ingress gate above: that gate decides
+# whether this fixture is evidence for the dialect it is being landed as at
+# all, which is a question about its IDENTITY, while this one is about
+# whether the client's two self-statements agree. A wrong-dialect fixture
+# reported as a version disagreement would name the smaller fault of the two.
+#
+# Either side ABSENT is not a disagreement: the comparator reports NOT
+# COMPARABLE (exit 3) and the fixture promotes with the absence recorded as
+# it stands. A fixture predating `binary_version` reaches exactly this arm,
+# which is what keeps the key additive.
+version_rc=0
+python3 "$CLIENT_VERSION" --compare \
+  "$CLAIMED_BINARY_VERSION" "$CLAIMED_WIRE_VERSION" || version_rc=$?
+case "$version_rc" in
+  0|3) : ;;
+  1)
+    echo "promote_fixture: refusing to promote '$SRC': it records client version" >&2
+    echo "'$CLAIMED_WIRE_VERSION' on the wire but '$CLAIMED_BINARY_VERSION' off the binary," >&2
+    echo "so it is evidence about neither. the destination '$DST' is untouched." >&2
+    exit 1
+    ;;
+  *)
+    echo "promote_fixture: refusing to promote '$SRC': the client-version comparator could" >&2
+    echo "not run, so its two version statements are unchecked. the destination is untouched." >&2
+    exit 2
+    ;;
+esac
 
 # Rename-aside-then-delete. Both operands are absolute (a
 # `cd <dir> && rm` compound short-circuits into a no-op when cwd already

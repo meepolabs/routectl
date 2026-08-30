@@ -407,6 +407,74 @@ fn every_committed_driver_fixture_pins_its_ingress_kind_and_wire_pattern() {
     );
 }
 
+/// The COMMITTED corpus still loads after `client.binary_version` was
+/// added to the schema.
+///
+/// The field is additive by construction (a serde default on
+/// [`common::replay::FixtureClient`]), and this is the assertion that the
+/// construction holds against the fixtures ACTUALLY ON DISK rather than
+/// against a planted variant: every committed fixture predates the key, so
+/// a required field -- or a default that failed to apply -- would show up
+/// here as a corpus that stopped walking. A required field is a major
+/// fixture-format bump, which under the committed-corpus regime orphans
+/// every contributed cell whose session cannot be re-driven.
+///
+/// It asserts the LOAD and the field's absence-value, never a populated
+/// value: the corpus was captured before the driver-side read reached the
+/// rig, so demanding a value here would demand a recapture the regime is
+/// built to avoid.
+///
+/// The absent-corpus skip keys on ENTRIES WALKED, not on fixtures LOADED.
+/// Keying on the loaded count would make this test SKIP in exactly the
+/// state it exists to catch: a required field stops every fixture loading,
+/// which leaves the loaded set empty and reads as "no corpus here".
+#[test]
+fn the_committed_corpus_loads_with_the_binary_client_version_key_absent() {
+    let root = driver_root();
+    let corpus = match discover_driver_fixtures(&root) {
+        Ok(corpus) => corpus,
+        Err(e) => panic!("the driver root {} must walk: {e}", root.display()),
+    };
+    let walked = corpus.fixtures.len() + corpus.skipped;
+    if walked == 0 {
+        eprintln!(
+            "conservation: driver root `{}` holds no fixture entry at all; the \
+             additive-field tolerance assertion is SKIPPED.",
+            root.display(),
+        );
+        return;
+    }
+
+    assert_eq!(
+        corpus.skipped,
+        0,
+        "adding client.binary_version must not skip a committed fixture: an additive key \
+         carries a default, and a fixture that stopped loading means the key became \
+         required -- a major fixture-format bump that orphans contributed cells. \
+         {walked} entr(ies) walked, {} loaded",
+        corpus.fixtures.len(),
+    );
+
+    // The wire-side value is what these fixtures DO carry, so asserting it
+    // alongside is the positive control: without it, a loader that returned
+    // an all-empty `client` would satisfy the absence check above.
+    for fixture in &corpus.fixtures {
+        assert!(
+            !fixture.meta.client.version.is_empty(),
+            "committed fixture `{}` carries no wire-side client.version, so the \
+             absence assertion below proves nothing about the new key",
+            fixture.name,
+        );
+        assert!(
+            fixture.meta.client.binary_version.is_empty(),
+            "committed fixture `{}` records a binary-side client version; it was \
+             captured before the driver-side read reached the rig, so this is a \
+             recapture (update this assertion) or a hand edit",
+            fixture.name,
+        );
+    }
+}
+
 /// The measured baseline of the live-box corpus, asserted only WHEN THAT
 /// CORPUS IS PRESENT.
 ///

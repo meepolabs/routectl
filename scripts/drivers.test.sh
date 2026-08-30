@@ -41,6 +41,7 @@ CASES="$DRIVERS/cases"
 VALIDATOR="$DRIVERS/lib/validate_case.py"
 VERIFIER="$DRIVERS/lib/verify_pattern.py"
 INGRESS_KINDS="$DRIVERS/lib/ingress_kinds.sh"
+CLIENT_VERSION="$DRIVERS/lib/client_version.py"
 CLASSIFICATION="$DRIVERS/lib/wire_pattern_classification.tsv"
 
 DRIVER_FILES=(
@@ -926,6 +927,98 @@ unset ingress_src_dir
     done
     exit "$fails"
 ) || fails=$((fails + $?))
+# ---------------------------------------------------------------------
+# Part 1d: the client-version comparator
+# ---------------------------------------------------------------------
+# A fixture carries TWO statements of one client's version: the wire value
+# parsed from the client-controlled `user-agent`, and the binary-side value
+# the driver read off the running client. This is the code that decides
+# whether they agree, and the promotion gates refuse a DISAGREEMENT.
+#
+# Every leg drives the comparator directly on a pair of strings, so a
+# verdict can only be attributed to the pair -- a fixture-level assertion
+# alone could not distinguish a real comparison from one that always agrees.
+
+# Exit codes, as the comparator's own docstring defines them. Named here
+# because three distinct non-zero verdicts is exactly the distinction a
+# blanket non-zero assertion would erase.
+CV_AGREE=0
+CV_DISAGREE=1
+CV_NOT_COMPARABLE=3
+
+cv_verdict() {
+    local rc=0
+    python3 "$CLIENT_VERSION" --compare "$1" "$2" >/dev/null 2>&1 || rc=$?
+    printf '%s\n' "$rc"
+}
+
+cv_check() {
+    local label="$1" expected="$2" binary="$3" wire="$4"
+    check "$label" "$expected" "$(cv_verdict "$binary" "$wire")"
+}
+
+# The REAL spellings, which differ by construction: a binary prints a human
+# line, the rig extracts a bare token out of `claude-cli/<v> (external,
+# cli)`. A string comparison would call this pair a disagreement and refuse
+# every genuine capture, so this leg is what pins the comparison to tokens.
+cv_check "the real binary line and the real wire token agree" \
+    "$CV_AGREE" "2.1.246 (Claude Code)" "2.1.246"
+cv_check "a differently-decorated binary line still agrees" \
+    "$CV_AGREE" "codex-cli 0.151.0" "0.151.0"
+cv_check "identical bare tokens agree" "$CV_AGREE" "2.1.246" "2.1.246"
+
+# The defect the gate exists for: a client that auto-updated mid-run reports
+# one version off the binary and another on the wire.
+cv_check "a mid-run update is a DISAGREEMENT" \
+    "$CV_DISAGREE" "2.1.247 (Claude Code)" "2.1.246"
+cv_check "a major-version difference is a DISAGREEMENT" \
+    "$CV_DISAGREE" "3.0.0" "2.1.246"
+
+# A version-shaped token must not be satisfied by a coincidental substring
+# on either side, in both directions.
+cv_check "a longer token is not matched by a shorter prefix of it" \
+    "$CV_DISAGREE" "2.1.24" "2.1.246"
+cv_check "a shorter token is not matched by a longer one containing it" \
+    "$CV_DISAGREE" "2.1.246" "2.1.24"
+
+# Absence is NOT COMPARABLE, and the two sides are checked separately: a
+# comparator that only handled one empty side would read the other as a
+# disagreement and refuse a live-box capture.
+cv_check "an absent binary version is not comparable" \
+    "$CV_NOT_COMPARABLE" "" "2.1.246"
+cv_check "an absent wire version is not comparable" \
+    "$CV_NOT_COMPARABLE" "2.1.246 (Claude Code)" ""
+cv_check "both absent is not comparable" "$CV_NOT_COMPARABLE" "" ""
+
+# A version line that carries no dotted-numeric token has said nothing to
+# contradict, so it is not comparable rather than a disagreement. Refusing
+# it would refuse the client instead of the contradiction.
+cv_check "a word-only version line is not comparable" \
+    "$CV_NOT_COMPARABLE" "development build" "2.1.246"
+cv_check "a lone major is not read as a version token" \
+    "$CV_NOT_COMPARABLE" "7" "2.1.246"
+
+# A prerelease suffix reduces the same way on both sides, because the
+# reduction is one function applied twice.
+cv_check "a prerelease suffix does not manufacture a disagreement" \
+    "$CV_AGREE" "2.1.246-beta.1 (Claude Code)" "2.1.246-beta.1"
+
+# A DISAGREEMENT must name both readings: a refusal that printed neither
+# sends whoever hit it back to the fixture to find out what disagreed.
+cv_reason="$(python3 "$CLIENT_VERSION" --compare "2.1.247" "2.1.246" 2>&1 || true)"
+for needle in 2.1.247 2.1.246; do
+    if printf '%s' "$cv_reason" | grep -qF -- "$needle"; then
+        echo "PASS: the disagreement names the reading '$needle'"
+    else
+        fail "the disagreement did not name the reading '$needle': $cv_reason"
+    fi
+done
+
+# A usage error is its OWN code, distinct from every verdict above: a caller
+# that invoked the comparator wrong must not read the answer as agreement.
+cv_usage_rc=0
+python3 "$CLIENT_VERSION" 2.1.246 2.1.246 >/dev/null 2>&1 || cv_usage_rc=$?
+check "a missing --compare is a usage error, not a verdict" "2" "$cv_usage_rc"
 
 # ---------------------------------------------------------------------
 # Part 2: driver hygiene, asserted on the committed files
@@ -1033,6 +1126,34 @@ if grep -qF 'ROUTECTL_FIXTURE_EXPECTED_INGRESS' <(code_lines "$RIG"); then
 else
     fail "the expected-ingress grep matches nothing in the rig, so its absence proves nothing"
 fi
+# EVERY driver brakes the client's auto-updater. A client that updates
+# itself mid-run moves the one value the corpus reads as its decay clock,
+# and it lands a capture whose binary-side and wire versions disagree --
+# which the promotion gate refuses, so an unbraked driver produces
+# unpromotable fixtures rather than merely noisy ones. Asserted over the
+# whole driver set rather than per file: a per-file check is a special case
+# of this, and it would keep passing while a fourth driver shipped with no
+# brake, which is exactly how the gap this closes was introduced.
+for driver in "${DRIVER_FILES[@]}"; do
+    if grep -qE '^[[:space:]]*export[[:space:]]+DISABLE_AUTOUPDATER=' \
+        <(code_lines "$driver"); then
+        echo "PASS: $(basename "$driver") exports the updater brake"
+    else
+        fail "$(basename "$driver") exports no DISABLE_AUTOUPDATER; its client can update mid-run"
+    fi
+done
+
+# The run record's basename is spelled in TWO files: the driver library
+# writes it, the runner reads `version=` back out of it after the driver
+# exits. Neither sources the other, so a drift in the spelling would leave
+# the runner reading a file nobody writes -- silently forwarding an empty
+# binary-side version and restoring the unchecked-user-agent state.
+lib_record="$(sed -n 's/^DRIVER_CLIENT_RECORD="\(.*\)"$/\1/p' "$DRIVERS/lib/common.sh")"
+runner_record="$(sed -n 's|^CLIENT_RECORD="\$RUN/\(.*\)"$|\1|p' "$ROOT/scripts/capture_driver.sh")"
+check "the run record's basename is non-empty in the driver library" \
+    "1" "$([ -n "$lib_record" ] && echo 1 || echo 0)"
+check "the runner reads the same run-record basename the library writes" \
+    "$lib_record" "$runner_record"
 
 # ---------------------------------------------------------------------
 # Fixtures for the end-to-end cases
@@ -1263,9 +1384,15 @@ free_port_pair() {
 }
 
 # Run the real runner in the throwaway repo, driving one real driver
-# against both stubs. `--keep` is deliberate: the driver records the client
-# version into the run workspace, and a removed workspace could not be
-# asserted on. The kept path is read back out of the runner's own log.
+# against both stubs. `--keep` is the DEFAULT here: the driver records the
+# client version into the run workspace, and a removed workspace could not
+# be asserted on. The kept path is read back out of the runner's own log.
+#
+# `DRIVER_KEEP=0` drops the flag, which is the production shape -- the
+# workspace is removed on exit. A case that asserts the binary-side version
+# reached the FIXTURE must run that way: with `--keep` the record survives,
+# so the assertion could pass against a runner that never crossed the value
+# back at all.
 #
 # The driver path is ABSOLUTE. The runner runs its driver command with cwd
 # set to the run's throwaway git repo, so a repo-relative path would
@@ -1275,7 +1402,8 @@ free_port_pair() {
 driver_run() {
     local work="$1" driver="$2" case_id="$3"
     shift 3
-    local port rc=0
+    local port rc=0 keep_argv=()
+    [ "${DRIVER_KEEP:-1}" = 0 ] || keep_argv=(--keep)
     port="$(free_port_pair)"
     (
         cd "$work/repo" || exit 2
@@ -1295,7 +1423,8 @@ driver_run() {
         ROUTECTL_DRIVER_EXIT_SECONDS=0 \
         ROUTECTL_DRIVER_PORT_MIN="$port" \
         ROUTECTL_DRIVER_PORT_MAX="$((port + 1))" \
-            bash scripts/capture_driver.sh --work "$work/runs" --keep \
+            bash scripts/capture_driver.sh --work "$work/runs" \
+            "${keep_argv[@]+"${keep_argv[@]}"}" \
             --case "$case_id" --lane "${DRIVER_LANE:-anthropic-api}" \
             --expected-ingress "${DRIVER_EXPECTED_INGRESS:-anthropic}" "$@" \
             -- "$work/repo/scripts/drivers/$driver"
@@ -1379,6 +1508,13 @@ for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
             "$(meta_get "$meta" case_id)"
         check "$driver: meta.client.version is populated" "9.9.9" \
             "$(meta_get "$meta" client.version)"
+        # The driver-side read reaching the fixture. The stub binary prints
+        # a DECORATED line and the canned trace's user-agent carries the
+        # bare token, so this pair also exercises the real spelling
+        # asymmetry: the two agree on the token and the promotion gate
+        # passed, which is why the fixture above landed at all.
+        check "$driver: meta.client.binary_version carries the driver's read" \
+            "9.9.9 (Stub Client)" "$(meta_get "$meta" client.binary_version)"
         check "$driver: meta.client.connection_mode is populated" "base-url" \
             "$(meta_get "$meta" client.connection_mode)"
         # The traced dialect the expected-ingress gate compared the pin
@@ -1406,6 +1542,95 @@ for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
     [ -n "$kept" ] && rm -rf "$kept"
     rm -rf "$work"
 done
+
+# ---------------------------------------------------------------------
+# Part 3b: the client version crosses the workspace's removal
+# ---------------------------------------------------------------------
+# The defect this closes: the driver-side version read used to die with the
+# run workspace, leaving `meta.client.version` -- parsed from the
+# CLIENT-CONTROLLED user-agent -- as the only statement about the client,
+# with nothing to check it against.
+#
+# So this part runs WITHOUT `--keep`, the production shape. Part 3's legs
+# all keep the workspace, so they cannot tell a value that crossed back
+# from one that merely survived in a directory nobody deleted.
+
+work="$(make_work)"
+rc=0
+DRIVER_KEEP=0 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
+check "a run with no --keep exits 0" "0" "$rc"
+# The precondition: the workspace really is gone. Without it, the fixture
+# assertion below could be satisfied by a run that kept it after all.
+kept="$(kept_run "$work")"
+check "the run workspace was removed" "" "$kept"
+if [ -z "$kept" ] && [ ! -d "$work/runs" ] || [ -z "$(ls -A "$work/runs" 2>/dev/null)" ]; then
+    echo "PASS: the run workspace left nothing behind"
+else
+    fail "the run workspace survived at $work/runs, so the crossing is unproven"
+fi
+meta="$(landed_meta "$work" plain-turn-01)"
+if [ -f "$meta" ]; then
+    check "the binary-side version reached the fixture with no workspace to read" \
+        "9.9.9 (Stub Client)" "$(meta_get "$meta" client.binary_version)"
+else
+    fail "no fixture landed at $meta"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# DISAGREEMENT REFUSES PROMOTION. The stub client's version is forced to a
+# value the canned trace's user-agent contradicts, which is the shape a
+# client that auto-updated mid-run produces. Nothing else about the run
+# changes, so the refusal is attributable to the disagreement alone -- and
+# Part 3's agreeing legs are the paired positive control that this gate does
+# not refuse every run.
+work="$(make_work)"
+rc=0
+STUB_CLIENT_VERSION="1.1.1 (Stub Client)" \
+    DRIVER_KEEP=0 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
+check_ne "a binary-vs-wire disagreement fails the run" "0" "$rc"
+if [ -f "$(landed_meta "$work" plain-turn-01)" ]; then
+    fail "a fixture whose two client versions disagree still landed"
+else
+    echo "PASS: a fixture whose two client versions disagree does not land"
+fi
+if grep -qF 'off the binary' "$work/runner.log"; then
+    echo "PASS: the refusal names the binary-side reading"
+else
+    fail "the refusal did not name the binary-side reading"
+    sed -n '1,30p' "$work/runner.log"
+fi
+rm -rf "$work"
+
+# AN ABSENT WIRE VERSION IS RECORDED AS ABSENT, NEVER INVENTED. The trace's
+# user-agent is stripped of its version, so the rig parses none -- and the
+# binary-side read still succeeded. The pair is unprovable rather than
+# contradicted, so the fixture LANDS with the wire field empty and the
+# binary field populated: nothing backfills one from the other, which is
+# what keeps the two able to disagree at all.
+work="$(make_work)"
+canned_trace | sed 's|claude-cli/9\.9\.9 (external, cli)|claude-cli|' \
+    >"$work/canned-trace.log"
+rc=0
+DRIVER_KEEP=0 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
+check "an absent wire version still lands a fixture" "0" "$rc"
+meta="$(landed_meta "$work" plain-turn-01)"
+if [ -f "$meta" ]; then
+    check "an absent wire version is recorded as empty" "" \
+        "$(meta_get "$meta" client.version)"
+    check "the binary-side version is NOT copied into the wire field" \
+        "9.9.9 (Stub Client)" "$(meta_get "$meta" client.binary_version)"
+    # The name still parses out of the same header, which is the control
+    # proving the trace edit removed the VERSION and not the user-agent.
+    check "the client name still parses from the stripped user-agent" \
+        "claude-cli" "$(meta_get "$meta" client.name)"
+else
+    fail "no fixture landed for the absent-wire-version case"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 3))
+fi
+rm -rf "$work"
 
 # ---------------------------------------------------------------------
 # Part 4: a driver fails closed
