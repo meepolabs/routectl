@@ -5477,7 +5477,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/common/replay/lane.rs` -- derived lane class (`lane_class`,
   `resolve_egress`) and the wire-conservation exception table
   (`all_exceptions`, `unexplained`, `unexplained_for_fixture`,
-  `normalize_ingress_for_lane`)
+  `normalize_ingress_for_lane`, and the pair-aware form a corpus walk uses,
+  `normalize_ingress_for_pair` / `system_turns_were_lifted` /
+  `in_band_system_turns`, which applies the system-turn rewrite only to a
+  pair that evidences the lift)
 - `tests/common/replay/conservation.rs` -- the conservation adjudicator:
   compares a fixture's captured `ingress_request.json` against its captured
   `outgoing_request.json` through the lane class and exception table
