@@ -367,7 +367,27 @@ fn is_inactive_thinking(shape: &str) -> bool {
     shape.is_empty() || shape == "disabled"
 }
 
+/// The ingress dialect token `baseline` is scoped to, as the structural line's
+/// own `id` field spells it (`IngressAdapter::id()`). Mirrors
+/// `ANTHROPIC_INGRESS_ID` in the Python port.
+const ANTHROPIC_INGRESS_ID: &str = "anthropic";
+
 fn line_is_baseline(line: &str) -> Result<(), String> {
+    // Scope before clauses, and by name: another client's floor request
+    // carries tools its own runtime requires, so `tools_len=8, want 0` would
+    // describe the refusal as a capture defect when it is a scope statement.
+    let dialect = token_value(line, "id")
+        .ok_or("id token absent; baseline is Anthropic-only and cannot be scoped")?
+        .trim_matches('"');
+    if dialect != ANTHROPIC_INGRESS_ID {
+        return Err(format!(
+            "ingress dialect {dialect:?} is not {ANTHROPIC_INGRESS_ID:?}; baseline is \
+             Anthropic-only, because another client's floor request carries tools it \
+             does not choose and a per-dialect tool-count floor would pin that \
+             client's version into this predicate"
+        ));
+    }
+
     let tools_len = count_token(line, "tools_len")?;
     if tools_len != 0 {
         return Err(format!("tools_len={tools_len}, want 0"));
@@ -585,18 +605,60 @@ fn a_record_with_the_wrong_field_count_is_a_failed_parse() {
 // ---------------------------------------------------------------------------
 
 /// Hand-built ingress summary in the real field order, with the three
-/// predicate fields supplied by the caller.
+/// predicate fields supplied by the caller, on the Anthropic dialect.
 fn structural_line(tools_len: &str, thinking: Option<&str>, cache_control_count: &str) -> String {
+    structural_line_for(
+        ANTHROPIC_INGRESS_ID,
+        tools_len,
+        thinking,
+        cache_control_count,
+    )
+}
+
+/// The same summary with the ingress `id` supplied, for the dialect-scope legs.
+fn structural_line_for(
+    dialect: &str,
+    tools_len: &str,
+    thinking: Option<&str>,
+    cache_control_count: &str,
+) -> String {
     let thinking_token = match thinking {
         Some(shape) => format!("thinking_shape={shape} "),
         None => String::new(),
     };
     format!(
-        "structural summary direction=\"ingress\" kind=\"ingress\" id=\"anthropic\" \
+        "structural summary direction=\"ingress\" kind=\"ingress\" id=\"{dialect}\" \
          model=claude-sonnet-4-5 max_tokens=32000 {thinking_token}output_config_effort= \
          tool_choice_shape= cache_control_count={cache_control_count} messages_len=1 \
          tools_len={tools_len} anthropic_beta= provider_extras_keys= stream=true"
     )
+}
+
+#[test]
+fn baseline_refuses_a_non_anthropic_ingress_dialect_by_name() {
+    // Every OTHER clause is satisfied, so the refusal can only come from the
+    // scope check -- and the reason must say Anthropic-only rather than report
+    // a tool count, which would read as a capture defect instead of a scope
+    // statement.
+    let line = structural_line_for("openai-responses", "0", Some("disabled"), "0");
+    let why = line_is_baseline(&line)
+        .expect_err("baseline is Anthropic-only and must refuse another dialect");
+    assert!(
+        why.contains("openai-responses") && why.contains("Anthropic-only"),
+        "unexpected reason: {why}"
+    );
+    assert!(
+        !why.contains("tools_len"),
+        "the refusal must not blame a tool count: {why}"
+    );
+}
+
+#[test]
+fn baseline_refuses_a_line_carrying_no_ingress_dialect_token() {
+    let line = structural_line("0", Some("disabled"), "0").replace("id=\"anthropic\" ", "");
+    let why = line_is_baseline(&line)
+        .expect_err("a line naming no dialect cannot be scoped to the Anthropic one");
+    assert!(why.contains("id token absent"), "unexpected reason: {why}");
 }
 
 #[test]

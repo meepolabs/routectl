@@ -432,6 +432,40 @@ absent_count="$(s_line ingress 0 disabled 0 | sed 's/cache_control_count=0 //')"
 denies "baseline refuses a line with no cache_control_count token" \
     "$(stage baseline-no-count "$absent_count" "")" baseline "absent"
 
+# --- baseline is ANTHROPIC-ONLY, scoped off the line's own id -----------
+# A non-Anthropic client's floor request carries tools its runtime requires
+# rather than tools a case permitted, so `tools_len == 0` describes a
+# request that client cannot send. The scope is a NAMED refusal rather than
+# a per-dialect tool-count floor: a floor keyed on a measured client tool
+# count would pin that client's version into the predicate and lie at its
+# next release. The accept legs above are the paired positive control --
+# without them a predicate refusing every dialect would read as this scope.
+
+for dialect in openai openai-responses; do
+    other_dialect="$(s_line ingress 0 disabled 0 | \
+        sed "s/id=\"anthropic\"/id=\"$dialect\"/")"
+    denies "baseline refuses the $dialect ingress dialect by name" \
+        "$(stage "baseline-$dialect" "$other_dialect" "")" baseline "$dialect"
+    denies "the $dialect refusal names the Anthropic-only scope" \
+        "$pat/baseline-$dialect" baseline "Anthropic-only"
+    # Every other baseline clause is satisfied on that line, so a reason
+    # blaming the tool count would mean the scope check never fired.
+    out="$(python3 "$VERIFIER" "$pat/baseline-$dialect" baseline 2>&1)" || true
+    if printf '%s' "$out" | grep -qF "tools_len"; then
+        fail "the $dialect refusal blames a tool count instead of the scope: $out"
+    else
+        echo "PASS: the $dialect refusal does not blame a tool count"
+    fi
+done
+unset other_dialect dialect
+
+# An ABSENT id token is not the Anthropic one: a line naming no dialect
+# cannot be scoped, and defaulting it would let any dialect's capture
+# satisfy the pattern by omitting one field.
+no_dialect="$(s_line ingress 0 disabled 0 | sed 's/id="anthropic" //')"
+denies "baseline refuses a line carrying no ingress dialect token" \
+    "$(stage baseline-no-dialect "$no_dialect" "")" baseline "id token absent"
+
 # --- thinking -----------------------------------------------------------
 
 exhibits "thinking accepts an enabled block with a budget" \
@@ -540,6 +574,89 @@ denies "a fixture with no ingress body is refused for tool-use-multiturn" \
     tool-use-multiturn "recorded no ingress body"
 denies "a fixture with no ingress body is refused for large-context" \
     "$pat/tools-no-body" large-context "recorded no ingress body"
+
+# --- the census answers for every ingress dialect ----------------------
+# A Responses-shape body carries its turns under `input` and spells the
+# pair as `function_call` / `function_call_output` ITEMS, which carry no
+# role at all. Same census, same ordering clause, one predicate: the turn
+# list is picked by which key the body carries, never by a recorded dialect
+# claim -- `meta.ingress_kind` sits beside the `wire_pattern` claim this
+# module checks, so reading one to decide the other verifies nothing.
+
+responses_pair='{"tools":[{"type":"function","name":"read"}],"input":[
+ {"type":"message","role":"user","content":[{"type":"input_text","text":"read it"}]},
+ {"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"},
+ {"type":"function_call_output","call_id":"call_1","output":"7"},
+ {"type":"message","role":"user","content":[{"type":"input_text","text":"and the next one"}]}]}'
+exhibits "tool-use-multiturn accepts a Responses function_call / output pair" \
+    "$(stage responses-pair "" "$responses_pair")" tool-use-multiturn
+
+# The chat-completions spelling of the same pair -- an assistant
+# `tool_calls` array plus a `role: "tool"` turn -- under `messages`. The
+# predicate has always read it; asserted here because the census now
+# claims to answer for every ingress dialect.
+chat_pair='{"tools":[{"type":"function","function":{"name":"read"}}],"messages":[
+ {"role":"user","content":"read it"},
+ {"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]},
+ {"role":"tool","tool_call_id":"call_1","content":"7"}]}'
+exhibits "tool-use-multiturn accepts a chat-completions tool_calls / tool pair" \
+    "$(stage chat-pair "" "$chat_pair")" tool-use-multiturn
+
+responses_call_only="$(printf '%s' "$responses_pair" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+body["input"] = [i for i in body["input"] if i["type"] != "function_call_output"]
+json.dump(body, sys.stdout)
+')"
+denies "a Responses call with no later output does not satisfy the census" \
+    "$(stage responses-call-only "" "$responses_call_only")" \
+    tool-use-multiturn "tool result"
+
+# The ordering clause holds on the Responses shape too, and the refusal
+# names the LIST it read: a census that reported `messages` here would be
+# describing a body it never parsed.
+responses_reversed="$(printf '%s' "$responses_pair" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+items = body["input"]
+items[1], items[2] = items[2], items[1]
+json.dump(body, sys.stdout)
+')"
+denies "a Responses output preceding its call does not satisfy the census" \
+    "$(stage responses-reversed "" "$responses_reversed")" \
+    tool-use-multiturn "no later turn"
+denies "the Responses refusal names the input list it read" \
+    "$pat/responses-reversed" tool-use-multiturn "input[2]"
+
+# An offered Responses tool list alone is not the pattern, the same way an
+# Anthropic `tools` array alone is not: the client offers its tools on
+# every request once they are permitted.
+responses_tools_only="$(printf '%s' "$responses_pair" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+body["input"] = [i for i in body["input"] if i["type"] == "message"]
+json.dump(body, sys.stdout)
+')"
+denies "an offered Responses tool list alone does not satisfy the census" \
+    "$(stage responses-tools-only "" "$responses_tools_only")" \
+    tool-use-multiturn "tool-call"
+
+# A body carrying NEITHER turn list is refused naming both keys it looked
+# for. The turn list is what the census reads, so its absence is the wrong
+# input rather than a body that fails the pattern.
+denies "a body carrying neither turn list is refused naming both keys" \
+    "$(stage no-turn-list "" '{"model":"gpt-5","tools":[{"name":"read"}]}')" \
+    tool-use-multiturn "no turn list under any of messages, input"
+
+# An EMPTY turn list under either key is the same refusal: an empty list
+# carries no census, and treating it as present would make the reason
+# point at an ordering clause no turn could have failed.
+for empty in '{"messages":[]}' '{"input":[]}'; do
+    denies "an empty turn list is refused as no turn list ($empty)" \
+        "$(stage "empty-turns-$(printf '%s' "$empty" | tr -dc 'a-z')" "" "$empty")" \
+        tool-use-multiturn "no turn list"
+done
+unset empty
 
 # --- large-context: an ingress body byte floor -------------------------
 
@@ -829,11 +946,19 @@ done
 # rig parses `meta.client.version` out of, so the version this trace
 # carries is the one a landed fixture must report. Every value is
 # synthetic.
+#
+# `kind` and `id` differ per direction, as the emitter writes them: the
+# ingress call site passes the ingress dialect token, the outgoing one the
+# provider kind and configured provider id. The `baseline` predicate scopes
+# itself to the Anthropic dialect off the ingress line's `id`, so reusing
+# the outgoing spelling on both lines would be refused.
 canned_trace() {
     local id="019eab77-0000-4000-8000-0000000000e2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
     local target="routectl_core::log_safe:"
-    local structural='kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
+    local fields='model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
+    local structural="kind=\"ingress\" id=\"anthropic\" $fields"
+    local structural_out="kind=\"anthropic\" id=\"anthropic-api:anthropic\" $fields"
     cat <<TRACE
 2026-08-26T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-26T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="anthropic" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -844,7 +969,7 @@ canned_trace() {
 2026-08-26T10:00:00.210000Z TRACE $span: $target upstream response headers direction="upstream" headers=[["content-type","application/json"]]
 2026-08-26T10:00:00.310000Z TRACE $span: $target egress response headers direction="egress" headers=[["content-type","application/json"]]
 2026-08-26T10:00:00.400000Z TRACE $span: $target structural summary direction="ingress" $structural
-2026-08-26T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural
+2026-08-26T10:00:00.500000Z TRACE $span: $target structural summary direction="outgoing" $structural_out
 TRACE
 }
 

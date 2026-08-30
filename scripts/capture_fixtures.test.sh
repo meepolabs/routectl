@@ -85,11 +85,23 @@ TRACE
 # (`tools_len`, `thinking_shape`, `cache_control_count`) make this line
 # `baseline` -- which is what the driver cases below claim, and what the
 # rig's promotion gate now reads.
+#
+# `kind` and `id` are DIRECTION-DEPENDENT, as the emitter writes them: the
+# ingress call site passes the ingress dialect token, the outgoing one
+# passes the provider kind and the provider's configured id. The `baseline`
+# predicate scopes itself to the Anthropic dialect off the ingress line's
+# `id`, so a line reusing the outgoing spelling for both directions would
+# be refused -- correctly, for naming a dialect no ingress adapter emits.
 structural_line() {
     local id="$1" direction="$2" frac="${3:-400000}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    printf '%s TRACE %s: routectl_core::log_safe: structural summary direction="%s" kind="anthropic" id=p model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n' \
-        "2026-08-25T10:00:00.${frac}Z" "$span" "$direction"
+    local kind="anthropic" source="anthropic-api:anthropic"
+    if [ "$direction" = "ingress" ]; then
+        kind="ingress"
+        source="anthropic"
+    fi
+    printf '%s TRACE %s: routectl_core::log_safe: structural summary direction="%s" kind="%s" id="%s" model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n' \
+        "2026-08-25T10:00:00.${frac}Z" "$span" "$direction" "$kind" "$source"
 }
 
 # A non-stream trace carrying BOTH request-side structural summaries --
