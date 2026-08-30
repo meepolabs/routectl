@@ -87,8 +87,8 @@ pub use loader::{
     discover_driver_fixtures, discover_fixtures, load_fixture,
 };
 pub use plant::{
-    current_meta, make_conserved, plant_driver_case, plant_fixture, plant_unloadable_driver_case,
-    write_required_files,
+    current_meta, make_conserved, plant_driver_case, plant_driver_case_with_ingress, plant_fixture,
+    plant_unloadable_driver_case, write_required_files,
 };
 pub use sse_diff::{ParseError, SseEventCmp, assert_sse_equal, parse_sse_events};
 

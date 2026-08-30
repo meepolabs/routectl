@@ -5600,6 +5600,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   against representative FILE paths because that is what gitleaks evaluates,
   with a positive control that the same matcher fires on the allowlisted
   live-capture root
+- `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
+  (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
+  half's `meta.client.connection_mode`, the MITM seam header and
+  `authorization` present on the front-proxy half and absent on the base-url
+  half, zero in-band `role:"system"` turns on BOTH halves (an Anthropic
+  ingress-dialect fact), and equal `lane` / `ingress_kind` / `wire_pattern`;
+  skips by name when either half is absent, and runs the same predicate over
+  planted pairs with one clause flipped as the paired controls
 - `tests/wire_pattern_weld.rs` -- cross-language weld over the wire-pattern
   vocabulary: parses `WIRE_PATTERNS` from `scripts/drivers/lib/validate_case.py`
   and the predicate table from `scripts/drivers/lib/verify_pattern.py` as text
