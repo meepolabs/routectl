@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "request_id": "01a053b0-a0a9-76b1-ad13-2d26d4fbca8e",
+  "captured_at_ts": "2026-08-30T17:21:33.410524Z",
+  "routectl_version": "0.9.0",
+  "alias": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-5",
+  "case_id": "thinking-01",
+  "config_sha": "94c2fc59b38b6f22e01f8e402bd9f3402299479fab4c775aba4ff95b58572eb2",
+  "wire_pattern": "thinking",
+  "client": {
+    "name": "claude-cli",
+    "version": "2.1.246",
+    "binary_version": "2.1.246 (Claude Code)",
+    "connection_mode": "base-url"
+  },
+  "ingress_kind": "anthropic",
+  "provider_kind": "anthropic",
+  "lane": "anthropic-api",
+  "stream": true,
+  "finish_reason": "stop",
+  "input_tokens": 6364,
+  "output_tokens": 614,
+  "total_tokens": 6978
+}
