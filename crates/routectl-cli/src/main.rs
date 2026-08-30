@@ -72,6 +72,16 @@ enum Cmd {
         host: Option<String>,
         #[arg(long)]
         port: Option<u16>,
+        /// Override `[mitm] listen_port` for this run; the config file
+        /// is not touched. Requires a `[mitm]` block in the config.
+        /// Port 0 is rejected: it would bind an OS-selected port with
+        /// no readback, so the caller could never learn the real port.
+        ///
+        /// `rc env` prints `HTTPS_PROXY` from the config file's
+        /// `listen_port`, so while this override is in effect its output
+        /// disagrees with the port the listener actually bound.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        mitm_port: Option<u16>,
         /// Allow non-loopback bind. Refuses without this flag.
         #[arg(long)]
         unsafe_public: bool,
@@ -636,6 +646,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Serve {
             host,
             port,
+            mitm_port,
             unsafe_public,
         } => {
             let resolved_config_path = resolve_config_path(cli.config.as_deref());
@@ -648,6 +659,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(p) = port {
                 config.server.port = p;
             }
+            apply_mitm_port_override(&mut config, mitm_port)?;
 
             let host = config.server.host.clone();
             let port = config.server.port;
@@ -1134,6 +1146,34 @@ fn load_config_unvalidated(
     Ok(server::load_effective_config_unvalidated(&path)?.config)
 }
 
+/// Apply the `serve --mitm-port` override to `config.mitm.listen_port`,
+/// mirroring how `--port` overrides `[server] port`: the config FILE is
+/// never rewritten, so its committed bytes (and any hash of them) stay
+/// intact while the booted value differs. Must run BEFORE the router
+/// build so `validate_mitm_config`'s port-collision check sees the
+/// booted values.
+///
+/// Fails closed when the override is given but the config carries no
+/// `[mitm]` block: nothing would bind the requested port, and silently
+/// ignoring it would let the caller believe a listener exists.
+fn apply_mitm_port_override(
+    config: &mut routectl_router::Config,
+    mitm_port: Option<u16>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(port) = mitm_port else {
+        return Ok(());
+    };
+    let Some(mitm) = &mut config.mitm else {
+        return Err(
+            "--mitm-port was given but the config has no [mitm] block; add a [mitm] block to \
+             enable the MITM listener, or drop the flag"
+                .into(),
+        );
+    };
+    mitm.listen_port = port;
+    Ok(())
+}
+
 /// Resolve the config path the same way `load_config` does, but
 /// without reading or parsing. Used to register the file-watch
 /// target in `Cmd::Serve`.
@@ -1488,5 +1528,164 @@ mod tests {
         let rendered = commands::parse_error_redaction::redact_config_load_error(&err.to_string());
 
         assert_eq!(rendered, message, "{rendered}");
+    }
+
+    /// `serve --mitm-port` is the argv sibling of `--port`: it must parse to
+    /// `Some(n)` when given and to `None` when omitted, alongside the
+    /// existing serve flags.
+    #[test]
+    fn serve_parses_mitm_port_alongside_port() {
+        let cli = Cli::parse_from(["routectl", "serve", "--port", "8787", "--mitm-port", "9443"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Serve {
+                port: Some(8787),
+                mitm_port: Some(9443),
+                ..
+            }
+        ));
+
+        let cli = Cli::parse_from(["routectl", "serve"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Serve {
+                port: None,
+                mitm_port: None,
+                ..
+            }
+        ));
+    }
+
+    /// `--mitm-port` takes a u16: a non-numeric or out-of-range value is a
+    /// clap-layer rejection, never a bogus port reaching the config.
+    #[test]
+    fn serve_rejects_a_non_u16_mitm_port() {
+        assert!(Cli::try_parse_from(["routectl", "serve", "--mitm-port", "not-a-port"]).is_err());
+        assert!(Cli::try_parse_from(["routectl", "serve", "--mitm-port", "65536"]).is_err());
+    }
+
+    /// `--mitm-port 0` is rejected at the clap layer: port 0 binds an
+    /// OS-selected port with no readback surface, so the caller would
+    /// believe it selected a port it never learns. The paired positive
+    /// control proves the range floor sits at exactly 1.
+    #[test]
+    fn serve_rejects_mitm_port_zero() {
+        assert!(
+            Cli::try_parse_from(["routectl", "serve", "--mitm-port", "0"]).is_err(),
+            "--mitm-port 0 must be a clap-layer rejection"
+        );
+        assert!(
+            Cli::try_parse_from(["routectl", "serve", "--mitm-port", "1"]).is_ok(),
+            "positive control: the range floor is 1, not higher"
+        );
+    }
+
+    /// With a `[mitm]` block present, the override lands on
+    /// `config.mitm.listen_port` and touches nothing else.
+    #[test]
+    fn mitm_port_override_mutates_listen_port_when_mitm_is_present() {
+        let mut config = routectl_router::Config {
+            mitm: Some(routectl_router::MitmConfig::default()),
+            ..routectl_router::Config::default()
+        };
+
+        apply_mitm_port_override(&mut config, Some(9443)).expect("override must apply");
+
+        assert_eq!(config.mitm.as_ref().unwrap().listen_port, 9443);
+    }
+    /// The override with no `[mitm]` block fails closed: nothing would bind
+    /// the requested port, so silently ignoring it would let a caller
+    /// believe it selected a port that a listener serves. The error names
+    /// the missing block.
+    #[test]
+    fn mitm_port_override_without_a_mitm_block_fails_closed() {
+        let mut config = routectl_router::Config::default();
+        assert!(config.mitm.is_none(), "positive control: no [mitm] block");
+
+        let err = apply_mitm_port_override(&mut config, Some(9443))
+            .expect_err("override with no [mitm] block must be an error");
+
+        let msg = err.to_string();
+        assert!(msg.contains("[mitm]"), "must name the missing block: {msg}");
+        assert!(msg.contains("--mitm-port"), "must name the flag: {msg}");
+    }
+
+    /// No override means no mutation: the config serializes to the same
+    /// bytes before and after, so the committed-bytes property (`--mitm-port`
+    /// exists so a run never rewrites the file) holds on the default path.
+    #[test]
+    fn no_mitm_port_override_leaves_the_config_byte_identical() {
+        let mut config = routectl_router::Config {
+            mitm: Some(routectl_router::MitmConfig::default()),
+            ..routectl_router::Config::default()
+        };
+        let before = toml::to_string(&config).expect("config must serialize");
+
+        apply_mitm_port_override(&mut config, None).expect("None override must be Ok");
+
+        let after = toml::to_string(&config).expect("config must serialize");
+        assert_eq!(before, after, "no override must leave the config untouched");
+    }
+
+    /// The override runs BEFORE validation, so an override colliding with
+    /// `[server] port` is refused by `validate_mitm_config` at startup
+    /// rather than discovered as a bind failure.
+    #[test]
+    fn mitm_port_override_colliding_with_server_port_is_rejected_by_validation() {
+        let mut config = routectl_router::Config {
+            mitm: Some(routectl_router::MitmConfig::default()),
+            ..routectl_router::Config::default()
+        };
+        routectl_router::validate_mitm_config(&config)
+            .expect("positive control: defaults must validate clean");
+
+        let server_port = config.server.port;
+        apply_mitm_port_override(&mut config, Some(server_port))
+            .expect("the mutation itself must apply; validation owns the refusal");
+
+        let err = routectl_router::validate_mitm_config(&config)
+            .expect_err("a listen_port colliding with [server] port must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("listen_port"), "msg: {msg}");
+        assert!(msg.contains("collides"), "msg: {msg}");
+    }
+
+    /// The override-before-validation contract, end to end on the real
+    /// loader: a COMMITTED config whose `[mitm] listen_port` collides with
+    /// `[server] port` must survive `load_effective_config` (the loader's
+    /// shared suite deliberately omits the MITM validator -- it runs in the
+    /// router build, after the Serve arm's overrides), stay refused by
+    /// `validate_mitm_config` while unrepaired, and validate clean once
+    /// `--mitm-port` moves the listener off the collision. If the MITM
+    /// validator ever joins the load-time suite, the load assertion here
+    /// turns red before the repair path silently breaks.
+    #[test]
+    #[serial_test::serial]
+    fn file_backed_mitm_collision_is_repaired_by_the_override_before_validation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "version = {}\n[server]\nhost = \"127.0.0.1\"\nport = 8443\n\n\
+                 [mitm]\nlisten_port = 8443\n",
+                routectl_router::CURRENT_CONFIG_VERSION
+            ),
+        )
+        .expect("write config.toml");
+
+        let mut config = server::load_effective_config(&cfg_path)
+            .expect("the loader must not refuse a [mitm] collision a CLI override can repair")
+            .config;
+
+        routectl_router::validate_mitm_config(&config)
+            .expect_err("positive control: unrepaired, the collision must be refused");
+
+        apply_mitm_port_override(&mut config, Some(9443)).expect("the override must apply");
+
+        routectl_router::validate_mitm_config(&config)
+            .expect("the repaired config must validate clean");
+        assert_eq!(config.mitm.as_ref().unwrap().listen_port, 9443);
     }
 }
