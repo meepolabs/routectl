@@ -74,6 +74,7 @@ use routectl_core::{
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
 use crate::bounded_diagnostics::BoundedLogSample;
+use crate::translation_drop_metrics::{record_translation_drop, record_translation_lane_seen};
 
 use super::types::{
     CachePoint, ConverseCitationsConfig, ConverseContentBlock, ConverseDocument,
@@ -344,10 +345,12 @@ fn message_content_has_tool_use(content: &MessageContent) -> bool {
 /// are emitted; others (e.g. OpenAI-format) are skipped -- they have no
 /// Converse wire equivalent. Bedrock validates the signature on multi-turn
 /// replay identical to direct Anthropic; a missing signature 400s with
-/// "invalid reasoning content". Unsigned blocks are skipped and recorded on
-/// the `ReasoningSkipTally`, which aggregates every turn's skips into a
-/// single per-request WARN so the operator can correlate without per-detail
-/// log spam. The provider id rides on the tally, which owns the WARN.
+/// "invalid reasoning content". Unsigned blocks and kinds with no Converse
+/// wire shape (`Summary`, an unrecognized kind) are both skipped and
+/// recorded on the `ReasoningSkipTally`, which aggregates every turn's
+/// skips into one per-request WARN per category so the operator can
+/// correlate without per-detail log spam. The provider id rides on the
+/// tally, which owns the WARN.
 fn emit_reasoning_blocks_converse(
     message_index: usize,
     details: &[ReasoningDetail],
@@ -408,38 +411,55 @@ fn emit_reasoning_blocks_converse(
                 });
             }
             ReasoningDetailKind::Summary | ReasoningDetailKind::Other(_) => {
-                // Not a Bedrock Converse block type; skip. An
-                // unrecognized kind gets the same treatment as Summary:
-                // neither has a Converse wire equivalent.
+                // Neither a reasoning summary nor an unrecognized detail
+                // kind has a slot in the Converse `reasoningContent`
+                // union, so there is no wire form to translate into --
+                // forwarding either would mean inventing a block type
+                // AWS does not accept. This is a baked seed verdict
+                // pending real per-lane replay evidence, not a
+                // permanent policy: deletion stays blocked until that
+                // evidence exists. Recorded on the tally rather than
+                // logged here so a turn with several such details in a
+                // row still emits one aggregated WARN.
+                reasoning.record_summary_skip();
             }
         }
     }
     Ok(blocks)
 }
 
-/// Per-request tally of reasoning details skipped on the Converse egress
-/// because their signature was missing or empty. Threaded through the
-/// assistant path from `build_messages` so a history with several unsigned
-/// turns emits ONE WARN instead of one per turn. Mirrors
-/// `anthropic_api::messages::ReasoningSkipTally`, minus its foreign-format
-/// category: a non-`anthropic-claude-v1` detail has no Converse wire
-/// equivalent and drops silently here.
+/// Per-request tally of reasoning details skipped on the Converse egress,
+/// either because their signature was missing or empty, or because their
+/// kind has no Converse `reasoningContent` wire shape at all. Threaded
+/// through the assistant path from `build_messages` so a history with
+/// several affected turns emits ONE WARN per category instead of one per
+/// turn. Mirrors `anthropic_api::messages::ReasoningSkipTally`, minus its
+/// foreign-format category: a non-`anthropic-claude-v1` detail has no
+/// Converse wire equivalent and drops silently here.
 ///
-/// `skipped_count` and `turns_affected` are exact; `skipped_locations` is a
-/// bounded SAMPLE and its `truncated()` flag -- never a count comparison --
-/// says whether anything was dropped from it. Each location is
-/// `(message_index, detail_index)`: every message's `reasoning_details`
-/// carries its own index space, so a bare detail index pooled across turns
-/// would render identically for two unrelated details and the operator
-/// could not tell a contiguous tail from a scattered set. The detail slot
-/// stays `Option<u32>` so an index the upstream never supplied reads as
-/// `None` rather than as a plausible 0.
+/// `skipped_count`, `turns_affected`, and `summary_skipped_count` are
+/// exact; `skipped_locations` is a bounded SAMPLE and its `truncated()`
+/// flag -- never a count comparison -- says whether anything was dropped
+/// from it. Each location is `(message_index, detail_index)`: every
+/// message's `reasoning_details` carries its own index space, so a bare
+/// detail index pooled across turns would render identically for two
+/// unrelated details and the operator could not tell a contiguous tail
+/// from a scattered set. The detail slot stays `Option<u32>` so an index
+/// the upstream never supplied reads as `None` rather than as a plausible
+/// 0.
 struct ReasoningSkipTally<'a> {
     provider: &'a str,
     skipped_count: usize,
     turns_affected: usize,
     last_turn: Option<usize>,
     skipped_locations: BoundedLogSample<(usize, Option<u32>)>,
+    /// Count of details dropped for having no Converse wire shape
+    /// (`Summary` or an unrecognized kind). Kept separate from
+    /// `skipped_count` because the two categories have different
+    /// remediations: a missing signature is a signing defect upstream,
+    /// while a no-wire-shape kind is a permanent representability gap on
+    /// this lane.
+    summary_skipped_count: usize,
 }
 
 impl<'a> ReasoningSkipTally<'a> {
@@ -450,6 +470,7 @@ impl<'a> ReasoningSkipTally<'a> {
             turns_affected: 0,
             last_turn: None,
             skipped_locations: BoundedLogSample::new(),
+            summary_skipped_count: 0,
         }
     }
 
@@ -465,9 +486,21 @@ impl<'a> ReasoningSkipTally<'a> {
         self.skipped_locations.push((message_index, detail_index));
     }
 
-    /// Emit the aggregated WARN, if anything was skipped. Called once per
-    /// request from `build_messages`, on both the Ok and the Err arm.
+    /// Record one reasoning detail dropped because its kind (`Summary` or
+    /// an unrecognized kind) has no Converse wire shape to translate into.
+    const fn record_summary_skip(&mut self) {
+        self.summary_skipped_count = self.summary_skipped_count.saturating_add(1);
+    }
+
+    /// Emit the aggregated WARN(s), if anything was skipped, and bump the
+    /// per-request translation-drop counters. Called exactly once per
+    /// request from `build_messages`, on both the Ok and the Err arm --
+    /// which is also why the lane-seen denominator is bumped
+    /// unconditionally here rather than only when a skip fires: this is
+    /// the one call site in the Converse egress path that reliably sees
+    /// every request exactly once, drop or no drop.
     fn flush(&self) {
+        record_translation_lane_seen("bedrock-converse");
         if self.skipped_count > 0 {
             tracing::warn!(
                 provider = self.provider,
@@ -478,6 +511,15 @@ impl<'a> ReasoningSkipTally<'a> {
                 "skipping Thinking blocks on Converse replay: signature missing or empty; \
                  Bedrock Converse requires a signature on replayed reasoningContent blocks"
             );
+        }
+        if self.summary_skipped_count > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                skipped_count = self.summary_skipped_count,
+                "skipping reasoning details on Converse egress: kind has no Converse \
+                 reasoningContent wire shape (reasoning summary or an unrecognized kind)"
+            );
+            record_translation_drop("bedrock-converse", "reasoning_summary_unsupported");
         }
     }
 }
@@ -1680,11 +1722,22 @@ mod tests {
     }
 
     /// Neither Summary nor an unrecognized kind (Other) has a Converse
-    /// wire equivalent, so both must be silently dropped -- the same
-    /// merged treatment `emit_reasoning_blocks_converse` gives them.
-    /// Paired with the Encrypted-detail test above (which DOES produce
-    /// a block on the same code path) as the positive control.
+    /// wire equivalent, so both must be dropped -- the same merged
+    /// treatment `emit_reasoning_blocks_converse` gives them. The
+    /// aggregated WARN and drop-counter increment for this drop are
+    /// pinned separately in `messages_reasoning_warn_tests.rs`; this test
+    /// stays scoped to the produced-block shape. Paired with the
+    /// Encrypted-detail test above (which DOES produce a block on the
+    /// same code path) as the positive control.
+    ///
+    /// Serialized against the counter-delta tests in
+    /// `messages_reasoning_warn_tests.rs`: this test also drives a
+    /// no-wire-shape drop through the same process-global
+    /// `bedrock-converse` / `reasoning_summary_unsupported` counter, and
+    /// an unmarked concurrent run could land its increment inside another
+    /// test's before/after snapshot window.
     #[test]
+    #[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
     fn summary_and_unrecognized_reasoning_details_are_both_dropped() {
         // Arrange
         let summary = ReasoningDetail {
