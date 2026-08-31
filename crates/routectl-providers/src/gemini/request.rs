@@ -363,6 +363,20 @@ fn content_to_parts(
     }
 }
 
+/// Cross-dialect translation lane: an Anthropic-shaped `RedactedThinking`
+/// block reaching the Gemini egress. Drop rather than forward -- Gemini's
+/// `Part` has no redacted-thinking slot, unlike the Converse egress, which
+/// carries the identical opaque payload verbatim in its own `redactedContent`
+/// field. This is a baked seed verdict: deletion-blocked pending per-lane
+/// wire evidence, not a permanent design decision to leave uninstrumented.
+fn drop_redacted_thinking(provider_id: &str) -> Result<Option<Part>> {
+    tracing::warn!(
+        provider = %provider_id,
+        "gemini: dropping redacted-thinking part (no wire slot on this egress)"
+    );
+    Ok(None)
+}
+
 fn content_part_to_part(
     provider_id: &str,
     part: &ContentPart,
@@ -477,10 +491,7 @@ fn content_part_to_part(
                 // turn (when this reasoning originated from Gemini).
                 Ok(Some(thought_part(thinking.clone(), signature.clone())))
             }
-            KnownContentPart::RedactedThinking { .. } => {
-                // Redacted blocks have no text we can forward; drop silently.
-                Ok(None)
-            }
+            KnownContentPart::RedactedThinking { .. } => drop_redacted_thinking(provider_id),
             KnownContentPart::File { file, .. } => {
                 // Canonical `file` IS the inner OpenAI object
                 // (`{filename, file_data}` or `{file_id}`), matching how
@@ -3378,6 +3389,54 @@ mod tests {
         // Assert
         assert!(parts.is_empty());
         assert_warned(&events, "dropping base64 document source with empty data");
+    }
+
+    fn redacted_thinking_part(data: &str) -> ContentPart {
+        ContentPart::Known(KnownContentPart::RedactedThinking { data: data.into() })
+    }
+
+    fn thinking_part(thinking: &str) -> ContentPart {
+        ContentPart::Known(KnownContentPart::Thinking {
+            thinking: thinking.into(),
+            signature: None,
+        })
+    }
+
+    #[test]
+    #[traced_test]
+    fn redacted_thinking_part_drops_with_warn() {
+        // Arrange: Gemini's Part has no redacted-thinking slot.
+        let part = redacted_thinking_part("AAECAwQF");
+
+        // Act
+        let mut parts = Vec::new();
+        let events = routectl_testkit::capture_events(|| parts = parts_for(part));
+
+        // Assert
+        assert!(
+            parts.is_empty(),
+            "a redacted-thinking part has no wire slot"
+        );
+        assert_warned(&events, "dropping redacted-thinking part");
+    }
+
+    #[test]
+    #[traced_test]
+    fn ordinary_thinking_part_survives_with_no_warn() {
+        // Arrange: the positive control -- an un-redacted thinking part
+        // travels the sibling `Thinking` arm, which must stay unaffected.
+        let part = thinking_part("reasoning about the answer");
+
+        // Act
+        let mut parts = Vec::new();
+        let events = routectl_testkit::capture_events(|| parts = parts_for(part));
+
+        // Assert
+        assert_eq!(parts.len(), 1, "an ordinary thinking part must survive");
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "an ordinary thinking part must not warn: {events:?}"
+        );
     }
 
     fn make_other(tag: &str, text: &str) -> Message {
