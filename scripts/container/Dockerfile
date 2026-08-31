@@ -103,9 +103,10 @@ RUN mkdir -p /opt/claude \
     && su -s /bin/sh -c 'claude --version' nobody
 
 # Codex ships a single static-musl binary with no install script, so there is
-# no per-build machine-identity state to remove: unlike the Claude installer
-# above, nothing here ever runs as root except `curl`/`tar`, so nothing
-# root-owned lands in the layer either.
+# no per-build machine-identity state to remove, unlike the Claude installer
+# above. Ownership still stays root -- this RUN executes as root like every
+# other layer -- and what makes the tree usable by the unprivileged runtime
+# uid is the mode bits (`chmod -R a+rX`), verified by the smoke test below.
 #
 # Same shape as CLAUDE_VERSION otherwise: build ARG for convenience only (the
 # fixture record is `meta.client.version` off the running binary), 0755 on
