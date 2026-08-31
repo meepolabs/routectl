@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::anthropic_api::ANTHROPIC_FORMAT;
+use routectl_core::cache_control::CacheControl;
 use routectl_testkit::{CapturedEvent, capture_events};
 
 /// Provider id passed to the translators under test; only reaches log
@@ -15,3 +16,4 @@ include!("messages_reasoning_warn_tests.rs");
 include!("messages_image_policy_tests.rs");
 include!("messages_document_policy_tests.rs");
 include!("messages_other_role_tests.rs");
+include!("messages_tool_result_cache_control_tests.rs");

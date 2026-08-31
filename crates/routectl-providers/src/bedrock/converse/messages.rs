@@ -101,15 +101,19 @@ use super::types::{
 /// aggregated WARN instead of one per document (see
 /// `translate_document_citations`). A `ReasoningSkipTally` threads through
 /// the assistant path for the same reason, collapsing unsigned-reasoning
-/// skips across every turn into one WARN.
+/// skips across every turn into one WARN. A `ToolResultCacheControlDropTally`
+/// threads through the tool-result path, collapsing every nested
+/// `cache_control` marker dropped there into one WARN.
 pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
     let mut tally = CitationsDropTally::new(id);
     let mut reasoning = ReasoningSkipTally::new(id);
-    let translated = translate_messages(id, messages, &mut tally, &mut reasoning);
+    let mut cc_tally = ToolResultCacheControlDropTally::new(id);
+    let translated = translate_messages(id, messages, &mut tally, &mut reasoning, &mut cc_tally);
     // Flush on both arms: a request that records a drop and only then
     // hits a translation error still owes the operator its aggregate WARN.
     tally.flush();
     reasoning.flush();
+    cc_tally.flush();
     translated
 }
 
@@ -118,6 +122,7 @@ fn translate_messages(
     messages: &[Message],
     tally: &mut CitationsDropTally<'_>,
     reasoning: &mut ReasoningSkipTally<'_>,
+    cc_tally: &mut ToolResultCacheControlDropTally<'_>,
 ) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for (i, msg) in messages.iter().enumerate() {
@@ -149,7 +154,7 @@ fn translate_messages(
                 push_or_coalesce(&mut out, "assistant", blocks);
             }
             Role::Tool => {
-                let tool_msg = build_tool_message(id, msg, tally)?;
+                let tool_msg = build_tool_message(id, msg, tally, cc_tally)?;
                 push_or_coalesce(&mut out, "user", tool_msg.content);
             }
             // Converse only models `user` and `assistant` roles, so an
@@ -1269,6 +1274,64 @@ fn ensure_min_tool_result_content(content: &mut Vec<ConverseToolResultContent>) 
     }
 }
 
+/// Per-request tally of `cache_control` markers dropped when a canonical
+/// part nested inside a `Role::Tool` turn's `Parts` translates into a
+/// `toolResult.content` element (see `translate_part_for_tool_result`).
+/// Threaded through the tool-result build path from `build_messages` so a
+/// turn with several such markers still emits ONE aggregated WARN, mirroring
+/// `CitationsDropTally` / `ReasoningSkipTally` above.
+struct ToolResultCacheControlDropTally<'a> {
+    provider: &'a str,
+    dropped: usize,
+}
+
+impl<'a> ToolResultCacheControlDropTally<'a> {
+    const fn new(provider: &'a str) -> Self {
+        Self {
+            provider,
+            dropped: 0,
+        }
+    }
+
+    const fn record(&mut self) {
+        self.dropped += 1;
+    }
+
+    /// Emit the aggregated WARN and the process-wide translation-drop
+    /// counter, if anything was dropped. Called once per request from
+    /// `build_messages`.
+    fn flush(&self) {
+        if self.dropped > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                dropped_count = self.dropped,
+                "dropping cache_control marker on a nested tool_result content \
+                 element on Converse egress; toolResult.content has no cachePoint \
+                 slot to carry it"
+            );
+            crate::translation_drop_metrics::record_translation_drop(
+                "bedrock-converse",
+                "tool_result_cache_control",
+            );
+        }
+    }
+}
+
+/// A `cache_control` marker on a canonical part that is itself nested
+/// inside a `Role::Tool` turn's `Parts` -- once that part translates into a
+/// `toolResult.content` element -- is dropped rather than forwarded. This
+/// is a cross-dialect translation lane: an Anthropic-shape breakpoint
+/// marker carried on a canonical part, translated onto the AWS Converse
+/// wire. AWS's `toolResult.content` union defines no `cachePoint` member a
+/// nested element could translate onto -- unlike a top-level message
+/// content block, which gets a sibling `cachePoint` entry, there is no
+/// wire slot at THIS position to forward the marker into. This drop is a
+/// baked seed verdict: it stands until this lane's own wire evidence
+/// contradicts it, and it is not eligible for deletion until then.
+const fn drop_nested_tool_result_cache_control(tally: &mut ToolResultCacheControlDropTally<'_>) {
+    tally.record();
+}
+
 /// Translate one element from an Anthropic-shape tool_result content
 /// array. Anthropic clients send blocks like `{"type":"text","text":"..."}`
 /// or `{"type":"image","source":{...}}`. The naive `Json` wrap loses
@@ -1336,6 +1399,7 @@ fn build_tool_message(
     id: &str,
     msg: &Message,
     tally: &mut CitationsDropTally<'_>,
+    cc_tally: &mut ToolResultCacheControlDropTally<'_>,
 ) -> Result<ConverseMessage> {
     let Some(tool_use_id) = msg.tool_call_id.as_ref().filter(|s| !s.is_empty()).cloned() else {
         return Err(routectl_core::Error::NormalizeRequest(
@@ -1353,7 +1417,7 @@ fn build_tool_message(
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
         MessageContent::Parts(parts) => parts
             .iter()
-            .map(|p| translate_part_for_tool_result(id, p, tally))
+            .map(|p| translate_part_for_tool_result(id, p, tally, cc_tally))
             .collect::<Result<Vec<_>>>()?,
         MessageContent::Null => Vec::new(),
     };
@@ -1390,7 +1454,11 @@ fn translate_part_for_tool_result(
     id: &str,
     p: &ContentPart,
     tally: &mut CitationsDropTally<'_>,
+    cc_tally: &mut ToolResultCacheControlDropTally<'_>,
 ) -> Result<ConverseToolResultContent> {
+    if p.cache_control().is_some() {
+        drop_nested_tool_result_cache_control(cc_tally);
+    }
     match p {
         ContentPart::Known(KnownContentPart::Text { text, .. }) => {
             Ok(ConverseToolResultContent::Text { text: text.clone() })
@@ -2704,8 +2772,13 @@ mod tests {
         };
 
         // Act
-        let result = build_tool_message(TEST_ID, &msg, &mut CitationsDropTally::new("test"))
-            .expect("Null-content tool message must translate");
+        let result = build_tool_message(
+            TEST_ID,
+            &msg,
+            &mut CitationsDropTally::new("test"),
+            &mut ToolResultCacheControlDropTally::new("test"),
+        )
+        .expect("Null-content tool message must translate");
 
         // Assert
         let tool_result = result
