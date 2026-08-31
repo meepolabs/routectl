@@ -263,6 +263,9 @@ fn emit_reasoning_detail(
         // signature rides out on the item.done body (mirrors the egress
         // `handle_item_done`). Nothing to stream here.
         ReasoningDetailKind::Encrypted => return,
+        // Unrecognized kind: no delta channel is defined for it
+        // either, same reasoning as Encrypted.
+        ReasoningDetailKind::Other(_) => return,
     };
     let Some(text) = d.payload.get("text").and_then(Value::as_str) else {
         return;
@@ -537,6 +540,10 @@ fn reasoning_done_item(detail_id: Option<String>, details: &[ReasoningDetail]) -
                     }
                 }
             }
+            // Same reasoning as `accumulate_reasoning_detail`: no slot
+            // exists for an arbitrary shape, so an unrecognized kind
+            // contributes nothing.
+            ReasoningDetailKind::Other(_) => {}
         }
     }
     let mut item = Map::new();

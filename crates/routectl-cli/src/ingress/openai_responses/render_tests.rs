@@ -364,6 +364,40 @@ fn reasoning_text_renders_reasoning_text_content_block() {
 }
 
 #[test]
+fn reasoning_unrecognized_kind_contributes_nothing() {
+    // This egress's `reasoning` item has no slot for an arbitrary
+    // shape (summary/content/encrypted_content are the complete set),
+    // so an unrecognized kind must be dropped -- paired with the
+    // recognized-kind test above (same accumulation path) as the
+    // positive control.
+    let mut msg = assistant_message(MessageContent::Null);
+    msg.reasoning_details = vec![responses_detail(
+        ReasoningDetailKind::Other("future.kind".to_string()),
+        "rs_1",
+        json!({"text": "a future shape"}),
+    )];
+
+    // Act
+    let v = render(msg, Some("stop"));
+
+    // Assert: the reasoning item still exists (id present) but carries
+    // neither summary nor content from the unrecognized detail.
+    let items = output(&v);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["type"], "reasoning");
+    let summary = items[0]["summary"].as_array().unwrap();
+    assert!(
+        summary.is_empty(),
+        "unrecognized kind must not contribute a summary entry: {summary:?}"
+    );
+    assert!(
+        items[0].get("content").is_none(),
+        "unrecognized kind must not contribute a content block: {:?}",
+        items[0]
+    );
+}
+
+#[test]
 fn first_encrypted_detail_becomes_item_level_signature() {
     // Inverse of the egress: the item-level encrypted_content signature
     // round-trips as a single Encrypted detail. Render must lift it back

@@ -536,6 +536,61 @@ fn render_response_summary_kind_omits_signature_key_when_absent() {
     );
 }
 
+/// An unrecognized detail kind must get the identical best-effort
+/// forward as Summary: surface `payload.text` as a thinking block
+/// rather than dropping it, since this render path forwards what can
+/// be displayed. Paired with the Summary test above (same code path,
+/// recognized kind) as the positive control.
+#[test]
+fn render_response_unrecognized_kind_falls_back_to_thinking_block() {
+    use routectl_core::{
+        Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage, schema::Choice,
+    };
+    let resp = ChatResponse {
+        id: "msg_unrecognized".into(),
+        model: "gpt-5".into(),
+        created: 0,
+        choices: vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("answer".into()),
+                reasoning: None,
+                reasoning_details: vec![ReasoningDetail {
+                    kind: ReasoningDetailKind::Other("future.kind".to_string()),
+                    id: Some("rd_2".into()),
+                    format: Some("openai-responses-v1".into()),
+                    index: Some(0),
+                    payload: json!({"text": "a future shape"}),
+                }],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            total_tokens: 15,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+        upstream_meta: None,
+    };
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+    let content = v["content"].as_array().expect("content is array");
+    let thinking = content
+        .iter()
+        .find(|b| b["type"] == "thinking")
+        .expect("unrecognized-kind detail must still produce a thinking block");
+    assert_eq!(thinking["thinking"], "a future shape");
+}
+
 /// Spec-drift fix: when canonical Usage has no cache fields (None),
 /// the non-streaming render must omit `cache_creation_input_tokens`,
 /// `cache_read_input_tokens`, and `cache_creation` from the wire

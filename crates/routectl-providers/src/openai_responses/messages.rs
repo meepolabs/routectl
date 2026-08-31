@@ -463,6 +463,13 @@ fn lift_reasoning_details(
                     }
                 }
             }
+            // Unrecognized kind: this egress's `reasoning` item has no
+            // slot for an arbitrary shape (summary/content/
+            // encrypted_content are the complete set), so it contributes
+            // nothing to the group -- the same forward-shaped no-op every
+            // arm above already applies when its own expected payload
+            // field is absent.
+            ReasoningDetailKind::Other(_) => {}
         }
     }
 
@@ -1147,6 +1154,32 @@ mod messages_tests {
             out.len(),
             1,
             "expected one Reasoning item from openai-responses-v1 detail"
+        );
+    }
+
+    /// An unrecognized kind has no slot in this egress's `reasoning`
+    /// item -- summary/content/encrypted_content are the complete set --
+    /// so it must be dropped, the same silent no-op every other arm in
+    /// `lift_reasoning_details` already applies when its own expected
+    /// payload field is absent. Paired with the recognized-kind test
+    /// above as the positive control.
+    #[test]
+    fn lift_skips_unrecognized_kind_detail() {
+        // Arrange
+        let details = vec![make_detail(
+            Some(OPENAI_RESPONSES_FORMAT),
+            ReasoningDetailKind::Other("future.kind".to_string()),
+            json!({"text": "some future payload"}),
+        )];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+
+        // Assert
+        assert!(
+            out.is_empty(),
+            "expected no Reasoning items from an unrecognized-kind detail"
         );
     }
 

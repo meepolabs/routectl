@@ -1360,6 +1360,7 @@ impl<T> tracing::instrument::Instrument for routectl_core::schema::MessageConten
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::MessageContent
 pub enum routectl_core::schema::ReasoningDetailKind
 pub routectl_core::schema::ReasoningDetailKind::Encrypted
+pub routectl_core::schema::ReasoningDetailKind::Other(alloc::string::String)
 pub routectl_core::schema::ReasoningDetailKind::Summary
 pub routectl_core::schema::ReasoningDetailKind::Text
 impl core::clone::Clone for routectl_core::schema::ReasoningDetailKind
@@ -1367,9 +1368,9 @@ pub fn routectl_core::schema::ReasoningDetailKind::clone(&self) -> routectl_core
 impl core::fmt::Debug for routectl_core::schema::ReasoningDetailKind
 pub fn routectl_core::schema::ReasoningDetailKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl serde_core::ser::Serialize for routectl_core::schema::ReasoningDetailKind
-pub fn routectl_core::schema::ReasoningDetailKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+pub fn routectl_core::schema::ReasoningDetailKind::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for routectl_core::schema::ReasoningDetailKind
-pub fn routectl_core::schema::ReasoningDetailKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub fn routectl_core::schema::ReasoningDetailKind::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for routectl_core::schema::ReasoningDetailKind
 impl core::marker::Send for routectl_core::schema::ReasoningDetailKind
 impl core::marker::Sync for routectl_core::schema::ReasoningDetailKind
@@ -3314,6 +3315,7 @@ impl<T> tracing::instrument::Instrument for routectl_core::ProbeOutcome
 impl<T> tracing::instrument::WithSubscriber for routectl_core::ProbeOutcome
 pub enum routectl_core::ReasoningDetailKind
 pub routectl_core::ReasoningDetailKind::Encrypted
+pub routectl_core::ReasoningDetailKind::Other(alloc::string::String)
 pub routectl_core::ReasoningDetailKind::Summary
 pub routectl_core::ReasoningDetailKind::Text
 impl core::clone::Clone for routectl_core::schema::ReasoningDetailKind
@@ -3321,9 +3323,9 @@ pub fn routectl_core::schema::ReasoningDetailKind::clone(&self) -> routectl_core
 impl core::fmt::Debug for routectl_core::schema::ReasoningDetailKind
 pub fn routectl_core::schema::ReasoningDetailKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl serde_core::ser::Serialize for routectl_core::schema::ReasoningDetailKind
-pub fn routectl_core::schema::ReasoningDetailKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+pub fn routectl_core::schema::ReasoningDetailKind::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for routectl_core::schema::ReasoningDetailKind
-pub fn routectl_core::schema::ReasoningDetailKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub fn routectl_core::schema::ReasoningDetailKind::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for routectl_core::schema::ReasoningDetailKind
 impl core::marker::Send for routectl_core::schema::ReasoningDetailKind
 impl core::marker::Sync for routectl_core::schema::ReasoningDetailKind

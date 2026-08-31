@@ -376,8 +376,10 @@ fn emit_reasoning_blocks_converse(
                     },
                 });
             }
-            ReasoningDetailKind::Summary => {
-                // Not a Bedrock Converse block type; skip.
+            ReasoningDetailKind::Summary | ReasoningDetailKind::Other(_) => {
+                // Not a Bedrock Converse block type; skip. An
+                // unrecognized kind gets the same treatment as Summary:
+                // neither has a Converse wire equivalent.
             }
         }
     }
@@ -1642,6 +1644,63 @@ mod tests {
             redacted.is_some(),
             "encrypted reasoning_detail must produce a RedactedContent block, \
              got: {:?}",
+            assistant.content
+        );
+    }
+
+    /// Neither Summary nor an unrecognized kind (Other) has a Converse
+    /// wire equivalent, so both must be silently dropped -- the same
+    /// merged treatment `emit_reasoning_blocks_converse` gives them.
+    /// Paired with the Encrypted-detail test above (which DOES produce
+    /// a block on the same code path) as the positive control.
+    #[test]
+    fn summary_and_unrecognized_reasoning_details_are_both_dropped() {
+        // Arrange
+        let summary = ReasoningDetail {
+            kind: ReasoningDetailKind::Summary,
+            id: Some("rd-4".into()),
+            format: Some(crate::anthropic_api::ANTHROPIC_FORMAT.to_string()),
+            index: Some(0),
+            payload: json!({"text": "summary text"}),
+        };
+        let unrecognized = ReasoningDetail {
+            kind: ReasoningDetailKind::Other("future.kind".to_string()),
+            id: Some("rd-5".into()),
+            format: Some(crate::anthropic_api::ANTHROPIC_FORMAT.to_string()),
+            index: Some(1),
+            payload: json!({"text": "some future payload"}),
+        };
+        let messages = vec![
+            user_msg(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("here".into()),
+                reasoning: None,
+                reasoning_details: vec![summary, unrecognized],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message must be present");
+        let reasoning_blocks: Vec<_> = assistant
+            .content
+            .iter()
+            .filter(|b| matches!(b, ConverseContentBlock::ReasoningContent { .. }))
+            .collect();
+        assert!(
+            reasoning_blocks.is_empty(),
+            "neither Summary nor an unrecognized kind has a Converse block \
+             shape, so no ReasoningContent block may be produced: {:?}",
             assistant.content
         );
     }
