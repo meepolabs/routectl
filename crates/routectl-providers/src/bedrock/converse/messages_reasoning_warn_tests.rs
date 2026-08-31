@@ -227,3 +227,171 @@ fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
         "the skip recorded before the error must still reach the operator"
     );
 }
+
+// ---------------------------------------------------------------------------
+// No-wire-shape reasoning kinds (Summary, an unrecognized kind): the
+// aggregated WARN plus the per-request `bedrock-converse` /
+// `reasoning_summary_unsupported` translation-drop counter this category
+// feeds. Serialized against each other and against the no-wire-shape test
+// in the host `messages.rs` inline `mod tests` (which shares this
+// drop_class): the counter is a process-global registry, so an unmarked
+// concurrent test asserting an exact delta on the same key would be flaky
+// against this crate's default multi-threaded test runner.
+// ---------------------------------------------------------------------------
+
+const SUMMARY_WARN_NEEDLE: &str = "skipping reasoning details on Converse egress: kind has no Converse reasoningContent wire shape";
+
+fn summary_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.message.contains(SUMMARY_WARN_NEEDLE))
+        .collect()
+}
+
+/// A reasoning detail whose kind has no Converse wire shape -- exactly the
+/// shape `emit_reasoning_blocks_converse`'s merged `Summary | Other` arm
+/// drops.
+fn no_wire_shape_detail(kind: ReasoningDetailKind, index: Option<u32>) -> ReasoningDetail {
+    ReasoningDetail {
+        kind,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index,
+        payload: json!({"text": "summary text"}),
+    }
+}
+
+/// The `(bedrock-converse, reasoning_summary_unsupported)` drop counter's
+/// current count, read through the same snapshot surface the router's
+/// doctor path reads.
+fn reasoning_summary_drop_count() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "bedrock-converse" && e.drop_class == "reasoning_summary_unsupported")
+        .map_or(0, |e| e.drop_count)
+}
+
+/// Negative control: a turn carrying one `Summary` detail drops it, the
+/// aggregated WARN names the category, and the per-request drop counter
+/// advances by exactly one.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
+fn summary_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
+    // Arrange
+    let before = reasoning_summary_drop_count();
+    let messages = vec![assistant_turn(vec![no_wire_shape_detail(
+        ReasoningDetailKind::Summary,
+        Some(0),
+    )])];
+
+    // Act
+    let events = capture_events(|| {
+        build_messages("prov-test", &messages).expect("translation ok");
+    });
+
+    // Assert
+    let matches = summary_warns(&events);
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one aggregated no-wire-shape WARN expected per request; got events: {events:?}"
+    );
+    assert_eq!(matches[0].level, tracing::Level::WARN);
+    assert_eq!(matches[0].field("skipped_count"), Some("1"));
+    assert_eq!(
+        reasoning_summary_drop_count(),
+        before + 1,
+        "the drop counter must advance by exactly one for this request"
+    );
+}
+
+/// Once-per-request property, proven rather than assumed: a request
+/// carrying THREE no-wire-shape details (a mix of `Summary` and an
+/// unrecognized `Other` kind) across two turns must still bump the drop
+/// counter by exactly one, not once per dropped detail. The counter is
+/// wired from the tally's `flush()`, which runs once per `build_messages`
+/// call -- this is the assertion that pins that placement.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
+fn multiple_no_wire_shape_details_in_one_request_bump_the_drop_counter_once() {
+    // Arrange
+    let before = reasoning_summary_drop_count();
+    let messages = vec![
+        assistant_turn(vec![
+            no_wire_shape_detail(ReasoningDetailKind::Summary, Some(0)),
+            no_wire_shape_detail(ReasoningDetailKind::Other("future.kind".into()), Some(1)),
+        ]),
+        assistant_turn(vec![no_wire_shape_detail(
+            ReasoningDetailKind::Summary,
+            Some(0),
+        )]),
+    ];
+
+    // Act
+    let events = capture_events(|| {
+        build_messages("prov-test", &messages).expect("translation ok");
+    });
+
+    // Assert
+    let matches = summary_warns(&events);
+    assert_eq!(
+        matches.len(),
+        1,
+        "three dropped details across two turns must still fold into ONE \
+         aggregated WARN; got events: {events:?}"
+    );
+    assert_eq!(
+        matches[0].field("skipped_count"),
+        Some("3"),
+        "the WARN's own count stays exact even though the drop counter \
+         below only advances once for the whole request"
+    );
+    assert_eq!(
+        reasoning_summary_drop_count(),
+        before + 1,
+        "three no-wire-shape details in one request is one drop EVENT, not \
+         three -- the counter must advance by exactly one"
+    );
+}
+
+/// Positive control: a sibling request carrying only `Text`/`Encrypted`
+/// details (both of which DO have a Converse wire shape) survives with no
+/// no-wire-shape WARN and no drop-counter increment.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
+fn wire_representable_reasoning_details_emit_no_summary_warn_or_drop() {
+    // Arrange
+    let before = reasoning_summary_drop_count();
+    let text = ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(0),
+        payload: json!({"text": "thinking", "signature": "sig_abc"}),
+    };
+    let encrypted = ReasoningDetail {
+        kind: ReasoningDetailKind::Encrypted,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(1),
+        payload: json!({"data": "opaque"}),
+    };
+    let messages = vec![assistant_turn(vec![text, encrypted])];
+
+    // Act
+    let events = capture_events(|| {
+        build_messages("prov-test", &messages).expect("translation ok");
+    });
+
+    // Assert
+    assert!(
+        summary_warns(&events).is_empty(),
+        "Text and Encrypted details both have a Converse wire shape, so no \
+         no-wire-shape WARN is owed; got events: {events:?}"
+    );
+    assert_eq!(
+        reasoning_summary_drop_count(),
+        before,
+        "a request with nothing dropped must not advance the drop counter"
+    );
+}
