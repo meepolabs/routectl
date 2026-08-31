@@ -711,14 +711,60 @@ mod unit_tests {
     }
 
     #[test]
-    fn uncovered_shippable_reason_never_cites_the_drained_codex_filing() {
-        let cell = Cell {
-            lane: "openai-responses".to_string(),
-            pattern: "baseline".to_string(),
-        };
+    fn no_citation_the_view_can_emit_names_the_drained_codex_filing() {
+        // Sweeps every citation BOTH reason functions can produce, over a grid
+        // holding each lane token paired with each pattern that has a branch.
+        // Asserting the drained id against one function's return is vacuous --
+        // that function has no branch able to produce it -- so the guard has to
+        // cover the whole emitted set, where a future citation table entry
+        // would actually land.
+        let configured: BTreeSet<String> = ["anthropic-api", "openai-compat", "openai-responses"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let lanes = [
+            "anthropic-api",
+            "openai-compat",
+            "openai-responses",
+            "bedrock-invoke",
+            "bedrock-converse",
+            "gemini",
+        ];
+        let patterns = ["baseline", "large-context", "mcp-tools"];
 
-        let reason = uncovered_shippable_reason(&cell);
+        let mut emitted: Vec<&str> = Vec::new();
+        for lane in lanes {
+            if let Some(reason) = unshippable_reason(lane, &configured) {
+                emitted.push(reason);
+            }
+            for pattern in patterns {
+                let cell = Cell {
+                    lane: lane.to_string(),
+                    pattern: pattern.to_string(),
+                };
+                if let Some(reason) = uncovered_shippable_reason(&cell) {
+                    emitted.push(reason);
+                }
+            }
+        }
 
-        assert_ne!(reason, Some("bl-codex-driver-lane"));
+        // Positive control: the sweep really does collect citations, so the
+        // absence below is evidence rather than an empty pass.
+        assert!(
+            emitted.contains(&CITE_BEDROCK_CREDENTIALS),
+            "the sweep collected no bedrock citation, so it proves nothing"
+        );
+        assert!(
+            emitted.contains(&CITE_LARGE_CONTEXT_OFF_ANTHROPIC),
+            "the sweep collected no large-context citation, so it proves nothing"
+        );
+
+        for reason in emitted {
+            assert_ne!(
+                reason, "bl-codex-driver-lane",
+                "this feature drains that filing; an uncovered codex cell is \
+                 the capture task's gap, not a filing's"
+            );
+        }
     }
 }
