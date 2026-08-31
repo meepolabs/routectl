@@ -8,7 +8,7 @@
 use routectl_core::ChatRequest;
 
 use crate::anthropic_api::request::{lift_legacy_system, translate_system};
-use crate::anthropic_api::types::AnthropicSystem;
+use crate::anthropic_api::types::{AnthropicSystem, AnthropicSystemBlock};
 
 use super::types::{CachePoint, ConverseSystemBlock};
 
@@ -23,7 +23,10 @@ use super::types::{CachePoint, ConverseSystemBlock};
 /// messages out of `req.messages` via `lift_legacy_system` -- mirrors
 /// the Anthropic egress so direct callers (no ingress, just
 /// `messages: [{role:"system",...}]`) don't silently lose their system
-/// prompt.
+/// prompt. When BOTH a top-level `system` and Role::System messages are
+/// present, `merge_system_sources` combines them into one `system`
+/// array rather than picking one and discarding the other -- see its
+/// doc comment for why merge, and in what order.
 pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>> {
     // Drop the Claude Code billing/attribution block before translation:
     // Bedrock is a third-party upstream and must not receive the client
@@ -45,10 +48,9 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
             "bedrock-converse egress: Claude Code billing/attribution system block dropped",
         );
     }
-    let anthropic_system = filtered_system
-        .as_ref()
-        .map(translate_system)
-        .or_else(|| lift_legacy_system(&req.messages))?;
+    let primary = filtered_system.as_ref().map(translate_system);
+    let legacy = lift_legacy_system(&req.messages);
+    let anthropic_system = merge_system_sources(primary, legacy)?;
     let mut out: Vec<ConverseSystemBlock> = Vec::new();
     match anthropic_system {
         AnthropicSystem::Text(t) if t.trim().is_empty() => {
@@ -78,10 +80,72 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// Combine the top-level canonical `system` translation with the
+/// legacy Role::System message lift. Lane: bedrock-converse,
+/// construction-time translation.
+///
+/// Converse's wire `system` field is an ordered array of blocks -- the
+/// same shape a canonical `SystemContent::Blocks` produces -- so both
+/// sources fit without any structural conflict. This is unlike the
+/// `messages[]` array, which Converse restricts to `user`/`assistant`
+/// roles and therefore has no slot to forward a Role::System turn in
+/// place the way the Anthropic-API egress does when both are present.
+/// A request naming both a top-level `system` and Role::System messages
+/// carries two distinct system inputs, and the wire shape has room for
+/// both, so nothing here needs to be picked over the other and
+/// discarded.
+///
+/// ORDER: the top-level `system` field's blocks come first, the
+/// legacy-lifted Role::System text is appended after. The top-level
+/// field is the canonical, structured input; the message-array shape
+/// is the backwards-compat path for direct callers with no ingress.
+/// Ordering the canonical input first matches the precedence a caller
+/// supplying it would expect, while still delivering the legacy
+/// content to the model instead of discarding it.
+fn merge_system_sources(
+    primary: Option<AnthropicSystem>,
+    legacy: Option<AnthropicSystem>,
+) -> Option<AnthropicSystem> {
+    match (primary, legacy) {
+        (Some(p), Some(l)) => {
+            tracing::debug!(
+                "bedrock-converse egress: merging top-level system with Role::System \
+                 message content; both were present on the same request"
+            );
+            let mut merged = as_system_blocks(p);
+            merged.extend(as_system_blocks(l));
+            Some(AnthropicSystem::Blocks(merged))
+        }
+        (Some(p), None) => Some(p),
+        (None, Some(l)) => Some(l),
+        (None, None) => None,
+    }
+}
+
+/// Normalize an `AnthropicSystem` to its block-array form so
+/// `merge_system_sources` can concatenate two sources regardless of
+/// which variant each one is. A `Text` variant becomes a single block
+/// with no cache_control or citations -- the same information a plain
+/// string system carries on the wire.
+fn as_system_blocks(s: AnthropicSystem) -> Vec<AnthropicSystemBlock> {
+    match s {
+        AnthropicSystem::Text(t) => vec![AnthropicSystemBlock {
+            kind: "text".into(),
+            text: t,
+            cache_control: None,
+            citations: None,
+        }],
+        AnthropicSystem::Blocks(b) => b,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use routectl_core::{CacheControl, ChatRequest, SystemBlock, SystemContent};
+    use routectl_core::{
+        CacheControl, ChatRequest, Message, MessageContent, Role, SystemBlock, SystemContent,
+    };
+    use routectl_testkit::capture_events;
 
     fn block(text: &str, cc: Option<CacheControl>) -> SystemBlock {
         SystemBlock {
@@ -259,6 +323,120 @@ mod tests {
             matches!(&out[0], ConverseSystemBlock::Text(t) if t == "real prompt"),
             "leading-whitespace billing block must still be dropped, got: {:?}",
             out[0]
+        );
+    }
+
+    fn sys_msg(text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::System,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// The headline defect this fixes: a request carrying BOTH a
+    /// top-level `system` and a Role::System message must not discard
+    /// either. Converse's `system` array has room for both blocks, so
+    /// both must survive, top-level first, legacy-lifted content
+    /// appended after.
+    #[test]
+    fn both_top_level_and_role_system_message_are_merged_not_dropped() {
+        // Arrange
+        let req = ChatRequest {
+            system: Some(SystemContent::Text("top-level prompt".into())),
+            messages: vec![sys_msg("legacy prompt")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let mut out = None;
+        let events = capture_events(|| {
+            out = build_system(&req);
+        });
+        let out = out.expect("both system sources present must produce a system array");
+
+        // Assert: both texts survive, top-level first.
+        assert_eq!(out.len(), 2, "expected both system texts, got: {out:?}");
+        assert!(
+            matches!(&out[0], ConverseSystemBlock::Text(t) if t == "top-level prompt"),
+            "the top-level system must come first, got: {:?}",
+            out[0]
+        );
+        assert!(
+            matches!(&out[1], ConverseSystemBlock::Text(t) if t == "legacy prompt"),
+            "the legacy-lifted Role::System text must be appended, got: {:?}",
+            out[1]
+        );
+        assert!(
+            events.iter().any(|e| e.level == tracing::Level::DEBUG
+                && e.message.contains("merging top-level system")),
+            "the merge must stay observable through a real tracing event; got: {events:?}"
+        );
+    }
+
+    /// Positive control: with only a top-level `system` present (no
+    /// Role::System messages), no merge happens and no merge log fires --
+    /// pins that the merge path is genuinely conditional on both sources
+    /// being present, proving the negative-control assertion above would
+    /// actually fail if the merge log fired unconditionally.
+    #[test]
+    fn only_top_level_system_present_emits_no_merge_log() {
+        // Arrange
+        let req = req_with_system(SystemContent::Text("solo top-level".into()));
+
+        // Act
+        let mut out = None;
+        let events = capture_events(|| {
+            out = build_system(&req);
+        });
+        let out = out.expect("a top-level system alone must still produce a system array");
+
+        // Assert
+        assert_eq!(out.len(), 1);
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("merging top-level system")),
+            "no merge should be logged when only one system source is present: {events:?}"
+        );
+    }
+
+    /// Positive control: with only a Role::System message present (no
+    /// top-level `system`), the legacy lift still runs alone and no merge
+    /// log fires -- mirrors `only_top_level_system_present_emits_no_merge_log`
+    /// for the other single-source shape.
+    #[test]
+    fn only_legacy_role_system_message_present_emits_no_merge_log() {
+        // Arrange
+        let req = ChatRequest {
+            messages: vec![sys_msg("solo legacy")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let mut out = None;
+        let events = capture_events(|| {
+            out = build_system(&req);
+        });
+        let out = out.expect("a legacy system message alone must still produce a system array");
+
+        // Assert
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&out[0], ConverseSystemBlock::Text(t) if t == "solo legacy"),
+            "the legacy-lifted text must survive, got: {:?}",
+            out[0]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("merging top-level system")),
+            "no merge should be logged when only one system source is present: {events:?}"
         );
     }
 }
