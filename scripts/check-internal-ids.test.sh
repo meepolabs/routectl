@@ -227,6 +227,34 @@ assert_diff_clean "catalog selector source with vendor model name is clean" \
 "+++ b/crates/routectl-router/src/catalog_codegen_selectors.rs
 +// keeps MiniMax-M3 selectable"
 
+# INTERNAL DOCUMENT references. This class leaked four times in one
+# feature's batch and passed every hook, because the id tiers look for
+# identifier shapes and a private doc's filename is ordinary prose to
+# them. Each accept below is the false positive that shaped a bound:
+# `litellm_context` is a real function name that a bare `llm_context`
+# core matched, and `Table Api` / `table_a_helper` are the prose and
+# identifier forms an unbounded table-label core would catch.
+assert_diff_caught "a table label from the internal lane document is caught" \
+"+++ b/crates/routectl-providers/src/x.rs
++// classified TRANSLATION-per-Table-A here"
+
+assert_diff_caught "the internal lane document's own name is caught" \
+"+++ b/crates/routectl-providers/src/x.rs
++// see lane-contract for the ruling"
+
+assert_diff_caught "a private-docs path is caught" \
+"+++ b/crates/routectl-providers/src/x.rs
++// per llm_context/architecture/foundations.md"
+
+assert_diff_clean "litellm_context is not a private-docs path" \
+"+++ b/crates/routectl-router/src/catalog_codegen.rs
++    let window = litellm_context(entry)?;"
+
+assert_diff_clean "table prose and identifiers are not internal labels" \
+"+++ b/crates/routectl-providers/src/x.rs
++// the mutable Table Api wrapper
++fn table_a_helper() {}"
+
 if [[ "$fails" -ne 0 ]]; then
     echo "check-internal-ids self-test: $fails failure(s)" >&2
     exit 1

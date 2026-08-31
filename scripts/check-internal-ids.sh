@@ -156,6 +156,34 @@ PATTERNS=(
     'SLICE-[0-9]{1,3}'
     '[Ss]lice-[0-9]{1,3}'
     "[Ss]lice [0-9]{1,3}'s"
+
+    # INTERNAL DOCUMENT references, not ids. Added after this class leaked
+    # FOUR times in one feature's batch and passed every hook each time:
+    # the tiers above look for identifier SHAPES, and a private doc's
+    # filename or a table label inside it is ordinary prose to them. The
+    # leak reads as helpful provenance ("classified TRANSLATION per Table
+    # A"), which is exactly why an author writes it and a reviewer skims
+    # past it -- and the documents named here state on their own first line
+    # that they never enter the code repo.
+    #
+    # The right way to cite that reasoning in shipped code is to RESTATE it
+    # in terms a reader of the code can check, never to point at a file
+    # they cannot open.
+    #
+    # MEASURED collision-free across every tracked .rs/.sh/.py/.toml/.md
+    # file (982 tracked files): zero matches outside this scanner. Two
+    # bounds are load-bearing rather than cosmetic:
+    #   - `Table [AB]` needs its leading word boundary: without it,
+    #     "...for the mutable Table Api" and similar prose would match.
+    #   - `llm_context` needs a trailing `/` AND a non-letter to its left:
+    #     bare `llm_context` false-matched `litellm_context`, a real
+    #     function name in the catalog codegen, verified before this bound
+    #     was added.
+    'Table-[AB]'
+    'Table [AB]'
+    'lane-contract'
+    'foundations\.md'
+    'llm_context/'
 )
 
 # Second tier: same whole-token wrapping, but the LEFT boundary also
