@@ -18,9 +18,16 @@
 //! dependency edge. So these counters live here, in `routectl-providers`,
 //! and the router's snapshot reads them through the `pub` functions below
 //! ([`translation_drop_snapshot`]) with no new dependency edge and no call
-//! back into router. `bedrock_validation_unmatched_total`'s
-//! `AtomicU64` + `incr_*()` + `fetch_add(Relaxed)` shape is still the model
-//! this module copies; only its crate location differs.
+//! back into router.
+//!
+//! The synchronization differs from that precedent deliberately, and the
+//! difference is worth naming: `bedrock_validation_unmatched_total` is a
+//! lock-free top-level field under a FIXED key, so an atomic with no lock is
+//! exactly right there. This registry keys on a DYNAMIC `(lane, drop_class)`
+//! pair discovered as call sites land, so the map itself needs a lock -- and
+//! once every access already holds that lock exclusively, per-entry atomics
+//! would buy nothing and would imply to a reader that lock-free access is
+//! possible. Plain `u64` under the mutex is the honest shape.
 //!
 //! # Count vs. rate
 //!
@@ -32,7 +39,6 @@
 //! per lane instead of an uncontextualized count.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// `(lane, drop_class)` label pair identifying one counted drop kind. Both
@@ -42,8 +48,8 @@ pub type DropKey = (&'static str, &'static str);
 
 #[derive(Debug, Default)]
 struct Registry {
-    drops: BTreeMap<DropKey, AtomicU64>,
-    lane_seen: BTreeMap<&'static str, AtomicU64>,
+    drops: BTreeMap<DropKey, u64>,
+    lane_seen: BTreeMap<&'static str, u64>,
 }
 
 fn registry() -> &'static Mutex<Registry> {
@@ -68,10 +74,8 @@ fn with_registry_mut<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
 /// is one drop event, not three.
 pub fn record_translation_drop(lane: &'static str, drop_class: &'static str) {
     with_registry_mut(|reg| {
-        reg.drops
-            .entry((lane, drop_class))
-            .or_insert_with(AtomicU64::default)
-            .fetch_add(1, Ordering::Relaxed);
+        let count = reg.drops.entry((lane, drop_class)).or_default();
+        *count = count.saturating_add(1);
     });
 }
 
@@ -82,10 +86,8 @@ pub fn record_translation_drop(lane: &'static str, drop_class: &'static str) {
 /// no-drop arm.
 pub fn record_translation_lane_seen(lane: &'static str) {
     with_registry_mut(|reg| {
-        reg.lane_seen
-            .entry(lane)
-            .or_insert_with(AtomicU64::default)
-            .fetch_add(1, Ordering::Relaxed);
+        let count = reg.lane_seen.entry(lane).or_default();
+        *count = count.saturating_add(1);
     });
 }
 
@@ -112,6 +114,7 @@ impl TranslationDropSnapshotEntry {
     /// not yet been marked seen -- e.g. before the dependent task wiring
     /// [`record_translation_lane_seen`] for this lane has landed -- rather
     /// than dividing by zero.
+    #[must_use]
     pub fn drop_rate(&self) -> f64 {
         if self.lane_seen_count == 0 {
             0.0
@@ -128,19 +131,17 @@ impl TranslationDropSnapshotEntry {
 /// [`record_translation_drop`] has been called for it at least once (the
 /// map entry is created on first increment), matching the
 /// grow-as-arms-land model this module is built for.
+#[must_use]
 pub fn translation_drop_snapshot() -> Vec<TranslationDropSnapshotEntry> {
     with_registry_mut(|reg| {
         reg.drops
             .iter()
             .map(
-                |(&(lane, drop_class), count)| TranslationDropSnapshotEntry {
+                |(&(lane, drop_class), &count)| TranslationDropSnapshotEntry {
                     lane,
                     drop_class,
-                    drop_count: count.load(Ordering::Relaxed),
-                    lane_seen_count: reg
-                        .lane_seen
-                        .get(lane)
-                        .map_or(0, |c| c.load(Ordering::Relaxed)),
+                    drop_count: count,
+                    lane_seen_count: reg.lane_seen.get(lane).copied().unwrap_or(0),
                 },
             )
             .collect()
@@ -238,6 +239,9 @@ mod tests {
             .find(|e| e.lane == lane && e.drop_class == drop_class)
             .expect("counter present");
         assert_eq!(entry.lane_seen_count, 0);
+        // Exact comparison is intentional here, unlike the epsilon check in
+        // the computed-rate test: the zero-denominator branch returns the
+        // literal 0.0 rather than dividing, so there is no rounding to admit.
         assert_eq!(entry.drop_rate(), 0.0);
     }
 }
