@@ -887,6 +887,7 @@ client-version read) lives in `scripts/drivers/lib/common.sh`.
 | `claude-code.sh` | interactive Claude Code | `ROUTECTL_DRIVER_CLAUDE_BIN`, default `claude` |
 | `claude-code-print.sh` | `claude -p` / Agent SDK print mode | same variable; the same binary, a different wire shape |
 | `external-agent-cli.sh` | any third-party Anthropic-dialect CLI | `ROUTECTL_DRIVER_AGENT_BIN`, REQUIRED, no default |
+| `codex.sh` | the codex CLI, which speaks the responses dialect | `ROUTECTL_DRIVER_CODEX_BIN`, default `codex` |
 
 ### Running a case
 

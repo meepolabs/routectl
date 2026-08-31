@@ -5498,6 +5498,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lane gated" (`resolve_gated_lanes`, `GatedLanes`), and the
   `translation_baseline.txt` reader (`read_translation_baseline`,
   `BaselineEntry`)
+- `tests/common/replay/json_diff.rs` -- structural JSON divergence comparator
+  (`diff_all`, `Divergence`, `DivergenceKind`) plus the header-bag comparator
+  and its redacting allowlist
+- `tests/common/replay/sse_diff.rs` -- SSE event-sequence parser
+  (`parse_sse_events`, `SseEventCmp`) and pairwise-equality comparator
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
 - `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +
@@ -5708,12 +5713,20 @@ Dev-dependency crate: shared test doubles and harnesses every other crate's
 
 ## scripts/ -- the capture container path and fixture promotion
 
-Shell, not Rust, and scoped: this section covers ONLY the container way to
-run a capture, the shared `--out` confinement helper, and the promotion
-step into the committed corpus. The rest of `scripts/` (the host capture
-rig, the scrub gate, the repo-hygiene checks) is not mapped here -- reach
-it through [DEVELOPMENT.md](DEVELOPMENT.md). Shell self-tests ARE listed
-because no cargo target runs them, so nothing else names their paths.
+Shell, not Rust, and scoped: this section covers the container way to run a
+capture, the shared `--out` confinement helper, the promotion step into the
+committed corpus, and the commit-gate / repo-hygiene scripts with no other
+named home. The rest of `scripts/` (the host capture rig, the scrub gate,
+and everything else named by exact path with a runnable command) is not
+mapped here -- reach it through [DEVELOPMENT.md](DEVELOPMENT.md). Shell
+self-tests ARE listed because no cargo target runs them, so nothing else
+names their paths.
+
+Rule for adding to this section: before touching a file under `scripts/`,
+grep both this file and `DEVELOPMENT.md` for its basename. Already named in
+either -> no action here. Named in neither -> one row below, file-level
+depth, navigation-only (what the file IS, not how it behaves) -- never a
+new section or a second doc.
 
 - `container/Dockerfile` -- the capture-cell image: a digest-pinned base,
   pinned installers for each shipped client (claude, codex), and the
@@ -5744,6 +5757,14 @@ because no cargo target runs them, so nothing else names their paths.
   copy the capture rig, the driver runner, and the promotion script validate
   their expected-ingress pin against, welded to `IngressAdapter::id()` by
   the shell self-tests
+- `drivers/config/credential_probe.sh` -- per-lane credential-resolution probe
+  (`CONFIG_FILE VAR...`): boots a lane config hermetically to establish that its
+  credential refs resolve, which a structural config check does not establish
+- `drivers/config/credential_probe.test.sh` -- self-test for that probe, run
+  against the committed lane configs themselves
+- `drivers/lib/resolve_bin.sh` -- sourced binary-resolution helper
+  (`resolve_bin`); the one copy the credential probe and its self-test share, so
+  a probe and the test that checks it cannot resolve different binaries
 - `drivers/profiles/README.md` -- the client-profile seam, committed with ZERO
   profiles: the closed-set and `key=value` rules, the forbidden keys, and the
   ordering constraint `driver_load_client_profile` enforces (a profile loads
@@ -5755,3 +5776,37 @@ because no cargo target runs them, so nothing else names their paths.
   MITM-seam-header coherence check, the traced-ingress-vs-pin check, and the
   client-version comparison) because a scratch fixture is hand-editable
 - `promote_fixture.test.sh` -- self-test for the promotion script
+- `public-api.sh` -- public-API drift gate: diffs each library crate's
+  cargo-public-api surface against its checked-in baseline (`generate`,
+  `--check` per crate or `all`); CI runs it unconditionally, locally it is
+  a commit-gate leg where the tooling is installed
+- `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
+  over `cargo test -- --list` output, for auditing a test-consolidation
+  change by exact test name; informational, gates nothing
+- `stray-build-dirs.sh` -- reports (never deletes) stray cargo
+  build-scratch directories outside the normal `target/` tree, including
+  ones nested inside it or sitting outside the git repo entirely
+- `coverage.sh` -- runs cargo-llvm-cov over the workspace and writes a
+  JSON + summary coverage report to an output dir; informational, not
+  wired into the commit gate
+- `bench.sh` -- perf bench runner: the workspace's criterion targets plus
+  the allocation-count pass, with a two-run noise contract, writing a
+  distilled baseline record to an output dir
+- `check-internal-ids.sh` -- internal-planning-ID scanner shared by the
+  pre-commit, commit-msg, and CI stages (`--staged`, `--commit-msg`,
+  `--range`, `--commit-range`); the single source of truth for the
+  pattern set
+- `check-internal-ids.test.sh` -- self-test for the internal-ID scanner
+- `check-log-display.sh` -- scans for tracing fields that render
+  wire-derived strings via unescaped `%` (Display) instead of a sanitizer,
+  across the ingress/egress/router/server/CLI surfaces that touch caller
+  or upstream bytes
+- `check-log-display.test.sh` -- self-test for the log-display scanner
+- `check-subject-length.sh` -- commit-msg stage gate rejecting a commit
+  subject line over the configured character limit
+- `check-subject-length.test.sh` -- self-test for the subject-length gate
+- `check-nav-index.sh` -- advisory, non-blocking check that every
+  `crates/**/*.rs` (minus `*_tests.rs` sidecars) and every `scripts/**/*.sh`
+  appears by path in this file or `DEVELOPMENT.md`; existence only, never
+  row wording or freshness
+- `check-nav-index.test.sh` -- self-test for the navigation-index check
