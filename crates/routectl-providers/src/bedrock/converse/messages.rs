@@ -1,9 +1,14 @@
 //! Canonical `messages[]` -> Converse `messages[]` translation.
 //!
 //! Per-role dispatch: User and Assistant turns ride through
-//! `build_content_blocks`; Role::System is dropped here (lifted into
-//! the top-level `system` array by `system.rs`); Role::Tool becomes a
-//! synthesized user-role message carrying a `toolResult` block.
+//! `build_content_blocks`; Role::System never contributes a block here --
+//! `system.rs::build_system` is the single site that owns its content,
+//! whether by translating the top-level canonical `system` field,
+//! lifting Role::System text when no top-level field is present, or
+//! merging both sources into the top-level `system` array when both are
+//! present on the same request (see `system::merge_system_sources`);
+//! Role::Tool becomes a synthesized user-role message carrying a
+//! `toolResult` block.
 //!
 //! Forward-compat catchalls: `ContentPart::Other` re-wraps as the AWS
 //! single-key union and passes through, so an unmodeled block preserved
@@ -116,12 +121,7 @@ fn translate_messages(
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for (i, msg) in messages.iter().enumerate() {
         match &msg.role {
-            Role::System => {
-                // System lives in the top-level `system` array. Drop here
-                // so we don't duplicate; direct callers without an
-                // ingress have already had their System messages lifted
-                // by `build_system` via `lift_legacy_system`.
-            }
+            Role::System => system_role_content_lives_in_top_level_system(),
             Role::User => {
                 let mut blocks = build_user_content_blocks(id, &msg.content, tally)?;
                 ensure_document_has_text_sibling(&mut blocks);
@@ -174,6 +174,18 @@ fn translate_messages(
     }
     Ok(out)
 }
+
+/// Role::System is absorbed by the top-level `system` array, never by
+/// this per-turn dispatch -- lane: bedrock-converse, construction-time
+/// translation. STRUCTURAL, not a drop: `system::build_system` reaches
+/// every Role::System message's content, whether by translating the
+/// top-level canonical `system` field, lifting the message content when
+/// no top-level field is present, or merging both sources when both are
+/// present on the same request. This arm is a no-op by construction, not
+/// a discard -- named and greppable (instead of a bare `=> {}`) so a
+/// future regression in `build_system`'s both-present coverage cannot
+/// hide silently behind it.
+const fn system_role_content_lives_in_top_level_system() {}
 
 /// Append a translated turn's content to `out`, merging into the
 /// previous message when it carries the same role. AWS Converse requires
