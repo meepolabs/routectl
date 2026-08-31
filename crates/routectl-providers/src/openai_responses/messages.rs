@@ -103,7 +103,7 @@ pub(super) fn build_input(
 ) -> Result<Vec<ResponseInputItem>> {
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
     for msg in messages {
-        match msg.role {
+        match &msg.role {
             Role::System => {
                 // Lifted into top-level `instructions` by system.rs;
                 // intentionally dropped here.
@@ -111,6 +111,17 @@ pub(super) fn build_input(
             Role::User => translate_user_message(id, msg, &mut out)?,
             Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out)?,
             Role::Tool => translate_tool_message(id, msg, &mut out)?,
+            // This function serves callers whose ingress dialect is
+            // openai_responses itself as well as callers translating in
+            // from other dialects. Unlike Anthropic/Gemini/Converse, the
+            // Responses wire role is a plain string with no closed
+            // vocabulary, so the faithful move for both classes of caller
+            // is to forward the original tag verbatim rather than
+            // collapsing it onto "user" -- still logged once so a caller
+            // translating in from elsewhere can see the choice made. This
+            // is a forward-compat seed: not yet eligible for removal until
+            // real unrecognized-role traffic is observed.
+            Role::Other(tag) => translate_other_message(id, tag, msg, &mut out)?,
         }
     }
     Ok(out)
@@ -141,6 +152,39 @@ fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
     }
     out.push(ResponseInputItem::Message {
         role: "user".into(),
+        content,
+    });
+    Ok(())
+}
+
+/// An unrecognized-role turn: forwarded verbatim as its original wire
+/// role string (see the `Role::Other` arm in `build_input`), reusing the
+/// same tool-result lift and content build as `translate_user_message`
+/// since Responses input items share one shape regardless of role tag.
+fn translate_other_message(
+    id: &str,
+    tag: &str,
+    msg: &Message,
+    out: &mut Vec<ResponseInputItem>,
+) -> Result<()> {
+    tracing::debug!(
+        provider = id,
+        role = %sanitize_for_log(tag),
+        "responses egress: unrecognized message role forwarded verbatim"
+    );
+    extract_tool_results(id, &msg.content, out)?;
+
+    let content = build_user_content(id, &msg.content)?;
+    if content.is_empty() {
+        tracing::debug!(
+            provider = id,
+            role = %sanitize_for_log(tag),
+            "skipping empty message after Responses translation"
+        );
+        return Ok(());
+    }
+    out.push(ResponseInputItem::Message {
+        role: tag.to_string(),
         content,
     });
     Ok(())
@@ -2064,6 +2108,100 @@ mod tool_calls_field_tests {
             .iter()
             .find(|i| matches!(i, ResponseInputItem::Message { role, .. } if role == "assistant"));
         assert!(assistant_msg.is_some(), "assistant Message must survive");
+    }
+}
+
+#[cfg(test)]
+mod role_other_field_tests {
+    use routectl_core::{Message, MessageContent, Role};
+
+    use super::super::AuthKind;
+    use super::super::types::ResponseInputItem;
+    use super::build_input;
+
+    fn user_text(text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn other_text(tag: &str, text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Other(tag.to_string()),
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// The FIDELITY-faithful move for Responses (unlike the other three
+    /// egresses): the wire role field is a plain string, so an
+    /// unrecognized role forwards VERBATIM rather than collapsing to
+    /// "user" -- plus exactly one DEBUG naming the tag.
+    #[test]
+    fn unrecognized_role_forwards_verbatim_with_debug() {
+        // Arrange
+        let messages = vec![other_text("narrator", "hello there")];
+
+        // Act
+        let mut out = Vec::new();
+        let events = routectl_testkit::capture_events(|| {
+            out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        });
+
+        // Assert
+        assert_eq!(out.len(), 1, "the turn must survive translation");
+        assert!(
+            matches!(&out[0], ResponseInputItem::Message { role, .. } if role == "narrator"),
+            "must forward the original tag verbatim, got: {:?}",
+            out[0]
+        );
+        let debug_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG && e.field("role") == Some("narrator"))
+            .collect();
+        assert_eq!(
+            debug_events.len(),
+            1,
+            "exactly one DEBUG must name the unrecognized role tag, got: {events:?}"
+        );
+    }
+
+    /// Sibling positive control: a recognized `Role::User` turn takes the
+    /// ordinary path and emits no such DEBUG, proving the assertion above
+    /// actually exercises the `Role::Other` arm rather than firing
+    /// regardless of role.
+    #[test]
+    fn known_user_role_emits_no_unrecognized_role_debug() {
+        // Arrange
+        let messages = vec![user_text("hello there")];
+
+        // Act
+        let mut out = Vec::new();
+        let events = routectl_testkit::capture_events(|| {
+            out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        });
+
+        // Assert
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], ResponseInputItem::Message { role, .. } if role == "user"));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("unrecognized message role")),
+            "a recognized role must not trip the unrecognized-role fallback, got: {events:?}"
+        );
     }
 }
 

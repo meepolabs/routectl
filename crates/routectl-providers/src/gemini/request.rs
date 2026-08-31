@@ -167,7 +167,7 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
     let tool_name_by_id = build_tool_call_name_index(req);
 
     for msg in &*req.messages {
-        match msg.role {
+        match &msg.role {
             Role::System => {
                 // Lifted into systemInstruction above; skip here.
             }
@@ -241,6 +241,26 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                         response: response_content,
                     })],
                 });
+            }
+            // Gemini's role vocabulary is closed and has no equivalent for
+            // an unrecognized role, so it forwards as the closest legal
+            // role -- "user", the same treatment `Role::Tool` gets above --
+            // with one DEBUG naming the dropped tag rather than a silent
+            // coercion. This is a forward-compat seed: not yet eligible for
+            // removal until real unrecognized-role traffic is observed.
+            Role::Other(tag) => {
+                tracing::debug!(
+                    provider = provider_id,
+                    role = %sanitize_for_log(tag),
+                    "gemini egress: unrecognized message role forwarded as user"
+                );
+                let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id)?;
+                if !parts.is_empty() {
+                    contents.push(Content {
+                        role: "user".into(),
+                        parts,
+                    });
+                }
             }
         }
     }
@@ -3358,5 +3378,76 @@ mod tests {
         // Assert
         assert!(parts.is_empty());
         assert_warned(&events, "dropping base64 document source with empty data");
+    }
+
+    fn make_other(tag: &str, text: &str) -> Message {
+        Message {
+            role: Role::Other(tag.to_string()),
+            content: MessageContent::Text(text.into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// An unrecognized role forwards its content as a "user" turn and
+    /// emits exactly one DEBUG naming the original tag.
+    #[test]
+    fn unrecognized_role_forwards_as_user_with_debug() {
+        // Arrange
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_other("narrator", "hello there")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let mut contents = Vec::new();
+        let events =
+            routectl_testkit::capture_events(|| contents = build_contents("prov", &req).unwrap());
+
+        // Assert
+        assert_eq!(contents.len(), 1, "the turn must survive translation");
+        assert_eq!(
+            contents[0].role, "user",
+            "must forward as the closest legal role"
+        );
+        let debug_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG && e.field("role") == Some("narrator"))
+            .collect();
+        assert_eq!(
+            debug_events.len(),
+            1,
+            "exactly one DEBUG must name the dropped role tag, got: {events:?}"
+        );
+    }
+
+    /// Sibling positive control: a recognized `Role::User` turn takes the
+    /// ordinary path and emits no such DEBUG, proving the assertion above
+    /// actually exercises the `Role::Other` arm rather than firing regardless
+    /// of role.
+    #[test]
+    fn known_user_role_emits_no_unrecognized_role_debug() {
+        // Arrange
+        let req = base_req();
+
+        // Act
+        let mut contents = Vec::new();
+        let events =
+            routectl_testkit::capture_events(|| contents = build_contents("prov", &req).unwrap());
+
+        // Assert
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].role, "user");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("unrecognized message role")),
+            "a recognized role must not trip the unrecognized-role fallback, got: {events:?}"
+        );
     }
 }

@@ -491,8 +491,16 @@ impl std::fmt::Display for ForwardedBearer {
 }
 
 /// Role of a message author on the wire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+///
+/// `Other` is the forward-compat carrier for a role tag this build does not
+/// recognize, mirroring `ContentPart::Other`'s discriminant-preserving
+/// convention: an unrecognized role string round-trips through routectl
+/// (via the manual `Serialize`/`Deserialize` below) instead of failing
+/// deserialization or silently collapsing onto a known variant. Each egress
+/// decides independently how to translate it -- forwarding it verbatim
+/// where the wire format allows an open role vocabulary, or mapping it to
+/// the closest legal value with a logged fallback where it doesn't.
+#[derive(Debug, Clone)]
 pub enum Role {
     /// System / developer instructions.
     System,
@@ -502,6 +510,42 @@ pub enum Role {
     Assistant,
     /// Tool-result turn.
     Tool,
+    /// A role tag this build does not recognize, carrying the original
+    /// wire string verbatim.
+    Other(String),
+}
+
+impl Role {
+    /// The lowercase wire string for this role: one of the four known
+    /// tags, or the original unrecognized tag carried by `Other`.
+    pub fn as_wire_str(&self) -> &str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::Other(tag) => tag,
+        }
+    }
+}
+
+impl Serialize for Role {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Role {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let tag = String::deserialize(deserializer)?;
+        Ok(match tag.as_str() {
+            "system" => Self::System,
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "tool" => Self::Tool,
+            _ => Self::Other(tag),
+        })
+    }
 }
 
 /// One conversation turn in canonical form.
