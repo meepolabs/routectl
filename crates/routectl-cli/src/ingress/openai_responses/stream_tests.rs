@@ -469,6 +469,58 @@ fn reasoning_encrypted_rides_to_item_done_not_a_delta() {
 }
 
 #[test]
+fn reasoning_unrecognized_kind_rides_to_item_done_contributing_nothing() {
+    // An unrecognized kind gets the same treatment as Encrypted: it
+    // opens/keeps the reasoning item alive (so the output_index does
+    // not gap) but emits no delta, and unlike Encrypted it contributes
+    // nothing to the completed item body either -- no slot exists for
+    // it there. Paired with the Encrypted test above (same code path,
+    // recognized kind that DOES land on item.done) as the positive
+    // control.
+    let mut state = fresh();
+    let mut events = render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_1", json!({"text": "s"})),
+    );
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(
+            ReasoningDetailKind::Other("future.kind".to_string()),
+            "rs_1",
+            json!({"text": "a future shape"}),
+        ),
+    ));
+
+    // Act: close the item.
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert: no delta event for the unrecognized detail.
+    assert!(
+        !names(&events)
+            .iter()
+            .any(|n| n.contains("reasoning") && n.contains("delta") && n.contains("future")),
+        "an unrecognized kind must never emit a delta event"
+    );
+    let item_done = data_of(&events, "response.output_item.done");
+    assert_eq!(
+        item_done["item"]["summary"][0]["text"], "s",
+        "the recognized detail must still land on the completed body"
+    );
+    let summary = item_done["item"]["summary"].as_array().unwrap();
+    assert_eq!(
+        summary.len(),
+        1,
+        "the unrecognized detail must not contribute a summary entry: {summary:?}"
+    );
+    assert!(
+        item_done["item"].get("content").is_none()
+            || item_done["item"]["content"].as_array().unwrap().is_empty(),
+        "the unrecognized detail must not contribute a content entry: {:?}",
+        item_done["item"]
+    );
+}
+
+#[test]
 fn reasoning_then_text_supersedes_and_closes_reasoning_item_first() {
     // Arrange
     let mut state = fresh();

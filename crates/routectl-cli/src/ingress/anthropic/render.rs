@@ -151,12 +151,15 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                     "data": data,
                 }));
             }
-            routectl_core::ReasoningDetailKind::Summary => {
-                // OpenAI Responses emits per-step reasoning summaries
-                // as Summary-kind details. Surface them as thinking
-                // blocks so cc displays them (and so they round-trip
-                // on multi-turn echo if the upstream uses summaries
-                // as its reasoning carrier).
+            // This is the client-facing render path (FIDELITY-per-Table-A
+            // when the ingress is Anthropic itself, TRANSLATION
+            // otherwise): forward what can be displayed rather than
+            // drop it. OpenAI Responses summaries land here too, so an
+            // unrecognized kind gets the identical best-effort fallback
+            // -- surface `payload.text` as a thinking block when
+            // present, and contribute nothing otherwise.
+            routectl_core::ReasoningDetailKind::Summary
+            | routectl_core::ReasoningDetailKind::Other(_) => {
                 let text = d
                     .payload
                     .get("text")

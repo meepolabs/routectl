@@ -667,6 +667,41 @@ fn reasoning_detail_to_thinking_block_skips_summary() {
     );
 }
 
+/// An unrecognized kind gets the same treatment as Summary: no
+/// Anthropic block shape is defined for it, so it maps to None
+/// rather than erroring or being invented a shape.
+#[test]
+fn reasoning_detail_to_thinking_block_skips_unrecognized_kind() {
+    let detail = make_detail(
+        ReasoningDetailKind::Other("future.kind".to_string()),
+        Some(super::super::ANTHROPIC_FORMAT),
+        serde_json::json!({"text": "summary text"}),
+    );
+    let result = reasoning_detail_to_thinking_block(&detail, &mut passthrough_tally());
+    assert!(
+        result.is_none(),
+        "unrecognized kind must map to None; got: {result:?}"
+    );
+}
+
+/// Positive control for the two tests above: a recognized, emittable
+/// kind (Text, correct format, valid signature) DOES produce a block,
+/// proving the harness would catch a regression that turned the
+/// Summary/Other skip into an always-None no-op.
+#[test]
+fn reasoning_detail_to_thinking_block_emits_for_recognized_kind() {
+    let detail = make_detail(
+        ReasoningDetailKind::Text,
+        Some(super::super::ANTHROPIC_FORMAT),
+        serde_json::json!({"text": "some thinking", "signature": "sig-valid"}),
+    );
+    let result = reasoning_detail_to_thinking_block(&detail, &mut passthrough_tally());
+    assert!(
+        result.is_some(),
+        "recognized, well-formed detail must produce a block"
+    );
+}
+
 // ------------------------------------------------------------------
 // Fix 1: non-cumulative interleaved-thinking tests
 // ------------------------------------------------------------------

@@ -314,6 +314,12 @@ fn accumulate_reasoning_detail(group: &mut ReasoningItemBuilder, d: &ReasoningDe
                 }
             }
         }
+        // This egress's `reasoning` item has no slot for an
+        // arbitrary shape -- summary/content/encrypted_content are
+        // the complete set -- so an unrecognized kind contributes
+        // nothing, the same as every arm above already does when its
+        // own expected payload field is absent.
+        ReasoningDetailKind::Other(_) => {}
     }
 }
 

@@ -394,7 +394,9 @@ fn is_anthropic_emittable_detail(detail: &ReasoningDetail) -> bool {
                     .is_some_and(|s| !s.is_empty())
         }
         ReasoningDetailKind::Encrypted => detail.format.as_deref() == Some(super::ANTHROPIC_FORMAT),
-        ReasoningDetailKind::Summary => false,
+        // Unrecognized kind (TRANSLATION-per-Table-A): no Anthropic block
+        // shape is defined for it, same as Summary.
+        ReasoningDetailKind::Summary | ReasoningDetailKind::Other(_) => false,
     }
 }
 
@@ -887,7 +889,12 @@ fn emit_reasoning_blocks(
                 ReasoningDetailKind::Text => {
                     skips.record_unsigned(message_index, detail.index);
                 }
-                ReasoningDetailKind::Encrypted | ReasoningDetailKind::Summary => {}
+                // Summary and an unrecognized kind (Other) are never
+                // emittable here (see `is_anthropic_emittable_detail`),
+                // so neither is worth a tally category of its own.
+                ReasoningDetailKind::Encrypted
+                | ReasoningDetailKind::Summary
+                | ReasoningDetailKind::Other(_) => {}
             }
             continue;
         }
@@ -921,7 +928,11 @@ fn emit_reasoning_blocks(
                     cache_control: None,
                 });
             }
-            ReasoningDetailKind::Summary => {}
+            // Neither Summary nor an unrecognized kind (Other) reaches
+            // this branch in practice -- both are never-emittable per
+            // `is_anthropic_emittable_detail` -- but the match must stay
+            // exhaustive.
+            ReasoningDetailKind::Summary | ReasoningDetailKind::Other(_) => {}
         }
     }
     Ok(blocks)

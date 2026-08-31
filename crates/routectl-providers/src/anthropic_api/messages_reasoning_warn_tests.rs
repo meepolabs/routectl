@@ -721,3 +721,63 @@ fn an_absent_format_renders_the_same_placeholder_in_both_knob_states() {
     assert_eq!(render_skipped_format(None, true), "<none>");
     assert_eq!(render_skipped_format(None, false), "<none>");
 }
+
+/// An unrecognized reasoning-detail kind must drop out of the translated
+/// message silently, with no WARN of any kind -- it gets the identical
+/// (currently un-instrumented) treatment as `Summary`, never a new
+/// category of its own. Paired with a recognized, emittable `Text`
+/// detail on the SAME turn as the positive control: if the drop path
+/// broke and swallowed the whole turn, the recognized block would
+/// vanish too.
+#[test]
+fn unrecognized_kind_drops_silently_with_no_warn_and_no_block() {
+    // Arrange
+    let recognized = ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(0),
+        payload: json!({"text": "thinking", "signature": "sig"}),
+    };
+    let unrecognized = ReasoningDetail {
+        kind: ReasoningDetailKind::Other("future.kind".to_string()),
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(1),
+        payload: json!({"text": "some future payload"}),
+    };
+    let mut envelopes = passthrough_tally();
+    let messages = vec![assistant_turn(vec![recognized, unrecognized])];
+
+    // Act
+    let mut translated = Vec::new();
+    let events = capture_events(|| {
+        translated = translate_messages(
+            "prov-test",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut envelopes,
+        )
+        .expect("translation ok");
+    });
+
+    // Assert
+    assert!(
+        events.iter().all(|e| e.level != tracing::Level::WARN),
+        "an unrecognized kind must not trigger any WARN; got: {events:?}"
+    );
+    let thinking_blocks: Vec<_> = match &translated[0].content {
+        AnthropicContent::Blocks(blocks) => blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Thinking { .. }))
+            .collect(),
+        AnthropicContent::Text(_) => Vec::new(),
+    };
+    assert_eq!(
+        thinking_blocks.len(),
+        1,
+        "the recognized detail must still be emitted (positive control); \
+         got content: {:?}",
+        translated[0].content
+    );
+}

@@ -338,7 +338,11 @@ fn reasoning_detail_to_thinking_block(
         }
         // Summary is an OpenAI Responses construct; not a valid
         // Anthropic block type. Silently skip it.
-        ReasoningDetailKind::Summary => None,
+        //
+        // Other (unrecognized kind, TRANSLATION-per-Table-A) has no
+        // Anthropic block shape to translate into either, so it gets the
+        // same treatment as Summary rather than a new one.
+        ReasoningDetailKind::Summary | ReasoningDetailKind::Other(_) => None,
     }
 }
 

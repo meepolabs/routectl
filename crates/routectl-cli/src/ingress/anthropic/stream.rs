@@ -400,10 +400,14 @@ fn emit_delta_events(
                     .unwrap_or_default(),
                 ));
             }
-            routectl_core::ReasoningDetailKind::Summary => {
+            routectl_core::ReasoningDetailKind::Summary
+            | routectl_core::ReasoningDetailKind::Other(_) => {
                 // OpenAI Responses summary text -> thinking_delta.
                 // Lets cc display the summary AND keeps the text in
                 // the round-trip history for any preserve-mode echo.
+                // An unrecognized kind (Other) gets the identical
+                // best-effort forward: same lane-class rationale as the
+                // non-stream renderer's Summary arm.
                 let detail_index = d.index.unwrap_or(0);
                 let idx = ensure_block(state, OpenBlockKind::Thinking { detail_index }, events);
                 if let Some(text) = d.payload.get("text").and_then(|v| v.as_str())

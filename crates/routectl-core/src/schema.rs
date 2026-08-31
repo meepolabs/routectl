@@ -924,21 +924,32 @@ pub struct ReasoningDetail {
 /// detail's `payload` object carries and how downstream egresses
 /// interpret it.
 ///
-/// Three variants, and only three: this is the canonical vocabulary every
-/// egress matches exhaustively. The Anthropic block spellings
-/// (`thinking`, `redacted_thinking`) are accepted INBOUND as serde
-/// aliases onto the canonical variant they already mean, so a client
-/// echoing a `reasoning_details` array in Anthropic vocabulary is not
-/// rejected at the ingress boundary. Aliases widen deserialization only
-/// -- serialization always emits the canonical `reasoning.*` spelling,
-/// so the outbound wire contract is unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Four variants: three known shapes plus `Other`, the forward-compat
+/// carrier. Every egress still matches this type exhaustively, but an
+/// unrecognized wire tag now lands in `Other(String)` -- holding the
+/// original tag verbatim -- instead of failing deserialization. That
+/// keeps a reasoning-detail array a client echoed back readable even
+/// when it carries a shape routectl does not yet model, per each
+/// egress's own lane-class rule for unknown vocabulary. The Anthropic
+/// block spellings (`thinking`, `redacted_thinking`) are accepted
+/// INBOUND as aliases onto the canonical variant they already mean, so
+/// a client echoing a `reasoning_details` array in Anthropic vocabulary
+/// is not rejected at the ingress boundary. Aliases widen
+/// deserialization only -- serialization always emits the canonical
+/// `reasoning.*` spelling for a known variant, so the outbound wire
+/// contract for those three is unchanged; `Other` serializes back to
+/// its original tag so an unrecognized detail round-trips byte-for-byte
+/// on its discriminator.
+///
+/// Hand-rolled `Serialize`/`Deserialize` rather than derive: serde's
+/// `#[serde(other)]` catch-all only supports a unit variant, which
+/// would discard the original tag and make `Other` indistinguishable
+/// from any other unrecognized kind on re-serialization.
+#[derive(Debug, Clone)]
 pub enum ReasoningDetailKind {
     /// OpenAI Responses reasoning summary block. `payload.text`
     /// carries a one-paragraph summary the model surfaces alongside
     /// the answer; not the full chain-of-thought.
-    #[serde(rename = "reasoning.summary")]
     Summary,
     /// OpenAI Responses encrypted reasoning. `payload.encrypted_content`
     /// is an opaque blob the model emits and expects back verbatim on
@@ -950,7 +961,6 @@ pub enum ReasoningDetailKind {
     /// `payload.data` -- so it aliases here. Both payload spellings are
     /// already read by the Anthropic egress and by the ingress's
     /// `encrypted_detail_data`.
-    #[serde(rename = "reasoning.encrypted", alias = "redacted_thinking")]
     Encrypted,
     /// Anthropic-shape thinking block. `payload.text` is the visible
     /// thinking content; `payload.signature` is mandatory for
@@ -963,8 +973,49 @@ pub enum ReasoningDetailKind {
     /// that vocabulary needs
     /// [`normalize_reasoning_detail_payloads`](crate::normalize_reasoning_detail_payloads)
     /// to land its text where every reader looks.
-    #[serde(rename = "reasoning.text", alias = "thinking")]
     Text,
+    /// A `type` tag not among the known spellings above (including
+    /// their aliases). Carries the tag verbatim so it can be logged,
+    /// classified by lane, and re-emitted unchanged.
+    Other(String),
+}
+
+const REASONING_DETAIL_KIND_SUMMARY: &str = "reasoning.summary";
+const REASONING_DETAIL_KIND_ENCRYPTED: &str = "reasoning.encrypted";
+const REASONING_DETAIL_KIND_ENCRYPTED_ALIAS: &str = "redacted_thinking";
+const REASONING_DETAIL_KIND_TEXT: &str = "reasoning.text";
+const REASONING_DETAIL_KIND_TEXT_ALIAS: &str = "thinking";
+
+impl Serialize for ReasoningDetailKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let tag: &str = match self {
+            Self::Summary => REASONING_DETAIL_KIND_SUMMARY,
+            Self::Encrypted => REASONING_DETAIL_KIND_ENCRYPTED,
+            Self::Text => REASONING_DETAIL_KIND_TEXT,
+            Self::Other(tag) => tag,
+        };
+        serializer.serialize_str(tag)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningDetailKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tag = String::deserialize(deserializer)?;
+        Ok(match tag.as_str() {
+            REASONING_DETAIL_KIND_SUMMARY => Self::Summary,
+            REASONING_DETAIL_KIND_ENCRYPTED | REASONING_DETAIL_KIND_ENCRYPTED_ALIAS => {
+                Self::Encrypted
+            }
+            REASONING_DETAIL_KIND_TEXT | REASONING_DETAIL_KIND_TEXT_ALIAS => Self::Text,
+            _ => Self::Other(tag),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1449,5 +1500,52 @@ mod tests {
             !wire.contains("routectl_internal"),
             "skipped carrier leaked to the wire: {wire}"
         );
+    }
+
+    /// Positive control: a known kind still round-trips through its
+    /// canonical wire tag, proving the hand-rolled `Deserialize` impl
+    /// has not silently regressed the recognized-tag path while
+    /// adding the `Other` catch-all.
+    #[test]
+    fn reasoning_detail_kind_known_tag_round_trips() {
+        let kind: ReasoningDetailKind = serde_json::from_value(json!("reasoning.text")).unwrap();
+        assert!(matches!(kind, ReasoningDetailKind::Text));
+        assert_eq!(
+            serde_json::to_value(&kind).unwrap(),
+            json!("reasoning.text")
+        );
+    }
+
+    /// Both `Encrypted` aliases still resolve to the same variant.
+    #[test]
+    fn reasoning_detail_kind_encrypted_alias_deserializes() {
+        let canonical: ReasoningDetailKind =
+            serde_json::from_value(json!("reasoning.encrypted")).unwrap();
+        let alias: ReasoningDetailKind =
+            serde_json::from_value(json!("redacted_thinking")).unwrap();
+        assert!(matches!(canonical, ReasoningDetailKind::Encrypted));
+        assert!(matches!(alias, ReasoningDetailKind::Encrypted));
+    }
+
+    /// An unrecognized "type" tag deserializes to `Other`, carrying the
+    /// exact original tag rather than being dropped or erroring out.
+    #[test]
+    fn reasoning_detail_kind_unrecognized_tag_becomes_other() {
+        let kind: ReasoningDetailKind =
+            serde_json::from_value(json!("reasoning.future_kind")).unwrap();
+        match kind {
+            ReasoningDetailKind::Other(tag) => assert_eq!(tag, "reasoning.future_kind"),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    /// `Other`'s carried tag serializes back byte-for-byte, so an
+    /// unrecognized shape survives a full deserialize/serialize
+    /// round-trip rather than being rewritten or discarded.
+    #[test]
+    fn reasoning_detail_kind_other_round_trips_original_tag() {
+        let original = json!("some.vendor_specific_kind");
+        let kind: ReasoningDetailKind = serde_json::from_value(original.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&kind).unwrap(), original);
     }
 }

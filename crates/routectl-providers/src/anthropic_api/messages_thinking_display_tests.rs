@@ -83,3 +83,22 @@ fn empty_text_reasoning_detail_with_a_signature_is_anthropic_emittable() {
         "negative control: no signature is still not emittable"
     );
 }
+
+/// An unrecognized kind is never emittable: no Anthropic block shape is
+/// defined for it. Paired with the recognized `Text` case above (which
+/// the enclosing test proves emittable when signed), so a regression
+/// that made every kind emittable could not pass this test alone.
+#[test]
+fn unrecognized_kind_reasoning_detail_is_not_anthropic_emittable() {
+    let detail = ReasoningDetail {
+        kind: ReasoningDetailKind::Other("future.kind".to_string()),
+        id: Some("d0".into()),
+        format: Some(ANTHROPIC_FORMAT.into()),
+        index: Some(0),
+        payload: serde_json::json!({"text": "x", "signature": OMITTED_DISPLAY_SIGNATURE}),
+    };
+    assert!(
+        !is_anthropic_emittable_detail(&detail),
+        "an unrecognized kind must never be emittable, even with a valid signature"
+    );
+}

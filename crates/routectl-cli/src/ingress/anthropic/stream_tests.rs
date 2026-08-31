@@ -795,6 +795,43 @@ fn summary_reasoning_lifts_text_into_thinking_delta() {
 }
 
 #[test]
+fn unrecognized_kind_reasoning_lifts_text_into_thinking_delta() {
+    // An unrecognized kind gets the identical best-effort forward as
+    // Summary: same lane-class rationale (no native block shape),
+    // proven here on the same lift path. Paired with the Summary test
+    // above as the positive control for a recognized kind.
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    const FUTURE_TEXT: &str = "a future reasoning shape";
+    let chunk = reasoning_chunk(ReasoningDetail {
+        kind: ReasoningDetailKind::Other("future.kind".to_string()),
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.into()),
+        index: Some(0),
+        payload: json!({"text": FUTURE_TEXT}),
+    });
+    let mut s = fresh_state();
+
+    // Act
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert
+    let delta = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_delta"))
+        .expect("unrecognized kind must emit a content_block_delta");
+    assert!(
+        delta.data.contains("\"type\":\"thinking_delta\""),
+        "unrecognized kind lifts to thinking_delta: {}",
+        delta.data
+    );
+    assert!(
+        delta.data.contains(FUTURE_TEXT),
+        "text must be carried: {}",
+        delta.data
+    );
+}
+
+#[test]
 fn stream_tool_call_index_above_cap_returns_streaming_error() {
     // tool_blocks Vec growth bound.
     use routectl_core::{ChunkChoice, ChunkDelta};
