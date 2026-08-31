@@ -115,7 +115,7 @@ fn translate_messages(
 ) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for (i, msg) in messages.iter().enumerate() {
-        match msg.role {
+        match &msg.role {
             Role::System => {
                 // System lives in the top-level `system` array. Drop here
                 // so we don't duplicate; direct callers without an
@@ -150,6 +150,25 @@ fn translate_messages(
             Role::Tool => {
                 let tool_msg = build_tool_message(id, msg, tally)?;
                 push_or_coalesce(&mut out, "user", tool_msg.content);
+            }
+            // Converse only models `user` and `assistant` roles, so an
+            // unrecognized role forwards as the closest legal role --
+            // `user`, the same treatment `Role::Tool` gets above -- with one
+            // DEBUG naming the dropped tag rather than a silent coercion.
+            // This is a forward-compat seed: not yet eligible for removal
+            // until real unrecognized-role traffic is observed.
+            Role::Other(tag) => {
+                tracing::debug!(
+                    provider = id,
+                    role = %sanitize_for_log(tag),
+                    "converse egress: unrecognized message role forwarded as user"
+                );
+                let mut blocks = build_user_content_blocks(id, &msg.content, tally)?;
+                ensure_document_has_text_sibling(&mut blocks);
+                if blocks.is_empty() {
+                    continue;
+                }
+                push_or_coalesce(&mut out, "user", blocks);
             }
         }
     }

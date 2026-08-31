@@ -14,3 +14,4 @@ const TEST_ID: &str = "prov-test";
 include!("messages_reasoning_warn_tests.rs");
 include!("messages_image_policy_tests.rs");
 include!("messages_document_policy_tests.rs");
+include!("messages_other_role_tests.rs");

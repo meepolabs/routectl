@@ -1333,7 +1333,7 @@ fn translate_messages_threaded(
     let mut i = 0usize;
     while i < messages.len() {
         let msg = &messages[i];
-        match msg.role {
+        match &msg.role {
             Role::System => {
                 match policy {
                     SystemTurnPolicy::Lift => {
@@ -1379,6 +1379,26 @@ fn translate_messages_threaded(
                 ledger.tool_runs_emitted += 1;
                 out.push(build_tool_message(&run, envelopes));
                 i = run_end;
+            }
+            // This function serves callers whose ingress dialect is
+            // Anthropic's own as well as callers translating in from other
+            // dialects; `AnthropicRole` has no slot for an unrecognized tag,
+            // so the closest legal wire value -- `user`, mirroring the
+            // ingress-side default for an unrecognized role -- is the
+            // shared answer either way, logged once rather than coerced
+            // silently. This is a forward-compat seed: not yet eligible for
+            // removal until real unrecognized-role traffic is observed.
+            Role::Other(tag) => {
+                tracing::debug!(
+                    provider = id,
+                    role = %sanitize_for_log(tag),
+                    "anthropic egress: unrecognized message role forwarded as user"
+                );
+                out.push(AnthropicMessage {
+                    role: AnthropicRole::User,
+                    content: translate_simple_content(&msg.content, envelopes),
+                });
+                i += 1;
             }
         }
     }
@@ -1530,7 +1550,9 @@ fn collect_tool_run(messages: &[Message], start: usize) -> (Vec<&Message>, usize
     while let Some(msg) = messages.get(i) {
         match msg.role {
             Role::Tool => run.push(msg),
-            Role::User | Role::Assistant | Role::System => break,
+            // An unrecognized role ends a tool run the same as any other
+            // non-Tool role; no separate handling is warranted here.
+            Role::User | Role::Assistant | Role::System | Role::Other(_) => break,
         }
         i += 1;
     }
@@ -2154,6 +2176,139 @@ mod tool_id_correlation_tests {
             .flatten()
             .filter_map(pick)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod role_other_egress_tests {
+    use super::{AnthropicRole, SystemTurnPolicy, passthrough_tally, translate_messages};
+    use crate::anthropic_api::types::AnthropicMessage;
+    use routectl_core::{Message, MessageContent, Role};
+
+    fn user_msg() -> Message {
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn other_msg(tag: &str, text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Other(tag.to_string()),
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn roles(out: &[AnthropicMessage]) -> Vec<&AnthropicRole> {
+        out.iter().map(|m| &m.role).collect()
+    }
+
+    /// An unrecognized role forwards as an Anthropic `user` message and
+    /// emits exactly one DEBUG naming the original tag.
+    #[test]
+    fn unrecognized_role_forwards_as_user_with_debug() {
+        // Arrange
+        let messages = vec![other_msg("narrator", "hello there")];
+
+        // Act
+        let mut out = Vec::new();
+        let events = routectl_testkit::capture_events(|| {
+            out = translate_messages(
+                "anthropic",
+                &messages,
+                SystemTurnPolicy::Lift,
+                &mut passthrough_tally(),
+            )
+            .expect("translation must not error");
+        });
+
+        // Assert
+        assert_eq!(out.len(), 1, "the turn must survive translation");
+        assert!(
+            matches!(roles(&out)[0], AnthropicRole::User),
+            "must forward as the closest legal role"
+        );
+        let debug_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG && e.field("role") == Some("narrator"))
+            .collect();
+        assert_eq!(
+            debug_events.len(),
+            1,
+            "exactly one DEBUG must name the dropped role tag, got: {events:?}"
+        );
+    }
+
+    /// Sibling positive control: a recognized `Role::User` turn takes the
+    /// ordinary path and emits no such DEBUG, proving the assertion above
+    /// actually exercises the `Role::Other` arm rather than firing
+    /// regardless of role.
+    #[test]
+    fn known_user_role_emits_no_unrecognized_role_debug() {
+        // Arrange
+        let messages = vec![user_msg()];
+
+        // Act
+        let mut out = Vec::new();
+        let events = routectl_testkit::capture_events(|| {
+            out = translate_messages(
+                "anthropic",
+                &messages,
+                SystemTurnPolicy::Lift,
+                &mut passthrough_tally(),
+            )
+            .expect("translation must not error");
+        });
+
+        // Assert
+        assert_eq!(out.len(), 1);
+        assert!(matches!(roles(&out)[0], AnthropicRole::User));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("unrecognized message role")),
+            "a recognized role must not trip the unrecognized-role fallback, got: {events:?}"
+        );
+    }
+
+    fn tool_msg(id: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text("ok".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some(id.into()),
+            tool_calls: None,
+        }
+    }
+
+    /// `collect_tool_run` treats an unrecognized role exactly like any
+    /// other non-Tool role: it ends the run without folding the turn in.
+    #[test]
+    fn unrecognized_role_ends_a_tool_run() {
+        // Arrange
+        let messages = [tool_msg("call_1"), other_msg("narrator", "after the run")];
+
+        // Act
+        let (run, end) = super::collect_tool_run(&messages, 0);
+
+        // Assert
+        assert_eq!(run.len(), 1, "only the Tool turn joins the run");
+        assert_eq!(end, 1, "the walk must stop at the unrecognized-role turn");
     }
 }
 
