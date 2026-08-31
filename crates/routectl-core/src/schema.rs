@@ -1592,4 +1592,40 @@ mod tests {
         let kind: ReasoningDetailKind = serde_json::from_value(original.clone()).unwrap();
         assert_eq!(serde_json::to_value(&kind).unwrap(), original);
     }
+
+    /// Every KNOWN role still deserializes from, and serializes back to,
+    /// exactly the wire spelling it used before `Other` was added. This is
+    /// the wire-invisibility control for the widening: a hand-rolled serde
+    /// impl that changed any of these four would silently rewrite the role
+    /// on every request through some lane.
+    #[test]
+    fn every_known_role_round_trips_its_prior_wire_spelling() {
+        for tag in ["system", "user", "assistant", "tool"] {
+            let original = json!(tag);
+            let role: Role = serde_json::from_value(original.clone()).unwrap();
+            assert!(
+                !matches!(role, Role::Other(_)),
+                "{tag} must resolve to a known variant, not Other"
+            );
+            assert_eq!(
+                serde_json::to_value(&role).unwrap(),
+                original,
+                "{tag} must serialize back to its original spelling"
+            );
+        }
+    }
+
+    /// An unrecognized role lands in `Other` carrying the exact tag, and
+    /// round-trips byte-for-byte -- the paired positive case for the
+    /// control above, so neither test passes vacuously.
+    #[test]
+    fn unrecognized_role_round_trips_as_other() {
+        let original = json!("moderator");
+        let role: Role = serde_json::from_value(original.clone()).unwrap();
+        match &role {
+            Role::Other(tag) => assert_eq!(tag, "moderator"),
+            other => panic!("expected Other, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&role).unwrap(), original);
+    }
 }
