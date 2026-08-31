@@ -1351,7 +1351,7 @@ canned_trace_openai_responses_tools() {
     local span="request{method=POST path=/v1/responses request_id=$id}"
     local target="routectl_core::log_safe:"
     local body='{"model":"gpt-5","input":[{"role":"user","content":"list the files"},{"type":"function_call","call_id":"call_01","name":"Bash","arguments":"{\"command\":\"ls\"}"},{"type":"function_call_output","call_id":"call_01","output":"notes.txt"}]}'
-    local fields='model=gpt-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=false'
+    local fields='model=gpt-5 max_tokens=64 thinking_shape= output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=false'
     local structural="kind=\"ingress\" id=\"openai-responses\" $fields"
     local structural_out="kind=\"openai-responses\" id=\"openai-responses:codex\" $fields"
     cat <<TRACE
