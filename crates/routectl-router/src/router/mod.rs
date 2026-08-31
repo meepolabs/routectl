@@ -849,6 +849,14 @@ impl RouterMetrics {
     /// `QuotaStore` (mirroring its own rejection counters), and the caller
     /// -- [`Router::log_metrics_snapshot`] -- is the one place that already
     /// holds both `self.metrics` and `self.quota_store`.
+    ///
+    /// `rc_translation_drop_counts` also rides this snapshot rather than
+    /// living on `RouterMetrics`: those counters are owned by
+    /// `routectl_providers::translation_drop_metrics` (see that module's doc
+    /// comment for why), and this call site reads them through its `pub`
+    /// snapshot function -- no dependency edge back into router. Debug-
+    /// rendered because the `(lane, drop_class)` key set grows as fix/sweep
+    /// arms land, so it cannot be a fixed set of named tracing fields.
     fn log_snapshot(&self, quota_refused_by_admission_total: u64) {
         let quota = self.quota_placement_totals();
         let pool = self.pool_totals();
@@ -888,6 +896,7 @@ impl RouterMetrics {
             rc_pool_member_omitted_provider_init_failed_total = pool.omitted_provider_init_failed,
             rc_pool_removed_pin_repick_total = pool.removed_pin_repick,
             rc_bedrock_validation_unmatched_total = self.bedrock_validation_unmatched_total(),
+            rc_translation_drop_counts = ?routectl_providers::translation_drop_metrics::translation_drop_snapshot(),
             "router metrics snapshot"
         );
         #[cfg(not(feature = "bedrock"))]
@@ -925,6 +934,7 @@ impl RouterMetrics {
             rc_pool_member_omitted_credential_invalid_total = pool.omitted_credential_invalid,
             rc_pool_member_omitted_provider_init_failed_total = pool.omitted_provider_init_failed,
             rc_pool_removed_pin_repick_total = pool.removed_pin_repick,
+            rc_translation_drop_counts = ?routectl_providers::translation_drop_metrics::translation_drop_snapshot(),
             "router metrics snapshot"
         );
     }

@@ -97,6 +97,12 @@ pub(crate) mod probe;
 // features this crate was built with.
 pub mod effort;
 
+// Process-wide translation-drop counters, keyed on (lane, drop_class).
+// Unconditional (no feature gate), same rationale as `effort`: dependency-free
+// and exported to `routectl-router` so its metrics snapshot can read the
+// counters regardless of which provider features this crate was built with.
+pub mod translation_drop_metrics;
+
 // Shared helpers for the Bedrock mantle lanes. The URL builders and the
 // service-scope constant are pure and dependency-free, so they stay
 // unconditional (`routectl-router` derives lane base URLs from a region

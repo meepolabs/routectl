@@ -487,6 +487,20 @@ license.
   harness's `classify_validation`) gates through one reduction and a
   still-namespaced discriminator is never silently missed by an exact match
   against the bare name; `strip_aws_namespace` itself stays crate-private
+- `src/translation_drop_metrics.rs` -- process-wide, per-request-tallied
+  `(lane, drop_class)` drop counters for translation-time drops in the
+  `translate_*`/`build_*` egress functions: `record_translation_drop(lane,
+  drop_class)` and `record_translation_lane_seen(lane)` bump `AtomicU64`
+  slots in a `Mutex`-guarded registry keyed by a `BTreeMap` (no fixed
+  enum/array, so independent fix/sweep arms never collide on this file);
+  `translation_drop_snapshot() -> Vec<TranslationDropSnapshotEntry>` reads
+  them back (`lane`, `drop_class`, `drop_count`, `lane_seen_count`,
+  `.drop_rate()`). Homed here rather than on the router's `RouterMetrics`
+  because the drops fire from providers-side translate/build functions and
+  router depends on providers, never the reverse; the router's metrics
+  snapshot (`routectl-router/src/router/mod.rs::log_snapshot`) reads this
+  module's `pub` snapshot fn as one Debug-rendered `rc_translation_drop_counts`
+  field, unconditional (no feature gate), same rationale as `effort`/`mantle`
 - `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: pure
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->

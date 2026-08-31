@@ -1865,6 +1865,47 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
 }
 
 #[test]
+fn log_snapshot_carries_translation_drop_counts_from_the_providers_registry() {
+    // Arrange: bump a providers-owned counter through its own accessor,
+    // not through anything on RouterMetrics -- this is the seam a
+    // providers-side translate/build function calls, unreachable from
+    // inside routectl-router by any other path.
+    let lane = "router-snapshot-test-lane";
+    let drop_class = "router-snapshot-test-class";
+    routectl_providers::translation_drop_metrics::record_translation_lane_seen(lane);
+    routectl_providers::translation_drop_metrics::record_translation_lane_seen(lane);
+    routectl_providers::translation_drop_metrics::record_translation_drop(lane, drop_class);
+
+    let config = Arc::new(Config::default());
+    let router = Router::new(config);
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        router.log_metrics_snapshot();
+    });
+
+    // Assert: the snapshot event carries the Debug-rendered registry
+    // contents, including this test's own (lane, drop_class) entry with
+    // its real count -- proving the router-side snapshot actually reads
+    // through to the providers-side registry rather than a stale copy.
+    let snapshot = events
+        .iter()
+        .find(|e| {
+            e.target == "routectl_router::router::metrics" && e.message == "router metrics snapshot"
+        })
+        .expect("router metrics snapshot event must be emitted");
+    let rendered = snapshot
+        .field("rc_translation_drop_counts")
+        .expect("rc_translation_drop_counts field must be present on the snapshot event");
+    assert!(
+        rendered.contains(lane)
+            && rendered.contains(drop_class)
+            && rendered.contains("drop_count: 1"),
+        "rendered field must contain this test's (lane, drop_class) entry with its count: {rendered}"
+    );
+}
+
+#[test]
 fn emit_class_observability_bumps_context_window_overflow_on_context_window_class() {
     use routectl_core::failure_class::{ClassifiedFailure, MatchedBy};
 
