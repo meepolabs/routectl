@@ -151,9 +151,10 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                     "data": data,
                 }));
             }
-            // This is the client-facing render path (FIDELITY-per-Table-A
-            // when the ingress is Anthropic itself, TRANSLATION
-            // otherwise): forward what can be displayed rather than
+            // This is the client-facing render path -- same-dialect
+            // passthrough when the ingress is Anthropic itself, and a
+            // cross-dialect translation otherwise. Either way, forward
+            // what can be displayed rather than
             // drop it. OpenAI Responses summaries land here too, so an
             // unrecognized kind gets the identical best-effort fallback
             // -- surface `payload.text` as a thinking block when

@@ -394,7 +394,7 @@ fn is_anthropic_emittable_detail(detail: &ReasoningDetail) -> bool {
                     .is_some_and(|s| !s.is_empty())
         }
         ReasoningDetailKind::Encrypted => detail.format.as_deref() == Some(super::ANTHROPIC_FORMAT),
-        // Unrecognized kind (TRANSLATION-per-Table-A): no Anthropic block
+        // An unrecognized kind is a cross-dialect translation drop: no Anthropic block
         // shape is defined for it, same as Summary.
         ReasoningDetailKind::Summary | ReasoningDetailKind::Other(_) => false,
     }
