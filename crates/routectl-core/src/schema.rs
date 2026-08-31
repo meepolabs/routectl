@@ -518,6 +518,7 @@ pub enum Role {
 impl Role {
     /// The lowercase wire string for this role: one of the four known
     /// tags, or the original unrecognized tag carried by `Other`.
+    #[must_use]
     pub fn as_wire_str(&self) -> &str {
         match self {
             Self::System => "system",
