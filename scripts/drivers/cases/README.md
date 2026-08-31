@@ -93,6 +93,22 @@ committability requirement, not a stylistic one: a case file is tracked
 content in a public repo, and a driven client reads its own prompts back
 into the request bodies a fixture pins.
 
+### A tool-loop case must not ask for a directory listing
+
+Constraint, not a preference. A client that runs `ls -l` reads the listing
+back into its next request body, and the account that owns the files rides
+along in the owner column. The scrub gate denies that -- correctly, since it
+cannot distinguish a container's synthetic account from a real one -- so the
+capture is unpromotable no matter how good the wire shape is.
+
+Name a file to read instead. A read reaches a tool just as reliably and
+carries no owner column. `tools-multiturn-01` is written that way for this
+reason, and its fixture landed once it was.
+
+The gate has no per-case exemption to claim, and asking for one is the wrong
+direction: the class is what keeps a real contributor's account name out of
+the committed corpus.
+
 ## Validating
 
 `scripts/drivers/lib/validate_case.py` is the single enforcement point --
