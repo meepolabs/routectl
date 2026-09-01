@@ -64,11 +64,20 @@ struct GeminiDropTally {
     tool_def_unnamed: bool,
     response_format_unrepresentable: bool,
     schema_keyword_unsupported: bool,
+    reasoning_effort_unrecognized: bool,
 }
 
 impl GeminiDropTally {
     fn flush(&self, provider_id: &str) {
         record_translation_lane_seen(LANE);
+        if self.reasoning_effort_unrecognized {
+            tracing::warn!(
+                provider = %provider_id,
+                "gemini: dropping an unrecognized reasoning effort token; the \
+                 caller's stated effort reaches neither thinkingLevel nor \
+                 thinkingBudget, so the model applies its own default"
+            );
+        }
         if self.schema_keyword_unsupported {
             tracing::warn!(
                 provider = %provider_id,
@@ -116,6 +125,10 @@ impl GeminiDropTally {
             (
                 self.schema_keyword_unsupported,
                 "schema_keyword_unsupported",
+            ),
+            (
+                self.reasoning_effort_unrecognized,
+                "reasoning_effort_unrecognized",
             ),
         ] {
             if fired {
@@ -1048,7 +1061,7 @@ fn build_generation_config(
     req: &ChatRequest,
     tally: &mut GeminiDropTally,
 ) -> Option<GenerationConfig> {
-    let thinking_config = build_thinking_config(req);
+    let thinking_config = build_thinking_config(req, tally);
     let (response_mime_type, response_schema) = build_response_format(req, tally);
 
     let has_any = req.temperature.is_some()
@@ -1148,7 +1161,7 @@ fn thinking_level_from_effort(effort: &str) -> Option<&'static str> {
 /// `include_thoughts` is true whenever thinking is on and not excluded,
 /// so thought summaries stream back and map to canonical reasoning.
 /// Exactly one of `thinking_budget` / `thinking_level` is ever populated.
-fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
+fn build_thinking_config(req: &ChatRequest, tally: &mut GeminiDropTally) -> Option<ThinkingConfig> {
     let reasoning = req.reasoning.as_ref()?;
     if reasoning.enabled == Some(false) {
         return None;
@@ -1162,7 +1175,20 @@ fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
             // budget -> canonical token -> Gemini level.
             thinking_level_from_effort(crate::effort::level_from_budget(budget))
         } else if let Some(effort) = reasoning.effort.as_deref() {
-            thinking_level_from_effort(effort)
+            // TRANSLATION-DROP: lane=gemini class=reasoning_effort_unrecognized test=unrecognized_reasoning_effort_drop_bumps_the_counter_once pattern: explicit
+            // Cross-dialect translation lane: `reasoning.effort` is a
+            // free-form client string, so a token outside the canonical
+            // vocabulary maps to no Gemini level. Drop rather than forward --
+            // `thinkingLevel` is a closed enum upstream and an invalid value
+            // 400s the request, while omitting the field lets the model apply
+            // its default. The caller's stated effort IS lost, which is why
+            // this counts rather than being structural. Baked seed verdict,
+            // deletion-blocked pending this lane's own wire evidence.
+            let level = thinking_level_from_effort(effort);
+            if level.is_none() {
+                tally.reasoning_effort_unrecognized = true;
+            }
+            level
         } else {
             None
         };

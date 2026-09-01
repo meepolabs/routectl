@@ -1206,3 +1206,76 @@ fn unmarked_request_counts_no_cache_control_drop() {
     );
     assert_eq!(after - before, 0);
 }
+
+// ---------------------------------------------------------------------------
+// reasoning_effort_unrecognized
+// ---------------------------------------------------------------------------
+
+/// A gemini-3 request (the thinkingLevel arm) carrying `reasoning.effort`.
+fn req_with_effort(effort: &str) -> ChatRequest {
+    ChatRequest {
+        model: "gemini-3-pro-preview".into(),
+        messages: vec![make_user("hi")].into(),
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: Some(effort.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+#[serial_test::serial(gemini_reasoning_effort_unrecognized)]
+fn unrecognized_reasoning_effort_drop_bumps_the_counter_once() {
+    // Arrange: a token outside the canonical effort vocabulary.
+    let req = req_with_effort("turbo");
+
+    // Act
+    let before = gemini_drop_count("reasoning_effort_unrecognized");
+    let mut body = Value::Null;
+    let events = routectl_testkit::capture_events(|| body = wire_body(&req));
+    let after = gemini_drop_count("reasoning_effort_unrecognized");
+
+    // Assert 1: the diagnostic fired.
+    assert_warned(&events, "dropping an unrecognized reasoning effort token");
+
+    // Assert 2: no thinkingLevel reached the emitted wire value. Asserting on
+    // the serialized body rather than the typed config is what would catch the
+    // token riding along inside the thinkingConfig object.
+    let wire = rendered(&body);
+    assert!(
+        !wire.contains("thinkingLevel") && !wire.contains("turbo"),
+        "an unmappable effort must leave no level on the wire: {wire}"
+    );
+
+    // Assert 3: positive control -- the turn itself still ships.
+    assert!(wire.contains("hi"), "the request must survive: {wire}");
+
+    assert_eq!(after - before, 1, "one counted drop for the request");
+}
+
+#[test]
+#[serial_test::serial(gemini_reasoning_effort_unrecognized)]
+fn a_recognized_reasoning_effort_maps_to_a_level_and_counts_no_drop() {
+    // The paired positive control for the test above: a token IN the
+    // vocabulary must reach the wire as a level and count nothing.
+    let req = req_with_effort("high");
+
+    let before = gemini_drop_count("reasoning_effort_unrecognized");
+    let mut body = Value::Null;
+    let events = routectl_testkit::capture_events(|| body = wire_body(&req));
+    let after = gemini_drop_count("reasoning_effort_unrecognized");
+
+    let wire = rendered(&body);
+    assert!(
+        wire.contains("thinkingLevel") && wire.contains("high"),
+        "a recognized effort must ship as a level: {wire}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.message.contains("unrecognized reasoning effort")),
+        "a representable effort must not warn, got: {events:?}"
+    );
+    assert_eq!(after - before, 0, "no drop for a representable effort");
+}
