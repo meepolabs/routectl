@@ -7,10 +7,12 @@
 use serde_json::{Value, from_value, json};
 
 use routectl_core::{
-    ChatRequest, ContentPart, CustomTool, KnownContentPart, Message, MessageContent,
-    ReasoningConfig, ResponsesPassthroughItem, Role, SystemBlock, SystemContent, ToolDef,
+    BEDROCK_MANTLE, CODEX_OAUTH, ChatRequest, ContentPart, CustomTool, KnownContentPart, Message,
+    MessageContent, ReasoningConfig, ReasoningDetail, ReasoningDetailKind,
+    ResponsesPassthroughItem, Role, SystemBlock, SystemContent, ToolDef,
     cache_control::CacheControl,
 };
+use routectl_testkit::CapturedEvent;
 
 use super::dropped_cache_surfaces;
 use super::translate;
@@ -85,7 +87,11 @@ fn blank_canonical_system_serializes_empty_instructions() {
     }
 }
 
+// Carries the `cache_control_unsupported` serial guard even though it asserts
+// no counter: it translates a marked request, so it bumps that process-global
+// counter incidentally and would race a sibling reading its delta.
 #[test]
+#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn system_content_with_cache_control_warns_and_strips() {
     // Arrange
     let mut req = req_with(vec![user_text("hi")]);
@@ -422,3 +428,4 @@ fn tool_choice_named_function_uses_flat_shape() {
 include!("request_extras_tests.rs");
 include!("request_content_tests.rs");
 include!("request_lane_observability_tests.rs");
+include!("request_drop_policy_tests.rs");

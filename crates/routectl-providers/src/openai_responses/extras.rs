@@ -180,6 +180,18 @@ pub(super) fn merge_provider_extras(
             // routectl-core::is_canonical_request_key -- if the
             // Responses API grows a new top-level field, we add it
             // here explicitly rather than silently passing through.
+            //
+            // No caller content is lost on this arm for the same-dialect
+            // pairing. The Responses ingress sweeps every unhandled
+            // top-level body field into `provider_extras`, so an inbound
+            // key outside this allowlist was outside the Responses API's
+            // own field set too -- forwarding it would put an unaudited
+            // operator- or client-supplied key on the wire, which is the
+            // failure this allowlist exists to prevent, not a fidelity
+            // loss it causes. A recognized field the API grows later is a
+            // code edit here, and the pinned allowlist is what makes that
+            // edit a review moment rather than a silent passthrough.
+            // TRANSLATION-DROP: structural -- the allowlist is the audited forwarding surface; an unlisted key was never a Responses API field
             _ => {}
         }
     }

@@ -847,7 +847,10 @@ license.
 - `src/openai_responses/cookies.rs` -- persistent Cloudflare cookie jar
   (allowlist-pinned to non-secret cookie names)
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest`
-  from `ChatRequest` via system/messages/tools/extras submodules
+  from `ChatRequest` via system/messages/tools/extras submodules; owns this
+  lane's single `record_translation_lane_seen` site (bumped before the first
+  fallible step, so a rejected request still counts toward the drop rate) and
+  counts the `cache_control_unsupported` drop once per request
 - `src/openai_responses/system.rs` -- canonical `system` -> Responses
   `instructions` flat string (drops per-block cache_control with DEBUG)
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses
@@ -866,7 +869,12 @@ license.
   parts split into two classes -- a MALFORMED part (names no bytes: absent or
   empty image url, empty base64 data, a file part with neither carrier) fails
   the request, while an UNREPRESENTABLE but well-formed part (no Responses slot,
-  forward-compat, unknown image-source kind) drops with a WARN
+  forward-compat, unknown image-source kind) drops with a WARN. A
+  `ResponsesDropTally` flushed once per request from `build_input` (on the Err
+  arm too) counts each deliberate drop class it made
+  (`image_source_kind_unrepresentable`, `reasoning_detail_kind_unsupported`,
+  `reasoning_format_foreign`, `reasoning_scheme_incompatible`) exactly once,
+  never once per dropped block
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
   `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key

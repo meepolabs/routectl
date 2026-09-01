@@ -338,8 +338,12 @@ fn dropped_surfaces_empty_for_clean_request() {
     assert!(surfaces.is_empty());
 }
 
+// Carries the `cache_control_unsupported` serial guard for the same reason
+// `system_content_with_cache_control_warns_and_strips` does: it translates a
+// marked request and so bumps that process-global counter incidentally.
 #[traced_test]
 #[test]
+#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn warn_fires_for_top_level_marker_and_wire_is_unchanged() {
     // Arrange: identical requests, one with a top-level marker.
     let clean = req_with(vec![user_text("hi")]);
