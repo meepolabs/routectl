@@ -663,6 +663,7 @@ impl GeminiProvider {
                         return;
                     }
                     Ok(event) => {
+                        // TRANSLATION-DROP: structural -- an empty SSE keepalive frame carries no payload; this is response-side stream draining, not request translation
                         if event.data.is_empty() {
                             continue;
                         }

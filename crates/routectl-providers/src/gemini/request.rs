@@ -18,19 +18,131 @@ use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::{ChatRequest, ReasoningDetail, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
+use crate::translation_drop_metrics::{record_translation_drop, record_translation_lane_seen};
+
 use super::GEMINI_FORMAT;
-use super::schema::clean_schema;
 use super::types::{
     Content, FunctionCallPart, FunctionCallingConfig, FunctionDeclaration, FunctionResponsePart,
     GeminiTool, GenerateContentRequest, GenerationConfig, InlineData, Part, SystemInstruction,
     ThinkingConfig, ToolConfig,
 };
 
+/// The lane spelling every `record_translation_drop` /
+/// `record_translation_lane_seen` call on this egress uses. Bound to
+/// `PROVIDER_KIND` rather than re-spelled so the telemetry lane and the
+/// provider kind can never drift apart.
+const LANE: &str = super::PROVIDER_KIND;
+
+/// Per-request tally of the deliberate drops this egress performs while
+/// assembling a body. Each flag records "this request lost at least one of
+/// these", so [`flush`](GeminiDropTally::flush) bumps each `(lane, class)`
+/// counter once per REQUEST rather than once per dropped block: a turn with
+/// three unrepresentable images is one drop event, not three.
+///
+/// Threaded through `build_contents` -> `content_to_parts` ->
+/// `content_part_to_part`, through `build_tools_and_config`, and through
+/// `build_generation_config` -> `build_response_format`; then flushed from
+/// [`translate`] on both the Ok and the Err arm -- which is also why the
+/// lane-seen denominator is bumped there unconditionally: that flush is the
+/// one point in this egress every request passes exactly once, dropped
+/// content or not.
+///
+/// Every drop below already emits its own WARN at the arm that performs it,
+/// EXCEPT `schema_keyword_unsupported`: `clean_schema` is a pure function by
+/// contract, so its aggregated WARN is emitted here instead.
+#[derive(Default)]
+struct GeminiDropTally {
+    cache_control_unsupported: bool,
+    image_source_no_inline_bytes: bool,
+    image_url_data_uri_unparseable: bool,
+    file_no_inline_bytes: bool,
+    document_source_no_inline_bytes: bool,
+    redacted_thinking_unsupported: bool,
+    foreign_reasoning_unreplayable: bool,
+    unknown_content_block_unrepresentable: bool,
+    tool_call_no_function_object: bool,
+    tool_def_unnamed: bool,
+    response_format_unrepresentable: bool,
+    schema_keyword_unsupported: bool,
+}
+
+impl GeminiDropTally {
+    fn flush(&self, provider_id: &str) {
+        record_translation_lane_seen(LANE);
+        if self.schema_keyword_unsupported {
+            tracing::warn!(
+                provider = %provider_id,
+                "gemini: dropping JSON Schema keywords Gemini's Schema proto rejects \
+                 from a tool or response_format schema; the stated constraint does not \
+                 reach the model"
+            );
+        }
+        for (fired, class) in [
+            (self.cache_control_unsupported, "cache_control_unsupported"),
+            (
+                self.image_source_no_inline_bytes,
+                "image_source_no_inline_bytes",
+            ),
+            (
+                self.image_url_data_uri_unparseable,
+                "image_url_data_uri_unparseable",
+            ),
+            (self.file_no_inline_bytes, "file_no_inline_bytes"),
+            (
+                self.document_source_no_inline_bytes,
+                "document_source_no_inline_bytes",
+            ),
+            (
+                self.redacted_thinking_unsupported,
+                "redacted_thinking_unsupported",
+            ),
+            (
+                self.foreign_reasoning_unreplayable,
+                "foreign_reasoning_unreplayable",
+            ),
+            (
+                self.unknown_content_block_unrepresentable,
+                "unknown_content_block_unrepresentable",
+            ),
+            (
+                self.tool_call_no_function_object,
+                "tool_call_no_function_object",
+            ),
+            (self.tool_def_unnamed, "tool_def_unnamed"),
+            (
+                self.response_format_unrepresentable,
+                "response_format_unrepresentable",
+            ),
+            (
+                self.schema_keyword_unsupported,
+                "schema_keyword_unsupported",
+            ),
+        ] {
+            if fired {
+                record_translation_drop(LANE, class);
+            }
+        }
+    }
+}
+
 /// Build a `GenerateContentRequest` from a canonical `ChatRequest`.
 ///
 /// The config's `id` is used only for error attribution.
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
-    warn_dropped_cache_control(provider_id, req);
+    let mut tally = GeminiDropTally::default();
+    let built = build_body(provider_id, req, &mut tally);
+    tally.flush(provider_id);
+    built
+}
+
+/// Assemble the wire body. Separated from [`translate`] only so the tally
+/// flush there runs on the Err arm too, without an early `?` skipping it.
+fn build_body(
+    provider_id: &str,
+    req: &ChatRequest,
+    tally: &mut GeminiDropTally,
+) -> Result<GenerateContentRequest> {
+    warn_dropped_cache_control(provider_id, req, tally);
     // `seed`, `presence_penalty` and `frequency_penalty` are translated onto
     // `generationConfig`; the remaining canonical sampling knobs have no
     // usable home here and are gated out of the provider_extras merge as
@@ -41,9 +153,9 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
         HONORED_SAMPLING_FIELDS,
     );
     let system_instruction = build_system_instruction(req);
-    let contents = build_contents(provider_id, req)?;
-    let (tools, tool_config) = build_tools_and_config(provider_id, req);
-    let generation_config = build_generation_config(req);
+    let contents = build_contents(provider_id, req, tally)?;
+    let (tools, tool_config) = build_tools_and_config(provider_id, req, tally);
+    let generation_config = build_generation_config(req, tally);
 
     Ok(GenerateContentRequest {
         contents,
@@ -84,11 +196,20 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
 /// cache-hinted traffic to a Gemini target sees the same breadcrumb on this
 /// leg as on the others. Logs only the surface name(s) + a count: no message
 /// content, no bodies, no secrets.
-fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest) {
+///
+/// Cross-dialect translation lane: an Anthropic-shaped `cache_control`
+/// breakpoint marker reaching the Gemini egress. Drop rather than forward --
+/// Gemini's prefix caching is implicit and automatic, with no
+/// caller-controllable breakpoint field anywhere in `GenerateContentRequest`
+/// to translate the marker onto. Baked seed verdict: deletion-blocked pending
+/// this lane's own wire evidence, not a permanent design decision.
+/// TRANSLATION-DROP: lane=gemini class=cache_control_unsupported test=cache_control_drop_bumps_the_counter_once_per_request
+fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest, tally: &mut GeminiDropTally) {
     let surfaces = dropped_cache_surfaces(req);
     if surfaces.is_empty() {
         return;
     }
+    tally.cache_control_unsupported = true;
     tracing::warn!(
         provider = %provider_id,
         dropped_surfaces = ?surfaces,
@@ -109,6 +230,7 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
     // empty part in systemInstruction is meaningless and the other
     // Anthropic-shape egresses already drop it.
     for msg in &*req.messages {
+        // TRANSLATION-DROP: structural -- a non-system role is not this loop's subject; `build_contents` translates it
         if !matches!(msg.role, Role::System) {
             continue;
         }
@@ -127,6 +249,7 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
                     }
                 }
             }
+            // TRANSLATION-DROP: structural -- a Null system message carries no text; there is nothing to lift
             MessageContent::Null => {}
         }
     }
@@ -162,17 +285,22 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
 // Contents array
 // ---------------------------------------------------------------------------
 
-fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> {
+fn build_contents(
+    provider_id: &str,
+    req: &ChatRequest,
+    tally: &mut GeminiDropTally,
+) -> Result<Vec<Content>> {
     let mut contents: Vec<Content> = Vec::new();
     let tool_name_by_id = build_tool_call_name_index(req);
 
     for msg in &*req.messages {
         match &msg.role {
+            // TRANSLATION-DROP: structural -- system content already reached the wire via `build_system_instruction`; a second copy in `contents` would duplicate it
             Role::System => {
                 // Lifted into systemInstruction above; skip here.
             }
             Role::User => {
-                let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id)?;
+                let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id, tally)?;
                 if !parts.is_empty() {
                     contents.push(Content {
                         role: "user".into(),
@@ -185,7 +313,7 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 // as thought parts (carrying the thoughtSignature) ahead of
                 // the visible output, so the model can continue its prior
                 // chain-of-thought. Foreign-provider reasoning is skipped.
-                let mut parts = reasoning_details_to_thought_parts(&msg.reasoning_details);
+                let mut parts = reasoning_details_to_thought_parts(&msg.reasoning_details, tally);
                 // A functionCall can reach this turn from either tool-call
                 // shape: an Anthropic-canonical `ToolUse` content-part (handled
                 // in `content_to_parts`) or the OpenAI-shape `tool_calls` array.
@@ -193,10 +321,11 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                     provider_id,
                     &msg.content,
                     &tool_name_by_id,
+                    tally,
                 )?);
                 if let Some(tool_calls_raw) = &msg.tool_calls {
                     for tc in tool_calls_raw {
-                        if let Some(p) = tool_call_to_function_call_part(provider_id, tc)? {
+                        if let Some(p) = tool_call_to_function_call_part(provider_id, tc, tally)? {
                             parts.push(p);
                         }
                     }
@@ -254,7 +383,7 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                     role = %sanitize_for_log(tag),
                     "gemini egress: unrecognized message role forwarded as user"
                 );
-                let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id)?;
+                let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id, tally)?;
                 if !parts.is_empty() {
                     contents.push(Content {
                         role: "user".into(),
@@ -277,6 +406,7 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
 fn build_tool_call_name_index(req: &ChatRequest) -> HashMap<String, String> {
     let mut index: HashMap<String, String> = HashMap::new();
     for msg in &*req.messages {
+        // TRANSLATION-DROP: structural -- only an assistant turn can carry a tool call to index; this builds a lookup and emits no wire content
         if !matches!(msg.role, Role::Assistant) {
             continue;
         }
@@ -341,6 +471,7 @@ fn content_to_parts(
     provider_id: &str,
     content: &MessageContent,
     tool_name_by_id: &HashMap<String, String>,
+    tally: &mut GeminiDropTally,
 ) -> Result<Vec<Part>> {
     match content {
         MessageContent::Text(t) => {
@@ -353,7 +484,7 @@ fn content_to_parts(
         MessageContent::Parts(parts) => {
             let mut out = Vec::new();
             for p in parts {
-                if let Some(part) = content_part_to_part(provider_id, p, tool_name_by_id)? {
+                if let Some(part) = content_part_to_part(provider_id, p, tool_name_by_id, tally)? {
                     out.push(part);
                 }
             }
@@ -369,7 +500,9 @@ fn content_to_parts(
 /// carries the identical opaque payload verbatim in its own `redactedContent`
 /// field. This is a baked seed verdict: deletion-blocked pending per-lane
 /// wire evidence, not a permanent design decision to leave uninstrumented.
-fn drop_redacted_thinking(provider_id: &str) -> Result<Option<Part>> {
+/// TRANSLATION-DROP: lane=gemini class=redacted_thinking_unsupported test=redacted_thinking_drop_bumps_the_counter_once_per_request
+fn drop_redacted_thinking(provider_id: &str, tally: &mut GeminiDropTally) -> Result<Option<Part>> {
+    tally.redacted_thinking_unsupported = true;
     tracing::warn!(
         provider = %provider_id,
         "gemini: dropping redacted-thinking part (no wire slot on this egress)"
@@ -381,6 +514,7 @@ fn content_part_to_part(
     provider_id: &str,
     part: &ContentPart,
     tool_name_by_id: &HashMap<String, String>,
+    tally: &mut GeminiDropTally,
 ) -> Result<Option<Part>> {
     match part {
         ContentPart::Known(known) => match known {
@@ -393,8 +527,14 @@ fn content_part_to_part(
                 // beats emitting an inlineData that claims a media type it
                 // has no payload for. Mirrors the Converse egress
                 // (`bedrock::converse::messages::translate_image_source`).
+                //
+                // Cross-dialect translation lane: an Anthropic-shaped image
+                // block reaching the Gemini egress. Baked seed verdict:
+                // deletion-blocked pending this lane's own wire evidence.
+                // TRANSLATION-DROP: lane=gemini class=image_source_no_inline_bytes test=image_source_drop_bumps_the_counter_once_per_request
                 let kind = source.get("type").and_then(Value::as_str);
                 if kind != Some("base64") {
+                    tally.image_source_no_inline_bytes = true;
                     tracing::warn!(
                         provider = %provider_id,
                         source_type = %sanitize_for_log(kind.unwrap_or("<missing>")),
@@ -407,6 +547,7 @@ fn content_part_to_part(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if data.is_empty() {
+                    tally.image_source_no_inline_bytes = true;
                     tracing::warn!(
                         provider = %provider_id,
                         "gemini: dropping base64 image source with empty data"
@@ -438,7 +579,14 @@ fn content_part_to_part(
                     // the whole base64 payload would ship upstream as prose,
                     // billed as input text, with no image and no diagnostic.
                     // Unparseable -> drop with a WARN.
+                    //
+                    // Cross-dialect translation lane: an OpenAI-shaped
+                    // `image_url` block reaching the Gemini egress. Baked seed
+                    // verdict: deletion-blocked pending this lane's own wire
+                    // evidence.
+                    // TRANSLATION-DROP: lane=gemini class=image_url_data_uri_unparseable test=image_url_data_uri_drop_bumps_the_counter_once_per_request
                     let Some(inline) = data_uri_inline_data(url) else {
+                        tally.image_url_data_uri_unparseable = true;
                         tracing::warn!(
                             provider = %provider_id,
                             "gemini: dropping data: image_url that is not a supported base64 image URI"
@@ -491,7 +639,7 @@ fn content_part_to_part(
                 // turn (when this reasoning originated from Gemini).
                 Ok(Some(thought_part(thinking.clone(), signature.clone())))
             }
-            KnownContentPart::RedactedThinking { .. } => drop_redacted_thinking(provider_id),
+            KnownContentPart::RedactedThinking { .. } => drop_redacted_thinking(provider_id, tally),
             KnownContentPart::File { file, .. } => {
                 // Canonical `file` IS the inner OpenAI object
                 // (`{filename, file_data}` or `{file_id}`), matching how
@@ -501,8 +649,18 @@ fn content_part_to_part(
                 // the `file_id` reference form and any non-base64-data-URI
                 // `file_data` are dropped with a WARN rather than emitted as
                 // a part whose payload Gemini cannot decode.
+                //
+                // Cross-dialect translation lane: an OpenAI-shaped `file`
+                // block reaching the Gemini egress. A `file_id` names an
+                // upload in the OpenAI Files namespace, which Gemini cannot
+                // resolve, and Gemini's `Part` has no
+                // reference-by-id member to forward it into. Baked seed
+                // verdict: deletion-blocked pending this lane's own wire
+                // evidence.
+                // TRANSLATION-DROP: lane=gemini class=file_no_inline_bytes test=file_no_inline_bytes_drop_bumps_the_counter_once_per_request
                 let file_data = file.get("file_data").and_then(Value::as_str);
                 let Some((media_type, b64)) = file_data.and_then(split_base64_data_uri) else {
+                    tally.file_no_inline_bytes = true;
                     tracing::warn!(
                         provider = %provider_id,
                         has_file_data = file_data.is_some(),
@@ -532,11 +690,18 @@ fn content_part_to_part(
                 // (which the Anthropic ingress accepts verbatim) has none --
                 // dropping it with a WARN beats emitting a zero-byte PDF.
                 // Mirrors the `Image` arm above.
+                //
+                // Cross-dialect translation lane: an Anthropic-shaped
+                // `document` block reaching the Gemini egress. Baked seed
+                // verdict: deletion-blocked pending this lane's own wire
+                // evidence.
+                // TRANSLATION-DROP: lane=gemini class=document_source_no_inline_bytes test=document_source_drop_bumps_the_counter_once_per_request
                 if let Some(t) = source.get("text").and_then(Value::as_str) {
                     return Ok(Some(text_part(t.to_string())));
                 }
                 let kind = source.get("type").and_then(Value::as_str);
                 if kind != Some("base64") {
+                    tally.document_source_no_inline_bytes = true;
                     tracing::warn!(
                         provider = %provider_id,
                         source_type = %sanitize_for_log(kind.unwrap_or("<missing>")),
@@ -549,6 +714,7 @@ fn content_part_to_part(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if data.is_empty() {
+                    tally.document_source_no_inline_bytes = true;
                     tracing::warn!(
                         provider = %provider_id,
                         "gemini: dropping base64 document source with empty data"
@@ -569,6 +735,18 @@ fn content_part_to_part(
             type_tag, extras, ..
         } => {
             // Unknown block type: log and skip to keep the request valid.
+            //
+            // Cross-dialect translation lane: any block whose `type` tag the
+            // canonical schema does not model, reaching the Gemini egress.
+            // Drop rather than forward -- `Part` is a closed oneof with no
+            // passthrough member, so an unmodeled block has no field to land
+            // in, and stringifying it would bill the caller for prose the
+            // model reads as literal JSON. DEBUG rather than WARN: an
+            // unrecognized tag is expected background traffic from newer
+            // clients rather than a defect being tracked to a fix. Baked seed
+            // verdict: deletion-blocked pending this lane's own wire evidence.
+            // TRANSLATION-DROP: lane=gemini class=unknown_content_block_unrepresentable test=unknown_content_block_drop_bumps_the_counter_once_per_request
+            tally.unknown_content_block_unrepresentable = true;
             tracing::debug!(
                 provider = %provider_id,
                 type_tag = %sanitize_for_log(type_tag),
@@ -591,10 +769,25 @@ fn extract_text_from_part(part: &ContentPart) -> Option<String> {
 ///
 /// The canonical `Message.tool_calls` field carries `Vec<Value>` in the
 /// OpenAI shape: `{id, type:"function", function:{name, arguments}}`.
-fn tool_call_to_function_call_part(provider_id: &str, tc: &Value) -> Result<Option<Part>> {
+///
+/// Cross-dialect translation lane: an OpenAI-shaped `tool_calls` entry
+/// reaching the Gemini egress. A value with no `function` object carries no
+/// name and no arguments, and Gemini's `functionCall` requires a name to
+/// correlate the later `functionResponse` -- so drop rather than forward an
+/// unnamed call the model can neither identify nor answer. DEBUG rather than
+/// WARN: a malformed entry is a client-shape problem, not a routectl
+/// translation defect. Baked seed verdict: deletion-blocked pending this
+/// lane's own wire evidence.
+/// TRANSLATION-DROP: lane=gemini class=tool_call_no_function_object test=tool_call_without_function_drop_bumps_the_counter_once_per_request
+fn tool_call_to_function_call_part(
+    provider_id: &str,
+    tc: &Value,
+    tally: &mut GeminiDropTally,
+) -> Result<Option<Part>> {
     let func = if let Some(f) = tc.get("function") {
         f
     } else {
+        tally.tool_call_no_function_object = true;
         tracing::debug!(
             provider = %provider_id,
             "gemini: tool_call missing 'function' field; skipping"
@@ -670,6 +863,7 @@ fn inject_skip_signature_sentinel(model: &str, parts: &mut [Part]) {
 fn build_tools_and_config(
     provider_id: &str,
     req: &ChatRequest,
+    tally: &mut GeminiDropTally,
 ) -> (Option<Vec<GeminiTool>>, Option<ToolConfig>) {
     let tool_defs = match &req.tools {
         Some(t) if !t.is_empty() => t,
@@ -680,16 +874,29 @@ fn build_tools_and_config(
     for def in tool_defs {
         match def {
             ToolDef::Custom(custom) => {
+                let (parameters, schema_dropped) =
+                    super::schema::clean_schema_reporting(&custom.input_schema);
+                tally.schema_keyword_unsupported |= schema_dropped;
                 declarations.push(FunctionDeclaration {
                     name: custom.name.clone(),
                     description: custom.description.clone(),
-                    parameters: Some(clean_schema(&custom.input_schema)),
+                    parameters: Some(parameters),
                 });
             }
             ToolDef::Other(v) => {
                 // OpenAI-shape: {type:"function", function:{name,description,parameters}}
                 let func = v.get("function").unwrap_or(v);
                 let name = func.get("name").and_then(Value::as_str).unwrap_or_default();
+                // Cross-dialect translation lane: an OpenAI-shaped hosted-tool
+                // declaration reaching the Gemini egress. Gemini's
+                // `functionDeclarations` models only caller-executed functions
+                // -- there is no member for a provider-hosted tool, and no
+                // name to build one from. Drop rather than forward: Gemini
+                // rejects an unknown tool shape outright, and an empty-named
+                // declaration is worse still, a tool the model can call and
+                // nothing can answer. Baked seed verdict: deletion-blocked
+                // pending this lane's own wire evidence.
+                // TRANSLATION-DROP: lane=gemini class=tool_def_unnamed test=unnamed_tool_def_drop_bumps_the_counter_once_per_request
                 if name.is_empty() {
                     // Hosted / unknown tool shape (web_search, file_search,
                     // codex namespaces) carries no usable function name. Gemini
@@ -698,6 +905,7 @@ fn build_tools_and_config(
                     // declaration is a silently broken tool the model may call.
                     // Skip with a structured WARN, mirroring openai-compat.
                     let kind = v.get("type").and_then(Value::as_str).unwrap_or("unknown");
+                    tally.tool_def_unnamed = true;
                     tracing::warn!(
                         provider = %provider_id,
                         tool_type = %sanitize_for_log(kind),
@@ -710,7 +918,11 @@ fn build_tools_and_config(
                     .get("description")
                     .and_then(Value::as_str)
                     .map(std::string::ToString::to_string);
-                let parameters = func.get("parameters").map(clean_schema);
+                let parameters = func.get("parameters").map(|p| {
+                    let (cleaned, schema_dropped) = super::schema::clean_schema_reporting(p);
+                    tally.schema_keyword_unsupported |= schema_dropped;
+                    cleaned
+                });
                 declarations.push(FunctionDeclaration {
                     name: name.to_string(),
                     description,
@@ -720,6 +932,13 @@ fn build_tools_and_config(
         }
     }
 
+    // A canonical `tool_choice` on a request whose every tool declaration was
+    // itself dropped has nowhere to land: Gemini rejects a `toolConfig` that
+    // names no `functionDeclarations`, so dropping the forcing keeps the rest
+    // of the request working where forwarding would fail it outright. Not
+    // separately counted -- the declaration drop that emptied the list is
+    // already counted as `tool_def_unnamed`, and counting the consequence
+    // again would double-report one loss.
     if declarations.is_empty() {
         // No usable declarations survive (e.g. every ToolDef was a nameless
         // hosted-tool shape). Emitting a `toolConfig` with no `tools` makes
@@ -825,9 +1044,12 @@ fn build_tool_config(
 /// candidates only once the response side carries them.
 const HONORED_SAMPLING_FIELDS: &[&str] = &["seed", "presence_penalty", "frequency_penalty"];
 
-fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
+fn build_generation_config(
+    req: &ChatRequest,
+    tally: &mut GeminiDropTally,
+) -> Option<GenerationConfig> {
     let thinking_config = build_thinking_config(req);
-    let (response_mime_type, response_schema) = build_response_format(req);
+    let (response_mime_type, response_schema) = build_response_format(req, tally);
 
     let has_any = req.temperature.is_some()
         || req.top_p.is_some()
@@ -983,7 +1205,19 @@ fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
 /// otherwise. The Gemini-2.0+ `responseJsonSchema` field is a DIFFERENT,
 /// full-JSON-Schema field: if a path emitting it is ever added, it must NOT
 /// be cleaned, since the OpenAPI-subset fixes corrupt valid JSON Schema.
-fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
+///
+/// Cross-dialect translation lane: an OpenAI-shape `response_format` reaching
+/// the Gemini egress. Only the two shapes above have a `responseMimeType` to
+/// map onto; an unrecognized `type` names a structured-output mode Gemini's
+/// `generationConfig` has no field for, so it is dropped rather than
+/// forwarded, since a `responseMimeType` guessed from an unknown tag would
+/// constrain the output in a way the caller never asked for. Baked seed
+/// verdict: deletion-blocked pending this lane's own wire evidence.
+/// TRANSLATION-DROP: lane=gemini class=response_format_unrepresentable test=unrecognized_response_format_drop_bumps_the_counter_once_per_request
+fn build_response_format(
+    req: &ChatRequest,
+    tally: &mut GeminiDropTally,
+) -> (Option<String>, Option<Value>) {
     let format = match req.response_format.as_ref() {
         Some(f) => f,
         None => return (None, None),
@@ -994,7 +1228,11 @@ fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
             let schema = format
                 .get("json_schema")
                 .and_then(|js| js.get("schema"))
-                .map(clean_schema);
+                .map(|s| {
+                    let (cleaned, schema_dropped) = super::schema::clean_schema_reporting(s);
+                    tally.schema_keyword_unsupported |= schema_dropped;
+                    cleaned
+                });
             if schema.is_none() {
                 tracing::warn!(
                     "response_format json_schema carries no json_schema.schema; \
@@ -1005,6 +1243,7 @@ fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
         }
         Some("json_object") => (Some("application/json".to_string()), None),
         _ => {
+            tally.response_format_unrepresentable = true;
             tracing::warn!(
                 response_format_type = kind.unwrap_or("<absent>"),
                 "unrecognized response_format shape; dropping structured-output \
@@ -1084,20 +1323,47 @@ const fn function_response_part(response: FunctionResponsePart) -> Part {
 /// continuity. Foreign-provider reasoning (e.g. Anthropic, OpenAI) is
 /// skipped -- replaying it without a matching Gemini signature would not
 /// continue the model's reasoning and risks an upstream reject.
-fn reasoning_details_to_thought_parts(details: &[ReasoningDetail]) -> Vec<Part> {
-    details
-        .iter()
-        .filter(|d| d.format.as_deref() == Some(GEMINI_FORMAT))
-        .filter_map(|d| {
-            let text = d.payload.get("text").and_then(Value::as_str)?;
-            let signature = d
-                .payload
-                .get("thought_signature")
-                .and_then(Value::as_str)
-                .map(std::string::ToString::to_string);
-            Some(thought_part(text.to_string(), signature))
-        })
-        .collect()
+///
+/// Cross-dialect translation lane: an assistant `reasoning_details` entry
+/// from a non-Gemini provider (or a Gemini-tagged one with no `payload.text`)
+/// reaching the Gemini egress. Drop rather than forward -- Gemini validates
+/// the `thoughtSignature` on a replayed thought part, and foreign reasoning
+/// has no signature it would accept, so forwarding trades a lost summary for
+/// a rejected request. DEBUG rather than WARN: mixed-provider history is
+/// ordinary traffic in a router, not a defect being tracked to a fix. Mirrors
+/// the Converse egress's `ReasoningSkipTally`. Baked seed verdict:
+/// deletion-blocked pending this lane's own wire evidence.
+/// TRANSLATION-DROP: lane=gemini class=foreign_reasoning_unreplayable test=foreign_reasoning_drop_bumps_the_counter_once_per_request
+fn reasoning_details_to_thought_parts(
+    details: &[ReasoningDetail],
+    tally: &mut GeminiDropTally,
+) -> Vec<Part> {
+    let mut parts: Vec<Part> = Vec::new();
+    let mut skipped = 0usize;
+    for detail in details {
+        let text = (detail.format.as_deref() == Some(GEMINI_FORMAT))
+            .then(|| detail.payload.get("text").and_then(Value::as_str))
+            .flatten();
+        let Some(text) = text else {
+            skipped += 1;
+            continue;
+        };
+        let signature = detail
+            .payload
+            .get("thought_signature")
+            .and_then(Value::as_str)
+            .map(std::string::ToString::to_string);
+        parts.push(thought_part(text.to_string(), signature));
+    }
+    if skipped > 0 {
+        tally.foreign_reasoning_unreplayable = true;
+        tracing::debug!(
+            skipped_count = skipped,
+            "gemini: skipping reasoning details with no replayable Gemini thought \
+             payload (foreign-provider reasoning carries no accepted thoughtSignature)"
+        );
+    }
+    parts
 }
 
 /// True when `key` is a request field routectl assembles itself and an
@@ -1124,6 +1390,12 @@ fn is_gemini_managed_key(key: &str) -> bool {
 /// dropped with a WARN so neither an operator nor a client smuggling
 /// extras through an ingress can clobber the assembled `contents` /
 /// `generationConfig` / `tools` / etc.
+///
+/// Not a translation drop: nothing canonical is lost here. The dropped value
+/// is an operator/client OVERRIDE ATTEMPT against a key routectl assembles
+/// itself, and refusing it is what keeps the assembled body authoritative --
+/// the canonical field it collides with still reaches the wire, translated.
+/// TRANSLATION-DROP: structural -- refuses an override of an assembled key; the canonical value it collides with still reaches the wire
 pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value) {
     let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
         return;
@@ -1719,6 +1991,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn custom_tool_parameters_are_gemini_cleaned() {
         use routectl_core::{CustomTool, ToolDef};
         // Arrange: a caller schema carrying constructs Gemini rejects raw.
@@ -1777,6 +2050,7 @@ mod tests {
 
     #[traced_test]
     #[test]
+    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn nameless_other_tool_is_skipped_with_warn_not_emitted() {
         use routectl_core::ToolDef;
         // Arrange: a hosted-tool shape carrying no usable function name.
@@ -1797,6 +2071,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn nameless_other_tool_does_not_starve_named_siblings() {
         use routectl_core::{CustomTool, ToolDef};
         // Arrange: a nameless hosted tool alongside a named Other and a Custom.
@@ -1831,6 +2106,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn named_other_tool_still_emits_declaration_unchanged() {
         use routectl_core::ToolDef;
         // Arrange: a native OpenAI function-shape ToolDef::Other.
@@ -2109,6 +2385,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn all_tools_skipped_with_auto_choice_omits_tool_config() {
         let req = nameless_tool_req_with_choice(json!("auto"));
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -2120,6 +2397,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn all_tools_skipped_with_required_choice_omits_tool_config() {
         let req = nameless_tool_req_with_choice(json!("required"));
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -2131,6 +2409,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn all_tools_skipped_with_named_choice_omits_tool_config() {
         let req = nameless_tool_req_with_choice(
             json!({"type": "function", "function": {"name": "web_search"}}),
@@ -2489,6 +2768,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_response_format_unrepresentable)]
     fn response_format_json_schema_maps_to_response_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2510,6 +2790,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn response_format_pydantic_shaped_schema_is_cleaned_on_the_wire() {
         // A pydantic-emitted schema carries additionalProperties, $defs and a
         // $ref to a nested model, plus an allOf wrapper. All must be gone and
@@ -2558,6 +2839,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn response_format_zod_shaped_schema_drops_dollar_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2588,6 +2870,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_response_format_unrepresentable)]
     fn response_format_json_schema_without_schema_emits_mime_only() {
         // The loss is warned at the call site; the wire keeps the JSON mime so
         // the request still asks for JSON rather than failing.
@@ -2606,6 +2889,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_response_format_unrepresentable)]
     fn response_format_json_object_sets_mime_without_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2622,6 +2906,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_foreign_reasoning_unreplayable)]
     fn gemini_reasoning_details_replayed_as_thought_parts() {
         // One Gemini-origin detail (replayed) + one foreign detail (skipped).
         let assistant = Message {
@@ -2987,6 +3272,7 @@ mod tests {
 
     #[traced_test]
     #[test]
+    #[serial_test::serial(gemini_cache_control_unsupported)]
     fn warn_fires_for_cache_control_bearing_request() {
         // Arrange: a request carrying a top-level cache_control breakpoint.
         let mut req = base_req();
@@ -3005,6 +3291,7 @@ mod tests {
 
     #[traced_test]
     #[test]
+    #[serial_test::serial(gemini_cache_control_unsupported)]
     fn no_warn_for_clean_request() {
         // Arrange: no cache_control -> no diagnostic.
         let req = base_req();
@@ -3063,6 +3350,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn data_uri_image_url_maps_to_inline_data() {
         // Arrange: the plain RFC 2397 base64 form.
         let part = image_url_part("data:image/png;base64,iVBORw0KGgo=");
@@ -3077,6 +3365,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn parameterized_data_uri_image_url_maps_to_inline_data() {
         // Arrange: RFC 2397 allows `;<param>` between the media type and the
         // `;base64` flag, and browser tooling emits `;charset=utf-8`. A
@@ -3099,6 +3388,7 @@ mod tests {
     /// legal spelling down the text fall-through and ship the base64 payload
     /// upstream as prose -- the failure the guard exists to prevent.
     #[test]
+    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn mixed_case_data_uri_scheme_maps_to_inline_data() {
         // Arrange
         let part = image_url_part("DATA:image/PNG;base64,iVBORw0KGgo=");
@@ -3115,6 +3405,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn unparseable_data_uri_image_url_drops_with_warn() {
         // Arrange: a data: URI with no `;base64,` separator. Passing this
         // through as text would smuggle the payload upstream as billed prose.
@@ -3130,6 +3421,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn empty_payload_data_uri_image_url_drops_with_warn() {
         // Arrange: truncated upload -- media type present, zero bytes.
         let part = image_url_part("data:image/png;base64,");
@@ -3143,6 +3435,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn remote_image_url_still_passes_through_as_text() {
         // Arrange: Gemini does not accept arbitrary remote URLs in
         // inlineData; forwarding the URL as text is a deliberate
@@ -3161,6 +3454,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_image_source_no_inline_bytes)]
     fn base64_image_source_maps_to_inline_data() {
         // Arrange: the Anthropic-shape source that genuinely carries bytes.
         let part = image_source_part(json!({
@@ -3180,6 +3474,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_image_source_no_inline_bytes)]
     fn url_image_source_drops_with_warn() {
         // Arrange: a legal Anthropic url-shape source, which the Anthropic
         // ingress accepts verbatim. It has no media_type and no data, so the
@@ -3199,6 +3494,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_image_source_no_inline_bytes)]
     fn base64_image_source_with_empty_data_drops_with_warn() {
         // Arrange: correct source type, truncated payload.
         let part = image_source_part(json!({
@@ -3234,6 +3530,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn openai_file_part_maps_to_inline_data() {
         // Arrange: the base64-upload form an OpenAI client sends.
         let part = file_part(json!({
@@ -3253,6 +3550,7 @@ mod tests {
     /// RFC 2397 allows omitting the media type. Only then does the filename
     /// extension get a say in the mime.
     #[test]
+    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn file_part_without_uri_media_type_falls_back_to_filename() {
         // Arrange
         let part = file_part(json!({
@@ -3289,6 +3587,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn file_id_only_file_part_drops_with_warn() {
         // Arrange: the previously-uploaded reference form carries no bytes.
         let part = file_part(json!({"file_id": "file-abc123"}));
@@ -3304,6 +3603,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn non_data_uri_file_data_drops_with_warn() {
         // Arrange: file_data that is not an RFC 2397 base64 URI. Emitting it
         // verbatim would ship unparseable bytes as a document part.
@@ -3322,6 +3622,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn text_document_source_takes_the_text_fast_path() {
         // Arrange
         let part = document_part(json!({"type": "text", "text": "hello doc"}));
@@ -3335,6 +3636,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn base64_document_source_maps_to_inline_data() {
         // Arrange
         let part = document_part(json!({
@@ -3354,6 +3656,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn url_document_source_drops_with_warn() {
         // Arrange: a legal Anthropic url-shape source, which the Anthropic
         // ingress accepts verbatim. It has no bytes, so the old code emitted
@@ -3374,6 +3677,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn base64_document_source_with_empty_data_drops_with_warn() {
         // Arrange: correct source type, truncated payload.
         let part = document_part(json!({
@@ -3404,6 +3708,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_redacted_thinking_unsupported)]
     fn redacted_thinking_part_drops_with_warn() {
         // Arrange: Gemini's Part has no redacted-thinking slot.
         let part = redacted_thinking_part("AAECAwQF");
@@ -3422,6 +3727,7 @@ mod tests {
 
     #[test]
     #[traced_test]
+    #[serial_test::serial(gemini_redacted_thinking_unsupported)]
     fn ordinary_thinking_part_survives_with_no_warn() {
         // Arrange: the positive control -- an un-redacted thinking part
         // travels the sibling `Thinking` arm, which must stay unaffected.
@@ -3465,8 +3771,9 @@ mod tests {
 
         // Act
         let mut contents = Vec::new();
-        let events =
-            routectl_testkit::capture_events(|| contents = build_contents("prov", &req).unwrap());
+        let events = routectl_testkit::capture_events(|| {
+            contents = build_contents("prov", &req, &mut GeminiDropTally::default()).unwrap();
+        });
 
         // Assert
         assert_eq!(contents.len(), 1, "the turn must survive translation");
@@ -3496,8 +3803,9 @@ mod tests {
 
         // Act
         let mut contents = Vec::new();
-        let events =
-            routectl_testkit::capture_events(|| contents = build_contents("prov", &req).unwrap());
+        let events = routectl_testkit::capture_events(|| {
+            contents = build_contents("prov", &req, &mut GeminiDropTally::default()).unwrap();
+        });
 
         // Assert
         assert_eq!(contents.len(), 1);
@@ -3509,4 +3817,8 @@ mod tests {
             "a recognized role must not trip the unrecognized-role fallback, got: {events:?}"
         );
     }
+
+    // The three-assertion pinning set for every counted drop, plus the lane
+    // denominator, lives in a sibling fragment so this file stays navigable.
+    include!("request_drop_counter_tests.rs");
 }

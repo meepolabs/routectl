@@ -30,21 +30,42 @@
 //! `items`, `prefixItems`, `anyOf`/`oneOf` branches); literal-valued
 //! keywords (`default`, `example`, `title`, ...) are cloned verbatim so a
 //! `type` field inside a VALUE is never misread as a schema type keyword.
-//! Pure function of its input -- no logging, no mutation.
+//! Pure function of its input -- no logging, no mutation. Several of the
+//! strips above LOSE a caller-stated constraint rather than renormalizing
+//! it, so [`clean_schema_reporting`] returns that fact for the egress's
+//! per-request tally to log and count; nothing in here logs.
 
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 
-/// Normalize a caller JSON Schema into the Gemini OpenAPI subset.
+/// Normalize a caller JSON Schema into the Gemini OpenAPI subset, discarding
+/// the drop report [`clean_schema_reporting`] returns. Test-only: every
+/// production call site must consume the report so the loss is counted.
+#[cfg(test)]
+fn clean_schema(schema: &Value) -> Value {
+    clean_schema_reporting(schema).0
+}
+
+/// Normalize a caller JSON Schema into the Gemini OpenAPI subset, reporting
+/// whether anything the caller STATED was lost rather than merely
+/// renormalized.
 ///
 /// The top-level schema is treated as the ref document root: its
 /// `$defs`/`definitions` back any intra-document `$ref` encountered at any
 /// depth. Those defs are collected once here and threaded through the
 /// recursion so nested refs resolve against the document root.
-pub(super) fn clean_schema(schema: &Value) -> Value {
+///
+/// The second element is `true` when at least one constraint keyword was
+/// stripped, an unsupported `format` was dropped, or a `$ref` degraded to an
+/// empty schema -- i.e. the model will not see a restriction the caller wrote.
+/// Returned rather than logged so this module stays a pure function of its
+/// input; the egress's per-request tally owns the WARN and the counter.
+pub(super) fn clean_schema_reporting(schema: &Value) -> (Value, bool) {
     let defs = collect_defs(schema);
     let mut visited = HashSet::new();
-    clean_value(schema, &defs, &mut visited)
+    let mut dropped = false;
+    let cleaned = clean_value(schema, &defs, &mut visited, &mut dropped);
+    (cleaned, dropped)
 }
 
 /// Collect the root `$defs`/`definitions` object schemas into a lookup keyed
@@ -67,13 +88,14 @@ fn clean_value(
     schema: &Value,
     defs: &HashMap<String, Value>,
     visited: &mut HashSet<String>,
+    dropped: &mut bool,
 ) -> Value {
     match schema {
-        Value::Object(map) => clean_object(map, defs, visited),
+        Value::Object(map) => clean_object(map, defs, visited, dropped),
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|i| clean_value(i, defs, visited))
+                .map(|i| clean_value(i, defs, visited, dropped))
                 .collect(),
         ),
         other => other.clone(),
@@ -87,6 +109,7 @@ fn resolve_ref(
     pointer: &str,
     defs: &HashMap<String, Value>,
     visited: &mut HashSet<String>,
+    dropped: &mut bool,
 ) -> Option<Value> {
     let decoded = decode_ref_pointer(pointer);
     if visited.contains(&decoded) {
@@ -94,7 +117,7 @@ fn resolve_ref(
     }
     let target = defs.get(&decoded)?.clone();
     visited.insert(decoded.clone());
-    let cleaned = clean_value(&target, defs, visited);
+    let cleaned = clean_value(&target, defs, visited, dropped);
     visited.remove(&decoded);
     Some(cleaned)
 }
@@ -112,6 +135,7 @@ fn clean_object(
     map: &Map<String, Value>,
     defs: &HashMap<String, Value>,
     visited: &mut HashSet<String>,
+    dropped: &mut bool,
 ) -> Value {
     let mut out = Map::new();
     // A resolvable `$ref` inlines its cleaned target as the base schema;
@@ -122,11 +146,25 @@ fn clean_object(
             // Resolve intra-document refs by inlining; drop the `$ref`
             // itself. An unresolvable or cyclic ref leaves `inlined` unset,
             // degrading to the prior drop/empty behavior with no panic.
+            //
+            // Cross-dialect translation lane: a caller schema authored for
+            // OpenAI/Anthropic (pydantic, zod) reaching Gemini's OpenAPI-subset
+            // `Schema` proto. Drop rather than forward -- a `$ref` Gemini's
+            // proto has no keyword for would 400 the whole request, whereas the
+            // unresolvable case degrades to an unconstrained schema that still
+            // reaches the model. Only the DEGRADED case is a content loss; an
+            // inlined ref preserves the shape, so only the former is tallied.
+            // Baked seed verdict: deletion-blocked pending this lane's own wire
+            // evidence.
+            // TRANSLATION-DROP: lane=gemini class=schema_keyword_unsupported test=unresolvable_ref_reports_a_drop
             "$ref" => {
                 if let Value::String(pointer) = value
-                    && let Some(Value::Object(target)) = resolve_ref(pointer, defs, visited)
+                    && let Some(Value::Object(target)) =
+                        resolve_ref(pointer, defs, visited, dropped)
                 {
                     inlined = Some(target);
+                } else {
+                    *dropped = true;
                 }
             }
             // Keywords Gemini's Schema proto rejects: drop them rather than
@@ -135,16 +173,26 @@ fn clean_object(
             // on the wire. `allOf`/`not`/`const`/`patternProperties` have no
             // Gemini equivalent; dropping loses the constraint (const loses
             // the pin) but avoids a hard 400 on common pydantic/zod schemas.
-            "$schema"
-            | "additionalProperties"
-            | "$defs"
-            | "definitions"
-            | "allOf"
-            | "not"
-            | "const"
-            | "patternProperties" => {}
+            //
+            // Cross-dialect translation lane: same as `$ref` above. Two shapes
+            // share this arm and only one loses anything. `$schema` and the
+            // `$defs`/`definitions` containers are STRUCTURAL -- metadata and a
+            // ref sidecar whose contents already reach the wire inlined at each
+            // ref site -- so they are not tallied. `additionalProperties`,
+            // `allOf`, `not`, `const` and `patternProperties` ARE caller-stated
+            // constraints with no Gemini keyword to carry them, so the model
+            // never learns them: tallied. Baked seed verdict, deletion-blocked
+            // pending this lane's own wire evidence.
+            // TRANSLATION-DROP: lane=gemini class=schema_keyword_unsupported test=unsupported_keywords_report_a_drop
+            "$schema" | "$defs" | "definitions" => {}
+            "additionalProperties" | "allOf" | "not" | "const" | "patternProperties" => {
+                *dropped = true;
+            }
             "oneOf" | "anyOf" => {
-                out.insert("anyOf".to_string(), clean_value(value, defs, visited));
+                out.insert(
+                    "anyOf".to_string(),
+                    clean_value(value, defs, visited, dropped),
+                );
             }
             "type" => insert_type(&mut out, value),
             "enum" => {
@@ -152,20 +200,30 @@ fn clean_object(
             }
             // Gemini accepts `format` only for a small closed set; any other
             // value (uri/email/uuid/date/...) is dropped, not passed through.
+            //
+            // Cross-dialect translation lane: a caller `format` outside
+            // Gemini's closed set. Drop rather than forward -- Gemini's Schema
+            // proto rejects an unknown `format` outright, so forwarding turns a
+            // lost hint into a failed request; the caller's validation
+            // expectation is what is lost. Baked seed verdict, deletion-blocked
+            // pending this lane's own wire evidence.
+            // TRANSLATION-DROP: lane=gemini class=schema_keyword_unsupported test=unsupported_format_reports_a_drop
             "format" => {
                 if value.as_str().is_some_and(is_supported_format) {
                     out.insert("format".to_string(), value.clone());
+                } else {
+                    *dropped = true;
                 }
             }
             // Name-keyed schema map: child keys are user-chosen property
             // names, not keywords, so recurse per-value without keyword
             // interpretation.
             "properties" => {
-                out.insert(key.clone(), clean_schema_map(value, defs, visited));
+                out.insert(key.clone(), clean_schema_map(value, defs, visited, dropped));
             }
             // Genuinely schema-valued keywords: recurse as schemas.
             "items" | "prefixItems" => {
-                out.insert(key.clone(), clean_value(value, defs, visited));
+                out.insert(key.clone(), clean_value(value, defs, visited, dropped));
             }
             // Literal-valued keywords (`default`, `example`, `examples`,
             // `title`, `description`) and any unrecognized keyword carry data
@@ -195,15 +253,16 @@ fn clean_schema_map(
     value: &Value,
     defs: &HashMap<String, Value>,
     visited: &mut HashSet<String>,
+    dropped: &mut bool,
 ) -> Value {
     match value {
         Value::Object(entries) => Value::Object(
             entries
                 .iter()
-                .map(|(name, schema)| (name.clone(), clean_value(schema, defs, visited)))
+                .map(|(name, schema)| (name.clone(), clean_value(schema, defs, visited, dropped)))
                 .collect(),
         ),
-        other => clean_value(other, defs, visited),
+        other => clean_value(other, defs, visited, dropped),
     }
 }
 
@@ -223,10 +282,21 @@ fn insert_type(out: &mut Map<String, Value>, value: &Value) {
                 match member.as_str() {
                     Some("null") => has_null = true,
                     Some(t) => concrete.push(t.to_uppercase()),
+                    // A non-string member of a `type` union is not a JSON
+                    // Schema type name at all, so there is nothing to lower
+                    // onto Gemini's scalar TYPE enum and nothing that could be
+                    // forwarded. Skipping it loses no caller-stated type.
+                    // TRANSLATION-DROP: structural -- a non-string `type` union member names no type; the union's real members all translate
                     None => {}
                 }
             }
             match concrete.len() {
+                // A `type` union with no concrete member (`["null"]` alone, or
+                // only non-string members) states no type to emit. `"null"`
+                // already lifted to `nullable` below, so omitting `type`
+                // reproduces the caller's schema exactly -- Gemini's proto has
+                // no NULL member of its TYPE enum to spell it with.
+                // TRANSLATION-DROP: structural -- an all-null `type` union is fully expressed by the `nullable` flag set below
                 0 => {}
                 1 => {
                     out.insert("type".to_string(), Value::String(concrete.remove(0)));

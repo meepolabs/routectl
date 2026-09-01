@@ -165,6 +165,7 @@ pub fn extract_project_id(obj: &Value) -> Option<String> {
                     }
                 }
             }
+            // TRANSLATION-DROP: structural -- a key of an unusable JSON type holds no project id; this reads an onboarding RESPONSE and translates no request content
             _ => {}
         }
     }
@@ -178,6 +179,7 @@ pub fn default_tier(load_resp: &Value) -> String {
     if let Some(tiers) = load_resp.get("allowedTiers").and_then(Value::as_array) {
         for tier in tiers {
             let is_default = tier.get("isDefault").and_then(Value::as_bool) == Some(true);
+            // TRANSLATION-DROP: structural -- a non-default tier is not this scan's subject; reads an onboarding RESPONSE and translates no request content
             if !is_default {
                 continue;
             }
