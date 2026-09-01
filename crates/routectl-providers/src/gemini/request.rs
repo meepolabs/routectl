@@ -584,7 +584,7 @@ fn content_part_to_part(
                     // `image_url` block reaching the Gemini egress. Baked seed
                     // verdict: deletion-blocked pending this lane's own wire
                     // evidence.
-                    // TRANSLATION-DROP: lane=gemini class=image_url_data_uri_unparseable test=image_url_data_uri_drop_bumps_the_counter_once_per_request
+                    // TRANSLATION-DROP: lane=gemini class=image_url_data_uri_unparseable test=image_url_data_uri_drop_bumps_the_counter_once_per_request pattern: explicit
                     let Some(inline) = data_uri_inline_data(url) else {
                         tally.image_url_data_uri_unparseable = true;
                         tracing::warn!(
