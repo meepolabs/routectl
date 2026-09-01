@@ -1486,10 +1486,23 @@ fn translate_part_for_tool_result(
     }
 }
 
+/// Wrap a part this egress has no typed carrier for as an opaque JSON
+/// payload, so the model still receives it.
+///
+/// The `cache_control` marker is REMOVED from that payload rather than
+/// riding along inside it. Every caller of this helper has already
+/// reported the marker as dropped, and the marker only serializes when
+/// present, so leaving it in would make the report false: the counter and
+/// the warning would claim a removal that never happened, on the one
+/// surface whose purpose is to describe removals accurately. The Converse
+/// wire has no place for it here either way -- an opaque blob is not a
+/// cache anchor.
 fn content_part_to_json_fallback(p: &ContentPart) -> ConverseToolResultContent {
-    ConverseToolResultContent::Json {
-        json: serde_json::to_value(p).unwrap_or(Value::Null),
+    let mut json = serde_json::to_value(p).unwrap_or(Value::Null);
+    if let Some(obj) = json.as_object_mut() {
+        obj.remove("cache_control");
     }
+    ConverseToolResultContent::Json { json }
 }
 
 /// Translate a canonical Anthropic-shape image source into the AWS
