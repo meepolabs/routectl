@@ -64,8 +64,13 @@ pub(super) fn build_additional_fields(
     let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
-    insert_provider_extras(cfg, req, &mut bag);
-    insert_operator_extras(cfg, &mut bag);
+    let extra_drops = insert_provider_extras(cfg, req, &mut bag);
+    let operator_drops = insert_operator_extras(cfg, &mut bag);
+    // Once per REQUEST per class, never once per dropped key: a bag whose
+    // extras collide on three managed keys is one drop event against this
+    // lane's request-volume denominator.
+    extra_drops.flush();
+    operator_drops.flush();
 
     // Filter anthropic_beta against the operator-supplied
     // `[bedrock] allowed_betas` list (routectl ships no const default).
@@ -151,6 +156,41 @@ pub(super) fn build_additional_fields(
     Some(bag)
 }
 
+/// Per-request record of `additionalModelRequestFields` entries dropped
+/// during bag assembly. Lane: bedrock-converse, construction-time
+/// translation, cross-dialect by construction. Each field is a per-request
+/// FLAG rather than a key count: the per-key log already names the offending
+/// key, and the `(lane, drop_class)` counters are per-REQUEST by contract.
+#[derive(Default)]
+struct BagDropTally {
+    provider_extra_managed_key_conflict: bool,
+    client_fingerprint_stripped: bool,
+    operator_extra_managed_key_conflict: bool,
+}
+
+impl BagDropTally {
+    fn flush(&self) {
+        if self.provider_extra_managed_key_conflict {
+            crate::translation_drop_metrics::record_translation_drop(
+                "bedrock-converse",
+                "provider_extra_managed_key_conflict",
+            );
+        }
+        if self.client_fingerprint_stripped {
+            crate::translation_drop_metrics::record_translation_drop(
+                "bedrock-converse",
+                "client_fingerprint_stripped",
+            );
+        }
+        if self.operator_extra_managed_key_conflict {
+            crate::translation_drop_metrics::record_translation_drop(
+                "bedrock-converse",
+                "operator_extra_managed_key_conflict",
+            );
+        }
+    }
+}
+
 /// Layer canonical `req.provider_extras` (the Anthropic ingress's
 /// forward-compat sweep destination) into the bag. Without this, top-
 /// level Anthropic body fields routectl doesn't model
@@ -167,12 +207,26 @@ pub(super) fn build_additional_fields(
 /// phrasing. Operator-config extras flow through
 /// `insert_operator_extras` below, which keeps the WARN-level
 /// adversarial phrasing because that path IS an operator misconfig.
-fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
+///
+/// Returns the request's drop flags for the caller to flush once.
+fn insert_provider_extras(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    bag: &mut Map<String, Value>,
+) -> BagDropTally {
+    let mut drops = BagDropTally::default();
     let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
-        return;
+        return drops;
     };
     for (k, v) in extras {
+        // A swept forward-compat key that collides with a field routectl
+        // itself computes cannot be forwarded: the bag has exactly one slot
+        // per key, and letting the client value win would silently replace
+        // the `thinking` block (or the Converse body field) routectl derived
+        // from canonical. Baked seed verdict per foundations sec 14.
+        // TRANSLATION-DROP: lane=bedrock-converse class=provider_extra_managed_key_conflict test=provider_extra_managed_key_conflict_bumps_the_drop_counter_once
         if is_converse_managed_key(k) {
+            drops.provider_extra_managed_key_conflict = true;
             tracing::debug!(
                 provider = %cfg.id,
                 key = %sanitize_for_log(k),
@@ -188,7 +242,11 @@ fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<
         // here) -- that is the operator's deliberate choice. Shared key
         // with the Invoke seam via
         // `crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY`.
+        // The drop is deliberate and NOT representability-driven: the wire
+        // would carry the block fine, and routectl declines to send it.
+        // TRANSLATION-DROP: lane=bedrock-converse class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_drop_counter_once
         if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
+            drops.client_fingerprint_stripped = true;
             tracing::debug!(
                 provider = %cfg.id,
                 "stripped client metadata fingerprint from Converse \
@@ -202,6 +260,7 @@ fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<
         // matches the Anthropic egress precedence.
         bag.insert(k.clone(), v.clone());
     }
+    drops
 }
 
 /// Honor the canonical structured-output directive on the Converse bag by
@@ -329,16 +388,26 @@ fn insert_top_level_cache_control(req: &ChatRequest, bag: &mut Map<String, Value
 /// anthropic_beta the caller intended to send. Routectl-managed keys
 /// are dropped with a WARN to match the Invoke egress's
 /// `is_bedrock_invoke_managed_key` policy.
-fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) {
+///
+/// Returns the request's drop flags for the caller to flush once.
+fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) -> BagDropTally {
+    let mut drops = BagDropTally::default();
     let Some(extras) = cfg
         .additional_model_request_fields
         .as_ref()
         .and_then(|v| v.as_object())
     else {
-        return;
+        return drops;
     };
     for (k, v) in extras {
+        // Same one-slot-per-key constraint as the client path above, with
+        // the operator as the source: forwarding the configured value would
+        // replace a field routectl derived from the canonical request. WARN
+        // rather than DEBUG because this path IS an operator misconfig, not
+        // a forward-compat sweep. Baked seed verdict per foundations sec 14.
+        // TRANSLATION-DROP: lane=bedrock-converse class=operator_extra_managed_key_conflict test=operator_extra_managed_key_conflict_bumps_the_drop_counter_once
         if is_converse_managed_key(k) {
+            drops.operator_extra_managed_key_conflict = true;
             tracing::warn!(
                 provider = %cfg.id,
                 key = %sanitize_for_log(k),
@@ -349,6 +418,7 @@ fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) {
         }
         bag.entry(k.clone()).or_insert_with(|| v.clone());
     }
+    drops
 }
 
 /// Keys in `additionalModelRequestFields` that routectl manages. This
@@ -481,6 +551,7 @@ mod tests {
     /// `additionalModelRequestFields`. (Operator-set metadata via config
     /// flows through `insert_operator_extras`, which is NOT gated here.)
     #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn client_metadata_fingerprint_skipped_from_converse_bag() {
         use serde_json::{Map, json};
         // Arrange: client supplies a metadata fingerprint via
@@ -1074,5 +1145,295 @@ mod tests {
             !logs_contain("dropping thinking.display"),
             "no display requested -> no strip WARN"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The three `additionalModelRequestFields` drop classes and their
+    // per-request counters. Log capture uses
+    // `routectl_testkit::capture_events` because the dropped KEY rides as a
+    // structured field, which a substring match on rendered output cannot
+    // assert. Each test is serialized on its own drop_class guard -- the
+    // registry is process-global and this crate's runner is threaded -- and
+    // the same guard is applied to every other test in the crate that
+    // reaches the same arm incidentally.
+    // -----------------------------------------------------------------
+
+    fn bag_drop_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "bedrock-converse" && e.drop_class == class)
+            .map_or(0, |e| e.drop_count)
+    }
+
+    /// The EMITTED WIRE VALUE for the bag: what actually rides in
+    /// `additionalModelRequestFields`. A key can only be proven dropped
+    /// against this, never against an intermediate typed view.
+    fn emitted_bag(cfg: &BedrockConfig, req: &ChatRequest) -> serde_json::Value {
+        build_additional_fields(cfg, req, None).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// NEGATIVE CONTROL. A forward-compat swept key colliding with a
+    /// routectl-managed field cannot be forwarded (one slot per key), so it
+    /// drops at DEBUG and the counter advances once for the request.
+    #[test]
+    #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
+    fn provider_extra_managed_key_conflict_bumps_the_drop_counter_once() {
+        // Arrange -- `thinking` is managed; `top_k` is representable.
+        let before = bag_drop_count("provider_extra_managed_key_conflict");
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.provider_extras = Some(serde_json::json!({
+            "thinking": {"type": "sentinel-client-thinking"},
+            "top_k": 40,
+        }));
+
+        // Act
+        let mut bag = serde_json::Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            bag = emitted_bag(&cfg, &req);
+        });
+        let after = bag_drop_count("provider_extra_managed_key_conflict");
+
+        // Assert 1 -- the DEBUG fired, naming the key as a structured field.
+        let event = events
+            .iter()
+            .find(|e| {
+                e.message
+                    .contains("forward-compat extra would override routectl-managed key")
+            })
+            .unwrap_or_else(|| panic!("the conflict must be logged; got: {events:?}"));
+        assert_eq!(event.field("key"), Some("thinking"));
+
+        // Assert 2 -- the client's colliding value is absent from the
+        // EMITTED bag; the routectl-derived `thinking` is what shipped.
+        assert!(
+            !bag.to_string().contains("sentinel-client-thinking"),
+            "the colliding client value must not reach the upstream; emitted bag: {bag}"
+        );
+
+        // Assert 3 -- positive control: the non-colliding sibling survived
+        // in that same emitted bag.
+        assert_eq!(
+            bag.get("top_k"),
+            Some(&serde_json::json!(40)),
+            "a non-managed extra must survive the drop; emitted bag: {bag}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the conflict counter must advance by exactly one for this request"
+        );
+    }
+
+    /// Two colliding keys in ONE request is one drop EVENT, not two.
+    #[test]
+    #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
+    fn two_provider_extra_conflicts_bump_the_drop_counter_once() {
+        // Arrange
+        let before = bag_drop_count("provider_extra_managed_key_conflict");
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.provider_extras = Some(serde_json::json!({
+            "thinking": {"type": "evil"},
+            "toolConfig": {"tools": []},
+        }));
+
+        // Act
+        let _ = emitted_bag(&cfg, &req);
+        let after = bag_drop_count("provider_extra_managed_key_conflict");
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "two colliding keys in one request is one drop event, not two"
+        );
+    }
+
+    /// POSITIVE CONTROL: extras that collide with nothing advance no
+    /// conflict counter and log no conflict at all.
+    #[test]
+    #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
+    fn non_colliding_provider_extras_advance_no_conflict_counter() {
+        // Arrange
+        let before = bag_drop_count("provider_extra_managed_key_conflict");
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.provider_extras = Some(serde_json::json!({"top_k": 40}));
+
+        // Act
+        let mut bag = serde_json::Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            bag = emitted_bag(&cfg, &req);
+        });
+        let after = bag_drop_count("provider_extra_managed_key_conflict");
+
+        // Assert
+        assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("would override routectl-managed key")),
+            "nothing collided, so nothing is owed a conflict log; got: {events:?}"
+        );
+        assert_eq!(after, before);
+    }
+
+    /// NEGATIVE CONTROL. The client fingerprint block is stripped on this
+    /// seam because Bedrock is always a third-party upstream. The drop is
+    /// deliberate and NOT representability-driven -- the wire would carry
+    /// the block fine, and routectl declines to send it.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn client_fingerprint_strip_bumps_the_drop_counter_once() {
+        // Arrange
+        let before = bag_drop_count("client_fingerprint_stripped");
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.provider_extras = Some(serde_json::json!({
+            "metadata": {"user_id": "sentinel-user", "account_uuid": "sentinel-account"},
+            "top_k": 40,
+        }));
+
+        // Act
+        let mut bag = serde_json::Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            bag = emitted_bag(&cfg, &req);
+        });
+        let after = bag_drop_count("client_fingerprint_stripped");
+
+        // Assert 1 -- the strip was logged.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message.contains("stripped client metadata fingerprint")),
+            "the strip must be logged; got: {events:?}"
+        );
+
+        // Assert 2 -- neither fingerprint value reaches the upstream in ANY
+        // form. Asserting against the serialized bag rather than a key check
+        // is what catches a value riding inside a nested member.
+        let serialized = bag.to_string();
+        for leak in ["sentinel-user", "sentinel-account"] {
+            assert!(
+                !serialized.contains(leak),
+                "`{leak}` must not reach the third-party upstream; emitted bag: {serialized}"
+            );
+        }
+
+        // Assert 3 -- positive control: the non-fingerprint sibling survived.
+        assert_eq!(
+            bag.get("top_k"),
+            Some(&serde_json::json!(40)),
+            "a non-fingerprint extra must survive the strip; emitted bag: {bag}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the fingerprint-strip counter must advance by exactly one"
+        );
+    }
+
+    /// POSITIVE CONTROL: extras carrying no fingerprint block advance no
+    /// strip counter.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn extras_without_a_fingerprint_advance_no_strip_counter() {
+        // Arrange
+        let before = bag_drop_count("client_fingerprint_stripped");
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.provider_extras = Some(serde_json::json!({"top_k": 40}));
+
+        // Act
+        let bag = emitted_bag(&cfg, &req);
+        let after = bag_drop_count("client_fingerprint_stripped");
+
+        // Assert
+        assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
+        assert_eq!(after, before);
+    }
+
+    /// NEGATIVE CONTROL. The operator path carries the identical one-slot
+    /// constraint, at WARN rather than DEBUG because this path IS a
+    /// misconfiguration rather than a forward-compat sweep.
+    #[test]
+    #[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
+    fn operator_extra_managed_key_conflict_bumps_the_drop_counter_once() {
+        // Arrange
+        let before = bag_drop_count("operator_extra_managed_key_conflict");
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(serde_json::json!({
+            "thinking": {"type": "sentinel-operator-thinking"},
+            "top_k": 40,
+        }));
+        let req = req_with_thinking();
+
+        // Act
+        let mut bag = serde_json::Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            bag = emitted_bag(&cfg, &req);
+        });
+        let after = bag_drop_count("operator_extra_managed_key_conflict");
+
+        // Assert 1 -- the WARN fired, naming the key as a structured field.
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains(
+                        "additional_model_request_fields attempted to override routectl-managed key",
+                    )
+            })
+            .unwrap_or_else(|| panic!("the operator conflict must WARN; got: {events:?}"));
+        assert_eq!(warn.field("key"), Some("thinking"));
+
+        // Assert 2 -- the operator's colliding value is absent from the
+        // emitted bag.
+        assert!(
+            !bag.to_string().contains("sentinel-operator-thinking"),
+            "the colliding operator value must not reach the upstream; emitted bag: {bag}"
+        );
+
+        // Assert 3 -- positive control: the non-colliding operator key
+        // survived in that same emitted bag.
+        assert_eq!(
+            bag.get("top_k"),
+            Some(&serde_json::json!(40)),
+            "a non-managed operator extra must survive; emitted bag: {bag}"
+        );
+
+        assert_eq!(after - before, 1);
+    }
+
+    /// POSITIVE CONTROL: operator extras that collide with nothing advance
+    /// no counter and emit no conflict WARN.
+    #[test]
+    #[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
+    fn non_colliding_operator_extras_advance_no_conflict_counter() {
+        // Arrange
+        let before = bag_drop_count("operator_extra_managed_key_conflict");
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(serde_json::json!({"top_k": 40}));
+        let req = req_with_thinking();
+
+        // Act
+        let mut bag = serde_json::Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            bag = emitted_bag(&cfg, &req);
+        });
+        let after = bag_drop_count("operator_extra_managed_key_conflict");
+
+        // Assert
+        assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
+        assert!(
+            !events.iter().any(|e| e
+                .message
+                .contains("attempted to override routectl-managed key")),
+            "nothing collided, so no conflict WARN is owed; got: {events:?}"
+        );
+        assert_eq!(after, before);
     }
 }

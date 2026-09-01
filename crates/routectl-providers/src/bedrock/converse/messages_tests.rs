@@ -17,3 +17,4 @@ include!("messages_image_policy_tests.rs");
 include!("messages_document_policy_tests.rs");
 include!("messages_other_role_tests.rs");
 include!("messages_tool_result_cache_control_tests.rs");
+include!("messages_content_drop_counter_tests.rs");

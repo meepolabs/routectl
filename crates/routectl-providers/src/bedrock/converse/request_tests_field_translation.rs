@@ -125,6 +125,7 @@ fn anthropic_object_none_tool_choice_suppresses_tool_config_entirely() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
 fn provider_extras_merge_into_additional_model_request_fields() {
     // Arrange: a custom forward-compat field (the Anthropic ingress
     // sweeps unknown top-level keys into provider_extras) must
@@ -209,6 +210,7 @@ fn body_fields_filter_drops_disallowed_keys_on_converse() {
 }
 
 #[test]
+#[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
 fn provider_extras_cannot_override_managed_keys_on_converse() {
     // Arrange: an attempt to inject managed-key overrides via
     // provider_extras (e.g. a malicious or careless caller setting

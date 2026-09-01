@@ -108,12 +108,21 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
     let mut tally = CitationsDropTally::new(id);
     let mut reasoning = ReasoningSkipTally::new(id);
     let mut cc_tally = ToolResultCacheControlDropTally::new(id);
-    let translated = translate_messages(id, messages, &mut tally, &mut reasoning, &mut cc_tally);
+    let mut content_drops = ContentDropTally::default();
+    let translated = translate_messages(
+        id,
+        messages,
+        &mut tally,
+        &mut reasoning,
+        &mut cc_tally,
+        &mut content_drops,
+    );
     // Flush on both arms: a request that records a drop and only then
     // hits a translation error still owes the operator its aggregate WARN.
     tally.flush();
     reasoning.flush();
     cc_tally.flush();
+    content_drops.flush();
     translated
 }
 
@@ -123,15 +132,17 @@ fn translate_messages(
     tally: &mut CitationsDropTally<'_>,
     reasoning: &mut ReasoningSkipTally<'_>,
     cc_tally: &mut ToolResultCacheControlDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for (i, msg) in messages.iter().enumerate() {
         match &msg.role {
             Role::System => system_role_content_lives_in_top_level_system(),
             Role::User => {
-                let mut blocks = build_user_content_blocks(id, &msg.content, tally)?;
+                let mut blocks = build_user_content_blocks(id, &msg.content, tally, content_drops)?;
                 ensure_document_has_text_sibling(&mut blocks);
                 if blocks.is_empty() {
+                    // TRANSLATION-DROP: structural -- an empty translated block vec carries no content; every part that did carry content was accounted for at its own arm
                     tracing::debug!(
                         provider = id,
                         role = "user",
@@ -142,8 +153,10 @@ fn translate_messages(
                 push_or_coalesce(&mut out, "user", blocks);
             }
             Role::Assistant => {
-                let blocks = build_assistant_content_blocks(id, i, msg, tally, reasoning)?;
+                let blocks =
+                    build_assistant_content_blocks(id, i, msg, tally, reasoning, content_drops)?;
                 if blocks.is_empty() {
+                    // TRANSLATION-DROP: structural -- an empty translated block vec carries no content; every part that did carry content was accounted for at its own arm
                     tracing::debug!(
                         provider = id,
                         role = "assistant",
@@ -169,9 +182,10 @@ fn translate_messages(
                     role = %sanitize_for_log(tag),
                     "converse egress: unrecognized message role forwarded as user"
                 );
-                let mut blocks = build_user_content_blocks(id, &msg.content, tally)?;
+                let mut blocks = build_user_content_blocks(id, &msg.content, tally, content_drops)?;
                 ensure_document_has_text_sibling(&mut blocks);
                 if blocks.is_empty() {
+                    // TRANSLATION-DROP: structural -- an empty translated block vec carries no content; every part that did carry content was accounted for at its own arm
                     continue;
                 }
                 push_or_coalesce(&mut out, "user", blocks);
@@ -179,6 +193,60 @@ fn translate_messages(
         }
     }
     Ok(out)
+}
+
+/// Per-request record of canonical content parts dropped on the plain
+/// message-content path because the Converse JSON wire has no slot for
+/// their shape. Lane: bedrock-converse, construction-time translation --
+/// and cross-dialect by construction, since no ingress in this codebase
+/// speaks native Converse wire shape.
+///
+/// Each field is a per-request FLAG rather than a block count on purpose.
+/// The per-block WARN at each drop site already carries the offending
+/// shape for the operator; the `(lane, drop_class)` counters flushed here
+/// are per-REQUEST by contract, so a turn carrying three unrepresentable
+/// images is ONE drop event against the lane's request-volume denominator,
+/// not three.
+///
+/// The tool-result carriers are deliberately absent from this tally: their
+/// `Ok(None)` is wrapped by the caller as a `ConverseToolResultContent::Json`
+/// payload the model still receives, so there is no loss there to count.
+/// Every drop recorded here is a real absence from the emitted wire value.
+#[derive(Default)]
+struct ContentDropTally {
+    image_source_unrepresentable: bool,
+    image_media_type_unsupported: bool,
+    image_url_unrepresentable: bool,
+    document_source_unrepresentable: bool,
+    document_media_type_unsupported: bool,
+    file_part_unrepresentable: bool,
+}
+
+impl ContentDropTally {
+    /// Bump the per-request drop counter for every class that fired at
+    /// least once. Called exactly once per request from `build_messages`,
+    /// on both the Ok and the Err arm -- a drop recorded before a later
+    /// malformed part still owes the operator its count.
+    fn flush(&self) {
+        if self.image_source_unrepresentable {
+            record_translation_drop("bedrock-converse", "image_source_unrepresentable");
+        }
+        if self.image_media_type_unsupported {
+            record_translation_drop("bedrock-converse", "image_media_type_unsupported");
+        }
+        if self.image_url_unrepresentable {
+            record_translation_drop("bedrock-converse", "image_url_unrepresentable");
+        }
+        if self.document_source_unrepresentable {
+            record_translation_drop("bedrock-converse", "document_source_unrepresentable");
+        }
+        if self.document_media_type_unsupported {
+            record_translation_drop("bedrock-converse", "document_media_type_unsupported");
+        }
+        if self.file_part_unrepresentable {
+            record_translation_drop("bedrock-converse", "file_part_unrepresentable");
+        }
+    }
 }
 
 /// Role::System is absorbed by the top-level `system` array, never by
@@ -191,6 +259,7 @@ fn translate_messages(
 /// a discard -- named and greppable (instead of a bare `=> {}`) so a
 /// future regression in `build_system`'s both-present coverage cannot
 /// hide silently behind it.
+// TRANSLATION-DROP: structural -- system::build_system reaches every Role::System message's content, by translation, by lift, or by merging both sources
 const fn system_role_content_lives_in_top_level_system() {}
 
 /// Append a translated turn's content to `out`, merging into the
@@ -250,8 +319,9 @@ fn build_user_content_blocks(
     id: &str,
     content: &MessageContent,
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Vec<ConverseContentBlock>> {
-    content_blocks_with_cache_control(id, content, tally)
+    content_blocks_with_cache_control(id, content, tally, content_drops)
 }
 
 /// Assistant-role content with text-after-tool_use cleanup. Bedrock and
@@ -281,17 +351,18 @@ fn build_assistant_content_blocks(
     msg: &Message,
     tally: &mut CitationsDropTally<'_>,
     reasoning: &mut ReasoningSkipTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Vec<ConverseContentBlock>> {
     let mut blocks = if !msg.reasoning_details.is_empty() {
         let mut blocks =
             emit_reasoning_blocks_converse(message_index, &msg.reasoning_details, reasoning)?;
-        append_converse_content_blocks(id, &msg.content, &mut blocks, tally)?;
+        append_converse_content_blocks(id, &msg.content, &mut blocks, tally, content_drops)?;
         blocks
     } else if let MessageContent::Parts(parts) = &msg.content {
         let cleaned = strip_text_after_tool_use(parts);
-        content_blocks_from_parts(id, &cleaned, tally)?
+        content_blocks_from_parts(id, &cleaned, tally, content_drops)?
     } else {
-        content_blocks_with_cache_control(id, &msg.content, tally)?
+        content_blocks_with_cache_control(id, &msg.content, tally, content_drops)?
     };
     append_tool_use_blocks_from_calls(id, msg, &mut blocks);
     Ok(blocks)
@@ -368,7 +439,18 @@ fn emit_reasoning_blocks_converse(
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
+                // A reasoning detail in any other upstream format carries a
+                // payload shaped for that format's own replay contract;
+                // Converse's `reasoningContent` union models only the
+                // Anthropic one, so there is no wire form to translate a
+                // foreign-format detail into. Forwarding the payload under
+                // the Anthropic shape would ship a signature Bedrock then
+                // rejects as invalid. Baked seed verdict pending this lane's
+                // own replay evidence; recorded on the tally so a turn with
+                // several foreign details still emits one aggregated WARN.
+                // TRANSLATION-DROP: lane=bedrock-converse class=reasoning_foreign_format_unsupported test=foreign_format_reasoning_detail_warns_and_bumps_the_drop_counter_once
                 if detail.format.as_deref() != Some(crate::anthropic_api::ANTHROPIC_FORMAT) {
+                    reasoning.record_foreign_format_skip();
                     continue;
                 }
                 let thinking = detail
@@ -387,6 +469,7 @@ fn emit_reasoning_blocks_converse(
                     // replay and 400s without it. Skip the block so replay
                     // doesn't fail on a guaranteed-bad echo; aggregate the
                     // WARN to avoid per-detail log spam.
+                    // TRANSLATION-DROP: lane=bedrock-converse class=reasoning_signature_missing test=unsigned_reasoning_skip_bumps_the_drop_counter_once
                     reasoning.record_unsigned(message_index, detail.index);
                     continue;
                 }
@@ -400,7 +483,14 @@ fn emit_reasoning_blocks_converse(
                 });
             }
             ReasoningDetailKind::Encrypted => {
+                // Same foreign-format reasoning as the `Text` arm above, and
+                // the same aggregated tally category: the redacted payload of
+                // a non-Anthropic format is opaque bytes whose meaning is
+                // defined by that format, so re-labelling it as Converse
+                // `redactedContent` would ship bytes the upstream cannot read.
+                // TRANSLATION-DROP: lane=bedrock-converse class=reasoning_foreign_format_unsupported test=foreign_format_reasoning_detail_warns_and_bumps_the_drop_counter_once
                 if detail.format.as_deref() != Some(crate::anthropic_api::ANTHROPIC_FORMAT) {
+                    reasoning.record_foreign_format_skip();
                     continue;
                 }
                 let data = detail
@@ -426,6 +516,7 @@ fn emit_reasoning_blocks_converse(
                 // evidence exists. Recorded on the tally rather than
                 // logged here so a turn with several such details in a
                 // row still emits one aggregated WARN.
+                // TRANSLATION-DROP: lane=bedrock-converse class=reasoning_summary_unsupported test=summary_reasoning_detail_warns_and_bumps_the_drop_counter_once
                 reasoning.record_summary_skip();
             }
         }
@@ -438,12 +529,17 @@ fn emit_reasoning_blocks_converse(
 /// kind has no Converse `reasoningContent` wire shape at all. Threaded
 /// through the assistant path from `build_messages` so a history with
 /// several affected turns emits ONE WARN per category instead of one per
-/// turn. Mirrors `anthropic_api::messages::ReasoningSkipTally`, minus its
-/// foreign-format category: a non-`anthropic-claude-v1` detail has no
-/// Converse wire equivalent and drops silently here.
+/// turn. Mirrors `anthropic_api::messages::ReasoningSkipTally`.
 ///
-/// `skipped_count`, `turns_affected`, and `summary_skipped_count` are
-/// exact; `skipped_locations` is a bounded SAMPLE and its `truncated()`
+/// Three categories, kept separate because their remediations differ: a
+/// missing signature is a signing defect upstream, a no-wire-shape kind is
+/// a permanent representability gap on this lane, and a foreign detail
+/// FORMAT is a replay-provenance mismatch (the detail was minted by a
+/// different upstream dialect than the one this egress replays).
+///
+/// `skipped_count`, `turns_affected`, `summary_skipped_count`, and
+/// `foreign_format_skipped_count` are exact; `skipped_locations` is a
+/// bounded SAMPLE and its `truncated()`
 /// flag -- never a count comparison -- says whether anything was dropped
 /// from it. Each location is `(message_index, detail_index)`: every
 /// message's `reasoning_details` carries its own index space, so a bare
@@ -459,12 +555,12 @@ struct ReasoningSkipTally<'a> {
     last_turn: Option<usize>,
     skipped_locations: BoundedLogSample<(usize, Option<u32>)>,
     /// Count of details dropped for having no Converse wire shape
-    /// (`Summary` or an unrecognized kind). Kept separate from
-    /// `skipped_count` because the two categories have different
-    /// remediations: a missing signature is a signing defect upstream,
-    /// while a no-wire-shape kind is a permanent representability gap on
-    /// this lane.
+    /// (`Summary` or an unrecognized kind).
     summary_skipped_count: usize,
+    /// Count of details dropped because their `format` tag is not the one
+    /// this egress replays, so no Converse `reasoningContent` member can
+    /// carry their payload faithfully.
+    foreign_format_skipped_count: usize,
 }
 
 impl<'a> ReasoningSkipTally<'a> {
@@ -476,6 +572,7 @@ impl<'a> ReasoningSkipTally<'a> {
             last_turn: None,
             skipped_locations: BoundedLogSample::new(),
             summary_skipped_count: 0,
+            foreign_format_skipped_count: 0,
         }
     }
 
@@ -497,6 +594,12 @@ impl<'a> ReasoningSkipTally<'a> {
         self.summary_skipped_count = self.summary_skipped_count.saturating_add(1);
     }
 
+    /// Record one reasoning detail dropped because its `format` tag is not
+    /// the one this egress replays.
+    const fn record_foreign_format_skip(&mut self) {
+        self.foreign_format_skipped_count = self.foreign_format_skipped_count.saturating_add(1);
+    }
+
     /// Emit the aggregated WARN(s), if anything was skipped, and bump the
     /// per-request translation-drop counters. Called exactly once per
     /// request from `build_messages`, on both the Ok and the Err arm --
@@ -516,6 +619,7 @@ impl<'a> ReasoningSkipTally<'a> {
                 "skipping Thinking blocks on Converse replay: signature missing or empty; \
                  Bedrock Converse requires a signature on replayed reasoningContent blocks"
             );
+            record_translation_drop("bedrock-converse", "reasoning_signature_missing");
         }
         if self.summary_skipped_count > 0 {
             tracing::warn!(
@@ -525,6 +629,15 @@ impl<'a> ReasoningSkipTally<'a> {
                  reasoningContent wire shape (reasoning summary or an unrecognized kind)"
             );
             record_translation_drop("bedrock-converse", "reasoning_summary_unsupported");
+        }
+        if self.foreign_format_skipped_count > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                skipped_count = self.foreign_format_skipped_count,
+                "skipping reasoning details on Converse egress: detail format is not the \
+                 one this egress replays, so no reasoningContent member can carry it"
+            );
+            record_translation_drop("bedrock-converse", "reasoning_foreign_format_unsupported");
         }
     }
 }
@@ -540,15 +653,17 @@ fn append_converse_content_blocks(
     content: &MessageContent,
     blocks: &mut Vec<ConverseContentBlock>,
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<()> {
     match content {
         MessageContent::Text(t) if !t.is_empty() => {
             blocks.push(ConverseContentBlock::Text { text: t.clone() });
         }
+        // TRANSLATION-DROP: structural -- an empty or Null text body carries no characters to emit, and a reasoning-only assistant turn is a valid Converse shape
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
-            let more = content_blocks_from_parts(id, &cleaned, tally)?;
+            let more = content_blocks_from_parts(id, &cleaned, tally, content_drops)?;
             blocks.extend(more);
         }
     }
@@ -559,11 +674,12 @@ fn content_blocks_with_cache_control(
     id: &str,
     content: &MessageContent,
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Vec<ConverseContentBlock>> {
     match content {
         MessageContent::Text(t) => Ok(vec![ConverseContentBlock::Text { text: t.clone() }]),
         MessageContent::Null => Ok(Vec::new()),
-        MessageContent::Parts(parts) => content_blocks_from_parts(id, parts, tally),
+        MessageContent::Parts(parts) => content_blocks_from_parts(id, parts, tally, content_drops),
     }
 }
 
@@ -576,10 +692,11 @@ fn content_blocks_from_parts(
     id: &str,
     parts: &[ContentPart],
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Vec<ConverseContentBlock>> {
     let mut out: Vec<ConverseContentBlock> = Vec::with_capacity(parts.len());
     for p in parts {
-        if let Some(block) = translate_content_part(id, p, tally)? {
+        if let Some(block) = translate_content_part(id, p, tally, content_drops)? {
             let cc = p.cache_control().cloned();
             out.push(block);
             if let Some(cc) = cc {
@@ -605,9 +722,10 @@ fn translate_content_part(
     id: &str,
     p: &ContentPart,
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Option<ConverseContentBlock>> {
     match p {
-        ContentPart::Known(k) => translate_known_part(id, k, tally),
+        ContentPart::Known(k) => translate_known_part(id, k, tally, content_drops),
         // Re-wrap the catchall as the AWS single-key union -- the exact
         // inverse of the response decoder's tag/extras split -- so an
         // unmodeled Converse block preserved on a prior response turn
@@ -634,13 +752,16 @@ fn translate_known_part(
     id: &str,
     k: &KnownContentPart,
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Option<ConverseContentBlock>> {
     match k {
         KnownContentPart::Text { text, .. } => {
             Ok(Some(ConverseContentBlock::Text { text: text.clone() }))
         }
-        KnownContentPart::Image { source, .. } => translate_image_source(id, source),
-        KnownContentPart::ImageUrl { image_url, .. } => translate_image_url(id, image_url),
+        KnownContentPart::Image { source, .. } => translate_image_source(id, source, content_drops),
+        KnownContentPart::ImageUrl { image_url, .. } => {
+            translate_image_url(id, image_url, content_drops)
+        }
         KnownContentPart::Document {
             source,
             title,
@@ -652,6 +773,7 @@ fn translate_known_part(
             title.as_deref(),
             citations.as_ref(),
             tally,
+            content_drops,
         )?),
         // OpenAI-shape file part. Reuse the document translator by first
         // rewriting the base64 `file_data` data URI into the canonical
@@ -660,11 +782,17 @@ fn translate_known_part(
         // type) drop with a WARN -- the JSON Converse wire cannot carry a
         // raw OpenAI file block, so passthrough is not an option here
         // (mirrors how `translate_image_url` drops unsupported refs).
+        // Lane: bedrock-converse, construction-time translation, and
+        // cross-dialect by construction. Baked seed verdict per
+        // foundations sec 14: deletion stays blocked until this lane's own
+        // wire evidence contradicts it.
+        // TRANSLATION-DROP: lane=bedrock-converse class=file_part_unrepresentable test=untranslatable_file_part_bumps_the_drop_counter_once
         KnownContentPart::File { file, .. } => {
             if let Some((source, title)) = file_data_to_document_source(file) {
                 // An OpenAI-shape file part has no citations carrier.
-                translate_document(id, &source, title.as_deref(), None, tally)
+                translate_document(id, &source, title.as_deref(), None, tally, content_drops)
             } else {
+                content_drops.file_part_unrepresentable = true;
                 tracing::warn!(
                     provider = id,
                     "dropping file part on Converse egress; only base64 PDF data URIs are supported"
@@ -758,7 +886,15 @@ fn translate_known_part(
 /// Required-field structure is checked BEFORE representability, so an
 /// empty-`data` part whose `media_type` is also unmapped reports the broken
 /// field rather than hiding behind the unsupported-media drop.
-fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseContentBlock>> {
+///
+/// Both unrepresentable arms are baked seed verdicts per foundations sec
+/// 14: deletion stays blocked until this lane's own wire evidence
+/// contradicts them.
+fn translate_image_source(
+    id: &str,
+    source: &Value,
+    content_drops: &mut ContentDropTally,
+) -> Result<Option<ConverseContentBlock>> {
     let Some(obj) = source.as_object() else {
         return Err(Error::normalize_request(
             id,
@@ -796,6 +932,8 @@ fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseCon
         // Forward-compat: an unknown but nonempty source shape may be a
         // valid vendor extension a later build learns. Erroring here would
         // 400 traffic that works the day one ships.
+        // TRANSLATION-DROP: lane=bedrock-converse class=image_source_unrepresentable test=unrepresentable_image_source_bumps_the_drop_counter_once
+        content_drops.image_source_unrepresentable = true;
         tracing::warn!(
             provider = id,
             source_type = %sanitize_for_log(kind),
@@ -826,6 +964,10 @@ fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseCon
         ));
     };
     let Some(format) = media_type_to_image_format(media_type) else {
+        // AWS's image format table is bounded and the caller did nothing
+        // wrong; the bytes simply have no `image.format` value to ride.
+        // TRANSLATION-DROP: lane=bedrock-converse class=image_media_type_unsupported test=unmapped_image_media_type_bumps_the_drop_counter_once
+        content_drops.image_media_type_unsupported = true;
         tracing::warn!(
             provider = id,
             media_type = %sanitize_for_log(media_type),
@@ -851,7 +993,14 @@ fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseCon
 /// Converse wire, so it drops with a WARN. A `data:` URI declaring base64
 /// with an empty payload is the same "asked to send bytes, named none"
 /// shape as an empty `source.data` and fails alongside it.
-fn translate_image_url(id: &str, image_url: &Value) -> Result<Option<ConverseContentBlock>> {
+///
+/// The warn-drop is a baked seed verdict per foundations sec 14: deletion
+/// stays blocked until this lane's own wire evidence contradicts it.
+fn translate_image_url(
+    id: &str,
+    image_url: &Value,
+    content_drops: &mut ContentDropTally,
+) -> Result<Option<ConverseContentBlock>> {
     let Some(url) = image_url
         .get("url")
         .and_then(|v| v.as_str())
@@ -884,6 +1033,11 @@ fn translate_image_url(id: &str, image_url: &Value) -> Result<Option<ConverseCon
             }));
         }
     }
+    // A well-formed reference this JSON wire cannot dereference: Converse
+    // carries inline bytes only, so there is no `image.source` member a URL
+    // could translate onto.
+    // TRANSLATION-DROP: lane=bedrock-converse class=image_url_unrepresentable test=unrepresentable_image_url_bumps_the_drop_counter_once
+    content_drops.image_url_unrepresentable = true;
     tracing::warn!(
         provider = id,
         "dropping image_url on Converse egress; only base64 data URIs are supported"
@@ -962,12 +1116,17 @@ fn media_type_to_image_format(mt: &str) -> Option<String> {
 /// representability, so an empty-`data` document whose `media_type` is
 /// also unmapped reports the broken field rather than hiding behind the
 /// unsupported-media drop.
+///
+/// Both unrepresentable arms are baked seed verdicts per foundations sec
+/// 14: deletion stays blocked until this lane's own wire evidence
+/// contradicts them.
 fn translate_document(
     id: &str,
     source: &Value,
     title: Option<&str>,
     citations: Option<&Value>,
     tally: &mut CitationsDropTally<'_>,
+    content_drops: &mut ContentDropTally,
 ) -> Result<Option<ConverseContentBlock>> {
     let Some(obj) = source.as_object() else {
         return Err(Error::normalize_request(
@@ -991,6 +1150,8 @@ fn translate_document(
         // Forward-compat: an unknown but nonempty source kind (a URL ref,
         // or a shape a later build learns) may be legitimate. Erroring
         // here would 400 traffic that works the day one ships.
+        // TRANSLATION-DROP: lane=bedrock-converse class=document_source_unrepresentable test=unrepresentable_document_source_bumps_the_drop_counter_once
+        content_drops.document_source_unrepresentable = true;
         tracing::warn!(
             provider = id,
             source_type = %sanitize_for_log(kind),
@@ -1025,6 +1186,10 @@ fn translate_document(
         ));
     };
     let Some(format) = media_type_to_document_format(media_type) else {
+        // AWS's document format table is bounded and the caller did nothing
+        // wrong; the body simply has no `document.format` value to ride.
+        // TRANSLATION-DROP: lane=bedrock-converse class=document_media_type_unsupported test=unmapped_document_media_type_bumps_the_drop_counter_once
+        content_drops.document_media_type_unsupported = true;
         tracing::warn!(
             provider = id,
             media_type = %sanitize_for_log(media_type),
@@ -1328,6 +1493,7 @@ impl<'a> ToolResultCacheControlDropTally<'a> {
 /// wire slot at THIS position to forward the marker into. This drop is a
 /// baked seed verdict: it stands until this lane's own wire evidence
 /// contradicts it, and it is not eligible for deletion until then.
+// TRANSLATION-DROP: lane=bedrock-converse class=tool_result_cache_control test=nested_tool_result_cache_control_marker_drops_and_warns
 const fn drop_nested_tool_result_cache_control(tally: &mut ToolResultCacheControlDropTally<'_>) {
     tally.record();
 }
@@ -1521,9 +1687,11 @@ fn image_source_to_tool_result(
     id: &str,
     source: &Value,
 ) -> Result<Option<ConverseToolResultContent>> {
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     let Some(obj) = source.as_object() else {
         return Ok(None);
     };
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     let Some(kind) = obj
         .get("type")
         .and_then(|v| v.as_str())
@@ -1531,6 +1699,7 @@ fn image_source_to_tool_result(
     else {
         return Ok(None);
     };
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     if kind != "base64" {
         return Ok(None);
     }
@@ -1556,6 +1725,7 @@ fn image_source_to_tool_result(
              source.data is absent, empty, or not a string",
         ));
     };
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     let Some(format) = media_type_to_image_format(media_type) else {
         return Ok(None);
     };
@@ -1592,9 +1762,11 @@ fn document_to_tool_result(
     citations: Option<&Value>,
     tally: &mut CitationsDropTally<'_>,
 ) -> Result<Option<ConverseToolResultContent>> {
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     let Some(obj) = source.as_object() else {
         return Ok(None);
     };
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     let Some(kind) = obj
         .get("type")
         .and_then(|v| v.as_str())
@@ -1624,6 +1796,7 @@ fn document_to_tool_result(
              source.data is absent, empty, or not a string",
         ));
     };
+    // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
     let Some(format) = media_type_to_document_format(media_type) else {
         return Ok(None);
     };
@@ -1872,6 +2045,7 @@ mod tests {
 
     /// Non-anthropic-claude-v1 format reasoning details must be ignored.
     #[test]
+    #[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
     fn non_anthropic_format_reasoning_detail_is_skipped() {
         // Arrange
         let detail = ReasoningDetail {
@@ -2067,6 +2241,7 @@ mod tests {
     /// can carry, so it is dropped with a diagnostic. A sibling Text block
     /// confirms only the file part was dropped.
     #[test]
+    #[serial_test::serial(bedrock_converse_file_part_unrepresentable)]
     fn file_id_only_part_is_dropped_on_converse() {
         // Arrange
         use routectl_core::KnownContentPart;
@@ -2115,6 +2290,7 @@ mod tests {
     /// egress helper. A sibling Text block confirms only the file part was
     /// dropped, not the whole message.
     #[test]
+    #[serial_test::serial(bedrock_converse_file_part_unrepresentable)]
     fn non_pdf_file_part_is_dropped_on_converse() {
         // Arrange
         use routectl_core::KnownContentPart;
@@ -2165,6 +2341,7 @@ mod tests {
     /// dropped (the caller-contract promises a tracing diagnostic on every
     /// drop). A sibling Text block confirms only the image was dropped.
     #[test]
+    #[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
     fn image_with_unmapped_media_type_is_dropped() {
         // Arrange
         use routectl_core::KnownContentPart;
@@ -2830,9 +3007,14 @@ mod tests {
             is_error: None,
             cache_control: None,
         };
-        let block = translate_known_part("test", &part, &mut CitationsDropTally::new("test"))
-            .expect("ToolResult part must translate")
-            .expect("ToolResult part must produce a block");
+        let block = translate_known_part(
+            "test",
+            &part,
+            &mut CitationsDropTally::new("test"),
+            &mut ContentDropTally::default(),
+        )
+        .expect("ToolResult part must translate")
+        .expect("ToolResult part must produce a block");
         match block {
             ConverseContentBlock::ToolResult { tool_result } => tool_result.content,
             other => panic!("expected a ToolResult block, got {other:?}"),
@@ -3759,7 +3941,19 @@ mod tests {
     /// validation, so a raw `\n` would forge a whole log line and a raw ANSI
     /// CSI sequence would scroll an operator's terminal. Every one must emit
     /// through `sanitize_for_log`.
+    ///
+    /// Guarded on the image drop classes it reaches INCIDENTALLY: this test
+    /// is about log sanitizing, not counters, but its fixture drives both an
+    /// unrepresentable source shape and an unmapped media type through the
+    /// process-global registry, so an unguarded run lands inside another
+    /// test's before/after window.
     #[test]
+    #[serial_test::serial(
+        bedrock_converse_image_source_unrepresentable,
+        bedrock_converse_image_media_type_unsupported,
+        bedrock_converse_document_source_unrepresentable,
+        bedrock_converse_document_media_type_unsupported
+    )]
     fn converse_warn_drop_fields_carry_no_raw_control_characters() {
         // Arrange: one hostile string reused for every field, carrying a
         // newline, a carriage return, and an ANSI erase-display sequence.

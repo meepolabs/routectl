@@ -281,6 +281,7 @@ fn tool_with_cache_control_emits_sibling_cache_point_in_tools_array() {
 }
 
 #[test]
+#[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
 fn anthropic_builtin_tool_dropped_under_non_strict() {
     // Arrange: a builtin tool (web_search) arrives via ToolDef::Other
     // -- canonical considers it an Anthropic builtin, no Converse
@@ -806,6 +807,7 @@ fn document_content_block_translates_to_aws_document_block() {
 }
 
 #[test]
+#[serial_test::serial(bedrock_converse_image_url_unrepresentable)]
 fn dropped_image_url_with_cache_control_does_not_emit_orphan_cache_point() {
     // Arrange: a non-data-URI image_url carries no inline bytes the JSON
     // Converse wire can carry, so the translator drops it. When such a
