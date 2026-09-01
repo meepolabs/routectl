@@ -20,6 +20,7 @@ fn run_translate(messages: &[Message]) -> (Result<Vec<ConverseMessage>>, Vec<Cap
     let mut tally = CitationsDropTally::new(TEST_ID);
     let mut reasoning = ReasoningSkipTally::new(TEST_ID);
     let mut cc_tally = ToolResultCacheControlDropTally::new(TEST_ID);
+    let mut content_drops = ContentDropTally::default();
     let mut out = None;
     let events = capture_events(|| {
         out = Some(translate_messages(
@@ -28,6 +29,7 @@ fn run_translate(messages: &[Message]) -> (Result<Vec<ConverseMessage>>, Vec<Cap
             &mut tally,
             &mut reasoning,
             &mut cc_tally,
+            &mut content_drops,
         ));
     });
     (out.expect("closure always runs"), events)

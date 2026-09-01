@@ -80,6 +80,7 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
                 // rejects a `{cachePoint}` with no preceding content block.
                 // Skip the whole entry so a verbatim-preserved empty block
                 // with cache_control doesn't emit a leading/orphan marker.
+                // TRANSLATION-DROP: structural -- a whitespace-only system block carries no instruction text, so skipping it removes no content from the emitted system array
                 if b.text.trim().is_empty() {
                     continue;
                 }

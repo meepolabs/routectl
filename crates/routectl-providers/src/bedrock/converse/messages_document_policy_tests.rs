@@ -391,6 +391,7 @@ fn tool_result_document_with_absent_media_type_fails_the_request() {
 /// unrepresentable, not malformed -- AWS's format table is bounded and the
 /// caller did nothing wrong. Pinned so the fix cannot over-reach.
 #[test]
+#[serial_test::serial(bedrock_converse_document_media_type_unsupported)]
 fn structurally_complete_unmapped_document_media_type_still_warn_drops() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -414,6 +415,7 @@ fn structurally_complete_unmapped_document_media_type_still_warn_drops() {
 /// cannot dereference. Tightening either to an error would 400 working
 /// traffic, so the forward-compat default is pinned here.
 #[test]
+#[serial_test::serial(bedrock_converse_document_source_unrepresentable)]
 fn unrecognized_document_source_kind_still_warn_drops() {
     // Arrange
     for kind in ["url", "some-future-source-kind"] {
@@ -439,6 +441,7 @@ fn unrecognized_document_source_kind_still_warn_drops() {
 /// never happens, so the document policy is never reached. Pinned because a
 /// naive "documents now error" reading would break these shapes.
 #[test]
+#[serial_test::serial(bedrock_converse_file_part_unrepresentable)]
 fn untranslatable_file_parts_still_warn_drop() {
     // Arrange
     for file in [
@@ -606,6 +609,7 @@ fn malformed_document_errors_never_echo_a_caller_value() {
 /// without a flush on the `Err` path both are silently swallowed and only
 /// the translation failure surfaces.
 #[test]
+#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn tallies_recorded_before_a_malformed_document_still_flush_on_the_error_path() {
     // Arrange: turn 0 drops a citations value, turn 1 skips an unsigned
     // reasoning detail, turn 2 carries the malformed document.

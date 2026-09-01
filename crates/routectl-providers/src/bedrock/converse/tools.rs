@@ -60,6 +60,7 @@ pub(super) fn build_tool_config(
     // present, so emitting tools-without-toolChoice would let the
     // model call tools the caller forbade. A `"none"` caller explicitly
     // forbade tools, so the dummy backfill never runs under it.
+    // TRANSLATION-DROP: structural -- a "none" tool_choice is the caller forbidding tool use, so omitting toolConfig delivers their instruction rather than losing it
     if is_tool_choice_none(req.tool_choice.as_ref()) {
         return Ok(None);
     }
@@ -67,8 +68,18 @@ pub(super) fn build_tool_config(
     let tools: Vec<ConverseToolDef> = match req.tools.as_ref() {
         Some(canonical) => {
             let mut out = Vec::with_capacity(canonical.len());
+            let mut builtin_dropped = false;
             for td in canonical {
-                append_tool_with_cache_point(id, td, &mut out);
+                append_tool_with_cache_point(id, td, &mut out, &mut builtin_dropped);
+            }
+            if builtin_dropped {
+                // Once per REQUEST, not once per dropped tool: a request
+                // offering three builtins is one drop event against this
+                // lane's request-volume denominator.
+                crate::translation_drop_metrics::record_translation_drop(
+                    "bedrock-converse",
+                    "builtin_tool_unrepresentable",
+                );
             }
             out
         }
@@ -90,6 +101,7 @@ pub(super) fn build_tool_config(
             );
             return Ok(Some(dummy_tool_config()));
         }
+        // TRANSLATION-DROP: structural -- no tool def reached this point, so an absent toolConfig is the accurate wire shape; each tool that failed to translate was accounted for at its own arm
         return Ok(None);
     }
     let tool_choice = translate_tool_choice(id, req.tool_choice.as_ref());
@@ -153,7 +165,16 @@ fn is_tool_choice_none(tc: Option<&Value>) -> bool {
 /// `{cachePoint}` block. Per AWS docs, `toolConfig.tools` is a union of
 /// `{toolSpec}` and `{cachePoint}` entries -- emitting two adjacent
 /// items is the wire-correct way to mark a cached tool.
-fn append_tool_with_cache_point(id: &str, td: &ToolDef, out: &mut Vec<ConverseToolDef>) {
+///
+/// `builtin_dropped` is set when an Anthropic-builtin tool is discarded, so
+/// the caller can bump the drop counter once for the whole request rather
+/// than once per dropped tool.
+fn append_tool_with_cache_point(
+    id: &str,
+    td: &ToolDef,
+    out: &mut Vec<ConverseToolDef>,
+    builtin_dropped: &mut bool,
+) {
     let (spec, cache_control) = match td {
         ToolDef::Custom(c) => (custom_tool_to_converse(c), c.cache_control.clone()),
         ToolDef::Other(_) => match translate_tool(td) {
@@ -173,7 +194,19 @@ fn append_tool_with_cache_point(id: &str, td: &ToolDef, out: &mut Vec<ConverseTo
                 },
                 cache_control,
             ),
+            // An Anthropic server-side builtin (web_search, computer_use,
+            // ...) is a tool the PROVIDER implements, named by tag with no
+            // caller-supplied schema. Converse's `toolConfig.tools` union
+            // models only `{toolSpec}` and `{cachePoint}`, so there is no
+            // member to translate a builtin onto -- and synthesizing a
+            // `toolSpec` for it would offer the model a tool nothing can
+            // execute. Lane: bedrock-converse, construction-time
+            // translation, cross-dialect by construction. Baked seed
+            // verdict per foundations sec 14: deletion stays blocked until
+            // this lane's own wire evidence contradicts it.
+            // TRANSLATION-DROP: lane=bedrock-converse class=builtin_tool_unrepresentable test=anthropic_builtin_tool_drops_and_bumps_the_drop_counter_once
             AnthropicTool::Builtin(_) => {
+                *builtin_dropped = true;
                 tracing::warn!(
                     provider = id,
                     "dropping Anthropic-builtin tool on Converse egress; \
@@ -591,5 +624,156 @@ mod tests {
 
         // Assert: the newly-covered path is never a silent mutation.
         assert!(logs_contain("injecting reserved dummy toolSpec"));
+    }
+
+    // -----------------------------------------------------------------
+    // The Anthropic-builtin tool drop and its per-request
+    // `(bedrock-converse, builtin_tool_unrepresentable)` counter. Log
+    // capture here uses `routectl_testkit::capture_events` rather than
+    // `logs_contain`: the structured `provider` field is part of what the
+    // drop reports, and a substring match on rendered output cannot see it.
+    // Serialized on the drop_class's own guard because the counter registry
+    // is process-global and this crate's runner is threaded.
+    // -----------------------------------------------------------------
+
+    fn builtin_tool() -> ToolDef {
+        ToolDef::Other(json!({
+            "type": "web_search_20250901",
+            "name": "sentinel_builtin_tool",
+        }))
+    }
+
+    fn builtin_drop_count() -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| {
+                e.lane == "bedrock-converse" && e.drop_class == "builtin_tool_unrepresentable"
+            })
+            .map_or(0, |e| e.drop_count)
+    }
+
+    /// The emitted `toolConfig` wire value, so the absence assertion runs
+    /// against the serialized body rather than the typed vec.
+    fn emitted_tool_config(request: &ChatRequest) -> Value {
+        let cfg = build_tool_config(ID, request, &[]).expect("translation ok");
+        serde_json::to_value(&cfg).expect("toolConfig must serialize")
+    }
+
+    /// NEGATIVE CONTROL. A builtin has no `toolSpec` shape to translate onto,
+    /// so it drops; the counter advances once and the representable sibling
+    /// still ships.
+    #[test]
+    #[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
+    fn anthropic_builtin_tool_drops_and_bumps_the_drop_counter_once() {
+        // Arrange
+        let before = builtin_drop_count();
+        let request = ChatRequest {
+            tools: Some(vec![builtin_tool(), custom_tool()]),
+            ..Default::default()
+        };
+
+        // Act
+        let mut wire = Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            wire = emitted_tool_config(&request);
+        });
+        let after = builtin_drop_count();
+
+        // Assert 1 -- the WARN fired, carrying the provider id as a field.
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message
+                        .contains("dropping Anthropic-builtin tool on Converse egress")
+            })
+            .unwrap_or_else(|| panic!("the builtin drop must warn; got: {events:?}"));
+        assert_eq!(warn.field("provider"), Some(ID));
+
+        // Assert 2 -- the builtin's name is absent from the EMITTED WIRE
+        // VALUE, not merely from the typed tool vec.
+        assert!(
+            !wire.to_string().contains("sentinel_builtin_tool"),
+            "the builtin must not reach the upstream in any form; emitted toolConfig: {wire}"
+        );
+
+        // Assert 3 -- positive control: the representable custom tool
+        // survived in that same emitted value.
+        assert!(
+            wire.to_string().contains("get_weather"),
+            "the representable sibling tool must survive; emitted toolConfig: {wire}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the builtin-drop counter must advance by exactly one for this request"
+        );
+    }
+
+    /// Two builtins in ONE request is one drop EVENT, not two -- the counter
+    /// is bumped once per `build_tool_config` call, which is the placement
+    /// this assertion pins.
+    #[test]
+    #[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
+    fn two_builtin_tools_in_one_request_bump_the_drop_counter_once() {
+        // Arrange
+        let before = builtin_drop_count();
+        let request = ChatRequest {
+            tools: Some(vec![
+                builtin_tool(),
+                ToolDef::Other(json!({"type": "computer_20250124", "name": "computer"})),
+                custom_tool(),
+            ]),
+            ..Default::default()
+        };
+
+        // Act
+        let _ = build_tool_config(ID, &request, &[]).expect("translation ok");
+        let after = builtin_drop_count();
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "two dropped builtins in one request is one drop event, not two"
+        );
+    }
+
+    /// POSITIVE CONTROL: a request offering only representable custom tools
+    /// warns not at all and advances no counter, proving the fixture above
+    /// would have surfaced a WARN not actually tied to the builtin.
+    #[test]
+    #[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
+    fn custom_tools_only_advance_no_builtin_drop_counter() {
+        // Arrange
+        let before = builtin_drop_count();
+        let request = ChatRequest {
+            tools: Some(vec![custom_tool()]),
+            ..Default::default()
+        };
+
+        // Act
+        let mut wire = Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            wire = emitted_tool_config(&request);
+        });
+        let after = builtin_drop_count();
+
+        // Assert
+        assert!(
+            wire.to_string().contains("get_weather"),
+            "a representable tool must reach the upstream; emitted toolConfig: {wire}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.level == tracing::Level::WARN && e.message.contains("dropping")),
+            "nothing was unrepresentable, so no drop WARN is owed; got: {events:?}"
+        );
+        assert_eq!(
+            after, before,
+            "a request with nothing dropped must not advance the counter"
+        );
     }
 }

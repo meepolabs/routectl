@@ -83,6 +83,7 @@ fn find_unsigned_warn(events: &[CapturedEvent]) -> &CapturedEvent {
 /// overflow the cap after the second turn, so the sample is the first
 /// eight locations -- the counts, not the sample, carry the magnitude.
 #[test]
+#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_warn_aggregates_every_turn_and_caps_the_location_sample() {
     // Arrange: 3 assistant turns at message indices 0, 1, 2; 4 unsigned
     // details each, so 12 skips against a sample capped at 8.
@@ -133,6 +134,7 @@ fn unsigned_reasoning_warn_aggregates_every_turn_and_caps_the_location_sample() 
 /// upstream never supplied stays `None` rather than being flattened to a
 /// plausible 0.
 #[test]
+#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_warn_names_every_turn_and_keeps_a_missing_detail_index() {
     // Arrange: 3 assistant turns at message indices 0, 1, 2 with 2
     // unsigned details each -- 6 skips, under the cap. The first detail
@@ -200,6 +202,7 @@ fn signed_reasoning_details_emit_no_unsigned_warn() {
 /// flush on the error arm the recorded skip is silently swallowed and the
 /// operator sees only the translation failure.
 #[test]
+#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
     // Arrange
     let messages = vec![
@@ -393,5 +396,278 @@ fn wire_representable_reasoning_details_emit_no_summary_warn_or_drop() {
         reasoning_summary_drop_count(),
         before,
         "a request with nothing dropped must not advance the drop counter"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The two remaining reasoning drop classes and their per-request counters:
+// a detail whose `format` tag is not the one this egress replays, and a
+// Text detail whose signature is missing or empty. Both were already
+// skipped; neither was counted. Serialized on their own drop_class names,
+// which must also cover every test elsewhere in the crate that reaches the
+// same arm -- the unsigned tests above included.
+// ---------------------------------------------------------------------------
+
+const FOREIGN_FORMAT_WARN_NEEDLE: &str = "detail format is not the one this egress replays";
+
+fn foreign_format_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.message.contains(FOREIGN_FORMAT_WARN_NEEDLE))
+        .collect()
+}
+
+fn reasoning_drop_count(class: &str) -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "bedrock-converse" && e.drop_class == class)
+        .map_or(0, |e| e.drop_count)
+}
+
+/// A signed Text detail carrying a format tag this egress does not replay.
+/// Signed on purpose: the signature check sits BELOW the format guard, so a
+/// signed fixture proves the format guard is what dropped it.
+fn foreign_format_detail(kind: ReasoningDetailKind, payload: Value) -> ReasoningDetail {
+    ReasoningDetail {
+        kind,
+        id: None,
+        format: Some("some-other-upstream-v1".to_string()),
+        index: Some(0),
+        payload,
+    }
+}
+
+/// NEGATIVE CONTROL, `Text` arm. The format guard had zero tally and zero
+/// log before this: a foreign-format detail vanished with no trace at all,
+/// unlike the signature-empty case a few lines below it in the same arm.
+/// All three assertions run here -- the WARN, the absence from the EMITTED
+/// WIRE VALUE, and the surviving sibling.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
+fn foreign_format_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
+    // Arrange
+    let before = reasoning_drop_count("reasoning_foreign_format_unsupported");
+    let messages = vec![assistant_turn(vec![foreign_format_detail(
+        ReasoningDetailKind::Text,
+        json!({"text": "SENTINELFOREIGNTHOUGHT", "signature": "sig_present"}),
+    )])];
+
+    // Act
+    let mut wire = Value::Null;
+    let events = capture_events(|| {
+        let translated = build_messages(TEST_ID, &messages).expect("translation ok");
+        wire = serde_json::to_value(&translated).expect("the message vec must serialize");
+    });
+    let after = reasoning_drop_count("reasoning_foreign_format_unsupported");
+
+    // Assert 1 -- the WARN fired, with an exact skipped_count field.
+    let matches = foreign_format_warns(&events);
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one aggregated foreign-format WARN expected per request; got events: {events:?}"
+    );
+    assert_eq!(matches[0].level, tracing::Level::WARN);
+    assert_eq!(matches[0].field("skipped_count"), Some("1"));
+
+    // Assert 2 -- neither the thought text nor its signature reached the
+    // upstream in ANY form. Asserting on the serialized body rather than the
+    // typed block vec is what catches a payload riding inside an opaque
+    // member.
+    let body = wire.to_string();
+    assert!(
+        !body.contains("SENTINELFOREIGNTHOUGHT"),
+        "a foreign-format thought must not reach the upstream; emitted body: {body}"
+    );
+    assert!(
+        !body.contains("sig_present"),
+        "the foreign-format signature must not reach the upstream; emitted body: {body}"
+    );
+
+    // Assert 3 -- positive control: the turn's own text still shipped, so the
+    // fixture would have surfaced the thought had it ridden along.
+    assert!(
+        body.contains("ok"),
+        "the assistant turn's text must survive the dropped detail; emitted body: {body}"
+    );
+
+    assert_eq!(
+        after - before,
+        1,
+        "the foreign-format counter must advance by exactly one for this request"
+    );
+}
+
+/// The `Encrypted` arm carries the identical guard and feeds the same
+/// category, so a request mixing both arms is still ONE drop event. Pins
+/// that the two guards were not instrumented as two separate classes.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
+fn foreign_format_details_across_both_arms_bump_the_drop_counter_once() {
+    // Arrange
+    let before = reasoning_drop_count("reasoning_foreign_format_unsupported");
+    let messages = vec![assistant_turn(vec![
+        foreign_format_detail(
+            ReasoningDetailKind::Text,
+            json!({"text": "foreign thought", "signature": "sig_present"}),
+        ),
+        foreign_format_detail(
+            ReasoningDetailKind::Encrypted,
+            json!({"data": "SENTINELFOREIGNOPAQUE"}),
+        ),
+    ])];
+
+    // Act
+    let mut wire = Value::Null;
+    let events = capture_events(|| {
+        let translated = build_messages(TEST_ID, &messages).expect("translation ok");
+        wire = serde_json::to_value(&translated).expect("the message vec must serialize");
+    });
+    let after = reasoning_drop_count("reasoning_foreign_format_unsupported");
+
+    // Assert
+    let matches = foreign_format_warns(&events);
+    assert_eq!(
+        matches.len(),
+        1,
+        "both arms fold into ONE aggregated WARN; got events: {events:?}"
+    );
+    assert_eq!(
+        matches[0].field("skipped_count"),
+        Some("2"),
+        "the WARN's own count stays exact across both arms"
+    );
+    assert!(
+        !wire.to_string().contains("SENTINELFOREIGNOPAQUE"),
+        "the Encrypted arm's foreign payload must not reach the upstream; got: {wire}"
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "two foreign-format details in one request is one drop event, not two"
+    );
+}
+
+/// POSITIVE CONTROL: a detail carrying the format tag this egress DOES
+/// replay survives, emits no foreign-format WARN, and advances no
+/// foreign-format counter -- proving the guard keys on the format tag and
+/// not on something incidental to the fixture above.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
+fn replayed_format_reasoning_detail_emits_no_foreign_format_drop() {
+    // Arrange
+    let before = reasoning_drop_count("reasoning_foreign_format_unsupported");
+    let native = ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(0),
+        payload: json!({"text": "SURVIVINGTHOUGHT", "signature": "sig_present"}),
+    };
+    let messages = vec![assistant_turn(vec![native])];
+
+    // Act
+    let mut wire = Value::Null;
+    let events = capture_events(|| {
+        let translated = build_messages(TEST_ID, &messages).expect("translation ok");
+        wire = serde_json::to_value(&translated).expect("the message vec must serialize");
+    });
+    let after = reasoning_drop_count("reasoning_foreign_format_unsupported");
+
+    // Assert
+    assert!(
+        foreign_format_warns(&events).is_empty(),
+        "a detail in the replayed format is representable, so no WARN is owed; got: {events:?}"
+    );
+    assert!(
+        wire.to_string().contains("SURVIVINGTHOUGHT"),
+        "a representable detail must reach the upstream; emitted body: {wire}"
+    );
+    assert_eq!(
+        after, before,
+        "a request with nothing dropped must not advance the foreign-format counter"
+    );
+}
+
+/// The unsigned-signature skip was already tallied and warned but never
+/// counted. This pins its counter alongside the WARN the tests above
+/// already cover, and asserts the unsigned thought is absent from the
+/// EMITTED WIRE VALUE rather than merely from the typed block vec.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
+fn unsigned_reasoning_skip_bumps_the_drop_counter_once() {
+    // Arrange -- two unsigned details across two turns: still one event.
+    let before = reasoning_drop_count("reasoning_signature_missing");
+    let messages = vec![
+        assistant_turn(vec![unsigned_detail(Some(0))]),
+        assistant_turn(vec![unsigned_detail(Some(0))]),
+    ];
+
+    // Act
+    let mut wire = Value::Null;
+    let events = capture_events(|| {
+        let translated = build_messages(TEST_ID, &messages).expect("translation ok");
+        wire = serde_json::to_value(&translated).expect("the message vec must serialize");
+    });
+    let after = reasoning_drop_count("reasoning_signature_missing");
+
+    // Assert 1 -- the aggregated WARN fired with an exact count.
+    let warn = find_unsigned_warn(&events);
+    assert_eq!(warn.field("skipped_count"), Some("2"));
+
+    // Assert 2 -- the unsigned thought never reached the upstream. The
+    // fixture's payload text is `thinking`; a reasoningContent block would
+    // carry it verbatim.
+    let body = wire.to_string();
+    assert!(
+        !body.contains("reasoningContent"),
+        "an unsigned detail must emit no reasoningContent block; emitted body: {body}"
+    );
+
+    // Assert 3 -- positive control: the turns' own text still shipped.
+    assert!(
+        body.contains("ok"),
+        "the assistant turns' text must survive the dropped details; emitted body: {body}"
+    );
+
+    assert_eq!(
+        after - before,
+        1,
+        "two unsigned details across two turns is one drop event, not two"
+    );
+}
+
+/// POSITIVE CONTROL for the signature class: a signed detail in the
+/// replayed format produces its block and advances no counter.
+#[test]
+#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
+fn signed_reasoning_detail_emits_no_signature_missing_drop() {
+    // Arrange
+    let before = reasoning_drop_count("reasoning_signature_missing");
+    let signed = ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(0),
+        payload: json!({"text": "SIGNEDTHOUGHT", "signature": "sig_abc"}),
+    };
+    let messages = vec![assistant_turn(vec![signed])];
+
+    // Act
+    let mut wire = Value::Null;
+    capture_events(|| {
+        let translated = build_messages(TEST_ID, &messages).expect("translation ok");
+        wire = serde_json::to_value(&translated).expect("the message vec must serialize");
+    });
+    let after = reasoning_drop_count("reasoning_signature_missing");
+
+    // Assert
+    assert!(
+        wire.to_string().contains("SIGNEDTHOUGHT"),
+        "a signed detail must reach the upstream; emitted body: {wire}"
+    );
+    assert_eq!(
+        after, before,
+        "a request with nothing dropped must not advance the signature counter"
     );
 }
