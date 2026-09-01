@@ -32,6 +32,37 @@ use routectl_core::{ChatRequest, Error, Result};
 
 use super::reject_or_drop_unrepresentable;
 
+/// Per-request record of which inner-block drop classes fired, so the
+/// process-wide counters bump once per REQUEST rather than once per
+/// dropped block: a turn whose tool results carry three unrepresentable
+/// documents is one drop event an operator acts on, not three.
+#[derive(Default)]
+struct ToolResultDropTally {
+    document: bool,
+    image_source: bool,
+}
+
+impl ToolResultDropTally {
+    /// Bump the `(openai-compat, class)` counters for whatever fired.
+    /// Called exactly once per request from `lift`, which `lift_all` runs
+    /// exactly once. Only the lenient path reaches here -- strict mode
+    /// returns `Err` from the drop arm, so nothing lost is nothing counted.
+    fn flush(&self) {
+        if self.document {
+            crate::translation_drop_metrics::record_translation_drop(
+                "openai-compat",
+                "tool_result_document_unrepresentable",
+            );
+        }
+        if self.image_source {
+            crate::translation_drop_metrics::record_translation_drop(
+                "openai-compat",
+                "tool_result_image_source_unrepresentable",
+            );
+        }
+    }
+}
+
 pub fn lift(
     id: &str,
     obj: &mut Map<String, Value>,
@@ -40,22 +71,33 @@ pub fn lift(
 ) -> Result<()> {
     let messages = match obj.remove("messages") {
         Some(Value::Array(arr)) => arr,
+        // TRANSLATION-DROP: structural -- a non-array messages value is put back
+        // verbatim; this lift only reshapes an array of messages.
         Some(other) => {
             obj.insert("messages".into(), other);
             return Ok(());
         }
+        // TRANSLATION-DROP: structural -- no messages key means nothing to reshape.
         None => return Ok(()),
     };
 
+    let mut tally = ToolResultDropTally::default();
     let mut rewritten: Vec<Value> = Vec::with_capacity(messages.len());
     for msg in messages {
-        rewrite_message(id, msg, strict, &mut rewritten)?;
+        rewrite_message(id, msg, strict, &mut rewritten, &mut tally)?;
     }
     obj.insert("messages".into(), Value::Array(rewritten));
+    tally.flush();
     Ok(())
 }
 
-fn rewrite_message(id: &str, msg: Value, strict: bool, out: &mut Vec<Value>) -> Result<()> {
+fn rewrite_message(
+    id: &str,
+    msg: Value,
+    strict: bool,
+    out: &mut Vec<Value>,
+    tally: &mut ToolResultDropTally,
+) -> Result<()> {
     let role_is_user = msg
         .as_object()
         .and_then(|o| o.get("role"))
@@ -77,6 +119,8 @@ fn rewrite_message(id: &str, msg: Value, strict: bool, out: &mut Vec<Value>) -> 
         return Ok(());
     }
     // A tool_result is present: take ownership of the parts now.
+    // TRANSLATION-DROP: structural -- the else arm cannot be reached (the borrow
+    // check above already matched an array); the message rides on untouched.
     let parts = if let Some(Value::Array(parts)) = msg.as_object().and_then(|o| o.get("content")) {
         parts.clone()
     } else {
@@ -90,7 +134,7 @@ fn rewrite_message(id: &str, msg: Value, strict: bool, out: &mut Vec<Value>) -> 
     for part in parts {
         if part_is_tool_result(&part) {
             flush_user_chunk(&msg, &mut pending_user_chunk, out);
-            if let Some(tool_msg) = build_tool_message(id, &part, strict)? {
+            if let Some(tool_msg) = build_tool_message(id, &part, strict, tally)? {
                 out.push(tool_msg);
             }
         } else {
@@ -115,6 +159,9 @@ fn flush_user_chunk(template: &Value, pending: &mut Vec<Value>, out: &mut Vec<Va
     let mut new_msg = Map::new();
     if let Some(orig) = template.as_object() {
         for (k, v) in orig {
+            // TRANSLATION-DROP: structural -- the template's own content key is
+            // skipped only because the freshly-built chunk content replaces it two
+            // lines below; every other key is copied through.
             if k == "content" {
                 continue;
             }
@@ -139,7 +186,14 @@ fn is_text_block(part: &Value) -> bool {
         == Some("text")
 }
 
-fn build_tool_message(id: &str, part: &Value, strict: bool) -> Result<Option<Value>> {
+fn build_tool_message(
+    id: &str,
+    part: &Value,
+    strict: bool,
+    tally: &mut ToolResultDropTally,
+) -> Result<Option<Value>> {
+    // TRANSLATION-DROP: structural -- `part_is_tool_result` already proved this is
+    // an object, so this arm is unreachable defensive coding, not a drop.
     let obj = match part.as_object() {
         Some(o) => o,
         None => return Ok(None),
@@ -162,7 +216,7 @@ fn build_tool_message(id: &str, part: &Value, strict: bool) -> Result<Option<Val
         .get("content")
         .cloned()
         .unwrap_or(Value::String(String::new()));
-    let content = translate_tool_result_content(id, content, strict)?;
+    let content = translate_tool_result_content(id, content, strict, tally)?;
     let content = if is_error {
         mark_error_content(content)
     } else {
@@ -210,7 +264,12 @@ fn mark_error_content(content: Value) -> Value {
 ///   (document, unknown image source) are dropped (lenient) or rejected
 ///   (strict) via `reject_or_drop_unrepresentable`.
 /// - Object / scalar -> stringified JSON
-fn translate_tool_result_content(id: &str, content: Value, strict: bool) -> Result<Value> {
+fn translate_tool_result_content(
+    id: &str,
+    content: Value,
+    strict: bool,
+    tally: &mut ToolResultDropTally,
+) -> Result<Value> {
     match content {
         Value::String(_) => Ok(content),
         Value::Array(arr) => {
@@ -230,7 +289,7 @@ fn translate_tool_result_content(id: &str, content: Value, strict: bool) -> Resu
             }
             let mut lifted: Vec<Value> = Vec::with_capacity(arr.len());
             for block in arr {
-                if let Some(out) = lift_inner_block(id, block, strict)? {
+                if let Some(out) = lift_inner_block(id, block, strict, tally)? {
                     lifted.push(out);
                 }
             }
@@ -247,14 +306,30 @@ fn translate_tool_result_content(id: &str, content: Value, strict: bool) -> Resu
 /// `Err` when strict mode rejects an unrepresentable shape. Recognized
 /// base64 / url image blocks lift to `image_url`; all other recognized
 /// blocks pass through with Anthropic-only `cache_control` stripped.
-fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value>> {
+fn lift_inner_block(
+    id: &str,
+    block: Value,
+    strict: bool,
+    tally: &mut ToolResultDropTally,
+) -> Result<Option<Value>> {
+    // TRANSLATION-DROP: structural -- a non-object or untagged inner block rides
+    // through verbatim; nothing is lost.
     let Some(obj) = block.as_object() else {
         return Ok(Some(block));
     };
     let Some(t) = obj.get("type").and_then(|v| v.as_str()) else {
         return Ok(Some(block));
     };
+    // Cross-dialect translation lane: an Anthropic-shape `document` block
+    // nested inside a tool result. Drop rather than forward -- OpenAI tool
+    // message content admits only text and `image_url` elements, with no
+    // document member at any nesting depth, so there is no wire slot to
+    // translate onto. Baked seed verdict: it stands until this lane's own
+    // wire evidence contradicts it, and it is not eligible for deletion
+    // until then.
+    // TRANSLATION-DROP: lane=openai-compat class=tool_result_document_unrepresentable test=inner_document_block_drops_and_warns
     if t == "document" {
+        tally.document = true;
         reject_or_drop_unrepresentable(
             id,
             strict,
@@ -263,9 +338,15 @@ fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value
         )?;
         return Ok(None);
     }
+    // TRANSLATION-DROP: structural -- a non-image recognized block rides through
+    // with only the Anthropic-only cache_control marker stripped, which the
+    // top-level content lift's own strip site owns.
     if t != "image" {
         return Ok(Some(strip_cache_control(block)));
     }
+    // TRANSLATION-DROP: structural -- an image block with no `source` object at
+    // all is not an image this egress can be said to have translated; it rides
+    // through for the upstream to reject, matching pre-existing behavior.
     let Some(source) = obj.get("source").and_then(|v| v.as_object()) else {
         return Ok(Some(strip_cache_control(block)));
     };
@@ -279,9 +360,16 @@ fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value
             format!("data:{media_type};base64,{data}")
         }
         Some("url") => {
+            // Cross-dialect translation lane: a nested image block whose
+            // `source` claims the url form but carries no `url`. Drop rather
+            // than forward -- `image_url.url` is the only carrier and it is
+            // mandatory, so there is nothing to put in it. Same seed status
+            // as the unsupported-source arm below.
+            // TRANSLATION-DROP: lane=openai-compat class=tool_result_image_source_unrepresentable test=inner_image_url_missing_url_drops_and_warns
             if let Some(u) = source.get("url").and_then(|v| v.as_str()) {
                 u.to_string()
             } else {
+                tally.image_source = true;
                 reject_or_drop_unrepresentable(
                     id,
                     strict,
@@ -291,7 +379,16 @@ fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value
                 return Ok(None);
             }
         }
+        // Cross-dialect translation lane: a nested image block whose `source`
+        // is neither the base64 nor the url form. Drop rather than forward --
+        // OpenAI's nested image carrier is `image_url.url` and an
+        // unrecognized source yields no URL to build, so forwarding the raw
+        // Anthropic block would 400 the whole request over one element.
+        // Baked seed verdict: it stands until this lane's own wire evidence
+        // contradicts it, and it is not eligible for deletion until then.
+        // TRANSLATION-DROP: lane=openai-compat class=tool_result_image_source_unrepresentable test=inner_image_unknown_source_drops_and_warns
         _ => {
+            tally.image_source = true;
             reject_or_drop_unrepresentable(
                 id,
                 strict,
@@ -643,6 +740,7 @@ mod tests {
     /// dropped in lenient mode -- the raw Anthropic image must not reach
     /// the wire.
     #[test]
+    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_unknown_source_dropped_lenient() {
         // Arrange -- image with an unsupported source type, plus a real
         // image so the array form is preserved.
@@ -668,6 +766,7 @@ mod tests {
 
     /// The url-source-missing-url image is dropped in lenient mode.
     #[test]
+    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_url_missing_url_dropped_lenient() {
         // Arrange
         let messages = json!([
@@ -692,6 +791,7 @@ mod tests {
 
     /// Strict mode rejects the unrepresentable inner image.
     #[test]
+    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_unknown_source_strict_errors() {
         // Arrange
         let messages = json!([
@@ -720,6 +820,7 @@ mod tests {
     /// A nested document block inside a tool_result is dropped
     /// in lenient mode -- it must not reach the wire.
     #[test]
+    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
     fn inner_document_block_dropped_lenient() {
         // Arrange -- document block plus an image so the array survives.
         let messages = json!([
@@ -746,6 +847,7 @@ mod tests {
 
     /// Strict mode rejects a nested document block.
     #[test]
+    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
     fn inner_document_block_strict_errors() {
         // Arrange
         let messages = json!([
@@ -845,5 +947,189 @@ mod tests {
 
         // Assert
         assert_eq!(obj["messages"][0]["content"], json!("ok"));
+    }
+
+    /// The `(openai-compat, class)` counter's current value, read back
+    /// through the public snapshot.
+    fn drop_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "openai-compat" && e.drop_class == class)
+            .map_or(0, |e| e.drop_count)
+    }
+
+    /// Run the lenient lift and return the EMITTED WIRE BODY as the string
+    /// an upstream would receive, plus every captured event. Asserting
+    /// against the serialized body -- not a typed view of the content array
+    /// -- is what catches a dropped block that actually rode upstream
+    /// nested inside some other element's payload.
+    fn emitted_wire(messages: Value) -> (String, Vec<routectl_testkit::CapturedEvent>) {
+        let req = empty_req();
+        let mut obj = Map::new();
+        obj.insert("messages".into(), messages);
+        let events = routectl_testkit::capture_events(|| {
+            lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+        });
+        let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
+        (wire, events)
+    }
+
+    /// A tool result carrying `block` alongside a representable image
+    /// sibling (the sibling also keeps the content in array form, which
+    /// text-only content would collapse out of).
+    fn tool_result_with(block: Value) -> Value {
+        json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    block,
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png",
+                        "data": "TUFSS0VSLUdPT0Qt"
+                    }}
+                ]}
+            ]}
+        ])
+    }
+
+    /// Assert the three bars for one dropped inner block: the WARN fired
+    /// with the expected structured `what`, the block's own payload is gone
+    /// from the EMITTED WIRE BODY, and the representable image sibling
+    /// survives in that same body. `marker` is a token unique to the
+    /// fixture so the absence assertion cannot pass by accident.
+    fn assert_inner_drop(block: Value, marker: &str, expected_what: &str, class: &str) {
+        // Act
+        let before = drop_count(class);
+        let (wire, events) = emitted_wire(tool_result_with(block));
+        let after = drop_count(class);
+
+        // Assert 1 -- the WARN fired, naming the tool_result context.
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .unwrap_or_else(|| panic!("the drop must warn, got: {events:?}"));
+        assert_eq!(warn.field("provider"), Some("test"));
+        assert_eq!(warn.field("context"), Some("tool_result block"));
+        assert_eq!(warn.field("what"), Some(expected_what));
+
+        // Assert 2 -- the dropped block's payload is off the emitted wire.
+        assert!(
+            !wire.contains(marker),
+            "the dropped block's payload must not reach the wire, got: {wire}"
+        );
+
+        // Assert 3 -- the representable sibling survived, lifted, in that
+        // same body.
+        assert!(
+            wire.contains("data:image/png;base64,TUFSS0VSLUdPT0Qt"),
+            "the representable image sibling must survive, got: {wire}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the drop must be counted exactly once for the request"
+        );
+    }
+
+    /// NEGATIVE CONTROL: a nested document block.
+    #[test]
+    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
+    fn inner_document_block_drops_and_warns() {
+        assert_inner_drop(
+            json!({"type": "document", "source": {
+                "type": "base64", "media_type": "application/pdf",
+                "data": "TUFSS0VSLURPQ1VNRU5U"
+            }}),
+            "TUFSS0VSLURPQ1VNRU5U",
+            "document content block (no OpenAI equivalent)",
+            "tool_result_document_unrepresentable",
+        );
+    }
+
+    /// NEGATIVE CONTROL: a nested image block with an unrecognized source.
+    #[test]
+    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
+    fn inner_image_unknown_source_drops_and_warns() {
+        assert_inner_drop(
+            json!({"type": "image", "source": {
+                "type": "marker_future_source_kind", "blob": "unused"
+            }}),
+            "marker_future_source_kind",
+            "image block with unsupported source shape (expected base64 or url)",
+            "tool_result_image_source_unrepresentable",
+        );
+    }
+
+    /// NEGATIVE CONTROL: a nested image block claiming the url source form
+    /// but carrying no `url`.
+    #[test]
+    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
+    fn inner_image_url_missing_url_drops_and_warns() {
+        assert_inner_drop(
+            json!({"type": "image", "source": {
+                "type": "url", "href": "marker_wrong_url_key"
+            }}),
+            "marker_wrong_url_key",
+            "image block with url source missing `url`",
+            "tool_result_image_source_unrepresentable",
+        );
+    }
+
+    /// POSITIVE CONTROL for all three fixtures above: a nested image block
+    /// with a REPRESENTABLE url source takes the same arm family, must
+    /// survive on the emitted body, and must warn not at all. Without this,
+    /// every absence assertion above would pass on a lift that dropped
+    /// every nested block.
+    #[test]
+    fn representable_inner_url_image_survives_without_warning() {
+        // Act
+        let (wire, events) = emitted_wire(tool_result_with(json!({
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.com/marker_kept.png"}
+        })));
+
+        // Assert
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a representable nested image must not warn at all, got: {events:?}"
+        );
+        assert!(
+            wire.contains("https://example.com/marker_kept.png"),
+            "the representable nested image must reach the wire, got: {wire}"
+        );
+    }
+
+    /// Two dropped nested documents in ONE request are ONE counted drop
+    /// event, even when they sit in different tool results.
+    #[test]
+    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
+    fn two_dropped_inner_documents_count_as_one_request_drop() {
+        // Arrange
+        let doc = json!({"type": "document", "source": {
+            "type": "base64", "media_type": "application/pdf", "data": "QQ=="
+        }});
+        let keeper = json!({"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": "Wlo="
+        }});
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": [doc.clone(), keeper.clone()]},
+                {"type": "tool_result", "tool_use_id": "t2",
+                 "content": [doc, keeper]}
+            ]}
+        ]);
+
+        // Act
+        let before = drop_count("tool_result_document_unrepresentable");
+        run(messages);
+        let after = drop_count("tool_result_document_unrepresentable");
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "two dropped blocks in one request must count once"
+        );
     }
 }

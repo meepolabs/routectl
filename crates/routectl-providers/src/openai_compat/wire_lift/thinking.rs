@@ -53,9 +53,14 @@ pub fn lift(
         return Ok(());
     };
     for msg in messages.iter_mut() {
+        // TRANSLATION-DROP: structural -- a non-object messages entry has no
+        // assistant content array to lift from; the entry rides on untouched.
         let Some(msg_obj) = msg.as_object_mut() else {
             continue;
         };
+        // TRANSLATION-DROP: structural -- only assistant turns carry replayed
+        // reasoning; a non-assistant turn's blocks are emitted verbatim by the
+        // content lift instead.
         if msg_obj.get("role").and_then(|v| v.as_str()) != Some("assistant") {
             continue;
         }
@@ -134,6 +139,9 @@ fn rewrite_assistant_thinking(msg: &mut Map<String, Value>) {
                 detail_index += 1;
             }
             _ => {
+                // TRANSLATION-DROP: structural -- a non-thinking block is pushed to
+                // `surviving` and re-emitted on the message's content array; this
+                // arm moves blocks, it does not lose them.
                 surviving.push(part);
             }
         }
