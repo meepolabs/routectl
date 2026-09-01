@@ -60,17 +60,32 @@ impl ContentDropTally {
     }
 }
 
-pub fn lift(
+/// Flushes the drop tally on BOTH arms of the fallible body below.
+///
+/// The split exists only for that: a `?` inside `lift_tallied` would otherwise
+/// skip the flush, so a request that dropped content and THEN failed
+/// translation would never reach the numerator -- while `request::normalize`
+/// has already bumped this lane's denominator ahead of its first fallible
+/// step. The rate would then read low for exactly the requests that went
+/// worst. Mirrors `gemini::request::translate`/`build_body`.
+pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest, strict: bool) -> Result<()> {
+    let mut tally = ContentDropTally::default();
+    let out = lift_tallied(id, obj, req, strict, &mut tally);
+    tally.flush();
+    out
+}
+
+fn lift_tallied(
     id: &str,
     obj: &mut Map<String, Value>,
     _req: &ChatRequest,
     strict: bool,
+    tally: &mut ContentDropTally,
 ) -> Result<()> {
     let messages = match obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(m) => m,
         None => return Ok(()),
     };
-    let mut tally = ContentDropTally::default();
     for (msg_idx, msg) in messages.iter_mut().enumerate() {
         // TRANSLATION-DROP: structural -- a non-object messages entry has no
         // content array to walk; the entry itself rides on untouched.
@@ -88,7 +103,7 @@ pub fn lift(
         let Some(parts) = content_val.as_array_mut() else {
             continue;
         };
-        rewrite_parts(id, msg_idx, parts, strict, &mut tally)?;
+        rewrite_parts(id, msg_idx, parts, strict, tally)?;
         // Strip Anthropic-only per-block `cache_control` from every
         // surviving part. The block-level warn path in
         // `request::check_dropped_anthropic_fields` was informational
@@ -103,7 +118,6 @@ pub fn lift(
             }
         }
     }
-    tally.flush();
     Ok(())
 }
 
@@ -521,6 +535,34 @@ mod tests {
             after - before,
             1,
             "two dropped blocks in one request must count once"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
+    fn a_drop_before_a_translation_error_is_still_counted() {
+        // The drop happens, THEN strict mode rejects a later block in the same
+        // request. The counter must still move: `request::normalize` bumps this
+        // lane's denominator before its first fallible step, so a numerator
+        // that skipped failed requests would make the drop rate read LOW for
+        // exactly the requests that went worst. This is why `lift` flushes the
+        // tally outside its fallible body.
+        let messages = json!([{
+            "role": "user",
+            "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "QQ=="}}
+            ]
+        }]);
+
+        let before = drop_count("document_block_unrepresentable");
+        let res = run(messages, true);
+        let after = drop_count("document_block_unrepresentable");
+
+        assert!(res.is_err(), "strict mode must reject the document block");
+        assert_eq!(
+            after - before,
+            1,
+            "a drop on a request that then failed must still be counted"
         );
     }
 

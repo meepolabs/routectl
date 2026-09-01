@@ -649,6 +649,52 @@ fn cache_control_marker_drops_from_the_wire_and_counts() {
 
 #[test]
 #[serial_test::serial(openai_responses_cache_control_unsupported)]
+fn a_tools_position_cache_marker_leaves_the_wire_and_the_tool_survives() {
+    // A tools-position marker is a counted cache breakpoint, and the forwarding
+    // path for a non-custom tool clones the caller's value verbatim -- so this
+    // is the shape where the lane's counter could report a removal the wire
+    // never performed. Assertion 2 is the whole point of the test: an earlier
+    // version of this lane counted the drop while the marker rode to the
+    // upstream inside the forwarded tool object.
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![routectl_core::ToolDef::Other(json!({
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "cache_control": {"type": "ephemeral"}
+    }))]);
+
+    let before = responses_drop_count("cache_control_unsupported");
+    let (wire, _events) = translate_capturing(&cfg(), &req);
+    let after = responses_drop_count("cache_control_unsupported");
+
+    // Assert 2: absent from the SERIALIZED body -- the marker sits inside an
+    // opaque forwarded object, so a typed-view check would not see it.
+    let bytes = wire.to_string();
+    assert!(
+        !bytes.contains("cache_control"),
+        "a tools-position marker must not ride to the wire: {wire}"
+    );
+    assert!(
+        !bytes.contains("ephemeral"),
+        "the marker's value must not ride either: {wire}"
+    );
+
+    // Assert 3: positive control -- the tool itself still ships, so assertion
+    // 2 is not passing because the whole tool vanished.
+    assert!(
+        bytes.contains("web_search_20250305") && bytes.contains("web_search"),
+        "the forwarded tool must survive the strip: {wire}"
+    );
+
+    assert_eq!(
+        after - before,
+        1,
+        "the drop must be counted exactly once for the request"
+    );
+}
+
+#[test]
+#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn a_system_only_cache_marker_still_counts_though_the_warn_defers_to_system_rs() {
     // Arrange: the ONLY marker sits on a system block. `system.rs` owns that
     // surface's DEBUG record, so the request-level WARN deliberately excludes

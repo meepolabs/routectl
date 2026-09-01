@@ -63,11 +63,27 @@ impl ToolResultDropTally {
     }
 }
 
-pub fn lift(
+/// Flushes the drop tally on BOTH arms of the fallible body below.
+///
+/// The split exists only for that: a `?` inside `lift_tallied` would otherwise
+/// skip the flush, so a request that dropped content and THEN failed
+/// translation would never reach the numerator -- while `request::normalize`
+/// has already bumped this lane's denominator ahead of its first fallible
+/// step. The rate would then read low for exactly the requests that went
+/// worst. Mirrors `gemini::request::translate`/`build_body`.
+pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest, strict: bool) -> Result<()> {
+    let mut tally = ToolResultDropTally::default();
+    let out = lift_tallied(id, obj, req, strict, &mut tally);
+    tally.flush();
+    out
+}
+
+fn lift_tallied(
     id: &str,
     obj: &mut Map<String, Value>,
     _req: &ChatRequest,
     strict: bool,
+    tally: &mut ToolResultDropTally,
 ) -> Result<()> {
     let messages = match obj.remove("messages") {
         Some(Value::Array(arr)) => arr,
@@ -81,13 +97,11 @@ pub fn lift(
         None => return Ok(()),
     };
 
-    let mut tally = ToolResultDropTally::default();
     let mut rewritten: Vec<Value> = Vec::with_capacity(messages.len());
     for msg in messages {
-        rewrite_message(id, msg, strict, &mut rewritten, &mut tally)?;
+        rewrite_message(id, msg, strict, &mut rewritten, tally)?;
     }
     obj.insert("messages".into(), Value::Array(rewritten));
-    tally.flush();
     Ok(())
 }
 
