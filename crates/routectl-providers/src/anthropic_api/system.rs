@@ -107,9 +107,16 @@ fn collect_system_texts(messages: &[Message]) -> Vec<String> {
 /// `pub(crate)` so the Bedrock Converse egress can reuse the same
 /// legacy-shape fallback (single source of truth). Gated on the
 /// `bedrock` feature because the anthropic-api egress uses the
-/// billing-aware `lift_legacy_system_stripped`; Converse is the only
-/// remaining caller of the unfiltered lift.
-#[cfg(feature = "bedrock")]
+/// billing-aware `lift_legacy_system_stripped`.
+///
+/// TEST-ONLY. No egress calls this: the Converse path used to, back when
+/// it lifted a system-role message only if no top-level system existed, so
+/// a fingerprint could never ride alongside other system content. Once
+/// that path began MERGING both sources the unfiltered lift became a way
+/// to leak a client fingerprint to a third-party upstream, and Converse
+/// moved to the stripped variant. Kept, compiled only under test, as the
+/// contrast case its sibling's regression pin asserts against.
+#[cfg(test)]
 pub fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
     let texts = collect_system_texts(messages);
     if texts.is_empty() {
@@ -202,7 +209,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "bedrock")]
     fn original_lift_still_includes_billing_text() {
         // Regression pin: the unfiltered lift_legacy_system keeps billing
         // text -- it is the caller's responsibility to strip when needed.
