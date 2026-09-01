@@ -251,3 +251,25 @@ swept file for every candidate-arm pattern and asserts the found set
 equals a maintained manifest exactly) is what would make completeness a
 checkable property; until that lands, treat every table above as a
 sample, not a census.
+
+## Lifecycle: this file is scaffolding, and it has an end state
+
+The findings tables here are working notes for the per-surface sweeps that
+follow, not a permanent reference. The derivation commands above are the
+durable part; the rows are a dated reading of code the sweeps are about to
+change.
+
+So this file is expected to SHRINK, not grow:
+
+- Once the census lands -- a maintained manifest plus a test asserting the
+  found set of candidate arms equals it exactly -- that manifest becomes the
+  authoritative inventory and every findings table below the methodology
+  section should be deleted. Two inventories of one thing is how the second
+  one rots.
+- Keep the methodology section. Its value is that anyone can re-derive from
+  scratch, and that does not expire.
+- Do not update a row in place to track a code change. Re-run the command.
+  A hand-patched row is indistinguishable from a stale one.
+
+If you are reading a findings row and the census already exists, prefer the
+census and treat this row as history.

@@ -37,6 +37,23 @@
 //! counts every request a lane's translate/build path processed, dropped or
 //! not, so [`TranslationDropSnapshotEntry::drop_rate`] reports the drop RATE
 //! per lane instead of an uncontextualized count.
+//!
+//! # Testing against this registry
+//!
+//! The registry is PROCESS-GLOBAL and the test runner is multi-threaded, so
+//! any test asserting an exact counter value or delta races every other test
+//! that touches the same key. Guard all of them with the same
+//! `#[serial_test::serial(<lane>_<drop_class>)]` name -- including tests that
+//! only trigger the drop incidentally, not just the one reading the counter
+//! back. A guard whose name no sibling shares excludes nothing.
+//!
+//! This is not hypothetical: a delta assertion added without covering its
+//! already-existing sibling failed three times in six runs at 32 threads,
+//! and passed every single-threaded run before that.
+//!
+//! Prefer a delta (read before, act, read after) over an absolute value.
+//! Counters accumulate across the whole test binary, so an absolute
+//! expectation is wrong the moment a second test touches the key.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
