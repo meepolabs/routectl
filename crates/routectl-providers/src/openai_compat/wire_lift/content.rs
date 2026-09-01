@@ -28,6 +28,38 @@ use routectl_core::{ChatRequest, Result};
 
 use super::reject_or_drop_unrepresentable;
 
+/// Per-request record of which content-block drop classes fired, so the
+/// process-wide counters are bumped once per REQUEST rather than once
+/// per dropped block: a turn carrying three unrepresentable documents is
+/// one drop event an operator should see, not three.
+#[derive(Default)]
+struct ContentDropTally {
+    document: bool,
+    image_source: bool,
+}
+
+impl ContentDropTally {
+    /// Bump the `(openai-compat, class)` counters for whatever fired.
+    /// Called exactly once per request from `lift`, which `lift_all`
+    /// itself runs exactly once. Only the lenient path reaches here --
+    /// strict mode returns `Err` from the drop arm, so nothing was lost
+    /// and nothing is counted.
+    fn flush(&self) {
+        if self.document {
+            crate::translation_drop_metrics::record_translation_drop(
+                "openai-compat",
+                "document_block_unrepresentable",
+            );
+        }
+        if self.image_source {
+            crate::translation_drop_metrics::record_translation_drop(
+                "openai-compat",
+                "image_source_unrepresentable",
+            );
+        }
+    }
+}
+
 pub fn lift(
     id: &str,
     obj: &mut Map<String, Value>,
@@ -38,18 +70,25 @@ pub fn lift(
         Some(m) => m,
         None => return Ok(()),
     };
+    let mut tally = ContentDropTally::default();
     for (msg_idx, msg) in messages.iter_mut().enumerate() {
+        // TRANSLATION-DROP: structural -- a non-object messages entry has no
+        // content array to walk; the entry itself rides on untouched.
         let Some(msg_obj) = msg.as_object_mut() else {
             continue;
         };
+        // TRANSLATION-DROP: structural -- a message with no content key has no
+        // blocks to rewrite; the message rides on untouched.
         let Some(content_val) = msg_obj.get_mut("content") else {
             continue;
         };
         // String / null / non-array content -- nothing to do.
+        // TRANSLATION-DROP: structural -- legacy string / null content carries no
+        // blocks to rewrite and is emitted verbatim.
         let Some(parts) = content_val.as_array_mut() else {
             continue;
         };
-        rewrite_parts(id, msg_idx, parts, strict)?;
+        rewrite_parts(id, msg_idx, parts, strict, &mut tally)?;
         // Strip Anthropic-only per-block `cache_control` from every
         // surviving part. The block-level warn path in
         // `request::check_dropped_anthropic_fields` was informational
@@ -64,17 +103,36 @@ pub fn lift(
             }
         }
     }
+    tally.flush();
     Ok(())
 }
 
-fn rewrite_parts(id: &str, msg_idx: usize, parts: &mut Vec<Value>, strict: bool) -> Result<()> {
+fn rewrite_parts(
+    id: &str,
+    msg_idx: usize,
+    parts: &mut Vec<Value>,
+    strict: bool,
+    tally: &mut ContentDropTally,
+) -> Result<()> {
     // Build a new vec; drop document blocks; rewrite image blocks.
     let original = std::mem::take(parts);
     for part in original {
         match part_kind(&part) {
             PartKind::AnthropicImage => match rewrite_image_part(&part) {
                 Some(rewritten) => parts.push(rewritten),
+                // Cross-dialect translation lane: an Anthropic-shape image
+                // block whose `source` is neither the base64 nor the url form
+                // this egress knows how to build a data / plain URL from.
+                // Drop rather than forward -- the OpenAI-compat wire has one
+                // image carrier, `image_url.url`, and an unrecognized source
+                // yields no URL to put in it, so forwarding the raw Anthropic
+                // block would 400 a strict host with a shape it cannot parse
+                // instead of losing one block. Baked seed verdict: it stands
+                // until this lane's own wire evidence contradicts it, and is
+                // not eligible for deletion until then.
+                // TRANSLATION-DROP: lane=openai-compat class=image_source_unrepresentable test=unsupported_image_source_drops_and_warns
                 None => {
+                    tally.image_source = true;
                     reject_or_drop_unrepresentable(
                         id,
                         strict,
@@ -83,7 +141,17 @@ fn rewrite_parts(id: &str, msg_idx: usize, parts: &mut Vec<Value>, strict: bool)
                     )?;
                 }
             },
+            // Cross-dialect translation lane: an Anthropic-shape `document`
+            // block reaching the OpenAI-compat egress. Drop rather than
+            // forward -- OpenAI chat-completions message content has no
+            // document member at all (its `file` block is a distinct shape
+            // this canonical part is not, and carries no Anthropic `source`
+            // union), so there is no wire slot to translate onto. Baked seed
+            // verdict: it stands until this lane's own wire evidence
+            // contradicts it, and is not eligible for deletion until then.
+            // TRANSLATION-DROP: lane=openai-compat class=document_block_unrepresentable test=document_block_drops_and_warns
             PartKind::Document => {
+                tally.document = true;
                 reject_or_drop_unrepresentable(
                     id,
                     strict,
@@ -122,6 +190,12 @@ fn part_kind(part: &Value) -> PartKind {
 /// Translate a single Anthropic-shape image block to OpenAI-shape.
 /// Returns `None` if the source shape is unrecognized (caller decides
 /// strict-vs-warn).
+///
+/// Every `?` and the `_` arm below funnel into ONE caller-side outcome:
+/// `rewrite_parts`'s `None` arm, which is where the warn, the counter,
+/// and the marker live. Nothing is lost or counted at this level.
+// TRANSLATION-DROP: structural -- every exit here returns None to the caller's
+// single marked drop arm, which owns the warn and the counter.
 fn rewrite_image_part(part: &Value) -> Option<Value> {
     let source = part.get("source")?.as_object()?;
     let src_type = source.get("type").and_then(|v| v.as_str())?;
@@ -227,6 +301,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn document_block_warn_drops_in_default_mode() {
         // Arrange
         let messages = json!([{
@@ -246,7 +321,211 @@ mod tests {
         assert_eq!(parts[0]["type"], "text");
     }
 
+    /// The `(openai-compat, class)` counter's current value, read back
+    /// through the public snapshot.
+    fn drop_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "openai-compat" && e.drop_class == class)
+            .map_or(0, |e| e.drop_count)
+    }
+
+    /// The full emitted wire body of a single-user-message request, as the
+    /// serialized string an upstream would receive. Asserting against this
+    /// -- rather than against a typed view -- is what catches a dropped
+    /// shape that actually rode to the upstream nested inside some other
+    /// key's payload.
+    fn emitted_wire(messages: Value) -> String {
+        let obj = run(messages, false).expect("lenient lift must succeed");
+        serde_json::to_string(&Value::Object(obj)).expect("wire body serializes")
+    }
+
+    /// NEGATIVE CONTROL: a document block is dropped, the drop surfaces
+    /// through its WARN with structured fields, and the block's payload is
+    /// gone from the EMITTED WIRE BODY -- not merely absent from a typed
+    /// view of the parts array.
     #[test]
+    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
+    fn document_block_drops_and_warns() {
+        // Arrange -- a document alongside a representable text sibling.
+        let messages = json!([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "see attached"},
+                {"type": "document", "source": {
+                    "type": "base64", "media_type": "application/pdf",
+                    "data": "TUFSS0VSLURPQ1VNRU5U"
+                }}
+            ]
+        }]);
+
+        // Act
+        let before = drop_count("document_block_unrepresentable");
+        let mut wire = String::new();
+        let events = routectl_testkit::capture_events(|| {
+            wire = emitted_wire(messages);
+        });
+        let after = drop_count("document_block_unrepresentable");
+
+        // Assert 1 -- the WARN fired, with the structured fields naming it.
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .unwrap_or_else(|| panic!("the drop must warn, got: {events:?}"));
+        assert_eq!(warn.field("provider"), Some("test"));
+        assert_eq!(warn.field("context"), Some("message 0"));
+        assert_eq!(
+            warn.field("what"),
+            Some("document content block (no OpenAI equivalent)")
+        );
+
+        // Assert 2 -- the payload is absent from the EMITTED WIRE BODY.
+        assert!(
+            !wire.contains("TUFSS0VSLURPQ1VNRU5U"),
+            "the document payload must not reach the wire in any form, got: {wire}"
+        );
+        assert!(
+            !wire.contains("document"),
+            "no document block may survive anywhere in the body, got: {wire}"
+        );
+
+        // Assert 3 -- the representable sibling survived in that same body.
+        assert!(
+            wire.contains("see attached"),
+            "the representable text sibling must survive, got: {wire}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the drop must be counted exactly once for the request"
+        );
+    }
+
+    /// POSITIVE CONTROL for the fixture above: the same request shape with
+    /// the document replaced by a representable image block must warn not
+    /// at all and must land BOTH blocks on the wire. Without this, the
+    /// negative control's absence assertions could pass on a lift that
+    /// drops every block indiscriminately.
+    #[test]
+    fn representable_blocks_survive_without_warning() {
+        // Arrange
+        let messages = json!([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "see attached"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png",
+                    "data": "TUFSS0VSLUlNQUdF"
+                }}
+            ]
+        }]);
+
+        // Act
+        let mut wire = String::new();
+        let events = routectl_testkit::capture_events(|| {
+            wire = emitted_wire(messages);
+        });
+
+        // Assert
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a fully representable turn must not warn at all, got: {events:?}"
+        );
+        assert!(
+            wire.contains("see attached") && wire.contains("TUFSS0VSLUlNQUdF"),
+            "both representable blocks must reach the wire, got: {wire}"
+        );
+    }
+
+    /// NEGATIVE CONTROL: an image block whose source shape yields no URL is
+    /// dropped, warns with its own structured `what`, and its payload does
+    /// not reach the emitted body.
+    #[test]
+    #[serial_test::serial(openai_compat_image_source_unrepresentable)]
+    fn unsupported_image_source_drops_and_warns() {
+        // Arrange -- an unrepresentable source alongside a representable
+        // image sibling, so the positive control rides in the same body.
+        let messages = json!([{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {
+                    "type": "future_source_kind", "blob": "TUFSS0VSLUJBRC1TUkM"
+                }},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png",
+                    "data": "TUFSS0VSLUdPT0Qt"
+                }}
+            ]
+        }]);
+
+        // Act
+        let before = drop_count("image_source_unrepresentable");
+        let mut wire = String::new();
+        let events = routectl_testkit::capture_events(|| {
+            wire = emitted_wire(messages);
+        });
+        let after = drop_count("image_source_unrepresentable");
+
+        // Assert 1 -- the WARN fired with the source-shape wording.
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .unwrap_or_else(|| panic!("the drop must warn, got: {events:?}"));
+        assert_eq!(
+            warn.field("what"),
+            Some("image block with unsupported source shape (expected base64 or url)")
+        );
+
+        // Assert 2 -- the unrepresentable block's payload is off the wire.
+        assert!(
+            !wire.contains("TUFSS0VSLUJBRC1TUkM") && !wire.contains("future_source_kind"),
+            "the unrepresentable image must not reach the wire, got: {wire}"
+        );
+
+        // Assert 3 -- the representable sibling survived, lifted.
+        assert!(
+            wire.contains("data:image/png;base64,TUFSS0VSLUdPT0Qt"),
+            "the representable image must survive as a data URL, got: {wire}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the drop must be counted exactly once for the request"
+        );
+    }
+
+    /// Two dropped documents in ONE request are ONE counted drop event.
+    /// Counting per block would make the operator-facing rate report
+    /// block volume rather than affected-request volume.
+    #[test]
+    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
+    fn two_dropped_documents_count_as_one_request_drop() {
+        // Arrange
+        let messages = json!([{
+            "role": "user",
+            "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "QQ=="}},
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "Qg=="}}
+            ]
+        }]);
+
+        // Act
+        let before = drop_count("document_block_unrepresentable");
+        run(messages, false).unwrap();
+        let after = drop_count("document_block_unrepresentable");
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "two dropped blocks in one request must count once"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn document_block_strict_returns_err() {
         // Arrange
         let messages = json!([{

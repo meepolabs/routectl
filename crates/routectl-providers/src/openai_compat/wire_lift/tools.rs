@@ -27,6 +27,7 @@ pub fn lift(
     };
 
     let mut lifted: Vec<Value> = Vec::with_capacity(tools.len());
+    let mut dropped_non_custom = false;
     for tool in tools {
         match tool {
             ToolDef::Custom(c) => {
@@ -37,7 +38,20 @@ pub fn lift(
                     // Already OpenAI function shape -- pass through verbatim.
                     lifted.push(v.clone());
                 } else {
-                    // Anthropic builtin or unknown shape.
+                    // Cross-dialect translation lane: an Anthropic builtin
+                    // (`web_search_*`, `bash_*`, `code_execution_*`) or an
+                    // otherwise-unmodeled tool shape reaching the
+                    // OpenAI-compat egress. Drop rather than forward -- the
+                    // OpenAI `tools` array admits only
+                    // `{type:"function", function:{...}}`, and a builtin is
+                    // a SERVER-SIDE capability of the Anthropic API rather
+                    // than a schema an OpenAI-compat host could execute, so
+                    // no translation exists. Forwarding it verbatim 400s a
+                    // strict host on the unknown `type`. Baked seed verdict:
+                    // it stands until this lane's own wire evidence
+                    // contradicts it, and is not eligible for deletion
+                    // until then.
+                    // TRANSLATION-DROP: lane=openai-compat class=non_custom_tool_unrepresentable test=anthropic_builtin_tool_drops_and_warns
                     let builtin = v
                         .as_object()
                         .and_then(|o| o.get("type"))
@@ -48,6 +62,7 @@ pub fn lift(
                         .and_then(|o| o.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("");
+                    dropped_non_custom = true;
                     reject_or_drop_unrepresentable(
                         id,
                         strict,
@@ -64,6 +79,16 @@ pub fn lift(
         obj.remove("tools");
     } else {
         obj.insert("tools".to_string(), Value::Array(lifted));
+    }
+
+    // One counted drop event per REQUEST, at this lift's single exit: a
+    // request declaring three builtins is one loss an operator acts on,
+    // not three. Strict mode never arrives -- the arm above returned Err.
+    if dropped_non_custom {
+        crate::translation_drop_metrics::record_translation_drop(
+            "openai-compat",
+            "non_custom_tool_unrepresentable",
+        );
     }
 
     Ok(())
@@ -196,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
     fn other_with_anthropic_builtin_warns_and_drops_non_strict() {
         // Arrange -- Anthropic builtin tool, not representable on OpenAI wire.
         let tool = ToolDef::Other(json!({"type": "web_search_20250305", "name": "web_search"}));
@@ -208,7 +234,138 @@ mod tests {
         assert!(obj.get("tools").is_none(), "builtin tool must be dropped");
     }
 
+    /// The `(openai-compat, class)` counter's current value, read back
+    /// through the public snapshot.
+    fn drop_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "openai-compat" && e.drop_class == class)
+            .map_or(0, |e| e.drop_count)
+    }
+
+    /// Run the lenient lift and return the EMITTED WIRE BODY as the string
+    /// an upstream would receive, plus every captured event.
+    fn emitted_wire(tools: Vec<ToolDef>) -> (String, Vec<routectl_testkit::CapturedEvent>) {
+        let req = make_req(Some(tools));
+        let mut obj = serde_json::Map::new();
+        let events = routectl_testkit::capture_events(|| {
+            lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+        });
+        let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
+        (wire, events)
+    }
+
+    /// NEGATIVE CONTROL: an Anthropic builtin tool drops, warns with its
+    /// structured fields, and none of its shape reaches the emitted wire
+    /// body -- while a representable custom sibling declared in the same
+    /// request rides through in that same body.
     #[test]
+    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
+    fn anthropic_builtin_tool_drops_and_warns() {
+        // Arrange -- one builtin plus one representable custom tool.
+        let builtin = ToolDef::Other(json!({
+            "type": "marker_builtin_kind", "name": "marker_builtin_name"
+        }));
+        let custom = ToolDef::Custom(CustomTool {
+            name: "marker_surviving_custom".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        });
+
+        // Act
+        let before = drop_count("non_custom_tool_unrepresentable");
+        let (wire, events) = emitted_wire(vec![builtin, custom]);
+        let after = drop_count("non_custom_tool_unrepresentable");
+
+        // Assert 1 -- the drop warned, naming the tool and the shape.
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .unwrap_or_else(|| panic!("the drop must warn, got: {events:?}"));
+        assert_eq!(warn.field("provider"), Some("test"));
+        assert_eq!(warn.field("context"), Some("tool `marker_builtin_name`"));
+        assert_eq!(
+            warn.field("what"),
+            Some("Anthropic builtin / non-custom tool `marker_builtin_kind`")
+        );
+
+        // Assert 2 -- no trace of the builtin reached the emitted body, in
+        // any key. A builtin re-serialized inside some other tool's payload
+        // would still 400 the upstream.
+        assert!(
+            !wire.contains("marker_builtin_kind") && !wire.contains("marker_builtin_name"),
+            "the builtin must not reach the wire in any form, got: {wire}"
+        );
+
+        // Assert 3 -- the representable sibling survived in that same body.
+        assert!(
+            wire.contains("marker_surviving_custom"),
+            "the representable custom tool must survive, got: {wire}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the drop must be counted exactly once for the request"
+        );
+    }
+
+    /// POSITIVE CONTROL: a `ToolDef::Other` that is ALREADY OpenAI
+    /// function-shape takes the same `Other` arm and must NOT drop or warn.
+    /// Without this, the fixture above would pass on a lift that dropped
+    /// every `Other` variant indiscriminately.
+    #[test]
+    fn openai_shape_other_tool_survives_without_warning() {
+        // Arrange
+        let tool = ToolDef::Other(json!({
+            "type": "function",
+            "function": {"name": "marker_openai_shape_tool", "parameters": {"type": "object"}}
+        }));
+
+        // Act
+        let (wire, events) = emitted_wire(vec![tool]);
+
+        // Assert
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "an already-OpenAI-shape tool must not warn at all, got: {events:?}"
+        );
+        assert!(
+            wire.contains("marker_openai_shape_tool"),
+            "the OpenAI-shape tool must reach the wire verbatim, got: {wire}"
+        );
+    }
+
+    /// Two dropped builtins in ONE request are ONE counted drop event.
+    #[test]
+    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
+    fn two_dropped_builtins_count_as_one_request_drop() {
+        // Arrange
+        let tools = vec![
+            ToolDef::Other(json!({"type": "web_search_20250305", "name": "a"})),
+            ToolDef::Other(json!({"type": "bash_20250124", "name": "b"})),
+        ];
+
+        // Act
+        let before = drop_count("non_custom_tool_unrepresentable");
+        let (_obj, res) = run(Some(tools), false);
+        res.unwrap();
+        let after = drop_count("non_custom_tool_unrepresentable");
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "two dropped tools in one request must count once"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
     fn other_with_anthropic_builtin_strict_returns_err() {
         // Arrange
         let tool = ToolDef::Other(json!({"type": "web_search_20250305", "name": "web_search"}));

@@ -46,6 +46,16 @@ pub fn normalize(
     payload_extras: Option<&Value>,
     strict_translation: bool,
 ) -> Result<Value> {
+    // The one point every openai-compat egress request passes exactly
+    // once, on both the Ok and the Err arm: it precedes the first
+    // fallible step. This is the DENOMINATOR for this lane's
+    // translation-drop counters -- a raw drop count with no
+    // request-volume figure behind it cannot tell a lane that drops on
+    // every request from one that dropped once all week. Exactly one call
+    // site per lane; a second anywhere would understate the rate for the
+    // whole lane.
+    crate::translation_drop_metrics::record_translation_lane_seen(super::PROVIDER_KIND);
+
     // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
     // can't carry. Default mode warns + continues; strict mode 400s.
     check_dropped_anthropic_fields(id, req, strict_translation)?;
@@ -1501,6 +1511,97 @@ mod tests {
         assert_eq!(
             messages[0]["content"], "real prompt",
             "leading-whitespace billing block must still be dropped, got: {body}"
+        );
+    }
+
+    /// This lane's request-volume denominator, read back through the public
+    /// snapshot. The registry materializes a row only once some
+    /// `(lane, drop_class)` pair on the lane has been counted; every row on a
+    /// lane then reports the same `lane_seen_count`.
+    fn lane_seen_count() -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == super::super::PROVIDER_KIND)
+            .map_or(0, |e| e.lane_seen_count)
+    }
+
+    /// A request carrying one Anthropic-shape document block: the content
+    /// lift drops it (creating a row on this lane) and strict mode rejects
+    /// it, so one fixture drives both of `normalize`'s arms.
+    fn req_with_dropped_document() -> ChatRequest {
+        let mut req = simple_req("m");
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::Document {
+                        source: json!({
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "AA=="
+                        }),
+                        title: None,
+                        citations: None,
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        req
+    }
+
+    /// `normalize` bumps this lane's request-volume denominator on BOTH the
+    /// Ok and the Err arm. Without the Err arm, strict-rejected requests
+    /// vanish from the denominator and every drop rate on the lane reads
+    /// high. The assertion is monotonic rather than an exact delta on
+    /// purpose: the denominator is lane-global and every other `normalize`
+    /// caller in this test binary bumps the same counter, so only "it moved"
+    /// is a sound claim here. `.13` welds the at-most-one-call-site half.
+    #[test]
+    fn normalize_counts_the_request_on_both_arms() {
+        // Arrange
+        let req = req_with_dropped_document();
+
+        // Act + Assert -- the lenient arm returns Ok and is counted.
+        let before = lane_seen_count();
+        normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .expect("lenient normalize must succeed");
+        assert!(
+            lane_seen_count() > before,
+            "the Ok arm must count the request in the lane denominator"
+        );
+
+        // Act + Assert -- the strict arm returns Err and is still counted.
+        let before = lane_seen_count();
+        let res = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            true,
+        );
+        assert!(
+            res.is_err(),
+            "strict mode must reject the unrepresentable document block"
+        );
+        assert!(
+            lane_seen_count() > before,
+            "the Err arm must count the request in the lane denominator too"
         );
     }
 }

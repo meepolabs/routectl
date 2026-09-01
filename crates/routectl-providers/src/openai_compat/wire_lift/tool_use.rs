@@ -42,6 +42,8 @@ pub fn lift(
         None => return Ok(()),
     };
     for msg in messages.iter_mut() {
+        // TRANSLATION-DROP: structural -- a non-object messages entry carries no
+        // assistant content array to lift from; the entry rides on untouched.
         let Some(msg_obj) = msg.as_object_mut() else {
             continue;
         };
@@ -49,6 +51,8 @@ pub fn lift(
             .get("role")
             .and_then(|r| r.as_str())
             .map(std::string::ToString::to_string);
+        // TRANSLATION-DROP: structural -- only assistant turns carry tool_use
+        // blocks to lift; other roles' content is emitted verbatim.
         if role.as_deref() != Some("assistant") {
             continue;
         }
