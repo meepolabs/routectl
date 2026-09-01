@@ -1514,15 +1514,11 @@ mod tests {
         );
     }
 
-    /// This lane's request-volume denominator, read back through the public
-    /// snapshot. The registry materializes a row only once some
-    /// `(lane, drop_class)` pair on the lane has been counted; every row on a
-    /// lane then reports the same `lane_seen_count`.
+    /// This lane's request-volume denominator, read through the registry's own
+    /// accessor, so it reads correctly even before any drop class on this lane
+    /// has fired.
     fn lane_seen_count() -> u64 {
-        crate::translation_drop_metrics::translation_drop_snapshot()
-            .into_iter()
-            .find(|e| e.lane == super::super::PROVIDER_KIND)
-            .map_or(0, |e| e.lane_seen_count)
+        crate::translation_drop_metrics::translation_lane_seen(super::super::PROVIDER_KIND)
     }
 
     /// A request carrying one Anthropic-shape document block: the content

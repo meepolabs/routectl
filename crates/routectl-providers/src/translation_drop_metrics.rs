@@ -165,6 +165,21 @@ pub fn translation_drop_snapshot() -> Vec<TranslationDropSnapshotEntry> {
     })
 }
 
+/// One lane's request-volume denominator: how many requests
+/// [`record_translation_lane_seen`] has observed for `lane`. `0` when the lane
+/// has never been marked seen.
+///
+/// Exists because [`translation_drop_snapshot`] exposes the denominator only
+/// hanging off a `(lane, drop_class)` row, so reading it before any drop class
+/// has fired required SEEDING a throwaway drop entry -- a read that writes.
+/// Three separate test surfaces independently invented that workaround, one of
+/// them mutating the registry on every read. Reading the denominator is a
+/// legitimate question on its own, so it gets its own accessor.
+#[must_use]
+pub fn translation_lane_seen(lane: &str) -> u64 {
+    with_registry_mut(|reg| reg.lane_seen.get(lane).copied().unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +254,30 @@ mod tests {
         assert_eq!(entry.lane_seen_count, 4);
         assert_eq!(entry.drop_count, 1);
         assert!((entry.drop_rate() - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn translation_lane_seen_reads_the_denominator_without_seeding_a_drop_row() {
+        // Arrange
+        let lane = "unit-test-lane-accessor";
+
+        // Act
+        record_translation_lane_seen(lane);
+        record_translation_lane_seen(lane);
+
+        // Assert: the count is readable with NO drop class on the lane, which
+        // is the whole reason this accessor exists -- the snapshot exposes the
+        // denominator only via a (lane, drop_class) row.
+        assert_eq!(translation_lane_seen(lane), 2);
+        assert!(
+            !translation_drop_snapshot().iter().any(|e| e.lane == lane),
+            "reading the denominator must not create a drop row"
+        );
+    }
+
+    #[test]
+    fn translation_lane_seen_is_zero_for_a_lane_never_marked_seen() {
+        assert_eq!(translation_lane_seen("unit-test-lane-never-seen"), 0);
     }
 
     #[test]
