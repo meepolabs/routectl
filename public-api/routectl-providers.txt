@@ -2039,6 +2039,7 @@ pub fn routectl_providers::translation_drop_metrics::TranslationDropSnapshotEntr
 pub fn routectl_providers::translation_drop_metrics::record_translation_drop(&'static str, &'static str)
 pub fn routectl_providers::translation_drop_metrics::record_translation_lane_seen(&'static str)
 pub fn routectl_providers::translation_drop_metrics::translation_drop_snapshot() -> alloc::vec::Vec<routectl_providers::translation_drop_metrics::TranslationDropSnapshotEntry>
+pub fn routectl_providers::translation_drop_metrics::translation_lane_seen(&str) -> u64
 pub type routectl_providers::translation_drop_metrics::DropKey = (&'static str, &'static str)
 pub const routectl_providers::VALIDATION_EXCEPTION_TYPE: &str
 pub fn routectl_providers::aws_exception_type_is(&str, &str) -> bool

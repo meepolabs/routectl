@@ -765,20 +765,10 @@ fn every_translated_request_counts_toward_the_lane_denominator() {
     );
 }
 
-/// This lane's request-volume denominator, read through the public snapshot.
-/// Any `(openai-responses, *)` entry carries it, so read it off whichever
-/// entry exists; `None` means no drop class has ever fired on this lane in
-/// this process, in which case the denominator is unobservable and the test
-/// that needs it seeds one.
+/// This lane's request-volume denominator, read through the registry's own
+/// accessor. Reads only: an earlier version seeded a throwaway drop class so
+/// the snapshot would materialize a row to read the denominator off, which
+/// made a function named `..._count` mutate the registry on every call.
 fn responses_lane_seen_count() -> u64 {
-    // Seed a class so an entry exists to read the denominator off. The class
-    // is reserved to this helper so no other test's assertion sees it.
-    crate::translation_drop_metrics::record_translation_drop(
-        "openai-responses",
-        "lane-seen-probe-reserved-to-this-test",
-    );
-    crate::translation_drop_metrics::translation_drop_snapshot()
-        .into_iter()
-        .find(|e| e.lane == "openai-responses")
-        .map_or(0, |e| e.lane_seen_count)
+    crate::translation_drop_metrics::translation_lane_seen("openai-responses")
 }

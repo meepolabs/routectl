@@ -104,46 +104,53 @@ use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 /// shape for.
 #[derive(Default)]
 struct ResponsesDropTally {
-    image_source_kind: u32,
-    reasoning_detail_kind: u32,
-    reasoning_format_foreign: u32,
-    reasoning_scheme_incompatible: u32,
+    image_source_kind: bool,
+    reasoning_detail_kind: bool,
+    reasoning_format_foreign: bool,
+    reasoning_scheme_incompatible: bool,
 }
 
 impl ResponsesDropTally {
     const fn record_image_source_kind(&mut self) {
-        self.image_source_kind = self.image_source_kind.saturating_add(1);
+        self.image_source_kind = true;
     }
 
     const fn record_reasoning_detail_kind(&mut self) {
-        self.reasoning_detail_kind = self.reasoning_detail_kind.saturating_add(1);
+        self.reasoning_detail_kind = true;
     }
 
     const fn record_reasoning_format_foreign(&mut self) {
-        self.reasoning_format_foreign = self.reasoning_format_foreign.saturating_add(1);
+        self.reasoning_format_foreign = true;
     }
 
     const fn record_reasoning_scheme_incompatible(&mut self) {
-        self.reasoning_scheme_incompatible = self.reasoning_scheme_incompatible.saturating_add(1);
+        self.reasoning_scheme_incompatible = true;
     }
 
     /// Bump one process-wide counter per drop class this request hit at
     /// least once. The lane's request-volume denominator is NOT bumped
     /// here: `request::translate` owns the single `record_translation_lane_seen`
-    /// site for this lane, because `build_input` also has direct
-    /// test-only callers and a denominator counted from here would not
-    /// mean "requests this lane processed".
+    /// site for this lane.
+    ///
+    /// The consequence, stated because it is easy to misread a drop count on
+    /// this lane: in the TEST binary the numerator and denominator have
+    /// different reachability. Roughly twenty in-crate test callers invoke
+    /// `build_input` directly, so they move these drop counters without moving
+    /// `lane_seen`. In production `translate` is the only caller, so the two
+    /// agree there. A drop RATE computed inside the test binary is therefore
+    /// not meaningful; a delta on a single class still is, which is what the
+    /// pinning tests assert.
     fn flush(&self) {
-        if self.image_source_kind > 0 {
+        if self.image_source_kind {
             record_translation_drop("openai-responses", "image_source_kind_unrepresentable");
         }
-        if self.reasoning_detail_kind > 0 {
+        if self.reasoning_detail_kind {
             record_translation_drop("openai-responses", "reasoning_detail_kind_unsupported");
         }
-        if self.reasoning_format_foreign > 0 {
+        if self.reasoning_format_foreign {
             record_translation_drop("openai-responses", "reasoning_format_foreign");
         }
-        if self.reasoning_scheme_incompatible > 0 {
+        if self.reasoning_scheme_incompatible {
             record_translation_drop("openai-responses", "reasoning_scheme_incompatible");
         }
     }

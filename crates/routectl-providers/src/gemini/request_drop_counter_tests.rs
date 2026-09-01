@@ -23,13 +23,10 @@ fn gemini_drop_count(class: &str) -> u64 {
         .map_or(0, |e| e.drop_count)
 }
 
-/// The lane's request-volume denominator, read back through any entry (every
-/// entry carries it) or `0` when the lane has no counted drop key yet.
+/// The lane's request-volume denominator, read through the registry's own
+/// accessor rather than off an arbitrary drop row.
 fn gemini_lane_seen_count() -> u64 {
-    crate::translation_drop_metrics::translation_drop_snapshot()
-        .into_iter()
-        .find(|e| e.lane == "gemini")
-        .map_or(0, |e| e.lane_seen_count)
+    crate::translation_drop_metrics::translation_lane_seen("gemini")
 }
 
 /// The serialized wire body, which is what actually ships upstream. Assert
