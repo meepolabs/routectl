@@ -490,12 +490,15 @@ license.
 - `src/translation_drop_metrics.rs` -- process-wide, per-request-tallied
   `(lane, drop_class)` drop counters for translation-time drops in the
   `translate_*`/`build_*` egress functions: `record_translation_drop(lane,
-  drop_class)` and `record_translation_lane_seen(lane)` bump `AtomicU64`
-  slots in a `Mutex`-guarded registry keyed by a `BTreeMap` (no fixed
-  enum/array, so independent fix/sweep arms never collide on this file);
+  drop_class)` and `record_translation_lane_seen(lane)` bump plain `u64`
+  counters in a `Mutex`-guarded registry keyed by a `BTreeMap` (no fixed
+  enum/array, so independent fix/sweep arms never collide on this file; the
+  map itself needs the lock, and once every access holds it exclusively a
+  per-entry atomic would buy nothing and imply lock-free access is possible);
   `translation_drop_snapshot() -> Vec<TranslationDropSnapshotEntry>` reads
   them back (`lane`, `drop_class`, `drop_count`, `lane_seen_count`,
-  `.drop_rate()`). Homed here rather than on the router's `RouterMetrics`
+  `.drop_rate()`), and `translation_lane_seen(lane) -> u64` reads one lane's
+  denominator alone, without the snapshot's need for an existing drop row. Homed here rather than on the router's `RouterMetrics`
   because the drops fire from providers-side translate/build functions and
   router depends on providers, never the reverse; the router's metrics
   snapshot (`routectl-router/src/router/mod.rs::log_snapshot`) reads this
@@ -783,9 +786,18 @@ license.
 ### openai_compat/wire_lift
 
 - `src/openai_compat/wire_lift/mod.rs` -- ordered dispatch table rewriting
-  Anthropic-shape body fields to OpenAI-compat wire shape
+  Anthropic-shape body fields to OpenAI-compat wire shape. Every drop arm in
+  this directory carries a `TRANSLATION-DROP:` verdict marker (see
+  `src/translation_drop_metrics.rs`); `content.rs` and `tool_result.rs` each
+  own a per-request drop tally flushed OUTSIDE their fallible body, so a
+  request that drops content and then fails translation still reaches the
+  counter. The lane's single request-volume denominator is bumped in
+  `openai_compat/request.rs::normalize`, ahead of its first fallible step
 - `src/openai_compat/wire_lift/content.rs` -- image content blocks (Anthropic
-  base64 source and url source shapes -> `image_url`), drops documents
+  base64 source and url source shapes -> `image_url`), drops documents and
+  unrepresentable image sources (each counted once per request via
+  `ContentDropTally`), and strips Anthropic-only per-block `cache_control`
+  from every surviving part
 - `src/openai_compat/wire_lift/thinking.rs` -- assistant
   `thinking`/`redacted_thinking` blocks -> message-envelope
   `reasoning_details`
@@ -794,7 +806,8 @@ license.
 - `src/openai_compat/wire_lift/tool_use.rs` -- assistant `tool_use` content
   blocks -> top-level `tool_calls` array
 - `src/openai_compat/wire_lift/tool_result.rs` -- user-message `tool_result`
-  blocks -> separate `role:"tool"` wire messages
+  blocks -> separate `role:"tool"` wire messages; drops inner document and
+  unrepresentable image-source blocks via `ToolResultDropTally`
 - `src/openai_compat/wire_lift/tool_choice.rs` -- Anthropic tool_choice tagged
   objects -> OpenAI bare-string / function-object form
 - `src/openai_compat/wire_lift/response_format.rs` -- `output_config.format`
@@ -1077,12 +1090,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
   messages: `build_messages` per-role dispatch, the three document paths
   (`translate_document`, `document_to_tool_result`, the raw
-  Anthropic-shape array element), image/tool_result carriers
+  Anthropic-shape array element), image/tool_result carriers. Four
+  per-request drop tallies flush unconditionally from `build_messages` (so the
+  Err arm counts too); `ReasoningSkipTally::flush` also owns this lane's single
+  request-volume denominator
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
-  when the translated transcript carries a `toolResult` but no tools survive
+  when the translated transcript carries a `toolResult` but no tools survive;
+  drops non-custom (Anthropic builtin) tools with a counted verdict
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
-  (thinking, anthropic_beta, cache_control, output_config)
+  (thinking, anthropic_beta, cache_control, output_config); two `BagDropTally`
+  instances count the managed-key override refusals and the client-fingerprint
+  strip once per request each
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame

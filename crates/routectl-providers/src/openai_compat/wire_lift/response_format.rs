@@ -477,6 +477,10 @@ mod tests {
     /// This is the `?`-on-`Option` exit that matched none of the audit's
     /// candidate-arm grep patterns and dropped with no log at all.
     #[test]
+    // Sole holder of this guard name today: exactly one fixture in the crate
+    // reaches this arm, so the guard excludes nothing yet. It is here so the
+    // NEXT test that constructs this shape shares a name rather than silently
+    // making the delta below flaky.
     #[serial_test::serial(openai_compat_response_format_schema_missing)]
     fn json_schema_without_schema_drops_and_warns() {
         // Arrange -- a json_schema entry carrying only a name.

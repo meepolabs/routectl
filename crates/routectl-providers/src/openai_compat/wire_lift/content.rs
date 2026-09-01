@@ -456,6 +456,10 @@ mod tests {
     /// dropped, warns with its own structured `what`, and its payload does
     /// not reach the emitted body.
     #[test]
+    // Sole holder of this guard name today: exactly one fixture in the crate
+    // reaches this arm, so the guard excludes nothing yet. It is here so the
+    // NEXT test that constructs this shape shares a name rather than silently
+    // making the delta below flaky.
     #[serial_test::serial(openai_compat_image_source_unrepresentable)]
     fn unsupported_image_source_drops_and_warns() {
         // Arrange -- an unrepresentable source alongside a representable
