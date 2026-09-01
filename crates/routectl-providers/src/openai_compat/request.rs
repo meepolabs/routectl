@@ -1563,8 +1563,19 @@ mod tests {
     /// high. The assertion is monotonic rather than an exact delta on
     /// purpose: the denominator is lane-global and every other `normalize`
     /// caller in this test binary bumps the same counter, so only "it moved"
-    /// is a sound claim here. `.13` welds the at-most-one-call-site half.
+    /// is a sound claim here. The at-most-one-call-site half is welded by the
+    /// census test.
+    ///
+    /// The serial guard is NOT about this test's own monotonic assertion, which
+    /// no sibling could break. It is about the DROP counter this test bumps as a
+    /// side effect: the fixture carries an unrepresentable document block, so
+    /// each `normalize` here increments
+    /// `(openai-compat, document_block_unrepresentable)` twice, which the exact
+    /// delta assertions in `wire_lift::content::tests` read back. Sharing their
+    /// guard name is what keeps those deltas sound -- a test that only triggers
+    /// a counted drop incidentally still has to hold the key's guard.
     #[test]
+    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn normalize_counts_the_request_on_both_arms() {
         // Arrange
         let req = req_with_dropped_document();

@@ -185,7 +185,7 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
             // marker, never the marker's translation: `system.rs` owns both
             // the drop and its record for that surface. Nothing is lost here
             // that is not accounted for there.
-            // TRANSLATION-DROP: structural -- de-duplicates the system surface's diagnostic; system.rs owns that drop and its record
+            // TRANSLATION-DROP: structural -- de-duplicates the system surface's diagnostic; the system surface owns that drop and its record
             BreakpointPosition::System => continue,
         };
         if !surfaces.contains(&name) {
