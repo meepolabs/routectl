@@ -1906,6 +1906,65 @@ fn log_snapshot_carries_translation_drop_counts_from_the_providers_registry() {
 }
 
 #[test]
+fn log_snapshot_carries_translation_policy_action_counts_from_the_providers_registry() {
+    // Arrange: the policy-action counter is a separate map behind the same
+    // providers-side accessor pattern, so it needs its own proof that the
+    // router snapshot reads through to it.
+    let lane = "router-snapshot-policy-test-lane";
+    let policy_class = "router-snapshot-policy-test-class";
+    let drop_class = "router-snapshot-policy-test-drop-class";
+    routectl_providers::translation_drop_metrics::record_translation_lane_seen(lane);
+    routectl_providers::translation_drop_metrics::record_translation_policy_action(
+        lane,
+        policy_class,
+    );
+    // Positive control for the negative assertion below: without a drop
+    // actually recorded, an empty drop field would satisfy `!contains` no
+    // matter what the split did.
+    routectl_providers::translation_drop_metrics::record_translation_drop(lane, drop_class);
+
+    let config = Arc::new(Config::default());
+    let router = Router::new(config);
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        router.log_metrics_snapshot();
+    });
+
+    // Assert
+    let snapshot = events
+        .iter()
+        .find(|e| {
+            e.target == "routectl_router::router::metrics" && e.message == "router metrics snapshot"
+        })
+        .expect("router metrics snapshot event must be emitted");
+    let rendered = snapshot
+        .field("rc_translation_policy_action_counts")
+        .expect("rc_translation_policy_action_counts field must be present on the snapshot event");
+    assert!(
+        rendered.contains(lane)
+            && rendered.contains(policy_class)
+            && rendered.contains("action_count: 1"),
+        "rendered field must contain this test's (lane, policy_class) entry with its count: {rendered}"
+    );
+    // The two vocabularies are rendered separately: this class must not have
+    // leaked into the drop field. The drop_class assertion is the positive
+    // control proving the field is populated at all.
+    let drops = snapshot
+        .field("rc_translation_drop_counts")
+        .expect("rc_translation_drop_counts field must be present too");
+    assert!(
+        drops.contains(drop_class),
+        "the drop field must carry this test's own drop class, or the negative \
+         assertion below proves nothing: {drops}"
+    );
+    assert!(
+        !drops.contains(policy_class),
+        "a policy-action class must not appear in the drop field: {drops}"
+    );
+}
+
+#[test]
 fn emit_class_observability_bumps_context_window_overflow_on_context_window_class() {
     use routectl_core::failure_class::{ClassifiedFailure, MatchedBy};
 

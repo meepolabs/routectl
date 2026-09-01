@@ -2036,10 +2036,73 @@ impl<T> typenum::type_operators::Same for routectl_providers::translation_drop_m
 pub type routectl_providers::translation_drop_metrics::TranslationDropSnapshotEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::translation_drop_metrics::TranslationDropSnapshotEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::translation_drop_metrics::TranslationDropSnapshotEntry::into_shared(self) -> Shared
+pub struct routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::action_count: u64
+pub routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::lane: &'static str
+pub routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::lane_seen_count: u64
+pub routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::policy_class: &'static str
+impl routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::action_rate(&self) -> f64
+impl core::clone::Clone for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::clone(&self) -> routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::cmp::Eq for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::cmp::PartialEq for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::eq(&self, &routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry) -> bool
+impl core::fmt::Debug for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::marker::StructuralPartialEq for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::marker::Freeze for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::marker::Send for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::marker::Sync for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::marker::Unpin for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::marker::UnsafeUnpin for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl core::panic::unwind_safe::UnwindSafe for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl<Q, K> equivalent::Equivalent<K> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where U: core::convert::From<T>
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where U: core::convert::Into<T>
+pub type routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::Error = core::convert::Infallible
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where U: core::convert::TryFrom<T>
+pub type routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: core::clone::Clone
+pub type routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::Owned = T
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::clone_into(&self, &mut T)
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: 'static + ?core::marker::Sized
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: ?core::marker::Sized
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: ?core::marker::Sized
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: core::clone::Clone
+pub unsafe fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: core::clone::Clone
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl<T> outref::AsOut<T> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: core::marker::Copy
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where T: ?core::marker::Sized
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl<T> tracing::instrument::WithSubscriber for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+impl<T> typenum::type_operators::Same for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry
+pub type routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry::into_shared(self) -> Shared
 pub fn routectl_providers::translation_drop_metrics::record_translation_drop(&'static str, &'static str)
 pub fn routectl_providers::translation_drop_metrics::record_translation_lane_seen(&'static str)
+pub fn routectl_providers::translation_drop_metrics::record_translation_policy_action(&'static str, &'static str)
 pub fn routectl_providers::translation_drop_metrics::translation_drop_snapshot() -> alloc::vec::Vec<routectl_providers::translation_drop_metrics::TranslationDropSnapshotEntry>
 pub fn routectl_providers::translation_drop_metrics::translation_lane_seen(&str) -> u64
+pub fn routectl_providers::translation_drop_metrics::translation_policy_action_snapshot() -> alloc::vec::Vec<routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry>
 pub type routectl_providers::translation_drop_metrics::DropKey = (&'static str, &'static str)
 pub const routectl_providers::VALIDATION_EXCEPTION_TYPE: &str
 pub fn routectl_providers::aws_exception_type_is(&str, &str) -> bool

@@ -64,13 +64,14 @@ pub(super) fn build_additional_fields(
     let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
-    let extra_drops = insert_provider_extras(cfg, req, &mut bag);
-    let operator_drops = insert_operator_extras(cfg, &mut bag);
-    // Once per REQUEST per class, never once per dropped key: a bag whose
-    // extras collide on three managed keys is one drop event against this
-    // lane's request-volume denominator.
-    extra_drops.flush();
-    operator_drops.flush();
+    let provider_actions = insert_provider_extras(cfg, req, &mut bag);
+    let operator_actions = insert_operator_extras(cfg, &mut bag);
+    // Once per REQUEST per class, never once per withheld key: a bag whose
+    // extras collide on three managed keys is one policy-action event against
+    // this lane's request-volume denominator. Flushed here, outside any
+    // fallible body, so a request that later fails still counts.
+    provider_actions.flush();
+    operator_actions.flush();
 
     // Filter anthropic_beta against the operator-supplied
     // `[bedrock] allowed_betas` list (routectl ships no const default).
@@ -156,34 +157,58 @@ pub(super) fn build_additional_fields(
     Some(bag)
 }
 
-/// Per-request record of `additionalModelRequestFields` entries dropped
-/// during bag assembly. Lane: bedrock-converse, construction-time
-/// translation, cross-dialect by construction. Each field is a per-request
-/// FLAG rather than a key count: the per-key log already names the offending
-/// key, and the `(lane, drop_class)` counters are per-REQUEST by contract.
+/// Per-request record of `additionalModelRequestFields` entries WITHHELD
+/// during bag assembly by the PROVIDER-EXTRAS path (the Anthropic ingress's
+/// forward-compat sweep). Lane: bedrock-converse. Both classes are policy
+/// actions rather than drops -- the Converse bag could carry either value and
+/// the upstream would accept it; routectl declines to send the client
+/// fingerprint and refuses to let a swept key override one it manages. Each
+/// field is a per-request FLAG rather than a key count: the per-key log
+/// already names the offending key, and the `(lane, class)` counters are
+/// per-REQUEST by contract.
+///
+/// Split from the operator path's tally deliberately. One shared three-field
+/// type would let a future edit set the same flag from both paths, and the
+/// caller flushes both, so that class would count twice for one request --
+/// breaking the per-request contract with no test to catch it. Separate types
+/// make the disjointness a compile error instead of a convention.
+#[must_use = "the tally must be flushed once per request or the policy-action count is lost"]
 #[derive(Default)]
-struct BagDropTally {
+struct ProviderExtrasPolicyActions {
     provider_extra_managed_key_conflict: bool,
     client_fingerprint_stripped: bool,
-    operator_extra_managed_key_conflict: bool,
 }
 
-impl BagDropTally {
+impl ProviderExtrasPolicyActions {
     fn flush(&self) {
         if self.provider_extra_managed_key_conflict {
-            crate::translation_drop_metrics::record_translation_drop(
+            crate::translation_drop_metrics::record_translation_policy_action(
                 "bedrock-converse",
                 "provider_extra_managed_key_conflict",
             );
         }
         if self.client_fingerprint_stripped {
-            crate::translation_drop_metrics::record_translation_drop(
+            crate::translation_drop_metrics::record_translation_policy_action(
                 "bedrock-converse",
                 "client_fingerprint_stripped",
             );
         }
+    }
+}
+
+/// Per-request record of entries WITHHELD by the OPERATOR-EXTRAS path.
+/// See [`ProviderExtrasPolicyActions`] for why the two paths carry separate
+/// types rather than one shared tally.
+#[must_use = "the tally must be flushed once per request or the policy-action count is lost"]
+#[derive(Default)]
+struct OperatorExtrasPolicyActions {
+    operator_extra_managed_key_conflict: bool,
+}
+
+impl OperatorExtrasPolicyActions {
+    fn flush(&self) {
         if self.operator_extra_managed_key_conflict {
-            crate::translation_drop_metrics::record_translation_drop(
+            crate::translation_drop_metrics::record_translation_policy_action(
                 "bedrock-converse",
                 "operator_extra_managed_key_conflict",
             );
@@ -200,23 +225,23 @@ impl BagDropTally {
 /// on canonical's typed surface.
 ///
 /// Source: this helper only ever sees `req.provider_extras` -- the
-/// Anthropic ingress's forward-compat sweep. Drops here are by design
+/// Anthropic ingress's forward-compat sweep. Withholding here is by design
 /// (the swept key conflicts with a key routectl builds itself, e.g.
-/// `thinking`) and were flooding `routectl-warn.log` on every
-/// claude-code request. The drop log fires at DEBUG with neutral
+/// `thinking`) and was flooding `routectl-warn.log` on every
+/// claude-code request. The refusal log fires at DEBUG with neutral
 /// phrasing. Operator-config extras flow through
 /// `insert_operator_extras` below, which keeps the WARN-level
 /// adversarial phrasing because that path IS an operator misconfig.
 ///
-/// Returns the request's drop flags for the caller to flush once.
+/// Returns the request's policy-action flags for the caller to flush once.
 fn insert_provider_extras(
     cfg: &BedrockConfig,
     req: &ChatRequest,
     bag: &mut Map<String, Value>,
-) -> BagDropTally {
-    let mut drops = BagDropTally::default();
+) -> ProviderExtrasPolicyActions {
+    let mut actions = ProviderExtrasPolicyActions::default();
     let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
-        return drops;
+        return actions;
     };
     for (k, v) in extras {
         // A swept forward-compat key that collides with a field routectl
@@ -224,9 +249,9 @@ fn insert_provider_extras(
         // per key, and letting the client value win would silently replace
         // the `thinking` block (or the Converse body field) routectl derived
         // from canonical. Baked seed verdict per foundations sec 14.
-        // TRANSLATION-DROP: lane=bedrock-converse class=provider_extra_managed_key_conflict test=provider_extra_managed_key_conflict_bumps_the_drop_counter_once
+        // TRANSLATION-DROP: policy-action class=provider_extra_managed_key_conflict test=provider_extra_managed_key_conflict_bumps_the_policy_action_counter_once
         if is_converse_managed_key(k) {
-            drops.provider_extra_managed_key_conflict = true;
+            actions.provider_extra_managed_key_conflict = true;
             tracing::debug!(
                 provider = %cfg.id,
                 key = %sanitize_for_log(k),
@@ -244,9 +269,9 @@ fn insert_provider_extras(
         // `crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY`.
         // The drop is deliberate and NOT representability-driven: the wire
         // would carry the block fine, and routectl declines to send it.
-        // TRANSLATION-DROP: lane=bedrock-converse class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_drop_counter_once
+        // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_policy_action_counter_once
         if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
-            drops.client_fingerprint_stripped = true;
+            actions.client_fingerprint_stripped = true;
             tracing::debug!(
                 provider = %cfg.id,
                 "stripped client metadata fingerprint from Converse \
@@ -260,7 +285,7 @@ fn insert_provider_extras(
         // matches the Anthropic egress precedence.
         bag.insert(k.clone(), v.clone());
     }
-    drops
+    actions
 }
 
 /// Honor the canonical structured-output directive on the Converse bag by
@@ -386,18 +411,21 @@ fn insert_top_level_cache_control(req: &ChatRequest, bag: &mut Map<String, Value
 /// routectl didn't set, but lose to canonical-derived fields above when
 /// keys clash -- avoids a misconfigured config silently overriding
 /// anthropic_beta the caller intended to send. Routectl-managed keys
-/// are dropped with a WARN to match the Invoke egress's
+/// are withheld with a WARN to match the Invoke egress's
 /// `is_bedrock_invoke_managed_key` policy.
 ///
-/// Returns the request's drop flags for the caller to flush once.
-fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) -> BagDropTally {
-    let mut drops = BagDropTally::default();
+/// Returns the request's policy-action flags for the caller to flush once.
+fn insert_operator_extras(
+    cfg: &BedrockConfig,
+    bag: &mut Map<String, Value>,
+) -> OperatorExtrasPolicyActions {
+    let mut actions = OperatorExtrasPolicyActions::default();
     let Some(extras) = cfg
         .additional_model_request_fields
         .as_ref()
         .and_then(|v| v.as_object())
     else {
-        return drops;
+        return actions;
     };
     for (k, v) in extras {
         // Same one-slot-per-key constraint as the client path above, with
@@ -405,9 +433,9 @@ fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) -> 
         // replace a field routectl derived from the canonical request. WARN
         // rather than DEBUG because this path IS an operator misconfig, not
         // a forward-compat sweep. Baked seed verdict per foundations sec 14.
-        // TRANSLATION-DROP: lane=bedrock-converse class=operator_extra_managed_key_conflict test=operator_extra_managed_key_conflict_bumps_the_drop_counter_once
+        // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once
         if is_converse_managed_key(k) {
-            drops.operator_extra_managed_key_conflict = true;
+            actions.operator_extra_managed_key_conflict = true;
             tracing::warn!(
                 provider = %cfg.id,
                 key = %sanitize_for_log(k),
@@ -418,7 +446,7 @@ fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) -> 
         }
         bag.entry(k.clone()).or_insert_with(|| v.clone());
     }
-    drops
+    actions
 }
 
 /// Keys in `additionalModelRequestFields` that routectl manages. This
@@ -551,7 +579,9 @@ mod tests {
     /// `additionalModelRequestFields`. (Operator-set metadata via config
     /// flows through `insert_operator_extras`, which is NOT gated here.)
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    // No serial guard: this test drives the helper in isolation and never
+    // flushes, so it touches no counter key. A guard here would tell the next
+    // reader it mutates one.
     fn client_metadata_fingerprint_skipped_from_converse_bag() {
         use serde_json::{Map, json};
         // Arrange: client supplies a metadata fingerprint via
@@ -566,7 +596,9 @@ mod tests {
         // Act: drive insert_provider_extras directly so the assertion
         // targets the client path in isolation.
         let mut bag: Map<String, serde_json::Value> = Map::new();
-        super::insert_provider_extras(&cfg, &req, &mut bag);
+        // Drives the helper in isolation and never flushes, so the tally is
+        // deliberately discarded and no serial guard is owed.
+        let _ = super::insert_provider_extras(&cfg, &req, &mut bag);
 
         // Assert: no metadata key, and no fingerprint substring.
         assert!(
@@ -646,7 +678,9 @@ mod tests {
         }));
 
         let mut bag: Map<String, serde_json::Value> = Map::new();
-        super::insert_operator_extras(&cfg, &mut bag);
+        // Drives the helper in isolation and never flushes, so the tally is
+        // deliberately discarded and no serial guard is owed.
+        let _ = super::insert_operator_extras(&cfg, &mut bag);
 
         assert_eq!(
             bag.get("metadata").and_then(|m| m.get("trace")),
@@ -1148,16 +1182,28 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The three `additionalModelRequestFields` drop classes and their
-    // per-request counters. Log capture uses
-    // `routectl_testkit::capture_events` because the dropped KEY rides as a
-    // structured field, which a substring match on rendered output cannot
-    // assert. Each test is serialized on its own drop_class guard -- the
-    // registry is process-global and this crate's runner is threaded -- and
-    // the same guard is applied to every other test in the crate that
-    // reaches the same arm incidentally.
+    // The three `additionalModelRequestFields` policy-action classes and
+    // their per-request counters. None is a wire-representability loss: the
+    // bag could carry every one of these values, and routectl withholds
+    // them, so they count on the policy-action counter and never on the drop
+    // counter. Log capture uses `routectl_testkit::capture_events` because
+    // the withheld KEY rides as a structured field, which a substring match
+    // on rendered output cannot assert. Each test is serialized on its own
+    // class guard -- the registry is process-global and this crate's runner
+    // is threaded -- and the same guard is applied to every other test in
+    // the crate that reaches the same arm incidentally.
     // -----------------------------------------------------------------
 
+    fn bag_policy_action_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_policy_action_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "bedrock-converse" && e.policy_class == class)
+            .map_or(0, |e| e.action_count)
+    }
+
+    /// The drop counter for the same `(lane, class)` pair, read so each
+    /// pinning test can prove the class left the DROP vocabulary rather than
+    /// merely arriving in the policy one.
     fn bag_drop_count(class: &str) -> u64 {
         crate::translation_drop_metrics::translation_drop_snapshot()
             .into_iter()
@@ -1174,12 +1220,13 @@ mod tests {
 
     /// NEGATIVE CONTROL. A forward-compat swept key colliding with a
     /// routectl-managed field cannot be forwarded (one slot per key), so it
-    /// drops at DEBUG and the counter advances once for the request.
+    /// is withheld at DEBUG and the counter advances once for the request.
     #[test]
     #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
-    fn provider_extra_managed_key_conflict_bumps_the_drop_counter_once() {
+    fn provider_extra_managed_key_conflict_bumps_the_policy_action_counter_once() {
         // Arrange -- `thinking` is managed; `top_k` is representable.
-        let before = bag_drop_count("provider_extra_managed_key_conflict");
+        let before = bag_policy_action_count("provider_extra_managed_key_conflict");
+        let drops_before = bag_drop_count("provider_extra_managed_key_conflict");
         let cfg = fake_cfg();
         let mut req = req_with_thinking();
         req.provider_extras = Some(serde_json::json!({
@@ -1192,7 +1239,8 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             bag = emitted_bag(&cfg, &req);
         });
-        let after = bag_drop_count("provider_extra_managed_key_conflict");
+        let after = bag_policy_action_count("provider_extra_managed_key_conflict");
+        let drops_after = bag_drop_count("provider_extra_managed_key_conflict");
 
         // Assert 1 -- the DEBUG fired, naming the key as a structured field.
         let event = events
@@ -1224,14 +1272,21 @@ mod tests {
             1,
             "the conflict counter must advance by exactly one for this request"
         );
+        // Assert 4 -- the class left the DROP vocabulary: refusing an
+        // override is not a representability loss, and the two vocabularies
+        // must stay disjoint.
+        assert_eq!(
+            drops_after, drops_before,
+            "a policy action must not also count as a translation drop"
+        );
     }
 
-    /// Two colliding keys in ONE request is one drop EVENT, not two.
+    /// Two colliding keys in ONE request is one policy-action EVENT, not two.
     #[test]
     #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
-    fn two_provider_extra_conflicts_bump_the_drop_counter_once() {
+    fn two_provider_extra_conflicts_bump_the_policy_action_counter_once() {
         // Arrange
-        let before = bag_drop_count("provider_extra_managed_key_conflict");
+        let before = bag_policy_action_count("provider_extra_managed_key_conflict");
         let cfg = fake_cfg();
         let mut req = req_with_thinking();
         req.provider_extras = Some(serde_json::json!({
@@ -1241,13 +1296,13 @@ mod tests {
 
         // Act
         let _ = emitted_bag(&cfg, &req);
-        let after = bag_drop_count("provider_extra_managed_key_conflict");
+        let after = bag_policy_action_count("provider_extra_managed_key_conflict");
 
         // Assert
         assert_eq!(
             after - before,
             1,
-            "two colliding keys in one request is one drop event, not two"
+            "two colliding keys in one request is one policy-action event, not two"
         );
     }
 
@@ -1257,7 +1312,7 @@ mod tests {
     #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
     fn non_colliding_provider_extras_advance_no_conflict_counter() {
         // Arrange
-        let before = bag_drop_count("provider_extra_managed_key_conflict");
+        let before = bag_policy_action_count("provider_extra_managed_key_conflict");
         let cfg = fake_cfg();
         let mut req = req_with_thinking();
         req.provider_extras = Some(serde_json::json!({"top_k": 40}));
@@ -1267,7 +1322,7 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             bag = emitted_bag(&cfg, &req);
         });
-        let after = bag_drop_count("provider_extra_managed_key_conflict");
+        let after = bag_policy_action_count("provider_extra_managed_key_conflict");
 
         // Assert
         assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
@@ -1281,14 +1336,16 @@ mod tests {
     }
 
     /// NEGATIVE CONTROL. The client fingerprint block is stripped on this
-    /// seam because Bedrock is always a third-party upstream. The drop is
+    /// seam because Bedrock is always a third-party upstream. The strip is
     /// deliberate and NOT representability-driven -- the wire would carry
-    /// the block fine, and routectl declines to send it.
+    /// the block fine, and routectl declines to send it -- so it counts as a
+    /// policy action, never as a translation drop.
     #[test]
     #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
-    fn client_fingerprint_strip_bumps_the_drop_counter_once() {
+    fn client_fingerprint_strip_bumps_the_policy_action_counter_once() {
         // Arrange
-        let before = bag_drop_count("client_fingerprint_stripped");
+        let before = bag_policy_action_count("client_fingerprint_stripped");
+        let drops_before = bag_drop_count("client_fingerprint_stripped");
         let cfg = fake_cfg();
         let mut req = req_with_thinking();
         req.provider_extras = Some(serde_json::json!({
@@ -1301,7 +1358,8 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             bag = emitted_bag(&cfg, &req);
         });
-        let after = bag_drop_count("client_fingerprint_stripped");
+        let after = bag_policy_action_count("client_fingerprint_stripped");
+        let drops_after = bag_drop_count("client_fingerprint_stripped");
 
         // Assert 1 -- the strip was logged.
         assert!(
@@ -1334,6 +1392,13 @@ mod tests {
             1,
             "the fingerprint-strip counter must advance by exactly one"
         );
+        // Assert 4 -- the class left the DROP vocabulary. This class fires
+        // on nearly every request to this lane, which is exactly why it must
+        // never be in the drop rate's numerator.
+        assert_eq!(
+            drops_after, drops_before,
+            "a privacy strip must not also count as a translation drop"
+        );
     }
 
     /// POSITIVE CONTROL: extras carrying no fingerprint block advance no
@@ -1342,14 +1407,14 @@ mod tests {
     #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn extras_without_a_fingerprint_advance_no_strip_counter() {
         // Arrange
-        let before = bag_drop_count("client_fingerprint_stripped");
+        let before = bag_policy_action_count("client_fingerprint_stripped");
         let cfg = fake_cfg();
         let mut req = req_with_thinking();
         req.provider_extras = Some(serde_json::json!({"top_k": 40}));
 
         // Act
         let bag = emitted_bag(&cfg, &req);
-        let after = bag_drop_count("client_fingerprint_stripped");
+        let after = bag_policy_action_count("client_fingerprint_stripped");
 
         // Assert
         assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
@@ -1361,9 +1426,10 @@ mod tests {
     /// misconfiguration rather than a forward-compat sweep.
     #[test]
     #[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
-    fn operator_extra_managed_key_conflict_bumps_the_drop_counter_once() {
+    fn operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once() {
         // Arrange
-        let before = bag_drop_count("operator_extra_managed_key_conflict");
+        let before = bag_policy_action_count("operator_extra_managed_key_conflict");
+        let drops_before = bag_drop_count("operator_extra_managed_key_conflict");
         let mut cfg = fake_cfg();
         cfg.additional_model_request_fields = Some(serde_json::json!({
             "thinking": {"type": "sentinel-operator-thinking"},
@@ -1376,7 +1442,8 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             bag = emitted_bag(&cfg, &req);
         });
-        let after = bag_drop_count("operator_extra_managed_key_conflict");
+        let after = bag_policy_action_count("operator_extra_managed_key_conflict");
+        let drops_after = bag_drop_count("operator_extra_managed_key_conflict");
 
         // Assert 1 -- the WARN fired, naming the key as a structured field.
         let warn = events
@@ -1406,6 +1473,11 @@ mod tests {
         );
 
         assert_eq!(after - before, 1);
+        // Assert 4 -- the class left the DROP vocabulary.
+        assert_eq!(
+            drops_after, drops_before,
+            "a refused override must not also count as a translation drop"
+        );
     }
 
     /// POSITIVE CONTROL: operator extras that collide with nothing advance
@@ -1414,7 +1486,7 @@ mod tests {
     #[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
     fn non_colliding_operator_extras_advance_no_conflict_counter() {
         // Arrange
-        let before = bag_drop_count("operator_extra_managed_key_conflict");
+        let before = bag_policy_action_count("operator_extra_managed_key_conflict");
         let mut cfg = fake_cfg();
         cfg.additional_model_request_fields = Some(serde_json::json!({"top_k": 40}));
         let req = req_with_thinking();
@@ -1424,7 +1496,7 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             bag = emitted_bag(&cfg, &req);
         });
-        let after = bag_drop_count("operator_extra_managed_key_conflict");
+        let after = bag_policy_action_count("operator_extra_managed_key_conflict");
 
         // Assert
         assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
