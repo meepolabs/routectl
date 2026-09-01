@@ -982,12 +982,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `warn_dropped_cache_control`
   emits the drop-with-warn breadcrumb for caller `cache_control` markers
   (Gemini has no breakpoint surface), matching the openai-compat/responses
-  egresses
-- `src/gemini/schema.rs` -- `clean_schema`: pure JSON-Schema -> Gemini
-  OpenAPI-subset cleaner shared by tool `parameters` and
+  egresses; `GeminiDropTally` is the per-request drop tally flushed once from
+  `translate` on both the Ok and the Err arm -- the lane's single
+  `record_translation_lane_seen("gemini")` denominator site, and the single
+  `record_translation_drop` site for every counted class
+- `src/gemini/request_drop_counter_tests.rs` -- `include!`d into
+  `request.rs`'s `tests` module: the three-assertion pinning set per counted
+  drop (warn/debug captured via `capture_events`, field absent from the
+  EMITTED WIRE VALUE, representable sibling survives) plus the per-class
+  counter deltas under `serial_test` guards
+- `src/gemini/schema.rs` -- `clean_schema_reporting`: pure JSON-Schema ->
+  Gemini OpenAPI-subset cleaner shared by tool `parameters` and
   `generationConfig.responseSchema` (oneOf -> anyOf, strip
   `$schema`/`$ref`/`additionalProperties`, nullable-union lift, numeric-enum
-  coercion, uppercased `type`), recursing nested objects/arrays/combinators
+  coercion, uppercased `type`), recursing nested objects/arrays/combinators;
+  returns a constraint-lost flag alongside the cleaned schema so the egress
+  tally owns the WARN and the counter and this module stays log-free
 - `src/gemini/response.rs` -- Gemini response -> canonical `ChatResponse`;
   `translate_usage` maps `cachedContentTokenCount` ->
   `cache_read_input_tokens` and `thoughtsTokenCount` -> `reasoning_tokens`
