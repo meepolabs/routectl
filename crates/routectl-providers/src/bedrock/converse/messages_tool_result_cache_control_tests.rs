@@ -36,6 +36,7 @@ fn only_tool_result_content(messages: &[Message]) -> Vec<ConverseToolResultConte
 /// drops silently from the wire but must still surface through the
 /// aggregated WARN, and the text it was attached to must still translate.
 #[test]
+#[serial_test::serial(bedrock_converse_tool_result_cache_control_drop)]
 fn nested_tool_result_cache_control_marker_drops_and_warns() {
     // Arrange
     let messages = vec![tool_turn(vec![text_part_with_cache_control(
@@ -91,5 +92,64 @@ fn nested_tool_result_without_cache_control_does_not_warn() {
     assert!(
         !events.iter().any(|e| e.level == tracing::Level::WARN),
         "an unmarked tool-result part must not warn at all, got: {events:?}"
+    );
+}
+
+/// The `(lane, drop_class)` counter this tally feeds, read back through the
+/// public snapshot.
+fn tool_result_cache_control_drop_count() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "bedrock-converse" && e.drop_class == "tool_result_cache_control")
+        .map_or(0, |e| e.drop_count)
+}
+
+/// The reported drop must be a REAL drop: a part this egress has no typed
+/// carrier for takes the opaque JSON path, and the marker must not ride
+/// along inside that payload. Without this the warning and the counter
+/// would both claim a removal the wire never performed -- the exact
+/// overclaim this surface exists to prevent.
+#[test]
+#[serial_test::serial(bedrock_converse_tool_result_cache_control_drop)]
+fn a_fallback_wrapped_part_does_not_carry_the_marker_into_its_payload() {
+    // Arrange -- a tool_use-shaped part has no toolResult carrier, so it
+    // takes the JSON fallback, and it carries a marker.
+    let marked: ContentPart = serde_json::from_value(serde_json::json!({
+        "type": "tool_use",
+        "id": "tu_1",
+        "name": "probe",
+        "input": {},
+        "cache_control": {"type": "ephemeral"}
+    }))
+    .expect("a tool_use part with a marker");
+    let messages = vec![tool_turn(vec![marked])];
+
+    // Act
+    let before = tool_result_cache_control_drop_count();
+    let content = only_tool_result_content(&messages);
+    let after = tool_result_cache_control_drop_count();
+
+    // Assert -- the payload landed, without the marker, and the drop was
+    // counted exactly once for the request.
+    let json = content
+        .iter()
+        .find_map(|c| match c {
+            ConverseToolResultContent::Json { json } => Some(json),
+            _ => None,
+        })
+        .expect("the part must land as a Json payload");
+    assert!(
+        json.get("cache_control").is_none(),
+        "the marker must not survive into the opaque payload, got: {json}"
+    );
+    assert_eq!(
+        json.get("name").and_then(serde_json::Value::as_str),
+        Some("probe"),
+        "the rest of the part must survive, got: {json}"
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "the drop must be counted exactly once for the request"
     );
 }
