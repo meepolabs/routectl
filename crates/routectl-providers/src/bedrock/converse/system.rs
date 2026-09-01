@@ -7,7 +7,7 @@
 
 use routectl_core::ChatRequest;
 
-use crate::anthropic_api::request::{lift_legacy_system, translate_system};
+use crate::anthropic_api::request::{lift_legacy_system_stripped, translate_system};
 use crate::anthropic_api::types::{AnthropicSystem, AnthropicSystemBlock};
 
 use super::types::{CachePoint, ConverseSystemBlock};
@@ -49,7 +49,22 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
         );
     }
     let primary = filtered_system.as_ref().map(translate_system);
-    let legacy = lift_legacy_system(&req.messages);
+    // The lifted content runs through the SAME billing-attribution strip as
+    // the top-level system. Before both sources were merged this lift only
+    // ran when no top-level system existed, so an unfiltered lift could not
+    // pair a fingerprint with other system content; merging removed that
+    // guarantee, and this upstream is third-party either way.
+    let mut legacy_billing_dropped = false;
+    let legacy = lift_legacy_system_stripped(&req.messages, &mut legacy_billing_dropped)
+        .as_ref()
+        .map(translate_system);
+    if legacy_billing_dropped {
+        tracing::warn!(
+            model = %routectl_core::sanitize_for_log(&req.model),
+            "bedrock-converse egress: Claude Code billing/attribution block \
+             dropped from a system-role message",
+        );
+    }
     let anthropic_system = merge_system_sources(primary, legacy)?;
     let mut out: Vec<ConverseSystemBlock> = Vec::new();
     match anthropic_system {
@@ -437,6 +452,53 @@ mod tests {
                 .iter()
                 .any(|e| e.message.contains("merging top-level system")),
             "no merge should be logged when only one system source is present: {events:?}"
+        );
+    }
+
+    /// The billing/attribution strip must reach BOTH system sources, not
+    /// just the top-level one. This pairing is the gap the merge opened:
+    /// before it, a system-role message was lifted only when no top-level
+    /// system existed, so an unfiltered lift could never pair a client
+    /// fingerprint with other system content. Merging removed that
+    /// guarantee, and this upstream is third-party either way.
+    #[test]
+    fn a_billing_block_in_a_system_message_is_stripped_even_when_merging() {
+        // Arrange -- both sources present, the fingerprint riding in the
+        // message-array half.
+        let req = ChatRequest {
+            system: Some(SystemContent::Text("top-level prompt".into())),
+            messages: vec![
+                sys_msg("x-anthropic-billing-header: v=1; fp=abc"),
+                sys_msg("legacy prompt"),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let mut out = None;
+        let events = capture_events(|| {
+            out = build_system(&req);
+        });
+        let out = out.expect("both system sources present must produce a system array");
+
+        // Assert -- the fingerprint is gone, the real content on both sides
+        // survives, and the strip is reported.
+        let rendered = format!("{out:?}");
+        assert!(
+            !rendered.contains("x-anthropic-billing-header"),
+            "the client fingerprint must not reach a third-party upstream, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("top-level prompt") && rendered.contains("legacy prompt"),
+            "both real system texts must survive the strip, got: {rendered}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == tracing::Level::WARN
+                    && e.message.contains("billing/attribution")),
+            "dropping a fingerprint must be reported, got: {events:?}"
         );
     }
 }

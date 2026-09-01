@@ -74,14 +74,15 @@ pub(crate) use super::system::translate_system;
 // see `apply_structured_outputs_beta_to_body`.
 #[cfg(feature = "bedrock")]
 pub(crate) use super::extras::apply_structured_outputs_beta_to_body;
-// `lift_legacy_system` (the unfiltered lift) is consumed only by the
-// Bedrock Converse egress; the anthropic-api orchestrator below uses the
-// billing-aware `lift_legacy_system_stripped`. Gate the re-export so the
-// lean (no-bedrock) build does not flag it as unused.
-#[cfg(feature = "bedrock")]
-pub(crate) use super::system::lift_legacy_system;
-
-use super::system::lift_legacy_system_stripped;
+// The billing-aware lift is used by BOTH the anthropic-api orchestrator
+// below and the Bedrock Converse egress, so it is visible crate-wide and
+// needs no feature gate: the orchestrator in this file consumes it in
+// every build. Converse once used an unfiltered variant, which was safe
+// only while it lifted exclusively when no top-level system existed; now
+// that it merges both sources, an unfiltered lift would forward a
+// client-fingerprinting block to a third-party upstream whenever both are
+// present.
+pub(crate) use super::system::lift_legacy_system_stripped;
 pub(crate) use super::tools::translate_tool;
 
 // `effort_ratio` and `is_routectl_managed_key` are surfaced only for the
