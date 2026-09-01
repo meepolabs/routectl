@@ -498,12 +498,23 @@ license.
   `translation_drop_snapshot() -> Vec<TranslationDropSnapshotEntry>` reads
   them back (`lane`, `drop_class`, `drop_count`, `lane_seen_count`,
   `.drop_rate()`), and `translation_lane_seen(lane) -> u64` reads one lane's
-  denominator alone, without the snapshot's need for an existing drop row. Homed here rather than on the router's `RouterMetrics`
+  denominator alone, without the snapshot's need for an existing drop row.
+  `record_translation_policy_action(lane, policy_class)` /
+  `translation_policy_action_snapshot() ->
+  Vec<TranslationPolicyActionSnapshotEntry>` (`.action_rate()`) are the
+  sibling counter for content routectl DECLINED to send or refused to
+  override (a privacy strip, a managed-key collision guard) as opposed to
+  content the wire could not represent: a second `BTreeMap` in the same
+  `Registry` under the same mutex, sharing the one `lane_seen` denominator,
+  with a class vocabulary disjoint from the drop counter's so a
+  near-every-request policy action cannot swamp `drop_rate()`. Homed here
+  rather than on the router's `RouterMetrics`
   because the drops fire from providers-side translate/build functions and
   router depends on providers, never the reverse; the router's metrics
   snapshot (`routectl-router/src/router/mod.rs::log_snapshot`) reads this
-  module's `pub` snapshot fn as one Debug-rendered `rc_translation_drop_counts`
-  field, unconditional (no feature gate), same rationale as `effort`/`mantle`
+  module's `pub` snapshot fns as the Debug-rendered
+  `rc_translation_drop_counts` and `rc_translation_policy_action_counts`
+  fields, unconditional (no feature gate), same rationale as `effort`/`mantle`
 - `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: pure
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->
@@ -1099,9 +1110,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   when the translated transcript carries a `toolResult` but no tools survive;
   drops non-custom (Anthropic builtin) tools with a counted verdict
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
-  (thinking, anthropic_beta, cache_control, output_config); two `BagDropTally`
-  instances count the managed-key override refusals and the client-fingerprint
-  strip once per request each
+  (thinking, anthropic_beta, cache_control, output_config);
+  `ProviderExtrasPolicyActions` and `OperatorExtrasPolicyActions` count the
+  managed-key override refusals and the client-fingerprint strip once per
+  request each, on the POLICY-ACTION counter rather than the drop counter (the
+  bag could carry every one of those values and the upstream would accept them;
+  routectl withholds them). Separate types per path so a flag cannot be set
+  from both and counted twice for one request
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
