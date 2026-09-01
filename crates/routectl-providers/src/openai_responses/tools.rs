@@ -47,7 +47,20 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
                 // future shapes ride here unchanged so the Responses
                 // server can surface its own error if it doesn't
                 // accept them.
-                out.push(ResponsesTool::Other(v.clone()));
+                //
+                // EXCEPT `cache_control`: an Anthropic-only prompt-cache
+                // marker has no Responses wire slot, and a tools-position
+                // marker IS a counted cache breakpoint, so leaving it on
+                // the forwarded value made the lane's
+                // `cache_control_unsupported` counter report a removal that
+                // never happened while the field still reached the upstream.
+                // Stripping here is what makes that count true. Mirrors the
+                // per-part strip the openai-compat content lift performs.
+                let mut forwarded = v.clone();
+                if let Some(obj) = forwarded.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+                out.push(ResponsesTool::Other(forwarded));
             }
         }
     }
