@@ -20,12 +20,21 @@ use super::system::translate_system;
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::{ResponseInput, ResponsesRequest};
 use super::{AuthKind, OpenAiResponsesConfig, extras};
+use crate::translation_drop_metrics::{record_translation_drop, record_translation_lane_seen};
 
 /// Build a fully-populated `ResponsesRequest` from a routectl
 /// `ChatRequest`. The Provider's `complete()` toggles `stream` to
 /// false / `stream()` toggles it true; this orchestrator builds with
 /// `stream = false` and the caller flips as needed.
 pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<ResponsesRequest> {
+    // The ONE per-lane denominator site for `openai-responses`. Placed at the
+    // top of the orchestrator rather than inside a sub-module: this is the
+    // only function every request on this lane passes through exactly once,
+    // and it runs before the first `?` so a request that FAILS translation
+    // still counts toward the lane's volume -- a drop rate whose denominator
+    // omitted the failures would read low for exactly the requests that went
+    // worst.
+    record_translation_lane_seen("openai-responses");
     warn_dropped_cache_control(req);
     // The canonical sampling knobs have no Responses-API home and are gated
     // out of the provider_extras merge as canonical keys; WARN once so the
@@ -172,6 +181,11 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
             BreakpointPosition::Messages => "messages",
             BreakpointPosition::TopLevel => "top-level",
             // Already logged at DEBUG in system.rs; skip to avoid a double-log.
+            // This `continue` skips only the REPORTING of a system-surface
+            // marker, never the marker's translation: `system.rs` owns both
+            // the drop and its record for that surface. Nothing is lost here
+            // that is not accounted for there.
+            // TRANSLATION-DROP: structural -- de-duplicates the system surface's diagnostic; system.rs owns that drop and its record
             BreakpointPosition::System => continue,
         };
         if !surfaces.contains(&name) {
@@ -182,13 +196,31 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
 }
 
 /// Emit one WARN naming every cache-prefix surface carrying a caller
-/// `cache_control` marker that the Responses egress drops. Matches the
-/// openai-compat egress convention (`check_dropped_anthropic_fields`),
-/// which WARNs on every dropped cache_control carrier so an operator
-/// routing cache-hinted traffic to a Responses target sees the same
-/// breadcrumb. Logs only the surface name(s) + a count: no message
-/// content, no bodies, no secrets.
+/// `cache_control` marker that the Responses egress drops, and count the
+/// drop once for the request. Matches the openai-compat egress convention
+/// (`check_dropped_anthropic_fields`), which WARNs on every dropped
+/// cache_control carrier so an operator routing cache-hinted traffic to a
+/// Responses target sees the same breadcrumb. Logs only the surface
+/// name(s) + a count: no message content, no bodies, no secrets.
+///
+/// The WARN and the COUNTER have deliberately different surface sets. The
+/// WARN excludes `system` because `system.rs` already logs that surface at
+/// DEBUG and a second record would double-report it. The counter includes
+/// it, because a request whose ONLY marker sat on a system block did have a
+/// marker dropped, and a counter that missed it would understate the lane's
+/// drop rate. Both fire at most once per request either way.
+///
+/// Cross-dialect only. The Responses wire has no prompt-cache breakpoint
+/// field, so its ingress mints no `cache_control` anywhere -- every content
+/// part and system block it builds sets the marker to `None`. A marker
+/// reaching this egress therefore came from an Anthropic-shape or
+/// OpenAI-shape client. Seed per foundations sec 14, deletion-blocked
+/// pending per-lane wire evidence.
+/// TRANSLATION-DROP: lane=openai-responses class=cache_control_unsupported test=cache_control_marker_drops_from_the_wire_and_counts
 fn warn_dropped_cache_control(req: &ChatRequest) {
+    if !req.cache_breakpoints().is_empty() {
+        record_translation_drop("openai-responses", "cache_control_unsupported");
+    }
     let surfaces = dropped_cache_surfaces(req);
     if surfaces.is_empty() {
         return;

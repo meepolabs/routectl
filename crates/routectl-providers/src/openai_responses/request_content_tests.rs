@@ -38,7 +38,12 @@ fn user_image_url_translates_to_input_image_url() {
     assert_eq!(content["image_url"], "https://example.com/cat.jpg");
 }
 
+// Carries the `image_source_kind_unrepresentable` serial guard even though it
+// asserts no counter: it triggers that drop incidentally, and the registry is
+// process-global, so a sibling reading the counter's delta races this test
+// unless both hold the same guard name.
 #[test]
+#[serial_test::serial(openai_responses_image_source_kind_unrepresentable)]
 fn user_image_unknown_source_kind_warns_and_drops() {
     // Arrange: source.type is an unsupported kind (forward-compat
     // extension). The part should be dropped; the message item should
@@ -355,7 +360,9 @@ fn tool_result_unrepresentable_part_drops_and_image_still_ships() {
     );
 }
 
+// Same incidental-trigger guard as `user_image_unknown_source_kind_warns_and_drops`.
 #[test]
+#[serial_test::serial(openai_responses_image_source_kind_unrepresentable)]
 fn tool_result_unknown_image_source_kind_drops_and_text_still_ships() {
     // Arrange: an unknown source kind is forward-compat, not malformed.
     let parts = vec![

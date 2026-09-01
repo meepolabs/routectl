@@ -57,6 +57,12 @@ pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
 /// will be dropped on the Responses wire. Operators can raise the log level
 /// to DEBUG to see the loss and can either move the prompt to an
 /// Anthropic-shape provider or accept the drop.
+///
+/// Cross-dialect only: the Responses wire models no prompt-cache breakpoint,
+/// so its own ingress builds every `SystemBlock` with `cache_control: None`.
+/// A marker reaching here came from an Anthropic-shape or OpenAI-shape
+/// client. Seed per foundations sec 14, deletion-blocked pending per-lane
+/// wire evidence.
 fn warn_on_cache_control_loss(blocks: &[routectl_core::SystemBlock]) {
     let dropped = blocks.iter().filter(|b| b.cache_control.is_some()).count();
     if dropped > 0 {

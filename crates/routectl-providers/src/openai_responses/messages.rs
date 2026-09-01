@@ -85,7 +85,69 @@ use super::types::{
     ReasoningSummaryItem, ResponseInputItem, ResponsesContentItem,
 };
 use super::{AuthKind, lane_scheme};
+use crate::translation_drop_metrics::record_translation_drop;
 use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+
+/// Per-request tally of the deliberate content drops this egress makes
+/// while building `input[]`.
+///
+/// Exactly one instance exists per request and it is flushed exactly once,
+/// from [`build_input`], on both the Ok and the Err arm. That is what makes
+/// the counters per-REQUEST rather than per-block: a turn carrying three
+/// unrepresentable image sources is one drop event for the request, not
+/// three.
+///
+/// Only the process-wide counters flush from here. Each arm keeps its own
+/// WARN/DEBUG record at its own site, because those records carry
+/// arm-specific structured fields (the offending source kind, the bounded
+/// sample of foreign format tags) that a request-level aggregate has no
+/// shape for.
+#[derive(Default)]
+struct ResponsesDropTally {
+    image_source_kind: u32,
+    reasoning_detail_kind: u32,
+    reasoning_format_foreign: u32,
+    reasoning_scheme_incompatible: u32,
+}
+
+impl ResponsesDropTally {
+    const fn record_image_source_kind(&mut self) {
+        self.image_source_kind = self.image_source_kind.saturating_add(1);
+    }
+
+    const fn record_reasoning_detail_kind(&mut self) {
+        self.reasoning_detail_kind = self.reasoning_detail_kind.saturating_add(1);
+    }
+
+    const fn record_reasoning_format_foreign(&mut self) {
+        self.reasoning_format_foreign = self.reasoning_format_foreign.saturating_add(1);
+    }
+
+    const fn record_reasoning_scheme_incompatible(&mut self) {
+        self.reasoning_scheme_incompatible = self.reasoning_scheme_incompatible.saturating_add(1);
+    }
+
+    /// Bump one process-wide counter per drop class this request hit at
+    /// least once. The lane's request-volume denominator is NOT bumped
+    /// here: `request::translate` owns the single `record_translation_lane_seen`
+    /// site for this lane, because `build_input` also has direct
+    /// test-only callers and a denominator counted from here would not
+    /// mean "requests this lane processed".
+    fn flush(&self) {
+        if self.image_source_kind > 0 {
+            record_translation_drop("openai-responses", "image_source_kind_unrepresentable");
+        }
+        if self.reasoning_detail_kind > 0 {
+            record_translation_drop("openai-responses", "reasoning_detail_kind_unsupported");
+        }
+        if self.reasoning_format_foreign > 0 {
+            record_translation_drop("openai-responses", "reasoning_format_foreign");
+        }
+        if self.reasoning_scheme_incompatible > 0 {
+            record_translation_drop("openai-responses", "reasoning_scheme_incompatible");
+        }
+    }
+}
 
 /// Walk the canonical `messages[]` and produce a flat `input[]` array
 /// in Responses-shape. System messages are dropped here (lifted into
@@ -101,16 +163,37 @@ pub(super) fn build_input(
     auth_kind: AuthKind,
     messages: &[Message],
 ) -> Result<Vec<ResponseInputItem>> {
+    let mut tally = ResponsesDropTally::default();
+    let out = build_input_tallied(id, auth_kind, messages, &mut tally);
+    // Flushed before the `?`-free return so a request that FAILS after
+    // dropping something still reports the drop it already made.
+    tally.flush();
+    out
+}
+
+fn build_input_tallied(
+    id: &str,
+    auth_kind: AuthKind,
+    messages: &[Message],
+    tally: &mut ResponsesDropTally,
+) -> Result<Vec<ResponseInputItem>> {
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
     for msg in messages {
         match &msg.role {
-            Role::System => {
-                // Lifted into top-level `instructions` by system.rs;
-                // intentionally dropped here.
-            }
-            Role::User => translate_user_message(id, msg, &mut out)?,
-            Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out)?,
-            Role::Tool => translate_tool_message(id, msg, &mut out)?,
+            // A system turn's content is not lost here: `system.rs` reads
+            // `req.system`, and BOTH ingresses that can reach this egress
+            // hoist every `Role::System` message into that field before the
+            // request leaves the ingress (`ingress::lift_system_messages`,
+            // called unconditionally on the Responses and the OpenAI
+            // ingress; the Anthropic ingress carries `system` as a
+            // top-level field only). So no `Role::System` message survives
+            // to reach this arm with content still on it, and the arm is a
+            // structural filter rather than a drop.
+            // TRANSLATION-DROP: structural -- system content is hoisted into `req.system` at ingress and emitted as `instructions`
+            Role::System => {}
+            Role::User => translate_user_message(id, msg, &mut out, tally)?,
+            Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out, tally)?,
+            Role::Tool => translate_tool_message(id, msg, &mut out, tally)?,
             // This function serves callers whose ingress dialect is
             // openai_responses itself as well as callers translating in
             // from other dialects. Unlike Anthropic/Gemini/Converse, the
@@ -120,8 +203,11 @@ pub(super) fn build_input(
             // collapsing it onto "user" -- still logged once so a caller
             // translating in from elsewhere can see the choice made. This
             // is a forward-compat seed: not yet eligible for removal until
-            // real unrecognized-role traffic is observed.
-            Role::Other(tag) => translate_other_message(id, tag, msg, &mut out)?,
+            // real unrecognized-role traffic is observed. Nothing is lost:
+            // the tag rides to the wire verbatim and the turn's content
+            // goes through the same tool-result lift and content build a
+            // `Role::User` turn does.
+            Role::Other(tag) => translate_other_message(id, tag, msg, &mut out, tally)?,
         }
     }
     Ok(out)
@@ -131,7 +217,12 @@ pub(super) fn build_input(
 // Per-role translation
 // ---------------------------------------------------------------------------
 
-fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
+fn translate_user_message(
+    id: &str,
+    msg: &Message,
+    out: &mut Vec<ResponseInputItem>,
+    tally: &mut ResponsesDropTally,
+) -> Result<()> {
     // Lift any `tool_result` parts into FunctionCallOutput input items.
     // The Anthropic ingress emits tool outputs as
     // `ContentPart::ToolResult` on a user-role message (the Anthropic
@@ -141,7 +232,7 @@ fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
     // function call <id>".
     extract_tool_results(id, &msg.content, out)?;
 
-    let content = build_user_content(id, &msg.content)?;
+    let content = build_user_content(id, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -166,6 +257,7 @@ fn translate_other_message(
     tag: &str,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
+    tally: &mut ResponsesDropTally,
 ) -> Result<()> {
     tracing::debug!(
         provider = id,
@@ -174,7 +266,7 @@ fn translate_other_message(
     );
     extract_tool_results(id, &msg.content, out)?;
 
-    let content = build_user_content(id, &msg.content)?;
+    let content = build_user_content(id, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -213,6 +305,12 @@ fn extract_tool_results(
         return Ok(());
     };
     for p in parts {
+        // Every non-ToolResult part is skipped by this pass ONLY: the
+        // caller runs `build_user_content` over the same parts slice
+        // immediately afterwards, which is where each of those parts is
+        // translated or deliberately dropped with its own record. Nothing
+        // is lost at this `continue`.
+        // TRANSLATION-DROP: structural -- selects tool_result parts; the caller's content build walks the remaining parts
         let ContentPart::Known(KnownContentPart::ToolResult {
             tool_use_id,
             content,
@@ -309,6 +407,7 @@ fn translate_assistant_message(
     auth_kind: AuthKind,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
+    tally: &mut ResponsesDropTally,
 ) -> Result<()> {
     let mut reasoning_items: Vec<ResponseInputItem> = Vec::new();
     let mut message_content: Vec<ResponsesContentItem> = Vec::new();
@@ -318,7 +417,12 @@ fn translate_assistant_message(
     // Only entries tagged with a Responses-family format participate;
     // other formats (e.g. Anthropic) ride a different replay shape that
     // the canonical hub doesn't translate here.
-    lift_reasoning_details(&msg.reasoning_details, auth_kind, &mut reasoning_items);
+    lift_reasoning_details(
+        &msg.reasoning_details,
+        auth_kind,
+        &mut reasoning_items,
+        tally,
+    );
     let suppress_thinking_parts = !reasoning_items.is_empty();
 
     let mut content_has_tool_use = false;
@@ -326,6 +430,12 @@ fn translate_assistant_message(
         MessageContent::Text(t) if !t.is_empty() => {
             message_content.push(ResponsesContentItem::OutputText { text: t.clone() });
         }
+        // An empty-string or Null assistant content carries no text to
+        // emit, and a Responses `message` item with an empty `content`
+        // array is what the arm below would produce -- which the caller
+        // already declines to push. A reasoning-only or tool-call-only
+        // assistant turn is legitimate and its other surfaces still ship.
+        // TRANSLATION-DROP: structural -- an empty or null assistant content has no text to carry
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
             content_has_tool_use = parts
@@ -441,6 +551,7 @@ fn lift_reasoning_details(
     details: &[ReasoningDetail],
     auth_kind: AuthKind,
     out: &mut Vec<ResponseInputItem>,
+    tally: &mut ResponsesDropTally,
 ) {
     if details.is_empty() {
         return;
@@ -457,17 +568,43 @@ fn lift_reasoning_details(
     // control characters share one slot.
     let mut skipped_formats: BoundedLogSample<String> = BoundedLogSample::new();
     let mut stripped_count: u32 = 0;
+    let mut unsupported_kind_count: u32 = 0;
+    // The `Other` discriminator is CLIENT-CONTROLLED, so it is sanitized
+    // before the distinctness test -- same collection-time bounding the
+    // format sample uses, for the same log-injection reason.
+    let mut unsupported_kinds: BoundedLogSample<String> = BoundedLogSample::new();
     let lane = lane_scheme(auth_kind);
 
     for d in details {
         let format = d.format.as_deref();
+        // A foreign-tagged detail was minted by an upstream in a different
+        // dialect; its payload is not a token this egress's `reasoning`
+        // item can carry, and forwarding it corrupts the upstream's replay
+        // gate. Cross-dialect only: the Responses ingress stamps
+        // `openai-responses-v1` on every detail it produces, which is a
+        // Responses-family tag, so a same-dialect request never reaches
+        // this gate. Seed per foundations sec 14, deletion-blocked pending
+        // per-lane wire evidence.
+        // TRANSLATION-DROP: lane=openai-responses class=reasoning_format_foreign test=foreign_format_detail_drops_from_the_wire_and_counts
         if !is_responses_family(format) {
             skipped_count += 1;
             skipped_formats.push_distinct(sanitize_for_log(format.unwrap_or("<none>")));
+            tally.record_reasoning_format_foreign();
             continue;
         }
+        // A Responses-family artifact whose replay scheme the TARGET lane
+        // is proven to reject: the upstream validator refuses it outright,
+        // so shipping it turns a serviceable request into a 400. Only a
+        // PROVEN-incompatible pair is stripped; an unestablished pair is
+        // carried optimistically by the same gate. Same-dialect reachable
+        // (a Responses client's own artifact steered at a different
+        // Responses lane), but nothing is lost that the far side would
+        // have accepted -- the far side is the one rejecting it. Seed per
+        // foundations sec 14, deletion-blocked pending per-lane evidence.
+        // TRANSLATION-DROP: lane=openai-responses class=reasoning_scheme_incompatible test=scheme_incompatible_detail_drops_from_the_wire_and_counts
         if is_replayable(scheme_of(format), lane) == Replayability::Strip {
             stripped_count += 1;
+            tally.record_reasoning_scheme_incompatible();
             continue;
         }
         let key = d.id.clone();
@@ -476,7 +613,7 @@ fn lift_reasoning_details(
             groups.insert(key.clone(), ReasoningGroup::default());
         }
         let group = groups.get_mut(&key).expect("inserted above");
-        match d.kind {
+        match &d.kind {
             ReasoningDetailKind::Summary => {
                 if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
                     group.summary.push(ReasoningSummaryItem::SummaryText {
@@ -513,7 +650,23 @@ fn lift_reasoning_details(
             // nothing to the group -- the same forward-shaped no-op every
             // arm above already applies when its own expected payload
             // field is absent.
-            ReasoningDetailKind::Other(_) => {}
+            //
+            // Cross-dialect only. The Responses ingress is the sole
+            // same-dialect producer of `reasoning_details`, and both of its
+            // constructing helpers emit only Summary / Encrypted / Text --
+            // an unknown inner reasoning-content type dies at the inner
+            // helper's own catch-all before a detail is ever built. An
+            // `Other` kind therefore arises only from `Deserialize` mapping
+            // an unrecognized discriminator on the canonical schema, which
+            // a Chat Completions client reaches by deserializing
+            // `ChatRequest` wholesale. Seed per foundations sec 14,
+            // deletion-blocked pending per-lane wire evidence.
+            // TRANSLATION-DROP: lane=openai-responses class=reasoning_detail_kind_unsupported test=unrecognized_detail_kind_drops_from_the_wire_and_counts
+            ReasoningDetailKind::Other(tag) => {
+                unsupported_kind_count += 1;
+                unsupported_kinds.push_distinct(sanitize_for_log(tag));
+                tally.record_reasoning_detail_kind();
+            }
         }
     }
 
@@ -528,6 +681,19 @@ fn lift_reasoning_details(
         // The upstream item id is a reasoning-replay artifact and must
         // never reach a log line at any level -- count the skips and
         // emit a bounded aggregate instead of the id itself.
+        //
+        // OPEN, and why this is a fidelity risk rather than an accepted
+        // drop: the skip discards the group's `summary` and `content`
+        // surfaces along with the unreplayable id, and it is SAME-DIALECT
+        // REACHABLE. The Responses ingress attaches an `Encrypted` detail
+        // only when the inbound item carried a non-empty
+        // `encrypted_content`, so a Responses client echoing back a
+        // summary-only reasoning item loses that summary here. Whether an
+        // id-less summary-only `reasoning` item is accepted by either lane
+        // -- which would make forwarding the summary the faithful move --
+        // is UNVERIFIED against a live upstream. Until it is, this arm is
+        // not documented as an acceptable translation drop.
+        // TRANSLATION-DROP: fidelity-risk -- same-dialect reachable: a summary-only reasoning item loses its summary along with the unreplayable id
         if encrypted_content.is_empty() {
             empty_encrypted_count += 1;
             continue;
@@ -561,6 +727,14 @@ fn lift_reasoning_details(
             "openai-responses: stripped reasoning_details entries whose replay scheme the target lane rejects"
         );
     }
+    if unsupported_kind_count > 0 {
+        tracing::debug!(
+            dropped = unsupported_kind_count,
+            kinds = ?unsupported_kinds.items(),
+            kinds_truncated = unsupported_kinds.truncated(),
+            "openai-responses: dropped reasoning_details entries whose kind has no Responses reasoning-item slot"
+        );
+    }
 }
 
 #[derive(Default)]
@@ -579,7 +753,12 @@ struct ReasoningGroup {
 /// tool result. `extract_tool_results` applies the same policy to an
 /// empty `tool_use_id` on the Anthropic-shape lane: one defect, one
 /// policy, so the outcome does not depend on the ingress shape.
-fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
+fn translate_tool_message(
+    id: &str,
+    msg: &Message,
+    out: &mut Vec<ResponseInputItem>,
+    tally: &mut ResponsesDropTally,
+) -> Result<()> {
     let Some(raw_call_id) = msg.tool_call_id.as_deref().filter(|s| !s.is_empty()) else {
         return Err(Error::normalize_request(
             id,
@@ -592,7 +771,7 @@ fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
         MessageContent::Null => FunctionCallOutputBody::Text(String::new()),
-        MessageContent::Parts(parts) => build_tool_output_body(id, parts)?,
+        MessageContent::Parts(parts) => build_tool_output_body(id, parts, tally)?,
     };
     out.push(ResponseInputItem::FunctionCallOutput { call_id, output });
     Ok(())
@@ -602,7 +781,11 @@ fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
 // Per-part translation
 // ---------------------------------------------------------------------------
 
-fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<ResponsesContentItem>> {
+fn build_user_content(
+    id: &str,
+    content: &MessageContent,
+    tally: &mut ResponsesDropTally,
+) -> Result<Vec<ResponsesContentItem>> {
     match content {
         MessageContent::Text(t) if t.is_empty() => Ok(Vec::new()),
         MessageContent::Text(t) => Ok(vec![ResponsesContentItem::InputText { text: t.clone() }]),
@@ -617,7 +800,7 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
                         }
                     }
                     ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-                        if let Some(item) = translate_image_source(id, source)? {
+                        if let Some(item) = translate_image_source(id, source, tally)? {
                             out.push(item);
                         }
                     }
@@ -918,9 +1101,18 @@ fn translate_file_part(id: &str, file: &serde_json::Value) -> Result<ResponsesCo
 /// An empty base64 `data` or an empty `url` is malformed and fails the
 /// request. An unrecognized source shape is a forward-compat extension
 /// this egress cannot represent, so it yields `Ok(None)` and a WARN.
+///
+/// The unrecognized-kind drop is CROSS-DIALECT ONLY. The Responses ingress
+/// produces no `KnownContentPart::Image` at all -- an `input_image` block
+/// becomes the OpenAI-shape `ImageUrl` carrier, which takes the sibling arm
+/// in `build_user_content` and never reaches here. An `Image` part with a
+/// `source.type` outside `base64` / `url` therefore arrives only from an
+/// Anthropic-shape or forward-compat client. Seed per foundations sec 14,
+/// deletion-blocked pending per-lane wire evidence.
 fn translate_image_source(
     id: &str,
     source: &serde_json::Value,
+    tally: &mut ResponsesDropTally,
 ) -> Result<Option<ResponsesContentItem>> {
     let kind = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
@@ -956,6 +1148,7 @@ fn translate_image_source(
                 detail: None,
             }))
         }
+        // TRANSLATION-DROP: lane=openai-responses class=image_source_kind_unrepresentable test=unknown_user_image_source_kind_drops_from_the_wire_and_counts
         other => {
             tracing::warn!(
                 provider = id,
@@ -963,6 +1156,7 @@ fn translate_image_source(
                 role = "user",
                 "dropping image part with unknown source kind on Responses egress"
             );
+            tally.record_image_source_kind();
             Ok(None)
         }
     }
@@ -974,7 +1168,11 @@ fn translate_image_source(
 /// by a visual tool) the result is an Items array. Parts this egress
 /// cannot represent are WARN-dropped and the remaining known parts are
 /// still forwarded; a malformed image part fails the request.
-fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> Result<FunctionCallOutputBody> {
+fn build_tool_output_body(
+    id: &str,
+    parts: &[ContentPart],
+    tally: &mut ResponsesDropTally,
+) -> Result<FunctionCallOutputBody> {
     let has_non_text = parts.iter().any(|p| {
         matches!(
             p,
@@ -1011,7 +1209,7 @@ fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> Result<FunctionCal
                 items.push(FunctionCallOutputContentItem::InputText { text: text.clone() });
             }
             ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-                if let Some(item) = translate_tool_image_source(id, source)? {
+                if let Some(item) = translate_tool_image_source(id, source, tally)? {
                     items.push(item);
                 }
             }
@@ -1056,9 +1254,16 @@ fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> Result<FunctionCal
 ///
 /// An empty base64 `data` or an empty `url` is malformed and fails the
 /// request; an unrecognized source kind yields `Ok(None)` and a WARN.
+///
+/// Same reachability as [`translate_image_source`]: cross-dialect only.
+/// The Responses ingress models a tool output's content blocks through the
+/// same `parse_content_block` walk, which mints the OpenAI-shape `ImageUrl`
+/// carrier for `input_image` and never a `KnownContentPart::Image`. Seed per
+/// foundations sec 14, deletion-blocked pending per-lane wire evidence.
 fn translate_tool_image_source(
     id: &str,
     source: &serde_json::Value,
+    tally: &mut ResponsesDropTally,
 ) -> Result<Option<FunctionCallOutputContentItem>> {
     let kind = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
@@ -1094,6 +1299,7 @@ fn translate_tool_image_source(
                 detail: None,
             }))
         }
+        // TRANSLATION-DROP: lane=openai-responses class=image_source_kind_unrepresentable test=unknown_tool_result_image_source_kind_drops_from_the_wire_and_counts
         other => {
             tracing::warn!(
                 provider = id,
@@ -1101,6 +1307,7 @@ fn translate_tool_image_source(
                 role = "tool",
                 "dropping image part with unknown source kind in tool result on Responses egress"
             );
+            tally.record_image_source_kind();
             Ok(None)
         }
     }
@@ -1117,8 +1324,19 @@ mod messages_tests {
 
     use super::super::types::ResponseInputItem;
     use super::super::{AuthKind, OPENAI_RESPONSES_FORMAT};
-    use super::{lift_reasoning_details, translate_thinking_part};
+    use super::{ResponsesDropTally, lift_reasoning_details, translate_thinking_part};
     use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
+
+    /// Drive the lift with a throwaway tally that is never flushed, so a
+    /// test exercising the lift in isolation asserts its OUTPUT and its LOG
+    /// records without touching the process-global drop registry -- which is
+    /// what keeps these tests free of a serial guard. The counter-delta
+    /// assertions live in the drop-policy fragment, which drives the lift
+    /// through `build_input` (the site that does flush) instead.
+    fn lift(details: &[ReasoningDetail], lane: AuthKind, out: &mut Vec<ResponseInputItem>) {
+        let mut tally = ResponsesDropTally::default();
+        lift_reasoning_details(details, lane, out, &mut tally);
+    }
 
     fn make_detail(
         format: Option<&str>,
@@ -1150,7 +1368,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: no items emitted for anthropic-format details.
         assert!(
@@ -1170,7 +1388,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: no items emitted for format-less details.
         assert!(
@@ -1191,7 +1409,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: openai-responses-v1 details produce a Reasoning item.
         assert_eq!(
@@ -1218,7 +1436,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert
         assert!(
@@ -1240,7 +1458,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert
         assert!(
@@ -1267,7 +1485,7 @@ mod messages_tests {
 
         let events = routectl_testkit::capture_events(|| {
             let mut out = Vec::new();
-            lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+            lift(&details, AuthKind::ChatgptOauth, &mut out);
             assert!(out.is_empty(), "empty-encrypted item must be skipped");
         });
 
@@ -1304,7 +1522,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: a single Reasoning item carrying the signature.
         assert_eq!(out.len(), 1, "expected one replayed Reasoning item");
@@ -1341,7 +1559,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+        lift(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: only the v1 item is included.
         assert_eq!(
@@ -1371,7 +1589,7 @@ mod messages_tests {
     fn format_skip_event(details: &[ReasoningDetail]) -> routectl_testkit::CapturedEvent {
         let events = routectl_testkit::capture_events(|| {
             let mut out = Vec::new();
-            lift_reasoning_details(details, AuthKind::ChatgptOauth, &mut out);
+            lift(details, AuthKind::ChatgptOauth, &mut out);
         });
         let matches: Vec<_> = events
             .iter()
@@ -1571,7 +1789,7 @@ mod messages_tests {
 
     fn lifted_count(format: &str, lane: AuthKind) -> usize {
         let mut out = Vec::new();
-        lift_reasoning_details(&[signed_detail(format)], lane, &mut out);
+        lift(&[signed_detail(format)], lane, &mut out);
         out.len()
     }
 

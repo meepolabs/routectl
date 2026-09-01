@@ -92,6 +92,10 @@ fn translate_tool_choice_object(map: &serde_json::Map<String, Value>) -> Option<
         Some("auto") => return Some(Value::String("auto".into())),
         Some("any" | "required") => return Some(Value::String("required".into())),
         Some("none") => return Some(Value::String("none".into())),
+        // Not one of the mode spellings, so this object is a named-function
+        // shape (or malformed). Fall through to the name extraction below
+        // rather than returning: nothing is decided or discarded here.
+        // TRANSLATION-DROP: structural -- falls through to named-function extraction; no branch is terminal
         _ => {}
     }
 
