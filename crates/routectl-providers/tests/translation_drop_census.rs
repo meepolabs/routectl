@@ -111,8 +111,8 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
 const EXPECTED_LANE_MARKERS: usize = 60;
-const EXPECTED_POLICY_ACTION_MARKERS: usize = 4;
-const EXPECTED_STRUCTURAL_MARKERS: usize = 50;
+const EXPECTED_POLICY_ACTION_MARKERS: usize = 5;
+const EXPECTED_STRUCTURAL_MARKERS: usize = 49;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
 /// a worse defect to be FILED rather than an accepted drop. Pinned by CONTENT

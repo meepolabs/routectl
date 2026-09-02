@@ -18,7 +18,9 @@ use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::{ChatRequest, ReasoningDetail, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
-use crate::translation_drop_metrics::{record_translation_drop, record_translation_lane_seen};
+use crate::translation_drop_metrics::{
+    record_translation_drop, record_translation_lane_seen, record_translation_policy_action,
+};
 
 use super::GEMINI_FORMAT;
 use super::types::{
@@ -1417,17 +1419,27 @@ fn is_gemini_managed_key(key: &str) -> bool {
 /// extras through an ingress can clobber the assembled `contents` /
 /// `generationConfig` / `tools` / etc.
 ///
-/// Not a translation drop: nothing canonical is lost here. The dropped value
-/// is an operator/client OVERRIDE ATTEMPT against a key routectl assembles
-/// itself, and refusing it is what keeps the assembled body authoritative --
-/// the canonical field it collides with still reaches the wire, translated.
-/// TRANSLATION-DROP: structural -- refuses an override of an assembled key; the canonical value it collides with still reaches the wire
+/// A POLICY ACTION, not a wire-representability drop: the upstream would
+/// accept the colliding value on the wire, and routectl refuses it to keep
+/// its own assembled body authoritative. The canonical field the entry
+/// collides with still reaches the wire, translated. Shares its class literal
+/// with the Converse egress's client-path guard, which refuses the same
+/// override for the same reason -- one operator-facing label per action, keyed
+/// apart by lane.
+///
+/// Counted once per REQUEST, not once per colliding key: this runs once per
+/// request from the provider's own `normalize_request`, and the lane's
+/// denominator is already bumped by the translation tally that ran before it,
+/// so no new lane-seen site is added.
+/// TRANSLATION-DROP: policy-action class=provider_extra_managed_key_conflict test=payload_extras_managed_key_override_bumps_the_policy_action_counter_once
 pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value) {
     let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
         return;
     };
+    let mut refused_a_managed_key = false;
     for (k, v) in extra_obj {
         if is_gemini_managed_key(k) {
+            refused_a_managed_key = true;
             tracing::warn!(
                 provider = %provider_id,
                 key = %sanitize_for_log(k),
@@ -1436,6 +1448,9 @@ pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value)
             continue;
         }
         body_obj.insert(k.clone(), v.clone());
+    }
+    if refused_a_managed_key {
+        record_translation_policy_action(LANE, "provider_extra_managed_key_conflict");
     }
 }
 
@@ -2987,6 +3002,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     fn responses_reasoning_context_mode_dropped() {
         // A Responses-ingress request carrying reasoning context/mode routed
         // to the Gemini egress does NOT emit them. The fidelity WARN for the
@@ -3145,6 +3161,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     fn payload_extras_drops_canonical_managed_key() {
         // `tools` is a routectl-managed canonical key (and a real Gemini
         // body key) -- payload_extras must not be allowed to clobber it.
@@ -3159,6 +3176,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     fn payload_extras_cannot_clobber_gemini_structural_keys() {
         // contents / generationConfig are Gemini wire-owned keys (NOT
         // canonical names), but a client can smuggle them via provider_extras
@@ -3198,6 +3216,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     #[traced_test]
     fn payload_extras_generation_config_topk_never_reaches_wire() {
         // An operator setting `payload_extras.generationConfig.topK` gets a

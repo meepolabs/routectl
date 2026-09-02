@@ -1024,7 +1024,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `request.rs`'s `tests` module: the three-assertion pinning set per counted
   drop (warn/debug captured via `capture_events`, field absent from the
   EMITTED WIRE VALUE, representable sibling survives) plus the per-class
-  counter deltas under `serial_test` guards
+  counter deltas under `serial_test` guards, and the lane's policy-action
+  pinning set for `merge_payload_extras`'s managed-key override refusal
 - `src/gemini/schema.rs` -- `clean_schema_reporting`: pure JSON-Schema ->
   Gemini OpenAPI-subset cleaner shared by tool `parameters` and
   `generationConfig.responseSchema` (oneOf -> anyOf, strip
@@ -1215,6 +1216,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   request-translation surfaces hold exactly the content-pinned in-scope file
   list plus the exempted files, each exemption carrying its reason, so a new
   file in a swept directory cannot pass the census unclassified
+- `tests/translation_drop_declared_loss_weld.rs` -- the declared-loss contract
+  at SYMBOL granularity: side A is a `warn!`/`debug!` whose message matches a
+  loss vocabulary (read over the macro's whole delimited argument list, since
+  rustfmt wraps them), side B is markers attributed to their nearest enclosing
+  `fn`, DERIVED from position with no marker field. Every loss-declaring log is
+  accounted for by a marker, by the log-and-count tally-emitter shape, or by
+  all-callers-marked attribution; every loss-claiming marker's symbol declares
+  that loss through a log, a counter, or the `silent` tag; and a `structural`
+  marker sharing a symbol with a loss log is refused unless content-pinned with
+  its adjudication. Four content-pinned registers, occurrence-counted
 
 ## routectl-router
 
