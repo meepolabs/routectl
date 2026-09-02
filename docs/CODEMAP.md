@@ -1196,6 +1196,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (surface enumeration, test-file predicate, per-marker parse), as a shared
   module so the welds built on the census consume one parse rather than each
   re-deriving one that could disagree
+- `tests/translation_drop_census/counter.rs` -- the counter side of the census:
+  every `record_translation_drop` / `record_translation_policy_action` /
+  `record_translation_lane_seen` call in the crate's production source, with
+  lanes resolved through their constants' definitions and classes resolved
+  through the `for (fired, class) in [...]` tally tables. Offset-based rather
+  than line-based, since rustfmt wraps a fully-qualified call's arguments onto
+  following lines; an unresolvable lane or class is an error, never a skipped
+  call
+- `tests/translation_drop_counter_weld.rs` -- the counted contract: exact-set
+  equality in both directions between the marked drop vocabulary and the
+  counted one (on `(lane, class)`), the marked and counted policy-action
+  vocabularies (on class alone), the asserted DISJOINTNESS of the two, every
+  `test=` name resolving to a function in the tree, and one
+  `record_translation_lane_seen` site per lane -- each with its planted-defect
+  control
+- `tests/translation_drop_scope_weld.rs` -- the scope weld: the four
+  request-translation surfaces hold exactly the content-pinned in-scope file
+  list plus the exempted files, each exemption carrying its reason, so a new
+  file in a swept directory cannot pass the census unclassified
 
 ## routectl-router
 
