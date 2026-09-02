@@ -37,6 +37,7 @@ use routectl_core::ChatRequest;
 use super::AuthKind;
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
 use crate::effort::{clamp_effort_to_supported, level_from_budget};
+use crate::translation_drop_metrics::record_translation_drop;
 
 /// Set `request.reasoning` from `req.reasoning` plus the Responses-dialect
 /// remainder the ingress stashed under `provider_extras["reasoning"]`.
@@ -265,7 +266,13 @@ pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRe
     let Some(rf) = req.response_format.as_ref() else {
         return;
     };
-    let Some(format) = responses_text_format(rf) else {
+    // The tally is created and flushed inside this same infallible function,
+    // so the flush cannot be stranded behind a `?`: every request that can
+    // record a loss here also reaches the flush.
+    let mut tally = ResponseFormatDropTally::default();
+    let format = responses_text_format(rf, &mut tally);
+    tally.flush();
+    let Some(format) = format else {
         return;
     };
     match request.text.as_mut() {
@@ -282,21 +289,95 @@ pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRe
     }
 }
 
+/// Per-REQUEST tally for the structured-output directive's drops on this
+/// lane.
+///
+/// Each field is a per-request FLAG, not an occurrence count: a request
+/// carries exactly one `response_format`, so its five failing arms are one
+/// request's worth of loss for whichever class fired -- never five events.
+/// The three classes are the three distinct operator problems (a directive
+/// whose envelope cannot be read, a type token with no Responses spelling,
+/// and a `json_schema` entry carrying no schema), which is also how the
+/// openai-compat lift splits the same surface.
+///
+/// The denominator is NOT touched here: `request::translate` owns the
+/// single `record_translation_lane_seen` site for this lane, and a second
+/// would understate the rate for the whole lane.
+#[derive(Default)]
+#[must_use = "a tally records nothing until flush() runs"]
+struct ResponseFormatDropTally {
+    shape_unrepresentable: bool,
+    type_unrepresentable: bool,
+    schema_missing: bool,
+}
+
+impl ResponseFormatDropTally {
+    /// Record a directive whose envelope this egress cannot read at all --
+    /// not an object, or carrying no string `type`.
+    const fn record_shape_unrepresentable(&mut self) {
+        self.shape_unrepresentable = true;
+    }
+
+    /// Record a directive whose `type` token has no Responses `text.format`
+    /// spelling.
+    const fn record_type_unrepresentable(&mut self) {
+        self.type_unrepresentable = true;
+    }
+
+    /// Record a `json_schema` directive carrying no usable schema.
+    const fn record_schema_missing(&mut self) {
+        self.schema_missing = true;
+    }
+
+    fn flush(self) {
+        if self.shape_unrepresentable {
+            record_translation_drop("openai-responses", "response_format_shape_unrepresentable");
+        }
+        if self.type_unrepresentable {
+            record_translation_drop("openai-responses", "response_format_type_unrepresentable");
+        }
+        if self.schema_missing {
+            record_translation_drop("openai-responses", "response_format_schema_missing");
+        }
+    }
+}
+
 /// Convert the canonical OpenAI Chat-shape `response_format` into the
 /// Responses API `text.format` object (flattened: `name`/`schema`/`strict`
 /// at the top level, not nested under `json_schema`). Returns `None` for an
 /// absent or unrecognized shape. The Responses API requires `name` on a
 /// json_schema format, so a missing name defaults to `"response"` (matching
 /// the openai-compat wire-lift default).
-fn responses_text_format(response_format: &Value) -> Option<Value> {
+///
+/// Every `None` exit loses the caller's structured-output request outright:
+/// the model answers in free-form prose while the client parses for JSON. So
+/// each warns here, where the offending shape is in hand, and records its
+/// class on the caller's per-request tally.
+fn responses_text_format(
+    response_format: &Value,
+    tally: &mut ResponseFormatDropTally,
+) -> Option<Value> {
+    // A `response_format` that is not an object carries no `type` and no
+    // schema, so the Responses `text.format` member -- an object tagged with
+    // a `type` -- has no shape it could become, and the upstream rejects a
+    // bare scalar there. Lane: openai-responses, construction-time
+    // translation. Baked seed verdict: it stands until this lane's own wire
+    // evidence contradicts it, and is not eligible for deletion until then.
+    // TRANSLATION-DROP: lane=openai-responses class=response_format_shape_unrepresentable test=responses_non_object_response_format_drops_and_counts_once
     let Some(obj) = response_format.as_object() else {
+        tally.record_shape_unrepresentable();
         tracing::warn!(
             "response_format is not an object; dropping structured-output \
              directive on Responses egress"
         );
         return None;
     };
+    // Same class, second arm: an object with no string `type` names no format
+    // member, and `text.format` is a tagged union the upstream rejects
+    // untagged.
+    // TRANSLATION-DROP: lane=openai-responses class=response_format_shape_unrepresentable test=responses_response_format_without_a_type_token_drops_and_counts_once
     let Some(kind) = obj.get("type").and_then(Value::as_str) else {
+        tally.record_shape_unrepresentable();
         tracing::warn!(
             "response_format carries no string type token; dropping \
              structured-output directive on Responses egress"
@@ -305,14 +386,27 @@ fn responses_text_format(response_format: &Value) -> Option<Value> {
     };
     match kind {
         "json_schema" => {
+            // A `json_schema` directive with no `json_schema` member has no
+            // schema to carry, and the Responses `text.format` json_schema
+            // member requires one -- emitting the envelope without it is
+            // rejected upstream. Lane: openai-responses, construction-time
+            // translation. Baked seed verdict: it stands until this lane's
+            // own wire evidence contradicts it, and is not eligible for
+            // deletion until then.
+            // TRANSLATION-DROP: lane=openai-responses class=response_format_schema_missing test=responses_json_schema_without_a_schema_drops_and_counts_once
             let Some(js) = obj.get("json_schema").and_then(Value::as_object) else {
+                tally.record_schema_missing();
                 tracing::warn!(
                     "response_format json_schema is absent or not an object; \
                      dropping structured-output directive on Responses egress"
                 );
                 return None;
             };
+            // Same class, second arm: the member is present but carries no
+            // `schema`, so there is still nothing the upstream would accept.
+            // TRANSLATION-DROP: lane=openai-responses class=response_format_schema_missing test=responses_json_schema_member_without_a_schema_drops_and_counts_once
             let Some(schema) = js.get("schema").cloned() else {
+                tally.record_schema_missing();
                 tracing::warn!(
                     "response_format json_schema carries no json_schema.schema; \
                      dropping structured-output directive on Responses egress"
@@ -330,7 +424,26 @@ fn responses_text_format(response_format: &Value) -> Option<Value> {
             Some(Value::Object(fmt))
         }
         "json_object" => Some(serde_json::json!({"type": "json_object"})),
+        // A DOCUMENTED Responses `text.format` member, and one this lane's own
+        // ingress lifts verbatim -- so it arrives on a same-dialect request.
+        // Re-emitted rather than dropped: it was previously read as an unknown
+        // tag, which warned and counted a loss that never happened. A false
+        // numerator entry is worse than a missing one, because it discredits the
+        // metric for the drops that ARE real.
+        "text" => Some(serde_json::json!({"type": "text"})),
+
+        // A type token from neither dialect's known vocabulary (a future
+        // OpenAI format, or a client typo). The Responses `text.format` union
+        // admits only the tags handled above, so routectl cannot know which
+        // member an unknown tag was meant to become and the upstream rejects
+        // it -- inventing a member would silently constrain the model's
+        // output shape. Lane: openai-responses, construction-time
+        // translation. Baked seed verdict: it stands until this lane's own
+        // wire evidence contradicts it, and is not eligible for deletion
+        // until then.
+        // TRANSLATION-DROP: lane=openai-responses class=response_format_type_unrepresentable test=responses_unrecognized_response_format_type_drops_and_counts_once
         other => {
+            tally.record_type_unrepresentable();
             tracing::warn!(
                 response_format_type = other,
                 "unrecognized response_format shape; dropping structured-output \
@@ -411,5 +524,276 @@ fn apply_store_override(request: &mut ResponsesRequest, v: &Value, auth_kind: Au
     }
     if let Some(b) = v.as_bool() {
         request.store = b;
+    }
+}
+
+#[cfg(test)]
+mod response_format_drop_tests {
+    use super::super::request::translate;
+    use super::super::{AuthKind, OpenAiResponsesConfig};
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use serde_json::{Value, json};
+
+    fn cfg() -> OpenAiResponsesConfig {
+        let mut c = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+        c.auth_kind = AuthKind::ChatgptOauth;
+        c
+    }
+
+    /// A minimal request carrying the given structured-output directive plus
+    /// one representable sibling field. The sibling is the positive control's
+    /// survivor: `text.format` is what these arms lose, so a surviving
+    /// `text.verbosity` proves the whole `text` object did not simply vanish.
+    fn req_with(response_format: Option<Value>) -> ChatRequest {
+        ChatRequest {
+            model: "gpt-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("marker_user_turn_survives".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            response_format,
+            provider_extras: Some(json!({"text": {"verbosity": "low"}})),
+            ..Default::default()
+        }
+    }
+
+    fn drop_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "openai-responses" && e.drop_class == class)
+            .map_or(0, |e| e.drop_count)
+    }
+
+    fn shape_count() -> u64 {
+        drop_count("response_format_shape_unrepresentable")
+    }
+
+    fn type_count() -> u64 {
+        drop_count("response_format_type_unrepresentable")
+    }
+
+    fn schema_count() -> u64 {
+        drop_count("response_format_schema_missing")
+    }
+
+    /// Translate under log capture and return the EMITTED WIRE BODY plus every
+    /// captured event, so absence is asserted against the serialized request
+    /// rather than the typed struct.
+    fn emitted(response_format: Option<Value>) -> (Value, Vec<routectl_testkit::CapturedEvent>) {
+        let request = req_with(response_format);
+        let mut wire = Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            let translated = translate(&cfg(), &request).expect("translation ok");
+            wire = serde_json::to_value(&translated).expect("body serializes");
+        });
+        (wire, events)
+    }
+
+    /// Assert the emitted body carries no `format` under `text`, and that the
+    /// representable sibling survived beside the loss.
+    fn assert_format_absent_sibling_survives(wire: &Value) {
+        assert!(
+            wire["text"].get("format").is_none(),
+            "no format may be invented for an unusable directive; emitted: {wire}"
+        );
+        assert_eq!(
+            wire["text"]["verbosity"], "low",
+            "the representable text sibling must survive the format's loss; emitted: {wire}"
+        );
+        assert!(
+            wire.to_string().contains("marker_user_turn_survives"),
+            "the rest of the request must survive; emitted: {wire}"
+        );
+    }
+
+    /// NEGATIVE CONTROL: a non-object directive drops, warns, and counts once
+    /// on the shape class.
+    #[test]
+    #[serial_test::serial(openai_responses_response_format_shape_unrepresentable)]
+    fn responses_non_object_response_format_drops_and_counts_once() {
+        // Arrange
+        let before = shape_count();
+
+        // Act
+        let (wire, events) = emitted(Some(json!("json_object")));
+        let after = shape_count();
+
+        // Assert
+        assert!(
+            events.iter().any(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("response_format is not an object")
+            }),
+            "the drop must warn; got: {events:?}"
+        );
+        assert_format_absent_sibling_survives(&wire);
+        assert_eq!(after - before, 1);
+    }
+
+    /// NEGATIVE CONTROL: an object with no string `type` token names no format
+    /// member -- the same class as the non-object arm, so ONE request hitting
+    /// it is one drop event on that class.
+    #[test]
+    #[serial_test::serial(openai_responses_response_format_shape_unrepresentable)]
+    fn responses_response_format_without_a_type_token_drops_and_counts_once() {
+        // Arrange
+        let before = shape_count();
+
+        // Act
+        let (wire, events) = emitted(Some(json!({"json_schema": {"schema": {}}})));
+        let after = shape_count();
+
+        // Assert
+        assert!(
+            events.iter().any(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("carries no string type token")
+            }),
+            "the drop must warn; got: {events:?}"
+        );
+        assert_format_absent_sibling_survives(&wire);
+        assert_eq!(after - before, 1);
+    }
+
+    /// NEGATIVE CONTROL: an unrecognized `type` token drops, warns naming the
+    /// token, and counts once on its own class.
+    #[test]
+    #[serial_test::serial(openai_responses_response_format_type_unrepresentable)]
+    fn responses_unrecognized_response_format_type_drops_and_counts_once() {
+        // Arrange
+        let before = type_count();
+
+        // Act
+        let (wire, events) = emitted(Some(json!({"type": "marker_future_format_tag"})));
+        let after = type_count();
+
+        // Assert
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("unrecognized response_format shape")
+            })
+            .unwrap_or_else(|| panic!("the drop must warn; got: {events:?}"));
+        assert_eq!(
+            warn.field("response_format_type"),
+            Some("marker_future_format_tag")
+        );
+        assert_format_absent_sibling_survives(&wire);
+        assert!(
+            !wire.to_string().contains("marker_future_format_tag"),
+            "no trace of the dropped tag may reach the wire; emitted: {wire}"
+        );
+        assert_eq!(after - before, 1);
+    }
+
+    /// NEGATIVE CONTROL: a `json_schema` directive with no `json_schema`
+    /// member drops and counts on the schema class.
+    #[test]
+    #[serial_test::serial(openai_responses_response_format_schema_missing)]
+    fn responses_json_schema_without_a_schema_drops_and_counts_once() {
+        // Arrange
+        let before = schema_count();
+
+        // Act
+        let (wire, events) = emitted(Some(json!({"type": "json_schema"})));
+        let after = schema_count();
+
+        // Assert
+        assert!(
+            events.iter().any(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("json_schema is absent or not an object")
+            }),
+            "the drop must warn; got: {events:?}"
+        );
+        assert_format_absent_sibling_survives(&wire);
+        assert_eq!(after - before, 1);
+    }
+
+    /// NEGATIVE CONTROL: the member is present but carries no `schema` -- the
+    /// same class, so this request is one drop event on it too.
+    #[test]
+    #[serial_test::serial(openai_responses_response_format_schema_missing)]
+    fn responses_json_schema_member_without_a_schema_drops_and_counts_once() {
+        // Arrange
+        let before = schema_count();
+
+        // Act
+        let (wire, events) = emitted(Some(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "marker_orphan_schema_name"}
+        })));
+        let after = schema_count();
+
+        // Assert
+        assert!(
+            events.iter().any(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("carries no json_schema.schema")
+            }),
+            "the drop must warn; got: {events:?}"
+        );
+        assert_format_absent_sibling_survives(&wire);
+        assert!(
+            !wire.to_string().contains("marker_orphan_schema_name"),
+            "no partial envelope may reach the wire; emitted: {wire}"
+        );
+        assert_eq!(after - before, 1);
+    }
+
+    /// POSITIVE CONTROL for every fixture above: a representable directive of
+    /// each recognized type reaches the emitted body, warns not at all, and
+    /// advances NONE of the three counters. Without it the absence assertions
+    /// would pass against an egress that dropped every directive.
+    #[test]
+    #[serial_test::serial(
+        openai_responses_response_format_schema_missing,
+        openai_responses_response_format_shape_unrepresentable,
+        openai_responses_response_format_type_unrepresentable
+    )]
+    fn representable_response_formats_survive_and_advance_no_counter() {
+        for directive in [
+            json!({"type": "json_object"}),
+            // A documented Responses `text.format` member the lane's own ingress
+            // lifts verbatim. It was read as an unknown tag and counted as a
+            // drop, so this fixture is the control that keeps it representable.
+            json!({"type": "text"}),
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "marker_representable_schema",
+                    "schema": {"type": "object", "properties": {}}
+                }
+            }),
+        ] {
+            // Arrange
+            let before = (shape_count(), type_count(), schema_count());
+
+            // Act
+            let (wire, events) = emitted(Some(directive.clone()));
+
+            // Assert
+            assert!(
+                !events.iter().any(|e| e.level == tracing::Level::WARN),
+                "{directive} is representable and must not warn; got: {events:?}"
+            );
+            assert_eq!(
+                wire["text"]["format"]["type"], directive["type"],
+                "{directive} must reach the wire; emitted: {wire}"
+            );
+            assert_eq!(
+                (shape_count(), type_count(), schema_count()),
+                before,
+                "{directive} counted a drop"
+            );
+        }
     }
 }

@@ -368,6 +368,11 @@ fn tool_choice_anthropic_object_translates_to_specific_tool() {
 }
 
 #[test]
+// Its fixture drives six unnamed forcing shapes through the egress, so it
+// bumps the tool_choice name-missing counter six times even though its own
+// assertion is a wire-shape one. A sibling's exact delta on that key would go
+// flaky without this guard.
+#[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
 fn tool_choice_with_empty_name_drops_field() {
     // Arrange: each name extraction site (Anthropic-shape `tool`,
     // OpenAI-shape `function`, Converse-shape `tool` passthrough)
