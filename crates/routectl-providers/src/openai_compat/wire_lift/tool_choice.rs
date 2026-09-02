@@ -142,7 +142,7 @@ fn map_tool_choice(id: &str, tc: &Value, dropped_shape: &mut bool) -> Option<Val
     // 400s the whole request over one selector. Baked seed verdict: it
     // stands until this lane's own wire evidence contradicts it, and is not
     // eligible for deletion until then.
-    // TRANSLATION-DROP: lane=openai-compat class=tool_choice_shape_unrepresentable test=untagged_tool_choice_drops_and_warns pattern: explicit
+    // TRANSLATION-DROP: lane=openai-compat class=tool_choice_shape_unrepresentable test=untagged_tool_choice_drops_and_warns
     let Some(obj) = tc.as_object() else {
         *dropped_shape = true;
         warn!(
@@ -154,7 +154,7 @@ fn map_tool_choice(id: &str, tc: &Value, dropped_shape: &mut bool) -> Option<Val
     };
     // Same lane, same class: an object with no string `type` discriminant
     // cannot be mapped onto any OpenAI tool_choice member either.
-    // TRANSLATION-DROP: lane=openai-compat class=tool_choice_shape_unrepresentable test=tool_choice_object_without_type_drops_and_warns pattern: explicit
+    // TRANSLATION-DROP: lane=openai-compat class=tool_choice_shape_unrepresentable test=tool_choice_object_without_type_drops_and_warns
     let Some(kind) = obj.get("type").and_then(|t| t.as_str()) else {
         *dropped_shape = true;
         warn!(

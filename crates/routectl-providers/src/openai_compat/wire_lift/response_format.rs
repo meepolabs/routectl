@@ -105,10 +105,7 @@ fn translate_format(id: &str, format: &Value) -> Option<Value> {
             // 400s the host on a field routectl invented. Baked seed
             // verdict: it stands until this lane's own wire evidence
             // contradicts it, and is not eligible for deletion until then.
-            //
-            // The `?`-on-`Option` shape below matches none of the audit's
-            // three candidate-arm grep patterns, hence `pattern: explicit`.
-            // TRANSLATION-DROP: lane=openai-compat class=response_format_schema_missing test=json_schema_without_schema_drops_and_warns pattern: explicit
+            // TRANSLATION-DROP: lane=openai-compat class=response_format_schema_missing test=json_schema_without_schema_drops_and_warns
             let Some(schema) = obj.get("schema").cloned() else {
                 warn!(
                     provider = id,
