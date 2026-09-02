@@ -1,20 +1,40 @@
-# Egress drop-arm audit: methodology and findings
+# Egress drop-arm audit: methodology
 
 This document records how to re-derive an inventory of "drop candidate"
-match arms in routectl's egress translation code, and the findings from one
-pass of that derivation. It is a snapshot of a derivation, not a frozen
-inventory: re-run the commands below against current code before trusting
-any row here. Nothing in this document claims the swept surfaces are fully
-enumerated -- that property (an exhaustive, self-checking census) is a
-separate, not-yet-built piece of work; this document only reports what one
-targeted read-through found.
+match arms in routectl's egress translation code, by hand, from scratch.
+It carries no inventory of its own: the authoritative one is the
+`TRANSLATION-DROP:` verdict marker at each arm, held honest by the census
+tests described below. Use this file when you want to look for arms the
+markers do not yet cover.
+
+## The census is the inventory
+
+Each arm's verdict lives in a `TRANSLATION-DROP:` marker beside the code it
+describes. `crates/routectl-providers/tests/translation_drop_census.rs`
+parses every marker out of the four surfaces and pins the population; three
+welds hold the markers against the rest of the tree. Two have landed: the
+COUNTED weld, comparing marker classes against the literals reachable from
+the drop counters, and the SCOPE weld, asserting the four swept directories
+hold exactly the files classified in scope plus the files explicitly
+exempted with a reason. The third, the DECLARED-LOSS weld -- comparing
+loss-declaring log statements against markers at symbol granularity -- is
+NOT YET IN THE TREE. Stated as pending rather than omitted: a reader who
+greps for it needs to find out it is absent, not conclude they misread.
+
+THE CEILING, stated here because an unstated one gets read as a coverage
+guarantee: no source-derived census can see a fully silent drop, because a
+silent drop is defined by the ABSENCE of evidence -- there is no log to
+harvest, no counter literal to resolve, and no marker unless a human wrote
+one. The welds make divergence between authored verdicts and code loud.
+They do not, and cannot, enumerate the arms nobody has looked at yet. That
+is what the derivation below is for.
 
 ## Scope
 
 Four egress surfaces, request-translation code only (not response
 handling, not streaming state machines):
 
-- `crates/routectl-providers/src/openai_compat/wire_lift/` (8 files)
+- `crates/routectl-providers/src/openai_compat/wire_lift/`
 - `crates/routectl-providers/src/bedrock/converse/`
 - `crates/routectl-providers/src/gemini/`
 - `crates/routectl-providers/src/openai_responses/` (egress-side; not the
@@ -26,6 +46,18 @@ match arms they contain) are candidates. Response deserialization,
 streaming delta accumulation, and pure structural filters (skipping a
 message because it belongs to a different match arm entirely, not because
 content inside it was lost) are out of scope.
+
+These directories hold both kinds of file, so which file is on which side
+is not something to re-judge by eye: the scope weld pins the in-scope list
+and the exemption list, each exemption with its reason, and refuses a file
+on neither.
+
+RENORMALIZE vs LOSE is the scope test, applied PER ARM. "This file looks
+like normalization, not translation" is not a scope test and has already
+been wrong once here at the cost of seven constraint-destroying arms in one
+module: a module can renormalize almost everywhere and still destroy a
+caller-written constraint in one arm, and a file-level judgement loses every
+instance inside it.
 
 ## Two lane classes
 
@@ -49,26 +81,32 @@ into one of two classes:
   does NOT drop, both asserting against real log capture rather than a
   hand-typed expectation of what a log "should" say).
 
-A drop candidate on a same-dialect pairing must never be documented in
-the findings table below as an acceptable, deliberate translation drop --
-that misclassifies a worse bug as a survivable one. Every candidate found
-here was checked against this before being scored.
+A drop candidate on a same-dialect pairing must never be recorded as an
+acceptable, deliberate translation drop -- that misclassifies a worse bug as
+a survivable one. The marker grammar spells this out as its own verdict
+(`fidelity-risk`), so such a candidate is filed as a defect rather than
+wearing the verdict of an accepted drop.
 
 Two of the four surfaces (Bedrock Converse, Gemini) can never be a
 same-dialect pairing -- no ingress in this codebase speaks native
 Converse or native Gemini wire shape, so every request reaching those
 egresses is cross-dialect by construction. The other two
 (`openai_compat/wire_lift/`, `openai_responses/`) share code between
-same-dialect and cross-dialect callers; for those, "reachability" below
-records whether the drop-triggering shape can actually be produced by
-the matching same-dialect ingress, which is what determines whether a
-given arm is a real same-dialect risk despite living in shared,
-dialect-agnostic code.
+same-dialect and cross-dialect callers, so for those the reachability of an
+arm has to be derived rather than assumed.
+
+Derive it from what the ingress SWEEPS, not from what it explicitly parses.
+A forward-compat passthrough sweep of unknown top-level keys into
+`provider_extras` makes every NON-CANONICAL key reachable by construction --
+so "the matching ingress does not populate this field" is not available as a
+reason on any shared, dialect-agnostic code path unless the field is a
+canonical request key. Check the key against `is_canonical_request_key` and
+read the ingress's sweep before concluding an arm is cross-dialect-only.
 
 ## Derivation commands
 
-Run from the repo root. These are the patterns that produced the table
-below; re-running them is the only way to check the table for drift.
+Run from the repo root. These are the candidate-shape patterns a by-hand
+sweep starts from.
 
 ```sh
 # Ok(None) returns inside translate_*/build_*/lift* functions
@@ -105,12 +143,18 @@ rg -n 'tracing_test::traced_test|logs_contain\(' <file>
 Each `Ok(None)` / bare-arm / `continue` hit still needs a human read: the
 patterns overmatch enormously (ordinary parsing logic, test assertions,
 and structural role/message filters all produce the same greppable
-shapes as a genuine content drop). A fourth pattern considered during
-this pass, `=> \{` spanning multiple lines to catch comment-only arms
-with a trailing statement, was tried and rejected: on these four
-surfaces it matches hundreds of ordinary match arms and cannot be
-narrowed further with plain regex. Treat every hit from the three
-patterns above as a candidate to read, not a confirmed finding.
+shapes as a genuine content drop). Treat every hit as a candidate to
+read, not a confirmed finding.
+
+Do NOT try to grow this pattern set into a gate. That was measured and it
+does not converge: "code that silently loses data" is not syntactically
+characterizable in Rust -- the same `let ... else` is a real drop in one
+function on these surfaces and pure control flow in another, so the
+predicate is semantic. Widening the set buys a few recall wins at several
+times the cost in arms it red-fails on correctly, and a check that
+red-fails on correct code gets loosened the first time it fires. That is
+why the welds compare authored verdicts against counters and logs instead
+of against syntax.
 
 ## How to score a candidate
 
@@ -132,144 +176,24 @@ score three bars:
   paired positive control -- fails this bar even though it does exercise
   the drop.
 
-## Findings
+The verdict then goes in a `TRANSLATION-DROP:` marker at the arm, which is
+where the census picks it up. It does not come back here.
 
-Legend: **Dial.** = same-dialect reachable (Y/N/? = undetermined in this
-pass); D/L/T = deliberate/logged/tested.
+## Lifecycle: this file is scaffolding, and it has reached its end state
 
-### `openai_compat/wire_lift/`
+This file is expected to SHRINK, not grow. The findings tables it once
+carried were working notes for the per-surface sweeps; those sweeps have run
+and the census is the inventory now, so the tables are deleted. Two
+inventories of one thing is how the second one rots.
 
-| Module::function or arm | Dial. | D | L | T | Note |
-|---|---|---|---|---|---|
-| `content.rs::rewrite_parts` -- image block, unsupported source shape | N | partial | Y | N | Message states what's dropped but has no rationale comment; drop-triggering shapes (Anthropic `image`/`document` types) are not producible by the OpenAI Chat Completions ingress, so this is cross-dialect-only in practice despite the code being dialect-agnostic. No dedicated test exercises this branch. |
-| `content.rs::rewrite_parts` -- document content block | N | Y | Y | N* | Has a rationale comment and a warn. Existing tests (`document_block_warn_drops_in_default_mode`, `document_block_strict_returns_err`) assert output shape only -- neither uses real tracing capture. See systemic note below. |
-| `tool_result.rs::lift_inner_block` -- document / image-url-missing-url / image-unsupported-source-shape (three call sites in one function) | N | Y | Y | N* | Each has a rationale comment and a warn via the shared helper. Existing tests (e.g. `inner_document_block_dropped_lenient`) assert output shape only. |
-| `tool_choice.rs::map_tool_choice` -- `{type:"tool"}` missing/invalid `name` | N | partial | Y | N | Warn message states the problem; no separate rationale comment. No dedicated test. |
-| `tool_choice.rs::map_tool_choice` -- unrecognized shape | N | partial | Y | N | Same pattern; `unknown_shape_is_dropped` test asserts absence only. |
-| `tool_choice.rs::lift` -- forcing tool_choice with no tools to force | N | Y | Y | N* | Rationale comment present; `forcing_tool_choice_without_tools_dropped_lenient` asserts absence only. |
-| `tools.rs::lift` -- Anthropic builtin / non-custom tool | N | Y | Y | N* | Rationale comment present (in the surrounding match); `other_with_anthropic_builtin_warns_and_drops_non_strict` asserts absence only. |
-| `response_format.rs::translate_format` -- unrecognized `format.type` (`_ => None`) | N | N | N | N | NEW finding, not previously flagged. No rationale comment, no log statement at all -- the arm silently returns `None` and the caller treats absence as "nothing to lift." Existing test `unknown_format_type_is_no_op` asserts absence only; there is no warn to capture. Reachable only via Anthropic-shape `provider_extras.output_config`, which the OpenAI ingress does not populate -- cross-dialect-only in practice. |
-| `response_format.rs::translate_format` -- `json_schema` missing `schema` key (`obj.get("schema").cloned()?`) | N | N | N | N | Same function, same defect: the `?` on the `Option` silently exits with no log. No test found exercising a `json_schema` entry with no `schema` key. |
+The rules that remain in force:
 
-`N*` = the drop mechanics are otherwise solid (deliberate + logged), but
-fail the tested bar strictly because the codebase's tracing-capture
-harness (`tracing_test`) is available and used elsewhere in this
-workspace but is not used anywhere in `wire_lift/`. Every existing test
-in this directory that touches a drop site asserts the resulting shape
-(field absent, key removed) rather than the log line, and none pairs
-that with a captured-log assertion. This is a **systemic gap across the
-whole directory**, not an isolated per-site issue -- fixing it once
-(adopting the same `#[traced_test]` + `logs_contain(...)` pattern already
-used in `bedrock/converse/` and `openai_responses/`, see below) would
-close the tested bar for every row marked `N*` here.
-
-### `bedrock/converse/`
-
-| Module::function or arm | Dial. | D | L | T | Note |
-|---|---|---|---|---|---|
-| `messages.rs::translate_messages` -- `Role::System => {}` | N | N | N | N | Already flagged and being fixed by other in-flight work at the time of this pass; not re-reported as new. No log statement; the comment claims the case is already handled elsewhere, which is only true when a separate top-level system field is absent. |
-| `messages.rs::emit_reasoning_blocks_converse` -- `ReasoningDetailKind::Summary \| ReasoningDetailKind::Other(_) => {}` | N | partial | N | N | Already flagged and being fixed by other in-flight work at the time of this pass; not re-reported as new. Sits ~30 lines from a sibling arm in the same match that IS tallied and warned. |
-| `messages.rs::emit_reasoning_blocks_converse` -- `if detail.format != <the reasoning-detail format tag this egress replays> { continue; }`, present in both the `Text` and `Encrypted` arms of the same match | N | N | N | N | NEW finding. Zero tally, zero log, in both arms -- unlike the signature-empty case a few lines below in the same `Text` arm, which IS tallied and eventually warned when the tally is flushed. A non-native-format reasoning detail riding through on replay is silently dropped with no trace. |
-| `tools.rs::append_tool_with_cache_point` -- Anthropic builtin tool | N | Y | Y | N | Rationale comment ("no equivalent shape available") and a warn. No test references this drop at all (searched for "builtin" in the file's test module; zero hits). |
-| `extras.rs::insert_provider_extras` -- managed-key override attempt (debug) | N | Y | Y | N | Rationale comment and a debug log. No test exercises this specific branch. |
-| `extras.rs::insert_provider_extras` -- client metadata fingerprint skip (debug) | N | Y | Y | partial | Rationale comment and a debug log. `client_metadata_fingerprint_skipped_from_converse_bag` asserts the bag does not contain the fingerprint, but does not use `#[traced_test]` / `logs_contain` -- absence-only, same systemic pattern as `wire_lift/`. |
-
-For contrast: `extras.rs::insert_top_level_cache_control`'s warn-and-forward
-site and `tools.rs::build_tool_config`'s dummy-toolConfig-injection warn
-ARE tested with `#[traced_test]` + `logs_contain(...)` paired against a
-"does not warn" sibling test. Those are not drops (nothing is lost, the
-value is forwarded inert or a placeholder is injected), so they are not
-findings, but they are the reference pattern the rows above should be
-brought up to.
-
-### `gemini/`
-
-Gemini has no native ingress in this codebase, so every request reaching
-this egress is cross-dialect by construction -- no same-dialect risk is
-possible here regardless of arm.
-
-| Module::function or arm | D | L | T | Note |
-|---|---|---|---|---|
-| `request.rs::content_part_to_part` -- `Image`, non-base64 source | Y | Y | Y | Well-covered: rationale comment, warn, and a `#[traced_test]`-backed assertion (`dropping non-base64 image source`). |
-| `request.rs::content_part_to_part` -- `Image`, empty base64 data | Y | Y | Y | Same pattern, covered by a test asserting `"empty data"` under real capture. |
-| `request.rs::content_part_to_part` -- `ImageUrl`, unparseable `data:` URI | Y | Y | Y | Covered (`dropping data: image_url`, under real capture). |
-| `request.rs::content_part_to_part` -- `Document`, non-base64 / empty-data source | Y | Y | Y | Covered under real capture. |
-| `request.rs::drop_redacted_thinking` (`RedactedThinking` arm) | Y | Y | Y | Already flagged in prior work and fixed before this pass began (now warns; a sibling arm ~40 lines away warns for the equivalent case). Function-level comment states this is a seed decision pending further evidence, matching the deliberate bar closely. Covered under real capture (`dropping redacted-thinking part`). |
-| `request.rs::content_part_to_part` -- `File`, no inline base64 `file_data` | Y | N | N | NEW finding. Rationale comment and a warn exist, but no test references this message at all (`no inline base64 file_data`). Everything else in this function that drops has a matching `logs_contain` test; this one is the exception. |
-| `request.rs::content_part_to_part` -- `ContentPart::Other` unknown block type (debug) | partial | Y | N | Comment is a one-line description rather than a stated rationale; debug log present; no test found for this message. Lower-severity: this is the same "unrecognized shape, forward-compat" family as the wire_lift passthrough arms, but here it drops rather than passing through verbatim. |
-
-### `openai_responses/` (egress)
-
-This surface is the one place among the four where a genuine same-dialect
-pairing exists (an OpenAI Responses client routed to an OpenAI Responses
-host), and it is also the only surface with runtime lane-awareness already
-built in (`lift_reasoning_details` computes a lane from the auth kind and
-checks per-format replayability before deciding whether a reasoning detail
-rides the wire). This pass did not do a full line-by-line read of this
-directory (it is the largest of the four, with roughly a hundred
-warn/drop-shaped hits across its request-side files); the rows below are
-what a targeted read of the message- and reasoning-translation functions
-turned up, not a complete inventory of the directory.
-
-| Module::function or arm | Dial. | D | L | T | Note |
-|---|---|---|---|---|---|
-| `messages.rs::translate_image_source` -- unrecognized source `type` | N | Y | Y | ? | Rationale comment, warn. Not yet checked against existing tests in this pass. |
-| `messages.rs::translate_tool_image_source` -- unrecognized source `type` (tool result variant) | N | Y | Y | ? | Same pattern as above; not yet checked against tests. |
-| `messages.rs::build_tool_output_body` -- unsupported tool result part type | N | Y | Y | ? | Warn present with rationale in the surrounding doc comment; not yet checked against tests. |
-| `messages.rs::lift_reasoning_details` -- `ReasoningDetailKind::Other(_) => {}` | **?** | Y | N | partial | See the filed backlog item below -- this is the one candidate in this pass that could not be confidently classified as cross-dialect-only. It sits beside two sibling gates in the same function that ARE tallied and logged; this arm has neither. It has a paired test (`lift_skips_unrecognized_kind_detail` alongside a recognized-kind positive control), but the test only asserts item absence because there is no log to capture. Whether this arm is reachable from the same-dialect (Responses-to-Responses) pairing was not resolved in this pass -- it requires reading the Responses ingress's reasoning-detail parser, which is out of scope for an egress-only audit. **Not documented here as an accepted translation drop; filed to backlog pending that verification**, per the rule that a same-dialect drop candidate is a different and worse defect than a cross-dialect one. |
-
-No other rows for this directory are reported as findings in this pass;
-absence of a row is not a claim of a clean surface -- see Coverage below.
-
-## Coverage: what this pass does and does not cover
-
-Covered at file-level read depth: all 8 files in `openai_compat/wire_lift/`;
-`bedrock/converse/messages.rs`, `tools.rs`, `system.rs`, `extras.rs` (deep
-read); `bedrock/converse/response.rs`, `response_types.rs`, `eventstream.rs`
-(scanned for candidate patterns; hits there were response-deserialization
-and streaming-state-machine code, judged out of scope, not deep-read
-line-by-line); `gemini/request.rs` (deep read on all content-part and
-reasoning-detail translation arms; not deep-read on sampling-parameter and
-tool-declaration arms); `gemini/schema.rs`, `gemini/cloudcode.rs`,
-`gemini/mod.rs` (scanned only; `schema.rs` in particular looks like JSON
-Schema shape-cleaning rather than message-content translation and was not
-pursued further).
-
-NOT covered at read depth in this pass: most of `openai_responses/`
-(scanned for candidate patterns only; `messages.rs`'s tool-call and
-tool-output translation paths beyond what's listed above, `extras.rs`,
-`tools.rs`, `system.rs`, `request.rs` were not individually read for
-deliberate/logged/tested scoring, nor checked for same-dialect
-reachability). Any sweep of this directory should treat every row above
-as a starting point, not a ceiling, and should re-run the derivation
-commands rather than trusting this table's absence of a row as evidence
-of a clean site.
-
-This document does not claim exhaustiveness for any of the four surfaces.
-A separate piece of work (a manifest-plus-test census that greps every
-swept file for every candidate-arm pattern and asserts the found set
-equals a maintained manifest exactly) is what would make completeness a
-checkable property; until that lands, treat every table above as a
-sample, not a census.
-
-## Lifecycle: this file is scaffolding, and it has an end state
-
-The findings tables here are working notes for the per-surface sweeps that
-follow, not a permanent reference. The derivation commands above are the
-durable part; the rows are a dated reading of code the sweeps are about to
-change.
-
-So this file is expected to SHRINK, not grow:
-
-- Once the census lands -- a maintained manifest plus a test asserting the
-  found set of candidate arms equals it exactly -- that manifest becomes the
-  authoritative inventory and every findings table below the methodology
-  section should be deleted. Two inventories of one thing is how the second
-  one rots.
-- Keep the methodology section. Its value is that anyone can re-derive from
+- The methodology stays. Its value is that anyone can re-derive from
   scratch, and that does not expire.
-- Do not update a row in place to track a code change. Re-run the command.
-  A hand-patched row is indistinguishable from a stale one.
-
-If you are reading a findings row and the census already exists, prefer the
-census and treat this row as history.
+- No inventory returns here -- no table of arms, no per-file coverage claim,
+  no list of what was and was not read. A coverage claim in prose is the one
+  thing this document got most wrong: it was written as a note about reading
+  depth and was read as a verdict on the code, which is how one module's
+  losing arms stayed uninstrumented through three sweeps.
+- A verdict on an arm goes in that arm's marker, never in a row here. A
+  hand-patched row is indistinguishable from a stale one.
