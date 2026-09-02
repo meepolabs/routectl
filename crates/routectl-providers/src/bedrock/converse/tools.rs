@@ -86,6 +86,13 @@ pub(super) fn build_tool_config(
         None => Vec::new(),
     };
 
+    // Translated BEFORE the no-tools early returns, not after: a request whose
+    // tool_choice is unrepresentable loses it whether or not a tool def survived,
+    // and the population that reaches those returns is precisely the
+    // malformed-tool_choice-without-tools case. Counting only the with-tools half
+    // made drop_rate() read low for the requests most likely to be broken.
+    let tool_choice = translate_tool_choice(id, req.tool_choice.as_ref());
+
     if tools.is_empty() {
         // No usable tool defs survived (none supplied, an empty list, or
         // every entry was an Anthropic builtin that dropped). If the
@@ -101,10 +108,9 @@ pub(super) fn build_tool_config(
             );
             return Ok(Some(dummy_tool_config()));
         }
-        // TRANSLATION-DROP: structural -- no tool def reached this point, so an absent toolConfig is the accurate wire shape; each tool that failed to translate was accounted for at its own arm
+        // TRANSLATION-DROP: structural -- no tool def reached this point, so an absent toolConfig is the accurate wire shape; each tool that failed to translate was accounted for at its own arm, and the tool_choice was translated and tallied above this branch
         return Ok(None);
     }
-    let tool_choice = translate_tool_choice(id, req.tool_choice.as_ref());
     Ok(Some(ToolConfig { tools, tool_choice }))
 }
 
@@ -245,22 +251,95 @@ fn custom_tool_to_converse(c: &CustomTool) -> ConverseToolDef {
     }
 }
 
+/// Per-REQUEST tally for the tool_choice family's drops on this lane.
+///
+/// Each field is a per-request FLAG, not an occurrence count: a request
+/// carries exactly one `tool_choice`, and the two classes are the two
+/// distinct operator problems a malformed one presents. The per-arm WARN
+/// already carries the offending shape; the counters flushed here answer
+/// "how often does this lane lose a caller's tool_choice" against the
+/// lane's request-volume denominator.
+///
+/// The denominator itself is NOT touched here: the Converse egress owns
+/// exactly one `record_translation_lane_seen` site, and a second would
+/// understate the rate for the whole lane.
+#[derive(Default)]
+#[must_use = "a tally records nothing until flush() runs"]
+struct ToolChoiceDropTally {
+    shape_unrepresentable: bool,
+    name_missing: bool,
+}
+
+impl ToolChoiceDropTally {
+    /// Record that the caller's tool_choice named a mode or shape the
+    /// Converse `toolChoice` union has no member for.
+    const fn record_shape_unrepresentable(&mut self) {
+        self.shape_unrepresentable = true;
+    }
+
+    /// Record that the caller asked for a specific tool but supplied no
+    /// usable name for it.
+    const fn record_name_missing(&mut self) {
+        self.name_missing = true;
+    }
+
+    fn flush(self) {
+        if self.shape_unrepresentable {
+            crate::translation_drop_metrics::record_translation_drop(
+                "bedrock-converse",
+                "tool_choice_shape_unrepresentable",
+            );
+        }
+        if self.name_missing {
+            crate::translation_drop_metrics::record_translation_drop(
+                "bedrock-converse",
+                "tool_choice_name_missing",
+            );
+        }
+    }
+}
+
 /// Map canonical `tool_choice` Value into AWS's union shape. Accepts
 /// bare-string OpenAI shapes ("auto" / "required") and Anthropic-shape
 /// objects ({"type":"tool","name":"X"}, {"type":"auto"}, ...) so the
 /// Converse egress works for both ingress dialects without translation
 /// at the canonical level. Unknown shapes drop with a WARN (let the
 /// upstream surface its own error rather than guessing).
+///
+/// Owns the tally's whole lifetime: this is the one function every
+/// request's tool_choice passes through exactly once, and nothing on the
+/// path below it is fallible, so the flush cannot be skipped by an early
+/// `?` the way a flush placed further out could be.
+///
+/// That "exactly once" holds only because the caller invokes this ABOVE its
+/// no-tools early returns. It previously ran below them, so a malformed
+/// tool_choice on a request offering no usable tools was lost with no log and
+/// no count -- the half of the population most likely to be malformed.
 fn translate_tool_choice(id: &str, tc: Option<&Value>) -> Option<ConverseToolChoice> {
+    let mut tally = ToolChoiceDropTally::default();
+    let out = translate_tool_choice_tallied(id, tc, &mut tally);
+    tally.flush();
+    out
+}
+
+fn translate_tool_choice_tallied(
+    id: &str,
+    tc: Option<&Value>,
+    tally: &mut ToolChoiceDropTally,
+) -> Option<ConverseToolChoice> {
     let tc = tc?;
     match tc {
-        Value::String(s) => translate_tool_choice_string(id, s),
-        Value::Object(map) => translate_tool_choice_object(id, map),
+        Value::String(s) => translate_tool_choice_string(id, s, tally),
+        Value::Object(map) => translate_tool_choice_object(id, map, tally),
         _ => None,
     }
 }
 
-fn translate_tool_choice_string(id: &str, s: &str) -> Option<ConverseToolChoice> {
+fn translate_tool_choice_string(
+    id: &str,
+    s: &str,
+    tally: &mut ToolChoiceDropTally,
+) -> Option<ConverseToolChoice> {
     match s {
         "auto" => Some(ConverseToolChoice::Auto {
             auto: EmptyObject {},
@@ -269,7 +348,18 @@ fn translate_tool_choice_string(id: &str, s: &str) -> Option<ConverseToolChoice>
             any: EmptyObject {},
         }),
         "none" => None, // handled at the build_tool_config level
+        // A bare-string mode token outside `auto` / `required` / `none` (a
+        // future OpenAI spelling, or a client typo). The Converse
+        // `toolChoice` union carries no free-form mode member, so there is
+        // no shape to emit; guessing at the nearest mode would let the model
+        // call tools the caller may have meant to forbid. Lane:
+        // bedrock-converse, construction-time translation, cross-dialect by
+        // construction. Baked seed verdict: it stands until this lane's own
+        // wire evidence contradicts it, and is not eligible for deletion
+        // until then.
+        // TRANSLATION-DROP: lane=bedrock-converse class=tool_choice_shape_unrepresentable test=converse_unknown_bare_string_tool_choice_drops_and_counts_once
         other => {
+            tally.record_shape_unrepresentable();
             tracing::warn!(
                 provider = id,
                 tool_choice = %sanitize_for_log(other),
@@ -283,33 +373,73 @@ fn translate_tool_choice_string(id: &str, s: &str) -> Option<ConverseToolChoice>
 fn translate_tool_choice_object(
     id: &str,
     map: &serde_json::Map<String, Value>,
+    tally: &mut ToolChoiceDropTally,
 ) -> Option<ConverseToolChoice> {
     // Converse-shape passthrough first: {"auto":{}} | {"any":{}} |
     // {"tool":{"name":"X"}} -- detect via top-level keys.
-    if let Some(c) = passthrough_converse_tool_choice(id, map) {
-        return Some(c);
+    match passthrough_converse_tool_choice(id, map, tally) {
+        ConversePassthrough::Translated(c) => Some(c),
+        // The object IS a Converse-shape `{"tool":{...}}` entry whose name is
+        // unusable, which the passthrough has already reported. Terminal
+        // rather than falling through, because the typed translation below
+        // would read the same object as an unknown OBJECT SHAPE and report a
+        // second, different loss for the one lost tool_choice.
+        ConversePassthrough::NameMissing => None,
+        ConversePassthrough::NotConverseShape => translate_typed_tool_choice(id, map, tally),
     }
-    // Fall through to Anthropic / OpenAI shapes that need translation.
-    translate_typed_tool_choice(id, map)
+}
+
+/// What the Converse-shape passthrough made of the caller's object. Three
+/// outcomes rather than an `Option`, because "this is a Converse `tool`
+/// entry I cannot use" and "this is not a Converse shape at all" lead to
+/// different places: only the latter may fall through to the typed
+/// translation.
+enum ConversePassthrough {
+    Translated(ConverseToolChoice),
+    NameMissing,
+    NotConverseShape,
 }
 
 fn passthrough_converse_tool_choice(
     id: &str,
     map: &serde_json::Map<String, Value>,
-) -> Option<ConverseToolChoice> {
+    tally: &mut ToolChoiceDropTally,
+) -> ConversePassthrough {
     if map.contains_key("auto") {
-        return Some(ConverseToolChoice::Auto {
+        return ConversePassthrough::Translated(ConverseToolChoice::Auto {
             auto: EmptyObject {},
         });
     }
     if map.contains_key("any") {
-        return Some(ConverseToolChoice::Any {
+        return ConversePassthrough::Translated(ConverseToolChoice::Any {
             any: EmptyObject {},
         });
     }
-    let tool = map.get("tool").and_then(|v| v.as_object())?;
+    let Some(tool) = map.get("tool").and_then(|v| v.as_object()) else {
+        return ConversePassthrough::NotConverseShape;
+    };
     let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    // A Converse-shape `{"tool":{...}}` entry whose name is absent, empty, or
+    // not a string. `toolChoice.tool` requires the name, and AWS rejects the
+    // member without it -- while substituting `{any:{}}` would force a
+    // DIFFERENT tool than the one the caller named. Lane: bedrock-converse,
+    // construction-time translation. Baked seed verdict: it stands until this
+    // lane's own wire evidence contradicts it, and is not eligible for
+    // deletion until then.
+    // TRANSLATION-DROP: lane=bedrock-converse class=tool_choice_name_missing test=converse_passthrough_tool_choice_without_a_name_drops_and_counts_once
     if name.is_empty() {
+        // AMBIGUOUS OBJECT: a `{"tool":{...}}` with no usable name that ALSO
+        // carries a typed spelling (`{"tool":{}, "type":"tool", "name":"calc"}`)
+        // is not a Converse-shape entry this can decide. Before the tally
+        // existed, such an object fell through to the typed translation and
+        // emitted the caller's named tool; making the name-missing case terminal
+        // regressed that to dropping the tool_choice entirely. So defer, and let
+        // the typed path own it -- recording nothing here, since nothing is lost
+        // when the fall-through succeeds.
+        if map.contains_key("type") {
+            return ConversePassthrough::NotConverseShape;
+        }
+        tally.record_name_missing();
         tracing::warn!(
             provider = id,
             shape_type = map
@@ -318,9 +448,9 @@ fn passthrough_converse_tool_choice(
                 .unwrap_or("unknown"),
             "tool_choice missing or invalid name; dropping field"
         );
-        return None;
+        return ConversePassthrough::NameMissing;
     }
-    Some(ConverseToolChoice::Tool {
+    ConversePassthrough::Translated(ConverseToolChoice::Tool {
         tool: ConverseSpecificTool {
             name: name.to_string(),
         },
@@ -332,6 +462,7 @@ fn passthrough_converse_tool_choice(
 fn translate_typed_tool_choice(
     id: &str,
     map: &serde_json::Map<String, Value>,
+    tally: &mut ToolChoiceDropTally,
 ) -> Option<ConverseToolChoice> {
     match map.get("type").and_then(|v| v.as_str()) {
         Some("auto") => Some(ConverseToolChoice::Auto {
@@ -340,9 +471,13 @@ fn translate_typed_tool_choice(
         Some("any" | "required") => Some(ConverseToolChoice::Any {
             any: EmptyObject {},
         }),
+        // Same loss as the passthrough's unusable-name arm, reached through
+        // the Anthropic spelling: `{"type":"tool"}` with no usable `name`.
+        // TRANSLATION-DROP: lane=bedrock-converse class=tool_choice_name_missing test=converse_anthropic_tool_choice_without_a_name_drops_and_counts_once
         Some("tool") => {
             let name = map.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
+                tally.record_name_missing();
                 tracing::warn!(
                     provider = id,
                     shape_type = "tool",
@@ -356,6 +491,9 @@ fn translate_typed_tool_choice(
                 },
             })
         }
+        // Same loss again, reached through the OpenAI spelling:
+        // `{"type":"function"}` with no usable `function.name`.
+        // TRANSLATION-DROP: lane=bedrock-converse class=tool_choice_name_missing test=converse_openai_tool_choice_without_a_name_drops_and_counts_once
         Some("function") => {
             let name = map
                 .get("function")
@@ -363,6 +501,7 @@ fn translate_typed_tool_choice(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if name.is_empty() {
+                tally.record_name_missing();
                 tracing::warn!(
                     provider = id,
                     shape_type = "function",
@@ -376,7 +515,18 @@ fn translate_typed_tool_choice(
                 },
             })
         }
+        // An object matching neither the Converse union nor a typed mode
+        // spelling this egress reads. The Converse `toolChoice` union carries
+        // only `{auto:{}} | {any:{}} | {tool:{name}}`, so there is no member
+        // an unreadable object could become, and guessing at one would let
+        // the model call tools on a request whose intent nobody can read.
+        // Lane: bedrock-converse, construction-time translation,
+        // cross-dialect by construction. Baked seed verdict: it stands until
+        // this lane's own wire evidence contradicts it, and is not eligible
+        // for deletion until then.
+        // TRANSLATION-DROP: lane=bedrock-converse class=tool_choice_shape_unrepresentable test=converse_unknown_tool_choice_object_shape_drops_and_counts_once
         _ => {
+            tally.record_shape_unrepresentable();
             tracing::warn!(
                 provider = id,
                 "unknown tool_choice object shape; dropping on Converse egress"
@@ -774,6 +924,360 @@ mod tests {
         assert_eq!(
             after, before,
             "a request with nothing dropped must not advance the counter"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The tool_choice family's two drop classes and their per-REQUEST
+    // counters. Each fixture drives the whole `build_tool_config` entry
+    // point rather than the private arm, because the per-request placement
+    // of the flush is part of what is pinned: a counter bumped inside the
+    // arm would pass an arm-level test and still be wrong.
+    // -----------------------------------------------------------------
+
+    fn tool_choice_drop_count(class: &str) -> u64 {
+        crate::translation_drop_metrics::translation_drop_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "bedrock-converse" && e.drop_class == class)
+            .map_or(0, |e| e.drop_count)
+    }
+
+    fn shape_drop_count() -> u64 {
+        tool_choice_drop_count("tool_choice_shape_unrepresentable")
+    }
+
+    fn name_drop_count() -> u64 {
+        tool_choice_drop_count("tool_choice_name_missing")
+    }
+
+    /// One request offering a representable tool plus the given tool_choice.
+    /// Returns the EMITTED WIRE VALUE of the whole `toolConfig` plus every
+    /// captured event, so an absence assertion runs against the serialized
+    /// body rather than the typed struct.
+    fn emitted_with_tool_choice(choice: Value) -> (Value, Vec<routectl_testkit::CapturedEvent>) {
+        let request = ChatRequest {
+            tools: Some(vec![custom_tool()]),
+            tool_choice: Some(choice),
+            ..Default::default()
+        };
+        let mut wire = Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            wire = emitted_tool_config(&request);
+        });
+        (wire, events)
+    }
+
+    /// NEGATIVE CONTROL: a bare-string mode token the Converse `toolChoice`
+    /// union has no member for drops, warns with the sanitized token, and
+    /// counts once. Before this the arm warned and counted nothing.
+    #[test]
+    #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
+    fn converse_unknown_bare_string_tool_choice_drops_and_counts_once() {
+        // Arrange
+        let before = shape_drop_count();
+
+        // Act
+        let (wire, events) = emitted_with_tool_choice(json!("marker_future_mode"));
+        let after = shape_drop_count();
+
+        // Assert 1 -- the WARN fired, carrying the provider and the token.
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("unknown bare-string tool_choice")
+            })
+            .unwrap_or_else(|| panic!("the drop must warn; got: {events:?}"));
+        assert_eq!(warn.field("provider"), Some(ID));
+
+        // Assert 2 -- no toolChoice on the emitted wire value, and no trace
+        // of the unusable token riding along.
+        assert!(
+            !wire.to_string().contains("toolChoice")
+                && !wire.to_string().contains("marker_future_mode"),
+            "the unusable tool_choice must not reach the upstream; emitted: {wire}"
+        );
+
+        // Assert 3 -- positive control: the tools the request offered survived.
+        assert!(
+            wire.to_string().contains("get_weather"),
+            "the request's tools must still ship; emitted: {wire}"
+        );
+
+        assert_eq!(
+            after - before,
+            1,
+            "the drop must be counted exactly once for the request"
+        );
+    }
+
+    /// NEGATIVE CONTROL: an object matching neither the Converse union nor a
+    /// typed mode spelling drops and counts on the same class -- one lost
+    /// tool_choice is one drop event whichever spelling produced it.
+    #[test]
+    #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
+    fn converse_unknown_tool_choice_object_shape_drops_and_counts_once() {
+        // Arrange
+        let before = shape_drop_count();
+
+        // Act
+        let (wire, events) = emitted_with_tool_choice(json!({"marker_unknown_key": "x"}));
+        let after = shape_drop_count();
+
+        // Assert
+        assert!(
+            events.iter().any(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("unknown tool_choice object shape")
+            }),
+            "the drop must warn; got: {events:?}"
+        );
+        assert!(
+            !wire.to_string().contains("toolChoice"),
+            "no toolChoice may be invented for an unreadable object; emitted: {wire}"
+        );
+        assert!(
+            wire.to_string().contains("get_weather"),
+            "the request's tools must still ship; emitted: {wire}"
+        );
+        assert_eq!(after - before, 1);
+    }
+
+    /// NEGATIVE CONTROL: the Converse-shape `{"tool":{...}}` passthrough with
+    /// no usable name. Counts on the name class, and -- because the object IS
+    /// a Converse `tool` entry -- must NOT also be reported as an unreadable
+    /// object shape: one lost tool_choice is one drop event, not two on two
+    /// classes.
+    #[test]
+    #[serial_test::serial(
+        bedrock_converse_tool_choice_name_missing,
+        bedrock_converse_tool_choice_shape_unrepresentable
+    )]
+    fn converse_passthrough_tool_choice_without_a_name_drops_and_counts_once() {
+        // Arrange
+        let before_name = name_drop_count();
+        let before_shape = shape_drop_count();
+
+        // Act
+        let (wire, events) = emitted_with_tool_choice(json!({"tool": {"name": ""}}));
+        let after_name = name_drop_count();
+        let after_shape = shape_drop_count();
+
+        // Assert 1 -- exactly one WARN, the name one.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .count(),
+            1,
+            "one lost tool_choice owes exactly one WARN; got: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message.contains("tool_choice missing or invalid name")),
+            "the drop must warn about the name; got: {events:?}"
+        );
+
+        // Assert 2 -- nothing forced on the emitted wire value. Substituting
+        // `{any:{}}` here would force a DIFFERENT tool than the caller named.
+        assert!(
+            !wire.to_string().contains("toolChoice"),
+            "an unnamed forcing choice must not become a forcing one; emitted: {wire}"
+        );
+
+        // Assert 3 -- the name class advanced once, and the shape class not
+        // at all: the object was recognized as a Converse `tool` entry.
+        assert_eq!(after_name - before_name, 1);
+        assert_eq!(
+            after_shape, before_shape,
+            "a recognized Converse tool entry must not also count as an unreadable shape"
+        );
+    }
+
+    /// NEGATIVE CONTROL: the Anthropic spelling of the same loss.
+    #[test]
+    #[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
+    fn converse_anthropic_tool_choice_without_a_name_drops_and_counts_once() {
+        // Arrange
+        let before = name_drop_count();
+
+        // Act
+        let (wire, events) = emitted_with_tool_choice(json!({"type": "tool"}));
+        let after = name_drop_count();
+
+        // Assert
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("tool_choice missing or invalid name")
+            })
+            .unwrap_or_else(|| panic!("the drop must warn; got: {events:?}"));
+        assert_eq!(warn.field("shape_type"), Some("tool"));
+        assert!(!wire.to_string().contains("toolChoice"), "emitted: {wire}");
+        assert_eq!(after - before, 1);
+    }
+
+    /// NEGATIVE CONTROL: the OpenAI spelling of the same loss.
+    #[test]
+    #[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
+    fn converse_openai_tool_choice_without_a_name_drops_and_counts_once() {
+        // Arrange
+        let before = name_drop_count();
+
+        // Act
+        let (wire, events) = emitted_with_tool_choice(json!({"type": "function", "function": {}}));
+        let after = name_drop_count();
+
+        // Assert
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message.contains("tool_choice missing or invalid name")
+            })
+            .unwrap_or_else(|| panic!("the drop must warn; got: {events:?}"));
+        assert_eq!(warn.field("shape_type"), Some("function"));
+        assert!(!wire.to_string().contains("toolChoice"), "emitted: {wire}");
+        assert_eq!(after - before, 1);
+    }
+
+    /// POSITIVE CONTROL for every fixture above: each representable
+    /// tool_choice spelling reaches the emitted wire value, warns not at all,
+    /// and advances NEITHER counter. Without it the absence assertions above
+    /// would pass against an egress that dropped every tool_choice.
+    #[test]
+    #[serial_test::serial(
+        bedrock_converse_tool_choice_name_missing,
+        bedrock_converse_tool_choice_shape_unrepresentable
+    )]
+    fn representable_tool_choices_survive_and_advance_no_counter() {
+        for (choice, expected_member) in [
+            (json!("auto"), "auto"),
+            (json!("required"), "any"),
+            (json!({"auto": {}}), "auto"),
+            (json!({"any": {}}), "any"),
+            (json!({"tool": {"name": "get_weather"}}), "tool"),
+            (json!({"type": "auto"}), "auto"),
+            (json!({"type": "any"}), "any"),
+            (json!({"type": "tool", "name": "get_weather"}), "tool"),
+            (
+                json!({"type": "function", "function": {"name": "get_weather"}}),
+                "tool",
+            ),
+        ] {
+            // Arrange
+            let before_name = name_drop_count();
+            let before_shape = shape_drop_count();
+
+            // Act
+            let (wire, events) = emitted_with_tool_choice(choice.clone());
+
+            // Assert
+            assert!(
+                !events.iter().any(|e| e.level == tracing::Level::WARN),
+                "{choice} is representable and must not warn; got: {events:?}"
+            );
+            assert_eq!(
+                wire["toolChoice"]
+                    .as_object()
+                    .and_then(|o| o.keys().next().map(String::as_str)),
+                Some(expected_member),
+                "{choice} must reach the wire as the {expected_member} member; emitted: {wire}"
+            );
+            assert_eq!(name_drop_count(), before_name, "{choice} counted a drop");
+            assert_eq!(shape_drop_count(), before_shape, "{choice} counted a drop");
+        }
+    }
+    #[test]
+    #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
+    fn an_unrepresentable_tool_choice_counts_even_when_no_tool_def_survives() {
+        // The population that reaches build_tool_config's no-tools early returns
+        // is precisely the malformed-tool_choice-without-tools case, so counting
+        // only the with-tools half made drop_rate() read LOW for the requests most
+        // likely to be broken. Measured before the fix: delta 0 without tools, 1
+        // with them, for the same tool_choice.
+        fn shape_count() -> u64 {
+            crate::translation_drop_metrics::translation_drop_snapshot()
+                .into_iter()
+                .find(|e| {
+                    e.lane == "bedrock-converse"
+                        && e.drop_class == "tool_choice_shape_unrepresentable"
+                })
+                .map_or(0, |e| e.drop_count)
+        }
+
+        // Arrange: a tool_choice no Converse member can carry, and NO tool defs.
+        let request = req(Some(json!("marker_future_mode")));
+        let before = shape_count();
+
+        // Act
+        let out = build_tool_config(ID, &request, &[]).expect("builds");
+
+        // Assert: absent toolConfig is still the right wire shape, and the lost
+        // tool_choice is counted exactly once for the request.
+        assert!(
+            out.is_none(),
+            "no tool def survived, so toolConfig is absent"
+        );
+        assert_eq!(
+            shape_count() - before,
+            1,
+            "the lost tool_choice must count once even with no tools to force"
+        );
+    }
+    #[test]
+    #[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
+    fn an_ambiguous_tool_choice_still_reaches_the_typed_translation() {
+        // REGRESSION GUARD. An object carrying BOTH an unusable Converse-shape
+        // `tool` entry and a usable typed spelling must still emit the caller's
+        // named tool. Making the name-missing case terminal dropped it entirely,
+        // and no fixture covered the hybrid, so the suite could not see it.
+        fn name_missing_count() -> u64 {
+            crate::translation_drop_metrics::translation_drop_snapshot()
+                .into_iter()
+                .find(|e| {
+                    e.lane == "bedrock-converse" && e.drop_class == "tool_choice_name_missing"
+                })
+                .map_or(0, |e| e.drop_count)
+        }
+
+        // Arrange
+        let mut hybrid = req(Some(json!({"tool": {}, "type": "tool", "name": "calc"})));
+        hybrid.tools = Some(vec![custom_tool()]);
+        let before = name_missing_count();
+
+        // Act
+        let out = build_tool_config(ID, &hybrid, &[]).unwrap().unwrap();
+
+        // Assert -- the named tool rides, and nothing was reported lost.
+        assert_eq!(
+            serde_json::to_value(&out.tool_choice).unwrap(),
+            json!({"tool": {"name": "calc"}}),
+            "the typed spelling must still translate"
+        );
+        assert_eq!(
+            name_missing_count() - before,
+            0,
+            "nothing is lost when the fall-through succeeds, so nothing may be counted"
+        );
+
+        // Paired control: a PURE Converse-shape entry with no usable name is
+        // still terminal and still counted, so the gate narrowed the decision
+        // without disabling it.
+        let mut pure = req(Some(json!({"tool": {}})));
+        pure.tools = Some(vec![custom_tool()]);
+        let before_pure = name_missing_count();
+        let out_pure = build_tool_config(ID, &pure, &[]).unwrap().unwrap();
+        assert!(
+            out_pure.tool_choice.is_none(),
+            "an unusable Converse-shape entry still drops"
+        );
+        assert_eq!(
+            name_missing_count() - before_pure,
+            1,
+            "and still counts once"
         );
     }
 }
