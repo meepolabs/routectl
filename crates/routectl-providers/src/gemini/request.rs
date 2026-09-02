@@ -597,7 +597,7 @@ fn content_part_to_part(
                     // `image_url` block reaching the Gemini egress. Baked seed
                     // verdict: deletion-blocked pending this lane's own wire
                     // evidence.
-                    // TRANSLATION-DROP: lane=gemini class=image_url_data_uri_unparseable test=image_url_data_uri_drop_bumps_the_counter_once_per_request pattern: explicit
+                    // TRANSLATION-DROP: lane=gemini class=image_url_data_uri_unparseable test=image_url_data_uri_drop_bumps_the_counter_once_per_request
                     let Some(inline) = data_uri_inline_data(url) else {
                         tally.image_url_data_uri_unparseable = true;
                         tracing::warn!(
@@ -1175,7 +1175,7 @@ fn build_thinking_config(req: &ChatRequest, tally: &mut GeminiDropTally) -> Opti
             // budget -> canonical token -> Gemini level.
             thinking_level_from_effort(crate::effort::level_from_budget(budget))
         } else if let Some(effort) = reasoning.effort.as_deref() {
-            // TRANSLATION-DROP: lane=gemini class=reasoning_effort_unrecognized test=unrecognized_reasoning_effort_drop_bumps_the_counter_once pattern: explicit
+            // TRANSLATION-DROP: lane=gemini class=reasoning_effort_unrecognized test=unrecognized_reasoning_effort_drop_bumps_the_counter_once
             // Cross-dialect translation lane: `reasoning.effort` is a
             // free-form client string, so a token outside the canonical
             // vocabulary maps to no Gemini level. Drop rather than forward --

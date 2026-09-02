@@ -799,8 +799,10 @@ license.
 - `src/openai_compat/wire_lift/mod.rs` -- ordered dispatch table rewriting
   Anthropic-shape body fields to OpenAI-compat wire shape. Every drop arm in
   this directory carries a `TRANSLATION-DROP:` verdict marker (see
-  `src/translation_drop_metrics.rs`); `content.rs` and `tool_result.rs` each
-  own a per-request drop tally flushed OUTSIDE their fallible body, so a
+  `src/translation_drop_metrics.rs`, and `tests/translation_drop_census.rs` for
+  the grammar those markers are parsed against); `content.rs` and
+  `tool_result.rs` each own a per-request drop tally flushed OUTSIDE their
+  fallible body, so a
   request that drops content and then fails translation still reaches the
   counter. The lane's single request-volume denominator is bumped in
   `openai_compat/request.rs::normalize`, ahead of its first fallible step
@@ -1180,6 +1182,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `tests/contract_stream_egress.rs` -- canned SSE bodies through `stream()`
   asserting canonical chunk sequence (catches stream-ordering and usage-merge
   regressions)
+- `tests/translation_drop_census.rs` -- the `TRANSLATION-DROP:` marker
+  grammar rules (each violation a parse error with its own control) and the
+  content-pinned population recovered from the four request-translation
+  surfaces (`openai_compat/wire_lift/`, `bedrock/converse/`, `gemini/`,
+  `openai_responses/`): per-FILE marker counts, per-verdict counts, and the
+  `fidelity-risk` / `unresolved` / `silent` registers. Test code is excluded by
+  a content-pinned FILE list rather than by `#[cfg(test)]` position, with a
+  positive control on the markers that sit below a test-only helper attribute.
+  States its own ceiling: no source-derived side can see a fully silent drop,
+  so the `silent` register is a human register rather than a derivation
+- `tests/translation_drop_census/marker.rs` -- the marker parser itself
+  (surface enumeration, test-file predicate, per-marker parse), as a shared
+  module so the welds built on the census consume one parse rather than each
+  re-deriving one that could disagree
 
 ## routectl-router
 
