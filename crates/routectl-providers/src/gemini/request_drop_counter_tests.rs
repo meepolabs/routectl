@@ -1279,3 +1279,98 @@ fn a_recognized_reasoning_effort_maps_to_a_level_and_counts_no_drop() {
     );
     assert_eq!(after - before, 0, "no drop for a representable effort");
 }
+
+// ---------------------------------------------------------------------------
+// The policy-action vocabulary on this lane. A managed-key override refusal is
+// a POLICY ACTION, not a drop: the upstream would accept the colliding value
+// and routectl refuses it to keep its own assembled body authoritative.
+// ---------------------------------------------------------------------------
+
+/// The `(gemini, <class>)` policy-action counter, read back through the public
+/// snapshot.
+fn gemini_policy_action_count(class: &str) -> u64 {
+    crate::translation_drop_metrics::translation_policy_action_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "gemini" && e.policy_class == class)
+        .map_or(0, |e| e.action_count)
+}
+
+#[test]
+#[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
+fn payload_extras_managed_key_override_bumps_the_policy_action_counter_once() {
+    // Arrange -- two managed keys in one request, so the ONCE-per-request
+    // contract is what the delta proves rather than a coincidence of one key.
+    let req = base_req();
+    let extras = json!({
+        "generationConfig": {"temperature": 9.9},
+        "contents": "client-clobber",
+        "safetySettings": [{"category": "HARM_CATEGORY_HATE_SPEECH"}],
+    });
+
+    let before = gemini_policy_action_count("provider_extra_managed_key_conflict");
+    let drops_before = gemini_drop_count("provider_extra_managed_key_conflict");
+    let mut body = Value::Null;
+    let events =
+        routectl_testkit::capture_events(|| body = normalize_body("gemini:test", &req, &extras));
+    let after = gemini_policy_action_count("provider_extra_managed_key_conflict");
+    let drops_after = gemini_drop_count("provider_extra_managed_key_conflict");
+
+    // Assert 1: the refusal is declared at WARN, once per colliding key.
+    assert!(
+        events.iter().any(|e| e
+            .message
+            .contains("attempted to override routectl-managed key")),
+        "the refusal must warn, got: {events:?}"
+    );
+
+    // Assert 2: the assembled value survives and the override never lands.
+    let wire = rendered(&body);
+    assert!(
+        !wire.contains("client-clobber") && !wire.contains("9.9"),
+        "no managed-key override may reach the wire: {wire}"
+    );
+
+    // Assert 3: a non-managed sibling still merges, so the guard is scoped.
+    assert!(
+        body.get("safetySettings").is_some(),
+        "a representable extra must still merge: {wire}"
+    );
+
+    assert_eq!(
+        after - before,
+        1,
+        "two colliding keys in one request count ONE policy action"
+    );
+    assert_eq!(
+        drops_after, drops_before,
+        "a policy action must not reach the drop vocabulary; the two are disjoint"
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
+fn payload_extras_with_no_managed_key_counts_no_policy_action() {
+    // The paired positive control: without a collision the guard must not
+    // fire, so the counter above measures the refusal and not the merge.
+    let req = base_req();
+    let extras = json!({"safetySettings": [{"category": "HARM_CATEGORY_HATE_SPEECH"}]});
+
+    let before = gemini_policy_action_count("provider_extra_managed_key_conflict");
+    let mut body = Value::Null;
+    let events =
+        routectl_testkit::capture_events(|| body = normalize_body("gemini:test", &req, &extras));
+    let after = gemini_policy_action_count("provider_extra_managed_key_conflict");
+
+    assert!(
+        body.get("safetySettings").is_some(),
+        "the non-managed extra must merge: {}",
+        rendered(&body)
+    );
+    assert!(
+        !events.iter().any(|e| e
+            .message
+            .contains("attempted to override routectl-managed key")),
+        "no collision must warn, got: {events:?}"
+    );
+    assert_eq!(after - before, 0, "no refusal, no policy action");
+}

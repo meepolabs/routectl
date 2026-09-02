@@ -478,7 +478,7 @@ pub fn code_only(source: &str) -> String {
 
 /// The text between a delimiter and its match, starting at the opening
 /// delimiter's offset.
-fn delimited(source: &str, open_at: usize, open: char, close: char) -> Result<&str, String> {
+pub fn delimited(source: &str, open_at: usize, open: char, close: char) -> Result<&str, String> {
     let bytes = source.as_bytes();
     if bytes.get(open_at) != Some(&(open as u8)) {
         return Err(format!("expected {open:?} at offset {open_at}"));
