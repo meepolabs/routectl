@@ -865,12 +865,54 @@ fn build_reasoning(reasoning: Value) -> ReasoningSplit {
 // ---------------------------------------------------------------------------
 
 /// Extract `text.format` (the Responses structured-output surface) into
-/// the canonical `response_format` slot. The egress forwards `text`
-/// verbatim from provider_extras; here we lift the `format` sub-object
-/// into the canonical home so structured-output config survives the
-/// ingress. Returns None when no `format` is present.
+/// the canonical `response_format` slot, normalized to the nested
+/// OpenAI Chat-Completions shape every egress mapper already consumes.
+/// Returns None when no `format` is present.
+///
+/// The Responses wire spells a schema format FLAT
+/// (`{"type":"json_schema","name":X,"schema":{...},"strict":B}`).
+/// Canonical is the nested form
+/// (`{"type":"json_schema","json_schema":{name,schema,strict}}`) --
+/// what the openai and anthropic ingresses already produce and what
+/// all five egresses read. Normalizing here means every egress sees
+/// one shape; the openai-compat egress in particular has no reader at
+/// all and serializes the slot verbatim, so a flat value reaches a
+/// strict host as an unsupported `response_format` and is rejected.
+/// Every other tag (unknown tags, non-objects, objects with no string
+/// `type`) passes through verbatim, mirroring `normalize_tool_choice`.
 fn extract_text_format(text: &Value) -> Option<Value> {
-    text.as_object()?.get("format").cloned()
+    let format = text.as_object()?.get("format").cloned()?;
+    Some(nest_json_schema_format(format))
+}
+
+/// Move every non-`type` key of a flat `json_schema` format into a
+/// `json_schema` member. Wholesale rather than a named `name`/`schema`/
+/// `strict` triple, so a future sibling on the Responses wire survives
+/// the trip. The inverse lives at the Responses egress, which carries
+/// the whole member back out.
+///
+/// A schema-less `json_schema` gains an empty member rather than riding
+/// through flat, so an egress reader meets one shape for the tag. The
+/// rewrite is total on the tag EXCEPT a format already carrying a
+/// `json_schema` object, which is already canonical and rides through.
+fn nest_json_schema_format(format: Value) -> Value {
+    let Value::Object(mut map) = format else {
+        return format;
+    };
+    // An already-nested value is canonical: a Chat-shaped `text.format`
+    // reaches this ingress too, and nesting it again buries the schema one
+    // level deeper than every egress reader looks. Same guard as
+    // `normalize_tool_choice`.
+    if map.get("type").and_then(Value::as_str) != Some("json_schema")
+        || map.get("json_schema").is_some_and(Value::is_object)
+    {
+        return Value::Object(map);
+    }
+    map.remove("type");
+    let mut out = Map::new();
+    out.insert("type".into(), Value::from("json_schema"));
+    out.insert("json_schema".into(), Value::Object(map));
+    Value::Object(out)
 }
 
 /// Strip `format` from a `text` object and return the remaining fields

@@ -4457,7 +4457,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ChatRequest`: flattens the tagged-union `input[]` (`message` /
   `function_call` / `function_call_output` / `reasoning`) into `messages[]`,
   lifts `instructions`->`system`, `max_output_tokens`->`max_tokens`,
-  `text.format`->`response_format`; forward-compat sweep into
+  `text.format`->`response_format` (a flat `json_schema` format is rewritten
+  into the nested canonical member; other tags ride verbatim); forward-compat
+  sweep into
   `provider_extras`. `reasoning.effort` lifts to canonical `ReasoningConfig`;
   the reasoning remainder (`summary`/`context`/`mode`/future) is stashed under
   `provider_extras["reasoning"]` and forwarded verbatim (no sub-key vocabulary
@@ -5664,6 +5666,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Responses `{type:function,name:X}` through the `/v1/responses` ingress
   reaches the Anthropic egress as `{type:tool,name:X}` and the openai-compat
   egress as `{type:function,function:{name:X}}` (asserts the upstream body)
+- `tests/responses_structured_output_egress_e2e.rs` -- cross-lane pin for the
+  canonical `response_format` shape contract: a flat Responses
+  `text.format = {type:json_schema, name, schema, strict}` through the
+  `/v1/responses` ingress reaches every structured-output egress (responses,
+  openai-compat, anthropic-api, gemini, bedrock-invoke) carrying the caller's
+  schema
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`
   shape per ingress
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` ->

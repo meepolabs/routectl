@@ -133,7 +133,25 @@ pub struct ChatRequest {
     /// Tool-selection directive, passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
-    /// Structured-output / response-format directive, passed through verbatim.
+    /// Structured-output directive in the OpenAI Chat-Completions shape:
+    /// `{"type":"json_schema","json_schema":{"schema":{...},"name"?,
+    /// "strict"?}}`, `{"type":"json_object"}`, or `{"type":"text"}`. The
+    /// `json_schema` member is NESTED -- flat variants of the same
+    /// directive (the shape the Responses wire spells) are normalized into
+    /// it at the ingress, so this slot carries one shape whatever dialect
+    /// produced it. An unrecognized tag rides through verbatim; each egress
+    /// owns its own representability decision for it.
+    ///
+    /// Direction of travel: the openai and anthropic ingresses receive this
+    /// shape natively (their wire spells it nested), and the Responses
+    /// ingress normalizes its flat wire form into it. A NEW ingress whose
+    /// dialect spells the directive differently MUST normalize at the
+    /// producer. Every egress reads OUT of it (openai-responses flattens it back,
+    /// anthropic-shape egresses map it onto `output_config.format`, gemini
+    /// onto `responseMimeType`/`responseSchema`, openai-compat serializes
+    /// it verbatim). An egress that serializes the slot without reading it
+    /// depends on that normalization, so a producer emitting any other
+    /// shape ships it straight onto the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
 
