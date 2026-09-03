@@ -35,11 +35,16 @@ port = 8787
 # `base_url` has no factory default for this kind -- it must be spelled
 # out, and it is what makes this the OpenAI Chat Completions wire shape
 # rather than any other `openai-compat` host. `api_key_ref` names the
-# SAME env var as the codex lane's `openai-responses.toml`: both configs
-# hold a credential for the `openai` provider (per the
+# SAME env var as the codex lane's `openai-responses.toml` (per the
 # `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` convention, keyed on provider
-# name, not on lane), so a seat that can drive codex can drive this lane
-# without a second credential. There is no `account_id_ref` here -- that
+# name, not on lane).
+#
+# It does NOT follow that a seat driving codex can drive this lane. The
+# codex lane authenticates with a ChatGPT-account OAuth seat; this lane
+# needs a plain api.openai.com API key, which is a different credential
+# from a different account type. An earlier version of this comment
+# claimed one seat covered both, and a capture attempt against that
+# claim could not run. There is no `account_id_ref` here -- that
 # field belongs only to the `chatgpt-oauth` auth kind, and this provider
 # authenticates with a plain API key.
 [providers.openai]
