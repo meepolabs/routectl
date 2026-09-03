@@ -86,6 +86,28 @@ assert_caught "H# invariant token" "preserves the H7 invariant"
 # POSITIVE (planning-shorthand class): the task / feature / decision
 # shorthand forms are caught.
 assert_caught "f<n>.<nn> task shorthand" "landed in f1.02 slice"
+assert_caught "f<n>.<nn> task shorthand, unpadded two digits" "landed in f2.13 slice"
+assert_caught "f<n>.<n> task shorthand, one-digit suffix" "the f2.7 sweep landed"
+assert_caught "f<nn>.<n> task shorthand, two-digit feature" "the f10.7 sweep landed"
+
+# ARM COVERAGE for the float-width exclusion. Measured before these existed:
+# 7 of the 9 alternation arms could be deleted with the whole suite still
+# green, so the width boundaries the design hinges on were unasserted and a
+# future edit that broke one would have shipped quiet. Each pair below
+# straddles one excluded width: the neighbours must be CAUGHT (they are
+# ordinary feature numbers) while the width itself stays CLEAN below.
+assert_caught "run just below the f16 width" "the f15.0 sweep landed"
+assert_caught "run just above the f16 width" "the f17.0 sweep landed"
+assert_caught "run just below the f32 width" "the f31.0 sweep landed"
+assert_caught "run just above the f32 width" "the f33.0 sweep landed"
+assert_caught "run just below the f64 width" "the f63.0 sweep landed"
+assert_caught "run just above the f64 width" "the f65.0 sweep landed"
+assert_caught "run just below the f128 width" "the f127.0 sweep landed"
+assert_caught "run just above the f128 width" "the f129.0 sweep landed"
+assert_caught "wide run beyond every float width" "the f12345.6 sweep landed"
+assert_caught "f<n>.<n> at line start" "f4.3 is the follow-up"
+assert_caught "f<n>.<n> before a sentence period" "carried over from f7.1."
+assert_caught "f<n>.<n> as the whole line" "f9.2"
 assert_caught "(pre-)f<n> planning commentary" "adjust pre-f2 before merge"
 assert_caught "(post-)f<n> planning commentary" "post-f3 cleanup pass"
 assert_caught "D<nn> decision shorthand" "recorded under D42 rationale"
@@ -177,6 +199,23 @@ assert_clean "RV embedded in identifier" "field myRV-99thing here"
 # task / feature / decision shorthand but must NOT trip.
 assert_clean "genuine float literal near f<n>.<nn>" "let scale = 1.02 as ratio"
 assert_clean "f<n>.<nn> embedded in identifier" "the conf1.02 setting"
+
+# NEGATIVE (float-width controls): the task-shorthand core excludes the Rust
+# float widths BY SPELLING, because these are numeric wire-translation
+# surfaces and `f32.0` prose is legitimate. These are the controls that keep
+# the exclusion from being relaxed to `f[0-9]+\.[0-9]+` -- without them,
+# widening the core to close the one-digit gap looks green.
+assert_clean "f32 float-width prose" "cast the f32.0 literal before the sum"
+assert_clean "f64 float-width prose" "the f64.5 midpoint rounds up here"
+assert_clean "f128 float-width prose" "widen to f128.0 before the divide"
+assert_clean "f16 float-width prose" "the f16.5 sample clips at the top"
+assert_clean "f32 with no dot" "the tensor is f32 on this path"
+assert_clean "f64 with no dot" "sum the deltas as f64 then round"
+# Single-purpose LEFT-boundary control: the run `2` is NOT a float width,
+# so this line stays clean ONLY because `cast_` puts an underscore to the
+# token's left. A width run here would pass for two reasons at once and
+# so could not detect a boundary regression on its own.
+assert_clean "task-id shape inside an identifier" "call cast_f2.7 conversion here"
 assert_clean "word containing postfix" "apply the postfix operator here"
 assert_clean "word containing prefix" "strip the prefix from the key"
 assert_clean "D-digits inside a longer identifier" "the buildD42tag helper"

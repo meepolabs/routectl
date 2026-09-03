@@ -44,6 +44,30 @@ EXCLUDE_PATHS=(
     "scripts/check-internal-ids.test.sh"
 )
 
+# LINE-level exemption, deliberately not a path entry.
+#
+# A test whose SUBJECT is the id shape cannot avoid spelling the shape: the
+# census parser's own paired controls assert that its `holds_task_id` scan
+# refuses a one-digit suffix, which requires writing one. Those controls use
+# this synthetic slug precisely so no real id is present.
+#
+# Scoped to the LINE rather than the file on purpose. Excluding the whole
+# census test file would blind every OTHER core (`llm_context/`, `DEC-`,
+# `MEE-`, `RV-`, `M<n>.<n>`, `Table A`) on ~970 lines of actively-edited,
+# prose-heavy test source -- measured: all six ride through clean under a
+# file entry. That trades a five-line problem for a file-sized blind spot,
+# which is the opposite of what this gate is for.
+#
+# The exemption is narrow by construction: a line earns it only by carrying
+# this synthetic slug, which no real id can spell.
+#
+# RESIDUAL COST, accepted and measured: the exemption is whole-LINE, so a
+# genuine leak sharing a line with the marker rides through. Keeping it
+# line-scoped rather than match-scoped is what keeps this implementable in
+# one `grep -vF`; the alternative re-implements match-offset bookkeeping in
+# shell for a case that requires an author to write both on one line.
+CONTROL_FIXTURE_MARKER='placeholder-slug.'
+
 # True (0) when a path is excluded. Directory entries (ending in `/`)
 # exclude any path UNDER that prefix; file entries match by EXACT
 # equality only, so `scripts/check-internal-ids.test.sh` does not also
@@ -84,12 +108,43 @@ is_excluded() {
 # `xR2-EXAMPLEy`, `myRV-99thing`) is NOT -- identical on GNU and BSD.
 #
 # The last three cores catch the planning-shorthand class (task /
-# feature / decision ids). CAUTION: bare `f<n>` is NOT catchable -- it
-# collides with the Rust float types `f32` / `f64` -- so only the SAFE
-# forms are matched: `f<n>.<nn>` task shorthand (a dotted two-digit
-# suffix a float literal never carries in that boundary), `(pre-|post-)f<n>`
+# feature / decision ids): `f<n>.<m>` task shorthand, `(pre-|post-)f<n>`
 # planning commentary, and standalone `D<nn>` decision shorthand (the
 # token boundary keeps `d17_tail`-style identifiers and hex bytes clear).
+#
+# CAUTION on the task-shorthand core: bare `f<n>` is NOT catchable -- it
+# collides with the Rust float types `f16` / `f32` / `f64` / `f128`, and
+# these are numeric wire-translation surfaces where `f32.0` / `f64.5`
+# prose is likely. A core of `f[0-9]+\.[0-9]+` would red-fail on that
+# correct prose, and a gate that blocks correct commits gets loosened or
+# bypassed -- worse than any gap it closes. Do NOT "simplify" it back.
+#
+# The bound was originally TWO digits after the dot (`f[0-9]+\.[0-9]{2}`),
+# which sidestepped the collision only because a float literal rarely
+# carries two fractional digits in that boundary. That let a real id with
+# a single-digit task suffix (`f2.7`, `f10.7`) through: board ids are
+# zero-padded by convention, but nothing enforces the convention and
+# prose drops the padding naturally.
+#
+# So the float widths are excluded BY SPELLING instead, PORTED FROM the
+# census parser's `holds_task_id`: the digit run before the dot may be
+# ANY run except the literals `16`, `32`, `64`, `128`, and the suffix is
+# one or more digits. ERE has no negative lookahead, so the exclusion is
+# spelled as an alternation over every other run. A LEADING-ZERO run
+# (`f032.0`) is deliberately matched: it is neither a real float width
+# nor plausible prose.
+#
+# PORTED FROM, not identical to -- do not assume parity in either
+# direction. This gate additionally requires a whole-token RIGHT boundary
+# (added by `joined_pattern`), while `holds_task_id` never inspects the
+# character after the suffix digits. So `f2.7x` is refused by the census
+# test and rides past this gate. The Rust scan is strictly stricter;
+# a change made to one does not automatically hold for the other.
+#
+# The alternation is verified mechanically over runs 0..1500 plus wide
+# runs on three engines -- if you touch it, re-verify rather than
+# re-read it. The width boundaries it hinges on (15/17, 31/33, 63/65,
+# 127/129) are asserted in the self-test; keep them there.
 #
 # The stage-label cores are NARROWED to the spellings that actually occurred,
 # because this scanner BLOCKS commits and a false positive on legitimate prose
@@ -149,7 +204,11 @@ PATTERNS=(
     'TODO\(M[0-9]{1,3}(-[A-Za-z0-9_-]+)?\)'
     'M[0-9]+\.[0-9]+'
     'H[0-9]{1,3} (fix|invariant)'
-    'f[0-9]+\.[0-9]{2}'
+    # Task shorthand `f<run>.<digits>`, where <run> is any digit run that
+    # does not spell a Rust float width (16 / 32 / 64 / 128). The arms, in
+    # order: one digit; two digits excluding 16/32/64; three digits
+    # excluding 128; four or more digits.
+    'f([0-9]|1[0-57-9]|3[0-13-9]|6[0-35-9]|[0245789][0-9]|12[0-79]|1[013-9][0-9]|[02-9][0-9][0-9]|[0-9]{4,})\.[0-9]+'
     '(pre-|post-)f[0-9]+'
     'D[0-9]{2}'
     'SLICE [0-9]{1,3}'
@@ -243,6 +302,11 @@ scan_text() {
     local matches
     # grep -E returns 1 on no-match; tolerate that without `set -e` abort.
     matches="$(grep -nE "$pattern" || true)"
+    # Drop matched lines that carry the synthetic control-fixture marker.
+    # Runs AFTER `grep -n` so the reported line numbers stay accurate.
+    if [[ -n "$matches" ]]; then
+        matches="$(printf '%s\n' "$matches" | grep -vF "$CONTROL_FIXTURE_MARKER" || true)"
+    fi
     if [[ -n "$matches" ]]; then
         echo "check-internal-ids: banned internal ID(s) found in $label:" >&2
         echo "$matches" >&2
