@@ -880,8 +880,92 @@ fn max_output_tokens_maps_to_max_tokens() {
 
 #[test]
 fn text_format_maps_to_response_format() {
-    // Arrange
-    let format = json!({"type": "json_schema", "name": "out", "schema": {"type": "object"}});
+    // Arrange: the FLAT json_schema shape a native Responses client
+    // sends. Canonical is the nested OpenAI Chat-Completions shape every
+    // egress reads, so the lift must rewrite, not copy.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "text": {"format": {
+            "type": "json_schema",
+            "name": "out",
+            "schema": {"type": "object"},
+            "strict": true
+        }}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: every non-`type` key moved wholesale into the member.
+    assert_eq!(
+        req.response_format,
+        Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "out",
+                "schema": {"type": "object"},
+                "strict": true
+            }
+        }))
+    );
+}
+
+#[test]
+fn text_format_json_schema_sibling_key_survives_the_nesting() {
+    // Arrange: a key neither routectl nor the current Responses wire
+    // names. The rewrite moves every non-`type` key, so a future sibling
+    // rides into the member rather than being enumerated away.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "text": {"format": {
+            "type": "json_schema",
+            "schema": {"type": "object"},
+            "marker_future_sibling": "kept"
+        }}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(
+        req.response_format.as_ref().and_then(|rf| rf
+            .get("json_schema")
+            .and_then(|js| js.get("marker_future_sibling"))),
+        Some(&json!("kept")),
+        "unknown sibling must ride into the member: {:?}",
+        req.response_format
+    );
+}
+
+#[test]
+fn schemaless_text_format_json_schema_still_nests() {
+    // Arrange: a json_schema tag with nothing to nest. Normalizing it
+    // anyway keeps the rewrite total on the tag, so no egress reader
+    // meets a second shape.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "text": {"format": {"type": "json_schema"}}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(
+        req.response_format,
+        Some(json!({"type": "json_schema", "json_schema": {}}))
+    );
+}
+
+#[test]
+fn text_format_with_an_unknown_tag_passes_through_verbatim() {
+    // Arrange: the rewrite fires only on `json_schema`. Every other tag
+    // rides untouched, mirroring normalize_tool_choice.
+    let format = json!({"type": "marker_unknown_tag", "schema": {"type": "object"}});
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -893,6 +977,57 @@ fn text_format_maps_to_response_format() {
 
     // Assert
     assert_eq!(req.response_format, Some(format));
+}
+
+#[test]
+fn non_object_text_format_passes_through_verbatim() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "text": {"format": "json_schema"}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(req.response_format, Some(json!("json_schema")));
+}
+
+#[test]
+fn an_already_nested_text_format_is_not_nested_a_second_time() {
+    // A Chat-shaped `text.format` reaches this ingress too. Nesting it again
+    // would bury the schema one level below where every egress reader looks,
+    // turning a directive that worked on all five lanes into a drop.
+    // Arrange
+    let format = json!({
+        "type": "json_schema",
+        "json_schema": {"name": "out", "schema": {"type": "object"}}
+    });
+    let body = json!({"model": "m", "input": "hi", "text": {"format": format}});
+
+    // Act
+    let req = parse(body);
+
+    // Assert: unchanged, and the schema still sits where the egresses read it.
+    assert_eq!(req.response_format.as_ref(), Some(&format));
+    assert!(
+        req.response_format
+            .as_ref()
+            .and_then(|rf| rf.pointer("/json_schema/schema"))
+            .is_some(),
+        "the schema must stay at json_schema.schema: {:?}",
+        req.response_format
+    );
+    assert!(
+        req.response_format
+            .as_ref()
+            .and_then(|rf| rf.pointer("/json_schema/json_schema"))
+            .is_none(),
+        "double-nested: {:?}",
+        req.response_format
+    );
 }
 
 #[test]

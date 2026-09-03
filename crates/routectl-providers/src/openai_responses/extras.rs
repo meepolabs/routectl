@@ -255,8 +255,8 @@ pub(super) fn apply_installation_id(
 /// `provider_extras["text"]`), so the egress must re-emit it or strict JSON
 /// decode fails.
 ///
-///   `{type:json_schema, json_schema:{schema, name?, strict?}}`
-///       -> `text.format = {type:json_schema, name, schema, strict?}`
+///   `{type:json_schema, json_schema:{schema, name?, ...}}`
+///       -> `text.format = {type:json_schema, name, schema, ...}`
 ///   `{type:json_object}` -> `text.format = {type:json_object}`
 ///
 /// Runs AFTER `merge_provider_extras`, so a `verbosity` sibling lifted into
@@ -343,11 +343,17 @@ impl ResponseFormatDropTally {
 }
 
 /// Convert the canonical OpenAI Chat-shape `response_format` into the
-/// Responses API `text.format` object (flattened: `name`/`schema`/`strict`
-/// at the top level, not nested under `json_schema`). Returns `None` for an
+/// Responses API `text.format` object (flattened: the whole `json_schema`
+/// member's keys at the top level, not nested). Returns `None` for an
 /// absent or unrecognized shape. The Responses API requires `name` on a
 /// json_schema format, so a missing name defaults to `"response"` (matching
 /// the openai-compat wire-lift default).
+///
+/// The flatten carries the WHOLE member out rather than a named
+/// `name`/`schema`/`strict` triple, making it the exact inverse of the
+/// Responses ingress nesting (`ingress/openai_responses/parse.rs`). Exact
+/// inverses is what makes the same-dialect round trip closed for every key
+/// rather than closed for three of them.
 ///
 /// Every `None` exit loses the caller's structured-output request outright:
 /// the model answers in free-form prose while the client parses for JSON. So
@@ -405,21 +411,21 @@ fn responses_text_format(
             // Same class, second arm: the member is present but carries no
             // `schema`, so there is still nothing the upstream would accept.
             // TRANSLATION-DROP: lane=openai-responses class=response_format_schema_missing test=responses_json_schema_member_without_a_schema_drops_and_counts_once
-            let Some(schema) = js.get("schema").cloned() else {
+            if !js.contains_key("schema") {
                 tally.record_schema_missing();
                 tracing::warn!(
                     "response_format json_schema carries no json_schema.schema; \
                      dropping structured-output directive on Responses egress"
                 );
                 return None;
-            };
-            let name = js.get("name").and_then(Value::as_str).unwrap_or("response");
-            let mut fmt = serde_json::Map::new();
+            }
+            let mut fmt = js.clone();
             fmt.insert("type".into(), Value::from("json_schema"));
-            fmt.insert("name".into(), Value::from(name));
-            fmt.insert("schema".into(), schema);
-            if js.get("strict").and_then(Value::as_bool) == Some(true) {
-                fmt.insert("strict".into(), Value::Bool(true));
+            // Repairs a non-string `name` as well as an absent one: the
+            // upstream requires a string here, and `entry()` alone would
+            // forward a null or a number unchanged.
+            if !fmt.get("name").is_some_and(Value::is_string) {
+                fmt.insert("name".into(), Value::from("response"));
             }
             Some(Value::Object(fmt))
         }
