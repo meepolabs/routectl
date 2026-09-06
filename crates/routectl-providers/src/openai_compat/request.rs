@@ -83,10 +83,36 @@ pub fn normalize(
         // client fingerprint the block carries.
         let mut billing_dropped = false;
         let filtered = crate::system_filter::strip_billing_attribution(sys, &mut billing_dropped);
+        // Withheld by routectl, not by the wire: the lowered `role: "system"`
+        // message would carry the block's text fine, and an openai-compat host
+        // is a third-party upstream that must not receive the client
+        // fingerprint it holds. Shares the class literal with the other
+        // egresses that strip the same content -- one operator-facing label per
+        // action, keyed apart by lane.
+        //
+        // Recorded HERE rather than beside the message insert below: a request
+        // whose whole system IS the block flattens to empty text and skips that
+        // insert entirely, so a record placed past it would miss exactly the
+        // requests that stripped the most while this lane's denominator still
+        // counted them. Nothing between the strip and this point can fail, so
+        // no later `?` can skip it either. The flag is one bool per request, so
+        // a system carrying several such blocks is still one action.
+        // NO TRANSLATION-DROP MARKER HERE, deliberately: this file is outside
+        // the census's swept surfaces, so a marker on it is never parsed and
+        // cannot fail -- one was verified to survive being replaced by an
+        // unparseable verdict with every weld green. A pin that cannot fail is
+        // worse than none, because it reads as enforcement. The behaviour is
+        // covered by the per-arm tests named below; widening the census to this
+        // surface is filed separately.
+        // Covered by: an_all_billing_system_still_counts_the_openai_compat_policy_action
         if billing_dropped {
             warn!(
                 provider = id,
                 "openai-compat egress: Claude Code billing/attribution system block dropped",
+            );
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "client_fingerprint_stripped",
             );
         }
         let text = filtered
@@ -1415,6 +1441,7 @@ mod tests {
     /// before the openai-compat egress lowers `system` to a role:system
     /// message; a normal sibling block must survive and reach the wire.
     #[test]
+    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn openai_compat_drops_billing_block_keeps_normal_block() {
         use routectl_core::{SystemBlock, SystemContent};
         let mut req = simple_req("gpt-4o");
@@ -1481,6 +1508,7 @@ mod tests {
     /// Leading whitespace before the billing prefix still matches and the
     /// block is dropped (mirrors the reference trim-then-prefix check).
     #[test]
+    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn openai_compat_drops_billing_block_with_leading_whitespace() {
         use routectl_core::{SystemBlock, SystemContent};
         let mut req = simple_req("gpt-4o");
@@ -1519,6 +1547,136 @@ mod tests {
     /// has fired.
     fn lane_seen_count() -> u64 {
         crate::translation_drop_metrics::translation_lane_seen(super::super::PROVIDER_KIND)
+    }
+
+    /// The `(openai-compat, client_fingerprint_stripped)` policy-action
+    /// counter, read through the public snapshot. Zero before its first bump.
+    ///
+    /// SERIAL GUARDS: this key is process-global and the runner is threaded, so
+    /// every test that drives the strip carries
+    /// `openai_compat_client_fingerprint_stripped` -- the ones asserting a
+    /// delta AND the ones that only bump it incidentally while asserting
+    /// something else. A guard name no sibling shares excludes nothing.
+    fn fingerprint_strip_count() -> u64 {
+        crate::translation_drop_metrics::translation_policy_action_snapshot()
+            .into_iter()
+            .find(|e| e.lane == "openai-compat" && e.policy_class == "client_fingerprint_stripped")
+            .map_or(0, |e| e.action_count)
+    }
+
+    /// Build a request whose `system` carries the supplied blocks.
+    fn req_with_system_blocks(texts: &[&str]) -> ChatRequest {
+        use routectl_core::{SystemBlock, SystemContent};
+        let mut req = simple_req("gpt-4o");
+        req.system = Some(SystemContent::Blocks(
+            texts
+                .iter()
+                .map(|text| SystemBlock {
+                    kind: "text".into(),
+                    text: (*text).into(),
+                    cache_control: None,
+                    citations: None,
+                })
+                .collect(),
+        ));
+        req
+    }
+
+    fn lenient_normalize(req: &ChatRequest) -> serde_json::Value {
+        normalize(
+            "test",
+            req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .expect("lenient normalize must succeed")
+    }
+
+    /// The counted half of the strip: one request whose system carries the
+    /// block bumps the policy-action counter exactly once, however many blocks
+    /// it stripped, and the withheld text is absent from the lowered message
+    /// while its unmarked sibling survives.
+    #[test]
+    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
+    fn the_billing_strip_counts_one_openai_compat_policy_action_for_the_request() {
+        // Arrange -- TWO billing blocks in one request. The count is per
+        // REQUEST, so two stripped blocks are still one action; a
+        // per-occurrence bump would read 2 here.
+        let req = req_with_system_blocks(&[
+            "x-anthropic-billing-header: v=1; fp=secret",
+            "x-anthropic-billing-header: v=2; fp=other",
+            "you are helpful",
+        ]);
+
+        // Act
+        let before = fingerprint_strip_count();
+        let body = lenient_normalize(&req);
+        let after = fingerprint_strip_count();
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "two stripped blocks in one request are one policy action"
+        );
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["content"], "you are helpful");
+        assert!(
+            !body.to_string().contains("fp="),
+            "the withheld fingerprint must not reach the wire body: {body}"
+        );
+    }
+
+    /// The record sits ahead of the message lowering, so the request whose
+    /// whole system IS the block -- the one shape that flattens to empty and
+    /// lowers no system message at all -- still reaches the counter. A record
+    /// placed past that skip would miss exactly the requests that strip the
+    /// most while the lane denominator counted them, reading the action rate
+    /// low for the case that withholds most often.
+    #[test]
+    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
+    fn an_all_billing_system_still_counts_the_openai_compat_policy_action() {
+        // Arrange
+        let req = req_with_system_blocks(&["x-anthropic-billing-header: v=1; fp=secret"]);
+
+        // Act
+        let before = fingerprint_strip_count();
+        let body = lenient_normalize(&req);
+        let after = fingerprint_strip_count();
+
+        // Assert -- nothing was lowered, and the strip still counted.
+        let messages = body["messages"].as_array().expect("messages array");
+        assert!(
+            messages.iter().all(|m| m["role"] != "system"),
+            "an all-billing system must lower no system message, got: {body}"
+        );
+        assert_eq!(
+            after - before,
+            1,
+            "a system that collapsed to nothing still stripped a block"
+        );
+    }
+
+    /// The positive control on the counter: a system carrying no billing block
+    /// leaves the key untouched, so the delta assertions above cannot pass on a
+    /// counter that bumps for every request.
+    #[test]
+    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
+    fn a_system_with_no_billing_block_records_no_openai_compat_policy_action() {
+        // Arrange
+        let req = req_with_system_blocks(&["you are helpful"]);
+
+        // Act
+        let before = fingerprint_strip_count();
+        let body = lenient_normalize(&req);
+        let after = fingerprint_strip_count();
+
+        // Assert
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["content"], "you are helpful");
+        assert_eq!(after, before, "nothing was stripped, so nothing is counted");
     }
 
     /// A request carrying one Anthropic-shape document block: the content

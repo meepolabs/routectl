@@ -58,16 +58,86 @@ use super::types::{ConverseRequest, InferenceConfig};
 /// reviewable in one place.
 const RESPONSE_FIELD_PATHS: &[&str] = &["/stop_sequence"];
 
+/// Per-request record of whether this request's Claude Code client
+/// fingerprint was withheld from the upstream ANYWHERE on this lane.
+///
+/// ONE tally for the whole lane rather than one per stripping site, because
+/// the class is counted per REQUEST and this lane withholds the same
+/// fingerprint on three independent surfaces: the top-level `system` field,
+/// the Role::System message lift, and the `metadata` entry of the
+/// forward-compat extras bag. A client sending the fingerprint sends it on
+/// whichever of those surfaces its shape uses, and `merge_system_sources`
+/// concatenates rather than picks, so a caller supplying both system sources
+/// trips two sites on ONE request -- a record per site would then count that
+/// request twice against a denominator that counted it once, pushing the
+/// action rate above 1.0.
+///
+/// Reachability, stated precisely because the obvious reading overstates it:
+/// the Role::System lift site is unreachable through the OpenAI and Responses
+/// ingresses, which promote those messages into `system` at parse time. It is
+/// live through the Anthropic ingress, which forwards them unlifted, and for a
+/// direct library caller.
+///
+/// This is the convention for the class generally, not a quirk of this lane:
+/// one operator-facing label per action, one record per request, however many
+/// surfaces of that request carried the withheld content.
+#[derive(Default)]
+pub(super) struct ClientFingerprintStripTally {
+    stripped: bool,
+}
+
+impl ClientFingerprintStripTally {
+    /// Note that this request withheld the fingerprint at one more site.
+    /// Idempotent by construction: the flush is per request, not per site.
+    pub(super) const fn record(&mut self) {
+        self.stripped = true;
+    }
+
+    fn flush(&self) {
+        if self.stripped {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "client_fingerprint_stripped",
+            );
+        }
+    }
+
+    /// Flush a tally the caller drove itself, for a test exercising ONE of the
+    /// lane's strip sites in isolation. Production code reaches the flush only
+    /// through [`translate`], which owns the per-request lifetime.
+    #[cfg(test)]
+    pub(super) fn flush_for_test(&self) {
+        self.flush();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Top-level translate
 // ---------------------------------------------------------------------------
 
 pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseRequest> {
+    let mut fingerprint = ClientFingerprintStripTally::default();
+    let translated = translate_tallied(cfg, req, &mut fingerprint);
+    // Flushed on BOTH arms and outside every fallible step of the translation:
+    // a request whose entire system IS the fingerprint block translates to no
+    // system at all, and one that withholds a fingerprint and only then fails
+    // to translate its messages was still counted by this lane's denominator.
+    // Either shape missing from the numerator reads the action rate low for
+    // precisely the requests that withhold the most.
+    fingerprint.flush();
+    translated
+}
+
+fn translate_tallied(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Result<ConverseRequest> {
     // The canonical sampling knobs have no `inferenceConfig` home and are
     // gated out of the additionalModelRequestFields merge as canonical keys;
     // WARN once so the loss isn't silent.
     crate::sampling_drop_guard::warn_dropped_sampling_fields(&cfg.id, req, &[]);
-    let system = build_system(req);
+    let system = build_system(req, fingerprint);
     let messages = build_messages(&cfg.id, &req.messages)?;
     let tool_config = build_tool_config(&cfg.id, req, &messages)?;
     // Reach into the post-translation toolChoice so build_additional_fields
@@ -76,7 +146,8 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
     // source of truth for bag composition while toolChoice translation
     // stays in tools.rs.
     let tool_choice = tool_config.as_ref().and_then(|tc| tc.tool_choice.as_ref());
-    let additional_model_request_fields = build_additional_fields(cfg, req, tool_choice);
+    let additional_model_request_fields =
+        build_additional_fields(cfg, req, tool_choice, fingerprint);
 
     // The sampling clamp must key off whether thinking ACTUALLY survives on
     // the wire, not the provisional build_thinking result: build_additional_fields

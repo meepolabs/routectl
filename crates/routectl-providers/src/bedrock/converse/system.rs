@@ -10,6 +10,7 @@ use routectl_core::ChatRequest;
 use crate::anthropic_api::request::{lift_legacy_system_stripped, translate_system};
 use crate::anthropic_api::types::{AnthropicSystem, AnthropicSystemBlock};
 
+use super::request::ClientFingerprintStripTally;
 use super::types::{CachePoint, ConverseSystemBlock};
 
 /// Translate the canonical `system` field into AWS's
@@ -27,7 +28,10 @@ use super::types::{CachePoint, ConverseSystemBlock};
 /// present, `merge_system_sources` combines them into one `system`
 /// array rather than picking one and discarding the other -- see its
 /// doc comment for why merge, and in what order.
-pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>> {
+pub(super) fn build_system(
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Option<Vec<ConverseSystemBlock>> {
     // Drop the Claude Code billing/attribution block before translation:
     // Bedrock is a third-party upstream and must not receive the client
     // fingerprint the block carries.
@@ -42,7 +46,28 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
         // (non-zero length) but a meaningless instruction.
         .filter(|s| !s.is_blank())
         .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut billing_dropped));
+    // Withheld by routectl, not by the wire: the Converse `system` array would
+    // carry the block's text fine, and Bedrock is a third-party upstream that
+    // must not receive the client fingerprint it holds.
+    //
+    // ONE CLASS, ONCE PER REQUEST -- not a second class beside the
+    // system-role-message strip below, and not a second record. Both strips
+    // run the same predicate over the same content and withhold it from the
+    // same upstream for the same reason, so they are two SITES of one policy
+    // action rather than two actions; the operator reading the counter is
+    // asking how often routectl withheld a fingerprint from this lane, and
+    // the surface it arrived on does not change that answer. They are also
+    // routinely both live on one request: a caller supplying a top-level
+    // system AND system-role messages has both merged, so a record per site
+    // would count that request twice against a denominator counting it once.
+    // The shared tally makes that impossible rather than merely unlikely.
+    // The pin names the SINGLE-SOURCE test deliberately: a both-sources test
+    // sets the shared tally from the sibling site too, so deleting this
+    // record leaves it green. Only a request whose fingerprint is in the
+    // top-level system ALONE isolates this site.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_the_top_level_system_counts_the_policy_action
     if billing_dropped {
+        fingerprint.record();
         tracing::warn!(
             model = %routectl_core::sanitize_for_log(&req.model),
             "bedrock-converse egress: Claude Code billing/attribution system block dropped",
@@ -58,7 +83,16 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
     let legacy = lift_legacy_system_stripped(&req.messages, &mut legacy_billing_dropped)
         .as_ref()
         .map(translate_system);
+    // The second SITE of the one policy action adjudicated above, sharing its
+    // tally so a request stripping on both surfaces still counts once.
+    //
+    // The pin names the SINGLE-SOURCE test deliberately: a both-sources test
+    // sets the shared tally from the other site too, so deleting this record
+    // leaves it green. Only a request whose fingerprint is in the message
+    // array ALONE isolates this site.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_counts_the_policy_action
     if legacy_billing_dropped {
+        fingerprint.record();
         tracing::warn!(
             model = %routectl_core::sanitize_for_log(&req.model),
             "bedrock-converse egress: Claude Code billing/attribution block \
@@ -159,7 +193,8 @@ fn as_system_blocks(s: AnthropicSystem) -> Vec<AnthropicSystemBlock> {
 mod tests {
     use super::*;
     use routectl_core::{
-        CacheControl, ChatRequest, Message, MessageContent, Role, SystemBlock, SystemContent,
+        CacheControl, ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, Role,
+        SystemBlock, SystemContent,
     };
     use routectl_testkit::capture_events;
 
@@ -194,7 +229,7 @@ mod tests {
             let req = req_with_system(system);
 
             // Act
-            let out = build_system(&req);
+            let out = build_system(&req, &mut ClientFingerprintStripTally::default());
 
             // Assert
             assert!(
@@ -216,7 +251,7 @@ mod tests {
         )]));
 
         // Act
-        let out = build_system(&req);
+        let out = build_system(&req, &mut ClientFingerprintStripTally::default());
 
         // Assert
         assert!(
@@ -238,7 +273,8 @@ mod tests {
         )]));
 
         // Act
-        let out = build_system(&req).expect("non-empty system must produce blocks");
+        let out = build_system(&req, &mut ClientFingerprintStripTally::default())
+            .expect("non-empty system must produce blocks");
 
         // Assert
         assert_eq!(out.len(), 2, "expected a Text block then a cachePoint");
@@ -266,7 +302,8 @@ mod tests {
         ]));
 
         // Act
-        let out = build_system(&req).expect("the real block must survive");
+        let out = build_system(&req, &mut ClientFingerprintStripTally::default())
+            .expect("the real block must survive");
 
         // Assert
         assert_eq!(out.len(), 2, "only the real block + its cachePoint remain");
@@ -289,7 +326,8 @@ mod tests {
         ]));
 
         // Act
-        let out = build_system(&req).expect("the normal block must survive");
+        let out = build_system(&req, &mut ClientFingerprintStripTally::default())
+            .expect("the normal block must survive");
 
         // Assert
         assert_eq!(out.len(), 1, "only the normal block survives");
@@ -310,7 +348,8 @@ mod tests {
         )]));
 
         // Act
-        let out = build_system(&req).expect("a mid-string block must survive");
+        let out = build_system(&req, &mut ClientFingerprintStripTally::default())
+            .expect("a mid-string block must survive");
 
         // Assert
         assert_eq!(out.len(), 1);
@@ -331,7 +370,8 @@ mod tests {
         ]));
 
         // Act
-        let out = build_system(&req).expect("the real block must survive");
+        let out = build_system(&req, &mut ClientFingerprintStripTally::default())
+            .expect("the real block must survive");
 
         // Assert
         assert_eq!(out.len(), 1);
@@ -372,7 +412,7 @@ mod tests {
         // Act
         let mut out = None;
         let events = capture_events(|| {
-            out = build_system(&req);
+            out = build_system(&req, &mut ClientFingerprintStripTally::default());
         });
         let out = out.expect("both system sources present must produce a system array");
 
@@ -408,7 +448,7 @@ mod tests {
         // Act
         let mut out = None;
         let events = capture_events(|| {
-            out = build_system(&req);
+            out = build_system(&req, &mut ClientFingerprintStripTally::default());
         });
         let out = out.expect("a top-level system alone must still produce a system array");
 
@@ -437,7 +477,7 @@ mod tests {
         // Act
         let mut out = None;
         let events = capture_events(|| {
-            out = build_system(&req);
+            out = build_system(&req, &mut ClientFingerprintStripTally::default());
         });
         let out = out.expect("a legacy system message alone must still produce a system array");
 
@@ -479,7 +519,7 @@ mod tests {
         // Act
         let mut out = None;
         let events = capture_events(|| {
-            out = build_system(&req);
+            out = build_system(&req, &mut ClientFingerprintStripTally::default());
         });
         let out = out.expect("both system sources present must produce a system array");
 
@@ -501,5 +541,301 @@ mod tests {
                     && e.message.contains("billing/attribution")),
             "dropping a fingerprint must be reported, got: {events:?}"
         );
+    }
+
+    /// The `(bedrock-converse, client_fingerprint_stripped)` policy-action
+    /// counter, read through the public snapshot. Zero before its first bump.
+    ///
+    /// SERIAL GUARDS: this key is process-global and the runner is threaded, so
+    /// every test that drives any of this lane's three strip sites carries
+    /// `bedrock_converse_client_fingerprint_stripped` -- the ones asserting a
+    /// delta AND the ones that only bump it incidentally. A guard name no
+    /// sibling shares excludes nothing.
+    fn fingerprint_strip_count() -> u64 {
+        crate::translation_drop_metrics::translation_policy_action_snapshot()
+            .into_iter()
+            .find(|e| {
+                e.lane == "bedrock-converse" && e.policy_class == "client_fingerprint_stripped"
+            })
+            .map_or(0, |e| e.action_count)
+    }
+
+    fn converse_cfg() -> crate::bedrock::BedrockConfig {
+        crate::bedrock::BedrockConfig {
+            id: "bedrock:test-converse".into(),
+            region: "us-west-2".into(),
+            model_id: "anthropic.claude-sonnet-4-5".into(),
+            api_shape: crate::bedrock::BedrockApiShape::Converse,
+            creds: crate::bedrock::BedrockCreds::BearerKey { key: "test".into() },
+            user_agent: None,
+            header_extras: Vec::new(),
+            anthropic_beta: Vec::new(),
+            allowed_betas: Vec::new(),
+            allowed_body_fields: Vec::new(),
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        }
+    }
+
+    /// THE ADJUDICATION, pinned. A request whose fingerprint rides BOTH system
+    /// sources at once -- the top-level `system` field and a Role::System
+    /// message -- is ONE policy action, not two. Both sites strip the same
+    /// content under the same rule for the same reason, so they are two sites
+    /// of one action; counting each would put this lane's action count above
+    /// its request-volume denominator on the shape that trips both, which is
+    /// an ordinary claude-code request rather than an exotic one.
+    ///
+    /// Drives the whole-request translation rather than `build_system` alone,
+    /// because the shared tally is flushed there -- the unit under test is the
+    /// per-request contract, not one function.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn a_fingerprint_on_both_system_sources_counts_one_policy_action() {
+        // Arrange -- a fingerprint on each source, plus real content on each
+        // so the merge path is genuinely live.
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Blocks(vec![
+                block("x-anthropic-billing-header: v=1; fp=secret", None),
+                block("top-level prompt", None),
+            ])),
+            messages: vec![
+                sys_msg("x-anthropic-billing-header: v=2; fp=other"),
+                sys_msg("legacy prompt"),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let before = fingerprint_strip_count();
+        let out = super::super::request::translate(&converse_cfg(), &req)
+            .expect("both system sources present must translate");
+        let after = fingerprint_strip_count();
+
+        // Assert -- one action for the request, though two sites stripped.
+        assert_eq!(
+            after - before,
+            1,
+            "two strip SITES on one request are one policy action, not two"
+        );
+        // Positive control on the fixture: both sites really did strip, so the
+        // count above is one-of-two rather than one-of-one.
+        let rendered = format!("{:?}", out.system);
+        assert!(
+            !rendered.contains("x-anthropic-billing-header"),
+            "neither fingerprint may reach the upstream, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("top-level prompt") && rendered.contains("legacy prompt"),
+            "both real system texts must survive the strip, got: {rendered}"
+        );
+    }
+
+    /// PER-ARM cover for the top-level `system` site, the mirror of the lift
+    /// test below. The both-sources test cannot stand in for this one either:
+    /// its lift strip sets the shared tally on its own, so deleting THIS
+    /// site's record leaves it green. Only a request whose fingerprint rides
+    /// the top-level system ALONE -- with clean system-role messages present,
+    /// so the sibling site is live but records nothing -- fails when this site
+    /// stops recording.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn a_fingerprint_only_in_the_top_level_system_counts_the_policy_action() {
+        // Arrange -- the message array is clean, so the only strip is the
+        // top-level one.
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Text(
+                "x-anthropic-billing-header: v=1; fp=secret".into(),
+            )),
+            messages: vec![sys_msg("legacy prompt")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let before = fingerprint_strip_count();
+        let out = super::super::request::translate(&converse_cfg(), &req)
+            .expect("the request must translate");
+        let after = fingerprint_strip_count();
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "the top-level system strip must count exactly one policy action"
+        );
+        let rendered = serde_json::to_string(&out).expect("the body must serialize");
+        assert!(
+            !rendered.contains("fp=secret"),
+            "the fingerprint must not reach the wire: {rendered}"
+        );
+    }
+
+    /// PER-ARM cover for the system-role-message lift site. The both-sources
+    /// test above cannot stand in for this one: its top-level strip sets the
+    /// shared tally on its own, so deleting the lift site's record leaves that
+    /// test green. Only a request whose fingerprint rides the message array
+    /// ALONE -- with a clean top-level system present -- fails when the lift
+    /// site stops recording.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn a_fingerprint_only_in_a_system_role_message_counts_the_policy_action() {
+        // Arrange -- the top-level system is clean, so the only strip is the
+        // lift's.
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Text("top-level prompt".into())),
+            messages: vec![
+                sys_msg("x-anthropic-billing-header: v=1; fp=secret"),
+                sys_msg("legacy prompt"),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let before = fingerprint_strip_count();
+        let out = super::super::request::translate(&converse_cfg(), &req)
+            .expect("the request must translate");
+        let after = fingerprint_strip_count();
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "a fingerprint withheld from a system-role message is a policy action"
+        );
+        let rendered = format!("{:?}", out.system);
+        assert!(
+            !rendered.contains("x-anthropic-billing-header"),
+            "the fingerprint must not reach the upstream, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("top-level prompt") && rendered.contains("legacy prompt"),
+            "both real system texts must survive, got: {rendered}"
+        );
+    }
+
+    /// The third site of the same one action: the extras bag's `metadata`
+    /// entry. A request carrying the fingerprint in the bag AND in its system
+    /// is still one action -- the adjudication above is a property of the
+    /// class on this lane, not of the two system sites alone.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn a_fingerprint_in_the_extras_bag_and_the_system_counts_one_policy_action() {
+        // Arrange
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Blocks(vec![
+                block("x-anthropic-billing-header: v=1; fp=secret", None),
+                block("top-level prompt", None),
+            ])),
+            messages: vec![sys_msg("legacy prompt")].into(),
+            provider_extras: Some(serde_json::json!({
+                "metadata": {"user_id": "sentinel-user"},
+                "top_k": 40,
+            })),
+            ..Default::default()
+        };
+
+        // Act
+        let before = fingerprint_strip_count();
+        let out = super::super::request::translate(&converse_cfg(), &req)
+            .expect("the request must translate");
+        let after = fingerprint_strip_count();
+
+        // Assert
+        assert_eq!(
+            after - before,
+            1,
+            "a fingerprint withheld from the bag AND the system is one policy action"
+        );
+        let serialized =
+            serde_json::to_string(&out).expect("the translated request must serialize");
+        assert!(
+            !serialized.contains("sentinel-user")
+                && !serialized.contains("x-anthropic-billing-header"),
+            "no fingerprint may reach the third-party upstream, got: {serialized}"
+        );
+    }
+
+    /// The flush sits OUTSIDE every fallible step of the translation, so a
+    /// request that withheld a fingerprint and only then failed to translate
+    /// still counts. This lane's denominator already counted it, so a record
+    /// placed on the Ok arm alone would read the action rate low for exactly
+    /// the requests that failed after stripping.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn a_translation_that_fails_after_the_strip_still_counts_the_policy_action() {
+        // Arrange -- the strip fires, then the breakpoint cap rejects the
+        // request. Five message-level markers exceed the four-breakpoint cap.
+        let parts: Vec<ContentPart> = (0..5)
+            .map(|_| {
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "x".into(),
+                    citations: None,
+                    cache_control: Some(CacheControl::ephemeral_5m()),
+                })
+            })
+            .collect();
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Text(
+                "x-anthropic-billing-header: v=1; fp=secret".into(),
+            )),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(parts),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let before = fingerprint_strip_count();
+        let outcome = super::super::request::translate(&converse_cfg(), &req);
+        let after = fingerprint_strip_count();
+
+        // Assert -- the request failed, and the strip still counted.
+        assert!(
+            outcome.is_err(),
+            "the fixture must fail translation after the strip, got: {outcome:?}"
+        );
+        assert_eq!(
+            after - before,
+            1,
+            "a request that stripped and then failed to translate still withheld a fingerprint"
+        );
+    }
+
+    /// The positive control on the counter: a request carrying no fingerprint
+    /// on any of the lane's three surfaces leaves the key untouched, so the
+    /// delta assertions above cannot pass on a counter that bumps for every
+    /// request.
+    #[test]
+    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
+    fn a_request_with_no_fingerprint_records_no_policy_action() {
+        // Arrange
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Text("top-level prompt".into())),
+            messages: vec![sys_msg("legacy prompt")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let before = fingerprint_strip_count();
+        super::super::request::translate(&converse_cfg(), &req).expect("the request translates");
+        let after = fingerprint_strip_count();
+
+        // Assert
+        assert_eq!(after, before, "nothing was stripped, so nothing is counted");
     }
 }

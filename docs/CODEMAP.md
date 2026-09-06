@@ -763,7 +763,10 @@ license.
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum +
   format-tag accessors
 - `src/openai_compat/request.rs` -- `ChatRequest` -> OpenAI-compat wire body
-  (dialect dispatch + extras merge)
+  (dialect dispatch + extras merge); withholds the Claude Code
+  billing/attribution block from this third-party upstream and counts that
+  once per request on the POLICY-ACTION counter, recorded ahead of the system
+  lowering so a request whose whole system was the block still counts
 - `src/openai_compat/response.rs` -- response normalization; lifts
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +
@@ -1098,9 +1101,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/response_types.rs` -- response + ConverseStream event
   wire types
 - `src/bedrock/converse/request.rs` -- canonical -> Converse request body
-  orchestrator (camelCase + `additionalModelRequestFields`)
+  orchestrator (camelCase + `additionalModelRequestFields`); owns
+  `ClientFingerprintStripTally`, the per-request tally the lane's three
+  fingerprint-strip sites share, flushed on both the Ok and the Err arm so one
+  request counts exactly one policy action however many sites stripped
 - `src/bedrock/converse/system.rs` -- canonical `system` -> Converse
-  `[{text}|{cachePoint}]` block array
+  `[{text}|{cachePoint}]` block array; two of the lane's fingerprint-strip
+  sites (the top-level system field and the Role::System message lift) record
+  into the request's shared tally rather than counting separately
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
   messages: `build_messages` per-role dispatch, the three document paths
   (`translate_document`, `document_to_tool_result`, the raw
@@ -1115,11 +1123,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
   (thinking, anthropic_beta, cache_control, output_config);
   `ProviderExtrasPolicyActions` and `OperatorExtrasPolicyActions` count the
-  managed-key override refusals and the client-fingerprint strip once per
-  request each, on the POLICY-ACTION counter rather than the drop counter (the
-  bag could carry every one of those values and the upstream would accept them;
-  routectl withholds them). Separate types per path so a flag cannot be set
-  from both and counted twice for one request
+  managed-key override refusals once per request each, on the POLICY-ACTION
+  counter rather than the drop counter (the bag could carry every one of those
+  values and the upstream would accept them; routectl withholds them). Separate
+  types per path so a flag cannot be set from both and counted twice for one
+  request. The bag's client-fingerprint strip is the lane's third strip site
+  and records into the request-wide tally the orchestrator owns
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
