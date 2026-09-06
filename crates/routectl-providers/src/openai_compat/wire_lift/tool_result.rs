@@ -50,13 +50,13 @@ impl ToolResultDropTally {
     fn flush(&self) {
         if self.document {
             crate::translation_drop_metrics::record_translation_drop(
-                "openai-compat",
+                super::super::LANE,
                 "tool_result_document_unrepresentable",
             );
         }
         if self.image_source {
             crate::translation_drop_metrics::record_translation_drop(
-                "openai-compat",
+                super::super::LANE,
                 "tool_result_image_source_unrepresentable",
             );
         }

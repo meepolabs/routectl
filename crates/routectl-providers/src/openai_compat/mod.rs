@@ -53,6 +53,13 @@ use crate::mantle::MantleAuth;
 /// and a typo-on-rename can't silently break operator log filters.
 const PROVIDER_KIND: &str = "openai-compat";
 
+/// The lane spelling every `record_translation_drop` /
+/// `record_translation_policy_action` / `record_translation_lane_seen`
+/// call on this egress uses. Bound to `PROVIDER_KIND` rather than
+/// re-spelled so the telemetry lane and the provider kind can never
+/// drift apart.
+pub(crate) const LANE: &str = PROVIDER_KIND;
+
 /// Configuration for an openai-compat egress provider.
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatConfig {

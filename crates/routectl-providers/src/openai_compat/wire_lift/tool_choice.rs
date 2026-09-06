@@ -84,13 +84,13 @@ pub fn lift(
     // drop arms returned Err), so nothing lost is nothing counted.
     if dropped_shape {
         crate::translation_drop_metrics::record_translation_drop(
-            "openai-compat",
+            super::super::LANE,
             "tool_choice_shape_unrepresentable",
         );
     }
     if dropped_forcing {
         crate::translation_drop_metrics::record_translation_drop(
-            "openai-compat",
+            super::super::LANE,
             "forcing_tool_choice_without_tools",
         );
     }

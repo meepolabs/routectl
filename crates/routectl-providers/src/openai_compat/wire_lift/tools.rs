@@ -86,7 +86,7 @@ pub fn lift(
     // not three. Strict mode never arrives -- the arm above returned Err.
     if dropped_non_custom {
         crate::translation_drop_metrics::record_translation_drop(
-            "openai-compat",
+            super::super::LANE,
             "non_custom_tool_unrepresentable",
         );
     }

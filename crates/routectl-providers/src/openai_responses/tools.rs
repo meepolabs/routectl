@@ -98,10 +98,10 @@ impl ToolChoiceDropTally {
 
     fn flush(self) {
         if self.shape_unrepresentable {
-            record_translation_drop("openai-responses", "tool_choice_shape_unrepresentable");
+            record_translation_drop(super::LANE, "tool_choice_shape_unrepresentable");
         }
         if self.name_missing {
-            record_translation_drop("openai-responses", "tool_choice_name_missing");
+            record_translation_drop(super::LANE, "tool_choice_name_missing");
         }
     }
 }

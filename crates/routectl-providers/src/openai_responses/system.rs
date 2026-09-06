@@ -50,7 +50,7 @@ pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
         tracing::warn!(
             "openai-responses egress: Claude Code billing/attribution system block dropped",
         );
-        record_translation_policy_action("openai-responses", "client_fingerprint_stripped");
+        record_translation_policy_action(super::LANE, "client_fingerprint_stripped");
     }
     instructions
 }

@@ -331,13 +331,13 @@ impl ResponseFormatDropTally {
 
     fn flush(self) {
         if self.shape_unrepresentable {
-            record_translation_drop("openai-responses", "response_format_shape_unrepresentable");
+            record_translation_drop(super::LANE, "response_format_shape_unrepresentable");
         }
         if self.type_unrepresentable {
-            record_translation_drop("openai-responses", "response_format_type_unrepresentable");
+            record_translation_drop(super::LANE, "response_format_type_unrepresentable");
         }
         if self.schema_missing {
-            record_translation_drop("openai-responses", "response_format_schema_missing");
+            record_translation_drop(super::LANE, "response_format_schema_missing");
         }
     }
 }

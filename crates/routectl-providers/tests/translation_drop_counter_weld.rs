@@ -285,7 +285,7 @@ fn the_harvest_resolves_a_class_passed_through_a_tally_table() {
 #[test]
 fn the_harvest_resolves_a_lane_passed_as_a_constant() {
     // Only two of the four denominator sites pass a lane literal; the others
-    // pass `LANE` and `super::PROVIDER_KIND`. A literal-only harvest reads
+    // pass `LANE` or `super::LANE`. A literal-only harvest reads
     // those two lanes as having no denominator site at all -- and a lane with
     // no denominator has a drop rate that reads zero forever.
     let calls = expect(harvest_crate());
