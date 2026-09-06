@@ -77,7 +77,7 @@ pub(super) fn build_tool_config(
                 // offering three builtins is one drop event against this
                 // lane's request-volume denominator.
                 crate::translation_drop_metrics::record_translation_drop(
-                    "bedrock-converse",
+                    super::LANE,
                     "builtin_tool_unrepresentable",
                 );
             }
@@ -286,13 +286,13 @@ impl ToolChoiceDropTally {
     fn flush(self) {
         if self.shape_unrepresentable {
             crate::translation_drop_metrics::record_translation_drop(
-                "bedrock-converse",
+                super::LANE,
                 "tool_choice_shape_unrepresentable",
             );
         }
         if self.name_missing {
             crate::translation_drop_metrics::record_translation_drop(
-                "bedrock-converse",
+                super::LANE,
                 "tool_choice_name_missing",
             );
         }

@@ -183,13 +183,13 @@ impl ProviderExtrasPolicyActions {
     fn flush(&self) {
         if self.provider_extra_managed_key_conflict {
             crate::translation_drop_metrics::record_translation_policy_action(
-                "bedrock-converse",
+                super::LANE,
                 "provider_extra_managed_key_conflict",
             );
         }
         if self.client_fingerprint_stripped {
             crate::translation_drop_metrics::record_translation_policy_action(
-                "bedrock-converse",
+                super::LANE,
                 "client_fingerprint_stripped",
             );
         }
@@ -209,7 +209,7 @@ impl OperatorExtrasPolicyActions {
     fn flush(&self) {
         if self.operator_extra_managed_key_conflict {
             crate::translation_drop_metrics::record_translation_policy_action(
-                "bedrock-converse",
+                super::LANE,
                 "operator_extra_managed_key_conflict",
             );
         }

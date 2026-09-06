@@ -721,14 +721,22 @@ fn str_constants(
 }
 
 /// The file holding `super::` of `file`: its parent module's `mod.rs`.
+///
+/// Strips the file's OWN module segment before walking up, so `a/b/mod.rs`
+/// (module `a::b`) resolves to `a/mod.rs` rather than back to itself. Naming
+/// the directory alone makes a `mod.rs` its own parent, which turns a
+/// legitimate `super::` chain into an unresolvable self-reference.
 fn parent_module(file: &str) -> Option<String> {
-    let dir = file.rsplit_once('/')?.0;
-    Some(format!("{dir}/mod.rs"))
+    let module_path = file
+        .strip_suffix("/mod.rs")
+        .or_else(|| file.strip_suffix(".rs"))?;
+    let parent_dir = module_path.rsplit_once('/')?.0;
+    Some(format!("{parent_dir}/mod.rs"))
 }
 
 /// Resolve a lane expression to its literal by reading the constant's own
 /// definition, transitively. Only two of the four denominator sites pass a
-/// literal -- the others pass `LANE` and `super::PROVIDER_KIND` -- so a
+/// literal -- the others pass `LANE` or `super::LANE` -- so a
 /// literal-only harvest reads two lanes as having no denominator site at all.
 fn resolve_str(
     expr: &str,
@@ -742,15 +750,17 @@ fn resolve_str(
         if let Some(literal) = expr.strip_prefix('"').and_then(|r| r.split('"').next()) {
             return Ok(literal.to_string());
         }
-        let (lookup_file, name) = match expr.strip_prefix("super::") {
-            Some(name) => (
-                parent_module(&file).ok_or_else(|| {
-                    format!("{where_} names {expr} but {file} has no parent module")
-                })?,
-                name.to_string(),
-            ),
-            None => (file.clone(), expr.clone()),
-        };
+        // One module hop per `super::`, not just the first: a constant reached
+        // from a nested surface reads `super::super::NAME`, and stopping after
+        // one hop leaves `super::NAME` looking like an unread path shape.
+        let mut lookup_file = file.clone();
+        let mut name = expr.clone();
+        while let Some(rest) = name.strip_prefix("super::") {
+            lookup_file = parent_module(&lookup_file).ok_or_else(|| {
+                format!("{where_} names {expr} but {lookup_file} has no parent module")
+            })?;
+            name = rest.to_string();
+        }
         if name.contains("::") {
             return Err(format!(
                 "{where_} names {expr}, a path shape this resolver does not read; resolve it by \

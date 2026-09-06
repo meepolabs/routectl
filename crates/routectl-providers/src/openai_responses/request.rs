@@ -34,7 +34,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // still counts toward the lane's volume -- a drop rate whose denominator
     // omitted the failures would read low for exactly the requests that went
     // worst.
-    record_translation_lane_seen("openai-responses");
+    record_translation_lane_seen(super::LANE);
     warn_dropped_cache_control(req);
     // The canonical sampling knobs have no Responses-API home and are gated
     // out of the provider_extras merge as canonical keys; WARN once so the
@@ -219,7 +219,7 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
 /// TRANSLATION-DROP: lane=openai-responses class=cache_control_unsupported test=cache_control_marker_drops_from_the_wire_and_counts
 fn warn_dropped_cache_control(req: &ChatRequest) {
     if !req.cache_breakpoints().is_empty() {
-        record_translation_drop("openai-responses", "cache_control_unsupported");
+        record_translation_drop(super::LANE, "cache_control_unsupported");
     }
     let surfaces = dropped_cache_surfaces(req);
     if surfaces.is_empty() {

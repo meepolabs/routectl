@@ -47,13 +47,13 @@ impl ContentDropTally {
     fn flush(&self) {
         if self.document {
             crate::translation_drop_metrics::record_translation_drop(
-                "openai-compat",
+                super::super::LANE,
                 "document_block_unrepresentable",
             );
         }
         if self.image_source {
             crate::translation_drop_metrics::record_translation_drop(
-                "openai-compat",
+                super::super::LANE,
                 "image_source_unrepresentable",
             );
         }

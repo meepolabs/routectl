@@ -54,7 +54,7 @@ pub fn normalize(
     // every request from one that dropped once all week. Exactly one call
     // site per lane; a second anywhere would understate the rate for the
     // whole lane.
-    crate::translation_drop_metrics::record_translation_lane_seen(super::PROVIDER_KIND);
+    crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
 
     // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
     // can't carry. Default mode warns + continues; strict mode 400s.

@@ -86,6 +86,13 @@ pub(crate) const OPENAI_RESPONSES_FORMAT: &str = routectl_core::OPENAI_RESPONSES
 /// the openai_compat module for the rationale.
 const PROVIDER_KIND: &str = "openai-responses";
 
+/// The lane spelling every `record_translation_drop` /
+/// `record_translation_policy_action` / `record_translation_lane_seen`
+/// call on this egress uses. Bound to `PROVIDER_KIND` rather than
+/// re-spelled so the telemetry lane and the provider kind can never
+/// drift apart.
+pub(crate) const LANE: &str = PROVIDER_KIND;
+
 /// How the provider authenticates to the Responses API.
 ///
 /// Kebab-case on the TOML wire so config writes look natural:

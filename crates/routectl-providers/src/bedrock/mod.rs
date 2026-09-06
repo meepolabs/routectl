@@ -121,7 +121,7 @@ impl BedrockApiShape {
     pub const fn provider_kind_str(self) -> &'static str {
         match self {
             Self::Invoke => "bedrock-invoke",
-            Self::Converse => "bedrock-converse",
+            Self::Converse => converse::PROVIDER_KIND,
         }
     }
 }

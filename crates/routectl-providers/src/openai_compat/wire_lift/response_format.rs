@@ -114,7 +114,7 @@ fn translate_format(id: &str, format: &Value) -> Option<Value> {
                      member; OpenAI response_format.json_schema requires one"
                 );
                 crate::translation_drop_metrics::record_translation_drop(
-                    "openai-compat",
+                    super::super::LANE,
                     "response_format_schema_missing",
                 );
                 return None;
@@ -156,7 +156,7 @@ fn translate_format(id: &str, format: &Value) -> Option<Value> {
                  OpenAI response_format equivalent"
             );
             crate::translation_drop_metrics::record_translation_drop(
-                "openai-compat",
+                super::super::LANE,
                 "response_format_type_unrepresentable",
             );
             None

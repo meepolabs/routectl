@@ -229,22 +229,22 @@ impl ContentDropTally {
     /// malformed part still owes the operator its count.
     fn flush(&self) {
         if self.image_source_unrepresentable {
-            record_translation_drop("bedrock-converse", "image_source_unrepresentable");
+            record_translation_drop(super::LANE, "image_source_unrepresentable");
         }
         if self.image_media_type_unsupported {
-            record_translation_drop("bedrock-converse", "image_media_type_unsupported");
+            record_translation_drop(super::LANE, "image_media_type_unsupported");
         }
         if self.image_url_unrepresentable {
-            record_translation_drop("bedrock-converse", "image_url_unrepresentable");
+            record_translation_drop(super::LANE, "image_url_unrepresentable");
         }
         if self.document_source_unrepresentable {
-            record_translation_drop("bedrock-converse", "document_source_unrepresentable");
+            record_translation_drop(super::LANE, "document_source_unrepresentable");
         }
         if self.document_media_type_unsupported {
-            record_translation_drop("bedrock-converse", "document_media_type_unsupported");
+            record_translation_drop(super::LANE, "document_media_type_unsupported");
         }
         if self.file_part_unrepresentable {
-            record_translation_drop("bedrock-converse", "file_part_unrepresentable");
+            record_translation_drop(super::LANE, "file_part_unrepresentable");
         }
     }
 }
@@ -608,7 +608,7 @@ impl<'a> ReasoningSkipTally<'a> {
     /// the one call site in the Converse egress path that reliably sees
     /// every request exactly once, drop or no drop.
     fn flush(&self) {
-        record_translation_lane_seen("bedrock-converse");
+        record_translation_lane_seen(super::LANE);
         if self.skipped_count > 0 {
             tracing::warn!(
                 provider = self.provider,
@@ -619,7 +619,7 @@ impl<'a> ReasoningSkipTally<'a> {
                 "skipping Thinking blocks on Converse replay: signature missing or empty; \
                  Bedrock Converse requires a signature on replayed reasoningContent blocks"
             );
-            record_translation_drop("bedrock-converse", "reasoning_signature_missing");
+            record_translation_drop(super::LANE, "reasoning_signature_missing");
         }
         if self.summary_skipped_count > 0 {
             tracing::warn!(
@@ -628,7 +628,7 @@ impl<'a> ReasoningSkipTally<'a> {
                 "skipping reasoning details on Converse egress: kind has no Converse \
                  reasoningContent wire shape (reasoning summary or an unrecognized kind)"
             );
-            record_translation_drop("bedrock-converse", "reasoning_summary_unsupported");
+            record_translation_drop(super::LANE, "reasoning_summary_unsupported");
         }
         if self.foreign_format_skipped_count > 0 {
             tracing::warn!(
@@ -637,7 +637,7 @@ impl<'a> ReasoningSkipTally<'a> {
                 "skipping reasoning details on Converse egress: detail format is not the \
                  one this egress replays, so no reasoningContent member can carry it"
             );
-            record_translation_drop("bedrock-converse", "reasoning_foreign_format_unsupported");
+            record_translation_drop(super::LANE, "reasoning_foreign_format_unsupported");
         }
     }
 }
@@ -1475,7 +1475,7 @@ impl<'a> ToolResultCacheControlDropTally<'a> {
                  slot to carry it"
             );
             crate::translation_drop_metrics::record_translation_drop(
-                "bedrock-converse",
+                super::LANE,
                 "tool_result_cache_control",
             );
         }

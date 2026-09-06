@@ -142,16 +142,16 @@ impl ResponsesDropTally {
     /// pinning tests assert.
     fn flush(&self) {
         if self.image_source_kind {
-            record_translation_drop("openai-responses", "image_source_kind_unrepresentable");
+            record_translation_drop(super::LANE, "image_source_kind_unrepresentable");
         }
         if self.reasoning_detail_kind {
-            record_translation_drop("openai-responses", "reasoning_detail_kind_unsupported");
+            record_translation_drop(super::LANE, "reasoning_detail_kind_unsupported");
         }
         if self.reasoning_format_foreign {
-            record_translation_drop("openai-responses", "reasoning_format_foreign");
+            record_translation_drop(super::LANE, "reasoning_format_foreign");
         }
         if self.reasoning_scheme_incompatible {
-            record_translation_drop("openai-responses", "reasoning_scheme_incompatible");
+            record_translation_drop(super::LANE, "reasoning_scheme_incompatible");
         }
     }
 }
