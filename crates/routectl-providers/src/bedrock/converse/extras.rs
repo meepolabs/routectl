@@ -22,6 +22,7 @@ use crate::effort::clamp_effort_to_supported;
 
 use super::super::BedrockConfig;
 use super::super::betas::filter_bedrock_betas;
+use super::request::ClientFingerprintStripTally;
 use super::types::ConverseToolChoice;
 
 /// Build the `additionalModelRequestFields` bag. Returns None when no
@@ -46,6 +47,7 @@ pub(super) fn build_additional_fields(
     cfg: &BedrockConfig,
     req: &ChatRequest,
     tool_choice: Option<&ConverseToolChoice>,
+    fingerprint: &mut ClientFingerprintStripTally,
 ) -> Option<Value> {
     let mut bag: Map<String, Value> = Map::new();
 
@@ -64,12 +66,16 @@ pub(super) fn build_additional_fields(
     let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
-    let provider_actions = insert_provider_extras(cfg, req, &mut bag);
+    let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint);
     let operator_actions = insert_operator_extras(cfg, &mut bag);
     // Once per REQUEST per class, never once per withheld key: a bag whose
     // extras collide on three managed keys is one policy-action event against
     // this lane's request-volume denominator. Flushed here, outside any
     // fallible body, so a request that later fails still counts.
+    //
+    // The fingerprint strip is deliberately NOT among these: it fires from
+    // three surfaces of one request across two modules, so its tally is owned
+    // by the whole-request translation and flushed there.
     provider_actions.flush();
     operator_actions.flush();
 
@@ -159,24 +165,26 @@ pub(super) fn build_additional_fields(
 
 /// Per-request record of `additionalModelRequestFields` entries WITHHELD
 /// during bag assembly by the PROVIDER-EXTRAS path (the Anthropic ingress's
-/// forward-compat sweep). Lane: bedrock-converse. Both classes are policy
-/// actions rather than drops -- the Converse bag could carry either value and
-/// the upstream would accept it; routectl declines to send the client
-/// fingerprint and refuses to let a swept key override one it manages. Each
-/// field is a per-request FLAG rather than a key count: the per-key log
-/// already names the offending key, and the `(lane, class)` counters are
-/// per-REQUEST by contract.
+/// forward-compat sweep). Lane: bedrock-converse. The class here is a policy
+/// action rather than a drop -- the Converse bag could carry the value and the
+/// upstream would accept it; routectl refuses to let a swept key override one
+/// it manages. The field is a per-request FLAG rather than a key count: the
+/// per-key log already names the offending key, and the `(lane, class)`
+/// counters are per-REQUEST by contract.
 ///
-/// Split from the operator path's tally deliberately. One shared three-field
-/// type would let a future edit set the same flag from both paths, and the
-/// caller flushes both, so that class would count twice for one request --
-/// breaking the per-request contract with no test to catch it. Separate types
-/// make the disjointness a compile error instead of a convention.
+/// Split from the operator path's tally deliberately. One shared type would
+/// let a future edit set the same flag from both paths, and the caller flushes
+/// both, so that class would count twice for one request -- breaking the
+/// per-request contract with no test to catch it. Separate types make the
+/// disjointness a compile error instead of a convention.
+///
+/// The client-fingerprint strip this path also performs is NOT a field here:
+/// it fires from two further surfaces outside this module, so the whole-request
+/// translation owns that tally and this path records into the one it is handed.
 #[must_use = "the tally must be flushed once per request or the policy-action count is lost"]
 #[derive(Default)]
 struct ProviderExtrasPolicyActions {
     provider_extra_managed_key_conflict: bool,
-    client_fingerprint_stripped: bool,
 }
 
 impl ProviderExtrasPolicyActions {
@@ -185,12 +193,6 @@ impl ProviderExtrasPolicyActions {
             crate::translation_drop_metrics::record_translation_policy_action(
                 super::LANE,
                 "provider_extra_managed_key_conflict",
-            );
-        }
-        if self.client_fingerprint_stripped {
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "client_fingerprint_stripped",
             );
         }
     }
@@ -238,6 +240,7 @@ fn insert_provider_extras(
     cfg: &BedrockConfig,
     req: &ChatRequest,
     bag: &mut Map<String, Value>,
+    fingerprint: &mut ClientFingerprintStripTally,
 ) -> ProviderExtrasPolicyActions {
     let mut actions = ProviderExtrasPolicyActions::default();
     let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
@@ -269,9 +272,13 @@ fn insert_provider_extras(
         // `crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY`.
         // The drop is deliberate and NOT representability-driven: the wire
         // would carry the block fine, and routectl declines to send it.
+        //
+        // One of THREE surfaces of this lane that withhold the same
+        // fingerprint; they share the request's tally so a client sending it
+        // on more than one still counts as one policy action.
         // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_policy_action_counter_once
         if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
-            actions.client_fingerprint_stripped = true;
+            fingerprint.record();
             tracing::debug!(
                 provider = %cfg.id,
                 "stripped client metadata fingerprint from Converse \
@@ -533,6 +540,7 @@ fn strip_thinking_when_tool_choice_forces_use(
 
 #[cfg(test)]
 mod tests {
+    use super::super::request::ClientFingerprintStripTally;
     use super::super::types::{ConverseSpecificTool, ConverseToolChoice, EmptyObject};
     use super::{
         build_additional_fields, is_converse_managed_key,
@@ -598,7 +606,12 @@ mod tests {
         let mut bag: Map<String, serde_json::Value> = Map::new();
         // Drives the helper in isolation and never flushes, so the tally is
         // deliberately discarded and no serial guard is owed.
-        let _ = super::insert_provider_extras(&cfg, &req, &mut bag);
+        let _ = super::insert_provider_extras(
+            &cfg,
+            &req,
+            &mut bag,
+            &mut ClientFingerprintStripTally::default(),
+        );
 
         // Assert: no metadata key, and no fingerprint substring.
         assert!(
@@ -628,7 +641,13 @@ mod tests {
         req.cache_control = Some(routectl_core::cache_control::CacheControl::ephemeral_1h());
 
         // Act
-        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("bag should be present");
 
         // Assert: WARN fired, and the marker is still forwarded inert
         // (wire shape unchanged from the prior drop-silently behavior
@@ -656,7 +675,12 @@ mod tests {
         let req = req_with_thinking();
 
         // Act
-        let _ = build_additional_fields(&cfg, &req, None);
+        let _ = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        );
 
         // Assert
         assert!(
@@ -767,7 +791,12 @@ mod tests {
         };
 
         // Act
-        let bag = build_additional_fields(&cfg, &req, Some(&tc));
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            Some(&tc),
+            &mut ClientFingerprintStripTally::default(),
+        );
 
         // Assert: thinking dropped. Because thinking was the only field
         // in the bag, the now-empty bag collapses to None -- either way
@@ -790,7 +819,12 @@ mod tests {
         };
 
         // Act
-        let bag = build_additional_fields(&cfg, &req, Some(&tc));
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            Some(&tc),
+            &mut ClientFingerprintStripTally::default(),
+        );
 
         // Assert: thinking dropped (bag collapses to None when empty).
         assert!(
@@ -809,7 +843,13 @@ mod tests {
             auto: EmptyObject {},
         };
 
-        let bag = build_additional_fields(&cfg, &req, Some(&tc)).expect("bag should be present");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            Some(&tc),
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("bag should be present");
         let bag = bag.as_object().expect("bag is an object");
 
         assert_eq!(
@@ -825,7 +865,13 @@ mod tests {
         let cfg = fake_cfg();
         let req = req_with_thinking();
 
-        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("bag should be present");
         let bag = bag.as_object().expect("bag is an object");
 
         assert_eq!(
@@ -851,7 +897,12 @@ mod tests {
         };
 
         // Act
-        let bag = build_additional_fields(&cfg, &req, Some(&tc));
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            Some(&tc),
+            &mut ClientFingerprintStripTally::default(),
+        );
 
         // Assert: thinking gone AND the orphaned output_config.effort gone.
         assert!(
@@ -950,7 +1001,13 @@ mod tests {
         }));
 
         // Act
-        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("bag should be present");
         let bag = bag.as_object().expect("bag is an object");
 
         // Assert: the directive reached the bag, and its gating beta rode
@@ -981,7 +1038,13 @@ mod tests {
         let cfg = fake_cfg();
         let req = req_with_thinking();
 
-        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("bag should be present");
         let bag = bag.as_object().expect("bag is an object");
 
         assert!(
@@ -1019,7 +1082,13 @@ mod tests {
             }
         }));
 
-        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("bag should be present");
 
         let fmt = bag["output_config"]["format"]
             .as_object()
@@ -1071,7 +1140,13 @@ mod tests {
             let req = req_with_thinking_display(exclude);
 
             // Act
-            let bag = build_additional_fields(&cfg, &req, None).expect("thinking fills the bag");
+            let bag = build_additional_fields(
+                &cfg,
+                &req,
+                None,
+                &mut ClientFingerprintStripTally::default(),
+            )
+            .expect("thinking fills the bag");
 
             // Assert
             let thinking = bag["thinking"]
@@ -1129,7 +1204,13 @@ mod tests {
         let req = req_with_updates_display_carrier();
 
         // Act
-        let bag = build_additional_fields(&cfg, &req, None).expect("thinking fills the bag");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("thinking fills the bag");
 
         // Assert
         let thinking = bag["thinking"]
@@ -1172,7 +1253,13 @@ mod tests {
         let cfg = fake_cfg();
         let req = req_with_thinking();
 
-        let bag = build_additional_fields(&cfg, &req, None).expect("thinking fills the bag");
+        let bag = build_additional_fields(
+            &cfg,
+            &req,
+            None,
+            &mut ClientFingerprintStripTally::default(),
+        )
+        .expect("thinking fills the bag");
 
         assert!(bag["thinking"].get("display").is_none());
         assert!(
@@ -1214,8 +1301,16 @@ mod tests {
     /// The EMITTED WIRE VALUE for the bag: what actually rides in
     /// `additionalModelRequestFields`. A key can only be proven dropped
     /// against this, never against an intermediate typed view.
+    /// Drive the bag builder the way the request translation does: with a
+    /// fingerprint tally that is flushed once after the build. The flush is
+    /// the translation's in production, so a test reading the strip counter
+    /// back has to close the same loop or it reads a tally nobody emptied.
     fn emitted_bag(cfg: &BedrockConfig, req: &ChatRequest) -> serde_json::Value {
-        build_additional_fields(cfg, req, None).unwrap_or(serde_json::Value::Null)
+        let mut fingerprint = ClientFingerprintStripTally::default();
+        let bag = build_additional_fields(cfg, req, None, &mut fingerprint)
+            .unwrap_or(serde_json::Value::Null);
+        fingerprint.flush_for_test();
+        bag
     }
 
     /// NEGATIVE CONTROL. A forward-compat swept key colliding with a
