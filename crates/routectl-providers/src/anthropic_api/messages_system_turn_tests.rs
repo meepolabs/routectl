@@ -98,7 +98,7 @@ fn st_roles(out: &[AnthropicMessage]) -> Vec<&'static str> {
 }
 
 fn st_forward(messages: &[Message]) -> Vec<AnthropicMessage> {
-    translate_messages(
+    translate_messages_untallied(
         "anthropic",
         messages,
         SystemTurnPolicy::Forward,
@@ -141,7 +141,7 @@ fn lift_policy_emits_no_system_turn() {
     ];
 
     // Act
-    let out = translate_messages(
+    let out = translate_messages_untallied(
         "anthropic",
         &messages,
         SystemTurnPolicy::Lift,
@@ -330,7 +330,7 @@ fn whitespace_only_forwarded_system_turn_errors_with_its_index() {
     ];
 
     // Act
-    let err = translate_messages(
+    let err = translate_messages_untallied(
         "anthropic",
         &messages,
         SystemTurnPolicy::Forward,
@@ -512,7 +512,7 @@ fn whole_turn_drop_still_fires_after_a_system_turn_on_the_lift_lane() {
         SystemTurnPolicy::Lift,
     )
     .expect("strip");
-    let out = translate_messages(
+    let out = translate_messages_untallied(
         "anthropic",
         &normalized,
         SystemTurnPolicy::Lift,
@@ -589,7 +589,7 @@ fn null_content_system_turn_on_the_forward_path_errors_with_its_index() {
     ];
 
     // Act
-    let err = translate_messages(
+    let err = translate_messages_untallied(
         "anthropic",
         &messages,
         SystemTurnPolicy::Forward,
@@ -614,7 +614,7 @@ fn null_content_system_turn_on_the_lift_path_is_not_an_error() {
     ];
 
     // Act
-    let out = translate_messages(
+    let out = translate_messages_untallied(
         "anthropic",
         &messages,
         SystemTurnPolicy::Lift,

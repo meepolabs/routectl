@@ -1,10 +1,11 @@
 //! xAI (Grok) OAuth flow.
 //!
-//! Constants verified against the CLIProxyAPI reference implementation
-//! (`internal/auth/xai`) and xAI's live OIDC discovery document. This is
-//! a public OAuth 2.0 PKCE client (no client_secret) -- the `client_id`
-//! below is a public client identifier, the xAI analogue of the hardcoded
-//! `client_id`s already carried by the Anthropic and codex flows.
+//! The endpoints and scopes below are verified against xAI's live OIDC
+//! discovery document (`https://auth.x.ai/.well-known/openid-configuration`).
+//! This is a public OAuth 2.0 PKCE client (no client_secret) -- the
+//! `client_id` below is a public client identifier, the xAI analogue of
+//! the hardcoded `client_id`s already carried by the Anthropic and codex
+//! flows.
 //!
 //! Surface map:
 //! - Authorize URL: <https://auth.x.ai/oauth2/authorize>

@@ -46,6 +46,30 @@ use crate::marker::{is_test_file, src_root};
 /// `the_metrics_module_calls_the_counters_only_from_its_own_tests` in the weld.
 pub const METRICS_MODULE: &str = "translation_drop_metrics.rs";
 
+/// Every lane that carries a request-volume denominator, which is a WIDER set
+/// than `marker::LANES`.
+///
+/// The two registers answer different questions and were one list until they
+/// diverged. `marker::LANES` is the MARKER GRAMMAR's closed vocabulary: the
+/// lanes a `lane=` verdict may name, bounded by which surfaces the census
+/// sweeps. This list is the TELEMETRY population: every lane whose
+/// translate/build path counts the requests it processed. A lane can be
+/// instrumented without its source being swept -- `anthropic-api` is, because
+/// its translation path spans a nested module directory the flat marker sweep
+/// refuses -- and conflating the two makes standing up a lane's denominator
+/// look like a grammar violation.
+///
+/// Pinned rather than derived for the reason every register here is: a
+/// harvest-derived list is satisfied by whatever it found, so a denominator
+/// that stopped being emitted would shrink both sides together and pass.
+pub const DENOMINATOR_LANES: &[&str] = &[
+    "anthropic",
+    "bedrock-converse",
+    "gemini",
+    "openai-compat",
+    "openai-responses",
+];
+
 /// The three counters, spelled as they appear at a call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Counter {

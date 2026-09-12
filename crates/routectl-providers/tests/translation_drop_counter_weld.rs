@@ -60,11 +60,11 @@ mod counter;
 mod marker;
 
 use counter::{
-    Counter, CounterCall, METRICS_MODULE, code_only, harvest, harvest_crate, lane_seen_sites,
-    src_path, vocabulary_overlaps, without_comments,
+    Counter, CounterCall, DENOMINATOR_LANES, METRICS_MODULE, code_only, harvest, harvest_crate,
+    lane_seen_sites, src_path, vocabulary_overlaps, without_comments,
 };
 use marker::{
-    LANES, MARKER_TOKEN, Marker, Verdict, census, expect, is_test_file, parse_file,
+    LANES, MARKER_TOKEN, Marker, Verdict, census, expect, holds_task_id, is_test_file, parse_file,
     production_files,
 };
 
@@ -153,13 +153,73 @@ fn the_marked_drop_vocabulary_equals_the_counted_drop_vocabulary() {
     );
 }
 
+/// Policy-action classes counted on a lane whose source the marker sweep does
+/// NOT reach, with the file that counts them and the reason no marker declares
+/// them. Content-pinned in both directions by the weld below.
+///
+/// Why an escape register rather than a marker: the census sweeps a fixed list
+/// of surfaces, and its file walk REFUSES a nested directory rather than
+/// skipping it -- so a lane whose translation spans a nested module directory
+/// cannot be swept without widening the traversal itself. A marker written on
+/// an unswept file is never parsed: it survives being replaced by an
+/// unparseable verdict with every weld green, which reads as enforcement while
+/// providing none.
+///
+/// So the class is declared HERE instead, where the assertion is real. This is
+/// strictly weaker than a marker -- it pins the class, not the arm -- and it
+/// is the honest shape of that weakness rather than a hole. The per-arm pin
+/// for these is the covering test each site names in prose.
+const UNSWEPT_POLICY_CLASSES: &[(&str, &str, &str, &str)] = &[
+    (
+        "client_fingerprint_stripped",
+        "anthropic_api/request.rs",
+        "the cloak lane's fingerprint withhold; its transforms live in a nested module \
+         directory the flat marker sweep refuses to descend into, so no marker on this \
+         file would ever be parsed",
+        "the_canonical_system_billing_strip_counts_one_policy_action",
+    ),
+    (
+        "client_fingerprint_stripped",
+        "openai_compat/request.rs",
+        "the same class on the openai-compat assembly path; that lane's swept surface is \
+         its wire_lift subdirectory, and the request path sits outside it",
+        "an_all_billing_system_still_counts_the_openai_compat_policy_action",
+    ),
+    (
+        "cloak_classified_non_cc",
+        "anthropic_api/client.rs",
+        "the anthropic-api cloak's classification split; its transforms live in a nested \
+         module directory the flat marker sweep refuses to descend into",
+        "a_non_cc_request_counts_the_non_cc_arm",
+    ),
+    (
+        "cloak_classified_genuine_cc",
+        "anthropic_api/client.rs",
+        "the other arm of the same split, unswept for the same reason: its counting site \
+         sits on a lane whose transforms live in a nested module directory the flat marker \
+         sweep refuses to descend into",
+        "a_genuine_cc_request_counts_the_genuine_cc_arm",
+    ),
+];
+
 #[test]
 fn the_marked_policy_vocabulary_equals_the_counted_policy_vocabulary() {
     // On CLASS ALONE, per the class-alone weld in the module doc: the grammar
     // carries no lane on this verdict, and no mapping table is introduced here
     // to recover one.
+    //
+    // The unswept register joins the MARKED side rather than being subtracted
+    // from the counted one. Subtracting would make the equality satisfiable by
+    // adding an entry, which is the shape of exemption that empties a weld;
+    // adding keeps both directions live -- a registered class that stops being
+    // counted is still red.
     let calls = expect(harvest_crate());
-    let marked = marked_policy_classes(&expect(census()));
+    let mut marked = marked_policy_classes(&expect(census()));
+    marked.extend(
+        UNSWEPT_POLICY_CLASSES
+            .iter()
+            .map(|(class, _, _, _)| (*class).to_string()),
+    );
     let counted = counted_policy_classes(&calls);
 
     assert_eq!(
@@ -170,6 +230,118 @@ fn the_marked_policy_vocabulary_equals_the_counted_policy_vocabulary() {
          counted and never declared.",
         policy_lanes(&calls)
     );
+}
+
+#[test]
+fn every_unswept_policy_class_is_counted_where_its_register_entry_says() {
+    // The register names a FILE, and this is what keeps that half honest: an
+    // entry whose class moved to another file, or stopped being counted at
+    // all, is red here rather than silently widening the escape.
+    let calls = expect(harvest_crate());
+    for (class, file, _, _) in UNSWEPT_POLICY_CLASSES {
+        let files: BTreeSet<&str> = calls
+            .iter()
+            .filter(|c| c.counter == Counter::PolicyAction && c.class.as_deref() == Some(class))
+            .map(|c| c.file.as_str())
+            .collect();
+        assert!(
+            files.contains(file),
+            "the register says {class} is counted in {file}; the harvest found it in {files:?}"
+        );
+    }
+}
+
+#[test]
+fn no_unswept_policy_class_sits_on_a_file_the_marker_sweep_reaches() {
+    // The register exists ONLY because the sweep cannot see the file. An entry
+    // whose file IS swept must carry a real marker instead -- otherwise the
+    // escape becomes the cheaper option everywhere and the census hollows out
+    // one entry at a time.
+    let swept = expect(marker::production_files());
+    for (class, file, _, _) in UNSWEPT_POLICY_CLASSES {
+        assert!(
+            !swept.iter().any(|f| f == file),
+            "{file} IS swept by the census, so {class} must declare itself with a marker rather \
+             than through the unswept register"
+        );
+    }
+}
+
+#[test]
+fn every_policy_class_counted_on_an_unswept_file_is_in_the_register() {
+    // The obligation direction. Its sibling above runs register -> tree; this
+    // one runs TREE -> REGISTER, without which the register is an allowlist
+    // nothing is required to join.
+    //
+    // The hole this closes was live when the register shipped: a class counted
+    // from an unswept file rode through because the SAME class literal was
+    // already marked on a swept file, and the policy weld compares on class
+    // alone. Deleting the unswept counter calls left every weld green.
+    let swept = expect(marker::production_files());
+    let registered: BTreeSet<&str> = UNSWEPT_POLICY_CLASSES
+        .iter()
+        .map(|(class, _, _, _)| *class)
+        .collect();
+
+    let mut missing: Vec<String> = expect(harvest_crate())
+        .into_iter()
+        .filter(|call| call.counter == Counter::PolicyAction)
+        .filter(|call| !swept.contains(&call.file))
+        .filter_map(|call| {
+            let class = call.class?;
+            (!registered.contains(class.as_str()))
+                .then(|| format!("{class} counted at {}:{}", call.file, call.line))
+        })
+        .collect();
+    missing.sort();
+    missing.dedup();
+
+    assert!(
+        missing.is_empty(),
+        "these policy classes are counted on files the marker sweep does not reach, and no \
+         register entry declares them: {missing:?}. A marker on an unswept file is never \
+         parsed, so the register is the only place the declaration can be real."
+    );
+}
+
+#[test]
+fn every_unswept_register_entry_names_a_pinning_test_that_exists() {
+    // The register's per-arm pin. Without this the entry's covering test is
+    // named only in prose, and nothing in the tree parses prose -- deleting
+    // the test that pins an unswept class left every weld green.
+    //
+    // Reuses the same `holds_fn` resolver the marker `test=` tag uses, so both
+    // kinds of pin are enforced by one bounded matcher rather than two.
+    let sources = expect(all_rust_sources());
+    for (class, _, _, test) in UNSWEPT_POLICY_CLASSES {
+        let hits = sources
+            .iter()
+            .filter(|(_, source)| holds_fn(source, test))
+            .count();
+        assert!(
+            hits > 0,
+            "the register entry for {class} names test={test}, which pins nothing: no \
+             `fn {test}` exists in this crate. Restore the test or re-point the entry."
+        );
+    }
+}
+
+#[test]
+fn every_unswept_register_entry_carries_a_reason_a_reader_can_check() {
+    // The reason IS the value of an escape entry: the weld proves only that
+    // the class is counted, so the reason is what a reviewer re-takes when the
+    // surface changes. A blank or placeholder reason is an unexplained hole
+    // wearing the shape of a decision.
+    for (class, _, reason, _) in UNSWEPT_POLICY_CLASSES {
+        assert!(
+            reason.len() > 40,
+            "{class} carries a reason too short to be one: {reason:?}"
+        );
+        assert!(
+            !holds_task_id(reason),
+            "{class} carries a planning id; state a reason a reader of this repo can check"
+        );
+    }
 }
 
 #[test]
@@ -284,10 +456,15 @@ fn the_harvest_resolves_a_class_passed_through_a_tally_table() {
 
 #[test]
 fn the_harvest_resolves_a_lane_passed_as_a_constant() {
-    // Only two of the four denominator sites pass a lane literal; the others
-    // pass `LANE` or `super::LANE`. A literal-only harvest reads
-    // those two lanes as having no denominator site at all -- and a lane with
-    // no denominator has a drop rate that reads zero forever.
+    // Only one denominator site passes a lane literal; every other passes
+    // `LANE` or `super::LANE`. A literal-only harvest reads those lanes as
+    // having no denominator site at all -- and a lane with no denominator has
+    // a rate that reads zero forever.
+    //
+    // Compared against DENOMINATOR_LANES, not the marker grammar's LANES: a
+    // lane is instrumented independently of whether its source is swept for
+    // markers, and holding the two to one list reported standing up an
+    // unswept lane's denominator as a grammar violation.
     let calls = expect(harvest_crate());
     let denominators: BTreeSet<&str> = calls
         .iter()
@@ -296,8 +473,11 @@ fn the_harvest_resolves_a_lane_passed_as_a_constant() {
         .collect();
     assert_eq!(
         denominators,
-        LANES.iter().copied().collect::<BTreeSet<&str>>(),
-        "the resolved denominator lanes are not the four fixed spellings; a lane missing here \
+        DENOMINATOR_LANES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<&str>>(),
+        "the resolved denominator lanes are not the pinned spellings; a lane missing here \
          passes its lane as an expression the harvest did not resolve"
     );
 }
@@ -509,7 +689,10 @@ fn each_lane_has_at_most_one_lane_seen_call_site() {
     let sites = lane_seen_sites(&calls);
     assert_eq!(
         sites.keys().map(String::as_str).collect::<BTreeSet<&str>>(),
-        LANES.iter().copied().collect::<BTreeSet<&str>>(),
+        DENOMINATOR_LANES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<&str>>(),
         "every lane needs its denominator site; a lane absent here has a rate that reads zero \
          forever"
     );
@@ -522,6 +705,32 @@ fn each_lane_has_at_most_one_lane_seen_call_site() {
             found.len()
         );
     }
+}
+
+#[test]
+fn every_marker_grammar_lane_also_carries_a_denominator() {
+    // The weld BETWEEN the two lane registers, added when they were split.
+    // `DENOMINATOR_LANES` is deliberately wider than the marker grammar's
+    // `LANES` -- a lane can be instrumented without its source being swept --
+    // but the containment only runs one way: a lane whose arms carry `lane=`
+    // markers declares counted drops, and a counted drop divided by no
+    // denominator is a rate that reads zero forever.
+    //
+    // Without this, splitting the registers would let a swept lane's
+    // denominator be deleted with every weld green, which is exactly the
+    // false green the one-list version was accidentally preventing.
+    let denominators: BTreeSet<&str> = DENOMINATOR_LANES.iter().copied().collect();
+    let missing: Vec<&str> = LANES
+        .iter()
+        .copied()
+        .filter(|lane| !denominators.contains(lane))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these marker-grammar lanes have no pinned denominator: {missing:?}. A lane whose arms \
+         declare counted drops must count the requests it processed, or every rate on it reads \
+         zero."
+    );
 }
 
 #[test]

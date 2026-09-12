@@ -1786,6 +1786,7 @@ fn own_mode_anthropic_beta_header_applies_allowlist() {
 /// complete and stream `remove("anthropic_beta")`, count_tokens reshapes
 /// through the field allowlist. So the request.rs site is inert on
 /// egress and needs no forwarded-leg gate.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn body_anthropic_beta_field_absent_on_all_egress_paths() {
     let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
@@ -1869,6 +1870,7 @@ fn body_has_billing(body: &Value) -> bool {
 /// interactive identity line only, the client system is relocated into
 /// the first user message as a `<system-reminder>`, `metadata.user_id` is
 /// minted, AND the billing block is stripped.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_body_non_cc_stamps_identity_and_metadata_and_strips_billing() {
     let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
@@ -1910,6 +1912,7 @@ fn cloak_body_non_cc_stamps_identity_and_metadata_and_strips_billing() {
 /// (b) OauthBearer + api.anthropic.com + GENUINE-CC req (captured
 /// `x-claude-code-session-id`): the billing block is stripped, but NO
 /// identity stamp and NO metadata mint.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_body_genuine_cc_strips_billing_only() {
     let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
@@ -2096,6 +2099,7 @@ fn cloak_mode_never_skips_all_transforms() {
 /// `mode = always` cloaks as a non-CC client even when the request DID
 /// carry an `x-claude-code-session-id` capture (which `Auto` would treat
 /// as genuine CC): identity stamped + metadata minted.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_mode_always_stamps_identity_even_with_session_header() {
     let provider = oauth_provider_with_cloak(CloakConfig {
@@ -2123,6 +2127,7 @@ fn cloak_mode_always_stamps_identity_even_with_session_header() {
 /// `mode = auto` (the default) keeps the original heuristic: a request
 /// WITH a session-id capture is treated as genuine CC (no identity stamp,
 /// no metadata), billing still stripped.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_mode_auto_matches_baseline_for_genuine_cc() {
     let provider = oauth_provider_with_cloak(CloakConfig::default());
@@ -3632,6 +3637,7 @@ fn final_body(provider: &AnthropicApiProvider, req: &ChatRequest) -> Value {
 /// Own-OAuth lane: the caller's `temperature` and `top_p` never reach the
 /// wire, while `stop_sequences` (accepted by the seat) survives. Anthropic's
 /// OAuth seat 400s a body carrying either sampling param.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_lane_strips_caller_sampling_and_keeps_stop_sequences() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -3659,6 +3665,7 @@ fn cloak_lane_strips_caller_sampling_and_keeps_stop_sequences() {
 /// routectl's OWN thinking clamp forces `temperature: 1.0` whenever
 /// thinking is composed. The strip is the last word on the body, so that
 /// self-inflicted value is removed too -- not just caller-supplied ones.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_lane_strips_thinking_clamp_temperature() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -3695,6 +3702,7 @@ fn cloak_lane_strips_thinking_clamp_temperature() {
 /// future relaxation of `is_routectl_managed_key` cannot quietly re-open the
 /// route without failing here. (`top_k` is NOT canonical and remains a
 /// genuine pass-through hole; see docs/WIRE-GOTCHAS.md.)
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn provider_extras_cannot_smuggle_sampling_onto_the_cloak_lane() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -3724,6 +3732,7 @@ fn provider_extras_cannot_smuggle_sampling_onto_the_cloak_lane() {
 /// (is_non_cc false) the sampling params are still dropped -- gating on the
 /// cloak flag instead would let `cloak.mode = never` re-introduce the
 /// lane-wide 400.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn cloak_lane_strips_sampling_under_every_cloak_mode() {
     for mode in [CloakMode::Never, CloakMode::Always, CloakMode::Auto] {
@@ -3836,6 +3845,7 @@ fn off_lane_requests_keep_sampling_byte_unchanged() {
 /// absent, and `merge_provider_extras` shields both as managed keys -- so
 /// the combined case is covered at the emitter level by
 /// `sampling_strip_emits_one_warn_naming_both_dropped_keys`.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[tokio::test]
 async fn complete_and_stream_both_strip_sampling_on_the_cloak_lane() {
     for path in ["complete", "stream"] {
@@ -3955,6 +3965,7 @@ fn sampling_strip_emits_one_warn_naming_both_dropped_keys() {
 
 /// Only the keys actually present are named: a body carrying just
 /// `temperature` must not claim `top_p` was dropped.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn sampling_strip_warn_names_only_present_keys() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -3965,6 +3976,7 @@ fn sampling_strip_warn_names_only_present_keys() {
 
 /// No affected key -> no WARN at all. The strip must stay silent on the
 /// overwhelmingly common request shape rather than logging a no-op.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn sampling_strip_emits_no_warn_when_nothing_is_dropped() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -4015,6 +4027,7 @@ fn sampling_strip_warn_never_carries_the_removed_values() {
 /// the seeded key name. A hostile sampling value is used as the canary so a
 /// regression that interpolated the removed value -- or the body -- into any
 /// field or the message would surface here on the production path.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[tokio::test]
 async fn real_complete_and_stream_each_emit_exactly_one_strip_warn() {
     const HOSTILE_TEMPERATURE: f64 = 0.123_456_789;
@@ -4087,6 +4100,7 @@ async fn real_complete_and_stream_each_emit_exactly_one_strip_warn() {
 /// the call there would only multiply WARNs on a path Claude Code polls
 /// heavily. Pin both halves -- sampling absent from the count_tokens body,
 /// and no strip WARN attributable to building it.
+#[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn count_tokens_body_drops_sampling_by_allowlist_without_a_strip_warn() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -4358,4 +4372,131 @@ fn off_lane_beta_headers_are_byte_unchanged_by_an_effort_body() {
             "{label} must not gain the effort beta"
         );
     }
+}
+
+// -- the cloak classification split ------------------------------------
+
+/// One arm of the `(anthropic, cloak_classified_*)` policy-action split, read
+/// through the public snapshot. Zero before its first bump.
+///
+/// SERIAL GUARDS: these keys are process-global and the runner is threaded, so
+/// every test driving a cloaked request carries `anthropic_api_cloak_split` --
+/// the ones asserting a delta AND the ones that only bump a key incidentally
+/// while asserting something else.
+fn cloak_split_count(class: &str) -> u64 {
+    crate::translation_drop_metrics::translation_policy_action_snapshot()
+        .into_iter()
+        .find(|e| e.lane == LANE && e.policy_class == class)
+        .map_or(0, |e| e.action_count)
+}
+
+/// SINGLE-ARM pin on the non-CC classification. A request with no captured
+/// session-id header classifies non-CC, so deleting the `is_non_cc` arm of the
+/// split record must red THIS test. The genuine-CC arm is asserted flat in the
+/// same act, so the two records cannot be swapped without a red.
+#[test]
+#[serial_test::serial(anthropic_api_cloak_split)]
+fn a_non_cc_request_counts_the_non_cc_arm() {
+    // Arrange
+    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("session-stable-123".into()),
+        Vec::new(),
+        false,
+    ));
+    let req = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
+    let mut body = cloak_test_body();
+
+    // Act
+    let non_cc_before = cloak_split_count("cloak_classified_non_cc");
+    let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
+    provider.cloak_body(&mut body, &req);
+    let non_cc_after = cloak_split_count("cloak_classified_non_cc");
+    let genuine_after = cloak_split_count("cloak_classified_genuine_cc");
+
+    // Assert
+    assert_eq!(
+        non_cc_after - non_cc_before,
+        1,
+        "a non-CC request counts exactly one non-CC classification"
+    );
+    assert_eq!(
+        genuine_after, genuine_before,
+        "a non-CC request must not touch the genuine-CC arm"
+    );
+}
+
+/// SINGLE-ARM pin on the genuine-CC classification, the mirror of the test
+/// above: deleting the genuine-CC arm of the split record must red THIS test
+/// and not the other.
+#[test]
+#[serial_test::serial(anthropic_api_cloak_split)]
+fn a_genuine_cc_request_counts_the_genuine_cc_arm() {
+    // Arrange -- the session-id header is present, so the heuristic reads the
+    // client as genuine Claude Code.
+    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("session-stable-123".into()),
+        Vec::new(),
+        false,
+    ));
+    let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+    let mut body = cloak_test_body();
+
+    // Act
+    let non_cc_before = cloak_split_count("cloak_classified_non_cc");
+    let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
+    provider.cloak_body(&mut body, &req);
+    let non_cc_after = cloak_split_count("cloak_classified_non_cc");
+    let genuine_after = cloak_split_count("cloak_classified_genuine_cc");
+
+    // Assert
+    assert_eq!(
+        genuine_after - genuine_before,
+        1,
+        "a genuine-CC request counts exactly one genuine-CC classification"
+    );
+    assert_eq!(
+        non_cc_after, non_cc_before,
+        "a genuine-CC request must not touch the non-CC arm"
+    );
+}
+
+/// POSITIVE CONTROL on the split: a request the cloak does not run on at all
+/// counts NEITHER arm. Without it, both deltas above would pass against a pair
+/// of records that fired on every request through this provider, and the
+/// split's whole value is that its two arms partition the CLOAKED population
+/// rather than counting traffic the cloak never touched.
+///
+/// `mode = never` is the gate under test because it returns after the lane and
+/// identity gates have already passed -- the narrowest of the five early
+/// returns, so a record drifting above ANY of them reds here.
+#[test]
+#[serial_test::serial(anthropic_api_cloak_split)]
+fn a_request_the_cloak_skips_counts_neither_arm() {
+    // Arrange
+    let provider = oauth_provider_with_cloak(CloakConfig {
+        mode: CloakMode::Never,
+        ..CloakConfig::default()
+    });
+    let req = req_with_claude_code_headers(Vec::new());
+    let mut body = cloak_test_body();
+
+    // Act
+    let non_cc_before = cloak_split_count("cloak_classified_non_cc");
+    let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
+    let result = provider.cloak_body(&mut body, &req);
+    let non_cc_after = cloak_split_count("cloak_classified_non_cc");
+    let genuine_after = cloak_split_count("cloak_classified_genuine_cc");
+
+    // Assert
+    assert!(result.is_none(), "mode = never must skip the cloak");
+    assert_eq!(
+        non_cc_after, non_cc_before,
+        "a skipped cloak must not count the non-CC arm"
+    );
+    assert_eq!(
+        genuine_after, genuine_before,
+        "a skipped cloak must not count the genuine-CC arm"
+    );
 }

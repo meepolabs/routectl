@@ -11,16 +11,18 @@ use serde_json::Value;
 pub(super) const ZERO_WIDTH_SPACE: char = '\u{200B}';
 
 /// Minimum length (in chars) a configured sensitive word must have to be
-/// obfuscated. Mirrors CLIProxyAPI's matcher: words shorter than this are
-/// dropped to avoid pathological single-letter rewrites.
+/// obfuscated. A single-character word would match nearly every position
+/// in the body, so words shorter than this are dropped at build time
+/// rather than rewriting the payload into noise.
 const MIN_SENSITIVE_WORD_LEN: usize = 2;
 
 /// Obfuscate each configured sensitive word in the outgoing body by
 /// inserting a zero-width space (U+200B) after the first character of each
-/// match. Mirrors CLIProxyAPI's `ObfuscateSensitiveWords`: matches are
-/// case-insensitive and longest-match-first; obfuscation is applied to
-/// `system` (string and array-of-text-blocks forms) and `messages[]`
-/// content text (string and array-of-text-blocks forms). The inserted
+/// match. Matching is case-insensitive and longest-match-first, so a
+/// configured word never shadows a longer configured word that starts at
+/// the same position. Obfuscation is applied to `system` (string and
+/// array-of-text-blocks forms) and `messages[]` content text (string and
+/// array-of-text-blocks forms). The inserted
 /// zero-width space is invisible to the model, so no reverse mapping is
 /// needed on the response. An empty word list is a byte-identical no-op.
 pub(super) fn obfuscate_sensitive_words(body: &mut Value, words: &[String]) {
@@ -61,8 +63,10 @@ impl SensitiveWordMatcher {
         if valid.is_empty() {
             return None;
         }
-        // Longest-first (by char count) so the scan prefers the longest
-        // overlapping match, matching CLIProxyAPI's sort-by-length.
+        // Sorted longest-first (by char count) so the linear scan in
+        // `match_at` returns the longest word anchored at a position: the
+        // first hit wins, so a shorter word that is a prefix of a longer
+        // one must never be tried first.
         valid.sort_by_key(|w| std::cmp::Reverse(w.0.chars().count()));
         Some(Self { words: valid })
     }
@@ -168,8 +172,10 @@ impl SensitiveWordMatcher {
 }
 
 /// Append `matched` to `out` with a zero-width space inserted after its
-/// first character. A single-char match is left unchanged (no interior
-/// position to mark), matching CLIProxyAPI's `size >= len` guard.
+/// first character. A single-char match is left unchanged: the marker goes
+/// *after* the first character, so a one-character match has no interior
+/// position to mark and appending one would extend the word rather than
+/// split it.
 fn push_obfuscated(out: &mut String, matched: &str) {
     let mut chars = matched.chars();
     if let Some(first) = chars.next() {
