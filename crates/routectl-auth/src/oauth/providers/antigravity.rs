@@ -1,11 +1,11 @@
 //! Google "Antigravity" OAuth flow (Gemini via the Cloud Code surface).
 //!
-//! Constants extracted from the CLIProxyAPI reference implementation
-//! (`internal/auth/antigravity/constants.go`). These are the production
-//! values baked into the public Antigravity desktop client; the
-//! `client_secret` below is a *public* desktop/installed-app secret
-//! (distributed inside the client binary), not a routectl-managed
-//! credential -- it is the antigravity analogue of the hardcoded
+//! The constants below are the production values baked into the public
+//! Antigravity desktop client, recovered from that shipped client rather
+//! than issued to routectl; the `client_secret` below is a *public*
+//! desktop/installed-app secret (distributed inside the client binary),
+//! not a routectl-managed credential -- it is the antigravity analogue of
+//! the hardcoded
 //! `client_id`s already carried by the Anthropic and codex flows. It is
 //! safe to commit for the same reason: Google's installed-app client
 //! type treats it as non-confidential.

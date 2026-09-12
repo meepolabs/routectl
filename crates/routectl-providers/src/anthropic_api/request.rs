@@ -92,6 +92,49 @@ pub(crate) use super::tools::translate_tool;
 use super::extras::{effort_ratio, is_routectl_managed_key};
 
 // ---------------------------------------------------------------------------
+// Per-request policy-action tallies
+// ---------------------------------------------------------------------------
+
+/// Per-request record of whether this request's Claude Code client
+/// fingerprint was withheld from the upstream ANYWHERE on the body-assembly
+/// path.
+///
+/// ONE tally for the whole lane rather than one per stripping site, because
+/// the class is counted per REQUEST and this path withholds the same
+/// fingerprint on two independent surfaces: the canonical top-level `system`
+/// and the `Role::System` legacy lift. They are mutually exclusive in one
+/// assembly -- the lift runs only when no canonical system survives -- but
+/// the exclusivity is a property of today's branch, not of the class, and a
+/// record per site would count a future request that tripped both twice
+/// against a denominator that counted it once, pushing the action rate above
+/// 1.0.
+///
+/// This is the convention for the class generally, not a quirk of this lane:
+/// one operator-facing label per action, one record per request, however many
+/// surfaces of that request carried the withheld content.
+#[derive(Default)]
+pub(crate) struct ClientFingerprintStripTally {
+    stripped: bool,
+}
+
+impl ClientFingerprintStripTally {
+    /// Note that this request withheld the fingerprint at one more site.
+    /// Idempotent by construction: the flush is per request, not per site.
+    pub(crate) const fn record(&mut self) {
+        self.stripped = true;
+    }
+
+    fn flush(&self) {
+        if self.stripped {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "client_fingerprint_stripped",
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sampling clamp (shared with the Bedrock egresses)
 // ---------------------------------------------------------------------------
 
@@ -518,6 +561,13 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// target API has no such role never ships one. Stated at each call site, not
 /// defaulted.
 ///
+/// `fingerprint` is the caller-owned per-request tally for the client
+/// fingerprint this function withholds. It is recorded into, never flushed
+/// here: the flush belongs to whoever owns the request's lifetime AND knows
+/// which telemetry lane the request is on, and this function serves two
+/// (anthropic-api through [`normalize`], bedrock-invoke through its own
+/// seam).
+///
 /// Every other caller wants [`normalize`], which emits before returning.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) fn normalize_deferring_format_key_warn(
@@ -531,6 +581,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     >,
     terminal_anthropic_host: bool,
     forward_system_turns: bool,
+    fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
@@ -565,6 +616,21 @@ pub(crate) fn normalize_deferring_format_key_warn(
             provider = id,
             "anthropic-api egress: Claude Code billing/attribution system block dropped",
         );
+        // Withheld by routectl, not by the wire: real Anthropic would accept
+        // the block, and routectl declines to forward the client fingerprint
+        // it carries. Recorded into the request's tally rather than counted
+        // here, because the legacy-lift branch below withholds the SAME class
+        // from the same request and one request is one action.
+        //
+        // NO TRANSLATION-DROP MARKER HERE, deliberately: this file lies
+        // outside the census's swept surfaces, so a marker on it is never
+        // parsed and cannot fail -- one was verified to survive being replaced
+        // by an unparseable verdict with every weld green. A pin that cannot
+        // fail is worse than none, because it reads as enforcement. The
+        // covering tests are named below; widening the census to this surface
+        // is filed separately.
+        // Covered by: the_canonical_system_billing_strip_counts_one_policy_action
+        fingerprint.record();
     }
 
     // The wire system field and the messages array are two halves of one
@@ -625,6 +691,12 @@ pub(crate) fn normalize_deferring_format_key_warn(
                 "anthropic-api egress: Claude Code billing/attribution system block \
                      dropped (legacy Role::System path)",
             );
+            // Same class, same tally, for the same reason stated at the
+            // canonical-system site above -- one record per request, not one
+            // per surface that withheld the fingerprint. No marker here for
+            // the same census-scope reason.
+            // Covered by: the_legacy_lift_billing_strip_counts_one_policy_action
+            fingerprint.record();
         }
         lifted_content.as_ref().map(translate_system)
     });
@@ -633,7 +705,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
         id,
         terminal_anthropic_host,
     );
-    let mut anthropic_messages = translate_messages(id, &messages, system_turns, &mut envelopes)?;
+    let mut anthropic_messages =
+        translate_messages(id, &messages, system_turns, &mut envelopes, fingerprint)?;
 
     // When context_management emulation is active, re-inject cached
     // thinking blocks before ToolUse blocks per the clear_thinking_20251015
@@ -822,6 +895,12 @@ pub(crate) fn normalize_deferring_format_key_warn(
 /// the ONE `output_config` warning per diagnostic for the request. Callers
 /// that keep writing to `output_config` after assembly must use the deferring
 /// variant and emit once themselves, or the request warns twice.
+///
+/// It also owns this lane's TELEMETRY lifetime: the denominator bump on the
+/// way in and the per-request policy-action flush on the way out. The
+/// deferring variant is deliberately NOT the owner, because Bedrock-Invoke
+/// calls it directly and that request belongs to a different lane -- counting
+/// there would credit anthropic-api with Bedrock's volume.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) fn normalize(
     id: &str,
@@ -835,7 +914,17 @@ pub(crate) fn normalize(
     terminal_anthropic_host: bool,
     forward_system_turns: bool,
 ) -> Result<Value> {
-    let (body, deferred) = normalize_deferring_format_key_warn(
+    // The one point every anthropic-api egress request passes exactly once,
+    // on both the Ok and the Err arm: `complete`, `stream` and `count_tokens`
+    // all reach the wire body through here and nowhere else, and it precedes
+    // the first fallible step. This is the DENOMINATOR for this lane's
+    // translation counters -- a raw action count with no request-volume
+    // figure behind it cannot tell a lane that withholds on every request
+    // from one that withheld once all week. Exactly one call site per lane; a
+    // second anywhere would understate the rate for the whole lane.
+    crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
+    let mut fingerprint = ClientFingerprintStripTally::default();
+    let assembled = normalize_deferring_format_key_warn(
         id,
         req,
         adaptive,
@@ -844,7 +933,16 @@ pub(crate) fn normalize(
         thinking_cache,
         terminal_anthropic_host,
         forward_system_turns,
-    )?;
+        &mut fingerprint,
+    );
+    // Flushed on BOTH arms and outside every fallible step of the assembly: a
+    // request whose entire system IS the fingerprint block assembles to no
+    // system at all, and one that withheld a fingerprint and only then failed
+    // its replay-invariant walk was still counted by this lane's denominator.
+    // Either shape missing from the numerator reads the action rate low for
+    // precisely the requests that withhold the most.
+    fingerprint.flush();
+    let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)
 }

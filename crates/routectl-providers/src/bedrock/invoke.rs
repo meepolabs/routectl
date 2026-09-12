@@ -60,6 +60,14 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // for the same reason as the flag above -- a default changing
         // elsewhere must not start shipping the shape to Bedrock.
         false,
+        // Bedrock-Invoke is its OWN telemetry lane and is NOT YET
+        // instrumented -- it carries no denominator and no counters today.
+        // The fingerprint strip inside the shared assembly is real here too,
+        // but recording it against the anthropic-api lane would credit that
+        // lane with this one's volume, so the tally is driven and dropped.
+        // Nothing is lost by dropping it: there is no rate on this lane for
+        // the record to feed. Standing this lane up owns that work.
+        &mut crate::anthropic_api::request::ClientFingerprintStripTally::default(),
     )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(

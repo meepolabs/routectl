@@ -1171,6 +1171,7 @@ pub(super) fn translate_messages(
     messages: &[Message],
     policy: SystemTurnPolicy,
     envelopes: &mut EnvelopeUnwrapTally,
+    fingerprint: &mut super::request::ClientFingerprintStripTally,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut skips = ReasoningSkipTally::new(id);
     let mut system_turns = SystemTurnTally::new(id);
@@ -1182,11 +1183,35 @@ pub(super) fn translate_messages(
         &mut skips,
         &mut system_turns,
     );
+    // The THIRD withhold site on this lane, sharing the caller's tally so a
+    // request stripping here and on a canonical surface still counts once.
+    // Forward policy runs only when a canonical system survives, so this and
+    // the legacy lift are exclusive today -- but the class is counted per
+    // request, not per surface.
+    if system_turns.billing_blocks_stripped > 0 || system_turns.billing_turns_dropped > 0 {
+        fingerprint.record();
+    }
     skips.flush();
     system_turns.flush();
     let (out, ledger) = out?;
     ledger.verify(id, out.len())?;
     Ok(out)
+}
+
+/// Test-only shim: drive `translate_messages` without threading a
+/// fingerprint tally. Production always threads the caller's tally so the
+/// forwarded-turn withhold joins the per-request count; a test asserting
+/// message SHAPE has no tally to share and would otherwise have to invent
+/// one at every call site.
+#[cfg(test)]
+pub(super) fn translate_messages_untallied(
+    id: &str,
+    messages: &[Message],
+    policy: SystemTurnPolicy,
+    envelopes: &mut EnvelopeUnwrapTally,
+) -> Result<Vec<AnthropicMessage>> {
+    let mut fingerprint = super::request::ClientFingerprintStripTally::default();
+    translate_messages(id, messages, policy, envelopes, &mut fingerprint)
 }
 
 /// Whether a canonical `Role::System` turn reaches the wire as a
@@ -1919,7 +1944,7 @@ mod thinking_signature_tests {
 
 #[cfg(test)]
 mod tool_id_correlation_tests {
-    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages};
+    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
     use routectl_core::{Message, MessageContent, Role};
     use serde_json::json;
@@ -2004,7 +2029,7 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2030,7 +2055,7 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2062,7 +2087,7 @@ mod tool_id_correlation_tests {
         let messages = vec![user_msg(), assistant];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2099,7 +2124,7 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2135,7 +2160,7 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2181,7 +2206,7 @@ mod tool_id_correlation_tests {
 
 #[cfg(test)]
 mod role_other_egress_tests {
-    use super::{AnthropicRole, SystemTurnPolicy, passthrough_tally, translate_messages};
+    use super::{AnthropicRole, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
     use crate::anthropic_api::types::AnthropicMessage;
     use routectl_core::{Message, MessageContent, Role};
 
@@ -2225,7 +2250,7 @@ mod role_other_egress_tests {
         // Act
         let mut out = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            out = translate_messages(
+            out = translate_messages_untallied(
                 "anthropic",
                 &messages,
                 SystemTurnPolicy::Lift,
@@ -2263,7 +2288,7 @@ mod role_other_egress_tests {
         // Act
         let mut out = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            out = translate_messages(
+            out = translate_messages_untallied(
                 "anthropic",
                 &messages,
                 SystemTurnPolicy::Lift,
@@ -2316,7 +2341,7 @@ mod role_other_egress_tests {
 mod empty_content_backstop_tests {
     use super::{
         ReasoningSkipTally, SystemTurnPolicy, build_assistant_content, normalize_replay_invariants,
-        passthrough_tally, translate_messages,
+        passthrough_tally, translate_messages_untallied,
     };
     use crate::anthropic_api::ANTHROPIC_FORMAT;
     use crate::anthropic_api::types::{AnthropicContent, ContentBlock};
@@ -2484,7 +2509,7 @@ mod empty_content_backstop_tests {
             1,
             "a turn with tool_calls is never dropped"
         );
-        let wire = translate_messages(
+        let wire = translate_messages_untallied(
             "anthropic",
             &normalized,
             SystemTurnPolicy::Lift,
@@ -2552,7 +2577,8 @@ mod empty_content_backstop_tests {
 mod tool_use_dedup_tests {
     use super::{
         AnthropicContent, ContentBlock, ReasoningSkipTally, SystemTurnPolicy,
-        build_assistant_content, build_tool_message, passthrough_tally, translate_messages,
+        build_assistant_content, build_tool_message, passthrough_tally,
+        translate_messages_untallied,
     };
     use crate::anthropic_api::types::AnthropicMessage;
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
@@ -2727,7 +2753,7 @@ mod tool_use_dedup_tests {
         );
 
         // Act -- thread it back through the egress.
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &[assistant_msg],
             SystemTurnPolicy::Lift,
@@ -2836,7 +2862,7 @@ mod tool_use_dedup_tests {
 
 #[cfg(test)]
 mod tool_result_coalescing_tests {
-    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages};
+    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage, AnthropicRole};
     use routectl_core::{
         CacheControl, ContentPart, KnownContentPart, Message, MessageContent, Role,
@@ -2914,7 +2940,7 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2944,7 +2970,7 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -2972,7 +2998,7 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -3002,7 +3028,7 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,
@@ -3034,7 +3060,7 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages(
+        let out = translate_messages_untallied(
             "anthropic",
             &messages,
             SystemTurnPolicy::Lift,

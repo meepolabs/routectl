@@ -64,7 +64,7 @@ fn system_turn() -> Message {
 /// turn's helper) is the point: the aggregation is per outbound attempt.
 fn warns_for(messages: &[Message]) -> Vec<CapturedEvent> {
     let events = capture_events(|| {
-        translate_messages(
+        translate_messages_untallied(
             "prov-test",
             messages,
             SystemTurnPolicy::Lift,
@@ -752,7 +752,7 @@ fn unrecognized_kind_drops_silently_with_no_warn_and_no_block() {
     // Act
     let mut translated = Vec::new();
     let events = capture_events(|| {
-        translated = translate_messages(
+        translated = translate_messages_untallied(
             "prov-test",
             &messages,
             SystemTurnPolicy::Lift,

@@ -151,6 +151,11 @@ fn normalize_keeps_context_management_body_key_when_flag_false() {
 /// fingerprint never reaches a non-Anthropic party. The retained
 /// system blocks are forwarded in order.
 #[test]
+// Shares the guard with the counter tests in the sibling file: this test
+// drives `normalize` with a billing block, so it flushes the lane's
+// policy-action key incidentally. A guard no sibling shares excludes
+// nothing.
+#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn normalize_strips_billing_system_block() {
     use routectl_core::{SystemBlock, SystemContent};
     let mut req = simple_req();
@@ -182,6 +187,11 @@ fn normalize_strips_billing_system_block() {
 /// A pure-billing `Text` system collapses to absent: the whole string
 /// is the fingerprint-bearing block, so the `system` key is dropped.
 #[test]
+// Shares the guard with the counter tests in the sibling file: this test
+// drives `normalize` with a billing block, so it flushes the lane's
+// policy-action key incidentally. A guard no sibling shares excludes
+// nothing.
+#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn normalize_drops_pure_billing_text_system() {
     use routectl_core::SystemContent;
     let mut req = simple_req();
@@ -203,6 +213,11 @@ fn normalize_drops_pure_billing_text_system() {
 /// direct-caller / legacy gap so the Claude Code fingerprint never
 /// reaches a third-party anthropic-api host via the lift fallback.
 #[test]
+// Shares the guard with the counter tests in the sibling file: this test
+// drives `normalize` with a billing block, so it flushes the lane's
+// policy-action key incidentally. A guard no sibling shares excludes
+// nothing.
+#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn normalize_strips_billing_from_legacy_system_message() {
     use routectl_core::Role;
     let mut req = simple_req();
@@ -261,6 +276,11 @@ fn normalize_strips_billing_from_legacy_system_message() {
 /// must collapse to an absent `system` on the legacy lift path -- the
 /// fingerprint is the whole prompt, so nothing lands upstream.
 #[test]
+// Shares the guard with the counter tests in the sibling file: this test
+// drives `normalize` with a billing block, so it flushes the lane's
+// policy-action key incidentally. A guard no sibling shares excludes
+// nothing.
+#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn normalize_drops_pure_billing_legacy_system_message() {
     use routectl_core::Role;
     let mut req = simple_req();

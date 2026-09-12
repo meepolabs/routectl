@@ -1029,6 +1029,55 @@ impl AnthropicApiProvider {
         // call yields an upstream rejection, not a paid overage applied
         // quietly.
         let is_non_cc = self.is_non_cc(req);
+        // The classification SPLIT, counted on both arms so the ratio between
+        // them is derivable from the emitted metrics.
+        //
+        // This is the measurement that matters most on this surface, and it is
+        // the one nothing else reports. Under `CloakMode::Auto` the whole
+        // classification keys on a single client-supplied header, so a Claude
+        // Code auto-update that stops sending it flips every request on this
+        // provider from the genuine-CC arm to the non-CC one -- changing the
+        // wire body of every request, permanently, with no other counter
+        // moving. Both arms are policy actions under the same axis as the
+        // strips: the upstream would accept the client's real system and
+        // metadata, and routectl decides per request what to send instead.
+        //
+        // Counted here rather than inside `cloak_oauth_egress`: this is the
+        // one point that runs exactly once per cloaked request, AFTER every
+        // gate that makes the cloak a no-op (forwarded leg, non-OAuth,
+        // non-Anthropic host, `mode = never`, absent identity) has already
+        // returned. A record placed past the transforms would miss nothing
+        // today but would silently start counting whichever gate moved above
+        // it.
+        //
+        // NO TRANSLATION-DROP MARKER on these, deliberately, and the reason is
+        // mechanical rather than a judgement call: the census sweeps a fixed
+        // list of surfaces that does not include this one, and its file walk
+        // REFUSES a nested directory rather than skipping it -- so this lane's
+        // transforms, which live one level down, cannot be brought into that
+        // sweep without widening the traversal itself. Until then a marker
+        // here is never parsed: it survives being replaced by an unparseable
+        // verdict with every weld green, which reads as enforcement while
+        // providing none. The covering tests are named below.
+        // Covered by: a_non_cc_request_counts_the_non_cc_arm
+        //             a_genuine_cc_request_counts_the_genuine_cc_arm
+        //
+        // Two call sites rather than one passing the class as an `if`
+        // expression: the census harvest resolves a class to the literal an
+        // operator reads in telemetry, and it refuses an expression rather
+        // than skipping the call -- correctly, since a skipped call is a
+        // counted action that silently leaves the census.
+        if is_non_cc {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "cloak_classified_non_cc",
+            );
+        } else {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "cloak_classified_genuine_cc",
+            );
+        }
         let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc, &self.cfg.cloak);
         // Decision log: provider + non-CC gate + how many tool names were
         // normalized. NEVER logs tool names or message content.

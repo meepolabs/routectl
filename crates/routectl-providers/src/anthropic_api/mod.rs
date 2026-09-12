@@ -47,6 +47,13 @@ pub(crate) mod types_sse;
 /// the openai_compat module for the rationale.
 const PROVIDER_KIND: &str = "anthropic";
 
+/// The lane spelling every `record_translation_drop` /
+/// `record_translation_policy_action` / `record_translation_lane_seen`
+/// call on this egress uses. Bound to `PROVIDER_KIND` rather than
+/// re-spelled so the telemetry lane and the `provider_kind=` tracing
+/// field can never drift apart.
+pub(crate) const LANE: &str = PROVIDER_KIND;
+
 /// Anthropic wire-format tag for reasoning details. A single canonical
 /// definition shared by all sub-modules (context_management, request,
 /// response, sse) via `super::ANTHROPIC_FORMAT` paths.
@@ -1041,3 +1048,9 @@ mod tests;
 #[cfg(test)]
 #[path = "mod_envelope_unwrap_tests.rs"]
 mod envelope_unwrap_tests;
+
+// This lane's request-volume denominator and the per-request policy action
+// for the withheld client fingerprint.
+#[cfg(test)]
+#[path = "request_drop_counter_tests.rs"]
+mod request_drop_counter_tests;
