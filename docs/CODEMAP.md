@@ -566,6 +566,9 @@ license.
   `mantle` (`Option<MantleAuth>`, cfg `bedrock`)) + `AuthKind` (ApiKey /
   OauthBearer) +
   `AnthropicApiProvider::new`/`resolve_user_agent`/`build_headers`/`cloak_body`/`is_non_cc`/`is_cloak_lane`
+  (`cloak_body` also owns the cloak's classification SPLIT counters, one
+  policy action per cloaked request on each of the `is_non_cc` arms, so the
+  ratio between them is derivable)
   and the beta-decision 4xx observability (`BetaDecision`,
   `should_log_beta_4xx`, `log_beta_decision_on_4xx`). `BetaDecision` carries
   BOUNDED booleans only, all read off the FINAL composed beta set and final
@@ -642,7 +645,19 @@ license.
   scrub is shared by all three Claude seams -- and wires the `output_schema`
   mandatory-key repair on the same assembled body, which covers the
   anthropic-api and bedrock-invoke seams only (Converse is uncovered by
-  design)
+  design); also owns this lane's TELEMETRY lifetime -- `normalize` is the
+  single `record_translation_lane_seen` denominator site for the lane (the
+  one point `complete`, `stream` and `count_tokens` all pass through), and it
+  flushes the per-request `ClientFingerprintStripTally` on both the Ok and the
+  Err arm, shared by the three surfaces that can withhold the fingerprint --
+  the canonical `system`, the legacy lift, and a forwarded `Role::System` turn
+  screened in `messages.rs` -- so one request counts one policy action however
+  many of them stripped
+- `src/anthropic_api/request_drop_counter_tests.rs` -- the lane's telemetry
+  pinning set: the denominator counts a failed assembly as well as a clean
+  one, and one single-source test per fingerprint-strip site (plus the
+  collapsed-system, strip-then-fail, and no-strip controls) under
+  `serial_test` guards
 - `src/anthropic_api/system.rs` -- system-prompt translation:
   `translate_system` (typed `SystemContent` -> wire) + `lift_legacy_system`
   (Role::System fallback for direct callers, the `req.system`-absent path
