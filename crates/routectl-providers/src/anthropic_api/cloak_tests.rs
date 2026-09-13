@@ -1405,6 +1405,331 @@ fn sensitive_words_obfuscation_carries_no_reverse() {
     );
 }
 
+// -- sensitive_words over non-ASCII text -------------------------------
+
+/// Obfuscate `text` as a string `system` and return the resulting string.
+/// Every Unicode fixture below is written with `\u{...}` escapes so the
+/// source stays ASCII-only.
+fn obfuscated_system(text: &str) -> String {
+    let mut body = json!({"system": text});
+    obfuscate_sensitive_words(&mut body, &["secret".to_string()]);
+    body["system"]
+        .as_str()
+        .expect("system stays a string")
+        .into()
+}
+
+/// The marked form of a configured word: the zero-width space lands after
+/// the first character, so the folded term is no longer contiguous.
+fn marked(first: char, rest: &str) -> String {
+    format!("{first}{ZERO_WIDTH_SPACE}{rest}")
+}
+
+#[test]
+fn obfuscates_when_a_preceding_char_expands_under_lowercasing() {
+    // Arrange: U+0130 lowercases to two chars and U+212A to a shorter one,
+    // so any offset taken from a separately folded buffer drifts.
+    let text = "\u{130}SECRET\u{212A}\u{130}";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(
+        out,
+        format!("\u{130}{}\u{212A}\u{130}", marked('S', "ECRET"))
+    );
+}
+
+#[test]
+fn obfuscates_when_folded_char_count_is_preserved_but_byte_widths_shift() {
+    // Arrange: U+023A folds wider and U+1E9E folds narrower, so both the
+    // char count and the total byte length are preserved while the
+    // per-char byte widths differ.
+    let text = "\u{23A}SECRET\u{1E9E}";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(out, format!("\u{23A}{}\u{1E9E}", marked('S', "ECRET")));
+}
+
+#[test]
+fn obfuscates_when_cancelling_width_shifts_both_precede_the_match() {
+    // CONTROL, not a regression reproduction: U+023A widens by one byte and
+    // U+1E9E narrows by one, and both sit ahead of the configured word, so
+    // the net offset drift at the match is zero. The pre-repair matcher
+    // also passed this shape. The load-bearing mis-splice reproduction is
+    // `marks_the_term_itself_when_a_narrowing_fold_precedes_it`, where the
+    // two shifts straddle the term instead of cancelling before it.
+    let text = "\u{23A}\u{1E9E} the SECRET value";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert: the folded term must not survive contiguously anywhere.
+    assert_eq!(
+        out,
+        format!("\u{23A}\u{1E9E} the {} value", marked('S', "ECRET"))
+    );
+    assert!(
+        !out.to_lowercase().contains("secret"),
+        "the configured term must not remain contiguous"
+    );
+}
+
+#[test]
+fn marks_the_term_itself_when_a_narrowing_fold_precedes_it() {
+    // LOAD-BEARING mis-splice reproduction. A fold that narrows before the
+    // match, balanced by one that widens after it, keeps the total byte
+    // length equal while shifting every offset across the match. The
+    // pre-repair matcher returned success here with the marker one char
+    // early, leaving the folded term contiguous and unmarked.
+    let text = "\u{1E9E} the SECRET \u{23A}";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(
+        out,
+        format!("\u{1E9E} the {} \u{23A}", marked('S', "ECRET"))
+    );
+    assert!(
+        !out.to_lowercase().contains("secret"),
+        "the configured term must not remain contiguous"
+    );
+}
+
+#[test]
+fn obfuscates_an_ascii_match_when_an_expanding_char_follows_it() {
+    // Arrange: one expanding lowercase anywhere in the block must not
+    // stand the whole block down.
+    let text = "my SECRET \u{130}";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(out, format!("my {} \u{130}", marked('S', "ECRET")));
+}
+
+#[test]
+fn obfuscates_pure_ascii_text() {
+    // Arrange
+    let text = "the SECRET value";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(out, format!("the {} value", marked('S', "ECRET")));
+}
+
+#[test]
+fn obfuscates_when_a_following_char_folds_to_one_narrower_char() {
+    // Arrange
+    let text = "my SECRET \u{212A}";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(out, format!("my {} \u{212A}", marked('S', "ECRET")));
+}
+
+#[test]
+fn a_term_ending_mid_fold_of_one_char_is_left_untouched() {
+    // Arrange: U+0130 folds to two chars, the first of which is "i". A
+    // configured word ending on that first folded char has no original
+    // char boundary to splice at, so no marker may be inserted.
+    let mut body = json!({"system": "the ANT\u{130}s"});
+    let before = body.clone();
+
+    // Act
+    obfuscate_sensitive_words(&mut body, &["anti".to_string()]);
+
+    // Assert
+    assert_eq!(
+        serde_json::to_string(&body).unwrap(),
+        serde_json::to_string(&before).unwrap()
+    );
+}
+
+#[test]
+fn a_term_spanning_a_whole_expanding_fold_is_obfuscated() {
+    // Positive control for the case above: when the configured word covers
+    // BOTH folded chars of U+0130, the boundary exists and the match lands.
+    let mut body = json!({"system": "the ANT\u{130}s"});
+
+    // Act
+    obfuscate_sensitive_words(&mut body, &["anti\u{307}".to_string()]);
+
+    // Assert
+    assert_eq!(
+        body["system"].as_str().unwrap(),
+        format!("the {}s", marked('A', "NT\u{130}"))
+    );
+}
+
+#[test]
+fn obfuscates_when_a_following_char_folds_to_fewer_bytes() {
+    // Arrange
+    let text = "my SECRET \u{1E9E}";
+
+    // Act
+    let out = obfuscated_system(text);
+
+    // Assert
+    assert_eq!(out, format!("my {} \u{1E9E}", marked('S', "ECRET")));
+}
+
+#[test]
+fn non_ascii_text_without_a_match_is_byte_identical() {
+    // Arrange
+    let text = "\u{130}\u{212A}\u{1E9E}\u{23A} no configured term here";
+    let mut body = json!({"system": text});
+    let before = body.clone();
+
+    // Act
+    obfuscate_sensitive_words(&mut body, &["secret".to_string()]);
+
+    // Assert
+    assert_eq!(
+        serde_json::to_string(&body).unwrap(),
+        serde_json::to_string(&before).unwrap()
+    );
+}
+
+// -- sensitive_words: Greek sigma, single-char expansion, ordering ------
+
+/// Obfuscate `text` as a string `system` against one configured `word`.
+fn obfuscated_system_with(text: &str, word: &str) -> String {
+    let mut body = json!({"system": text});
+    obfuscate_sensitive_words(&mut body, &[word.to_string()]);
+    body["system"]
+        .as_str()
+        .expect("system stays a string")
+        .into()
+}
+
+#[test]
+fn an_uppercase_sigma_in_text_matches_a_final_sigma_configured_word() {
+    // Arrange: U+03A3 (capital sigma) folds to U+03C3 (normal sigma), while
+    // a configured word written with U+03C2 (final sigma) folds to itself.
+    // Without sigma normalization the two folded streams never meet.
+    let text = "\u{39F}\u{394}\u{39F}\u{3A3}";
+    let word = "\u{3BF}\u{3B4}\u{3BF}\u{3C2}";
+
+    // Act
+    let out = obfuscated_system_with(text, word);
+
+    // Assert
+    assert_eq!(
+        out,
+        marked('\u{39F}', "\u{394}\u{39F}\u{3A3}"),
+        "a final-sigma configured word must match uppercase sigma text"
+    );
+}
+
+#[test]
+fn a_final_sigma_in_text_matches_an_uppercase_sigma_configured_word() {
+    // The mirror direction: normalization must apply to the haystack too,
+    // not only to the configured word.
+    let text = "\u{3BF}\u{3B4}\u{3BF}\u{3C2}";
+    let word = "\u{39F}\u{394}\u{39F}\u{3A3}";
+
+    // Act
+    let out = obfuscated_system_with(text, word);
+
+    // Assert
+    assert_eq!(
+        out,
+        marked('\u{3BF}', "\u{3B4}\u{3BF}\u{3C2}"),
+        "an uppercase-sigma configured word must match final-sigma text"
+    );
+}
+
+#[test]
+fn a_final_sigma_configured_word_still_matches_final_sigma_text() {
+    // Control: normalization must not break the already-agreeing case.
+    let text = "\u{3BF}\u{3B4}\u{3BF}\u{3C2}";
+
+    // Act
+    let out = obfuscated_system_with(text, text);
+
+    // Assert
+    assert_eq!(out, marked('\u{3BF}', "\u{3B4}\u{3BF}\u{3C2}"));
+}
+
+#[test]
+fn a_match_consuming_one_original_char_is_not_a_rewrite() {
+    // End-to-end companion to `obfuscate::tests::
+    // a_one_original_char_expansion_reports_no_hit`, which is where the
+    // honesty of the reported hit is actually pinned. At this level the
+    // dishonest and the honest answer look the same (both leave the body
+    // byte-identical), so this case only guards the observable no-op.
+    let mut body = json!({"system": "a \u{130} b"});
+    let before = body.clone();
+
+    // Act
+    obfuscate_sensitive_words(&mut body, &["i\u{307}".to_string()]);
+
+    // Assert
+    assert_eq!(
+        serde_json::to_string(&body).unwrap(),
+        serde_json::to_string(&before).unwrap(),
+        "a one-original-char match must leave the body untouched"
+    );
+}
+
+#[test]
+fn a_folded_match_spanning_two_original_chars_still_marks() {
+    // Positive control for the case above: the same folded needle spread
+    // across TWO original chars has an interior boundary and must mark.
+    let text = "a i\u{307} b";
+
+    // Act
+    let out = obfuscated_system_with(text, "i\u{307}");
+
+    // Assert
+    assert_eq!(out, format!("a {} b", marked('i', "\u{307}")));
+}
+
+#[test]
+fn longest_match_is_keyed_on_folded_length_not_original_length() {
+    // Arrange: the longer word is SHORTER in original chars (3 x U+0130,
+    // folding to 6) than the word that is a prefix of its folded form
+    // (4 chars, folding to 4). Ordering by original char count would try
+    // the shorter folded word first and mark three times instead of twice.
+    let text = "\u{130}\u{130}\u{130}\u{130}\u{130}\u{130}";
+    let words = vec![
+        "i\u{307}i\u{307}".to_string(),
+        "\u{130}\u{130}\u{130}".to_string(),
+    ];
+    let mut body = json!({"system": text});
+
+    // Act
+    obfuscate_sensitive_words(&mut body, &words);
+
+    // Assert: two whole-word matches, each marked after its first char.
+    let out = body["system"].as_str().unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "{}{}",
+            marked('\u{130}', "\u{130}\u{130}"),
+            marked('\u{130}', "\u{130}\u{130}")
+        )
+    );
+    assert_eq!(
+        out.matches(ZERO_WIDTH_SPACE).count(),
+        2,
+        "the longest FOLDED word must win at each anchor"
+    );
+}
+
 // -- tool-array canonicalization (normalize_tools) ---------------------
 
 fn tool_names(body: &serde_json::Value) -> Vec<String> {
