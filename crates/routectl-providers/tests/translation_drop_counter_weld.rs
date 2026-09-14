@@ -169,37 +169,87 @@ fn the_marked_drop_vocabulary_equals_the_counted_drop_vocabulary() {
 /// strictly weaker than a marker -- it pins the class, not the arm -- and it
 /// is the honest shape of that weakness rather than a hole. The per-arm pin
 /// for these is the covering test each site names in prose.
-const UNSWEPT_POLICY_CLASSES: &[(&str, &str, &str, &str)] = &[
-    (
-        "client_fingerprint_stripped",
-        "anthropic_api/request.rs",
-        "the cloak lane's fingerprint withhold; its transforms live in a nested module \
+/// One register entry. NAMED fields rather than a positional 4-tuple: the
+/// entries are read by five assertions below, and a positional swap of the
+/// reason and the test name would still typecheck while quietly pointing every
+/// pin at prose.
+struct UnsweptPolicyClass {
+    /// The operator-facing class literal passed to the counter.
+    class: &'static str,
+    /// The file the class is counted in, relative to the crate's `src`.
+    file: &'static str,
+    /// Why no marker declares it, in terms a reader of this repo can check.
+    reason: &'static str,
+    /// The test that pins this class's arm.
+    test: &'static str,
+}
+
+const UNSWEPT_POLICY_CLASSES: &[UnsweptPolicyClass] = &[
+    UnsweptPolicyClass {
+        class: "client_fingerprint_stripped",
+        file: "anthropic_api/request.rs",
+        reason: "the cloak lane's fingerprint withhold; its transforms live in a nested module \
          directory the flat marker sweep refuses to descend into, so no marker on this \
          file would ever be parsed",
-        "the_canonical_system_billing_strip_counts_one_policy_action",
-    ),
-    (
-        "client_fingerprint_stripped",
-        "openai_compat/request.rs",
-        "the same class on the openai-compat assembly path; that lane's swept surface is \
+        test: "the_canonical_system_billing_strip_counts_one_policy_action",
+    },
+    UnsweptPolicyClass {
+        class: "client_fingerprint_stripped",
+        file: "openai_compat/request.rs",
+        reason: "the same class on the openai-compat assembly path; that lane's swept surface is \
          its wire_lift subdirectory, and the request path sits outside it",
-        "an_all_billing_system_still_counts_the_openai_compat_policy_action",
-    ),
-    (
-        "cloak_classified_non_cc",
-        "anthropic_api/client.rs",
-        "the anthropic-api cloak's classification split; its transforms live in a nested \
+        test: "an_all_billing_system_still_counts_the_openai_compat_policy_action",
+    },
+    UnsweptPolicyClass {
+        class: "cloak_classified_non_cc",
+        file: "anthropic_api/client.rs",
+        reason: "the anthropic-api cloak's classification split; its transforms live in a nested \
          module directory the flat marker sweep refuses to descend into",
-        "a_non_cc_request_counts_the_non_cc_arm",
-    ),
-    (
-        "cloak_classified_genuine_cc",
-        "anthropic_api/client.rs",
-        "the other arm of the same split, unswept for the same reason: its counting site \
+        test: "a_non_cc_request_counts_the_non_cc_arm",
+    },
+    UnsweptPolicyClass {
+        class: "cloak_classified_genuine_cc",
+        file: "anthropic_api/client.rs",
+        reason: "the other arm of the same split, unswept for the same reason: its counting site \
          sits on a lane whose transforms live in a nested module directory the flat marker \
          sweep refuses to descend into",
-        "a_genuine_cc_request_counts_the_genuine_cc_arm",
-    ),
+        test: "a_genuine_cc_request_counts_the_genuine_cc_arm",
+    },
+    UnsweptPolicyClass {
+        class: "cloak_client_system_prompt_discarded",
+        file: "anthropic_api/cloak.rs",
+        reason: "the cloak relocates the client system out of `system` and finds no user message to \
+         reattach it to, so the whole client prompt leaves the request; the orchestrator owns \
+         the record because the transform that detects it sits in the nested cloak directory \
+         the flat marker sweep refuses to descend into",
+        test: "a_cloaked_body_with_no_user_message_counts_the_discarded_system_prompt",
+    },
+    UnsweptPolicyClass {
+        class: "cloak_client_cache_breakpoints_collapsed",
+        file: "anthropic_api/cloak.rs",
+        reason: "the relocation joins the captured client system into one block, so more than one \
+         client cache breakpoint reduces to the last; counted from the orchestrator for the \
+         same nested-directory reason, and kept off the whole-prompt class because a \
+         cache-economics loss this frequent would swamp that far rarer signal",
+        test: "two_client_cache_breakpoints_count_one_collapse",
+    },
+    UnsweptPolicyClass {
+        class: "cloak_non_text_system_block_dropped",
+        file: "anthropic_api/cloak.rs",
+        reason: "a client system block carrying no string text has nothing to relocate into the \
+         text-only reminder, so it is lost; reachable through a forwarded system turn's block \
+         array, and counted from the orchestrator for the same nested-directory reason",
+        test: "a_forwarded_system_turn_with_a_non_text_block_counts_one_drop",
+    },
+    UnsweptPolicyClass {
+        class: "cloak_tool_sort_stood_down",
+        file: "anthropic_api/cloak.rs",
+        reason: "an opaque, duplicate, or missing tool name stands the whole tool-order sort down, so \
+         the cache-prefix stability it exists to provide is given up while every tool still \
+         rides upstream verbatim; counted from the orchestrator for the same nested-directory \
+         reason",
+        test: "duplicate_tool_names_count_one_tool_sort_stand_down",
+    },
 ];
 
 #[test]
@@ -218,7 +268,7 @@ fn the_marked_policy_vocabulary_equals_the_counted_policy_vocabulary() {
     marked.extend(
         UNSWEPT_POLICY_CLASSES
             .iter()
-            .map(|(class, _, _, _)| (*class).to_string()),
+            .map(|entry| entry.class.to_string()),
     );
     let counted = counted_policy_classes(&calls);
 
@@ -238,7 +288,7 @@ fn every_unswept_policy_class_is_counted_where_its_register_entry_says() {
     // entry whose class moved to another file, or stopped being counted at
     // all, is red here rather than silently widening the escape.
     let calls = expect(harvest_crate());
-    for (class, file, _, _) in UNSWEPT_POLICY_CLASSES {
+    for &UnsweptPolicyClass { class, file, .. } in UNSWEPT_POLICY_CLASSES {
         let files: BTreeSet<&str> = calls
             .iter()
             .filter(|c| c.counter == Counter::PolicyAction && c.class.as_deref() == Some(class))
@@ -258,7 +308,7 @@ fn no_unswept_policy_class_sits_on_a_file_the_marker_sweep_reaches() {
     // escape becomes the cheaper option everywhere and the census hollows out
     // one entry at a time.
     let swept = expect(marker::production_files());
-    for (class, file, _, _) in UNSWEPT_POLICY_CLASSES {
+    for &UnsweptPolicyClass { class, file, .. } in UNSWEPT_POLICY_CLASSES {
         assert!(
             !swept.iter().any(|f| f == file),
             "{file} IS swept by the census, so {class} must declare itself with a marker rather \
@@ -280,7 +330,7 @@ fn every_policy_class_counted_on_an_unswept_file_is_in_the_register() {
     let swept = expect(marker::production_files());
     let registered: BTreeSet<&str> = UNSWEPT_POLICY_CLASSES
         .iter()
-        .map(|(class, _, _, _)| *class)
+        .map(|entry| entry.class)
         .collect();
 
     let mut missing: Vec<String> = expect(harvest_crate())
@@ -313,7 +363,7 @@ fn every_unswept_register_entry_names_a_pinning_test_that_exists() {
     // Reuses the same `holds_fn` resolver the marker `test=` tag uses, so both
     // kinds of pin are enforced by one bounded matcher rather than two.
     let sources = expect(all_rust_sources());
-    for (class, _, _, test) in UNSWEPT_POLICY_CLASSES {
+    for &UnsweptPolicyClass { class, test, .. } in UNSWEPT_POLICY_CLASSES {
         let hits = sources
             .iter()
             .filter(|(_, source)| holds_fn(source, test))
@@ -327,12 +377,49 @@ fn every_unswept_register_entry_names_a_pinning_test_that_exists() {
 }
 
 #[test]
+fn every_unswept_register_entry_pins_a_distinct_test_and_row() {
+    // Resolution alone lets several entries name the SAME test. That test then
+    // reds when any one of their arms breaks, so each entry LOOKS pinned while
+    // no entry is pinned individually -- the arm-level signal the register
+    // exists to carry collapses to one bit. Deleting one arm's record would
+    // still red something, so the resolution check above stays green.
+    //
+    // Rows are checked on (class, file) for the same reason: one class
+    // legitimately appears on two files (the same withhold on two lanes), so
+    // the class alone is not the identity -- but two entries for one pair are a
+    // duplicate declaration, and whichever reason a reader takes as current is
+    // then a coin flip.
+    let mut tests: Vec<&str> = UNSWEPT_POLICY_CLASSES.iter().map(|e| e.test).collect();
+    tests.sort_unstable();
+    let mut distinct_tests = tests.clone();
+    distinct_tests.dedup();
+    assert_eq!(
+        tests, distinct_tests,
+        "two register entries name the same pinning test; each entry needs its own, or deleting \
+         one arm's record reds a test another entry was relying on and no arm is pinned alone"
+    );
+
+    let mut rows: Vec<(&str, &str)> = UNSWEPT_POLICY_CLASSES
+        .iter()
+        .map(|e| (e.class, e.file))
+        .collect();
+    rows.sort_unstable();
+    let mut distinct_rows = rows.clone();
+    distinct_rows.dedup();
+    assert_eq!(
+        rows, distinct_rows,
+        "two register entries declare the same (class, file) pair; one declaration per counted \
+         site, or a reader cannot tell which reason is the current one"
+    );
+}
+
+#[test]
 fn every_unswept_register_entry_carries_a_reason_a_reader_can_check() {
     // The reason IS the value of an escape entry: the weld proves only that
     // the class is counted, so the reason is what a reviewer re-takes when the
     // surface changes. A blank or placeholder reason is an unexplained hole
     // wearing the shape of a decision.
-    for (class, _, reason, _) in UNSWEPT_POLICY_CLASSES {
+    for &UnsweptPolicyClass { class, reason, .. } in UNSWEPT_POLICY_CLASSES {
         assert!(
             reason.len() > 40,
             "{class} carries a reason too short to be one: {reason:?}"

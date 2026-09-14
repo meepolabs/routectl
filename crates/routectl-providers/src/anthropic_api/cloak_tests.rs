@@ -96,7 +96,7 @@ fn relocate_string_system_sets_identity_only_and_moves_to_first_user() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: system is identity-only; first user content[0] is the
     // reminder wrapping the original string, content[1] the original text.
@@ -122,7 +122,7 @@ fn relocate_array_system_joins_blocks_into_one_reminder() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: identity-only system; reminder joins both blocks' text.
     let sys = body["system"].as_array().expect("system is array");
@@ -147,7 +147,7 @@ fn strict_mode_drops_client_system_and_leaves_user_message_unchanged() {
     });
 
     // Act
-    relocate_client_system(&mut body, true);
+    let _ = relocate_client_system(&mut body, true);
 
     // Assert: identity-only system; user message untouched, no reminder.
     let sys = body["system"].as_array().expect("system is array");
@@ -172,7 +172,7 @@ fn relocate_captures_and_removes_a_messages_system_turn() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert
     let msgs = body["messages"].as_array().expect("messages array");
@@ -204,7 +204,7 @@ fn strict_mode_drops_a_messages_system_turn_without_a_reminder() {
     });
 
     // Act
-    relocate_client_system(&mut body, true);
+    let _ = relocate_client_system(&mut body, true);
 
     // Assert
     let msgs = body["messages"].as_array().expect("messages array");
@@ -228,7 +228,7 @@ fn relocate_captures_block_array_content_of_a_messages_system_turn() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert
     let msgs = body["messages"].as_array().expect("messages array");
@@ -250,7 +250,7 @@ fn relocate_preserves_cache_control_on_reminder_block() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: the relocated reminder carries the cache_control.
     let reminder = &body["messages"][0]["content"][0];
@@ -266,7 +266,7 @@ fn relocate_no_panic_when_no_user_message_present() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: identity-only system; client body dropped; messages intact.
     let sys = body["system"].as_array().expect("system is array");
@@ -284,7 +284,7 @@ fn relocate_no_panic_when_messages_empty() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: identity-only system; no reminder anywhere.
     let sys = body["system"].as_array().expect("system is array");
@@ -302,7 +302,7 @@ fn relocate_identity_only_system_leaves_messages_untouched() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: identity-only system; no reminder added; message intact.
     let sys = body["system"].as_array().expect("system is array");
@@ -323,7 +323,7 @@ fn relocate_excludes_identity_line_from_reminder() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: identity-only system; only the real body relocated (the
     // identity line is not duplicated into the reminder).
@@ -343,7 +343,7 @@ fn relocated_identity_carries_no_cache_control() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: the injected identity block has no cache breakpoint.
     let injected = &body["system"][0];
@@ -360,7 +360,7 @@ fn relocate_non_object_body_is_noop() {
     let before = body.clone();
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: the whole transform is a no-op -- no panic, no reminder
     // insertion, no system rewrite. The body stays the same String.
@@ -380,7 +380,7 @@ fn relocate_drops_non_text_system_blocks() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: upstream system reduced to identity-only.
     let sys = body["system"].as_array().expect("system is array");
@@ -409,7 +409,7 @@ fn relocate_collapses_multi_block_cache_control_to_last() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: the reminder carries exactly ONE cache_control, equal to the
     // LAST captured block's cache_control (last-wins collapse, which also
@@ -437,7 +437,7 @@ fn relocate_neutralizes_injected_close_tag() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: the emitted reminder carries no stray closing tag in its
     // body -- only the single framing close tag at the very end.
@@ -469,7 +469,7 @@ fn relocate_targets_first_user_message_among_many() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: reminder prepended to user A only.
     assert_eq!(body["messages"][0]["content"], "prior");
@@ -490,7 +490,7 @@ fn relocate_handles_absent_or_null_user_content() {
     });
 
     // Act
-    relocate_client_system(&mut absent, false);
+    let _ = relocate_client_system(&mut absent, false);
 
     // Assert: content becomes an array holding only the reminder.
     let content = absent["messages"][0]["content"]
@@ -506,7 +506,7 @@ fn relocate_handles_absent_or_null_user_content() {
     });
 
     // Act
-    relocate_client_system(&mut null_content, false);
+    let _ = relocate_client_system(&mut null_content, false);
 
     // Assert: same -- content becomes an array holding only the reminder.
     let content = null_content["messages"][0]["content"]
@@ -525,7 +525,7 @@ fn relocate_handles_whitespace_only_system() {
     });
 
     // Act
-    relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false);
 
     // Assert: system is reduced to identity-only (sensible, no panic).
     let sys = body["system"].as_array().expect("system is array");
@@ -1137,12 +1137,12 @@ fn default_config_byte_identical_to_base_transforms() {
 
     let mut via_base = template;
     strip_billing_block(&mut via_base);
-    relocate_client_system(&mut via_base, false);
+    let _ = relocate_client_system(&mut via_base, false);
     mint_metadata_user_id(&mut via_base, &id);
     let _ = normalize_tool_names_to_mcp(&mut via_base);
     // The default config also canonicalizes tool order on the non-CC branch;
     // the base sequence must include the same sort to stay byte-identical.
-    super::tool_sort::sort_custom_tools_by_name(&mut via_base);
+    let _ = super::tool_sort::sort_custom_tools_by_name(&mut via_base);
 
     // Assert: byte-identical serialized output.
     assert_eq!(
@@ -1787,6 +1787,10 @@ fn knob_off_leaves_tool_order_untouched() {
 }
 
 #[test]
+// Shares the counter group's guard because this fixture trips the tool-sort
+// stand-down key while asserting something else; a guard only the asserting
+// test carries excludes nothing.
+#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn non_cc_opaque_tool_stands_down_sort() {
     // A builtin (Other-shaped) tool present stands the whole sort down; the
     // non-builtin names still normalize but keep verbatim order.

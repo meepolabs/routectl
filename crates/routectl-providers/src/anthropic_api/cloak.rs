@@ -210,6 +210,72 @@ impl ClaudeCodeIdentity {
     }
 }
 
+/// The per-request tally of the losses the cloak's transforms CHOSE, flushed
+/// once before `cloak_oauth_egress` returns.
+///
+/// The transforms themselves return structural outcomes and touch no registry:
+/// one flush point per request is what keeps each `(lane, class)` key at most
+/// one record per request, and a leaf that counted its own arm would bump the
+/// key again on every future caller of that leaf.
+///
+/// NO TRANSLATION-DROP MARKERS on the arms these classes cover, for the same
+/// mechanical reason the classification split carries none: the census sweeps a
+/// fixed surface list this module is not on, and its file walk refuses a nested
+/// directory rather than descending, so a marker written here is never parsed
+/// and would survive being replaced by nonsense with every weld green. The four
+/// classes declare themselves in the unswept-policy register instead, each with
+/// its covering test named there.
+#[derive(Debug, Default)]
+struct CloakPolicyTally {
+    system_prompt_discarded: bool,
+    cache_breakpoints_collapsed: bool,
+    non_text_block_dropped: bool,
+    tool_sort_stood_down: bool,
+}
+
+impl CloakPolicyTally {
+    const fn absorb_relocation(&mut self, outcome: identity::RelocationOutcome) {
+        self.system_prompt_discarded |= outcome.system_prompt_discarded;
+        self.cache_breakpoints_collapsed |= outcome.cache_breakpoints_collapsed;
+        self.non_text_block_dropped |= outcome.non_text_block_dropped;
+    }
+
+    const fn absorb_tool_sort(&mut self, outcome: tool_sort::ToolSortOutcome) {
+        self.tool_sort_stood_down |= outcome.stood_down;
+    }
+
+    fn flush(&self) {
+        // One call site per class rather than a loop over a table: the census
+        // harvest resolves each class to the literal an operator reads in
+        // telemetry, and an expression it cannot resolve takes the call out of
+        // the census entirely.
+        if self.system_prompt_discarded {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "cloak_client_system_prompt_discarded",
+            );
+        }
+        if self.cache_breakpoints_collapsed {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "cloak_client_cache_breakpoints_collapsed",
+            );
+        }
+        if self.non_text_block_dropped {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "cloak_non_text_system_block_dropped",
+            );
+        }
+        if self.tool_sort_stood_down {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "cloak_tool_sort_stood_down",
+            );
+        }
+    }
+}
+
 /// Apply the full cloak to the outgoing body on the OAuth anthropic-api
 /// surface. The billing block is stripped unconditionally (even for a
 /// genuine CC client). For a non-CC client the `system` field is reduced to
@@ -233,9 +299,14 @@ pub fn cloak_oauth_egress(
     is_non_cc: bool,
     config: &CloakConfig,
 ) -> CloakResult {
+    let mut tally = CloakPolicyTally::default();
     strip_billing_block(body);
     if is_non_cc {
-        relocate_client_system(body, config.strict_mode);
+        // `strict_mode` is the operator choosing to DROP the client system
+        // rather than relocate it, so the losses past that switch are
+        // configured, not chosen on the operator's behalf: the relocation
+        // reports none of its three classes under it.
+        tally.absorb_relocation(relocate_client_system(body, config.strict_mode));
         mint_metadata_user_id(body, identity);
     }
     let mut tool_reverse = normalize_tool_names_to_mcp(body);
@@ -249,12 +320,23 @@ pub fn cloak_oauth_egress(
     // would not be idempotent (a second cloak pass sorts the mcp__-prefixed
     // names and could reorder differently). All-or-nothing: any opaque tool,
     // missing name, or duplicate name stands the whole sort down.
+    //
+    // `normalize_tools = false` is the operator turning the canonicalization
+    // off, so the un-stabilized order under it is a configured choice and the
+    // stand-down class deliberately does not cover it -- the pass never runs.
     if is_non_cc && config.normalize_tools {
-        sort_custom_tools_by_name(body);
+        tally.absorb_tool_sort(sort_custom_tools_by_name(body));
     }
+    tally.flush();
     CloakResult { tool_reverse }
 }
 
 #[cfg(test)]
 #[path = "cloak_tests.rs"]
 mod tests;
+
+// Sibling test module (via `#[path]`) so the counter contract keeps its own
+// file rather than growing the transform test module past the length ceiling.
+#[cfg(test)]
+#[path = "cloak_policy_counter_tests.rs"]
+mod policy_counter_tests;

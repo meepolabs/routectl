@@ -744,23 +744,21 @@ license.
   into the egress complete/stream dir-3 sites
 - `src/anthropic_api/cloak.rs` -- OauthBearer-egress cloak root: shared
   config/types (`CloakMode`, `ToolRename`, `CloakConfig`, `CloakResult`,
-  `ClaudeCodeIdentity`) and the `cloak_oauth_egress` orchestrator sequencing
-  the concern submodules below
+  `ClaudeCodeIdentity`), the `cloak_oauth_egress` orchestrator, `CloakPolicyTally`
+- `src/anthropic_api/cloak_policy_counter_tests.rs` -- the cloak's telemetry
+  pinning set: one counter-delta-plus-log test per policy class, with the
+  lossless, genuine-CC, and operator-switch controls
 - `src/anthropic_api/cloak/billing.rs` -- strips the Claude Code
   billing/attribution system block unconditionally (`strip_billing_block`)
-- `src/anthropic_api/cloak/identity.rs` -- non-CC client system relocation
-  into a `<system-reminder>` block (from the `system` field AND from
-  `role: "system"` turns in `messages[]`, which are removed from the array)
-  plus identity-only system and minted
-  `metadata.user_id` (`relocate_client_system`, `mint_metadata_user_id`)
+- `src/anthropic_api/cloak/identity.rs` -- non-CC client system relocation into
+  a `<system-reminder>` block, identity-only system, minted `metadata.user_id`
+  (`relocate_client_system` -> `RelocationOutcome`, `mint_metadata_user_id`)
 - `src/anthropic_api/cloak/tool_rename.rs` -- tool-name `mcp__` normalization
   and operator `tool_rename` over the same tool-name paths, recording the
   per-request reverse map (`normalize_tool_names_to_mcp`, `apply_tool_rename`)
 - `src/anthropic_api/cloak/tool_sort.rs` -- all-or-nothing stable sort of
-  `tools[]` by name on the non-CC egress (`sort_custom_tools_by_name`), gated
-  on `is_non_cc && CloakConfig::normalize_tools`; stands the whole sort down
-  on any opaque/builtin tool, missing name, or duplicate name; runs after name
-  normalization so it orders final wire names (idempotent)
+  `tools[]` by name on the non-CC egress, gated on
+  `is_non_cc && CloakConfig::normalize_tools` (`sort_custom_tools_by_name` -> `ToolSortOutcome`)
 - `src/anthropic_api/cloak/obfuscate.rs` -- zero-width-space obfuscation of
   configured sensitive words in system and message text
   (`obfuscate_sensitive_words`, `SensitiveWordMatcher`)
