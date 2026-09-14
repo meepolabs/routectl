@@ -14,20 +14,39 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+/// What one `sort_custom_tools_by_name` pass gave up, reported upward as a
+/// value so the orchestrator owns the counter call and this module stays free
+/// of telemetry state.
+///
+/// `must_use`: a caller that computes this and drops it has silently stopped
+/// counting a stand-down the request still takes.
+#[must_use]
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ToolSortOutcome {
+    /// The scan found a tool it could not order safely, so the whole sort was
+    /// abandoned and `tools[]` kept its verbatim order.
+    pub(super) stood_down: bool,
+}
+
 /// Stably sort the outgoing body's `tools[]` by name, IFF every entry is a
 /// named custom tool with a unique name. Otherwise a no-op (verbatim order).
+///
+/// Reports a stand-down only for an array it would otherwise have reordered --
+/// one holding an opaque, duplicate, or missing name. A body with no `tools` or
+/// fewer than two of them stands nothing down: there was no order to stabilize,
+/// so nothing was given up.
 ///
 /// Deterministic and idempotent: the names are unique, so a stable sort by
 /// name yields one fixed order, and re-running it over the already-sorted
 /// array is a no-op. Pure aside from the in-place reorder of `tools[]`.
-pub(super) fn sort_custom_tools_by_name(body: &mut Value) {
+pub(super) fn sort_custom_tools_by_name(body: &mut Value) -> ToolSortOutcome {
     let should_sort = {
         let Some(tools) = body.get("tools").and_then(Value::as_array) else {
-            return;
+            return ToolSortOutcome::default();
         };
         // Nothing to reorder for fewer than two tools; skip the scan.
         if tools.len() < 2 {
-            return;
+            return ToolSortOutcome::default();
         }
         let mut seen: HashSet<&str> = HashSet::with_capacity(tools.len());
         let mut ok = true;
@@ -45,7 +64,22 @@ pub(super) fn sort_custom_tools_by_name(body: &mut Value) {
         ok
     };
     if !should_sort {
-        return;
+        // POLICY ACTION and a STAND-DOWN rather than a drop: no content leaves
+        // the request -- every tool rides upstream verbatim. What is given up is
+        // the cache-prefix stability the sort exists to provide, and it is given
+        // up because routectl refuses a partial reorder around a tool whose
+        // passthrough contract it cannot reason about. The wire would accept
+        // either order.
+        //
+        // DEBUG rather than WARN: nothing is lost from the request, the cost is
+        // cache economics, and a client sending one builtin alongside its custom
+        // tools trips this on every request it makes. Emitted once per pass, and
+        // the pass runs once per request.
+        tracing::debug!(
+            "cloak tool canonicalization: standing down the whole tool sort, the request carries \
+             a tool this pass cannot order safely"
+        );
+        return ToolSortOutcome { stood_down: true };
     }
     if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
         tools.sort_by(|a, b| {
@@ -54,6 +88,7 @@ pub(super) fn sort_custom_tools_by_name(body: &mut Value) {
             an.cmp(bn)
         });
     }
+    ToolSortOutcome::default()
 }
 
 /// The tool's name IFF it is a named custom tool: an object whose `type` is
@@ -100,7 +135,7 @@ mod tests {
                 {"type": "custom", "name": "mango"}
             ]
         });
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(names(&body), vec!["alpha", "mango", "zebra"]);
     }
 
@@ -110,9 +145,9 @@ mod tests {
             "tools": [{"name": "delta"}, {"name": "beta"}, {"name": "charlie"}]
         });
         let mut once = template.clone();
-        sort_custom_tools_by_name(&mut once);
+        let _ = sort_custom_tools_by_name(&mut once);
         let mut twice = once.clone();
-        sort_custom_tools_by_name(&mut twice);
+        let _ = sort_custom_tools_by_name(&mut twice);
         assert_eq!(once, twice);
     }
 
@@ -128,7 +163,7 @@ mod tests {
             ]
         });
         let before = body.clone();
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(body, before);
     }
 
@@ -138,7 +173,7 @@ mod tests {
             "tools": [{"name": "dup"}, {"name": "alpha"}, {"name": "dup"}]
         });
         let before = body.clone();
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(body, before);
     }
 
@@ -148,7 +183,7 @@ mod tests {
             "tools": [{"name": "zebra"}, {"description": "no name here"}]
         });
         let before = body.clone();
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(body, before);
     }
 
@@ -158,7 +193,7 @@ mod tests {
             "tools": [{"name": "zebra"}, {"name": ""}]
         });
         let before = body.clone();
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(body, before);
     }
 
@@ -166,7 +201,7 @@ mod tests {
     fn no_op_on_single_tool() {
         let mut body = json!({"tools": [{"name": "solo"}]});
         let before = body.clone();
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(body, before);
     }
 
@@ -174,7 +209,7 @@ mod tests {
     fn no_op_when_no_tools_field() {
         let mut body = json!({"messages": []});
         let before = body.clone();
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(body, before);
     }
 
@@ -186,7 +221,7 @@ mod tests {
                 {"type": "custom", "name": "ant"}
             ]
         });
-        sort_custom_tools_by_name(&mut body);
+        let _ = sort_custom_tools_by_name(&mut body);
         assert_eq!(names(&body), vec!["ant", "yak"]);
     }
 }
