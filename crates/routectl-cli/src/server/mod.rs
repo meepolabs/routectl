@@ -16,6 +16,7 @@ use routectl_usage::UsageHandle;
 pub mod auth;
 pub mod calibration_rebuild;
 pub mod capability_rebuild;
+pub mod cc_pin_drift;
 mod config_load;
 pub mod file_watch;
 pub mod k_rebuild;
@@ -78,6 +79,12 @@ pub struct AppState {
     /// legitimate stamper) via the SAME `Arc` -- never regenerated
     /// per-request, never logged, never in config.
     pub mitm_seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
+    /// Dedup state for the compiled-pin Claude Code version drift warning
+    /// (see `cc_pin_drift`). Lives HERE rather than inside the
+    /// `Arc<ArcSwap<Router>>` so a config reload does not re-warn a
+    /// version already reported, and on the instance rather than in a
+    /// process global so each test's traffic is its own.
+    pub cc_pin_drift: cc_pin_drift::CcPinDriftGuard,
 }
 
 impl AppState {
@@ -98,6 +105,7 @@ impl AppState {
             usage,
             activation: Arc::new(ArcSwap::from_pointee(ActivationState::default())),
             mitm_seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
+            cc_pin_drift: cc_pin_drift::CcPinDriftGuard::new(),
         });
         (state, dir)
     }

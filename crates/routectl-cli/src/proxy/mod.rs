@@ -33,7 +33,7 @@
 //! `Config::mitm.is_some()`.
 
 pub mod ca;
-pub(crate) mod cc_version;
+pub mod cc_version;
 pub mod forward;
 pub mod listener;
 pub mod metrics;

@@ -130,3 +130,86 @@ fn count_tokens_preserves_unknown_top_level_field_into_provider_extras() {
         .expect("unknown top-level field must round-trip into provider_extras");
     assert_eq!(extras["future_unknown_knob"], json!({"nested": [1, 2, 3]}));
 }
+
+/// A drifted client `User-Agent` on a count_tokens request is observed by
+/// the state-owned drift guard. count_tokens does NOT funnel through
+/// `ingress_handle`, so this path needs its own observation or base-url
+/// context sizing traffic produces no signal at all.
+#[tokio::test]
+async fn count_tokens_observes_a_drifted_client_version_before_dispatch() {
+    let (state, _dir) = test_state();
+    let mut req = post_req(
+        Some("application/json"),
+        r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
+    );
+    req.headers_mut().insert(
+        axum::http::header::USER_AGENT,
+        DRIFTED_CLIENT_UA.parse().unwrap(),
+    );
+
+    let _resp = app(Arc::clone(&state))
+        .oneshot(req)
+        .await
+        .expect("router is infallible");
+
+    assert!(
+        !state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+        "the handler must have already recorded this version, so a re-observation is a no-op"
+    );
+}
+
+/// The observation happens even though this request cannot dispatch (no
+/// count_tokens-capable provider is configured), which is what "after
+/// parse, before dispatch" buys: the signal does not depend on the
+/// upstream being reachable.
+#[tokio::test]
+async fn count_tokens_records_the_observation_independently_of_dispatch_outcome() {
+    let (state, _dir) = test_state();
+    let mut req = post_req(
+        Some("application/json"),
+        r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
+    );
+    req.headers_mut().insert(
+        axum::http::header::USER_AGENT,
+        DRIFTED_CLIENT_UA.parse().unwrap(),
+    );
+
+    let resp = app(Arc::clone(&state))
+        .oneshot(req)
+        .await
+        .expect("router is infallible");
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "no capable provider is configured, so this request does not succeed"
+    );
+    assert!(!state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)));
+}
+
+/// A malformed body is rejected BEFORE the observation, so a client that
+/// cannot even be parsed contributes no version record.
+#[tokio::test]
+async fn count_tokens_does_not_observe_when_the_body_never_parsed() {
+    let (state, _dir) = test_state();
+    let mut req = post_req(Some("application/json"), "{ not valid json");
+    req.headers_mut().insert(
+        axum::http::header::USER_AGENT,
+        DRIFTED_CLIENT_UA.parse().unwrap(),
+    );
+
+    let _resp = app(Arc::clone(&state))
+        .oneshot(req)
+        .await
+        .expect("router is infallible");
+
+    assert!(
+        state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+        "nothing was observed on a rejected request, so this is the first sighting"
+    );
+}
+
+/// A version well clear of anything routectl could mint, so the assertions
+/// above test drift rather than coincidence with the compiled pin.
+const DRIFTED_VERSION: &str = "99.9.9";
+const DRIFTED_CLIENT_UA: &str = "claude-cli/99.9.9 (external, sdk-cli)";

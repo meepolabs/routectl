@@ -17,3 +17,4 @@ pub mod proxy;
 pub mod server;
 #[cfg(test)]
 pub(crate) mod test_secret;
+pub(crate) mod warn_dedup;

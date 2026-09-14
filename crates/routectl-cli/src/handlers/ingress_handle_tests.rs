@@ -5141,3 +5141,205 @@ mod pre_change_ingress_contract {
         assert_eq!(extras["future_unknown_knob"], "keep-me");
     }
 }
+
+/// The state-owned compiled-pin drift guard, observed at the shared
+/// ingress funnel. These pin the OBSERVATION, not the response: every
+/// request below fails to dispatch (no reachable provider is configured),
+/// which is the point -- the signal must not depend on the upstream.
+mod cc_pin_drift_observation {
+    use std::sync::Arc;
+
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+
+    use crate::handlers::ingress_handle::ingress_handle;
+    use crate::ingress::anthropic::AnthropicIngress;
+    use crate::server::AppState;
+
+    /// A version well clear of anything routectl could mint, so these
+    /// assert drift rather than coincidence with the compiled pin.
+    const DRIFTED_VERSION: &str = "99.9.9";
+    const OTHER_DRIFTED_VERSION: &str = "99.9.8";
+
+    fn state() -> (Arc<AppState>, tempfile::TempDir) {
+        let swap = Arc::new(arc_swap::ArcSwap::from(super::k_test_router()));
+        AppState::for_test(swap)
+    }
+
+    fn request_headers(ua: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        if let Some(ua) = ua {
+            headers.insert(header::USER_AGENT, ua.parse().unwrap());
+        }
+        headers
+    }
+
+    fn body(stream: bool) -> Result<Bytes, axum::extract::rejection::BytesRejection> {
+        let stream_field = if stream { "true" } else { "false" };
+        Ok(Bytes::from(format!(
+            "{{\"model\":\"m\",\"max_tokens\":16,\"stream\":{stream_field},\
+             \"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}"
+        )))
+    }
+
+    fn ua_for(version: &str) -> String {
+        format!("claude-cli/{version} (external, sdk-cli)")
+    }
+
+    #[tokio::test]
+    async fn the_non_streaming_funnel_observes_a_drifted_client_version() {
+        let (state, _dir) = state();
+
+        let _resp = ingress_handle(
+            Arc::clone(&state),
+            request_headers(Some(&ua_for(DRIFTED_VERSION))),
+            None,
+            body(false),
+            AnthropicIngress,
+        )
+        .await;
+
+        assert!(
+            !state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+            "the funnel must have already recorded this version"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streaming_funnel_observes_through_the_same_call_site() {
+        let (state, _dir) = state();
+
+        let _resp = ingress_handle(
+            Arc::clone(&state),
+            request_headers(Some(&ua_for(DRIFTED_VERSION))),
+            None,
+            body(true),
+            AnthropicIngress,
+        )
+        .await;
+
+        assert!(
+            !state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+            "stream and complete share one funnel, so one observation covers both"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_user_agent_records_nothing() {
+        let (state, _dir) = state();
+
+        let _resp = ingress_handle(
+            Arc::clone(&state),
+            request_headers(None),
+            None,
+            body(false),
+            AnthropicIngress,
+        )
+        .await;
+
+        assert!(
+            state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+            "no User-Agent means no observation, so this is the first sighting"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_never_parsed_records_nothing() {
+        let (state, _dir) = state();
+        let malformed: Result<Bytes, axum::extract::rejection::BytesRejection> =
+            Ok(Bytes::from_static(b"{ not valid json"));
+
+        let resp = ingress_handle(
+            Arc::clone(&state),
+            request_headers(Some(&ua_for(DRIFTED_VERSION))),
+            None,
+            malformed,
+            AnthropicIngress,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+            "the observation sits after a successful parse, so a rejected body records nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn alternating_client_versions_each_record_once() {
+        let (state, _dir) = state();
+
+        for version in [
+            DRIFTED_VERSION,
+            OTHER_DRIFTED_VERSION,
+            DRIFTED_VERSION,
+            OTHER_DRIFTED_VERSION,
+        ] {
+            let _resp = ingress_handle(
+                Arc::clone(&state),
+                request_headers(Some(&ua_for(version))),
+                None,
+                body(false),
+                AnthropicIngress,
+            )
+            .await;
+        }
+
+        assert!(!state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)));
+        assert!(
+            !state
+                .cc_pin_drift
+                .observe_version(Some(OTHER_DRIFTED_VERSION)),
+            "both alternating versions are tracked, not just the last one seen"
+        );
+    }
+
+    /// A router hot-swap replaces the routing surface, not the guard: the
+    /// guard hangs off `AppState`, which outlives the swap.
+    #[tokio::test]
+    async fn a_router_hot_swap_does_not_reset_the_observation_record() {
+        let (state, _dir) = state();
+        let _resp = ingress_handle(
+            Arc::clone(&state),
+            request_headers(Some(&ua_for(DRIFTED_VERSION))),
+            None,
+            body(false),
+            AnthropicIngress,
+        )
+        .await;
+
+        state.router.store(super::k_test_router());
+
+        assert!(
+            !state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+            "the record survives a router reload"
+        );
+    }
+
+    /// A freshly built state carries a fresh guard, so one test's
+    /// observations can never satisfy or defeat another's.
+    #[tokio::test]
+    async fn each_app_state_owns_an_independent_guard() {
+        let (first, _first_dir) = state();
+        let (second, _second_dir) = state();
+
+        let _resp = ingress_handle(
+            Arc::clone(&first),
+            request_headers(Some(&ua_for(DRIFTED_VERSION))),
+            None,
+            body(false),
+            AnthropicIngress,
+        )
+        .await;
+
+        assert!(!first.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)));
+        assert!(
+            second.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
+            "a second state's guard knows nothing about the first's traffic"
+        );
+    }
+}

@@ -129,6 +129,7 @@ declare -A UNSCANNED_DIRS=(
     [crates/routectl-cli/src/main.rs]="binary shim: parses argv and hands off to commands/, no tracing call of any kind"
     [crates/routectl-cli/src/config_classify.rs]="pure Config-diff classification returning changed-key sets to its callers; no tracing call of any kind"
     [crates/routectl-cli/src/test_secret.rs]="test-only secret helper, not compiled into the shipped binary; no tracing call of any kind"
+    [crates/routectl-cli/src/warn_dedup.rs]="pure bounded dedup decision returning an enum to its callers; emits nothing, so every log target and field stays at the call sites the tiers above already scan"
 )
 
 if ! command -v rg >/dev/null 2>&1; then

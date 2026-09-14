@@ -142,6 +142,12 @@ the observed Claude Code version from the `claude-cli/<version>`
 `User-Agent` header and compares it against `tested_cc_version`. On a
 mismatch it logs a WARNING once per distinct observed version (a
 version change re-warns) -- it never refuses or alters the request.
+Any post-prefix token is compared verbatim, including a prerelease,
+build-suffixed, or otherwise opaque one, because `tested_cc_version` is
+a value you entered and narrowing what counts as a version here would
+silently stop warning about exactly the drift you asked to hear about
+(the stricter version parser routectl uses for its own compiled-pin
+check does not narrow this guard).
 Leaving `tested_cc_version` unset (the default) disables the check
 entirely: no extraction, no comparison, no warning.
 

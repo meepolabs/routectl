@@ -137,6 +137,15 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // `stainless_headers` empty.
     capture_stainless_headers(&headers, &router, &state.mitm_seam_nonce, &mut req);
 
+    // Compiled-pin drift observation, once per inbound request, AFTER the
+    // body parsed and BEFORE dispatch: a request that never parsed is not
+    // a client report worth recording, and observing here (rather than on
+    // the provider leg) keeps it exactly-once under retry and fallback.
+    // This funnel covers the messages / chat-completions / responses
+    // dialects on both the complete and stream paths; count_tokens has its
+    // own call site because it does not funnel through here.
+    state.cc_pin_drift.observe_headers(&headers);
+
     let mut opts = RouterOptions::new();
     // Gate `x-routectl-disable-fallbacks` behind the server-side
     // `[server] allow_disable_fallbacks` knob (default true). When the

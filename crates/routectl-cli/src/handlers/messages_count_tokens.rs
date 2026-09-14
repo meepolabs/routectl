@@ -67,6 +67,12 @@ pub async fn count_tokens(
         Err(e) => return map_error(envelope, e),
     };
 
+    // Compiled-pin drift observation, after a successful parse and before
+    // dispatch. count_tokens is the one inference endpoint that does not
+    // funnel through `ingress_handle`, so without this call a base-url
+    // client sizing its context window would produce no drift signal.
+    state.cc_pin_drift.observe_headers(&headers);
+
     // Snapshot the live Router once. Hot-reload-safe: if a swap
     // happens between the snapshot and `count_tokens`, the request
     // still uses the snapshot's routing surface, not a half-applied

@@ -240,7 +240,10 @@ license.
   pass-through only; named so the egress 4xx diagnostics match on them without
   re-typing the wire strings), consumed by the
   anthropic-api provider's header composition (`build_headers`) and the
-  beta-decision 4xx observability
+  beta-decision 4xx observability. Also the Claude-CLI User-Agent readers both
+  version checks share: `compiled_claude_cli_version`, strict
+  `parse_claude_cli_version`, loose `claude_cli_ua_token`,
+  `parse_claude_cli_ua_surface`
 - `src/identity/antigravity.rs` -- compiled Antigravity IDE identity for the
   gemini cloud-code lane: `PINNED_IDE_VERSION` (the client's `ideVersion`, a
   compiled pin with no live fetcher), `IDE_NAME`, a private pure
@@ -3559,7 +3562,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/server/mod.rs` -- server module hub: the shared `AppState` every axum
   handler reads (`Router` behind `ArcSwap` for lockless hot-swap, plus the
-  sibling usage handle, activation inventory, and MITM seam nonce), the
+  sibling usage handle, activation inventory, MITM seam nonce, and the
+  compiled-pin drift guard), the
   `check_bind_safety` loopback guard, the per-concern submodule declarations,
   and the `server::` re-exports callers use. Unit tests are paired
   per-concern: the `#[path]`-included hub sidecar `tests.rs` keeps only the
@@ -3638,6 +3642,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   boot's revision via `try_send_capability_event`. `emit_rebuild_log` reports
   the per-verdict tally with WARN-on-`REBUILD_ROW_LIMIT`-truncate. Boot never
   fails. Tests in the `#[path]`-included `capability_rebuild_tests.rs`
+- `src/server/cc_pin_drift.rs` -- `CcPinDriftGuard`: warns once per distinct
+  ingress-observed Claude Code version differing from the compiled pin.
+  `AppState`-owned; distinct log target/fields from `proxy::cc_version`
 - `src/server/ledger_reader.rs` -- shared read-only bridge from the usage
   capability-event ledger to the `routectl-router` replay seam, constructed by
   BOTH the serve warm (`capability_rebuild.rs`) and the offline doctor gather
@@ -4536,14 +4543,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `not_after` (truncated to midnight UTC to match the `Time::MIDNIGHT` rcgen
   bakes into the DER) is mirrored into a sidecar TOML read directly on reload,
   rather than re-parsing the X.509 DER `notAfter`
-- `src/proxy/cc_version.rs` -- Claude Code version warn-and-proceed check:
-  WARNS (never hard-refuses, so a CC release never breaks routectl) when the
-  observed version drifts from the tested one, the only signal that CC's wire
-  shape moved out from under `routectl_core::identity::anthropic`'s pinned
-  defaults. `observed_cc_version(&HeaderMap)` extracts the `<version>` token
-  from a `claude-cli/<version> (external, cli)` `User-Agent`;
-  `CcVersionWarnGuard::check(tested, observed)` dedups so a steady mismatch
-  warns exactly once and a version change re-warns
+- `src/proxy/cc_version.rs` -- `CcVersionWarnGuard`: opt-in MITM check of the
+  observed version against the operator's `[mitm] tested_cc_version`. Warns,
+  never refuses; reads any post-prefix token through core's loose helper
 - `src/proxy/forward.rs` -- the dumb, classification-agnostic byte forwarder
   both split legs reuse (loopback re-inject and catch-all upstream forward):
   streams bytes and records what it is told, never classifies. `forward(...)`
@@ -4578,7 +4580,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   own regression test. `ProxyMetrics` counts requests by the three
   closed dims (`Leg` / `ResultClass` / `PathClass`), open/closed streams, idle
   aborts, unknown forwarded paths, and TLS handshake failures/timeouts;
-  `WarnOnce::warn_once(method, path)` dedups a per-path warning. By
+  `WarnOnce::warn_once(method, path)` dedups a per-path warning over a shared
+  `warn_dedup::CappedWarnSet`. By
   construction no token / credential / body ever enters a counter dimension or
   a log line -- the only inputs are the small closed enums plus method + path
 - `src/proxy/mitm.rs` -- per-connection TLS termination + HTTP/1.1 serving.
@@ -4937,6 +4940,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `[capability]` section classifies as plain hot-reloadable (neither
   restart-required nor high-consequence) and `[pools]` as high-consequence
   beside `[providers]`
+- `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
+  dedup decision shared by `proxy::metrics::WarnOnce` and
+  `server::cc_pin_drift`. Decides only -- it emits nothing itself
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion
   against an alias or model nickname
 - `src/commands/prompt_size.rs` -- `routectl prompt-size --alias <X> --request
@@ -5785,6 +5791,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   that diffs the covered-cell set against a caller-supplied git revision
   (`ROUTECTL_COVERAGE_BASE_REV`) treating git itself as the prior run --
   never a silent pass when no baseline is given
+- `tests/client_fingerprint_pin.rs` -- exact-pins the five client-fingerprint
+  dimensions the committed `driver/anthropic-api/` corpus carries, each with a
+  reviewed `Relation` against routectl's minted values. Only UNPINNED reds
+- `tests/cc_version_warn_log.rs` -- pins each version warning's log target and
+  exact field set, and that the two guards share no field name
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor

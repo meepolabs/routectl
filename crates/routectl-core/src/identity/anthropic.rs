@@ -23,6 +23,168 @@
 /// Claude Code CLI version routectl mimics in the default User-Agent.
 const CLAUDE_CLI_VERSION: &str = "2.1.169";
 
+/// Prefix Claude Code's own `User-Agent` carries ahead of its version:
+/// `claude-cli/<version> (external, <surface>)`. The single source of
+/// truth for that literal, shared by the minted User-Agent below and by
+/// every reader here, so a composer and a reader can never disagree
+/// about the shape.
+const CLAUDE_CLI_UA_PREFIX: &str = "claude-cli/";
+
+/// Surface token routectl mints in its own `User-Agent` parenthetical.
+/// A fingerprint dimension in its own right, named so a reader can pin
+/// it without re-typing the composed string.
+pub const MINTED_UA_SURFACE: &str = "cli";
+
+/// Upper bound on the whole version token the STRICT parser will return.
+/// The returned value becomes a dedup-set key and a log field, so it is
+/// bounded here rather than at each caller. Three 8-digit components plus
+/// their two separators is 26; 32 leaves headroom without admitting a
+/// value worth truncating.
+const MAX_CLI_VERSION_TOKEN_LEN: usize = 32;
+
+/// Upper bound on the digits in one version component. A real component
+/// is 1-3 digits; 8 admits any plausible future numbering while refusing
+/// a value built to grow a key.
+const MAX_CLI_VERSION_COMPONENT_DIGITS: usize = 8;
+
+/// Components a stable version carries: `major.minor.patch`.
+const CLI_VERSION_COMPONENTS: usize = 3;
+
+/// The compiled Claude Code CLI version routectl mints. Read by any
+/// caller that must compare a version observed on the wire against the
+/// one this build presents, so the comparison never re-types the literal.
+pub const fn compiled_claude_cli_version() -> &'static str {
+    CLAUDE_CLI_VERSION
+}
+
+/// LOOSE read: the first whitespace-delimited token after the
+/// `claude-cli/` prefix, whatever it is -- a stable version, a
+/// prerelease, a build-suffixed value, or an opaque string.
+///
+/// This is the shape a caller wants when it compares against a string a
+/// human supplied: an operator's recorded tested-version is matched
+/// verbatim, so narrowing what counts as a token here would silently stop
+/// warning about the very drift they asked to be told about. Callers that
+/// key durable state on the result want [`parse_claude_cli_version`]
+/// instead, which refuses the values that vary per request.
+///
+/// `None` for a value that does not START with the prefix, or that
+/// carries no non-whitespace token after it.
+pub fn claude_cli_ua_token(user_agent: &str) -> Option<&str> {
+    let token = user_agent
+        .strip_prefix(CLAUDE_CLI_UA_PREFIX)?
+        .split_whitespace()
+        .next()?;
+    (!token.is_empty()).then_some(token)
+}
+
+/// STRICT read: a stable `major.minor.patch` Claude Code CLI version, or
+/// nothing.
+///
+/// Accepts only the bounded stable shape at the START of the value:
+/// exactly 3 components (`major.minor.patch`), each 1 to 8 ASCII digits
+/// with no leading zero (except a bare `0`), the whole token at most 32
+/// bytes, ending at a whitespace boundary. The version may be followed by
+/// further platform detail.
+///
+/// Every refusal has a caller-visible reason. A build or prerelease
+/// suffix is what a per-request billing attribution token carries, so a
+/// guard deduping on it would re-warn as that suffix changed. A leading
+/// zero gives one version two spellings, which a string-keyed set would
+/// track as two clients. The length bounds hold because the returned
+/// value is stored and logged. Panic-free by construction: it only
+/// slices at ASCII boundaries the prefix strip and `split_whitespace`
+/// already established.
+///
+/// `None` is indistinguishable from an absent header to every caller --
+/// no version was observed.
+pub fn parse_claude_cli_version(user_agent: &str) -> Option<&str> {
+    let rest = user_agent.strip_prefix(CLAUDE_CLI_UA_PREFIX)?;
+    // A token must start immediately: whitespace here means the client
+    // sent a prefix with no version attached to it.
+    if rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let token = rest.split_whitespace().next()?;
+    if token.is_empty() || token.len() > MAX_CLI_VERSION_TOKEN_LEN {
+        return None;
+    }
+
+    let mut components = 0usize;
+    for component in token.split('.') {
+        // Refuse a fourth component before inspecting it, so a long
+        // dotted string is rejected on its shape rather than scanned.
+        components += 1;
+        if components > CLI_VERSION_COMPONENTS {
+            return None;
+        }
+        if component.is_empty() || component.len() > MAX_CLI_VERSION_COMPONENT_DIGITS {
+            return None;
+        }
+        if !component.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if component.len() > 1 && component.starts_with('0') {
+            return None;
+        }
+    }
+    (components == CLI_VERSION_COMPONENTS).then_some(token)
+}
+
+/// Upper bound on the surface token [`parse_claude_cli_ua_surface`] will
+/// return. The value becomes a pinned observation and a comparison key, so
+/// it is bounded at the parse; the real tokens are 3 and 7 bytes.
+const MAX_UA_SURFACE_LEN: usize = 32;
+
+/// The SURFACE token a Claude CLI `User-Agent` names in its
+/// parenthetical: the `sdk-cli` in `claude-cli/2.1.246 (external,
+/// sdk-cli)`.
+///
+/// Its own dimension, deliberately separate from the version: a client
+/// and routectl can agree on one and differ on the other, and a caller
+/// pinning only the version must not read as having pinned the whole
+/// User-Agent.
+///
+/// Accepts only the shape a Claude CLI actually sends: the `claude-cli/`
+/// prefix at the START, then a `(<origin>, <surface>)` parenthetical with
+/// both halves non-empty, the surface at most 32 bytes drawn from ASCII
+/// alphanumerics plus `-` and `_`. Surrounding whitespace is trimmed; the
+/// comma may have none.
+///
+/// Every requirement earns its place. Without the prefix, any browser
+/// `User-Agent` -- `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)` and
+/// its many commas -- would yield a "surface" that then landed in a pinned
+/// observation. The charset and the length bound keep a path, a URL, or
+/// non-ASCII bytes from becoming a comparison key, and they are also what
+/// refuses an AMBIGUOUS multi-field parenthetical: a second comma lands
+/// inside the surface half, where the charset rejects it, so a value
+/// carrying more fields than this shape names is never resolved by
+/// guessing which field was meant. `None` for anything else --
+/// indistinguishable, to every caller, from a client that reported no
+/// surface at all.
+pub fn parse_claude_cli_ua_surface(user_agent: &str) -> Option<&str> {
+    let after_prefix = user_agent.strip_prefix(CLAUDE_CLI_UA_PREFIX)?;
+    let parenthetical = after_prefix.split_once('(')?.1.split_once(')')?.0;
+
+    let (origin, surface) = parenthetical.split_once(',')?;
+    if origin.trim().is_empty() {
+        return None;
+    }
+
+    let surface = surface.trim();
+    if surface.is_empty() || surface.len() > MAX_UA_SURFACE_LEN {
+        return None;
+    }
+    // Also the multi-field refusal: a second comma is not in this charset.
+    if !surface
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    Some(surface)
+}
+
 /// Stainless SDK package version stamped in `x-stainless-package-version`.
 const STAINLESS_PACKAGE_VERSION: &str = "0.94.0";
 
@@ -87,8 +249,10 @@ pub const STRUCTURED_OUTPUTS_BETA: &str = "structured-outputs-2025-12-15";
 /// process; subsequent calls return the cached value.
 pub fn default_claude_code_user_agent() -> &'static str {
     static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    UA.get_or_init(|| format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))
-        .as_str()
+    UA.get_or_init(|| {
+        format!("{CLAUDE_CLI_UA_PREFIX}{CLAUDE_CLI_VERSION} (external, {MINTED_UA_SURFACE})")
+    })
+    .as_str()
 }
 
 /// Map `std::env::consts::ARCH` to the Stainless `x-stainless-arch`
@@ -205,6 +369,371 @@ pub fn is_anthropic_api_host(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_claude_cli_version_is_the_minted_literal() {
+        assert_eq!(compiled_claude_cli_version(), CLAUDE_CLI_VERSION);
+        assert!(
+            default_claude_code_user_agent().contains(compiled_claude_cli_version()),
+            "the accessor and the minted User-Agent must read one constant"
+        );
+    }
+
+    #[test]
+    fn parse_extracts_the_version_from_a_claude_cli_user_agent() {
+        assert_eq!(
+            parse_claude_cli_version("claude-cli/2.1.246 (external, sdk-cli)"),
+            Some("2.1.246")
+        );
+        assert_eq!(
+            parse_claude_cli_version("claude-cli/2.1.169 (external, cli)"),
+            Some("2.1.169")
+        );
+        // The whole value may be just the prefix + version, with no
+        // trailing platform detail.
+        assert_eq!(
+            parse_claude_cli_version("claude-cli/2.1.263"),
+            Some("2.1.263")
+        );
+    }
+
+    #[test]
+    fn parse_accepts_the_minted_user_agent_routectl_itself_emits() {
+        // Positive control for the reject cases below: the shape routectl
+        // puts on the wire must parse, or the rejects prove nothing.
+        assert_eq!(
+            parse_claude_cli_version(default_claude_code_user_agent()),
+            Some(CLAUDE_CLI_VERSION)
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_non_claude_cli_user_agent() {
+        assert_eq!(parse_claude_cli_version("Mozilla/5.0 (X11; Linux)"), None);
+        assert_eq!(parse_claude_cli_version("anthropic-sdk/0.112.1"), None);
+        assert_eq!(parse_claude_cli_version(""), None);
+        // The prefix must be at the START; a value that merely contains it
+        // is a different client quoting one.
+        assert_eq!(
+            parse_claude_cli_version("proxy/1.0 (claude-cli/2.1.246)"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_version_token_that_is_not_a_stable_release() {
+        // A build/prerelease suffix is exactly what the billing block's
+        // per-request `cc_version` carries; the stable UA token never does,
+        // so accepting one here would make an unstable value look stable.
+        assert_eq!(parse_claude_cli_version("claude-cli/2.1.246.1e8"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2.1.246-beta.1"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2.1.246+build"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/abc"), None);
+    }
+
+    #[test]
+    fn parse_rejects_a_malformed_or_empty_version_token() {
+        assert_eq!(parse_claude_cli_version("claude-cli/"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/ (external)"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2."), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/.2"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2..1"), None);
+        // Non-ASCII digits must not pass as numeric components.
+        assert_eq!(parse_claude_cli_version("claude-cli/2.1.\u{0664}"), None);
+    }
+
+    #[test]
+    fn the_strict_parser_bounds_the_token_it_will_return() {
+        // The returned value becomes a dedup-set key and a log field, so its
+        // size is bounded at the parse rather than at every caller.
+        let overlong_component = format!("claude-cli/2.1.{}", "9".repeat(9));
+        assert_eq!(parse_claude_cli_version(&overlong_component), None);
+        let at_the_component_bound = format!("claude-cli/2.1.{}", "9".repeat(8));
+        assert_eq!(
+            parse_claude_cli_version(&at_the_component_bound).map(str::len),
+            Some(12),
+            "a component at the bound is still a version"
+        );
+
+        // The TOTAL bound is the outer guard: it refuses an oversized token
+        // before the component walk runs at all, so a long dotted string is
+        // rejected on its size rather than scanned component by component.
+        let long_dotted = "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16.17";
+        assert!(
+            long_dotted.len() > MAX_CLI_VERSION_TOKEN_LEN,
+            "control: this token must exceed the total bound"
+        );
+        assert_eq!(
+            parse_claude_cli_version(&format!("claude-cli/{long_dotted}")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_strict_parser_rejects_more_than_three_components_without_scanning_further() {
+        assert_eq!(parse_claude_cli_version("claude-cli/1.2.3.4"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/1.2.3.4.5.6.7.8"), None);
+    }
+
+    #[test]
+    fn the_strict_parser_rejects_a_leading_zero_but_accepts_a_bare_zero() {
+        // A leading zero makes two spellings of one version, so a dedup set
+        // keyed on the string would track them as different clients.
+        assert_eq!(parse_claude_cli_version("claude-cli/02.1.3"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2.01.3"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2.1.03"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/2.1.00"), None);
+        // A single zero is the only spelling of zero, so it is legal.
+        assert_eq!(parse_claude_cli_version("claude-cli/0.0.0"), Some("0.0.0"));
+        assert_eq!(parse_claude_cli_version("claude-cli/2.0.1"), Some("2.0.1"));
+    }
+
+    #[test]
+    fn the_strict_parser_rejects_whitespace_where_the_version_should_start() {
+        assert_eq!(parse_claude_cli_version("claude-cli/ 2.1.3"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/\t2.1.3"), None);
+        assert_eq!(parse_claude_cli_version("claude-cli/\n2.1.3"), None);
+    }
+
+    #[test]
+    fn the_strict_parser_accepts_the_real_shapes_both_clients_send() {
+        // Paired real-shape accepts for the reject batches above: the
+        // corpus's own surface token and the one routectl mints. A parser
+        // that rejected these would pass every reject test and be useless.
+        assert_eq!(
+            parse_claude_cli_version("claude-cli/2.1.246 (external, sdk-cli)"),
+            Some("2.1.246")
+        );
+        assert_eq!(
+            parse_claude_cli_version("claude-cli/2.1.270 (external, cli)"),
+            Some("2.1.270")
+        );
+    }
+
+    #[test]
+    fn the_loose_helper_returns_any_post_prefix_token_including_unstable_ones() {
+        // The MITM guard's contract, preserved: it warns on whatever the
+        // client put there, including a prerelease, a build suffix, or an
+        // opaque token, because an operator's tested-version string is
+        // compared verbatim.
+        assert_eq!(
+            claude_cli_ua_token("claude-cli/2.1.246 (external, sdk-cli)"),
+            Some("2.1.246")
+        );
+        assert_eq!(
+            claude_cli_ua_token("claude-cli/2.1.246.1e8 (external, cli)"),
+            Some("2.1.246.1e8")
+        );
+        assert_eq!(
+            claude_cli_ua_token("claude-cli/2.1.246-beta.1"),
+            Some("2.1.246-beta.1")
+        );
+        assert_eq!(claude_cli_ua_token("claude-cli/abc"), Some("abc"));
+    }
+
+    #[test]
+    fn the_loose_helper_still_requires_the_prefix_and_a_token() {
+        assert_eq!(claude_cli_ua_token("claude-cli/"), None);
+        assert_eq!(claude_cli_ua_token("claude-cli/   "), None);
+        assert_eq!(claude_cli_ua_token("Mozilla/5.0 (X11; Linux)"), None);
+        assert_eq!(claude_cli_ua_token(""), None);
+        // Whitespace after the prefix is SKIPPED, not refused: the token is
+        // whatever the client put first. This is the long-standing MITM
+        // reading and is preserved deliberately -- that guard compares the
+        // token against a string a human typed, so it must not decide for
+        // itself which values are worth reporting. The strict parser refuses
+        // this same value.
+        assert_eq!(
+            claude_cli_ua_token("claude-cli/ (external)"),
+            Some("(external)")
+        );
+        assert_eq!(parse_claude_cli_version("claude-cli/ (external)"), None);
+    }
+
+    #[test]
+    fn the_two_parsers_differ_exactly_on_token_stability() {
+        // The loose helper accepts a superset. Where the strict one answers,
+        // both must answer the SAME token -- otherwise one of them is
+        // reading a different part of the value.
+        for ua in [
+            "claude-cli/2.1.246 (external, sdk-cli)",
+            "claude-cli/2.1.246.1e8",
+            "claude-cli/abc",
+            "claude-cli/",
+            "Mozilla/5.0",
+        ] {
+            if let Some(strict) = parse_claude_cli_version(ua) {
+                assert_eq!(claude_cli_ua_token(ua), Some(strict));
+            }
+        }
+        assert!(parse_claude_cli_version("claude-cli/2.1.246.1e8").is_none());
+        assert!(claude_cli_ua_token("claude-cli/2.1.246.1e8").is_some());
+    }
+
+    #[test]
+    fn the_minted_user_agent_surface_token_is_readable_on_its_own() {
+        // The surface token is a fingerprint dimension in its own right: the
+        // corpus client and routectl spell it differently, and the version
+        // parse says nothing about it.
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external, sdk-cli)"),
+            Some("sdk-cli")
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.169 (external, cli)"),
+            Some("cli")
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface(default_claude_code_user_agent()),
+            Some(MINTED_UA_SURFACE),
+            "the minted surface token must be readable out of the minted UA"
+        );
+    }
+
+    /// Paired accepts for the reject batches below: every shape a real
+    /// Claude CLI is known to send must still parse, or the rejects prove
+    /// nothing about the parser's usefulness.
+    #[test]
+    fn the_surface_parser_accepts_the_real_shapes_and_tolerates_spacing() {
+        for (ua, expected) in [
+            ("claude-cli/2.1.246 (external, sdk-cli)", "sdk-cli"),
+            ("claude-cli/2.1.169 (external, cli)", "cli"),
+            // No space after the comma, and extra padding around it: both
+            // are the same self-report.
+            ("claude-cli/2.1.246 (external,sdk-cli)", "sdk-cli"),
+            ("claude-cli/2.1.246 (external,   cli)", "cli"),
+            // A version this parser does not vet is still fine here: the
+            // surface is its own dimension.
+            ("claude-cli/2.1.246.1e8 (external, sdk-cli)", "sdk-cli"),
+            // Trailing detail after the parenthetical does not matter.
+            ("claude-cli/2.1.246 (external, cli) extra", "cli"),
+        ] {
+            assert_eq!(parse_claude_cli_ua_surface(ua), Some(expected), "ua={ua}");
+        }
+    }
+
+    #[test]
+    fn the_surface_parser_requires_the_claude_cli_prefix() {
+        // A foreign client's parenthetical is not a Claude CLI surface
+        // report, however comma-shaped it happens to be. Without the prefix
+        // requirement, every browser UA below would yield a "surface".
+        assert_eq!(
+            parse_claude_cli_ua_surface(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface("Mozilla/5.0 (X11; Linux x86_64)"),
+            None
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface("some-proxy/1.0 (external, cli)"),
+            None
+        );
+        // Prefix present but not at the START is a different client quoting
+        // one, exactly as the two version readers treat it.
+        assert_eq!(
+            parse_claude_cli_ua_surface("proxy/1.0 (claude-cli/2.1.246 (external, cli))"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_surface_parser_requires_the_two_part_parenthetical() {
+        // No parenthetical, unclosed, empty, one part, or an empty surface.
+        assert_eq!(parse_claude_cli_ua_surface("claude-cli/2.1.246"), None);
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external, sdk-cli"),
+            None
+        );
+        assert_eq!(parse_claude_cli_ua_surface("claude-cli/2.1.246 ()"), None);
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external)"),
+            None
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external, )"),
+            None
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (, cli)"),
+            None,
+            "an empty origin half is not the expected shape either"
+        );
+    }
+
+    #[test]
+    fn the_surface_parser_rejects_an_ambiguous_multi_part_surface() {
+        // More than one comma means the value carries more fields than this
+        // shape describes, and picking one would be a guess about which
+        // field is the surface.
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external, cli, extra)"),
+            None
+        );
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external, cli,)"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_surface_parser_bounds_the_token_it_will_return() {
+        // The returned value becomes a pinned observation and a comparison
+        // key, so its size is bounded at the parse.
+        let at_bound = format!("claude-cli/2.1.246 (external, {})", "a".repeat(32));
+        assert_eq!(
+            parse_claude_cli_ua_surface(&at_bound).map(str::len),
+            Some(32),
+            "a token at the bound is still a surface"
+        );
+        let over_bound = format!("claude-cli/2.1.246 (external, {})", "a".repeat(33));
+        assert_eq!(parse_claude_cli_ua_surface(&over_bound), None);
+    }
+
+    #[test]
+    fn the_surface_parser_allows_only_a_narrow_ascii_token() {
+        // The charset admits `cli` / `sdk-cli` and their plausible
+        // relatives, and nothing that could carry a path, a URL, a version
+        // string with spaces, or non-ASCII bytes into a pinned observation.
+        for ok in ["cli", "sdk-cli", "sdk_cli", "cli2", "SDK-CLI"] {
+            let ua = format!("claude-cli/2.1.246 (external, {ok})");
+            assert_eq!(parse_claude_cli_ua_surface(&ua), Some(ok));
+        }
+        for bad in [
+            "sdk cli",
+            "sdk/cli",
+            "sdk.cli",
+            "cli;drop",
+            "cli\tx",
+            "cl\u{00ed}",
+            "cli\u{200b}",
+        ] {
+            let ua = format!("claude-cli/2.1.246 (external, {bad})");
+            assert_eq!(
+                parse_claude_cli_ua_surface(&ua),
+                None,
+                "surface {bad:?} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unparseable_surface_is_none_rather_than_a_guess() {
+        assert_eq!(parse_claude_cli_ua_surface("claude-cli/2.1.246"), None);
+        assert_eq!(parse_claude_cli_ua_surface("claude-cli/2.1.246 ()"), None);
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external)"),
+            None
+        );
+        assert_eq!(parse_claude_cli_ua_surface("Mozilla/5.0 (X11)"), None);
+        assert_eq!(
+            parse_claude_cli_ua_surface("claude-cli/2.1.246 (external, )"),
+            None
+        );
+    }
 
     #[test]
     fn is_anthropic_api_host_matches_only_the_exact_host() {
