@@ -241,6 +241,21 @@ PATTERNS=(
     'Table-[AB]'
     'Table [AB]'
     'lane-contract'
+    # The cloak enumeration's private companion. Same class as `lane-contract`
+    # and added for the same reason: the doc states on its own first line that it
+    # never enters the code repo, and the natural way to cite the two-tier
+    # ceiling in a weld's module doc is to point at the file that explains it --
+    # which is a filename a reader of this repo cannot open.
+    #
+    # Bare rather than `\.md`, matching the `lane-contract` precedent: a citation
+    # drops the extension as readily as it keeps it.
+    #
+    # MEASURED collision-free across all 1008 tracked files: whole-token
+    # `cloak-baseline` returns zero lines outside this scanner. The hyphen is
+    # what makes it safe -- the weld binary and its support modules spell
+    # themselves with UNDERSCORES (`cloak_baseline_weld`,
+    # `cloak_population`), so no code identifier can match this core.
+    'cloak-baseline'
     'foundations\.md'
     'llm_context/'
 )

@@ -285,6 +285,28 @@ assert_diff_caught "a private-docs path is caught" \
 "+++ b/crates/routectl-providers/src/x.rs
 +// per llm_context/architecture/foundations.md"
 
+# The cloak enumeration's private companion, same class as the lane document
+# above. The paired accepts below are the reason the core is safe to add: the
+# weld binary and its support modules spell themselves with UNDERSCORES, so no
+# code identifier collides with the hyphenated document name.
+assert_diff_caught "the internal cloak enumeration document's own name is caught" \
+"+++ b/crates/routectl-providers/tests/cloak_baseline_weld.rs
++//! the ceiling is stated in cloak-baseline.md in the same terms"
+
+assert_diff_caught "the cloak document name is caught without its extension" \
+"+++ b/crates/routectl-providers/src/anthropic_api/cloak.rs
++// enumerated in cloak-baseline, not repaired"
+
+assert_diff_clean "the weld binary's own underscored name is not the document" \
+"+++ b/docs/CODEMAP.md
++- \`tests/cloak_baseline_weld.rs\` -- the two-tier cloak transform register
++  and its \`cloak_population\` derivation"
+
+assert_diff_clean "an underscored cloak identifier is not the document" \
+"+++ b/crates/routectl-providers/tests/weld_support/cloak_population.rs
++pub const CLOAK_DIR: &str = \"anthropic_api/cloak\";
++fn cloak_baseline_population() {}"
+
 assert_diff_clean "litellm_context is not a private-docs path" \
 "+++ b/crates/routectl-router/src/catalog_codegen.rs
 +    let window = litellm_context(entry)?;"

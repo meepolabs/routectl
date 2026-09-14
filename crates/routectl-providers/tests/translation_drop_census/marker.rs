@@ -258,41 +258,25 @@ fn is_snake_case(value: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// A `<...>f<digits>.<digits>` run, the board task id shape. Detected by scan
-/// rather than by spelling an id out: a literal example of the shape would
-/// itself be the leak this refuses.
-pub fn holds_task_id(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    for (idx, byte) in bytes.iter().enumerate() {
-        if *byte != b'f' {
-            continue;
-        }
-        if idx > 0 && (bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_') {
-            continue;
-        }
-        let mut cursor = idx + 1;
-        let digits_start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-            cursor += 1;
-        }
-        if cursor == digits_start || cursor >= bytes.len() || bytes[cursor] != b'.' {
-            continue;
-        }
-        // A digit-run that spells a Rust FLOAT TYPE is prose, not an id:
-        // `f32.0` / `f64.5` read as a task id to a naive scan, and these are
-        // numeric wire-translation surfaces where that prose is likely. Excluded
-        // by the spelling rather than by requiring two digits after the dot,
-        // because a real id can carry only one there.
-        let width = &text[digits_start..cursor];
-        if matches!(width, "16" | "32" | "64" | "128") {
-            continue;
-        }
-        if bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit) {
-            return true;
-        }
-    }
-    false
-}
+/// The shared weld helpers, declared here rather than in each consumer so the
+/// four binaries that pull this parser in reach one implementation of the
+/// name-resolution and threat-surface scans.
+#[path = "../weld_support/item_resolve.rs"]
+pub mod item_resolve;
+
+/// The board-task-id scan, the bounded `fn <name>` resolver, and the shared
+/// pinning corpus, re-exported from the weld helpers so this parser's consumers
+/// keep importing them from here while exactly one implementation exists. A
+/// second copy would let the census and the cloak register refuse different
+/// shapes, leaving a reader unsure which rule is the contract.
+///
+/// `unused_imports` rather than the file's blanket `dead_code`: these are
+/// re-exports, which that lint does not cover, and each of the four binaries
+/// that pull this module in uses a different subset. The allow is narrowed to
+/// this one item so an unused import anywhere else in the file is still an
+/// error.
+#[allow(unused_imports)]
+pub use item_resolve::{crate_rust_sources, holds_fn, holds_task_id};
 
 /// A line reference in either shape a marker could carry it: the
 /// `<file>.rs:<digits>` suffix, or the prose `line <digits>` / `lines <digits>`

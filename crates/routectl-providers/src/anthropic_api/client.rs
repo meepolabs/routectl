@@ -276,6 +276,29 @@ pub(super) fn should_use_forwarded_bearer(
     use_forwarded_bearer && has_bearer && is_anthropic_api_host(base_url)
 }
 
+/// Union the single OAuth gate flag into an under-composition beta set,
+/// deduplicated through `seen`. Appended rather than inserted in place so the
+/// composed order stays exactly the order the wire carries.
+fn union_oauth_gate_beta(seen: &mut std::collections::BTreeSet<String>, betas: &mut Vec<String>) {
+    let oauth_beta = routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA;
+    if seen.insert(oauth_beta.to_string()) {
+        betas.push(oauth_beta.to_string());
+    }
+}
+
+/// Union the pinned Claude Code beta floor into an under-composition beta set,
+/// deduplicated through `seen`, in the floor's own declaration order.
+fn union_claude_code_beta_floor(
+    seen: &mut std::collections::BTreeSet<String>,
+    betas: &mut Vec<String>,
+) {
+    for flag in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+        if seen.insert((*flag).to_string()) {
+            betas.push((*flag).to_string());
+        }
+    }
+}
+
 /// anthropic-api Messages egress provider.
 pub struct AnthropicApiProvider {
     pub(super) cfg: AnthropicApiConfig,
@@ -629,10 +652,7 @@ impl AnthropicApiProvider {
         // Anthropic verbatim rather than being widened by routectl's minted
         // floor -- that would be a fingerprint the client never sent.
         if self.is_cloak_lane(req) {
-            let oauth_beta = routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA;
-            if beta_seen.insert(oauth_beta.to_string()) {
-                merged_betas.push(oauth_beta.to_string());
-            }
+            union_oauth_gate_beta(&mut beta_seen, &mut merged_betas);
 
             // Pinned Claude Code beta floor. These are operator-equivalent
             // pins (not client-requested), so they bypass the
@@ -644,11 +664,7 @@ impl AnthropicApiProvider {
             // Anthropic 400 the request. Only a non-CC client -- one
             // routectl is cloaking as Claude Code -- gets the full floor.
             if is_non_cc {
-                for t in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
-                    if beta_seen.insert((*t).to_string()) {
-                        merged_betas.push((*t).to_string());
-                    }
-                }
+                union_claude_code_beta_floor(&mut beta_seen, &mut merged_betas);
             }
         }
 
@@ -765,30 +781,8 @@ impl AnthropicApiProvider {
             // the identity defaults so an operator `header_extras` entry
             // still overrides (the apply loop below replaces) and a
             // forwarded client header overrides after that.
-            //   - x-client-request-id: one fresh uuid per request (the
-            //     upstream pairs it with the turn).
-            //   - x-claude-code-session-id: the provider's effective
-            //     session id (the minted identity's session_id, which
-            //     prefers cfg.session_id and falls back to a stable minted
-            //     uuid). Stamped only on this OAuth + anthropic-host path,
-            //     where `self.identity` is always `Some`. A forwarded
-            //     client header still overrides via the apply loop below.
             if is_anthropic_api_host(&self.cfg.base_url) {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                crate::http_client::insert_header(
-                    &mut header_map,
-                    &self.cfg.id,
-                    "x-client-request-id",
-                    &request_id,
-                );
-                if let Some(sid) = self.identity.as_ref().map(|i| &i.session_id) {
-                    crate::http_client::insert_header(
-                        &mut header_map,
-                        &self.cfg.id,
-                        "x-claude-code-session-id",
-                        sid,
-                    );
-                }
+                self.stamp_claude_code_session_identity(&mut header_map);
             }
         }
 
@@ -873,6 +867,40 @@ impl AnthropicApiProvider {
             body_has_effort,
         };
         (rb, decision)
+    }
+
+    /// Stamp the two Claude Code session-identity headers into an
+    /// under-construction header map.
+    ///
+    ///   - `x-client-request-id`: one fresh uuid per request (the upstream
+    ///     pairs it with the turn).
+    ///   - `x-claude-code-session-id`: the provider's effective session id (the
+    ///     minted identity's `session_id`, which prefers `cfg.session_id` and
+    ///     falls back to a stable minted uuid).
+    ///
+    /// Called ONLY from the OauthBearer + api.anthropic.com path, where
+    /// `self.identity` is always `Some` -- so a non-Anthropic base (a
+    /// third-party `/anthropic` surface, a proxy) never receives the Claude-Code
+    /// session id.
+    ///
+    /// Both values are minted, not the client's. On the forwarded leg the
+    /// client's own captured pair is inserted after this and replaces them.
+    fn stamp_claude_code_session_identity(&self, header_map: &mut reqwest::header::HeaderMap) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        crate::http_client::insert_header(
+            header_map,
+            &self.cfg.id,
+            "x-client-request-id",
+            &request_id,
+        );
+        if let Some(sid) = self.identity.as_ref().map(|i| &i.session_id) {
+            crate::http_client::insert_header(
+                header_map,
+                &self.cfg.id,
+                "x-claude-code-session-id",
+                sid,
+            );
+        }
     }
 
     /// Single source of truth for the beta-decision 4xx log lane gate,

@@ -137,6 +137,13 @@ criterion = { workspace = true }
 # client-builder branches through the process environment, so those tests
 # serialize against every other env-touching test in this crate.
 serial_test = "3"
+# Real Rust parser for the cloak baseline weld's item derivation. DEV-only: the
+# shipped library links nothing of it, and the package is already in the
+# lockfile through the proc-macro graph, so this adds no new package. A weld
+# that decided item visibility from a text scan would need brace tracking,
+# which is a hand-rolled Rust grammar -- the one shape this repo's derived
+# checks are not allowed to grow.
+syn = { version = "2", features = ["full", "parsing"] }
 
 # Egress typed->Value serialization cost via AnthropicApiProvider. Requires
 # the `anthropic-api` feature (the provider it constructs). `harness = false`:
