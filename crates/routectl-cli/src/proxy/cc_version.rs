@@ -12,33 +12,41 @@
 //! Claude Code's own `User-Agent` carries its version:
 //! `claude-cli/<version> (external, cli)` (see
 //! `routectl_core::identity::anthropic::default_claude_code_user_agent`).
-//! [`observed_cc_version`] extracts that token from a decrypted
-//! request's headers; [`CcVersionWarnGuard`] dedups the resulting
-//! warning so a steady mismatch warns exactly once and a version change
-//! re-warns (the newly observed version is itself new information).
+//! [`observed_cc_version`] lifts that header off a decrypted request and
+//! reads the post-prefix token through the shared LOOSE core helper
+//! (`claude_cli_ua_token`), which owns the prefix literal but decides
+//! nothing about the token's shape. Loose is the right reading HERE and
+//! not a shortcut: `tested_cc_version` is a string an operator typed and
+//! it is compared verbatim, so a prerelease, build-suffixed, or opaque
+//! token must still produce the warning they asked for. The sibling
+//! `server::cc_pin_drift` guard keys durable state on what it observes and
+//! therefore uses the STRICT parser instead.
+//!
+//! [`CcVersionWarnGuard`] dedups the resulting warning so a steady
+//! mismatch warns exactly once and a version change re-warns (the newly
+//! observed version is itself new information).
+//!
+//! MODULE VISIBILITY: `pub` FOR A CROSS-BINARY TEST, not for callers. The
+//! version-warning log-contract test lives in its own integration binary (a
+//! thread-local capture subscriber over a shared `warn!` callsite is
+//! unreliable inside the lib test binary, where sibling tests poison
+//! tracing's per-callsite `Interest` cache first), and an integration binary
+//! cannot see a `pub(crate)` module. The only production caller is
+//! `proxy::split`.
 
 use std::sync::Mutex;
 
 use http::HeaderMap;
 
-/// Prefix Claude Code's own `User-Agent` uses ahead of its version,
-/// matching `default_claude_code_user_agent`'s wire shape:
-/// `claude-cli/<version> (external, cli)`.
-const CLAUDE_CLI_UA_PREFIX: &str = "claude-cli/";
-
-/// Extracts the `<version>` token from a `claude-cli/<version> ...`
+/// Extracts the version token from a `claude-cli/<token> ...`
 /// `User-Agent` header value on a decrypted MITM request. Returns
-/// `None` for a missing header, a non-UTF8 value, or a `User-Agent`
-/// that doesn't start with the expected prefix followed by a version
-/// token -- callers treat all of those identically (no warning, no
-/// panic).
+/// `None` for a missing header, a non-UTF8 value, or a `User-Agent` that
+/// carries no post-prefix token -- callers treat all of those identically
+/// (no warning, no panic). Any non-empty token is reported, INCLUDING an
+/// unstable or opaque one; see the module doc for why.
 pub fn observed_cc_version(headers: &HeaderMap) -> Option<String> {
     let ua = headers.get(http::header::USER_AGENT)?.to_str().ok()?;
-    let version = ua
-        .strip_prefix(CLAUDE_CLI_UA_PREFIX)?
-        .split_whitespace()
-        .next()?;
-    Some(version.to_string())
+    routectl_core::identity::anthropic::claude_cli_ua_token(ua).map(str::to_string)
 }
 
 /// Dedups the CC-version-mismatch warning: fires at most once for the
@@ -142,6 +150,62 @@ mod tests {
             http::HeaderValue::from_bytes(&[0xC0, 0xAF]).unwrap(),
         );
         assert_eq!(observed_cc_version(&headers), None);
+    }
+
+    #[test]
+    fn observed_cc_version_agrees_with_the_shared_loose_core_helper() {
+        // One helper decides what the post-prefix token IS. This header
+        // extractor's only job is getting the value out of the HeaderMap, so
+        // its answer must be the shared helper's answer for the same string.
+        for ua in [
+            "claude-cli/2.1.246 (external, sdk-cli)",
+            "claude-cli/2.1.169 (external, cli)",
+            "claude-cli/2.1.246.1e8 (external, cli)",
+            "claude-cli/",
+            "Mozilla/5.0",
+        ] {
+            let headers = headers_with_ua(ua);
+            assert_eq!(
+                observed_cc_version(&headers).as_deref(),
+                routectl_core::identity::anthropic::claude_cli_ua_token(ua),
+                "header extraction must not decide token validity itself; ua={ua}"
+            );
+        }
+    }
+
+    #[test]
+    fn observed_cc_version_still_reports_an_unstable_or_opaque_token() {
+        // The long-standing contract, pinned so it cannot be narrowed by a
+        // change elsewhere. `tested_cc_version` is a string an operator
+        // typed, compared verbatim: if this extractor started refusing
+        // prerelease, build-suffixed, or opaque tokens, an operator who
+        // recorded one would silently stop being warned about the drift they
+        // asked to hear about.
+        assert_eq!(
+            observed_cc_version(&headers_with_ua("claude-cli/2.1.246.1e8 (external, cli)"))
+                .as_deref(),
+            Some("2.1.246.1e8")
+        );
+        assert_eq!(
+            observed_cc_version(&headers_with_ua("claude-cli/2.2.0-rc.1")).as_deref(),
+            Some("2.2.0-rc.1")
+        );
+        assert_eq!(
+            observed_cc_version(&headers_with_ua("claude-cli/nightly")).as_deref(),
+            Some("nightly")
+        );
+    }
+
+    #[test]
+    fn the_guard_warns_on_an_unstable_observed_token_exactly_as_before() {
+        let guard = CcVersionWarnGuard::new();
+
+        assert!(guard.check(Some("2.1.246"), Some("2.1.246.1e8")));
+        assert!(!guard.check(Some("2.1.246"), Some("2.1.246.1e8")));
+        assert!(
+            guard.check(Some("2.1.246"), Some("2.1.247-rc.1")),
+            "an unstable token is still a mismatch worth one warning"
+        );
     }
 
     #[test]

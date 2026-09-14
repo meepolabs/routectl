@@ -419,6 +419,7 @@ pub async fn serve_on_listener_with_secrets(
         usage: usage_handle.clone(),
         activation: activation_swap.clone(),
         mitm_seam_nonce: mitm_seam_nonce.clone(),
+        cc_pin_drift: crate::server::cc_pin_drift::CcPinDriftGuard::new(),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is
@@ -810,6 +811,55 @@ pub(super) const NON_MITM_INFERENCE_ROUTES: &[&str] = &[
     "/health",
     "/v1/chat/completions",
     "/v1/responses",
+    "/",
+    "/status",
+    "/status/usage",
+    "/status/health",
+    "/status/config",
+    "/status/doctor",
+    "/status/query",
+];
+
+/// Served paths that MUST observe the inbound client's self-reported
+/// Claude Code version (`server::cc_pin_drift`), i.e. every inference
+/// entry point a client body arrives on.
+///
+/// Three of these funnel through `handlers::ingress_handle`, which carries
+/// one observation call covering both its complete and stream paths;
+/// `/v1/messages/count_tokens` has its own handler and its own call. The
+/// point of naming all four rather than trusting the funnel is that the
+/// funnel is an implementation detail: a future inference route that does
+/// NOT funnel through it would otherwise ship with no signal at all, and
+/// nothing would say so.
+///
+/// Together with [`NON_OBSERVING_ROUTES`] this partitions the served
+/// surface, so a new route's author answers "does a client version arrive
+/// here?" in their own diff. `cfg(test)` like the sibling inventories:
+/// nothing on the request path consults it, so it costs nothing at
+/// runtime.
+#[cfg(test)]
+pub(super) const VERSION_OBSERVING_ROUTES: &[&str] = &[
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/chat/completions",
+    "/v1/responses",
+];
+
+/// Served paths that deliberately do NOT observe a client version, with
+/// the reason each is exempt.
+///
+///   * `/health`, `/`, `/status*` -- routectl's own liveness, dashboard
+///     and read-only status surface. No client body, no client
+///     fingerprint; a version read here would be about whatever tool
+///     curled the endpoint, not about the traffic routectl proxies.
+///   * `/v1/models` -- a catalog listing, not an inference entry point.
+///     A client version seen here says nothing about the bytes routectl
+///     puts on an inference wire, and observing it would let a poll loop
+///     dominate the signal.
+#[cfg(test)]
+pub(super) const NON_OBSERVING_ROUTES: &[&str] = &[
+    "/health",
+    "/v1/models",
     "/",
     "/status",
     "/status/usage",

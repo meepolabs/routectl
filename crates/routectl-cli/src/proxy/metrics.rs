@@ -19,9 +19,9 @@
 //! inputs this module accepts are small closed enums plus the HTTP
 //! method and path (for [`WarnOnce::warn_once`]), never headers or payloads.
 
-use std::collections::HashSet;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::warn_dedup::{CappedWarnSet, WarnDecision};
 
 /// Which leg of the proxy a request/stream belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,27 +254,26 @@ impl ProxyMetrics {
 
 /// Dedups repeated WARN emissions for the same `(method, path)` pair.
 ///
-/// Backed by a plain `Mutex<HashSet<...>>` (std-only, no new deps):
-/// the MITM proxy's WARN-worthy events (an unknown forwarded path, for
-/// instance) are cheap enough and rare enough on the hot path that a
-/// mutex is simpler and just as safe as a lock-free structure here --
-/// unlike `ProxyMetrics`'s per-request counters, this is not called
-/// once per request in steady state, only once per newly-seen pair.
-///
-/// The set is capped at `WARN_ONCE_CAP` distinct pairs: it is keyed on
-/// request-derived data (the exact path a client sends), so without a
-/// bound a client that sends many distinct unrecognized paths -- an
-/// attacker or a runaway client bug -- would grow this set without
-/// limit for the life of the process. Past the cap, this degrades to
-/// **never warn** for a newly-seen pair rather than warning on every
-/// request for it: the one-time cap-reached log below is the signal an
-/// operator needs that something pathological is happening, and staying
-/// quiet after that avoids turning the degradation itself into a second
-/// unbounded log-volume problem.
-#[derive(Debug, Default)]
+/// The bounded warn-once decision itself lives in
+/// `warn_dedup::CappedWarnSet`; this type owns the KEY shape, the
+/// cap's rationale, and the two log lines. The cap matters because the key
+/// is request-derived (the exact path a client sends), so an attacker or a
+/// runaway client bug would otherwise grow the set for the life of the
+/// process. Past the cap this degrades to never-warn for a newly-seen pair
+/// rather than warning on every request for it: the one-time cap-reached
+/// line is the signal an operator needs, and staying quiet after it avoids
+/// turning the degradation into a second unbounded log-volume problem.
+#[derive(Debug)]
 pub struct WarnOnce {
-    seen: Mutex<HashSet<(String, String)>>,
-    cap_reached: AtomicBool,
+    seen: CappedWarnSet<(String, String)>,
+}
+
+impl Default for WarnOnce {
+    fn default() -> Self {
+        Self {
+            seen: CappedWarnSet::new(WARN_ONCE_CAP),
+        }
+    }
 }
 
 /// Upper bound on the number of distinct `(method, path)` pairs
@@ -282,25 +281,6 @@ pub struct WarnOnce {
 /// never-before-seen proxy paths is already far past what any
 /// legitimate Claude Code / Anthropic surface would ever produce.
 const WARN_ONCE_CAP: usize = 1024;
-
-/// Outcome of checking one `(method, path)` pair against the tracked
-/// set, decided while holding the lock so the check-then-act is atomic.
-enum WarnDecision {
-    NewlyTracked,
-    AlreadyTracked,
-    CapReached,
-}
-
-fn decide_and_track(seen: &mut HashSet<(String, String)>, key: (String, String)) -> WarnDecision {
-    if seen.contains(&key) {
-        return WarnDecision::AlreadyTracked;
-    }
-    if seen.len() >= WARN_ONCE_CAP {
-        return WarnDecision::CapReached;
-    }
-    seen.insert(key);
-    WarnDecision::NewlyTracked
-}
 
 impl WarnOnce {
     pub fn new() -> Self {
@@ -312,19 +292,12 @@ impl WarnOnce {
     /// distinct pairs. Returns `true` if this call was the one that
     /// emitted (a fresh pair, tracked below the cap), `false` otherwise
     /// (an already-seen pair, or a fresh pair arriving once the cap has
-    /// been reached). Never panics: a poisoned mutex (only reachable if
-    /// a prior holder panicked while holding the lock, which nothing in
-    /// this method does) falls back to treating the pair as unseen and
-    /// still warns, rather than propagating a panic onto the proxy hot
+    /// been reached). Never panics -- a poisoned dedup lock is recovered
+    /// inside the shared set rather than propagated onto the proxy hot
     /// path.
     pub fn warn_once(&self, method: &str, path: &str) -> bool {
-        let key = (method.to_string(), path.to_string());
-        let decision = match self.seen.lock() {
-            Ok(mut seen) => decide_and_track(&mut seen, key),
-            Err(poisoned) => decide_and_track(&mut poisoned.into_inner(), key),
-        };
-        match decision {
-            WarnDecision::NewlyTracked => {
+        match self.seen.admit((method.to_string(), path.to_string())) {
+            WarnDecision::Emit => {
                 tracing::warn!(
                     target: "routectl_cli::proxy::metrics",
                     method,
@@ -333,12 +306,12 @@ impl WarnOnce {
                 );
                 true
             }
-            WarnDecision::AlreadyTracked => false,
-            WarnDecision::CapReached => {
-                if !self.cap_reached.swap(true, Ordering::Relaxed) {
+            WarnDecision::AlreadyWarned => false,
+            WarnDecision::CapReached { notice } => {
+                if notice {
                     tracing::warn!(
                         target: "routectl_cli::proxy::metrics",
-                        cap = WARN_ONCE_CAP,
+                        cap = self.seen.cap(),
                         "WarnOnce dedup set reached its cap -- further distinct \
                          unrecognized paths will no longer be individually warned"
                     );
@@ -504,21 +477,21 @@ mod tests {
                 "every one of the first {WARN_ONCE_CAP} distinct pairs must emit"
             );
         }
-        assert_eq!(warn_once.seen.lock().unwrap().len(), WARN_ONCE_CAP);
-        assert!(!warn_once.cap_reached.load(Ordering::Relaxed));
+        assert_eq!(warn_once.seen.len(), WARN_ONCE_CAP);
+        assert!(!warn_once.seen.cap_noted());
 
         // The (CAP + 1)th distinct pair pushes past the cap: it must not
         // emit its own "first occurrence" warning, but must be the one
         // call that flips the one-time cap-reached warning.
         assert!(!warn_once.warn_once("GET", "/v1/one-too-many"));
-        assert!(warn_once.cap_reached.load(Ordering::Relaxed));
+        assert!(warn_once.seen.cap_noted());
 
         // Further distinct pairs past the cap never warn again (the
         // never-warn-past-cap degradation), and the set never grows
         // past the cap.
         assert!(!warn_once.warn_once("GET", "/v1/still-more"));
         assert!(!warn_once.warn_once("POST", "/v1/yet-another"));
-        assert_eq!(warn_once.seen.lock().unwrap().len(), WARN_ONCE_CAP);
+        assert_eq!(warn_once.seen.len(), WARN_ONCE_CAP);
 
         // Pairs tracked before the cap was reached keep their existing
         // dedup behavior unaffected by the cap.

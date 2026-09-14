@@ -593,6 +593,20 @@ fn registered_paths_in(src: &str, label: &str) -> Vec<String> {
     paths
 }
 
+/// Every path literal registered anywhere in the crate's production
+/// sources. The shared starting point for all three route-classification
+/// guards below, so they cannot disagree about what "served" means.
+#[cfg(test)]
+fn served_paths() -> std::collections::BTreeSet<String> {
+    let mut served = std::collections::BTreeSet::new();
+    for path in production_rust_sources(&crate_src_dir()) {
+        let src = std::fs::read_to_string(&path).expect("read crate source file");
+        let label = path.display().to_string();
+        served.extend(registered_paths_in(&src, &label));
+    }
+    served
+}
+
 /// A route added to the serve router without being classified as either
 /// public or auth-gated must FAIL here rather than ship unauthenticated.
 ///
@@ -607,12 +621,7 @@ fn registered_paths_in(src: &str, label: &str) -> Vec<String> {
 #[test]
 fn every_registered_route_is_classified_public_or_auth_gated() {
     // Arrange
-    let mut served: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for path in production_rust_sources(&crate_src_dir()) {
-        let src = std::fs::read_to_string(&path).expect("read crate source file");
-        let label = path.display().to_string();
-        served.extend(registered_paths_in(&src, &label));
-    }
+    let served = served_paths();
     let declared: std::collections::BTreeSet<String> = PUBLIC_ROUTES
         .iter()
         .chain(AUTH_GATED_ROUTES.iter())
@@ -663,12 +672,7 @@ fn every_registered_route_is_classified_public_or_auth_gated() {
 #[test]
 fn every_registered_route_is_classified_for_the_mitm_split() {
     // Arrange
-    let mut served: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for path in production_rust_sources(&crate_src_dir()) {
-        let src = std::fs::read_to_string(&path).expect("read crate source file");
-        let label = path.display().to_string();
-        served.extend(registered_paths_in(&src, &label));
-    }
+    let served = served_paths();
     let classified: std::collections::BTreeSet<String> =
         crate::proxy::split::anthropic_inference_paths()
             .iter()
@@ -1173,5 +1177,136 @@ fn the_usage_writer_starts_before_the_capability_warm() {
     assert!(
         writer_at < warm_at,
         "build_usage_writer must run before warm_capability_registry_from_ledger"
+    );
+}
+
+/// A new inference route must decide, in its own diff, whether it observes
+/// the inbound client's Claude Code version.
+///
+/// The third classification the serve router carries, guarded the same way
+/// as auth and the MITM split. The failure this closes is an ABSENCE: today
+/// three of the four observing paths funnel through one call in
+/// `handlers::ingress_handle`, so a future inference route that does not
+/// funnel through it would ship with no drift signal, no test would fail,
+/// and nothing in the diff would say the signal had a hole. Requiring every
+/// served path to appear on exactly one side makes that a visible choice.
+///
+/// This pins the PARTITION, not the call sites -- the handler tests own
+/// "does this route actually call the guard". Both are needed: this one
+/// cannot see a route that is classified as observing but forgot its call,
+/// and those cannot see a route nobody thought about.
+#[test]
+fn every_registered_route_is_classified_for_version_observation() {
+    // Arrange
+    let served = served_paths();
+    let classified: std::collections::BTreeSet<String> = VERSION_OBSERVING_ROUTES
+        .iter()
+        .chain(NON_OBSERVING_ROUTES.iter())
+        .map(|p| (*p).to_string())
+        .collect();
+
+    // Assert: neither direction may drift.
+    let unclassified: Vec<&String> = served.difference(&classified).collect();
+    assert!(
+        unclassified.is_empty(),
+        "route(s) registered but not classified for version observation: \
+         {unclassified:?} -- add each to VERSION_OBSERVING_ROUTES (if a client body \
+         arrives there, so its self-reported version must be observed) or to \
+         NON_OBSERVING_ROUTES (with the reason no client fingerprint arrives there)"
+    );
+    let unserved: Vec<&String> = classified.difference(&served).collect();
+    assert!(
+        unserved.is_empty(),
+        "path(s) classified for version observation but no longer registered: \
+         {unserved:?} -- drop them from the inventory"
+    );
+
+    // A path may not be claimed by both sides at once.
+    for path in VERSION_OBSERVING_ROUTES {
+        assert!(
+            !NON_OBSERVING_ROUTES.contains(path),
+            "{path} is declared both observing and exempt"
+        );
+    }
+}
+
+/// Adding an inference route requires editing this expectation.
+///
+/// The same deliberate redundancy as
+/// `adding_a_public_route_requires_editing_this_expectation`: the partition
+/// guard above passes happily when an inference path is MOVED into the
+/// exempt list, because it reads the classification as its own oracle.
+/// Pinning the observing set literally means removing a path's observation
+/// requires editing this array, which puts it in the diff a reviewer reads.
+#[test]
+fn the_four_inference_paths_that_must_observe_are_pinned_exactly() {
+    let mut actual: Vec<&str> = VERSION_OBSERVING_ROUTES.to_vec();
+    actual.sort_unstable();
+
+    assert_eq!(
+        actual,
+        vec![
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/responses",
+        ],
+        "the set of inference entry points that observe a client version changed. \
+         Removing one silently blinds the drift signal on that path; adding one is \
+         fine but must come with its observation call and a handler test"
+    );
+}
+
+/// The observing set, derived from the OTHER classification rather than
+/// restating this one: every path the MITM split re-injects, MINUS the one
+/// re-injected path that carries no inference body, PLUS the OpenAI-shaped
+/// ingress dialects the MITM list deliberately excludes.
+///
+/// This is what stops a route from quietly landing on the exempt side of
+/// observation after joining the served surface as inference. The single
+/// subtraction is named and justified, so widening it is a visible edit
+/// rather than an accumulating exception list.
+#[test]
+fn the_observing_set_is_exactly_the_inference_surface() {
+    let observing: std::collections::BTreeSet<&str> =
+        VERSION_OBSERVING_ROUTES.iter().copied().collect();
+
+    // `/v1/models` is re-injected through the MITM seam (a client asks
+    // routectl for the catalog on the Anthropic host) but is a LISTING, not
+    // an inference entry point: no request body, no client fingerprint worth
+    // attributing to proxied traffic, and a client that polls it would
+    // otherwise dominate the signal.
+    const REINJECTED_NON_INFERENCE: &str = "/v1/models";
+    assert!(
+        crate::proxy::split::anthropic_inference_paths().contains(&REINJECTED_NON_INFERENCE),
+        "control: {REINJECTED_NON_INFERENCE} must still be a re-injected path, or this \
+         subtraction is describing something that no longer exists"
+    );
+
+    let anthropic_bodies: std::collections::BTreeSet<&str> =
+        crate::proxy::split::anthropic_inference_paths()
+            .iter()
+            .copied()
+            .filter(|p| *p != REINJECTED_NON_INFERENCE)
+            .collect();
+    let openai_dialect_inference: std::collections::BTreeSet<&str> =
+        ["/v1/chat/completions", "/v1/responses"]
+            .into_iter()
+            .collect();
+    let inference: std::collections::BTreeSet<&str> = anthropic_bodies
+        .union(&openai_dialect_inference)
+        .copied()
+        .collect();
+
+    assert_eq!(
+        observing, inference,
+        "the observing set and the inference surface diverged. An inference path that \
+         does not observe has no drift signal; a non-inference path that observes \
+         reports a version for traffic routectl does not proxy"
+    );
+    assert!(
+        NON_OBSERVING_ROUTES.contains(&REINJECTED_NON_INFERENCE),
+        "the one re-injected non-inference path must be explicitly exempt, not merely \
+         absent from the observing list"
     );
 }
