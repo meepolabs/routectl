@@ -64,8 +64,8 @@ use counter::{
     lane_seen_sites, src_path, vocabulary_overlaps, without_comments,
 };
 use marker::{
-    LANES, MARKER_TOKEN, Marker, Verdict, census, expect, holds_task_id, is_test_file, parse_file,
-    production_files,
+    LANES, MARKER_TOKEN, Marker, Verdict, census, crate_rust_sources, expect, holds_fn,
+    holds_task_id, is_test_file, parse_file, production_files,
 };
 
 /// The lane of a `policy-action` class, resolved from the CALL rather than from
@@ -362,7 +362,7 @@ fn every_unswept_register_entry_names_a_pinning_test_that_exists() {
     //
     // Reuses the same `holds_fn` resolver the marker `test=` tag uses, so both
     // kinds of pin are enforced by one bounded matcher rather than two.
-    let sources = expect(all_rust_sources());
+    let sources = expect(crate_rust_sources());
     for &UnsweptPolicyClass { class, test, .. } in UNSWEPT_POLICY_CLASSES {
         let hits = sources
             .iter()
@@ -723,7 +723,7 @@ fn every_pinning_test_name_resolves_to_a_function_in_the_tree() {
     // claiming a pin that no longer exists -- and every other weld stays green,
     // because none of them reads `test=`.
     let markers = expect(census());
-    let sources = expect(all_rust_sources());
+    let sources = expect(crate_rust_sources());
     let named: BTreeSet<&str> = markers.iter().filter_map(|m| m.test.as_deref()).collect();
     assert!(
         !named.is_empty(),
@@ -751,15 +751,6 @@ fn the_pinning_test_resolution_refuses_a_name_no_function_carries() {
     assert!(!holds_fn(source, "planted_pin"));
     assert!(holds_fn(source, "planted_pin_extra"));
     assert!(holds_fn("    async fn planted_pin() {}\n", "planted_pin"));
-}
-
-/// Whether `source` defines `fn <name>`, bounded so a longer name that starts
-/// with `name` is not a match.
-fn holds_fn(source: &str, name: &str) -> bool {
-    let needle = format!("fn {name}");
-    source.match_indices(&needle).any(|(at, _)| {
-        source[at + needle.len()..].starts_with(|c: char| !c.is_alphanumeric() && c != '_')
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,22 +999,6 @@ fn population_of(files: &[String]) -> Result<Vec<(String, String)>, String> {
         population.push((file.clone(), source));
     }
     Ok(population)
-}
-
-/// Every Rust source of this crate, tests included: a `test=` name resolves
-/// against the whole tree, since the pinning tests live in sidecar test files.
-fn all_rust_sources() -> Result<Vec<(String, String)>, String> {
-    let root = src_path("");
-    let mut sources = Vec::new();
-    for file in counter::rs_files(&root)? {
-        let source = std::fs::read_to_string(root.join(&file))
-            .map_err(|err| format!("{file} must be readable ({err})"))?;
-        sources.push((file, source));
-    }
-    if sources.is_empty() {
-        return Err("the crate holds no Rust source".to_string());
-    }
-    Ok(sources)
 }
 
 // ---------------------------------------------------------------------------

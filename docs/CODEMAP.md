@@ -1248,6 +1248,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   that loss through a log, a counter, or the `silent` tag; and a `structural`
   marker sharing a symbol with a loss log is refused unless content-pinned with
   its adjudication. Four content-pinned registers, occurrence-counted
+- `tests/cloak_baseline_weld.rs` -- `TIER_ONE` / `TIER_TWO` / `Gate`: the
+  credential-lane transform register, welding the parsed cloak-module item
+  population to tier 1 by occurrence count and pinning tier 2's anchors, gates
+  and tests where no derived side exists
+- `tests/weld_support/cloak_population.rs` -- `population_files`,
+  `eligible_items`: the `syn` item derivation behind tier 1, refusing every
+  shape whose reach or body a pre-expansion parse cannot decide
+- `tests/weld_support/item_resolve.rs` -- `holds_fn`, `holds_named_item`,
+  `crate_rust_sources`, `holds_task_id`: the one name-resolution and
+  threat-surface vocabulary every weld register in this crate shares
 
 ## routectl-router
 
