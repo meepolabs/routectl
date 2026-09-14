@@ -101,7 +101,7 @@ pub fn normalize(
         // the census's swept surfaces, so a marker on it is never parsed and
         // cannot fail -- one was verified to survive being replaced by an
         // unparseable verdict with every weld green. A pin that cannot fail is
-        // worse than none, because it reads as enforcement. The behaviour is
+        // worse than none, because it reads as enforcement. The behavior is
         // covered by the per-arm tests named below; widening the census to this
         // surface is filed separately.
         // Covered by: an_all_billing_system_still_counts_the_openai_compat_policy_action
