@@ -2802,6 +2802,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `release`) frees the slot without learning. Together those cover the four
   decay settlements: lapse -> one carry, success -> clear, same rejection ->
   refresh, unrelated error -> release unchanged
+- `src/field_capability.rs` -- sole owner of the envelope-field capability
+  namespace (crate-internal): `field_capability_key` mints a bounded key from a
+  qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait

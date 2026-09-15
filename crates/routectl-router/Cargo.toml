@@ -75,6 +75,20 @@ criterion = { workspace = true }
 # provider-emitted WARN with the enclosing request's id requires reading
 # the ambient span scope.
 tracing-subscriber.workspace = true
+# Real Rust lexer for the field-namespace uniqueness scan, which must decide
+# whether the prefix appears as a LITERAL VALUE rather than as a field label,
+# an identifier or prose. DEV-only: the shipped library links nothing of it,
+# and the package is already in the lockfile through the proc-macro graph, so
+# this adds no new package. Deciding literal-vs-label from a byte scan means
+# hand-rolling Rust token boundaries, escapes and raw-string forms -- the one
+# shape this repo's derived checks are not allowed to grow.
+#
+# `parsing` only, with default features off: the scan walks a proc-macro2
+# token stream and decodes literals through `Lit::new` / `LitStr::value`,
+# which is all `parsing` provides. It never builds a syntax tree, so `full`
+# (the item/expr AST) would be compiled for nothing.
+syn = { version = "2", default-features = false, features = ["parsing"] }
+proc-macro2 = "1"
 
 # ChatRequest::clone() cost on the dispatch hot path. `harness = false`:
 # the bench owns `main` to install the allocation-counting allocator.
