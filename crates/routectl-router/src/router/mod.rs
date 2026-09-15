@@ -37,6 +37,7 @@ mod dispatch;
 mod feature_filter;
 mod overlays;
 mod prefix_rewrite;
+mod repair_budget;
 mod replay_repair;
 mod runtime_gate;
 mod status;
@@ -2438,3 +2439,7 @@ mod quota_placement_dispatch_tests;
 #[cfg(test)]
 #[path = "prefix_rewrite_dispatch_tests.rs"]
 mod prefix_rewrite_dispatch_tests;
+
+#[cfg(test)]
+#[path = "repair_budget_cross_walk_tests.rs"]
+mod repair_budget_cross_walk_tests;

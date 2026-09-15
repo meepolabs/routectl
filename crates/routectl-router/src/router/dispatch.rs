@@ -41,6 +41,7 @@ use super::class_observe::{
 };
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::overlays::apply_layered_overlays;
+use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
@@ -52,10 +53,10 @@ use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, 
 const REPLAY_DEGRADE_EVENT: &str = "reasoning_replay_degraded";
 /// Action token: the fixed strip-repair correctness branch stripped the
 /// carried reasoning artifacts and re-dispatched the same target once.
-const REPLAY_ACTION_STRIP_REPAIR: &str = "strip_repair";
+pub(super) const REPLAY_ACTION_STRIP_REPAIR: &str = "strip_repair";
 /// Reason token: the carried variant drew the proven upstream replay
 /// rejection.
-const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejection";
+pub(super) const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejection";
 
 /// The one provider kind whose egress can represent the
 /// OpenAI-Responses-dialect `reasoning.context` / `reasoning.mode`
@@ -91,7 +92,7 @@ fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
 /// never the artifact bytes, a reasoning item id, a hash, the session
 /// key, or the upstream body. The request span already supplies
 /// `request_id` correlation across the retry and fallback hops.
-fn emit_replay_degradation(meta: &DispatchMeta) {
+pub(super) fn emit_replay_degradation(meta: &DispatchMeta) {
     let Some(deg) = meta.replay_degradation.as_ref() else {
         return;
     };
@@ -127,7 +128,11 @@ fn join_schemes(schemes: &[ReplayScheme]) -> String {
 /// debug-render the `Error`. The rebuilt `Upstream` keeps the status and
 /// the already-structured classifier tokens every downstream consumer
 /// reads, dropping ONLY the body.
-fn replay_rejection_body_free(err: &Error, class: &FailureClass, provider: &str) -> Option<Error> {
+pub(super) fn replay_rejection_body_free(
+    err: &Error,
+    class: &FailureClass,
+    provider: &str,
+) -> Option<Error> {
     if !Router::is_replay_rejection_class(class) {
         return None;
     }
@@ -290,6 +295,14 @@ impl Router {
         // target-accurate, and this flag stops a same-provider retry or a
         // later fallback hop from repeating it.
         let mut reasoning_drop_warned = false;
+        // Reactive-repair ceiling for THIS client request, declared above the
+        // chain loop beside the other request-scoped locals: each repair kind
+        // gates itself to at most once per target, and this bounds their SUM
+        // across every target the fallback walk reaches. Never declared inside
+        // the loop -- a per-target budget lets an N-target chain pay N repairs
+        // for one logical request. `stream_inner` and `count_tokens` draw from
+        // the same ceiling (see `repair_budget`).
+        let mut repair_budget = RepairBudget::per_request();
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -712,9 +725,17 @@ impl Router {
                         // carried variant. The held guards settle at the
                         // success arm (commit) or on any later exit (release /
                         // drop, learning nothing).
+                        //
+                        // `repair_budget.draw()` is the LAST condition: it
+                        // mutates, so drawing before the class check would
+                        // charge requests that never repair. An exhausted
+                        // request budget leaves this rejection on the ordinary
+                        // error path below -- no extra upstream call, no
+                        // breaker debit of its own.
                         if !replay_repair_attempted
                             && let Some(plan) = replay_plan.as_ref()
                             && Self::is_replay_rejection_class(&cf.class)
+                            && repair_budget.draw()
                         {
                             replay_repair_attempted = true;
                             replay_reject_status = upstream_facts(&e).status.unwrap_or(0);
@@ -1071,6 +1092,11 @@ impl Router {
         // `complete_inner`. Same stack-local once-flag over the dispatch-point
         // emit, so the streaming path is not a second site that repeats it.
         let mut reasoning_drop_warned = false;
+        // Reactive-repair ceiling for THIS client request -- see
+        // `complete_inner`. Same above-the-loop position and the same shared
+        // ceiling, so the streaming path is not a second walk with its own
+        // allowance.
+        let mut repair_budget = RepairBudget::per_request();
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -1459,10 +1485,12 @@ impl Router {
                         // re-dispatch this target exactly ONCE. Streams take no
                         // in-loop backoff, so the retry is immediate; it never
                         // nests across the fallback walk and never re-attempts
-                        // the carried variant.
+                        // the carried variant. The shared per-request ceiling
+                        // is drawn LAST for the same reason as there.
                         if !replay_repair_attempted
                             && let Some(plan) = replay_plan.as_ref()
                             && Self::is_replay_rejection_class(&cf.class)
+                            && repair_budget.draw()
                         {
                             replay_repair_attempted = true;
                             replay_reject_status = upstream_facts(&e).status.unwrap_or(0);

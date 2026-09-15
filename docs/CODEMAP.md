@@ -2321,7 +2321,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   declares the per-concern submodules: `dispatch`, `class_observe`, `chain`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
   `capability_cleared`, `cache_plan`, `prefix_rewrite`, `runtime_gate`,
-  `sticky`, `count_tokens`, `status`, `replay_repair`, `window_gate`
+  `sticky`, `count_tokens`, `status`, `replay_repair`, `repair_budget`,
+  `window_gate`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -2417,7 +2418,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   replay rejection admits via `replay_repair`, swaps to the stripped variant,
   and retries once; `replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
-  fires the single per-request degradation WARN. Reasoning-dialect fidelity
+  (`pub(super)`, also called by the token-count walk) fires the single
+  per-request degradation WARN. Both chain loops declare the shared
+  `repair_budget::RepairBudget` above themselves, and each repair arm draws
+  it as its LAST condition, so the repair count is bounded per REQUEST and
+  not per target. Reasoning-dialect fidelity
   guard (moved here from the providers crate so per-egress normalize's
   clone/retry/fallback can no longer repeat it):
   `warn_dropped_reasoning_dialect` +
@@ -2475,12 +2480,54 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (per-target gate + seat snapshot), `Router::seat_count_for`, and the private
   `gate_status_for` gate read
 - `src/router/count_tokens.rs` -- the token-counting dispatch path
-  (`Router::count_tokens` + `count_tokens_try_seat`): walks past
-  count_tokens-incapable targets, runs no reducer/cache, so
+  (`Router::count_tokens` + `count_tokens_walk` + `count_tokens_try_seat`):
+  walks past count_tokens-incapable targets, runs no reducer/cache, so
   it never touches the would-trim seam. Owns the private
   `seat_can_count_tokens` (egress kind + upstream model id -> capable; a
   `bedrock` seat needs an Anthropic-family model id) and the `pub(super)`
-  `CountSeatOutcome` (the per-seat walk outcome)
+  `CountSeatOutcome` (the per-seat walk outcome). Carries the third
+  reasoning-replay repair position: `plan_replay_carry` above the seat's
+  attempt loop, the strip-repair arm between auth recovery and the
+  capability/health settles (releasing and re-gating the probe slot like the
+  401 recovery, never debiting the breaker), and the body-free rebuild of a
+  classified replay rejection (`replay_rejection_body_free`, shared with the
+  messages walks) once the arm has declined, so no terminal error hands a
+  caller the rejection body. The repaired `attempt_req` is what the loop
+  re-dispatches and counts. The walk owns one request-scoped
+  `repair_budget::RepairBudget` and one `DispatchMeta` (for the calibration
+  re-stamp and the aggregated degradation WARN), threading both into every
+  seat; the bound is `2 * chain.len() + REPAIRS_PER_REQUEST` (single visit
+  per seat, plus a per-seat 401 retry, plus the per-REQUEST repair
+  allowance).
+  TEMPORARY SEAM, stated because the code reads as if it were live: this arm
+  is UNREACHABLE today. `seat_can_count_tokens` admits `anthropic-api` and
+  Anthropic-family `bedrock`, while the classifier's replay lift is closed
+  over the kinds with a captured envelope (`openai-responses`); both read the
+  same `DispatchTarget::provider_kind`, so the sets are disjoint. So the arm
+  deliberately does NOT run the two-phase settlement -- `commit` /
+  `settle_success` mutate the shared learned registry and return rows this
+  walk has no ledger sink for, and a mutation whose event row is dropped is
+  what a warm rebuild resurrects from. It records `repair_attempted` /
+  `repair_succeeded` and claims no `learned`. Its wiring is pinned by
+  source-scanning guards in
+  `src/router/count_tokens_repair_structure_tests.rs` (mutation-verified)
+  rather than a behavioral test that would pass with the arm deleted; the
+  disjointness itself is pinned in
+  `src/router/repair_budget_cross_walk_tests.rs`. When a repair kind lands
+  whose lane a capable seat reaches, that task owns the reachable
+  settlement plus persistence through the existing capability-event sink,
+  and replaces these guards with real N-seat behavioral coverage
+- `src/router/repair_budget.rs` -- the per-request reactive-repair ceiling
+  (`RepairBudget` + `REPAIRS_PER_REQUEST`) shared by all three dispatch
+  walks: declared ABOVE each chain / seat loop beside the other
+  request-scoped locals and threaded by `&mut`, so an N-target fallback
+  chain pays the request's allowance rather than one repair per target.
+  Complements each repair kind's own at-most-once-per-target gate; every
+  arm draws it LAST, after its own conditions hold. Cross-walk coverage
+  lives in `src/router/repair_budget_cross_walk_tests.rs`, which is
+  behavioral for `complete` and `stream` (a repair genuinely fires there)
+  and asserts only the threading for `count_tokens`, whose arm is currently
+  unreachable -- see that module's row
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (per-target header/payload/beta/reasoning
   overlays), `operator_betas`, the `pub
