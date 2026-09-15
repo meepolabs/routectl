@@ -1,17 +1,54 @@
 //! Token-counting dispatch path (no reducer/cache; independent of the would-trim seam).
+//!
+//! # The reactive-repair position here is currently UNREACHABLE
+//!
+//! This walk carries the third reasoning-replay repair position, wired at
+//! the same seam the two messages walks use and drawing the same
+//! per-request ceiling. It cannot fire today, and the reason is structural
+//! rather than a missing piece of wiring: [`seat_can_count_tokens`] admits
+//! only `anthropic-api` and Anthropic-family `bedrock` seats, while the
+//! classifier's replay-rejection lift is closed over the provider kinds
+//! with a captured envelope -- today only `openai-responses`. Both read the
+//! same `DispatchTarget::provider_kind`, so no seat this walk can dispatch
+//! to can produce the class the repair arm gates on.
+//!
+//! Two consequences a reader must not "fix" without changing that:
+//!
+//! - The arm settles its carry by DROPPING the plan (releasing the
+//!   single-flight slots, learning nothing) rather than running the
+//!   two-phase `commit` / `settle_success` the messages walks run. Those
+//!   mutate the shared learned registry AND return event rows the caller is
+//!   expected to drain to the capability-event ledger; this walk's
+//!   `DispatchMeta` is request-local with no such sink, so the mutation
+//!   would persist while its row was dropped -- the state a warm rebuild
+//!   resurrects a negative from. The degradation summary stays honest by
+//!   recording that the repair happened and claiming nothing was learned.
+//! - The arm's properties are pinned by source guards
+//!   (`count_tokens_repair_structure_tests`), not by a behavioral test: a
+//!   behavioral test of an unreachable arm passes with the arm deleted.
+//!
+//! Both are temporary. The task that lands a repair kind whose lane a
+//! capable seat reaches owns the reachable two-phase settlement plus its
+//! persistence path, and replaces those source guards with real per-seat
+//! behavioral coverage.
 
 use std::time::Instant;
 
-use routectl_core::failure_class::{LastOutcome, classify};
+use routectl_core::failure_class::{LastOutcome, classify, classify_with_attempt};
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
 use super::class_observe::{class_label, matched_by_label, upstream_facts};
 use super::dispatch::{
-    apply_remap, class_debits, forwarded_terminal_status, is_capability_error,
+    REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
+    emit_replay_degradation, forwarded_terminal_status, is_capability_error,
     log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
-    upstream_status_for_remap,
+    replay_rejection_body_free, upstream_status_for_remap,
 };
-use super::{DispatchTarget, Router, StripDecision, apply_layered_overlays};
+use super::repair_budget::RepairBudget;
+use super::replay_repair::strip_replay_artifacts_recalibrating;
+use super::{
+    DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision, apply_layered_overlays,
+};
 use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 
 /// Whether one dispatch seat can serve a token count, decided from its
@@ -60,6 +97,15 @@ pub(super) enum CountSeatOutcome {
     Capability,
 }
 
+/// Greppable anchor for the strip-repair arm in
+/// [`Router::count_tokens_try_seat`]. The structural guards in
+/// `count_tokens_repair_structure_tests` locate the arm by this marker
+/// rather than by matching its body text, which drifts. The literal itself
+/// lives in a comment on the arm; this constant is the single place the
+/// guards and the arm agree on its spelling.
+#[cfg(test)]
+const REPAIR_ARM_MARKER: &str = "count_tokens_strip_repair_arm";
+
 impl Router {
     /// Probe call: route a request to a count_tokens-CAPABLE provider in
     /// the dispatch chain and call `Provider::count_tokens`. Used by
@@ -98,9 +144,13 @@ impl Router {
     /// - A non-fallbackable 4xx -> release the probe slot and propagate.
     ///
     /// The walk is bounded and single-visit: each seat is dispatched to at
-    /// most once (plus at most one 401 auth-retry of that same seat), so
-    /// total upstream calls never exceed `2 * chain.len()`. When no
-    /// capable seat serves a count (none capable, or every capable seat
+    /// most once, plus at most one 401 auth-retry of that same seat, plus at
+    /// most one reactive repair re-dispatch of that same seat. The auth
+    /// retry is per SEAT, while repairs draw a per-REQUEST ceiling shared
+    /// with the two messages walks, so total upstream calls never exceed
+    /// `2 * chain.len() + REPAIRS_PER_REQUEST` -- the repair term is added
+    /// once for the whole walk, not once per seat. When no capable seat
+    /// serves a count (none capable, or every capable seat
     /// returned a capability error), this returns
     /// `Error::NotImplemented` naming the alias -- the handler maps that to
     /// a stable 501, and the last upstream's raw 501 body is never leaked
@@ -128,29 +178,24 @@ impl Router {
             );
         }
         let mut saw_capable = false;
-        for candidate in chain {
-            if !seat_can_count_tokens(candidate.provider_kind, &candidate.upstream) {
-                tracing::debug!(
-                    provider = %routectl_core::sanitize_for_log(&candidate.provider_name),
-                    kind = candidate.provider_kind.unwrap_or("unknown"),
-                    model = %routectl_core::sanitize_for_log(
-                        candidate.nickname.as_deref().unwrap_or("")
-                    ),
-                    "provider skipped: seat cannot count_tokens",
-                );
-                continue;
-            }
-            saw_capable = true;
-            match self.count_tokens_try_seat(&req, candidate).await {
-                CountSeatOutcome::Count(tc) => return Ok(tc),
-                CountSeatOutcome::Terminal(e) => return Err(e),
-                // Capability error: the seat was admitted as capable but its
-                // upstream cannot count. The slot was already released
-                // without a breaker debit; advance to the next capable
-                // seat in the already-resolved chain (single-visit,
-                // never re-resolved or re-queued).
-                CountSeatOutcome::Capability => continue,
-            }
+        // Reactive-repair ceiling for THIS client request, declared above the
+        // per-seat walk exactly as `complete_inner` declares it above its
+        // chain loop, and threaded by `&mut` into every seat. Constructing it
+        // inside `count_tokens_try_seat` would be the per-seat reset the shared
+        // ceiling exists to remove.
+        let mut repair_budget = RepairBudget::per_request();
+        // Request-scoped meta for the seat walk. The token-count path has no
+        // caller-visible meta, but the repair arm's calibration re-stamp and
+        // the degradation summary are recorded on one, so the walk owns it and
+        // emits the aggregated WARN when the walk ends -- one per request,
+        // mirroring `complete_with_options`.
+        let mut meta = DispatchMeta::for_alias(&req.model);
+        let outcome = self
+            .count_tokens_walk(&req, chain, &mut saw_capable, &mut repair_budget, &mut meta)
+            .await;
+        emit_replay_degradation(&meta);
+        if let Some(result) = outcome {
+            return result;
         }
         // Two distinct terminal shapes, both mapping to a 501 at the
         // handler: no capable seat existed at all, versus capable
@@ -168,6 +213,51 @@ impl Router {
         Err(Error::NotImplemented(req.model.clone(), detail.into()))
     }
 
+    /// The per-seat walk itself: `Some(result)` when a seat settled the
+    /// request (a count or a terminal error), `None` when the walk exhausted
+    /// without one and the caller must build the terminal 501.
+    ///
+    /// Split out of [`Router::count_tokens`] so the aggregated degradation
+    /// WARN fires on every exit of the walk rather than only the exhausted
+    /// one -- the same reason `complete_with_options` wraps `complete_inner`.
+    async fn count_tokens_walk(
+        &self,
+        req: &ChatRequest,
+        chain: Vec<DispatchTarget>,
+        saw_capable: &mut bool,
+        repair_budget: &mut RepairBudget,
+        meta: &mut DispatchMeta,
+    ) -> Option<Result<TokenCount>> {
+        for candidate in chain {
+            if !seat_can_count_tokens(candidate.provider_kind, &candidate.upstream) {
+                tracing::debug!(
+                    provider = %routectl_core::sanitize_for_log(&candidate.provider_name),
+                    kind = candidate.provider_kind.unwrap_or("unknown"),
+                    model = %routectl_core::sanitize_for_log(
+                        candidate.nickname.as_deref().unwrap_or("")
+                    ),
+                    "provider skipped: seat cannot count_tokens",
+                );
+                continue;
+            }
+            *saw_capable = true;
+            match self
+                .count_tokens_try_seat(req, candidate, repair_budget, meta)
+                .await
+            {
+                CountSeatOutcome::Count(tc) => return Some(Ok(tc)),
+                CountSeatOutcome::Terminal(e) => return Some(Err(e)),
+                // Capability error: the seat was admitted as capable but its
+                // upstream cannot count. The slot was already released
+                // without a breaker debit; advance to the next capable
+                // seat in the already-resolved chain (single-visit,
+                // never re-resolved or re-queued).
+                CountSeatOutcome::Capability => continue,
+            }
+        }
+        None
+    }
+
     /// Dispatch `count_tokens` to ONE already-selected capable seat and
     /// classify the outcome for the walk in [`Router::count_tokens`].
     ///
@@ -179,10 +269,16 @@ impl Router {
     /// with this seat's. `auth_retry_attempted` is a fresh per-seat local,
     /// so advancing to a new seat resets it -- safe because seats are
     /// single-visit.
+    ///
+    /// `repair_budget` is the opposite case and is therefore passed in: the
+    /// reactive-repair ceiling is per REQUEST, so a fresh one per seat would
+    /// let an N-seat walk pay N repairs for one logical token count.
     async fn count_tokens_try_seat(
         &self,
         req: &ChatRequest,
         target: DispatchTarget,
+        repair_budget: &mut RepairBudget,
+        meta: &mut DispatchMeta,
     ) -> CountSeatOutcome {
         let provider = match target.provider.clone() {
             Some(p) => p,
@@ -224,6 +320,16 @@ impl Router {
             StripDecision::RouteAway(_) => return CountSeatOutcome::Capability,
         }
 
+        // Reasoning-replay carry admission at the ANALOGOUS position the two
+        // messages walks use: after every request-shaping step and before the
+        // seat's attempt loop, so the gray-artifact count describes the exact
+        // carried bytes. `None` either found nothing to repair or already
+        // stripped `attempt_req` proactively (an acting negative or a peer
+        // probe), in which case the stripped variant is what this seat counts.
+        let now_admit = Instant::now();
+        let mut replay_plan = self.plan_replay_carry(&target, &mut attempt_req, meta, now_admit);
+        let mut replay_repair_attempted = false;
+
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
         loop {
@@ -255,9 +361,46 @@ impl Router {
                 Ok(tc) => {
                     self.record_success(&target.state_key);
                     probe_guard.disarm();
+                    // Settle the replay carry WITHOUT persisting or emitting:
+                    // dropping the plan releases every single-flight slot it
+                    // holds and leaves any resident entry exactly as it was.
+                    //
+                    // Deliberately NOT the two-phase settle the messages walks
+                    // run. `commit` / `settle_success` mutate the shared
+                    // learned registry AND return rows the caller is expected
+                    // to drain onto its dispatch meta -- and this walk's meta
+                    // is request-local with no ledger sink behind it, so those
+                    // rows would be produced and dropped. A registry mutation
+                    // whose event row never reaches the ledger is exactly the
+                    // state a warm rebuild resurrects from, i.e. a persistence
+                    // bug rather than a missing feature. So this walk learns
+                    // nothing until the settlement has a real sink; the
+                    // degradation summary below stays honest by claiming the
+                    // repair happened and NOT claiming anything was learned.
+                    drop(replay_plan.take());
+                    if replay_repair_attempted && let Some(deg) = meta.replay_degradation.as_mut() {
+                        deg.repair_succeeded = true;
+                    }
                     return CountSeatOutcome::Count(tc);
                 }
-                Err(e) => {
+                Err(mut e) => {
+                    // Classified ONCE at the top of the arm (as both messages
+                    // walks do), because the repair arm below and the health
+                    // settle further down must read the SAME effective class.
+                    // The carried-artifact signal comes from the plan, so a
+                    // proven replay rejection lifts here and nowhere else.
+                    let policy = self.policy_for(&req.model);
+                    let native_cf = match replay_plan.as_ref() {
+                        Some(plan) => {
+                            classify_with_attempt(&e, target.provider_kind, plan.attempt())
+                        }
+                        None => classify(&e, target.provider_kind),
+                    };
+                    let (cf, remapped) = apply_remap(
+                        native_cf,
+                        upstream_status_for_remap(&e),
+                        &target.class_overrides,
+                    );
                     // A forwarded-credential 401/403/429 is TERMINAL
                     // -- bypass the on_auth_failure refresh (below) AND any
                     // health park/debit, and surface verbatim as a Terminal
@@ -302,6 +445,65 @@ impl Router {
                         continue;
                     }
 
+                    // Reasoning-replay strip repair, the count_tokens twin of
+                    // the messages arms and placed at the analogous position:
+                    // after auth recovery, before the capability and health
+                    // settles. On the proven replay rejection, switch THIS
+                    // seat's attempt request to the pre-stripped variant and
+                    // re-dispatch it once; `strip_replay_artifacts_recalibrating`
+                    // re-stamps the calibration estimate, and because the loop
+                    // dispatches `attempt_req`, the repaired body is the one
+                    // sent upstream and the one whose count is returned.
+                    //
+                    // Slot handling mirrors the 401 recovery above: release the
+                    // half-open probe slot before the `continue` re-gates, and
+                    // never debit the breaker -- a repairable rejection is not
+                    // this seat's health signal. The per-seat
+                    // `replay_repair_attempted` flag keeps it at most once per
+                    // seat; `repair_budget.draw()` is the LAST condition, so a
+                    // request that never repairs is never charged and an
+                    // exhausted request budget leaves the rejection on the
+                    // ordinary settle path below.
+                    // count_tokens_strip_repair_arm
+                    if !replay_repair_attempted
+                        && let Some(plan) = replay_plan.as_ref()
+                        && Self::is_replay_rejection_class(&cf.class)
+                        && repair_budget.draw()
+                    {
+                        replay_repair_attempted = true;
+                        let lane = plan.lane();
+                        meta.replay_degradation = Some(ReplayDegradation {
+                            action: REPLAY_ACTION_STRIP_REPAIR,
+                            target_lane: lane,
+                            state_key: sanitize_for_log(&target.state_key),
+                            source_schemes: plan.source_schemes().to_vec(),
+                            reason: REPLAY_REASON_UPSTREAM_REJECTION,
+                            artifact_count: plan.artifact_count(),
+                            repair_attempted: true,
+                            repair_succeeded: false,
+                            learned: false,
+                        });
+                        strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
+                        self.release_probe_slot(&target.state_key);
+                        probe_guard.disarm();
+                        continue;
+                    }
+                    // The repair arm declined (already repaired this seat, not
+                    // a replay rejection, or the request's budget is spent), so
+                    // this error can now reach the CALLER. A replay rejection's
+                    // upstream body echoes the reasoning artifact it objected
+                    // to, so rebuild it body-free first -- the same helper and
+                    // the same position the two messages walks use, before
+                    // their generic logging and their returns. Without it the
+                    // token-count walk is the one surface that hands a client
+                    // the reasoning blob verbatim. A non-replay class is left
+                    // untouched (no clone on the common path).
+                    if let Some(body_free) =
+                        replay_rejection_body_free(&e, &cf.class, provider_name)
+                    {
+                        e = body_free;
+                    }
+
                     // CAPABILITY error, checked BEFORE should_fallback so a
                     // wire-501 can never reach record_failure: the seat was
                     // admitted as capable but its upstream cannot count. Release
@@ -338,13 +540,6 @@ impl Router {
                     // completions and streams. Either way this propagates --
                     // health fallback stays reserved for the messages path,
                     // so a 429 here does NOT walk.
-                    let policy = self.policy_for(&req.model);
-                    let native_cf = classify(&e, target.provider_kind);
-                    let (cf, remapped) = apply_remap(
-                        native_cf,
-                        upstream_status_for_remap(&e),
-                        &target.class_overrides,
-                    );
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
                     let debit = class_debits(&cf.class);
                     // The class/remap/debit decision on the token-count path was
@@ -389,3 +584,7 @@ impl Router {
 #[cfg(test)]
 #[path = "count_tokens_tests.rs"]
 mod count_tokens_tests;
+
+#[cfg(test)]
+#[path = "count_tokens_repair_structure_tests.rs"]
+mod count_tokens_repair_structure_tests;
