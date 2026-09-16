@@ -1768,7 +1768,7 @@ fn cloak_with_normalize(
 /// link-local / loopback predicates on the result so an SSRF target
 /// like `::169.254.169.254` (cloud metadata) cannot slip past in
 /// IPv4-compatible disguise.
-pub(super) fn ipv4_compatible_embedded(ip: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+pub fn ipv4_compatible_embedded(ip: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     let seg = ip.segments();
     if seg[0..6].iter().any(|&s| s != 0) {
         return None;

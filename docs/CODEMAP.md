@@ -2852,6 +2852,35 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
   qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
+- `src/field_verdict.rs` -- the envelope-field verdict lifecycle layered over
+  the learned registry, the concrete sibling of `learned_replay` rather than a
+  generic over both (the two identities share no field, and only this one
+  carries a mint-suppression predicate). Crate-internal.
+  `FieldVerdictKey::new(state_key, field path, provider_kind) -> Option` builds
+  the identity, minting its capability half through `field_capability` so a
+  path that namespace refuses yields no identity at all, and refusing a lane
+  whose capability-key normalization would REWRITE the minted key (the Stage 1
+  exclusion, enforced without changing the shared normalizer).
+  `FieldVerdictRegistry::admit_provisional(key, target_base_url, now) ->
+  Option<FieldRepairGuard>` is the single-flight repair claim, refusing on a
+  local target, a resident acting verdict, or an unresolved sibling repair.
+  The guard is the two-phase learn -- `commit` persists the verdict and returns
+  the existing `CapabilityLearnEvent` row ONLY after the repaired retry
+  succeeded, `clear` drops a resident verdict when the field was accepted and
+  returns a `CapabilityClearedEvent`, and `release` (plus an unsettled `Drop`)
+  frees the slot without learning. `loopback_target_suppresses_minting` is the
+  suppression predicate: keyed on the target base URL alone, never the
+  configured kind and never a non-default-base heuristic. Local means a
+  loopback address in any spelling, an unspecified wildcard address, the
+  RFC 6761 `localhost` name or its subtree, or an exact match against the
+  closed set of stock hosts-file aliases; names are compared on whole labels
+  with all terminal dots trimmed, and it fails toward suppression for a
+  non-http(s) scheme and for a base naming no host (including a malformed
+  address literal). Classification is SYNTACTIC and bounded: it resolves
+  nothing, so an arbitrary DNS name pointing at a local address is
+  deliberately outside the contract -- no resolver enters dispatch. Inferring
+  an address from a name's SHAPE was tried and removed as wrong in both
+  directions; the anti-regression test pins those names as remote
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait

@@ -50,6 +50,7 @@ pub(crate) mod doctor;
 pub(crate) mod factory;
 pub(crate) mod feature_keys;
 pub(crate) mod field_capability;
+pub(crate) mod field_verdict;
 pub(crate) mod glob;
 pub(crate) mod k_estimator;
 pub(crate) mod learned_capability;
