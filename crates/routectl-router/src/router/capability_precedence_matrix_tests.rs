@@ -106,6 +106,7 @@ fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePh
         SignalTier::SelfIdentifying,
         phase,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
 }
@@ -117,6 +118,7 @@ fn seed_verified(router: &Router, nickname: &str, feature: &str) {
         feature,
         KIND,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
 }

@@ -32,7 +32,7 @@ use super::{DispatchMeta, DispatchTarget, Router};
 use crate::capability_detect::{
     self, CapabilityObservation, DetectorContext, ObservationDirection,
 };
-use crate::learned_capability::{ObserveOutcome, PositiveOutcome};
+use crate::learned_capability::{GenerationOutcome, ObserveOutcome, PositiveOutcome};
 
 /// A single response-evidence observation captured on the terminal
 /// successful non-streaming dispatch, riding out on [`DispatchMeta`] to the
@@ -46,6 +46,16 @@ use crate::learned_capability::{ObserveOutcome, PositiveOutcome};
 /// ever enters this struct.
 #[derive(Debug, Clone)]
 pub struct CapabilityObserveEvent {
+    /// The EFFECTIVE persistence generation this event must be stamped with.
+    ///
+    /// Taken from the registry operation that produced the event, atomically
+    /// under the same guard as its read or mutation -- never sampled before or
+    /// after. A separate read could be taken across a boundary and stamp the
+    /// event with a generation that does not describe the state it reports. A
+    /// single request legitimately spans a boundary, so events on one request
+    /// may carry DIFFERENT generations.
+    pub persistence_generation: u64,
+
     /// Routing state key (nickname-or-provider) of the served target.
     pub state_key: String,
     /// Canonical capability key the observation attests to.
@@ -130,43 +140,68 @@ impl Router {
         meta: &mut DispatchMeta,
         now: Instant,
     ) {
+        // Both arms submit through the generation barrier. A `Stale` outcome
+        // means this Router has been superseded and the key is catalog-scoped:
+        // the observation is neither recorded nor counted, and nothing rides out
+        // on `meta`, so no ledger event is produced either. That is what stops a
+        // request still dispatching on the pre-swap Router from repopulating the
+        // catalog-scoped state the boundary just evicted.
         let acting = match obs.direction {
             ObservationDirection::Verified => {
-                let outcome = self.learned_capabilities.observe_positive(
+                let outcome = self.observe_verified_capability(
                     state_key,
                     obs.capability_key,
                     provider_kind,
                     EvidenceSource::Live,
+                    // Retained on the resident entry, not merely logged: the
+                    // warm rebuild fails closed on a `verified` row without a
+                    // recognized class, so an entry that cannot restate its
+                    // class would be evicted at the next boundary.
+                    Some(obs.evidence_class),
                     now,
                 );
-                if matches!(outcome, PositiveOutcome::Recorded) {
-                    self.metrics.incr_verified_working();
-                    true
-                } else {
-                    false
+                match outcome {
+                    GenerationOutcome::Applied {
+                        value: PositiveOutcome::Recorded,
+                        generation,
+                    } => {
+                        self.metrics.incr_verified_working();
+                        Some(generation)
+                    }
+                    // Not recorded, or refused as stale: no metric, no event.
+                    _ => None,
                 }
             }
             ObservationDirection::SuspectAbsence => {
-                let outcome = self.learned_capabilities.observe(
+                let outcome = self.observe_learned_capability(
                     state_key,
                     obs.capability_key,
                     provider_kind,
                     obs.tier,
                     FailurePhase::F3,
                     EvidenceSource::Live,
+                    // As above: a `suspect` row also requires a recognized
+                    // class on replay.
+                    Some(obs.evidence_class),
                     now,
                 );
-                if matches!(outcome, ObserveOutcome::Acting) {
-                    self.metrics.incr_f3_suspect();
-                    true
-                } else {
-                    false
+                match outcome {
+                    GenerationOutcome::Applied {
+                        value: ObserveOutcome::Acting,
+                        generation,
+                    } => {
+                        self.metrics.incr_f3_suspect();
+                        Some(generation)
+                    }
+                    _ => None,
                 }
             }
         };
-        if !acting {
+        // `Some(generation)` means the observation acted AND carries the
+        // generation its own mutation ran under.
+        let Some(persistence_generation) = acting else {
             return;
-        }
+        };
         tracing::warn!(
             event = "observe",
             state_key = %state_key,
@@ -179,6 +214,7 @@ impl Router {
             "response-evidence capability observation acted",
         );
         meta.capability_observations.push(CapabilityObserveEvent {
+            persistence_generation,
             state_key: state_key.to_string(),
             capability_key: obs.capability_key.to_string(),
             provider_kind: provider_kind.to_string(),

@@ -1113,6 +1113,7 @@ fn router_new_builds_learned_registry_reflecting_config_knobs() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         t0,
     );
     assert_eq!(
@@ -1197,6 +1198,7 @@ fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -1233,6 +1235,7 @@ fn carry_over_learned_from_clears_in_flight_slot() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         t0,
     );
     let t_probe = t0 + Duration::from_hours(1) + Duration::from_secs(1);
@@ -1259,9 +1262,13 @@ fn carry_over_learned_from_clears_in_flight_slot() {
     assert_eq!(carried.len(), 1);
     assert_eq!(carried[0].signal_tier, SignalTier::SelfIdentifying);
 
-    // The carried entry is still acting AND its in-flight slot was
-    // cleared, so the next matching request re-admits a probe rather than
-    // latching on a slot no outcome on the new Router can ever release.
+    // The in-flight admission STAYS held across the reload, and that is now
+    // the correct behavior: the registry is shared, so the probe outstanding on
+    // the pre-swap Router settles against this very store and releases the slot
+    // itself. (Under the retired snapshot-copy carry-over the slot had to be
+    // force-cleared, because a probe settling on the discarded registry could
+    // never reach the copy -- single-flight was traded away to avoid a
+    // permanently latched entry. Sharing the store removes that trade.)
     let t_query = t_probe + Duration::from_secs(1);
     assert_eq!(
         after.learned_capabilities.acting_negative_for(
@@ -1270,9 +1277,23 @@ fn carry_over_learned_from_clears_in_flight_slot() {
             "openai-compat",
             t_query,
         ),
-        RoutingDecision::ProbeAdmitted,
-        "carried-over slot must not stay latched after the reload",
+        RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
+        "the held admission survives the swap; the outstanding probe releases it",
     );
+
+    // Proof that it is HELD rather than lost: settling the outstanding probe
+    // through the shared registry clears the entry, which is only reachable if
+    // the pre-swap guard and the published Router address one store.
+    assert!(
+        before
+            .learned_capabilities
+            .remove_keyed("nick", "web_search", "openai-compat"),
+        "the pre-swap registry handle must address the same entry",
+    );
+    assert!(after.learned_capabilities.is_empty());
 }
 
 #[test]
@@ -1302,6 +1323,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         t0,
     );
     before.learned_capabilities.observe(
@@ -1311,6 +1333,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         t0,
     );
 
@@ -1368,6 +1391,7 @@ fn carry_over_preserves_learned_entries_across_an_essential_flip() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         t0,
     );
 
@@ -1435,6 +1459,7 @@ fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -1446,9 +1471,12 @@ fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
         after.carry_over_learned_from(&before);
     });
 
-    // Assert: fresher catalog truth wins -- registry starts empty, one
-    // WARN names the catalog trigger, invalidation counter bumped.
-    assert!(after.learned_capabilities.is_empty());
+    // Assert: one WARN names the catalog trigger and the invalidation counter
+    // bumped. The registry is NOT emptied here: eviction of the catalog-scoped
+    // entries belongs to the replay-boundary transition, which runs only once
+    // the boundary batch is durable -- a failed boundary must leave the store
+    // exactly as it was.
+    assert_eq!(after.learned_capabilities.snapshot().len(), 1);
     assert_eq!(after.metrics.invalidations_total(), 1);
     let warn = events
         .iter()
@@ -1484,6 +1512,7 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     // The rebuild picked up a newer overlay revision.
@@ -1495,9 +1524,10 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
         after.carry_over_learned_from(&before);
     });
 
-    // Assert: overlay change invalidates -- empty registry, one WARN
-    // naming the overlay trigger, invalidation counter bumped.
-    assert!(after.learned_capabilities.is_empty());
+    // Assert: overlay change invalidates -- one WARN naming the overlay
+    // trigger and the counter bumped. As above, the catalog-scoped eviction
+    // itself is the boundary transition's job, not this call's.
+    assert_eq!(after.learned_capabilities.snapshot().len(), 1);
     assert_eq!(after.metrics.invalidations_total(), 1);
     let warn = events
         .iter()
@@ -1515,6 +1545,190 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
     assert_eq!(warn.field("catalog_version"), Some(cur_cat.as_str()));
     assert_eq!(warn.field("previous_overlay_revision"), Some("3"));
     assert_eq!(warn.field("overlay_revision"), Some("4"));
+}
+
+/// The in-memory invalidation layer: a catalog change discards the
+/// catalog-scoped half of the registry and carries the envelope-field half.
+///
+/// Mixed batch on purpose. A test carrying only a field entry would pass
+/// against an unconditional carry-over, and a test clearing only a
+/// catalog-scoped entry would pass against the unconditional clear this
+/// replaces; both classes must sit in ONE registry for the assertion to
+/// discriminate. The warning and the invalidation counter are asserted
+/// alongside, because the clear did not stop happening -- it narrowed.
+#[test]
+fn carry_over_learned_from_keeps_field_entries_and_clears_catalog_scoped_on_catalog_bump() {
+    use routectl_core::capability::{FailurePhase, SignalTier};
+    use std::time::Instant;
+
+    // Arrange: one wire-shape negative and one catalog-scoped negative on
+    // the same outgoing registry, under the same target and provider kind.
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    for capability in [field_key.as_str(), "web_search"] {
+        before.learned_capabilities.observe(
+            "nick",
+            capability,
+            "anthropic-api",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            Instant::now(),
+        );
+    }
+    assert_eq!(
+        before.learned_capabilities.snapshot().len(),
+        2,
+        "both classes must be resident before the reload",
+    );
+    let mut after = Router::new(config);
+    after.catalog_version = before.catalog_version + 1;
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        after.carry_over_learned_from(&before);
+    });
+
+    // Assert: the attach itself evicts nothing -- a failed boundary must be
+    // able to leave the shared store untouched.
+    assert_eq!(
+        after.learned_capabilities.snapshot().len(),
+        2,
+        "the attach preserves both classes until the boundary commits",
+    );
+
+    // The boundary transition is what discriminates: advance the generation and
+    // prune, exactly as the reload coordinator does after its batch is durable.
+    after.learned_capabilities.advance_generation();
+    assert_eq!(after.learned_capabilities.prune_catalog_scoped(), 1);
+    let carried: Vec<String> = after
+        .learned_capabilities
+        .snapshot()
+        .into_iter()
+        .map(|entry| entry.feature_key)
+        .collect();
+    assert_eq!(
+        carried,
+        vec![field_key],
+        "only the envelope-field entry survives a catalog change",
+    );
+
+    // Assert: the existing invalidation signal still fires for the change.
+    assert_eq!(after.metrics.invalidations_total(), 1);
+    let warn = events
+        .iter()
+        .find(|e| e.level == tracing::Level::WARN)
+        .expect("catalog bump must still emit a WARN");
+    assert_eq!(warn.field("event"), Some("invalidation"));
+    assert_eq!(warn.field("catalog_changed"), Some("true"));
+}
+
+/// The composed durability path: a wire-shape verdict must be resident
+/// after a hot reload that changed the catalog AND after the cold replay a
+/// restart runs against a tombstone stamped with the new revision.
+///
+/// Fixing one layer alone is worse than fixing neither -- the verdict would
+/// survive every reload and vanish at the next restart -- so the guarantee
+/// is only observable end to end, which is what this exercises.
+#[test]
+fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
+    use crate::capability_rebuild::{CapabilityEventRow, CapabilityLedgerReader, ReplayTombstone};
+    use routectl_core::capability::{FailurePhase, SignalTier};
+    use std::time::Instant;
+
+    /// A ledger holding one pre-change wire-shape row and one pre-change
+    /// catalog-scoped row, read against a boundary stamped post-change.
+    struct MixedLedger {
+        tombstone: ReplayTombstone,
+        rows: Vec<CapabilityEventRow>,
+    }
+
+    impl CapabilityLedgerReader for MixedLedger {
+        fn tombstone(&self) -> Option<ReplayTombstone> {
+            Some(self.tombstone)
+        }
+
+        fn read_events(&self) -> Vec<CapabilityEventRow> {
+            self.rows.clone()
+        }
+    }
+
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+    let at = Instant::now();
+
+    // Arrange + Act, phase one: the hot reload, with the catalog bumped.
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    for capability in [field_key.as_str(), "web_search"] {
+        before.learned_capabilities.observe(
+            "nick",
+            capability,
+            "anthropic-api",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            at,
+        );
+    }
+    let mut reloaded = Router::new(config.clone());
+    reloaded.catalog_version = before.catalog_version + 1;
+    reloaded.carry_over_learned_from(&before);
+    // The boundary transition performs the eviction (the attach preserves both
+    // classes so a failed boundary can leave the store untouched).
+    reloaded.learned_capabilities.advance_generation();
+    reloaded.learned_capabilities.prune_catalog_scoped();
+    assert_eq!(
+        reloaded.learned_capability_snapshot().len(),
+        1,
+        "after the boundary, exactly the wire-shape entry is resident",
+    );
+
+    // Act, phase two: the restart. A fresh process starts with an empty
+    // registry and replays the persisted slice; the tombstone this boot
+    // matched carries the POST-change revision, while both persisted rows
+    // were stamped pre-change.
+    let restarted = Router::new(config);
+    let boundary_catalog = before.catalog_version + 1;
+    let row = |rowid: i64, capability: &str| {
+        CapabilityEventRow::new(
+            rowid,
+            at,
+            "broken".to_string(),
+            Some("f1".to_string()),
+            "live".to_string(),
+            Some("self-identifying".to_string()),
+            None,
+            capability.to_string(),
+            "nick".to_string(),
+            "anthropic-api".to_string(),
+            before.catalog_version,
+            0,
+        )
+    };
+    let summary = restarted.rebuild_learned_from_ledger(&MixedLedger {
+        tombstone: ReplayTombstone::new(0, boundary_catalog, 0),
+        rows: vec![row(1, &field_key), row(2, "web_search")],
+    });
+
+    // Assert: the wire-shape verdict is resident after BOTH transitions,
+    // and the catalog-scoped row was evicted by the revision guard.
+    let resident: Vec<String> = restarted
+        .learned_capability_snapshot()
+        .into_iter()
+        .map(|entry| entry.feature_key)
+        .collect();
+    assert_eq!(
+        resident,
+        vec![field_key],
+        "the wire-shape verdict survives the reload and the restart",
+    );
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.skipped_revision, 1);
 }
 
 #[test]
@@ -2026,5 +2240,165 @@ fn emit_class_observability_bumps_context_window_overflow_on_context_window_clas
         1,
         "a dispatch error arm reaching FailureClass::ContextWindow means the \
          target cleared the proactive window gate and still overflowed",
+    );
+}
+
+/// The survivor set a revision-changing reload must restate: every carried
+/// catalog-independent entry, with the provider kind each needs to reconstruct
+/// its persisted row.
+///
+/// The predicate decides membership, so a catalog-scoped sibling under the
+/// same target must be absent -- restating it would resurrect exactly the
+/// entry the revision change is meant to evict.
+#[test]
+fn catalog_independent_survivors_carry_the_fields_needed_to_restate_them() {
+    use routectl_core::capability::{FailurePhase, SignalTier};
+    use std::time::Instant;
+
+    // Arrange
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("mints a key");
+    let router = Router::new(Arc::new(Config::default()));
+    for capability in [field_key.as_str(), "web_search"] {
+        router.learned_capabilities.observe(
+            "nick",
+            capability,
+            "anthropic-api",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            Instant::now(),
+        );
+    }
+
+    // Act
+    let survivors = router.catalog_independent_survivors();
+
+    // Assert: exactly the field entry, carrying its evidence fields.
+    assert_eq!(survivors.len(), 1, "only the field entry survives");
+    let survivor = &survivors[0];
+    assert_eq!(survivor.state_key, "nick");
+    assert_eq!(survivor.capability, field_key);
+    assert_eq!(survivor.verdict, "broken");
+    assert_eq!(survivor.phase, "f1");
+    assert_eq!(survivor.source, "live");
+    assert_eq!(survivor.tier, "self-identifying");
+}
+
+/// The state_key-to-provider-kind resolution is centralized and reused, not
+/// re-derived per call site. An unknown key degrades to an empty kind rather
+/// than guessing -- an empty kind is inert in the registry's normalization, so
+/// it reconstructs the identical key.
+#[test]
+fn provider_kind_for_state_key_degrades_to_empty_for_an_unresolvable_key() {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "prov".to_string(),
+        ProviderEntry::openai_compat("https://example.test/v1", "env://K"),
+    );
+    let router = Router::new(Arc::new(Config {
+        providers,
+        ..Config::default()
+    }));
+
+    // With no resolved models installed, the identity map falls back to
+    // treating the key as a provider name -- which resolves for a configured
+    // provider and is empty for anything else.
+    assert_eq!(router.provider_kind_for_state_key("prov"), "openai-compat");
+    assert_eq!(
+        router.provider_kind_for_state_key("unknown-nick"),
+        "",
+        "an unresolvable key yields an empty (inert) kind, never a guess",
+    );
+}
+
+/// A reload ATTACHES the replacement Router to the outgoing registry `Arc`
+/// rather than copying entries into its own.
+///
+/// Pointer identity is the assertion, because that is the property everything
+/// else rests on: an in-flight request still holding the pre-swap Router
+/// writes into the SAME store the published Router reads. A snapshot copy
+/// would satisfy every value-equality check while silently dropping such a
+/// write.
+#[test]
+fn carry_over_learned_from_shares_the_outgoing_registry_arc() {
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    after.carry_over_learned_from(&before);
+
+    assert!(
+        Arc::ptr_eq(&after.learned_capabilities, &before.learned_capabilities),
+        "the replacement Router must share the outgoing registry Arc",
+    );
+}
+
+/// The learned-replay facade is rebuilt against the SHARED registry too.
+///
+/// It holds its own `Arc` to the registry. Left pointing at the fresh
+/// constructor's registry, every replay settlement after a reload would land in
+/// a store nothing reads -- a silent hole exactly where the two-phase learn
+/// discipline is supposed to persist its verdict.
+#[test]
+fn carry_over_learned_from_rebuilds_the_replay_facade_on_the_shared_registry() {
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    after.carry_over_learned_from(&before);
+
+    assert!(
+        Arc::ptr_eq(
+            after.learned_replay().registry_arc(),
+            &before.learned_capabilities
+        ),
+        "the replay facade must be rebuilt against the shared registry",
+    );
+}
+
+/// A reload applies hot-reloaded `[capability]` tempo to the shared registry.
+///
+/// The registry outlives the Router generation that built it, so this is the
+/// only path by which changed tuning can take effect at all.
+#[test]
+fn carry_over_learned_from_retunes_the_shared_registry() {
+    use crate::config::CapabilityConfig;
+
+    let before = Router::new(Arc::new(Config::default()));
+    let retuned = Arc::new(Config {
+        capability: CapabilityConfig {
+            decay_hours: 1,
+            ..CapabilityConfig::default()
+        },
+        ..Config::default()
+    });
+    let mut after = Router::new(retuned);
+
+    after.carry_over_learned_from(&before);
+
+    assert_eq!(
+        after.learned_capabilities.decay(),
+        std::time::Duration::from_hours(1),
+        "the reload's capability tempo must reach the shared registry",
+    );
+}
+
+/// The Router carries the generation it was published at, and a fresh Router
+/// adopts the shared registry's active generation on attach.
+#[test]
+fn a_router_carries_the_shared_registrys_generation_after_attach() {
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    before.learned_capabilities.advance_generation();
+    let mut after = Router::new(config);
+
+    after.carry_over_learned_from(&before);
+
+    assert_eq!(
+        after.registry_generation(),
+        before.learned_capabilities.generation(),
+        "the attached Router must adopt the shared registry's generation",
     );
 }

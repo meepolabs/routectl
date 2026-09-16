@@ -5,6 +5,15 @@ use crate::server::serve::build_usage_writer;
 use crate::server::test_support::isolate_usage_db;
 use routectl_testkit::ScopedEnv;
 
+/// A shutdown receiver that never fires, for reload tests whose subject is not
+/// the shutdown race. The sender is leaked deliberately: dropping it would make
+/// `changed()` resolve immediately and abandon every boundary under test.
+fn never_shutdown() -> watch::Receiver<()> {
+    let (tx, rx) = watch::channel(());
+    std::mem::forget(tx);
+    rx
+}
+
 /// SIGHUP-only delivery: drive `run_sighup_listener` directly with no
 /// filesystem watcher in the picture. Sending SIGHUP to ourselves
 /// must produce exactly one `Config` followed by one `Credentials`
@@ -409,6 +418,7 @@ async fn config_reload_flips_usage_enabled_gate_live() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )
     .await
     .expect("config reload must apply");
@@ -475,6 +485,7 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )
     .await
     .expect("reload with a fresh overlay file must apply");
@@ -498,6 +509,7 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )
     .await;
 
@@ -555,6 +567,7 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
             &swap,
             &usage,
             ReloadTrigger::ConfigFile,
+            &mut never_shutdown(),
         )))
         .await;
     config_result.expect("config-triggered reload must apply");
@@ -567,6 +580,7 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
             &swap,
             &usage,
             ReloadTrigger::CatalogOverlay,
+            &mut never_shutdown(),
         )))
         .await;
     overlay_result.expect("overlay-triggered reload must apply");
@@ -763,6 +777,7 @@ async fn config_reload_rejects_a_candidate_whose_pool_has_no_usable_member() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )
     .await;
 
@@ -839,6 +854,7 @@ async fn the_reload_rejection_warn_neutralizes_control_bytes_in_a_pool_key() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )))
     .await;
 
@@ -912,6 +928,7 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )
     .await;
 
@@ -990,6 +1007,7 @@ async fn config_reload_revision_change_enqueues_one_new_revision_tombstone() {
         &swap,
         &usage,
         ReloadTrigger::CatalogOverlay,
+        &mut never_shutdown(),
     )
     .await
     .expect("overlay reload must apply");
@@ -1066,6 +1084,7 @@ async fn config_reload_without_revision_change_enqueues_no_tombstone() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )
     .await
     .expect("config reload must apply");
@@ -1140,6 +1159,7 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
         &swap,
         &usage,
         ReloadTrigger::CatalogOverlay,
+        &mut never_shutdown(),
     )
     .await;
 
@@ -1208,6 +1228,7 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
             &swap,
             &usage,
             ReloadTrigger::ConfigFile,
+            &mut never_shutdown(),
         )))
         .await;
     let (flipped_config, _) = flip_result.expect("the flipping reload must apply");
@@ -1223,6 +1244,7 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
             &swap,
             &usage,
             ReloadTrigger::ConfigFile,
+            &mut never_shutdown(),
         )))
         .await;
     steady_result.expect("the no-change reload must apply");
@@ -1309,6 +1331,7 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
             &swap,
             &usage,
             ReloadTrigger::ConfigFile,
+            &mut never_shutdown(),
         )))
         .await;
     let (flipped_config, _) = flip_result.expect("the flipping reload must apply");
@@ -1324,6 +1347,7 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
             &swap,
             &usage,
             ReloadTrigger::ConfigFile,
+            &mut never_shutdown(),
         )))
         .await;
     steady_result.expect("the no-change reload must apply");
@@ -1404,6 +1428,7 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )))
     .await;
 
@@ -1474,6 +1499,7 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     )))
     .await;
     result.expect("the flipping reload must apply");
@@ -1566,6 +1592,7 @@ async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
         &swap,
         &usage,
         ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
     ))
     .await;
 
@@ -1753,5 +1780,105 @@ async fn router_metrics_snapshot_driver_flushes_on_the_periodic_tick() {
         snapshots[0].field("rc_invalidations_total"),
         Some("1"),
         "the periodic snapshot must carry the shared instance's accumulated total"
+    );
+}
+
+/// A revision-changing reload whose capability boundary cannot be written is
+/// REJECTED, and leaves every piece of live state exactly as it was.
+///
+/// This is the coordinator-level contract behind the boundary work: publishing a
+/// router whose verdicts the next boot cannot see is the failure being prevented,
+/// so a boundary that did not land must abort the reload rather than swap
+/// anyway. Asserted on the four things a caller could observe -- the return
+/// value, ArcSwap pointer identity, the shared registry's generation, and its
+/// resident entries -- because a partial rollback would satisfy any one of them
+/// alone.
+#[tokio::test]
+#[serial_test::serial]
+async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous_router() {
+    // Arrange: isolated config dir with a config.toml and no overlay yet.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
+    )
+    .unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut initial_config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut initial_config);
+    let initial_config = Arc::new(initial_config);
+    // A handle whose writer channel is CLOSED, so boundary admission is refused
+    // outright. Produced directly because `UsageWriter::shutdown` cannot close
+    // the channel while a handle holds a sender clone.
+    let usage = routectl_usage::handle_with_closed_channel();
+
+    let router = build_router_from_config_with_overlay(
+        initial_config.clone(),
+        &Arc::default(),
+        secrets.clone(),
+    )
+    .await
+    .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before_router = swap.load_full();
+    let registry_before = Arc::clone(before_router.learned_registry());
+    let generation_before = registry_before.generation();
+    let decay_before = registry_before.decay();
+    let entries_before = before_router.learned_capability_snapshot().len();
+
+    // Act: write an overlay cell so the reload CHANGES the revision, which is
+    // what makes a boundary necessary at all.
+    let overlay_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("catalog_overlay.json"),
+        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+    )
+    .unwrap();
+    let outcome = handle_config_reload(
+        Some(&cfg_path),
+        &initial_config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
+    )
+    .await;
+
+    // Assert: rejected, with no success signal for the caller to advance on.
+    assert!(
+        outcome.is_none(),
+        "a reload whose boundary cannot be written must report failure",
+    );
+    // The published router is the SAME allocation -- not an equal replacement.
+    assert!(
+        Arc::ptr_eq(&swap.load_full(), &before_router),
+        "the previous router must stay published, pointer-identical",
+    );
+    // And the shared state it serves from is untouched.
+    assert_eq!(
+        registry_before.generation(),
+        generation_before,
+        "a rejected reload must not advance the generation",
+    );
+    assert_eq!(
+        registry_before.decay(),
+        decay_before,
+        "nor retune the shared registry",
+    );
+    assert_eq!(
+        registry_before.effective_persistence_generation(),
+        generation_before,
+        "nor leave a pending generation installed",
+    );
+    assert_eq!(
+        before_router.learned_capability_snapshot().len(),
+        entries_before,
+        "nor prune any entry",
     );
 }

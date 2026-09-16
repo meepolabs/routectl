@@ -126,6 +126,7 @@ fn lapsed_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
         first_seen: base,
         last_seen: base,
         expires_at: base.checked_sub(Duration::from_secs(1)).unwrap_or(base),
+        evidence_class: None,
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
         in_flight: false,

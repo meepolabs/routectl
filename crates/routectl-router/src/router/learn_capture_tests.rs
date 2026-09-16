@@ -444,6 +444,7 @@ async fn masked_cell_rejection_does_not_refresh_resident_entry() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         t0,
     );
     let before = router.learned_capabilities.snapshot();
@@ -669,6 +670,7 @@ fn seed_expired_negative(router: &Router, state_key: &str, feature: &str) {
             first_seen: past,
             last_seen: past,
             expires_at: past,
+            evidence_class: None,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
             in_flight: false,
@@ -1333,6 +1335,7 @@ fn seed_expired_phase_negative(router: &Router, feature: &str, phase: FailurePha
             first_seen: past,
             last_seen: past,
             expires_at: past,
+            evidence_class: None,
             phase,
             source: EvidenceSource::Live,
             in_flight: false,
@@ -1348,6 +1351,7 @@ fn armed_guard_for(router: &Router, feature: &str) -> LearnedProbeGuard {
             state_key: "m1".into(),
             feature: feature.into(),
             provider_kind: "anthropic-api",
+            generation: 1,
         }],
         "complete",
     )
@@ -1381,9 +1385,10 @@ fn same_capability_settle_emits_no_cleared_event() {
     let mut guard = armed_guard_for(&router, "web_search");
 
     let matched = guard.settle_same_capability("m1", "web_search", "anthropic-api");
-    assert!(
+    assert_eq!(
         matched,
-        "the held probe matched the same-capability rejection"
+        super::super::runtime_gate::SameCapabilitySettlement::Applied,
+        "the held probe matched the same-capability rejection and applied"
     );
 
     let cleared = guard.settle_success();
@@ -2135,4 +2140,71 @@ async fn bedrock_drift_body_bumps_only_the_unmatched_counter() {
     assert_eq!(bedrock_unmatched_warns(&events).len(), 1);
     assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 1);
     assert_eq!(router.metrics.learned_negatives_f1_total(), 0);
+}
+
+/// A same-capability re-rejection whose admission went STALE leaves every
+/// downstream consequence unchanged, driven through the production settlement
+/// path the caller switches on.
+///
+/// The retired boolean returned `true` for a stale settlement too, so the caller
+/// bumped the probe-failure metric, recorded the cross-lane F1Seen marker, and
+/// inserted the request-local dedupe key -- three observable effects of a
+/// settlement that recorded nothing, booked against a catalog revision the daemon
+/// had already left.
+///
+/// # Why this stages the guard instead of driving a full dispatch
+///
+/// Two full-dispatch shapes were tried and both are unusable, measured rather
+/// than assumed:
+///
+/// - Advancing the generation BEFORE the request makes the feature filter refuse
+///   the admission outright, so no probe is attempted
+///   (`probe_attempts_total() == 0`) and every assertion holds vacuously.
+/// - Advancing it from the guarded-read pause hook DEADLOCKS: the hook runs while
+///   the generation read guard is held and `advance_generation` wants the write
+///   lock, so the suite hangs rather than failing.
+///
+/// The interleaving is therefore staged directly -- a guard armed at the
+/// admitting generation, the reload, then the production
+/// `settle_same_capability`. `advance_generation` alone rather than the full
+/// boundary transition, so the entry is not pruned and "unchanged" stays
+/// observable.
+#[tokio::test]
+async fn a_stale_same_capability_probe_settlement_books_nothing() {
+    // Arrange: an expired negative and a guard holding its re-probe admission.
+    let router = router_with(OPENAI_P1, self_identifying_provider());
+    seed_expired_negative(&router, "m1", "web_search");
+    let before = router.learned_capabilities.snapshot()[0].expires_at;
+    let observations_before = router.learned_capabilities.snapshot()[0].observations;
+    let failures_before = router.metrics.probe_failures_total();
+    let mut guard = armed_guard_for(&router, "web_search");
+
+    // The reload lands between the admission and the rejection.
+    router.learned_capabilities.advance_generation();
+
+    // Act: the production settlement path.
+    let settled = guard.settle_same_capability("m1", "web_search", "anthropic-api");
+
+    // Assert: reported as stale, which is what makes the caller skip its whole
+    // consequence block.
+    assert_eq!(
+        settled,
+        super::super::runtime_gate::SameCapabilitySettlement::Stale,
+        "the settlement must report Stale, not the retired `true`",
+    );
+    assert_eq!(
+        router.metrics.probe_failures_total(),
+        failures_before,
+        "a stale settlement books no probe failure -- none was recorded",
+    );
+    let snap = router.learned_capabilities.snapshot();
+    assert_eq!(snap.len(), 1, "the entry is still resident");
+    assert_eq!(
+        snap[0].observations, observations_before,
+        "a stale settlement must not bump the observation count",
+    );
+    assert_eq!(
+        snap[0].expires_at, before,
+        "nor refresh the backoff it did not book",
+    );
 }

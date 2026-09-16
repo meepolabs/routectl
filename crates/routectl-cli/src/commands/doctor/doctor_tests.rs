@@ -3554,6 +3554,7 @@ mod matrix_panel {
             first_seen: last_seen,
             last_seen,
             expires_at: last_seen,
+            evidence_class: None,
             phase: FailurePhase::F1,
             source,
         }

@@ -174,7 +174,10 @@ pub use k_estimator::{
     KSessionStore, KSessionWindow, LedgerBackedK, LedgerReader, LedgerSampleRow, Sample,
     ShadowOutcome, ShadowStore, rebuild_into,
 };
-pub use learned_capability::{LearnedCapabilityRegistry, LearnedRegistryEntry};
+pub use learned_capability::{
+    BoundaryCut, BoundaryReceipt, BoundarySettlement, GenerationOutcome, LearnedCapabilityRegistry,
+    LearnedRegistryEntry,
+};
 pub use override_registry::{
     OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
     validate_capability_overrides,
@@ -183,6 +186,6 @@ pub use pool_build::{PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolRe
 pub use pricing::{PricingSource, effective_pricing};
 pub use resolved::ResolvedModel;
 pub use router::{
-    ALIAS_MAX_RECURSION_DEPTH, DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions,
-    class_debits,
+    ALIAS_MAX_RECURSION_DEPTH, CatalogIndependentSurvivor, DispatchMeta, Dispatched,
+    DispatchedStream, Router, RouterOptions, class_debits,
 };

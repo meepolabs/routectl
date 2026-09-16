@@ -55,15 +55,26 @@ pub struct TombstoneRow {
     pub overlay_revision: Option<i64>,
 }
 
-/// Read up to `limit` capability events whose rowid is strictly greater
-/// than `after_rowid`, oldest-first.
+/// Read the NEWEST up to `limit` capability events whose rowid is strictly
+/// greater than `after_rowid`, returned oldest-first by rowid.
 ///
-/// Ordered `(ts ASC, rowid ASC)` so the replayer sees events in the order
-/// they were captured; `rowid` breaks ties among rows sharing an identical
-/// `ts` (millisecond collisions) by insertion order, keeping replay
-/// deterministic. Capped at `limit` rows (the warm-rebuild row cap): the
-/// caller treats a full result as "possibly truncated". `after_rowid = 0`
-/// (or any value below the first rowid) reads from the ledger's start.
+/// Ordered by `rowid` alone, in both directions of the query. `rowid` is
+/// monotonic per append, so it IS the ledger's append order; `ts` is a
+/// wall-clock stamp that an NTP correction or a clock rollback can move
+/// backwards relative to it. Because replay applies state transitions in the
+/// order it receives them (a negative, then the clear that settles it),
+/// ordering by `ts` could invert a settled pair and resurrect a cleared
+/// negative. `ts` remains decay-age input on the router side; it never
+/// decides precedence here.
+///
+/// The cap selects the NEWEST eligible rows rather than the oldest: those are
+/// the rows describing current state, including any survivor restatements a
+/// boundary batch just appended. Taking the oldest window on a dense ledger
+/// would replay ancient history and omit exactly the recent rows that matter.
+/// The inner query therefore walks `rowid DESC` under the limit and the outer
+/// one re-sorts ascending for the replayer. `after_rowid = 0` (or any value
+/// below the first rowid) reads from the ledger's start; the boundary is
+/// applied inside the limit, so the window never reaches back across it.
 pub fn read_capability_events_after(
     conn: &rusqlite::Connection,
     after_rowid: i64,
@@ -122,13 +133,23 @@ ORDER BY rowid DESC LIMIT 1";
 
 /// The bound read-after query. Column order matches `CapabilityEventRow`'s
 /// `get` positions above.
+///
+/// Two nested orderings, both on `rowid` and both load-bearing: the inner
+/// `DESC` + `LIMIT` takes the NEWEST eligible window, and the outer `ASC`
+/// hands it to the replayer oldest-first. Neither mentions `ts` -- append
+/// order is authoritative (see the function docs).
 const READ_AFTER_SQL: &str = "\
 SELECT rowid, ts, lane_key, capability, verdict, phase, source, tier,
        evidence_class, upstream_token, catalog_version, overlay_revision
-FROM capability_events
-WHERE rowid > ?1
-ORDER BY ts ASC, rowid ASC
-LIMIT ?2";
+FROM (
+    SELECT rowid, ts, lane_key, capability, verdict, phase, source, tier,
+           evidence_class, upstream_token, catalog_version, overlay_revision
+    FROM capability_events
+    WHERE rowid > ?1
+    ORDER BY rowid DESC
+    LIMIT ?2
+)
+ORDER BY rowid ASC";
 
 #[cfg(test)]
 #[path = "capability_tests.rs"]

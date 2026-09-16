@@ -157,30 +157,44 @@ pub trait CapabilityLedgerReader: Send + Sync {
 
 /// Whether one event survives the replay boundary. The single pure owner of
 /// "which events survive": the rebuild loop is oblivious. Post-tombstone
-/// survival is deliberately NOT unconditional -- a straggler carrying a
-/// revision other than the boundary's is skipped -- so no caller may assume
-/// an import clears everything after the tombstone.
+/// survival is deliberately NOT unconditional -- a catalog-scoped straggler
+/// carrying a revision other than the boundary's is skipped -- so no caller
+/// may assume an import clears everything after the tombstone. The two skip
+/// variants are distinct because they answer different operator questions: a
+/// boundary skip is ordinary bookkeeping, while a revision skip is an
+/// eviction the rebuild tally reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayDecision {
     Replay,
-    Skip,
+    /// At or before the tombstone rowid: this boot has already accounted for
+    /// the event. Unconditional -- it applies to every key class.
+    SkipBoundary,
+    /// Post-boundary, but the row's stamped revision is not this boundary's
+    /// and the row's fact is scoped to a catalog revision.
+    SkipRevision,
 }
 
 /// Pure replay-boundary rule. Skips rows at or before the tombstone rowid,
 /// and post-tombstone stragglers whose stamped revision differs from the
 /// boundary's (an old router can append stale-revision events after a
 /// tombstone during a reload swap).
-pub const fn should_replay(
-    event: &CapabilityEventRow,
-    tombstone: &ReplayTombstone,
-) -> ReplayDecision {
+///
+/// The rowid boundary is unconditional; the revision comparison applies only
+/// to catalog-scoped keys. A wire-shape fact an upstream stated about its
+/// request envelope does not depend on the catalog at all, so evicting it on
+/// a revision change would discard a still-true fact -- and because the
+/// in-memory carry-over honors the same predicate, a verdict that survives a
+/// reload survives the next restart too.
+pub fn should_replay(event: &CapabilityEventRow, tombstone: &ReplayTombstone) -> ReplayDecision {
     if event.rowid <= tombstone.rowid {
-        return ReplayDecision::Skip;
+        return ReplayDecision::SkipBoundary;
     }
-    if event.catalog_version != tombstone.catalog_version
-        || event.overlay_revision != tombstone.overlay_revision
+    let revision_differs = event.catalog_version != tombstone.catalog_version
+        || event.overlay_revision != tombstone.overlay_revision;
+    if revision_differs
+        && crate::field_capability::capability_key_is_catalog_scoped(&event.capability)
     {
-        return ReplayDecision::Skip;
+        return ReplayDecision::SkipRevision;
     }
     ReplayDecision::Replay
 }
@@ -205,12 +219,25 @@ pub struct CapabilityRebuildSummary {
     /// Events skipped because a token (source/verdict/tier/phase) was not
     /// recognized.
     pub skipped_unknown: usize,
+    /// Catalog-scoped events skipped because their stamped catalog / overlay
+    /// revision is not the replay boundary's -- an eviction, distinct from
+    /// both the rowid-boundary skip (ordinary bookkeeping, not counted) and
+    /// `skipped_unknown` (an unrecognized TOKEN). Without it an operator
+    /// cannot tell an empty history from a fully evicted one.
+    pub skipped_revision: usize,
 }
 
 /// Replay a ledger slice into `registry` through the live stage-2 admission
 /// calls. Reads the boundary and rows via `reader`, keeps the survivors,
-/// replays them oldest-first (same-instant rows tie-break by rowid), and
-/// returns the tally. A missing tombstone replays nothing (fail-closed).
+/// replays them in APPEND order (ascending `rowid`), and returns the tally. A
+/// missing tombstone replays nothing (fail-closed).
+///
+/// Precedence is `rowid` alone, never the mapped `observed_at`. The instant is
+/// derived from a persisted wall-clock stamp, so a clock rollback between two
+/// appends can map a later-appended row to an earlier instant; ordering by it
+/// would replay a settled negative-then-cleared pair backwards and resurrect
+/// the cleared negative. `observed_at` stays what it is for -- decay age fed
+/// into the admission calls -- and decides no state transition.
 pub fn rebuild_capabilities_into(
     reader: &dyn CapabilityLedgerReader,
     registry: &LearnedCapabilityRegistry,
@@ -220,16 +247,15 @@ pub fn rebuild_capabilities_into(
         return summary;
     };
 
-    let mut rows: Vec<CapabilityEventRow> = reader
-        .read_events()
-        .into_iter()
-        .filter(|row| matches!(should_replay(row, &tombstone), ReplayDecision::Replay))
-        .collect();
-    rows.sort_by(|a, b| {
-        a.observed_at
-            .cmp(&b.observed_at)
-            .then(a.rowid.cmp(&b.rowid))
-    });
+    let mut rows: Vec<CapabilityEventRow> = Vec::new();
+    for row in reader.read_events() {
+        match should_replay(&row, &tombstone) {
+            ReplayDecision::Replay => rows.push(row),
+            ReplayDecision::SkipRevision => summary.skipped_revision += 1,
+            ReplayDecision::SkipBoundary => {}
+        }
+    }
+    rows.sort_by_key(|row| row.rowid);
 
     for row in &rows {
         replay_row(row, registry, &mut summary);
@@ -273,6 +299,7 @@ fn replay_row(
                 &row.capability,
                 &row.provider_kind,
                 source,
+                row.evidence_class.as_deref(),
                 row.observed_at,
             );
             summary.replayed_verified += 1;
@@ -403,6 +430,7 @@ fn mint_negative(
         tier,
         phase,
         source,
+        row.evidence_class.as_deref(),
         row.observed_at,
     );
     summary.replayed_negative += 1;

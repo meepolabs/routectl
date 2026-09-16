@@ -485,7 +485,10 @@ impl UsageCapture {
     /// a full channel with its own counter. NEVER carries a request body /
     /// prompt / upstream text (log hygiene): only the normalized keys and the
     /// closed-set tokens reach the row.
-    fn drain_capability_events(
+    /// Crate-visible so the capability-boundary regression can drive the REAL
+    /// drain rather than a replica of it -- the point of that test is that the
+    /// production path stamps and persists correctly.
+    pub(crate) fn drain_capability_events(
         &self,
         meta: &DispatchMeta,
         catalog_version: u32,
@@ -494,54 +497,110 @@ impl UsageCapture {
         let catalog_version = i64::from(catalog_version);
         let overlay_revision = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
         let ts = epoch_ms_now();
+        // Each event carries its OWN generation, taken from the registry
+        // operation that produced it. Not one request-wide figure: a request can
+        // span a boundary, and then its earlier and later events legitimately
+        // belong to different generations.
+        // Generation 0 is never a live generation (they are 1-based), so a
+        // non-empty ride-along carrying it means a producer forgot to stamp the
+        // meta. Such events would be older than every boundary and the writer
+        // would drop them ONE BY ONE, silently -- the failure mode this whole
+        // barrier exists to prevent, arriving through the back door.
+        //
+        // Loud in debug so a new producer cannot land unstamped; fail-CLOSED in
+        // release, dropping the batch with a single ERROR rather than emitting
+        // rows whose fate is a silent per-event discard.
+        // Per EVENT, because each carries its own stamp now: one unstamped event
+        // among stamped siblings is exactly the case a request-wide check would
+        // miss.
+        let unstamped = meta
+            .learned_capabilities
+            .iter()
+            .map(|ev| ev.persistence_generation)
+            .chain(
+                meta.capability_observations
+                    .iter()
+                    .map(|ev| ev.persistence_generation),
+            )
+            .chain(
+                meta.cleared_capabilities
+                    .iter()
+                    .map(|ev| ev.persistence_generation),
+            )
+            .any(|generation| generation == 0);
+        if unstamped {
+            debug_assert!(
+                false,
+                "capability ride-along events were not stamped with a registry \
+                 generation; each event must carry the one its own registry \
+                 operation returned"
+            );
+            tracing::error!(
+                learned = meta.learned_capabilities.len(),
+                observed = meta.capability_observations.len(),
+                cleared = meta.cleared_capabilities.len(),
+                "capability events carried no registry generation; dropping them \
+                 rather than persisting rows the replay boundary would discard"
+            );
+            return;
+        }
         for ev in &meta.learned_capabilities {
-            self.usage.try_send_capability_event(CapabilityEvent {
-                ts,
-                lane_key: ev.state_key.clone(),
-                capability: ev.capability_key.clone(),
-                verdict: Verdict::LearnedBroken(ev.phase).as_str().to_string(),
-                phase: ev.phase.as_str().to_string(),
-                source: ev.source.as_str().to_string(),
-                tier: ev.signal_tier.as_str().to_string(),
-                evidence_class: None,
-                upstream_token: None,
-                catalog_version,
-                overlay_revision,
-            });
+            self.usage.try_send_capability_event_in_generation(
+                CapabilityEvent {
+                    ts,
+                    lane_key: ev.state_key.clone(),
+                    capability: ev.capability_key.clone(),
+                    verdict: Verdict::LearnedBroken(ev.phase).as_str().to_string(),
+                    phase: ev.phase.as_str().to_string(),
+                    source: ev.source.as_str().to_string(),
+                    tier: ev.signal_tier.as_str().to_string(),
+                    evidence_class: None,
+                    upstream_token: None,
+                    catalog_version,
+                    overlay_revision,
+                },
+                ev.persistence_generation,
+            );
         }
         for ev in &meta.capability_observations {
             let verdict = match ev.direction {
                 ObservationDirection::Verified => Verdict::VerifiedWorking,
                 ObservationDirection::SuspectAbsence => Verdict::SuspectIgnored,
             };
-            self.usage.try_send_capability_event(CapabilityEvent {
-                ts,
-                lane_key: ev.state_key.clone(),
-                capability: ev.capability_key.clone(),
-                verdict: verdict.as_str().to_string(),
-                phase: FailurePhase::F3.as_str().to_string(),
-                source: ev.source.as_str().to_string(),
-                tier: ev.signal_tier.as_str().to_string(),
-                evidence_class: Some(ev.evidence_class.clone()),
-                upstream_token: None,
-                catalog_version,
-                overlay_revision,
-            });
+            self.usage.try_send_capability_event_in_generation(
+                CapabilityEvent {
+                    ts,
+                    lane_key: ev.state_key.clone(),
+                    capability: ev.capability_key.clone(),
+                    verdict: verdict.as_str().to_string(),
+                    phase: FailurePhase::F3.as_str().to_string(),
+                    source: ev.source.as_str().to_string(),
+                    tier: ev.signal_tier.as_str().to_string(),
+                    evidence_class: Some(ev.evidence_class.clone()),
+                    upstream_token: None,
+                    catalog_version,
+                    overlay_revision,
+                },
+                ev.persistence_generation,
+            );
         }
         for ev in &meta.cleared_capabilities {
-            self.usage.try_send_capability_event(CapabilityEvent {
-                ts,
-                lane_key: ev.state_key.clone(),
-                capability: ev.capability_key.clone(),
-                verdict: Verdict::Cleared.as_str().to_string(),
-                phase: String::new(),
-                source: EvidenceSource::Live.as_str().to_string(),
-                tier: String::new(),
-                evidence_class: None,
-                upstream_token: None,
-                catalog_version,
-                overlay_revision,
-            });
+            self.usage.try_send_capability_event_in_generation(
+                CapabilityEvent {
+                    ts,
+                    lane_key: ev.state_key.clone(),
+                    capability: ev.capability_key.clone(),
+                    verdict: Verdict::Cleared.as_str().to_string(),
+                    phase: String::new(),
+                    source: EvidenceSource::Live.as_str().to_string(),
+                    tier: String::new(),
+                    evidence_class: None,
+                    upstream_token: None,
+                    catalog_version,
+                    overlay_revision,
+                },
+                ev.persistence_generation,
+            );
         }
     }
 

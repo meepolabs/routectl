@@ -45,14 +45,21 @@ fn sibling_models_on_one_lane_share_one_learned_entry() {
     // Act -- the first sibling carries, gets rejected, and its stripped
     // repair succeeds.
     let guard = reg
-        .admit_provisional(&sibling_a, t0)
+        .admit_provisional(&sibling_a, 1, t0)
+        .admitted()
         .expect("an unknown pair admits one carry");
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- the second sibling reads the SAME learned truth: no second
     // carry, no second learned retry.
     assert!(reg.is_negative_acting(&sibling_b, t0));
-    assert!(reg.admit_provisional(&sibling_b, t0).is_none());
+    assert!(
+        reg.admit_provisional(&sibling_b, 1, t0)
+            .admitted()
+            .is_none()
+    );
 }
 
 #[test]
@@ -67,9 +74,11 @@ fn distinct_lanes_and_artifact_schemes_are_distinct_entries() {
 
     // Act -- learn the codex-onto-mantle pair only.
     let _ = reg
-        .admit_provisional(&onto_mantle, t0)
+        .admit_provisional(&onto_mantle, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- neither the other lane nor the other artifact scheme
     // inherits that truth.
@@ -86,14 +95,19 @@ fn commit_persists_the_negative_only_after_a_successful_stripped_repair() {
     let reg = registry();
     let t0 = Instant::now();
     let k = key("t");
-    let guard = reg.admit_provisional(&k, t0).expect("unknown pair admits");
+    let guard = reg
+        .admit_provisional(&k, 1, t0)
+        .admitted()
+        .expect("unknown pair admits");
     assert!(
         !reg.is_negative_acting(&k, t0),
         "the rejection alone must not persist a negative"
     );
 
     // Act -- the stripped repair succeeds.
-    let event = guard.commit(400, vec!["reasoning_replay".to_string()], t0);
+    let event = guard
+        .commit(400, vec!["reasoning_replay".to_string()], t0)
+        .expect("a live commit emits its row");
 
     // Assert
     assert!(reg.is_negative_acting(&k, t0));
@@ -112,14 +126,17 @@ fn release_leaves_no_persisted_negative() {
     let reg = registry();
     let t0 = Instant::now();
     let k = key("t");
-    let guard = reg.admit_provisional(&k, t0).expect("unknown pair admits");
+    let guard = reg
+        .admit_provisional(&k, 1, t0)
+        .admitted()
+        .expect("unknown pair admits");
 
     // Act
     guard.release();
 
     // Assert -- nothing learned, and the slot is free for the next request.
     assert!(!reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, t0).is_some());
+    assert!(reg.admit_provisional(&k, 1, t0).admitted().is_some());
 }
 
 #[test]
@@ -130,11 +147,15 @@ fn dropping_an_unsettled_guard_releases_the_slot_without_learning() {
     let k = key("t");
 
     // Act
-    drop(reg.admit_provisional(&k, t0).expect("unknown pair admits"));
+    drop(
+        reg.admit_provisional(&k, 1, t0)
+            .admitted()
+            .expect("unknown pair admits"),
+    );
 
     // Assert
     assert!(!reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, t0).is_some());
+    assert!(reg.admit_provisional(&k, 1, t0).admitted().is_some());
 }
 
 // --- single-flight ---
@@ -160,7 +181,7 @@ fn exactly_one_of_n_concurrent_callers_carries_an_unknown_pair() {
             let barrier = Arc::clone(&barrier);
             let k = k.clone();
             thread::spawn(move || {
-                let guard = reg.admit_provisional(&k, t0);
+                let guard = reg.admit_provisional(&k, 1, t0).admitted();
                 if guard.is_some() {
                     admitted.fetch_add(1, Ordering::SeqCst);
                 }
@@ -187,16 +208,19 @@ fn a_concurrent_caller_strips_while_the_probe_is_unresolved() {
     let reg = registry();
     let t0 = Instant::now();
     let k = key("t");
-    let guard = reg.admit_provisional(&k, t0).expect("unknown pair admits");
+    let guard = reg
+        .admit_provisional(&k, 1, t0)
+        .admitted()
+        .expect("unknown pair admits");
 
     // Act / Assert -- the pair carries no acting negative yet, but the
     // second caller still strips rather than mounting its own carry.
     assert!(!reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, t0).is_none());
+    assert!(reg.admit_provisional(&k, 1, t0).admitted().is_none());
 
     // Once the probe settles the slot reopens.
     guard.release();
-    assert!(reg.admit_provisional(&k, t0).is_some());
+    assert!(reg.admit_provisional(&k, 1, t0).admitted().is_some());
 }
 
 // --- decay settlement paths ---
@@ -208,14 +232,16 @@ fn expired_negative_admits_exactly_one_carry() {
     let t0 = Instant::now();
     let k = key("t");
     let _ = reg
-        .admit_provisional(&k, t0)
+        .admit_provisional(&k, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
 
     // Act
-    let first = reg.admit_provisional(&k, lapsed);
-    let second = reg.admit_provisional(&k, lapsed);
+    let first = reg.admit_provisional(&k, 1, lapsed).admitted();
+    let second = reg.admit_provisional(&k, 1, lapsed).admitted();
 
     // Assert -- one caller re-verifies, the concurrent one keeps stripping.
     assert!(first.is_some());
@@ -229,12 +255,15 @@ fn a_lapsed_carry_that_succeeds_clears_the_negative() {
     let t0 = Instant::now();
     let k = key("t");
     let _ = reg
-        .admit_provisional(&k, t0)
+        .admit_provisional(&k, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
-        .admit_provisional(&k, lapsed)
+        .admit_provisional(&k, 1, lapsed)
+        .admitted()
         .expect("a lapsed entry admits one carry");
 
     // Act -- upstream was fixed: the carried artifacts went through.
@@ -244,7 +273,7 @@ fn a_lapsed_carry_that_succeeds_clears_the_negative() {
     // and the removal emits a cleared event to ride out on the dispatch meta.
     assert!(cleared.is_some());
     assert!(!reg.is_negative_acting(&k, lapsed));
-    assert!(reg.admit_provisional(&k, lapsed).is_some());
+    assert!(reg.admit_provisional(&k, 1, lapsed).admitted().is_some());
 }
 
 #[test]
@@ -254,21 +283,26 @@ fn a_lapsed_carry_hitting_the_same_rejection_refreshes_the_negative() {
     let t0 = Instant::now();
     let k = key("t");
     let _ = reg
-        .admit_provisional(&k, t0)
+        .admit_provisional(&k, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
-        .admit_provisional(&k, lapsed)
+        .admit_provisional(&k, 1, lapsed)
+        .admitted()
         .expect("a lapsed entry admits one carry");
 
     // Act -- the same rejection, again confirmed by a successful repair.
-    let event = guard.commit(400, vec![], lapsed);
+    let event = guard
+        .commit(400, vec![], lapsed)
+        .expect("a live commit emits its row");
 
     // Assert -- the entry re-acts on a fresh window with its history intact.
     assert_eq!(event.observations, 2);
     assert!(reg.is_negative_acting(&k, lapsed));
-    assert!(reg.admit_provisional(&k, lapsed).is_none());
+    assert!(reg.admit_provisional(&k, 1, lapsed).admitted().is_none());
 }
 
 #[test]
@@ -278,12 +312,15 @@ fn a_lapsed_carry_hitting_an_unrelated_error_releases_it_unchanged() {
     let t0 = Instant::now();
     let k = key("t");
     let _ = reg
-        .admit_provisional(&k, t0)
+        .admit_provisional(&k, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
-        .admit_provisional(&k, lapsed)
+        .admit_provisional(&k, 1, lapsed)
+        .admitted()
         .expect("a lapsed entry admits one carry");
 
     // Act -- a transient failure proves nothing either way.
@@ -293,7 +330,7 @@ fn a_lapsed_carry_hitting_an_unrelated_error_releases_it_unchanged() {
     // ORIGINAL window (still acting mid-window, still lapsed at the probe
     // time), so the next request re-verifies.
     assert!(reg.is_negative_acting(&k, t0 + DECAY / 2));
-    assert!(reg.admit_provisional(&k, lapsed).is_some());
+    assert!(reg.admit_provisional(&k, 1, lapsed).admitted().is_some());
 }
 
 // --- emission ---
@@ -304,10 +341,15 @@ fn the_emission_row_carries_no_body_blob_or_artifact_id() {
     let reg = registry();
     let t0 = Instant::now();
     let k = key("prod-lane");
-    let guard = reg.admit_provisional(&k, t0).expect("unknown pair admits");
+    let guard = reg
+        .admit_provisional(&k, 1, t0)
+        .admitted()
+        .expect("unknown pair admits");
 
     // Act
-    let event = guard.commit(400, vec!["reasoning_replay".to_string()], t0);
+    let event = guard
+        .commit(400, vec!["reasoning_replay".to_string()], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- every string field is a normalized key or a closed-set
     // token; the row has no field that could hold an artifact at all.
@@ -333,4 +375,199 @@ fn the_key_never_embeds_the_caller_supplied_model_string() {
     // Assert
     assert_eq!(k.lane_key(), "configured-target#mantle");
     assert_eq!(k.capability_key(), "reasoning_replay:codex");
+}
+
+// ---- generation barrier ------------------------------------------------------
+
+/// A replay carry settles against the generation it was ADMITTED under.
+///
+/// `reasoning_replay:<scheme>` is catalog-SCOPED, so a settlement arriving after
+/// a reload must persist nothing and emit no row: the negative would be
+/// attributed to a catalog revision the daemon has left, and its ledger row
+/// would be replayed by a later boot.
+#[test]
+fn a_stale_replay_commit_persists_nothing_and_emits_nothing() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+    let admitted_generation = reg.learned().generation();
+    let guard = reg
+        .admit_provisional(&key, admitted_generation, t0)
+        .admitted()
+        .expect("unknown pair admits");
+
+    // The reload lands between the carry and its settlement. Advance only: a
+    // full transition would also prune the entry, so "nothing persisted" could
+    // not distinguish a refusal from a prune.
+    reg.learned().advance_generation();
+
+    let emitted = guard.commit(400, vec![], t0);
+
+    assert!(emitted.is_none(), "a stale commit must emit no learn event");
+    assert!(
+        reg.learned().snapshot().is_empty(),
+        "and must persist no negative",
+    );
+}
+
+/// The positive control: with no reload in between the same commit persists and
+/// emits. Without it the test above would pass against a commit that never
+/// records anything.
+#[test]
+fn a_live_replay_commit_persists_and_emits() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+    let guard = reg
+        .admit_provisional(&key, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits");
+
+    let emitted = guard.commit(400, vec![], t0);
+
+    assert!(emitted.is_some(), "a live commit emits its row");
+    assert_eq!(reg.learned().snapshot().len(), 1);
+}
+
+/// A stale CLEAR removes nothing and emits no cleared event.
+#[test]
+fn a_stale_replay_clear_removes_nothing_and_emits_nothing() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+    // Persist a negative first, then lapse it so a later carry is admitted.
+    let guard = reg
+        .admit_provisional(&key, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits");
+    let _ = guard.commit(400, vec![], t0);
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let admitted_generation = reg.learned().generation();
+    let guard = reg
+        .admit_provisional(&key, admitted_generation, t_lapsed)
+        .admitted()
+        .expect("a lapsed pair admits one carry");
+
+    reg.learned().advance_generation();
+    let cleared = guard.clear();
+
+    assert!(
+        cleared.is_none(),
+        "a stale clear must emit no cleared event",
+    );
+    assert_eq!(
+        reg.learned().snapshot().len(),
+        1,
+        "and must leave the negative resident",
+    );
+}
+
+/// A stale settlement still RELEASES the in-flight slot.
+///
+/// The slot is request-local coordination, not persisted state. Leaking it would
+/// latch the pair forever: every later request would strip while nothing could
+/// ever settle the claim.
+#[test]
+fn a_stale_settlement_still_releases_the_in_flight_slot() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+    let admitted_generation = reg.learned().generation();
+    let guard = reg
+        .admit_provisional(&key, admitted_generation, t0)
+        .admitted()
+        .expect("unknown pair admits");
+    reg.learned().advance_generation();
+
+    let _ = guard.commit(400, vec![], t0);
+
+    // The slot is free, so the pair can be carried again on the live generation.
+    assert!(
+        reg.admit_provisional(&key, reg.learned().generation(), t0)
+            .admitted()
+            .is_some(),
+        "a stale settlement must not leave the carry slot latched",
+    );
+}
+
+/// An OLD guard releases the claim the REPLACEMENT facade reads.
+///
+/// The in-flight set is shared as an `Arc` across facade rebuilds precisely for
+/// this: a carry outstanding when the swap lands settles through the old facade,
+/// and if the two held separate sets the replacement would either admit a second
+/// concurrent carry for that pair or never see the release.
+#[test]
+fn an_old_guard_releases_the_replacement_facades_claim() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+    let guard = reg
+        .admit_provisional(&key, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits");
+
+    // The reload rebuilds the facade on the same shared registry.
+    let replacement = Arc::new(reg.rebuilt_on(Arc::clone(reg.registry_arc())));
+    // The replacement sees the outstanding claim, so it refuses a second carry.
+    assert!(
+        replacement
+            .admit_provisional(&key, reg.learned().generation(), t0)
+            .admitted()
+            .is_none(),
+        "the replacement must observe the old facade's outstanding claim",
+    );
+
+    // The OLD guard settles, releasing the shared claim.
+    let _ = guard.commit(400, vec![], t0);
+
+    // And the replacement can now admit -- only possible if both address one set.
+    assert!(
+        replacement
+            .admit_provisional(
+                &key,
+                reg.learned().generation(),
+                t0 + DECAY + Duration::from_secs(1)
+            )
+            .admitted()
+            .is_some(),
+        "the old guard's release must be visible to the replacement facade",
+    );
+}
+
+/// A superseded Router's admission reports STALE, distinctly from Acting.
+///
+/// The distinction is load-bearing: `Acting` makes the caller STRIP, and a
+/// stale Router stripping means it acted on the replacement generation's state
+/// -- a routing decision it has no standing to make. `Stale` makes it carry
+/// nothing and leave the request as the client sent it.
+#[test]
+fn a_superseded_router_admission_reports_stale_not_acting() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+    let stale_generation = reg.learned().generation();
+    // The reload lands; advance only, so the entry (if any) is not pruned and
+    // cannot be confused with the refusal.
+    reg.learned().advance_generation();
+
+    let admission = reg.admit_provisional(&key, stale_generation, t0);
+
+    assert!(
+        admission.is_stale(),
+        "a superseded admission must be Stale, never Acting -- Acting would \
+         make the caller strip on state it may not read",
+    );
+}
+
+/// The positive control: a LIVE admission on an unknown pair is admitted.
+#[test]
+fn a_live_admission_on_an_unknown_pair_is_admitted() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let key = key("lane-a");
+
+    let admission = reg.admit_provisional(&key, reg.learned().generation(), t0);
+
+    assert!(!admission.is_stale());
+    assert!(admission.admitted().is_some(), "an unknown pair admits");
 }

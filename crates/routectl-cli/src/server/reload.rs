@@ -9,7 +9,7 @@ use routectl_router::{
     ActivationDelta, ActivationState, CatalogOverlay, Config, Router, compute_activation,
     diff_activation,
 };
-use routectl_usage::{CapabilityEvent, UsageHandle};
+use routectl_usage::UsageHandle;
 use tokio::sync::{mpsc, watch};
 
 use super::build_router_from_config_with_overlay;
@@ -415,6 +415,7 @@ async fn run_reload_coordinator(
                             &ctx.router_swap,
                             &ctx.usage,
                             ReloadTrigger::ConfigFile,
+                            &mut shutdown,
                         ).await {
                             current_config = new_config;
                             current_overlay = new_overlay;
@@ -441,6 +442,7 @@ async fn run_reload_coordinator(
                             &ctx.router_swap,
                             &ctx.usage,
                             ReloadTrigger::CatalogOverlay,
+                            &mut shutdown,
                         ).await {
                             current_config = new_config;
                             current_overlay = new_overlay;
@@ -616,6 +618,7 @@ pub(super) async fn handle_config_reload(
     router_swap: &Arc<ArcSwap<Router>>,
     usage: &UsageHandle,
     trigger: ReloadTrigger,
+    shutdown: &mut watch::Receiver<()>,
 ) -> Option<(Arc<Config>, Arc<CatalogOverlay>)> {
     let Some(path) = config_path else {
         tracing::debug!("config reload requested but no config path was registered; ignoring",);
@@ -680,14 +683,56 @@ pub(super) async fn handle_config_reload(
 
     // A reload that advanced the catalog version or overlay revision moves the
     // replay boundary. Read both revisions before the swap (this coordinator is
-    // the sole writer, so the loaded Arc is the router being replaced) and stamp
-    // the new revision below.
+    // the sole writer, so the loaded Arc is the router being replaced).
     let revision_changed = previous_router.catalog_version() != new_router.catalog_version()
         || previous_router.overlay_revision() != new_router.overlay_revision();
-    let new_catalog_version = new_router.catalog_version();
-    let new_overlay_revision = new_router.overlay_revision();
 
-    router_swap.store(Arc::new(new_router));
+    // Moving the boundary makes every row before the new tombstone invisible
+    // to every later boot, so the surviving catalog-independent verdicts must
+    // be re-appended past it BEFORE the replacement router is published --
+    // otherwise they act for this process's life and vanish at the next
+    // restart.
+    //
+    // Three phases, in this order for a reason. The cut (snapshot + admit) runs
+    // under the registry guard so no observation can land between the two and
+    // be lost by both. The wait then runs with the guard RELEASED -- a lock is
+    // never held across SQLite. Only a committed batch advances the generation,
+    // evicts the catalog-scoped entries, and publishes; every failure leaves
+    // generation, registry and published Router untouched.
+    if revision_changed {
+        let boundary_router = Arc::new(new_router);
+        let Ok(admitted) =
+            super::capability_boundary::admit_capability_boundary(usage, &boundary_router)
+        else {
+            tracing::warn!(
+                "config reload failed: capability replay boundary not admitted; \
+                 keeping previous router",
+            );
+            return None;
+        };
+        // Observations made from here on carry the PENDING generation, so their
+        // events sort after the boundary the writer is about to commit rather
+        // than being rejected as pre-boundary.
+        boundary_router.set_pending_registry_generation(admitted.pending_generation());
+        match admitted.settle(shutdown).await {
+            super::capability_boundary::BoundaryOutcomeReport::Committed { .. } => {}
+            super::capability_boundary::BoundaryOutcomeReport::Failed(reason) => {
+                tracing::warn!(
+                    reason = ?reason,
+                    "config reload failed: capability replay boundary not durable; \
+                     keeping previous router",
+                );
+                return None;
+            }
+            super::capability_boundary::BoundaryOutcomeReport::Abandoned => {
+                tracing::warn!("config reload abandoned at shutdown; keeping previous router",);
+                return None;
+            }
+        }
+        router_swap.store(boundary_router);
+    } else {
+        router_swap.store(Arc::new(new_router));
+    }
 
     // Flip the usage capture gate live. `db_path` and `retention_days` are
     // restart-required (the writer holds the DB handle opened at boot, and
@@ -698,11 +743,9 @@ pub(super) async fn handle_config_reload(
 
     // Stamp the replay boundary at the post-reload revision so negatives
     // learned during the post-reload session sort after this tombstone and
-    // replay on the next boot. Enqueued after the gate flip so it honors the
-    // freshly-applied usage setting; best-effort, never blocks the reload.
-    if revision_changed {
-        enqueue_reload_tombstone(usage, new_catalog_version, new_overlay_revision);
-    }
+    // replay on the next boot. The revision-changed case already committed its
+    // boundary above (atomically, with the survivor restatements), so nothing
+    // remains to enqueue here.
 
     // The reduction and K-gated-emission master switches are the operator's
     // live kill switches for the dispatch-path minifier and for
@@ -758,26 +801,6 @@ pub(super) async fn handle_config_reload(
     }
 
     Some((new_config, new_overlay))
-}
-
-/// Enqueue exactly one tombstone stamped the post-reload revision when a hot
-/// reload advanced the catalog version or overlay revision. Non-blocking and
-/// best-effort like every usage write (`try_send_capability_event` never
-/// blocks, awaits, or panics; the enabled gate applies and a disabled writer
-/// drops it), so it never fails the reload. Shares the boot seam's tombstone
-/// clock source so both replay boundaries stamp the same wall-clock basis.
-fn enqueue_reload_tombstone(usage: &UsageHandle, catalog_version: u32, overlay_revision: u64) {
-    let event = CapabilityEvent::tombstone(
-        super::ledger_reader::epoch_ms_now(),
-        i64::from(catalog_version),
-        i64::try_from(overlay_revision).unwrap_or(i64::MAX),
-    );
-    usage.try_send_capability_event(event);
-    tracing::info!(
-        catalog_version,
-        overlay_revision,
-        "hot reload advanced the capability revision; enqueued a fresh tombstone (replay boundary)"
-    );
 }
 
 /// Activation-recompute + audit-event tests. Driven on the `#[tokio::test]`

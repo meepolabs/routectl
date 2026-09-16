@@ -802,7 +802,7 @@ Summary (grep the `event` field to isolate a kind):
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
 | `route_away` | INFO / WARN | `routectl_router::router` | `learned-capability negative de-prioritized this target to the tail` (INFO) / `... routed this target away; request survives only via the de-prioritized learned tail` (WARN) |
 | `count_tokens` | INFO | `routectl_router::router` | `count_tokens seat terminal; resilience class policy applied` |
-| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; clearing learned-capability registry` |
+| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; clearing catalog-scoped learned capabilities` |
 | `strip` | WARN | `routectl_router::router` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router` | `force_supported override contradicted: masked capability still rejected upstream` |
 | `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key is rewritten by normalization; ...` |
@@ -953,11 +953,53 @@ INFO routectl_router::router event=count_tokens state_key=haiku
   "count_tokens seat terminal; resilience class policy applied"
 ```
 
+### Capability replay boundary (INFO / ERROR)
+
+Emitted when a hot reload changes the catalog version or overlay revision.
+Moving the replay boundary makes every earlier ledger row invisible to
+later boots, so the reload re-appends the catalog-independent verdicts
+past the new boundary in one atomic batch before publishing the
+replacement router.
+
+| Level | Message | Meaning |
+|---|---|---|
+| INFO | `capability replay boundary committed; catalog-independent verdicts restated` | The tombstone and every restatement are durable. `restated_survivors` counts the carried verdicts, `generation` is the registry generation now active, and `pruned_catalog_scoped` counts the entries the transition evicted. |
+| ERROR | `capability replay boundary NOT admitted; keeping the previous router` | The batch was never queued (`reason`: unavailable writer or full channel). Nothing was written, no generation advanced, nothing pruned. |
+| ERROR | `capability replay boundary NOT committed; keeping the previous router` | The batch was admitted and the transaction failed. `reason` names it; `pending_survivors` counts what would have been restated. The generation does not advance and no entry is pruned -- the boundary was never recorded, so evicting anything would discard live state. |
+| WARN | `shutdown during a capability boundary write; publishing nothing` | Shutdown won the race against the admitted wait. The rows may or may not commit; nothing is published on the strength of them and the process does not resume serving. |
+
+Every non-committed outcome rejects the reload and leaves the previous router
+live. There is deliberately no timed-out outcome: answering while the queued
+transaction can still commit would let the ledger's boundary move behind a
+router that never adopted it.
+
+Capability events are stamped with the registry generation that produced them
+(the pending generation while a boundary is admitted), so an observation made
+during a boundary sorts after it rather than being discarded. A `debug` line on
+target `routectl_usage::writer` --
+`dropped a capability event older than the committed replay boundary` --
+records a straggler event the writer refused because a boundary has since
+committed at a newer generation (`event_generation` / `boundary_generation`).
+Persisting it would restore, on the next boot, state the boundary evicted.
+
+At boot, the same acknowledged path writes the fail-closed boundary when the
+ledger's tombstone is missing or stamped a different revision:
+
+| Level | Message | Meaning |
+|---|---|---|
+| INFO | `committed fresh capability tombstone at boot (fail-closed replay boundary)` | This boot's boundary is durable. Verdicts learned this session sort after it and replay on the next boot. |
+| ERROR | `capability boot tombstone NOT committed; verdicts learned this session may not survive a restart` | The boundary write failed. Boot continues (it never fails on the usage subsystem), but the consequence is named: this session's verdicts may sit before a stale boundary and be invisible to later boots. |
+
+A reload that did NOT change either revision writes no boundary and emits
+neither line.
+
 ### `invalidation` (WARN)
 
-Emitted when a catalog or overlay change across a hot reload clears the
-entire learned-capability registry (fresher config truth wins over
-learned negatives).
+Emitted when a catalog or overlay change across a hot reload discards the
+catalog-scoped learned capabilities (fresher config truth wins over
+learned negatives). Entries whose truth does not depend on the catalog --
+the envelope-field verdicts, keyed `field:<dotted.path>` -- are carried
+across instead, and `carried_catalog_independent` counts them.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -968,13 +1010,33 @@ learned negatives).
 | `catalog_version` | integer | The incoming Router's catalog version. |
 | `previous_overlay_revision` | integer | The outgoing Router's overlay revision. |
 | `overlay_revision` | integer | The incoming Router's overlay revision. |
+| `carried_catalog_independent` | integer | Entries carried across the change because their key is catalog-independent. |
 
 ```
 WARN routectl_router::router event=invalidation catalog_changed=true
   overlay_changed=false previous_catalog_version=7 catalog_version=8
   previous_overlay_revision=0 overlay_revision=0
-  "catalog/overlay changed across reload; clearing learned-capability registry"
+  carried_catalog_independent=1
+  "catalog/overlay changed across reload; clearing catalog-scoped learned capabilities"
 ```
+
+### Capability warm rebuild (INFO)
+
+Emitted once at serve bootstrap after the learned-capability registry is
+warmed from the usage ledger: `warmed learned-capability registry from
+usage ledger`, on target `routectl_cli::server::capability_rebuild`. The
+per-verdict fields (`replayed_verified`, `replayed_negative`,
+`replayed_cleared`, `cleared_noop`, `replayed_probe`) tally what replayed;
+`loaded_rows` and `row_cap` report the read.
+
+Two skip tallies are deliberately separate, because they answer different
+questions and only their combination distinguishes an empty verdict
+history from a fully evicted one:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `skipped_unknown` | integer | Rows skipped because a persisted TOKEN (verdict / phase / source / tier / evidence class) is not one this build recognizes. |
+| `skipped_revision` | integer | Catalog-scoped rows skipped because their stamped catalog / overlay revision is not the replay boundary's -- an eviction. Envelope-field rows are never counted here: their truth is catalog-independent, so they replay under a superseded revision. |
 
 ### `strip` (WARN)
 

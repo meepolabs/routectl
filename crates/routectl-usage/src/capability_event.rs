@@ -110,6 +110,53 @@ pub fn insert_capability_event(
     )
 }
 
+/// Insert a whole batch of capability events in ONE transaction: either
+/// every row is committed, or none is.
+///
+/// The atomicity is a correctness requirement, not an optimization. A
+/// caller writes a boundary tombstone followed by the entries that must
+/// survive past it, and the reader trusts only rows appended after the
+/// newest tombstone. A partially-applied batch -- the tombstone committed,
+/// its survivors lost -- therefore does not degrade gracefully: it silently
+/// evicts exactly the entries the batch existed to preserve. Rows are
+/// appended in slice order, so the caller controls the rowid ordering the
+/// boundary depends on.
+///
+/// Returns the number of rows committed. An empty batch commits nothing and
+/// returns zero. Uses `unchecked_transaction` so the caller may hold a
+/// shared connection reference; the transaction is still a real `BEGIN` /
+/// `COMMIT` pair and rolls back on drop if it is not committed.
+pub fn insert_capability_events_atomic(
+    conn: &Connection,
+    events: &[CapabilityEvent],
+) -> Result<usize, rusqlite::Error> {
+    if events.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut inserted = 0;
+    {
+        let mut stmt = tx.prepare_cached(INSERT_SQL)?;
+        for e in events {
+            inserted += stmt.execute(rusqlite::params![
+                e.ts,
+                e.lane_key,
+                e.capability,
+                e.verdict,
+                e.phase,
+                e.source,
+                e.tier,
+                e.evidence_class,
+                e.upstream_token,
+                e.catalog_version,
+                e.overlay_revision,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(inserted)
+}
+
 /// The bound `INSERT`. Names every writable column of
 /// `schema::CREATE_CAPABILITY_EVENTS_TABLE` (the `id` primary key is
 /// auto-assigned, so it is omitted); `?1..?11` positions match the params

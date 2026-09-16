@@ -339,11 +339,36 @@ pub async fn serve_on_listener_with_secrets(
     // and fail-closed: a missing / unreadable ledger, an absent tombstone, or
     // a revision mismatch replays nothing and enqueues one fresh tombstone
     // (stamped this boot's revision) through the writer started just above.
-    capability_rebuild::warm_capability_registry_from_ledger(
-        &config.usage.db_path,
-        &router,
-        &usage_handle,
-    );
+    //
+    // The whole warm -- the synchronous ledger classify, the row read, and the
+    // fail-closed boundary write with its acknowledged wait -- is blocking, so
+    // it runs OFF the runtime and is awaited before anything serves. Left on a
+    // worker it would stall every task sharing that thread for the duration of
+    // a SQLite read plus a transaction, and the boundary wait would block a
+    // worker outright.
+    let router = {
+        let db_path = config.usage.db_path.clone();
+        let usage_for_warm = usage_handle.clone();
+        match tokio::task::spawn_blocking(move || {
+            capability_rebuild::warm_capability_registry_from_ledger(
+                &db_path,
+                &router,
+                &usage_for_warm,
+            );
+            router
+        })
+        .await
+        {
+            Ok(router) => router,
+            Err(join_err) => {
+                // The warm never fails boot; a panicked warm task means the
+                // router value is gone, so this cannot continue.
+                return Err(Error::Internal(format!(
+                    "capability startup warm task failed: {join_err}"
+                )));
+            }
+        }
+    };
 
     // The bound address is fixed for the process; the config-load stamp lands
     // now (the config in `config` IS the one about to go live) and is

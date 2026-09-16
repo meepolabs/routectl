@@ -185,6 +185,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
 
@@ -217,6 +218,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -257,6 +259,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -286,6 +289,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     let mut admissions = Vec::new();
@@ -329,6 +333,7 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
 

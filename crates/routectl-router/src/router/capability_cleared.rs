@@ -21,6 +21,16 @@
 /// upstream text ever enters this struct.
 #[derive(Debug, Clone)]
 pub struct CapabilityClearedEvent {
+    /// The EFFECTIVE persistence generation this event must be stamped with.
+    ///
+    /// Taken from the registry operation that produced the event, atomically
+    /// under the same guard as its read or mutation -- never sampled before or
+    /// after. A separate read could be taken across a boundary and stamp the
+    /// event with a generation that does not describe the state it reports. A
+    /// single request legitimately spans a boundary, so events on one request
+    /// may carry DIFFERENT generations.
+    pub persistence_generation: u64,
+
     /// Routing state key (nickname-or-provider) of the re-probed target.
     pub state_key: String,
     /// Normalized capability key the cleared negative named.

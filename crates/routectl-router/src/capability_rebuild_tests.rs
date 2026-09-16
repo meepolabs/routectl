@@ -109,9 +109,12 @@ fn should_replay_skips_rows_at_or_before_the_tombstone() {
 
     assert_eq!(
         should_replay(&at_boundary, &tombstone),
-        ReplayDecision::Skip
+        ReplayDecision::SkipBoundary
     );
-    assert_eq!(should_replay(&before, &tombstone), ReplayDecision::Skip);
+    assert_eq!(
+        should_replay(&before, &tombstone),
+        ReplayDecision::SkipBoundary
+    );
     assert_eq!(should_replay(&after, &tombstone), ReplayDecision::Replay);
 }
 
@@ -129,12 +132,124 @@ fn should_replay_skips_post_tombstone_stragglers_of_a_different_revision() {
     // with a different revision is skipped.
     assert_eq!(
         should_replay(&stale_catalog, &tombstone),
-        ReplayDecision::Skip
+        ReplayDecision::SkipRevision
     );
     assert_eq!(
         should_replay(&stale_overlay, &tombstone),
-        ReplayDecision::Skip
+        ReplayDecision::SkipRevision
     );
+}
+
+/// The cold-replay layer: the revision comparison applies only to
+/// catalog-scoped keys, so a wire-shape row stamped with a superseded
+/// revision still replays.
+///
+/// Mixed batch on purpose: the two rows differ only in their capability
+/// key, so an unconditional revision guard skips both and an unconditional
+/// bypass replays both. Only the predicate separates them.
+#[test]
+fn should_replay_bypasses_the_revision_guard_for_field_keys_only() {
+    let base = Instant::now();
+    let tombstone = ReplayTombstone::new(5, CV, OV);
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+
+    let mut stale_field = broken(6, base, &field_key);
+    stale_field.catalog_version = CV + 1;
+    let mut stale_catalog_scoped = broken(7, base, "web_search");
+    stale_catalog_scoped.catalog_version = CV + 1;
+
+    assert_eq!(
+        should_replay(&stale_field, &tombstone),
+        ReplayDecision::Replay,
+        "a wire-shape fact does not depend on the catalog revision",
+    );
+    assert_eq!(
+        should_replay(&stale_catalog_scoped, &tombstone),
+        ReplayDecision::SkipRevision,
+        "a catalog-scoped fact under a superseded revision is still evicted",
+    );
+}
+
+/// The rowid boundary is unconditional: it applies to a wire-shape key
+/// exactly as it does to a catalog-scoped one, because it guards against
+/// double-replaying an event this boot has already accounted for -- a
+/// guarantee the field namespace needs and the revision guard is not.
+#[test]
+fn should_replay_applies_the_rowid_boundary_to_field_keys() {
+    let base = Instant::now();
+    let tombstone = ReplayTombstone::new(5, CV, OV);
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+
+    // Both at-or-before the boundary, one of them also revision-stale, so
+    // the rowid rule is what decides in each case.
+    let mut at_boundary = broken(5, base, &field_key);
+    at_boundary.catalog_version = CV + 1;
+    let before = broken(4, base, &field_key);
+    let after = broken(6, base, &field_key);
+
+    assert_eq!(
+        should_replay(&at_boundary, &tombstone),
+        ReplayDecision::SkipBoundary
+    );
+    assert_eq!(
+        should_replay(&before, &tombstone),
+        ReplayDecision::SkipBoundary
+    );
+    assert_eq!(should_replay(&after, &tombstone), ReplayDecision::Replay);
+}
+
+/// The revision skip is counted, and separately from the rowid and
+/// unrecognized-token skips -- without that an operator cannot tell "no
+/// wire-shape verdicts existed" from "every one of them was evicted".
+#[test]
+fn rebuild_counts_revision_skips_apart_from_boundary_and_unknown_skips() {
+    let base = Instant::now();
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+
+    let mut stale_catalog_scoped = broken(2, base, "web_search");
+    stale_catalog_scoped.catalog_version = CV + 1;
+    let mut stale_overlay_scoped = broken(3, base, "computer_use");
+    stale_overlay_scoped.overlay_revision = OV + 1;
+    let mut stale_field = broken(4, base, &field_key);
+    stale_field.catalog_version = CV + 1;
+
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(1, CV, OV)),
+        rows: vec![
+            // At the boundary: a rowid skip, not a revision skip.
+            broken(1, base, "prompt_caching"),
+            stale_catalog_scoped,
+            stale_overlay_scoped,
+            stale_field,
+            // Post-boundary, current revision, unrecognized verdict token.
+            row(5, base, "nonsense", None, "live", None, None, "thinking"),
+        ],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg);
+
+    assert_eq!(
+        summary.skipped_revision, 2,
+        "both catalog-scoped stragglers are counted, the field one is not",
+    );
+    assert_eq!(summary.skipped_unknown, 1);
+    assert_eq!(
+        summary.replayed_negative, 1,
+        "only the revision-stale wire-shape row replayed",
+    );
+    assert!(matches!(
+        reg.acting_negative_for(
+            "nn",
+            &field_key,
+            "openai-compat",
+            base + Duration::from_secs(1)
+        ),
+        RoutingDecision::RouteAway { .. },
+    ));
 }
 
 #[test]
@@ -527,5 +642,112 @@ fn no_tombstone_replays_nothing() {
             base + Duration::from_secs(1)
         ),
         RoutingDecision::Allow,
+    );
+}
+
+/// Replay precedence is APPEND order (rowid), never the mapped instant.
+///
+/// The reader derives `observed_at` from the persisted wall-clock `ts`, so a
+/// clock rollback between two appends can map a later-appended row to an
+/// earlier instant. Sorting by instant would then replay a settled
+/// negative-then-cleared pair backwards and leave the negative resident --
+/// resurrecting a verdict the clear had settled. The fixture inverts instant
+/// order against rowid order on purpose, so an instant-sorted implementation
+/// cannot pass.
+#[test]
+fn replay_precedence_follows_rowid_when_mapped_instants_disagree() {
+    let base = Instant::now();
+    let late = base + Duration::from_mins(1);
+
+    // The negative is appended FIRST (rowid 1) but carries the LATER instant;
+    // the clear is appended second (rowid 2) with the earlier instant.
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            broken(1, late, "web_search"),
+            cleared(2, base, "web_search"),
+        ],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg);
+
+    // Append order wins: the clear ran last and removed the negative.
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(
+        summary.replayed_cleared, 1,
+        "the clear must find the negative resident, i.e. replay after it",
+    );
+    assert_eq!(summary.cleared_noop, 0);
+    assert_eq!(
+        reg.acting_negative_for("nn", "web_search", "openai-compat", late),
+        RoutingDecision::Allow,
+        "a settled clear must not be inverted by a clock rollback",
+    );
+}
+
+/// An INFERRED negative's acting state is decided by how many observations
+/// replay, so the row count a restatement emits is a routing decision.
+///
+/// One row replays as a single pending observation -- resident, and NOT acting.
+/// Two replay as corroborated, which acts. This is the router-owned half of the
+/// restatement contract: it pins the mechanism on the real replay path
+/// (`rebuild_capabilities_into`), while the CLI's real-ledger test pins that the
+/// boundary actually emits the right number of rows end to end.
+///
+/// Owned here rather than in the CLI because the assertion is a `RoutingDecision`
+/// -- a routing-internal type that should not become public API just to be named
+/// by an acceptance test in another crate.
+#[test]
+fn one_replayed_inferred_row_stays_pending_while_two_act() {
+    let base = Instant::now();
+    let query = base + Duration::from_secs(1);
+
+    /// An inferred (not self-identifying) F1 negative -- the shape that needs
+    /// corroboration before it acts.
+    fn inferred(rowid: i64, at: Instant, capability: &str) -> CapabilityEventRow {
+        row(
+            rowid,
+            at,
+            "broken",
+            Some("f1"),
+            "live",
+            Some("inferred"),
+            None,
+            capability,
+        )
+    }
+
+    // A single restated row: pending, so routing must still ALLOW.
+    let one = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![inferred(1, base, "web_search")],
+    };
+    let reg = registry();
+    let summary = rebuild_capabilities_into(&one, &reg);
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(
+        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        RoutingDecision::Allow,
+        "one inferred observation must replay as PENDING and not route away",
+    );
+
+    // Two restated rows: corroborated, so routing must ROUTE AWAY.
+    let two = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            inferred(1, base, "web_search"),
+            inferred(2, base + Duration::from_millis(1), "web_search"),
+        ],
+    };
+    let reg = registry();
+    let summary = rebuild_capabilities_into(&two, &reg);
+    assert_eq!(summary.replayed_negative, 2);
+    assert!(
+        matches!(
+            reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+            RoutingDecision::RouteAway { .. }
+        ),
+        "two inferred observations must replay as CORROBORATED and route away",
     );
 }

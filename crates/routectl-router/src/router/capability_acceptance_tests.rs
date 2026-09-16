@@ -373,6 +373,7 @@ fn scenario_c_self_identifying_negative_replaces_resident_verified() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         now,
     );
 

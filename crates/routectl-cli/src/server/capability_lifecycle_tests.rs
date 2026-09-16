@@ -132,9 +132,41 @@ fn broken(ts: i64, lane: &str, cap: &str, tier: &str, cat: i64, overlay: i64) ->
 /// Warm `router` from the ledger at `db_path` through the real bridge, backed
 /// by a throwaway writer for the fail-closed enqueue seam, and return the
 /// router's post-warm snapshot.
+/// Run the (blocking) warm off the runtime thread.
+///
+/// The warm commits its fail-closed boundary through the acknowledged batch
+/// path, which blocks on the writer's reply; Tokio panics if a worker blocks.
+/// Production dispatches the whole warm through `spawn_blocking` for the same
+/// reason.
+fn warm_off_runtime(db_path: &Path, router: &Router, handle: &UsageHandle) {
+    let _ = warm_off_runtime_capturing(db_path, router, handle);
+}
+
+/// As [`warm_off_runtime`], returning the events the warm emitted.
+///
+/// The capture subscriber is thread-LOCAL, so it must be installed inside the
+/// spawned thread: wrapping the spawn in `capture_events` would record nothing,
+/// because every event is emitted on the child.
+fn warm_off_runtime_capturing(
+    db_path: &Path,
+    router: &Router,
+    handle: &UsageHandle,
+) -> Vec<routectl_testkit::CapturedEvent> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                routectl_testkit::capture_events(|| {
+                    warm_capability_registry_from_ledger(db_path, router, handle);
+                })
+            })
+            .join()
+            .expect("warm thread")
+    })
+}
+
 fn warm_and_snapshot(db_path: &Path, router: &Router, scratch: &Path) -> Vec<LearnedRegistryEntry> {
     let (handle, writer) = writer_at(scratch);
-    warm_capability_registry_from_ledger(db_path, router, &handle);
+    warm_off_runtime(db_path, router, &handle);
     drop(handle);
     writer.shutdown();
     router.learned_capability_snapshot()
@@ -322,11 +354,14 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
     let ts = now_ms();
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(ts, cat, overlay));
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     for (lane, capability, verdict, phase, source, tier, evidence) in specs {
-        handle.try_send_capability_event(cap_event(
-            ts, lane, capability, verdict, phase, source, tier, *evidence, cat, overlay,
-        ));
+        handle.try_send_capability_event_in_generation(
+            cap_event(
+                ts, lane, capability, verdict, phase, source, tier, *evidence, cat, overlay,
+            ),
+            1,
+        );
     }
     drop(handle);
     writer.shutdown();
@@ -415,15 +450,11 @@ async fn learned_negative_survives_restart_and_acts_without_a_fresh_attempt() {
 
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(ts, cat, overlay));
-    handle.try_send_capability_event(broken(
-        ts,
-        "gpt-nick",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, overlay),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
@@ -455,15 +486,11 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     let seed_router = default_router(&tmp).await;
     let cat = i64::from(seed_router.catalog_version());
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(ts, cat, 0));
-    handle.try_send_capability_event(broken(
-        ts,
-        "gpt-nick",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        0,
-    ));
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 0), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, 0),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
@@ -473,7 +500,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     let mut bumped = default_router(&tmp).await;
     bumped.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
     let (h2, w2) = writer_at(&ledger);
-    warm_capability_registry_from_ledger(&ledger, &bumped, &h2);
+    warm_off_runtime(&ledger, &bumped, &h2);
     drop(h2);
     w2.shutdown();
 
@@ -487,14 +514,17 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     // sits after the fresh boot tombstone. A later restart at the new revision
     // replays it -- re-learning against the new catalog's priors.
     let (h3, w3) = writer_at(&ledger);
-    h3.try_send_capability_event(broken(
-        now_ms(),
-        "claude-nick",
-        COMPUTER_USE,
-        "self-identifying",
-        cat,
-        7,
-    ));
+    h3.try_send_capability_event_in_generation(
+        broken(
+            now_ms(),
+            "claude-nick",
+            COMPUTER_USE,
+            "self-identifying",
+            cat,
+            7,
+        ),
+        1,
+    );
     drop(h3);
     w3.shutdown();
 
@@ -528,23 +558,32 @@ async fn stale_event_lapses_to_a_single_reprobe_across_restart() {
 
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(stale, cat, overlay));
-    handle.try_send_capability_event(broken(
-        stale,
-        "gpt-nick",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
-    handle.try_send_capability_event(broken(
-        recent,
-        "gpt-nick",
-        COMPUTER_USE,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
+    handle.try_send_capability_event_in_generation(
+        CapabilityEvent::tombstone(stale, cat, overlay),
+        1,
+    );
+    handle.try_send_capability_event_in_generation(
+        broken(
+            stale,
+            "gpt-nick",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
+    handle.try_send_capability_event_in_generation(
+        broken(
+            recent,
+            "gpt-nick",
+            COMPUTER_USE,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
@@ -584,24 +623,16 @@ async fn reload_then_restart_replays_only_post_reload_negatives() {
     let probe_router = default_router(&tmp).await;
     let cat = i64::from(probe_router.catalog_version());
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(ts, cat, 0));
-    handle.try_send_capability_event(broken(
-        ts,
-        "pre-lane",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        0,
-    ));
-    handle.try_send_capability_event(CapabilityEvent::tombstone(ts, cat, 1));
-    handle.try_send_capability_event(broken(
-        ts,
-        "post-lane",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 0), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(ts, "pre-lane", WEB_SEARCH, "self-identifying", cat, 0),
         1,
-    ));
+    );
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 1), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(ts, "post-lane", WEB_SEARCH, "self-identifying", cat, 1),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
@@ -635,21 +666,24 @@ async fn missing_tombstone_fails_closed_to_empty_registry() {
 
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(broken(
-        now_ms(),
-        "gpt-nick",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
+    handle.try_send_capability_event_in_generation(
+        broken(
+            now_ms(),
+            "gpt-nick",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
     // Act: warm reads the same ledger and must fail closed, writing a fresh
     // boot tombstone into it.
     let (h2, w2) = writer_at(&ledger);
-    warm_capability_registry_from_ledger(&ledger, &router, &h2);
+    warm_off_runtime(&ledger, &router, &h2);
     drop(h2);
     w2.shutdown();
 
@@ -680,60 +714,70 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
 
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(ts, cat, overlay));
-    handle.try_send_capability_event(cap_event(
-        ts,
-        "probe-lane",
-        WEB_SEARCH,
-        "broken",
-        "f1",
-        "probe",
-        "self-identifying",
-        None,
-        cat,
-        overlay,
-    ));
-    handle.try_send_capability_event(cap_event(
-        ts,
-        "wobble-lane",
-        WEB_SEARCH,
-        "wobbled",
-        "f1",
-        "live",
-        "self-identifying",
-        None,
-        cat,
-        overlay,
-    ));
-    handle.try_send_capability_event(cap_event(
-        ts,
-        "telepathy-lane",
-        WEB_SEARCH,
-        "broken",
-        "f1",
-        "telepathy",
-        "self-identifying",
-        None,
-        cat,
-        overlay,
-    ));
-    handle.try_send_capability_event(broken(
-        ts,
-        "valid-lane",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
+    handle.try_send_capability_event_in_generation(
+        cap_event(
+            ts,
+            "probe-lane",
+            WEB_SEARCH,
+            "broken",
+            "f1",
+            "probe",
+            "self-identifying",
+            None,
+            cat,
+            overlay,
+        ),
+        1,
+    );
+    handle.try_send_capability_event_in_generation(
+        cap_event(
+            ts,
+            "wobble-lane",
+            WEB_SEARCH,
+            "wobbled",
+            "f1",
+            "live",
+            "self-identifying",
+            None,
+            cat,
+            overlay,
+        ),
+        1,
+    );
+    handle.try_send_capability_event_in_generation(
+        cap_event(
+            ts,
+            "telepathy-lane",
+            WEB_SEARCH,
+            "broken",
+            "f1",
+            "telepathy",
+            "self-identifying",
+            None,
+            cat,
+            overlay,
+        ),
+        1,
+    );
+    handle.try_send_capability_event_in_generation(
+        broken(
+            ts,
+            "valid-lane",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
     // Act: warm under a capture subscriber -- it must not panic on the odd rows.
     let scratch = tmp.path().join("scratch.db");
     let (h2, w2) = writer_at(&scratch);
-    let events = routectl_testkit::capture_events(|| {
-        warm_capability_registry_from_ledger(&ledger, &router, &h2);
-    });
+    let events = warm_off_runtime_capturing(&ledger, &router, &h2);
     drop(h2);
     w2.shutdown();
 
@@ -787,23 +831,30 @@ async fn retention_prune_never_crosses_the_tombstone() {
 
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(broken(
-        old,
-        "ancient-pre",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
-    handle.try_send_capability_event(CapabilityEvent::tombstone(old, cat, overlay));
-    handle.try_send_capability_event(broken(
-        old,
-        "protected-post",
-        COMPUTER_USE,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
+    handle.try_send_capability_event_in_generation(
+        broken(
+            old,
+            "ancient-pre",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
+    handle
+        .try_send_capability_event_in_generation(CapabilityEvent::tombstone(old, cat, overlay), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(
+            old,
+            "protected-post",
+            COMPUTER_USE,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 
@@ -856,15 +907,19 @@ async fn future_dated_event_clamps_to_now_and_replays_fresh() {
 
     let ledger = tmp.path().join("usage.db");
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event(CapabilityEvent::tombstone(now, cat, overlay));
-    handle.try_send_capability_event(broken(
-        future,
-        "gpt-nick",
-        WEB_SEARCH,
-        "self-identifying",
-        cat,
-        overlay,
-    ));
+    handle
+        .try_send_capability_event_in_generation(CapabilityEvent::tombstone(now, cat, overlay), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(
+            future,
+            "gpt-nick",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
+        1,
+    );
     drop(handle);
     writer.shutdown();
 

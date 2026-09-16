@@ -338,12 +338,13 @@ impl Router {
                 if self.override_forces_supported(target, feature, provider_kind) {
                     continue;
                 }
-                match self.learned_capabilities.acting_negative_for(
+                let (decision, read_generation) = self.acting_negative_with_generation(
                     &target.state_key,
                     feature,
                     provider_kind,
                     now,
-                ) {
+                );
+                match decision {
                     crate::learned_capability::RoutingDecision::RouteAway { phase, .. } => {
                         learned_claimed.push(feature);
                         // Strip-vs-route: a droppable capability the operator
@@ -414,6 +415,8 @@ impl Router {
                             state_key: target.state_key.clone(),
                             feature: normalized,
                             provider_kind,
+                            // From the read that granted it, not a later sample.
+                            generation: read_generation,
                         });
                     }
                     crate::learned_capability::RoutingDecision::Allow => {}
@@ -450,7 +453,7 @@ impl Router {
             for feature in features {
                 if learned_claimed.contains(&feature.as_str())
                     || self.override_forces_supported(target, feature, provider_kind)
-                    || self.learned_capabilities.is_verified_working(
+                    || self.is_verified_working_or_false(
                         &target.state_key,
                         feature,
                         provider_kind,

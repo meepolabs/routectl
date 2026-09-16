@@ -92,7 +92,7 @@ impl ReplayCarryPlan<'_> {
     ) -> Vec<CapabilityLearnEvent> {
         self.guards
             .into_iter()
-            .map(|guard| guard.commit(upstream_status, request_features.to_vec(), now))
+            .filter_map(|guard| guard.commit(upstream_status, request_features.to_vec(), now))
             .collect()
     }
 
@@ -235,14 +235,32 @@ impl Router {
         let mut guards: Vec<ReplayProbeGuard<'a>> = Vec::with_capacity(schemes.len());
         for &scheme in &schemes {
             let key = ReplayLearnKey::new(&target.provider_name, provider_kind, lane, scheme);
-            match self.learned_replay().admit_provisional(&key, now) {
-                Some(guard) => guards.push(guard),
-                None => {
+            match self
+                .learned_replay()
+                .admit_provisional(&key, self.registry_generation(), now)
+            {
+                crate::learned_replay::ReplayAdmission::Admitted(guard) => guards.push(guard),
+                crate::learned_replay::ReplayAdmission::Acting
+                | crate::learned_replay::ReplayAdmission::Carried => {
                     // Acting negative or peer probe: carry nothing. Dropping
                     // the guards already taken releases their slots without
                     // learning, then strip proactively before dispatch.
                     drop(guards);
                     strip_replay_artifacts_recalibrating(attempt_req, lane, meta);
+                    return None;
+                }
+                crate::learned_replay::ReplayAdmission::Stale => {
+                    // This Router has been superseded. Its read tells us nothing
+                    // about the live lane, so it must NOT strip on the
+                    // replacement generation's state -- carry nothing and leave
+                    // the request as the client sent it.
+                    drop(guards);
+                    tracing::debug!(
+                        event = "replay_admission_stale",
+                        state_key = %target.provider_name,
+                        "reasoning-replay admission refused: this router predates the \
+                         live capability generation"
+                    );
                     return None;
                 }
             }

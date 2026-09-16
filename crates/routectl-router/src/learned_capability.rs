@@ -41,6 +41,9 @@ use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
+// Only the test-only hook slots need a Mutex.
+#[cfg(test)]
+use parking_lot::Mutex;
 use routectl_core::capability::{
     EvidenceSource, FailurePhase, SignalTier, Verdict, normalize_capability_key,
 };
@@ -108,6 +111,16 @@ struct LearnedEntry {
     phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
     source: EvidenceSource,
+    /// The pinned observation-evidence token this entry was admitted on, when
+    /// its verdict carries one (`verified` / `suspect` always do; `broken`
+    /// never does).
+    ///
+    /// Held because the warm rebuild REQUIRES a recognized class for those
+    /// verdicts and fails closed without one: an entry re-appended to the
+    /// ledger without its class is skipped on the next boot, so dropping it
+    /// here would silently evict the verdict rather than merely lose forensic
+    /// detail.
+    evidence_class: Option<String>,
 }
 
 impl LearnedEntry {
@@ -192,7 +205,9 @@ pub enum RoutingDecision {
     /// carrying the detection phase so the strip site reads it directly
     /// without a second registry lookup.
     RouteAway {
+        /// Signal tier of the negative that is acting.
         signal: SignalTier,
+        /// Detection phase that attributed it, read directly by the strip site.
         phase: FailurePhase,
     },
     /// The negative's decay lapsed and this caller claimed the single
@@ -259,6 +274,8 @@ pub struct LearnedRegistryEntry {
     /// positive this carries no decay meaning (a positive never decays);
     /// read the `verdict` discriminator, not this field, to tell them apart.
     pub expires_at: Instant,
+    /// The pinned observation-evidence token, when the verdict carries one.
+    pub evidence_class: Option<String>,
     /// The detection phase that attributed this entry.
     pub phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
@@ -287,16 +304,285 @@ pub struct ExportedEntry {
     #[cfg_attr(not(test), allow(dead_code))]
     pub in_flight: bool,
     pub consecutive_failed_probes: u32,
+    /// The pinned observation-evidence token, when the verdict carries one.
+    /// Round-tripped at full fidelity: the warm rebuild fails closed on a
+    /// `verified` / `suspect` row without a recognized class, so losing it
+    /// across a carry-over would evict the entry at the next boot.
+    pub evidence_class: Option<String>,
 }
 
 /// In-memory, interior-locked learned-capability store. Mutated through
 /// `&self`; held behind an `Arc` on the router.
-#[derive(Debug)]
 pub struct LearnedCapabilityRegistry {
     entries: RwLock<HashMap<RegistryKey, LearnedEntry>>,
+    /// Hot-reloadable tempo and capacity.
+    ///
+    /// Behind the same lock as `entries` rather than immutable fields,
+    /// because this registry now OUTLIVES the Router generation that built
+    /// it: one shared instance spans reloads, so a reload that changes the
+    /// `[capability]` knobs has no other way to apply them. Immutable fields
+    /// would silently pin the operator's tuning to whenever the daemon last
+    /// restarted.
+    tuning: RwLock<RegistryTuning>,
+    /// The ACTIVE router generation.
+    ///
+    /// One registry is shared across Router generations, so an operation can
+    /// arrive from a Router that has already been replaced. Catalog-scoped
+    /// truth belongs to the generation that learned it and must not survive a
+    /// revision change; a wire-shape fact is catalog-independent and stays
+    /// true regardless. The generation is what tells the two cases apart at
+    /// the moment of the call -- see [`LearnedCapabilityRegistry::generation`].
+    ///
+    /// # Lock order (the ONE order every path uses)
+    ///
+    /// `generation` -> `pending_generation` -> `entries` -> `tuning`.
+    ///
+    /// Every generation-validated operation acquires `generation` FIRST and holds
+    /// it across the `entries` work, so validation and the operation it guards
+    /// are one atomic step and a boundary transition cannot land between them.
+    /// `commit_boundary_transition` takes the same locks in the same order, which
+    /// is what makes the pairing deadlock-free.
+    ///
+    /// A path that needs only a subset still takes what it needs in this
+    /// sequence -- notably `effective_persistence_generation`, which reads
+    /// `generation` before `pending_generation` even though it wants the latter.
+    /// Reversing that pair was a live deadlock against
+    /// `commit_boundary_transition`, which write-locks both. No path takes any
+    /// two of these in reverse.
+    generation: RwLock<u64>,
+    /// The generation a boundary has ADMITTED but not yet committed, if any.
+    ///
+    /// Installed under the boundary cut before the guard is released, so from
+    /// that instant a catalog-independent operation arriving through the
+    /// still-published old Router is stamped with the PENDING generation. Its
+    /// ledger event then sorts after the boundary being committed instead of
+    /// being dropped as older than it -- which is what makes the observation
+    /// survive rather than merely be accepted in memory.
+    ///
+    /// Rolled back atomically on boundary failure or shutdown abandonment, and
+    /// promoted on commit. Held under the same `generation` lock so the pending
+    /// value can never be read apart from the active one.
+    pending_generation: RwLock<Option<BoundaryReceipt>>,
+    /// Monotonic receipt counter. Incremented on every successful admission, so
+    /// no two boundaries share a receipt even if they derive the same persistence
+    /// generation (the ABA case after a rollback).
+    next_receipt_id: RwLock<u64>,
+    /// Test-only hook fired between generation validation and the entries
+    /// operation, to prove the two are ATOMIC.
+    ///
+    /// Under the single-acquisition shape a competing boundary cannot make
+    /// progress here -- it blocks on the held generation lock -- so a hook that
+    /// advances the generation simply waits. A check-then-lock shape would let
+    /// it through, which is the window being tested.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pause_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Test-only hook fired from INSIDE the guarded operation, carrying the
+    /// generation active at that moment. Lets a test assert the operation ran
+    /// under the generation it validated against -- the property a
+    /// check-then-lock shape breaks, independently of which locks the inner
+    /// operation re-takes.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    probe_hook: Mutex<Option<Box<dyn Fn(u64) + Send + Sync>>>,
+    /// Test-only hook fired immediately AFTER each named lock is acquired,
+    /// carrying that lock's name.
+    ///
+    /// Exists so an ordering test can synchronize on the precise acquisition
+    /// point instead of sleeping: a sleep-based fixture passes whenever the
+    /// timing happens to work out, which is exactly the shape that made the
+    /// earlier lock-order tests non-discriminating. A hook lets the test block a
+    /// thread between two acquisitions deterministically.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    acquire_hook: Mutex<Option<Box<dyn Fn(&'static str) + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for LearnedCapabilityRegistry {
+    /// Hand-rolled because the test-only hooks are boxed closures, which cannot
+    /// derive `Debug`. Reports the observable state a reader wants (size,
+    /// generation, tuning) and never the hooks.
+    ///
+    /// Every value is SNAPSHOTTED first, in the documented
+    /// `generation -> pending_generation -> entries -> tuning` order, and every
+    /// guard is dropped before the formatter runs. Reading them inline inside
+    /// `debug_struct` took `entries` before `generation` and held both across the
+    /// builder -- the reverse of the order every other path uses, and so a cycle
+    /// against `commit_boundary_transition`, which takes them in order for
+    /// writing. A `Debug` on a shared registry is reachable from any tracing or
+    /// panic path, which makes an inverted acquisition there especially easy to
+    /// trip and especially hard to attribute.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (generation, pending, entries, tuning) = {
+            let generation = self.generation.read();
+            self.note_acquired("generation");
+            let pending = self.pending_generation.read();
+            self.note_acquired("pending_generation");
+            let entries = self.entries.read();
+            self.note_acquired("entries");
+            let tuning = self.tuning.read();
+            self.note_acquired("tuning");
+            (*generation, *pending, entries.len(), *tuning)
+        };
+        f.debug_struct("LearnedCapabilityRegistry")
+            .field("entries", &entries)
+            .field("generation", &generation)
+            .field("pending_generation", &pending)
+            .field("tuning", &tuning)
+            .finish()
+    }
+}
+
+/// An opaque, non-reused boundary receipt.
+///
+/// Every admitted boundary gets a receipt that is unique for the lifetime of the
+/// registry, so a rolled-back boundary's receipt can never match a later one
+/// that happens to derive the same persistence generation. The receipt counter is
+/// monotonic and separate from the persistence generation: the generation may
+/// reappear after a rollback, but the receipt never does.
+///
+/// `Copy + Eq` so it can be carried on the `AdmittedBoundary` and compared at
+/// settlement cheaply. `#[must_use]` because silently discarding a receipt
+/// instead of settling it would leave the pending slot occupied, blocking every
+/// later boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a boundary receipt must be settled (committed or rolled back)"]
+pub struct BoundaryReceipt {
+    /// The persistence generation this boundary establishes.
+    generation: u64,
+    /// An opaque, monotonic, non-reused identifier.
+    id: u64,
+}
+
+/// The result of asking for a boundary cut.
+///
+/// Four outcomes, because the caller acts differently on each and collapsing any
+/// two loses information it needs.
+#[derive(Debug)]
+#[must_use = "a Taken cut must be settled (committed or rolled back); \
+              a Rejected/Busy/Exhausted cut must not be silently ignored"]
+pub enum BoundaryCut<T> {
+    /// The cut was taken. Carries the closure's outcome and the generation this
+    /// boundary establishes -- the receipt that must be presented at settlement.
+    Taken {
+        /// The submit closure's own result.
+        outcome: T,
+        /// The opaque receipt that must be presented at settlement.
+        receipt: BoundaryReceipt,
+    },
+    /// A boundary is ALREADY admitted and unsettled, so this one is refused.
+    ///
+    /// Exactly one boundary may be in flight: two would each stamp events with
+    /// their own generation while only one can be promoted, so the loser's events
+    /// are dropped by the writer as older than the winner's boundary. Refusing is
+    /// the only outcome that cannot silently lose a verdict. Carries the
+    /// in-flight generation for the diagnostic.
+    Busy {
+        /// The already-admitted generation this cut yielded to.
+        in_flight: u64,
+    },
+    /// The generation counter cannot advance: it is at `u64::MAX`.
+    ///
+    /// Refused BEFORE any batch submission, prune, or state change, so an
+    /// exhausted counter degrades to "no more boundaries" rather than to a
+    /// wrapped generation that would make every later event compare wrongly.
+    Exhausted,
+    /// The submit closure ran but reported that admission FAILED (the batch was
+    /// not queued). No receipt was allocated, no pending state was installed, and
+    /// the caller has NO settlement obligation.
+    ///
+    /// `Taken` exists ONLY when the batch was admitted, because a receipt without
+    /// a queued batch would leave the pending slot occupied with nothing to settle
+    /// it. Moving the receipt allocation after the admission check is what
+    /// prevents that: a refused admission never consumes a receipt ID.
+    Rejected {
+        /// The submit closure's own result, so the caller can log the refusal
+        /// reason without re-deriving it.
+        outcome: T,
+    },
+}
+
+impl BoundaryReceipt {
+    /// The persistence generation this boundary establishes.
+    ///
+    /// The only public surface: the CLI needs it to stamp the tombstone row and
+    /// for diagnostic fields. Everything else about the receipt is opaque.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// The result of settling an admitted boundary.
+///
+/// A settlement presents the generation it was admitted at; a value that no
+/// longer matches the pending slot belongs to a boundary that has already been
+/// settled, so applying it would promote or clear state belonging to a different
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a StaleReceipt must not be silently ignored"]
+pub enum BoundarySettlement {
+    /// The receipt matched: the generation was promoted and the catalog-scoped
+    /// entries pruned.
+    Applied {
+        /// The generation now active.
+        generation: u64,
+        /// Catalog-scoped entries evicted by the transition.
+        pruned: usize,
+    },
+    /// The receipt did not match the pending slot. Nothing changed.
+    StaleReceipt,
+}
+
+/// Hot-reloadable registry tempo and capacity.
+#[derive(Debug, Clone, Copy)]
+struct RegistryTuning {
     decay: Duration,
     inferred_window: Duration,
     max_entries: usize,
+}
+
+/// Whether an operation submitted against a router generation was applied to
+/// the shared registry, or refused because that generation is stale.
+///
+/// `Stale` is not an error: it is the barrier working. The caller must then
+/// emit no ledger event and bump no metric, because the operation describes
+/// truth from a catalog revision the daemon has already left behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationOutcome<T> {
+    /// Applied, carrying the inner outcome and the EFFECTIVE persistence
+    /// generation the operation ran under.
+    Applied {
+        /// The operation's own result.
+        value: T,
+        /// The generation any persistence metadata for this operation must be
+        /// stamped with.
+        ///
+        /// Selected under the SAME guard as the read or mutation, never sampled
+        /// before or after it. A separate read cannot be trusted: a boundary
+        /// landing between the mutation and the sample would stamp the event
+        /// with a generation that does not match the state it describes -- and a
+        /// single request legitimately spans a boundary, so each event carries
+        /// its own value rather than one request-wide figure.
+        generation: u64,
+    },
+    /// Refused: the submitting generation is stale and the key is
+    /// catalog-scoped.
+    Stale,
+}
+
+impl<T> GenerationOutcome<T> {
+    /// The inner value when applied.
+    pub fn applied(self) -> Option<T> {
+        match self {
+            Self::Applied { value, .. } => Some(value),
+            Self::Stale => None,
+        }
+    }
+
+    /// Whether the operation was refused as stale.
+    pub const fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale)
+    }
 }
 
 impl LearnedCapabilityRegistry {
@@ -307,9 +593,22 @@ impl LearnedCapabilityRegistry {
     pub fn new(decay: Duration, inferred_window: Duration, max_entries: usize) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
-            decay,
-            inferred_window,
-            max_entries,
+            tuning: RwLock::new(RegistryTuning {
+                decay,
+                inferred_window,
+                max_entries,
+            }),
+            // Generations are 1-based so that zero is never a valid live
+            // generation: a default-constructed token cannot pass as current.
+            generation: RwLock::new(1),
+            pending_generation: RwLock::new(None),
+            next_receipt_id: RwLock::new(1),
+            #[cfg(test)]
+            pause_hook: Mutex::new(None),
+            #[cfg(test)]
+            probe_hook: Mutex::new(None),
+            #[cfg(test)]
+            acquire_hook: Mutex::new(None),
         }
     }
 
@@ -339,6 +638,7 @@ impl LearnedCapabilityRegistry {
         tier: SignalTier,
         phase: FailurePhase,
         source: EvidenceSource,
+        evidence_class: Option<&str>,
         now: Instant,
     ) -> ObserveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
@@ -359,7 +659,8 @@ impl LearnedCapabilityRegistry {
                 // negative, hence `Pending`.
                 EntryVerdict::Verified => match tier {
                     SignalTier::SelfIdentifying => {
-                        let (entry, outcome) = self.fresh_entry(tier, phase, source, now);
+                        let (entry, outcome) =
+                            self.fresh_entry(tier, phase, source, evidence_class, now);
                         *existing = entry;
                         outcome
                     }
@@ -368,7 +669,7 @@ impl LearnedCapabilityRegistry {
             };
         }
         self.evict_if_full(&mut entries);
-        let (entry, outcome) = self.fresh_entry(tier, phase, source, now);
+        let (entry, outcome) = self.fresh_entry(tier, phase, source, evidence_class, now);
         entries.insert(key, entry);
         outcome
     }
@@ -391,6 +692,7 @@ impl LearnedCapabilityRegistry {
         feature_key_raw: &str,
         provider_kind: &str,
         source: EvidenceSource,
+        evidence_class: Option<&str>,
         now: Instant,
     ) -> PositiveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
@@ -406,14 +708,14 @@ impl LearnedCapabilityRegistry {
             };
         }
         self.evict_if_full(&mut entries);
-        entries.insert(key, Self::fresh_positive(source, now));
+        entries.insert(key, Self::fresh_positive(source, evidence_class, now));
         PositiveOutcome::Recorded
     }
 
     /// Dispatch-path query. Returns the routing decision for this target
     /// and feature, admitting exactly one re-probe when the decay window
     /// has lapsed.
-    pub fn acting_negative_for(
+    pub(crate) fn acting_negative_for(
         &self,
         state_key: &str,
         feature_key_raw: &str,
@@ -577,6 +879,7 @@ impl LearnedCapabilityRegistry {
                 first_seen: entry.first_seen,
                 last_seen: entry.last_seen,
                 expires_at: entry.expires_at,
+                evidence_class: entry.evidence_class.clone(),
                 phase: entry.phase,
                 source: entry.source,
             })
@@ -601,6 +904,7 @@ impl LearnedCapabilityRegistry {
                 source: entry.source,
                 in_flight: entry.in_flight,
                 consecutive_failed_probes: entry.consecutive_failed_probes,
+                evidence_class: entry.evidence_class.clone(),
             })
             .collect()
     }
@@ -634,6 +938,7 @@ impl LearnedCapabilityRegistry {
                     // slot copied onto the new one, so carry across as free.
                     in_flight: false,
                     consecutive_failed_probes: exported.consecutive_failed_probes,
+                    evidence_class: exported.evidence_class,
                 },
             );
         }
@@ -700,6 +1005,623 @@ impl LearnedCapabilityRegistry {
         self.entries.write().remove(&key).is_some()
     }
 
+    /// The ACTIVE router generation.
+    ///
+    /// One registry instance is shared across Router generations (a reload
+    /// attaches the replacement Router to the SAME `Arc` rather than copying
+    /// entries into a fresh one), so an in-flight request can submit an
+    /// operation from a Router that has since been replaced. This counter is
+    /// how such an operation is recognized: a Router carries the generation it
+    /// was published at, and the `*_in_generation` entry points compare it
+    /// against this value.
+    pub fn generation(&self) -> u64 {
+        *self.generation.read()
+    }
+
+    /// Advance to the next generation and return it.
+    ///
+    /// Called once per successful boundary, AFTER the tombstone batch is
+    /// durable and BEFORE the replacement Router is published, so there is no
+    /// window in which the new generation is active but its boundary is not
+    /// recorded.
+    #[cfg(test)]
+    pub(crate) fn advance_generation(&self) -> u64 {
+        let mut generation = self.generation.write();
+        *generation = generation.saturating_add(1);
+        *generation
+    }
+
+    /// The current decay window.
+    pub fn decay(&self) -> Duration {
+        self.tuning.read().decay
+    }
+
+    /// The current inferred-corroboration window.
+    pub fn inferred_window(&self) -> Duration {
+        self.tuning.read().inferred_window
+    }
+
+    /// The current resident-entry cap.
+    pub fn max_entries(&self) -> usize {
+        self.tuning.read().max_entries
+    }
+
+    /// Apply hot-reloaded `[capability]` tempo and capacity in place.
+    ///
+    /// Resident entries keep the `expires_at` they were stamped with; the new
+    /// decay governs subsequent observations. Re-stamping live entries would
+    /// let a reload extend or truncate verdicts that were already acting,
+    /// which is a routing change the operator did not ask for.
+    pub fn retune(&self, decay: Duration, inferred_window: Duration, max_entries: usize) {
+        *self.tuning.write() = RegistryTuning {
+            decay,
+            inferred_window,
+            max_entries,
+        };
+    }
+
+    /// Run `op` under the generation guard, refusing a stale catalog-scoped
+    /// operation.
+    ///
+    /// THE single validated-operation shape. The generation READ lock is
+    /// acquired first and held across `op`, so validation and the entries work it
+    /// guards are one atomic step: a boundary transition (which takes the same
+    /// lock for WRITING, in the same order) cannot land between them. A
+    /// check-then-lock shape would leave a window where a catalog-scoped write
+    /// lands after the generation advanced and the prune ran -- repopulating
+    /// exactly what the boundary evicted.
+    ///
+    /// A catalog-independent key is always admissible: its truth does not depend
+    /// on the catalog revision, so an older generation observing one is still
+    /// observing a fact. A catalog-scoped key is admissible only from the active
+    /// generation, or from the PENDING generation a boundary has installed (see
+    /// `install_pending_generation`, which is test-only).
+    fn guarded<T>(
+        &self,
+        generation: u64,
+        feature_key: &str,
+        op: impl FnOnce() -> T,
+    ) -> GenerationOutcome<T> {
+        let active = self.generation.read();
+        let admitted = !crate::field_capability::capability_key_is_catalog_scoped(feature_key)
+            || generation == *active
+            // A caller stamped with the admitted-but-uncommitted generation is
+            // acting for the boundary that is landing, not against it.
+            || self.pending_generation.read().is_some_and(|r| r.generation == generation);
+        // Between validation and the operation. Inert under this shape: a
+        // competing boundary blocks on the lock still held above.
+        #[cfg(test)]
+        if let Some(hook) = self.pause_hook.lock().as_ref() {
+            hook();
+        }
+        if !admitted {
+            return GenerationOutcome::Stale;
+        }
+        // Reports the generation active AT operation time; still under the
+        // guard, so it equals what was validated.
+        #[cfg(test)]
+        if let Some(probe) = self.probe_hook.lock().as_ref() {
+            probe(*active);
+        }
+        let out = op();
+        // The effective generation, chosen while the guard still holds: pending
+        // when a boundary is admitted-but-uncommitted, otherwise active. Read
+        // here rather than by the caller so it cannot drift from the state this
+        // operation just produced.
+        let generation = self
+            .pending_generation
+            .read()
+            .map_or(*active, |r| r.generation);
+        drop(active);
+        GenerationOutcome::Applied {
+            value: out,
+            generation,
+        }
+    }
+
+    /// Install a test hook fired between generation validation and the guarded
+    /// operation. Test-only; see [`Self::guarded`].
+    #[cfg(test)]
+    pub(crate) fn set_generation_pause_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        *self.pause_hook.lock() = Some(hook);
+    }
+
+    /// Force the active generation, for tests that must reach a boundary value
+    /// (`u64::MAX`) that no realistic number of reloads would produce.
+    #[cfg(test)]
+    pub(crate) fn set_generation_for_test(&self, generation: u64) {
+        let mut slot = self.generation.write();
+        *slot = generation;
+    }
+
+    /// Install a test hook fired immediately after each named lock is acquired.
+    /// Test-only; see the `acquire_hook` field.
+    ///
+    /// The callback must not touch this registry: it runs with at least one guard
+    /// held, so re-entering would self-deadlock. Signalling a channel or barrier
+    /// is the intended use.
+    #[cfg(test)]
+    pub(crate) fn set_lock_acquire_hook(&self, hook: Box<dyn Fn(&'static str) + Send + Sync>) {
+        *self.acquire_hook.lock() = Some(hook);
+    }
+
+    /// Fire the acquisition hook for `lock`, if one is installed.
+    #[cfg(test)]
+    fn note_acquired(&self, lock: &'static str) {
+        // Cloned out from under its own lock first: holding the hook slot while
+        // the callback runs would deadlock a callback that installs another hook.
+        let hook = self.acquire_hook.lock();
+        if let Some(hook) = hook.as_ref() {
+            hook(lock);
+        }
+    }
+
+    /// No-op when not testing.
+    #[cfg(not(test))]
+    #[inline]
+    #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+    const fn note_acquired(&self, _lock: &'static str) {}
+
+    /// Install a test hook fired from inside the guarded operation with the
+    /// generation active at that moment. Test-only; see [`Self::guarded`].
+    #[cfg(test)]
+    pub(crate) fn set_generation_probe_hook(&self, hook: Box<dyn Fn(u64) + Send + Sync>) {
+        *self.probe_hook.lock() = Some(hook);
+    }
+
+    /// Record a negative observation on behalf of `generation`.
+    ///
+    /// Returns [`GenerationOutcome::Stale`] when the submitting generation has
+    /// been superseded and the key is catalog-scoped: the caller must then emit
+    /// no ledger event and bump no metric, because the observation describes a
+    /// catalog revision the daemon has left.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<ObserveOutcome> {
+        self.guarded(generation, feature_key_raw, || {
+            self.observe(
+                state_key,
+                feature_key_raw,
+                provider_kind,
+                tier,
+                phase,
+                source,
+                evidence_class,
+                now,
+            )
+        })
+    }
+
+    /// Record a positive observation on behalf of `generation`, with the same
+    /// staleness rule as [`Self::observe_in_generation`].
+    // Mirrors `observe_positive` plus the generation; grouping the arguments
+    // would only introduce a type that exists to satisfy a lint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_positive_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<PositiveOutcome> {
+        self.guarded(generation, feature_key_raw, || {
+            self.observe_positive(
+                state_key,
+                feature_key_raw,
+                provider_kind,
+                source,
+                evidence_class,
+                now,
+            )
+        })
+    }
+
+    /// The routing decision for `generation`, or `None` when that generation
+    /// may not read this key.
+    ///
+    /// `None` means STALE, not "allow": a caller holding a superseded Router
+    /// must fall through to its ordinary no-verdict path rather than route on
+    /// catalog truth the reload replaced.
+    pub(crate) fn acting_negative_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> Option<(RoutingDecision, u64)> {
+        match self.guarded(generation, feature_key_raw, || {
+            self.acting_negative_for(state_key, feature_key_raw, provider_kind, now)
+        }) {
+            GenerationOutcome::Applied { value, generation } => Some((value, generation)),
+            GenerationOutcome::Stale => None,
+        }
+    }
+
+    /// Remove a keyed entry on behalf of `generation` (the probe-settlement
+    /// clear), with the same staleness rule.
+    ///
+    /// A stale settlement is a no-op AND emits nothing: the probe it settles
+    /// was issued against a catalog revision the daemon has left, so treating
+    /// it as authoritative would clear an entry the live generation still
+    /// believes.
+    pub fn remove_keyed_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) -> GenerationOutcome<bool> {
+        self.guarded(generation, feature_key_raw, || {
+            self.remove_keyed(state_key, feature_key_raw, provider_kind)
+        })
+    }
+
+    /// The generation an event produced NOW must be stamped with to survive.
+    ///
+    /// The pending generation when a boundary is admitted-but-uncommitted,
+    /// otherwise the active one. Every producer of a ledger event asks this rather
+    /// than reading `generation()` directly: an event stamped with the active
+    /// generation during an admitted boundary would be older than the boundary the
+    /// writer is about to commit, and would be dropped.
+    ///
+    /// Takes `generation` before `pending_generation`, the documented order.
+    pub fn effective_persistence_generation(&self) -> u64 {
+        let active = self.generation.read();
+        let pending = self.pending_generation.read();
+        pending.map_or(*active, |r| r.generation)
+    }
+
+    /// Install the generation a boundary has admitted.
+    ///
+    /// Production installs it INSIDE [`Self::with_boundary_cut`], which is the only
+    /// window where the install and the survivor snapshot are indivisible. This
+    /// entry point exists for tests that stage a pending generation directly;
+    /// it takes `generation` before `pending_generation` like every other path.
+    #[cfg(test)]
+    pub(crate) fn install_pending_generation(&self, pending: u64) {
+        let _generation = self.generation.read();
+        let mut next = self.next_receipt_id.write();
+        let id = *next;
+        *next = next.saturating_add(1);
+        *self.pending_generation.write() = Some(BoundaryReceipt {
+            generation: pending,
+            id,
+        });
+    }
+
+    /// Discard an admitted-but-uncommitted generation: the boundary failed or was
+    /// abandoned at shutdown. Events produced after this revert to stamping the
+    /// active generation, which is still the newest committed boundary.
+    ///
+    /// Takes `generation` before `pending_generation`, the documented order, even
+    /// though it only writes the latter.
+    pub fn rollback_pending_generation(&self, receipt: &BoundaryReceipt) -> BoundarySettlement {
+        let _generation = self.generation.read();
+        let mut pending = self.pending_generation.write();
+        if *pending != Some(*receipt) {
+            tracing::warn!(
+                expected_receipt = ?receipt,
+                pending = ?*pending,
+                "capability boundary rollback ignored: the receipt does not match"
+            );
+            return BoundarySettlement::StaleReceipt;
+        }
+        *pending = None;
+        BoundarySettlement::Applied {
+            generation: receipt.generation,
+            pruned: 0,
+        }
+    }
+
+    /// Take the boundary cut: DERIVE the next pending generation, snapshot the
+    /// catalog-independent survivors, let `submit` admit them, and install the
+    /// pending generation on success -- all under one acquisition of
+    /// `generation -> pending_generation -> entries`, in the documented order.
+    ///
+    /// Returns `(outcome, pending)` so the caller knows which generation was
+    /// established without re-reading it.
+    ///
+    /// # Why the pending generation is derived HERE
+    ///
+    /// A caller that read `generation()` and handed back `+ 1` computed it outside
+    /// this lock, so two concurrent boundaries could derive the SAME pending value
+    /// and the second would silently reuse the first's -- and even a single caller
+    /// races a `commit_boundary_transition` landing between its read and this cut.
+    /// The old signature also rested on an unenforced single-writer assumption
+    /// (only the reload coordinator ever calls it), which nothing in the type
+    /// system or this module checks. Deriving under the guard removes the
+    /// assumption instead of documenting it.
+    ///
+    /// # Why the snapshot, admission and install are one operation
+    ///
+    /// The snapshot and the admission must be indivisible: an observation landing
+    /// between them would be in NEITHER place -- absent from the snapshot, so
+    /// never restated past the new tombstone, and written before the boundary, so
+    /// invisible to the next boot. It would disappear while every individual step
+    /// still looked correct.
+    ///
+    /// Installing the pending generation must be inside the same window, or an
+    /// observation arriving between admission and installation is stamped with the
+    /// pre-boundary generation and the writer drops it as older than the boundary
+    /// being committed.
+    ///
+    /// The retired shape held `entries` in a callback that then called
+    /// `install_pending_generation`, acquiring `entries -> pending_generation` --
+    /// the reverse of the documented order, and so a LATENT INVERSION HAZARD
+    /// against `commit_boundary_transition`, which takes them in order for
+    /// writing. It was never demonstrated as a live deadlock, but a future caller
+    /// holding both would have closed the cycle.
+    ///
+    /// `submit` must not block on I/O: it performs the (non-blocking) batch
+    /// ADMISSION only, and every lock here is released before the caller awaits
+    /// the writer's outcome. Holding these across SQLite would stall every
+    /// dispatching request for the length of a transaction.
+    ///
+    /// `pending` is installed only when `admitted` reports success, so a refused
+    /// admission leaves the registry byte-identical.
+    pub fn with_boundary_cut<T>(
+        &self,
+        submit: impl FnOnce(&[LearnedRegistryEntry], u64) -> T,
+        admitted: impl FnOnce(&T) -> bool,
+    ) -> BoundaryCut<T> {
+        // Take the receipt counter's lock in step, between pending and entries,
+        // as an inner component of the pending acquisition order.
+        // (It is always taken together with pending_generation, never alone.)
+        // The documented order, taken once, top to bottom.
+        let generation = self.generation.read();
+        self.note_acquired("generation");
+        let mut pending_slot = self.pending_generation.write();
+        self.note_acquired("pending_generation");
+
+        // REFUSE before any snapshot, submission or state change.
+        //
+        // An already-admitted boundary means two would be in flight at once, each
+        // stamping events with its own generation while only one can be promoted
+        // -- the loser's events are then dropped by the writer as older than the
+        // winner's boundary. The previous shape advanced PAST the in-flight value
+        // and allocated another, which is exactly that loss.
+        if let Some(in_flight) = *pending_slot {
+            tracing::warn!(
+                in_flight_receipt = ?in_flight,
+                "capability boundary refused: another boundary is admitted and \
+                 unsettled"
+            );
+            return BoundaryCut::Busy {
+                in_flight: in_flight.generation,
+            };
+        }
+        // `checked_add`, not saturating: at `u64::MAX` a saturating add would hand
+        // back the active generation as the "next" one, and every later comparison
+        // would read wrongly. Refused before the batch is built.
+        let mut next_receipt_id = self.next_receipt_id.write();
+        let Some(pending_gen) = generation.checked_add(1) else {
+            tracing::error!(
+                active_generation = *generation,
+                "capability boundary generation exhausted; refusing the boundary"
+            );
+            return BoundaryCut::Exhausted;
+        };
+        // Receipt counter exhaustion: also refuse before any change.
+        let Some(receipt_id) = next_receipt_id.checked_add(1) else {
+            tracing::error!("capability boundary receipt counter exhausted");
+            return BoundaryCut::Exhausted;
+        };
+
+        // The entries WRITE lock excludes readers too, which is what makes the
+        // cut a true quiescent point rather than merely serializing writers.
+        let entries = self.entries.write();
+        self.note_acquired("entries");
+
+        let survivors: Vec<LearnedRegistryEntry> = entries
+            .iter()
+            .filter(|(key, _)| {
+                !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+            })
+            .map(|(key, entry)| LearnedRegistryEntry {
+                state_key: key.state_key.clone(),
+                feature_key: key.feature_key.clone(),
+                verdict: entry.read_verdict(),
+                signal_tier: entry.signal,
+                observations: entry.observations,
+                first_seen: entry.first_seen,
+                last_seen: entry.last_seen,
+                expires_at: entry.expires_at,
+                evidence_class: entry.evidence_class.clone(),
+                phase: entry.phase,
+                source: entry.source,
+            })
+            .collect();
+
+        let outcome = submit(&survivors, pending_gen);
+        if !admitted(&outcome) {
+            // The batch was NOT queued. No receipt is allocated, no pending state
+            // installed, and the caller has no settlement obligation. The receipt
+            // counter stays untouched so a retry does not waste IDs.
+            return BoundaryCut::Rejected { outcome };
+        }
+        let receipt = BoundaryReceipt {
+            generation: pending_gen,
+            id: receipt_id,
+        };
+        *pending_slot = Some(receipt);
+        *next_receipt_id = receipt_id;
+        BoundaryCut::Taken { outcome, receipt }
+    }
+
+    /// Resident entry count, or `None` when the entries lock is held for writing.
+    ///
+    /// A non-blocking probe for the boundary-cut exclusion test: called from
+    /// inside the cut it must return `None`, which is direct evidence the cut
+    /// still holds the write lock. A blocking read there would deadlock and prove
+    /// nothing.
+    #[cfg(test)]
+    pub(crate) fn try_entry_count(&self) -> Option<usize> {
+        self.entries.try_read().map(|entries| entries.len())
+    }
+
+    /// Advance the generation and evict the catalog-scoped entries as ONE
+    /// transition, returning `(new_generation, pruned)`.
+    ///
+    /// Paired under a single lock acquisition so there is no window in which the
+    /// generation has advanced but the stale entries are still readable, nor one
+    /// in which they are gone while an old generation is still admitted to
+    /// re-learn them.
+    pub fn commit_boundary_transition(&self, receipt: &BoundaryReceipt) -> BoundarySettlement {
+        let mut generation = self.generation.write();
+        self.note_acquired("generation");
+        let mut pending = self.pending_generation.write();
+        self.note_acquired("pending_generation");
+
+        // Bound to the receipt, BEFORE the entries lock and before any mutation: a
+        // mismatched receipt belongs to a boundary already settled, and promoting
+        // it would move the generation on behalf of a different boundary and prune
+        // entries no committed batch accounted for.
+        if *pending != Some(*receipt) {
+            tracing::warn!(
+                expected_receipt = ?receipt,
+                pending = ?*pending,
+                active_generation = *generation,
+                "capability boundary commit ignored: the receipt does not match"
+            );
+            return BoundarySettlement::StaleReceipt;
+        }
+        // The promotion must be a STRICT ADVANCE. A pending value at or below the
+        // active generation would move the counter backwards or leave it still,
+        // and then events already stamped with the active generation would read as
+        // belonging to the new boundary. Only reachable through a hand-installed
+        // value, so it is refused rather than allowed to corrupt the counter.
+        if receipt.generation <= *generation {
+            tracing::error!(
+                active_generation = *generation,
+                rejected_receipt = ?receipt,
+                "pending capability generation did not strictly advance; refusing \
+                 the transition"
+            );
+            *pending = None;
+            return BoundarySettlement::StaleReceipt;
+        }
+
+        let mut entries = self.entries.write();
+        self.note_acquired("entries");
+        *pending = None;
+        *generation = receipt.generation;
+        let before = entries.len();
+        entries.retain(|key, _| {
+            !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+        });
+        BoundarySettlement::Applied {
+            generation: *generation,
+            pruned: before - entries.len(),
+        }
+    }
+
+    /// The decay state of an entry for `generation`, or `None` when that
+    /// generation may not read the key.
+    ///
+    /// Validated atomically with the read, so a superseded Router cannot decide
+    /// to strip on state belonging to the replacement generation.
+    pub fn negative_state_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> Option<(NegativeState, u64)> {
+        match self.guarded(generation, feature_key_raw, || {
+            self.negative_state(state_key, feature_key_raw, provider_kind, now)
+        }) {
+            GenerationOutcome::Applied { value, generation } => Some((value, generation)),
+            GenerationOutcome::Stale => None,
+        }
+    }
+
+    /// Lapse an entry into a single re-probe on behalf of `generation`, under
+    /// the same atomic guard. A stale catalog-scoped expiry is refused: the
+    /// entry belongs to a catalog revision the daemon has left, so resetting its
+    /// decay clock would extend a verdict the boundary is discarding.
+    pub fn expire_keyed_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> GenerationOutcome<bool> {
+        self.guarded(generation, feature_key_raw, || {
+            self.expire_keyed(state_key, feature_key_raw, provider_kind, now)
+        })
+    }
+
+    /// Settle a re-probe on behalf of `generation`, under the same atomic guard.
+    ///
+    /// A stale catalog-scoped settlement is refused, so the caller emits no
+    /// cleared event and bumps no metric: the probe was issued against a catalog
+    /// revision the daemon has left, and treating its result as authoritative
+    /// would clear or back off an entry the live generation still believes.
+    pub fn record_probe_outcome_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        outcome: ProbeOutcome,
+        now: Instant,
+    ) -> GenerationOutcome<()> {
+        self.guarded(generation, feature_key_raw, || {
+            self.record_probe_outcome(state_key, feature_key_raw, provider_kind, outcome, now);
+        })
+    }
+
+    /// True when `feature_key` is verified-working for `generation`, or `None`
+    /// when that generation may not read the key.
+    pub fn is_verified_working_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> Option<bool> {
+        match self.guarded(generation, feature_key_raw, || {
+            self.is_verified_working(state_key, feature_key_raw, provider_kind, now)
+        }) {
+            GenerationOutcome::Applied { value, .. } => Some(value),
+            GenerationOutcome::Stale => None,
+        }
+    }
+
+    /// Drop every catalog-scoped entry, keeping the catalog-independent ones.
+    /// Returns how many were removed.
+    ///
+    /// The eviction half of the boundary: paired with
+    /// [`Self::advance_generation`] under one caller-held transition so no
+    /// window exists where the generation advanced but the stale entries are
+    /// still resident.
+    #[cfg(test)]
+    pub(crate) fn prune_catalog_scoped(&self) -> usize {
+        let mut entries = self.entries.write();
+        let before = entries.len();
+        entries.retain(|key, _| {
+            !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+        });
+        before - entries.len()
+    }
+
     /// Build the map key, normalizing the raw capability key so an insert
     /// and a later lookup meet on identical strings.
     fn make_key(state_key: &str, feature_key_raw: &str, provider_kind: &str) -> RegistryKey {
@@ -722,7 +1644,7 @@ impl LearnedCapabilityRegistry {
         if entry.is_acting() {
             entry.observations = entry.observations.saturating_add(1);
             entry.last_seen = now;
-            entry.expires_at = now + self.decay;
+            entry.expires_at = now + self.decay();
             if matches!(tier, SignalTier::SelfIdentifying) {
                 entry.signal = SignalTier::SelfIdentifying;
                 entry.consecutive_failed_probes = 0;
@@ -739,17 +1661,17 @@ impl LearnedCapabilityRegistry {
                 entry.signal = SignalTier::SelfIdentifying;
                 entry.observations = entry.observations.saturating_add(1);
                 entry.last_seen = now;
-                entry.expires_at = now + self.decay;
+                entry.expires_at = now + self.decay();
                 entry.consecutive_failed_probes = 0;
                 ObserveOutcome::Acting
             }
             SignalTier::Inferred => {
                 let within_window =
-                    now.saturating_duration_since(entry.first_seen) <= self.inferred_window;
+                    now.saturating_duration_since(entry.first_seen) <= self.inferred_window();
                 if within_window {
                     entry.observations = 2;
                     entry.last_seen = now;
-                    entry.expires_at = now + self.decay;
+                    entry.expires_at = now + self.decay();
                     ObserveOutcome::Acting
                 } else {
                     // The confirming observation arrived too late: reset to a
@@ -772,11 +1694,12 @@ impl LearnedCapabilityRegistry {
         tier: SignalTier,
         phase: FailurePhase,
         source: EvidenceSource,
+        evidence_class: Option<&str>,
         now: Instant,
     ) -> (LearnedEntry, ObserveOutcome) {
         let (expires_at, outcome) = match tier {
             // Self-identifying acts immediately; stamp the decay window.
-            SignalTier::SelfIdentifying => (now + self.decay, ObserveOutcome::Acting),
+            SignalTier::SelfIdentifying => (now + self.decay(), ObserveOutcome::Acting),
             // Inferred starts pending; no decay window until it is confirmed.
             SignalTier::Inferred => (now, ObserveOutcome::Pending),
         };
@@ -791,6 +1714,7 @@ impl LearnedCapabilityRegistry {
             consecutive_failed_probes: 0,
             phase,
             source,
+            evidence_class: evidence_class.map(str::to_string),
         };
         (entry, outcome)
     }
@@ -800,7 +1724,11 @@ impl LearnedCapabilityRegistry {
     /// positive-detection phase). `source` attributes the evidence.
     /// `expires_at` is set to `now` but carries no decay meaning --
     /// `is_expired` excludes a positive, so it never lapses into a re-probe.
-    const fn fresh_positive(source: EvidenceSource, now: Instant) -> LearnedEntry {
+    fn fresh_positive(
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> LearnedEntry {
         LearnedEntry {
             verdict: EntryVerdict::Verified,
             signal: SignalTier::SelfIdentifying,
@@ -812,13 +1740,14 @@ impl LearnedCapabilityRegistry {
             consecutive_failed_probes: 0,
             phase: FailurePhase::F3,
             source,
+            evidence_class: evidence_class.map(str::to_string),
         }
     }
 
     /// Evict the entry with the oldest `last_seen` when the map is at cap,
     /// emitting a structured WARN. A safety valve, not a cache policy.
     fn evict_if_full(&self, map: &mut HashMap<RegistryKey, LearnedEntry>) {
-        if map.len() < self.max_entries {
+        if map.len() < self.max_entries() {
             return;
         }
         let victim = map
@@ -830,7 +1759,7 @@ impl LearnedCapabilityRegistry {
                 event = "evict",
                 state_key = %key.state_key,
                 capability_key = %key.feature_key,
-                max_entries = self.max_entries,
+                max_entries = self.max_entries(),
                 "learned-capability registry at capacity; evicted oldest entry",
             );
             map.remove(&key);
@@ -845,9 +1774,9 @@ impl LearnedCapabilityRegistry {
         let multiple = 2u64
             .saturating_pow(consecutive_failed_probes)
             .min(u64::from(MAX_BACKOFF_MULTIPLE)) as u32;
-        let base = self.decay.saturating_mul(multiple);
+        let base = self.decay().saturating_mul(multiple);
 
-        let span = (self.decay.as_nanos() / u128::from(JITTER_DIVISOR)) as i128;
+        let span = (self.decay().as_nanos() / u128::from(JITTER_DIVISOR)) as i128;
         let jitter = if span == 0 {
             0
         } else {
@@ -898,6 +1827,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -926,6 +1856,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -949,6 +1880,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let within = t0 + WINDOW / 2;
@@ -961,6 +1893,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             within,
         );
 
@@ -987,6 +1920,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let after = t0 + WINDOW + Duration::from_secs(1);
@@ -999,6 +1933,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             after,
         );
 
@@ -1025,6 +1960,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1057,6 +1993,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1094,6 +2031,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1132,6 +2070,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1167,6 +2106,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -1207,6 +2147,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -1244,6 +2185,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         reg.observe(
@@ -1253,6 +2195,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0 + Duration::from_secs(1),
         );
 
@@ -1265,6 +2208,7 @@ mod tests {
                 SignalTier::SelfIdentifying,
                 FailurePhase::F1,
                 EvidenceSource::Live,
+                None,
                 t0 + Duration::from_secs(2),
             );
         });
@@ -1299,6 +2243,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1332,6 +2277,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1374,6 +2320,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         reg.observe(
@@ -1383,6 +2330,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         // A non-default (phase, source) pair proves both survive the
@@ -1396,6 +2344,7 @@ mod tests {
             first_seen: t0,
             last_seen: t0,
             expires_at: t0 + Duration::from_hours(1),
+            evidence_class: None,
             phase: FailurePhase::F2,
             source: EvidenceSource::Probe,
             in_flight: false,
@@ -1438,6 +2387,7 @@ mod tests {
             first_seen: t0,
             last_seen: t0,
             expires_at: t0 + DECAY,
+            evidence_class: None,
             phase: FailurePhase::F2,
             source: EvidenceSource::Live,
             in_flight: false,
@@ -1467,6 +2417,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         assert!(!reg.is_empty());
@@ -1503,6 +2454,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         assert_eq!(
@@ -1550,6 +2502,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1584,6 +2537,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1625,6 +2579,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1652,6 +2607,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
         let long_after = t0 + DECAY * 100;
@@ -1676,6 +2632,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1685,6 +2642,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1713,6 +2671,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
         assert_eq!(reg.snapshot()[0].verdict, Verdict::VerifiedWorking);
@@ -1725,6 +2684,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1752,6 +2712,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1765,6 +2726,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F3,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1788,6 +2750,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         assert_eq!(outcome, ObserveOutcome::Acting);
@@ -1810,6 +2773,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F3,
             EvidenceSource::Live,
+            None,
             t0,
         );
         let confirm = t0 + WINDOW / 2;
@@ -1820,6 +2784,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F3,
             EvidenceSource::Live,
+            None,
             confirm,
         );
 
@@ -1851,6 +2816,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F3,
             EvidenceSource::Probe,
+            None,
             t0,
         );
         let confirm = t0 + WINDOW / 2;
@@ -1861,6 +2827,7 @@ mod tests {
             SignalTier::Inferred,
             FailurePhase::F3,
             EvidenceSource::Probe,
+            None,
             confirm,
         );
 
@@ -1892,6 +2859,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
         assert!(reg.is_verified_working("nick", "web_search", "openai-compat", t0));
@@ -1904,6 +2872,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             t0,
         );
         assert!(!reg.is_verified_working("nick", "computer_use", "openai-compat", t0));
@@ -1919,6 +2888,7 @@ mod tests {
             "web_search",
             "openai-compat",
             EvidenceSource::Live,
+            None,
             t0,
         );
         reg.observe(
@@ -1928,6 +2898,7 @@ mod tests {
             SignalTier::SelfIdentifying,
             FailurePhase::F2,
             EvidenceSource::Live,
+            None,
             t0,
         );
 
@@ -1961,6 +2932,7 @@ mod tests {
                 "web_search",
                 "openai-compat",
                 EvidenceSource::Live,
+                None,
                 t0,
             );
             reg.observe(
@@ -1970,6 +2942,7 @@ mod tests {
                 SignalTier::Inferred,
                 FailurePhase::F3,
                 EvidenceSource::Live,
+                None,
                 t0,
             );
             reg.observe(
@@ -1979,6 +2952,7 @@ mod tests {
                 SignalTier::Inferred,
                 FailurePhase::F3,
                 EvidenceSource::Live,
+                None,
                 t0 + WINDOW / 2,
             );
             reg.observe(
@@ -1988,6 +2962,7 @@ mod tests {
                 SignalTier::SelfIdentifying,
                 FailurePhase::F1,
                 EvidenceSource::Live,
+                None,
                 t0,
             );
             let mut snap = reg.snapshot();
@@ -2004,3 +2979,7 @@ mod tests {
         assert_eq!(apply(t0), apply(t0));
     }
 }
+
+#[cfg(test)]
+#[path = "learned_capability_generation_tests.rs"]
+mod generation_tests;

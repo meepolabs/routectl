@@ -120,6 +120,7 @@ fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::Export
         first_seen: base,
         last_seen: base,
         expires_at: base + Duration::from_hours(48),
+        evidence_class: None,
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
         in_flight: false,

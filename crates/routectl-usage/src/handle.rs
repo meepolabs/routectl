@@ -216,7 +216,7 @@ impl UsageHandle {
     /// WARN. Routing never depends on this landing -- it is best-effort.
     ///
     /// DEPRECATED: the request path no longer calls this -- learned negatives
-    /// now ride out as `broken` rows through [`Self::try_send_capability_event`]
+    /// now ride out as `broken` rows through `try_send_capability_event_in_generation`
     /// into the unified `capability_events` ledger. Retained (with the
     /// `LearnEvent` writer branch and the `capability_learn_events` DDL) so the
     /// legacy write path stays compilable and existing rows are untouched;
@@ -238,12 +238,31 @@ impl UsageHandle {
     /// full or closed channel drops the event with its own counter and
     /// rate-limited WARN. Routing never depends on this landing -- it is
     /// best-effort; the warm-rebuild replayer tolerates the gap.
-    pub fn try_send_capability_event(&self, event: CapabilityEvent) {
+    /// Hand a capability event to the writer, stamped with the registry
+    /// generation that produced it.
+    ///
+    /// THE only way to enqueue a capability event. There is deliberately no
+    /// generation-free wrapper: an unstamped event would default to a generation
+    /// older than every boundary, so the writer would drop it -- silently losing
+    /// a real observation. Requiring the argument makes the caller state which
+    /// generation the event belongs to.
+    ///
+    /// Best effort like every usage write (the enabled gate applies; a full or
+    /// closed channel drops with a counter).
+    /// The generation is transient sequencing: the writer drops the event if a
+    /// boundary batch has since committed at a NEWER generation, because such
+    /// an event predates that boundary and would otherwise be replayed after
+    /// its tombstone -- restoring state the boundary evicted. Nothing about the
+    /// generation is persisted.
+    pub fn try_send_capability_event_in_generation(&self, event: CapabilityEvent, generation: u64) {
         if !self.is_enabled() {
             self.counters.incr_dropped_disabled();
             return;
         }
-        match self.sender.try_send(WriterMessage::CapabilityEvent(event)) {
+        match self
+            .sender
+            .try_send(WriterMessage::CapabilityEvent(event, generation))
+        {
             Ok(()) => self.counters.incr_capability_events_enqueued(),
             Err(_) => self.note_capability_event_overflow_drop(),
         }
@@ -252,6 +271,13 @@ impl UsageHandle {
     /// Whether usage capture is currently enabled (runtime-flippable).
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// The producer end of the writer channel. Crate-internal so the
+    /// acknowledged capability batch can send its own message variant
+    /// without duplicating the handle's construction.
+    pub(crate) const fn sender(&self) -> &Sender<WriterMessage> {
+        &self.sender
     }
 
     /// Flip the runtime enabled gate. The daemon calls this on hot-reload;

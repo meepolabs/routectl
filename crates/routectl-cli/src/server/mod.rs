@@ -15,6 +15,7 @@ use routectl_usage::UsageHandle;
 
 pub mod auth;
 pub mod calibration_rebuild;
+pub mod capability_boundary;
 pub mod capability_rebuild;
 pub mod cc_pin_drift;
 mod config_load;

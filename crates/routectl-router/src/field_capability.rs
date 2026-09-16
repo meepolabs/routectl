@@ -33,10 +33,10 @@
 //! must survive that change, so the two classes are distinguished by one
 //! predicate rather than by each call site re-deciding.
 
-// The namespace is permanent and must be pinned before any key can be
-// persisted under it, so this module lands ahead of the mint and
-// invalidation paths that read it; until one of them calls in, only the
-// tests do.
+// `capability_key_is_catalog_scoped` is live at both invalidation layers.
+// The mint side still has no production caller: the namespace is permanent,
+// so it is pinned before anything can persist a key under it, and until the
+// mint path lands only the tests call it.
 #![allow(dead_code)]
 
 /// The permanent prefix of every envelope-field capability key.
