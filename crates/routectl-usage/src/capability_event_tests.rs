@@ -176,3 +176,116 @@ fn tombstone_carries_boundary_revision_and_empty_keys() {
     assert_eq!(catalog_version, 12);
     assert_eq!(overlay_revision, 4);
 }
+
+#[test]
+fn batch_insert_commits_every_row_in_one_transaction() {
+    // Arrange
+    let (_dir, db) = open_db();
+    let batch = vec![
+        CapabilityEvent::tombstone(500, 8, 1),
+        event(
+            "nick",
+            &format!("{}{}", "fie", "ld:thinking.enabled.display"),
+        ),
+    ];
+
+    // Act
+    let inserted =
+        insert_capability_events_atomic(db.conn(), &batch).expect("atomic batch commits");
+
+    // Assert: both rows landed, and the tombstone's rowid precedes the
+    // restatement's -- append order is the boundary contract.
+    assert_eq!(inserted, 2);
+    let rowids: Vec<(i64, String)> = db
+        .conn()
+        .prepare("SELECT rowid, verdict FROM capability_events ORDER BY rowid")
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+    assert_eq!(rowids.len(), 2);
+    assert_eq!(rowids[0].1, TOMBSTONE_VERDICT);
+    assert_eq!(rowids[1].1, "broken");
+    assert!(
+        rowids[0].0 < rowids[1].0,
+        "the tombstone must be appended before its survivors",
+    );
+}
+
+/// A later row failing must leave NO row of the batch committed -- the
+/// tombstone included. A partially-committed batch is the exact corruption
+/// the atomicity exists to prevent: a tombstone with no survivors after it
+/// silently evicts every verdict it was supposed to preserve.
+#[test]
+fn batch_insert_rolls_back_every_row_when_a_later_row_fails() {
+    // Arrange: the second row violates a NOT NULL constraint the first does
+    // not, so the failure lands after the tombstone already inserted inside
+    // the transaction.
+    let (_dir, db) = open_db();
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER reject_second BEFORE INSERT ON capability_events \
+             WHEN NEW.capability = 'poison' \
+             BEGIN SELECT RAISE(ABORT, 'forced row failure'); END",
+        )
+        .expect("install trigger");
+    let batch = vec![
+        CapabilityEvent::tombstone(500, 8, 1),
+        event("nick", "poison"),
+    ];
+
+    // Act
+    let result = insert_capability_events_atomic(db.conn(), &batch);
+
+    // Assert: the call reports failure and the ledger is untouched.
+    assert!(result.is_err(), "a failing row must fail the whole batch");
+    let count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM capability_events", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(
+        count, 0,
+        "neither the tombstone nor any survivor may remain committed",
+    );
+}
+
+/// A positive control for the rollback test above: the same batch minus the
+/// poison row commits, proving the trigger is what fails the batch and the
+/// fixture is not simply unable to insert anything.
+#[test]
+fn batch_insert_commits_under_the_same_fixture_without_the_failing_row() {
+    let (_dir, db) = open_db();
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER reject_second BEFORE INSERT ON capability_events \
+             WHEN NEW.capability = 'poison' \
+             BEGIN SELECT RAISE(ABORT, 'forced row failure'); END",
+        )
+        .expect("install trigger");
+
+    let inserted = insert_capability_events_atomic(
+        db.conn(),
+        &[
+            CapabilityEvent::tombstone(500, 8, 1),
+            event("nick", "web_search"),
+        ],
+    )
+    .expect("a batch with no poison row commits");
+
+    assert_eq!(inserted, 2);
+}
+
+#[test]
+fn batch_insert_of_no_rows_commits_nothing_and_reports_zero() {
+    let (_dir, db) = open_db();
+
+    let inserted = insert_capability_events_atomic(db.conn(), &[]).expect("empty batch is ok");
+
+    assert_eq!(inserted, 0);
+    let count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM capability_events", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 0);
+}

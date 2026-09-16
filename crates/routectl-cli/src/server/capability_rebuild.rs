@@ -30,7 +30,7 @@
 use std::path::Path;
 
 use routectl_router::{CapabilityRebuildSummary, Router};
-use routectl_usage::{CapabilityEvent, UsageHandle};
+use routectl_usage::{BatchCommit, CapabilityEvent, UsageHandle};
 
 use super::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, REBUILD_ROW_LIMIT, classify_boundary, epoch_ms_now,
@@ -73,7 +73,7 @@ pub(crate) fn warm_capability_registry_from_ledger(
         }
         outcome => {
             log_fail_closed(&outcome, db_path, catalog_version, overlay_revision);
-            enqueue_fresh_tombstone(usage, catalog_version, overlay_revision);
+            commit_fresh_tombstone(usage, catalog_version, overlay_revision);
         }
     }
 }
@@ -116,22 +116,47 @@ fn log_fail_closed(
     }
 }
 
-/// Enqueue exactly one fresh tombstone stamped this boot's revision through
-/// the usage writer. Non-blocking and best-effort like every usage write; the
-/// enabled gate applies, and a disabled writer drops it (consistent with a
-/// disabled ledger writing no events at all).
-fn enqueue_fresh_tombstone(usage: &UsageHandle, catalog_version: u32, overlay_revision: u64) {
+/// Commit exactly one fresh tombstone stamped this boot's revision, through
+/// the ACKNOWLEDGED batch path.
+///
+/// Not best-effort, and not subject to `usage.enabled`. Two reasons, both
+/// correctness rather than fidelity:
+///
+/// - The reader trusts only rows after the newest tombstone. If this boot
+///   leaves a STALE-revision tombstone in place, every verdict this session
+///   learns lands before that boundary and is invisible to every later boot --
+///   the daemon appears to learn while nothing it learns can survive a
+///   restart.
+/// - The gate cannot be consulted, because it is not fixed for the session: a
+///   later same-revision reload can enable capture, and a same-revision reload
+///   moves no boundary and so writes none of its own. A boot that skipped this
+///   write because capture happened to be off at the time would leave that
+///   session persisting rows behind a stale boundary.
+///
+/// A failure is logged at ERROR rather than propagated: boot never fails on
+/// the usage subsystem. The consequence is bounded and named -- this session's
+/// verdicts may not survive a restart -- which is strictly better than the
+/// silent version.
+fn commit_fresh_tombstone(usage: &UsageHandle, catalog_version: u32, overlay_revision: u64) {
     let event = CapabilityEvent::tombstone(
         epoch_ms_now(),
         i64::from(catalog_version),
         i64::try_from(overlay_revision).unwrap_or(i64::MAX),
     );
-    usage.try_send_capability_event(event);
-    tracing::info!(
-        catalog_version,
-        overlay_revision,
-        "enqueued fresh capability tombstone at boot (fail-closed replay boundary)"
-    );
+    match usage.commit_capability_events_blocking(vec![event], 1) {
+        BatchCommit::Committed { .. } => tracing::info!(
+            catalog_version,
+            overlay_revision,
+            "committed fresh capability tombstone at boot (fail-closed replay boundary)"
+        ),
+        failure => tracing::error!(
+            catalog_version,
+            overlay_revision,
+            reason = ?failure,
+            "capability boot tombstone NOT committed; verdicts learned this session \
+             may not survive a restart"
+        ),
+    }
 }
 
 /// Report the rebuild outcome: an `info` with the per-verdict tally, the row
@@ -153,6 +178,7 @@ fn emit_rebuild_log(summary: &CapabilityRebuildSummary, loaded_rows: usize) {
         cleared_noop = summary.cleared_noop,
         replayed_probe = summary.replayed_probe,
         skipped_unknown = summary.skipped_unknown,
+        skipped_revision = summary.skipped_revision,
         loaded_rows,
         row_cap = REBUILD_ROW_LIMIT,
         "warmed learned-capability registry from usage ledger"

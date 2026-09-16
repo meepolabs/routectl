@@ -432,6 +432,7 @@ mod tests {
             first_seen: Instant::now(),
             last_seen: Instant::now(),
             expires_at: Instant::now(),
+            evidence_class: None,
             phase: FailurePhase::F2,
             source: EvidenceSource::Live,
         };
@@ -459,6 +460,7 @@ mod tests {
             first_seen: Instant::now(),
             last_seen: Instant::now(),
             expires_at: Instant::now(),
+            evidence_class: None,
             phase: FailurePhase::F3,
             source: EvidenceSource::Live,
         };
@@ -477,6 +479,7 @@ mod tests {
             first_seen: last_seen,
             last_seen,
             expires_at: last_seen,
+            evidence_class: None,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
         }
@@ -663,6 +666,7 @@ mod tests {
                     first_seen: Instant::now(),
                     last_seen: Instant::now(),
                     expires_at: Instant::now(),
+                    evidence_class: None,
                     phase: FailurePhase::F1,
                     source: EvidenceSource::Live,
                 },

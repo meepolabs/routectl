@@ -719,6 +719,7 @@ fn learn_event(
     tier: routectl_core::SignalTier,
 ) -> routectl_router::router::CapabilityLearnEvent {
     routectl_router::router::CapabilityLearnEvent {
+        persistence_generation: 1,
         state_key: "prov".to_string(),
         capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
@@ -738,6 +739,7 @@ fn observe_event(
     evidence_class: &str,
 ) -> routectl_router::router::CapabilityObserveEvent {
     routectl_router::router::CapabilityObserveEvent {
+        persistence_generation: 1,
         state_key: "prov".to_string(),
         capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
@@ -751,6 +753,7 @@ fn observe_event(
 
 fn cleared_event(capability_key: &str) -> routectl_router::router::CapabilityClearedEvent {
     routectl_router::router::CapabilityClearedEvent {
+        persistence_generation: 1,
         state_key: "prov".to_string(),
         capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
@@ -844,6 +847,7 @@ async fn observe_meta_empty_capability_events_enqueues_nothing() {
 /// without reaching into router internals.
 fn replay_learn_event() -> routectl_router::router::CapabilityLearnEvent {
     routectl_router::router::CapabilityLearnEvent {
+        persistence_generation: 1,
         state_key: "lane-target#mantle".to_string(),
         capability_key: "reasoning_replay:codex".to_string(),
         provider_kind: "openai-responses".to_string(),
@@ -2217,5 +2221,103 @@ fn observe_quota_maps_non_empty_extras_into_json_object() {
             "fallback-percentage": "12",
             "7d-status": "allowed"
         }))
+    );
+}
+
+// ---- capability-generation drain guard --------------------------------------
+
+/// Drain `meta` and return how many capability rows landed.
+///
+/// Deliberately does NOT wait for a count: the unstamped case must persist
+/// nothing, so any wait would just burn its deadline. The writer shutdown
+/// flushes whatever was enqueued before the read.
+fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = routectl_usage::UsageWriter::start(
+        db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+        true,
+    );
+    let draft = build_usage_draft("anthropic", &minimal_request(), "req-gen".to_string());
+    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    cap.observe_meta(meta, 7, 1);
+    drop(cap);
+    drop(handle);
+    writer.shutdown();
+    let conn = rusqlite::Connection::open(&db_path).expect("read db");
+    conn.query_row("SELECT COUNT(*) FROM capability_events", [], |r| r.get(0))
+        .expect("count")
+}
+
+/// An unstamped ride-along must never be persisted.
+///
+/// Generation 0 is never live (generations are 1-based), so a non-empty
+/// ride-along carrying it means a producer emitted an event without the
+/// generation its own registry operation returned.
+/// Persisting those rows would have the writer drop them one by one, silently --
+/// the exact loss the barrier exists to prevent, arriving through the back door.
+///
+/// The FAIL-CLOSED half of the contract is what this asserts, because it is the
+/// half that holds in every build: the batch is dropped and no row lands. The
+/// loud half is a `debug_assert`, which release builds compile out -- so
+/// asserting the panic would pass in debug and fail the release suite.
+#[tokio::test]
+async fn an_unstamped_capability_ride_along_is_never_persisted() {
+    let mut meta = any_dispatch_meta().await;
+    let mut unstamped = learn_event("web_search", routectl_core::SignalTier::Inferred);
+    // Deliberately NOT stamped: this is the per-EVENT case, so one unstamped
+    // event among stamped siblings must still be caught.
+    unstamped.persistence_generation = 0;
+    meta.learned_capabilities = vec![
+        learn_event("computer_use", routectl_core::SignalTier::Inferred),
+        unstamped,
+    ];
+
+    // The `debug_assert` fires in a debug build; catching it lets one test cover
+    // both profiles, then the fail-closed assertion below holds in both.
+    let persisted =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drain_and_count(&meta)));
+    if let Ok(rows) = persisted {
+        assert_eq!(
+            rows, 0,
+            "an unstamped ride-along must persist nothing (release: fail closed)",
+        );
+    }
+}
+
+/// The positive control: an EMPTY ride-along at generation 0 is the ordinary
+/// case -- nothing was recorded, so nothing stamped it -- and must not fire the
+/// guard.
+///
+/// Without this the guard could be written as "generation 0 always fails" and
+/// would reject every request that learned nothing, which is nearly all of them.
+#[tokio::test]
+async fn an_empty_capability_ride_along_at_generation_zero_is_fine() {
+    let meta = any_dispatch_meta().await;
+    assert!(meta.learned_capabilities.is_empty());
+
+    assert_eq!(
+        drain_and_count(&meta),
+        0,
+        "an empty ride-along persists nothing and raises nothing",
+    );
+}
+
+/// A properly stamped ride-along drains normally -- the control proving the
+/// guard rejects only the unstamped case, not every event.
+#[tokio::test]
+async fn a_stamped_capability_ride_along_drains() {
+    let mut meta = any_dispatch_meta().await;
+    meta.learned_capabilities = vec![learn_event(
+        "web_search",
+        routectl_core::SignalTier::Inferred,
+    )];
+
+    assert_eq!(
+        drain_and_count(&meta),
+        1,
+        "a stamped ride-along persists its row",
     );
 }

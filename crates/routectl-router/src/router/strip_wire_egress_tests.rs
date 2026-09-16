@@ -220,6 +220,7 @@ fn acting_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
         first_seen: base,
         last_seen: base,
         expires_at: base + Duration::from_hours(48),
+        evidence_class: None,
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
         in_flight: false,

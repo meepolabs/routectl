@@ -14,6 +14,60 @@ use crate::capability_matcher::resolve_requested_capability;
 /// `ValidationException` envelope the drift observer inspects.
 const BEDROCK_PROVIDER_KIND: &str = "bedrock";
 
+/// One resident learned entry whose truth is independent of the catalog
+/// revision, in the shape a persisted restatement needs.
+///
+/// Produced by [`Router::catalog_independent_survivors`] when a reload moves
+/// the replay boundary: each survivor must be re-appended past the new
+/// boundary or the next boot cannot see it (the ledger read starts at the
+/// newest tombstone). Every field is carried VERBATIM from the resident
+/// entry -- a restatement re-states an existing fact, so refreshing its
+/// evidence or its decay age would silently extend a verdict's life every
+/// time an operator reloads config.
+///
+/// Plain owned strings: the consumer builds a leaf-crate ledger row that
+/// depends on none of this crate's types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogIndependentSurvivor {
+    /// Breaker state key (nickname-or-provider) the entry applies to.
+    pub state_key: String,
+    /// Normalized capability key.
+    pub capability: String,
+    /// Persisted verdict token.
+    pub verdict: String,
+    /// Persisted phase token.
+    pub phase: String,
+    /// Persisted evidence-source token.
+    pub source: String,
+    /// Persisted signal-tier token.
+    pub tier: String,
+    /// How many observations the entry had accrued.
+    ///
+    /// Load-bearing for an INFERRED negative: it acts only once corroborated
+    /// (two observations), so restating one row would replay a corroborated entry
+    /// as a single pending observation -- resident but NOT acting, silently
+    /// downgrading a verdict that was routing traffic. A self-identifying entry
+    /// acts on one observation and needs no second row.
+    pub observations: u32,
+    /// The pinned observation-evidence token, when this verdict carries one.
+    ///
+    /// Load-bearing, not forensic: the warm rebuild fails closed on a
+    /// `verified` / `suspect` row whose class is absent or unrecognized, so a
+    /// restatement that dropped it would be SKIPPED at the next boot and the
+    /// verdict would be evicted -- the exact outcome the restatement exists to
+    /// prevent. `None` for a `broken` verdict, which carries none.
+    pub evidence_class: Option<String>,
+    /// Provider-kind token, resolved through the one shared resolver
+    /// (`Router::provider_kind_for_state_key`).
+    pub provider_kind: String,
+    /// When the entry was first observed. Carried so a restatement preserves
+    /// the original observation time.
+    pub first_seen: Instant,
+    /// When the entry was most recently observed -- the age a restatement
+    /// must preserve rather than reset.
+    pub last_seen: Instant,
+}
+
 /// Per-request dedupe key for the learn path. The capability arm dedupes on
 /// `(state_key, feature_key)`; the drift signals dedupe on `state_key` alone;
 /// the F1-seen marker keys on `feature_key` alone (cross-lane -- it records
@@ -72,6 +126,16 @@ pub(super) enum LearnDedupeKey {
 /// ever enters this struct -- only the classifier's structured facts.
 #[derive(Debug, Clone)]
 pub struct CapabilityLearnEvent {
+    /// The EFFECTIVE persistence generation this event must be stamped with.
+    ///
+    /// Taken from the registry operation that produced the event, atomically
+    /// under the same guard as its read or mutation -- never sampled before or
+    /// after. A separate read could be taken across a boundary and stamp the
+    /// event with a generation that does not describe the state it reports. A
+    /// single request legitimately spans a boundary, so events on one request
+    /// may carry DIFFERENT generations.
+    pub persistence_generation: u64,
+
     /// Breaker state key (nickname-or-provider) of the rejecting target.
     pub state_key: String,
     /// Normalized capability key the rejection named.
@@ -128,12 +192,23 @@ impl Router {
                 .resolve(&provider_name, &nickname, &entry.feature_key, provider_kind)
                 .map(|(verdict, _)| verdict);
             if before != after {
-                self.learned_capabilities.expire_keyed(
-                    &entry.state_key,
-                    &entry.feature_key,
-                    provider_kind,
-                    now,
-                );
+                // Through the barrier: this sweep runs on the REPLACEMENT Router
+                // during a carry-over, so its generation is the live one -- but
+                // routing it through the facade keeps the invariant that no
+                // catalog-scoped mutation bypasses a generation check, rather
+                // than relying on where this happens to be called from.
+                if matches!(
+                    self.learned_capabilities.expire_keyed_in_generation(
+                        self.registry_generation(),
+                        &entry.state_key,
+                        &entry.feature_key,
+                        provider_kind,
+                        now,
+                    ),
+                    crate::learned_capability::GenerationOutcome::Stale
+                ) {
+                    continue;
+                }
                 tracing::debug!(
                     state_key = %entry.state_key,
                     capability_key = %entry.feature_key,
@@ -159,6 +234,222 @@ impl Router {
             return (model.provider_name.clone(), base.to_string());
         }
         (state_key.to_string(), String::new())
+    }
+
+    /// The provider-kind token for a learned-registry `state_key`.
+    ///
+    /// THE single owner of this resolution. Two surfaces need it -- restating
+    /// a survivor's persisted row across a reload boundary, and removing a
+    /// keyed entry on operator purge -- and both must agree exactly, because
+    /// the kind feeds `normalize_capability_key`: two call sites disagreeing
+    /// would compute different registry keys for the same target and each
+    /// would silently miss the other's rows.
+    ///
+    /// Resolves through the same shared `override_identity_for` map the
+    /// override comparison uses, so a pooled seat key resolves through its
+    /// base model exactly as it does there. An unresolvable key yields the empty string
+    /// rather than a guess: an empty kind is INERT in the normalization
+    /// (only the exact `bedrock` token reduces a key), so it reconstructs the
+    /// identical key instead of corrupting it.
+    pub fn provider_kind_for_state_key(&self, state_key: &str) -> &str {
+        let (provider_name, _nickname) = self.override_identity_for(state_key);
+        self.config
+            .providers
+            .get(&provider_name)
+            .map_or("", |p| p.kind_str())
+    }
+
+    /// Record a learned negative through the generation barrier.
+    ///
+    /// THE entry point for the learn path. Submits this Router's generation, so
+    /// a catalog-scoped observation arriving through a superseded Router is
+    /// refused ([`crate::learned_capability::GenerationOutcome::Stale`]) and the
+    /// caller must then emit no ledger event and bump no metric. A wire-shape
+    /// observation is accepted regardless of age -- its truth does not depend on
+    /// the catalog revision, and the shared registry means it lands in the store
+    /// the published Router reads.
+    // Mirrors the registry call it forwards to; grouping the arguments would
+    // only introduce a type that exists to satisfy a lint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_learned_capability(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::ObserveOutcome>
+    {
+        self.learned_capabilities.observe_in_generation(
+            self.registry_generation(),
+            state_key,
+            feature_key,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// Record a verified positive through the generation barrier, with the same
+    /// staleness rule as [`Self::observe_learned_capability`].
+    pub fn observe_verified_capability(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::PositiveOutcome>
+    {
+        self.learned_capabilities.observe_positive_in_generation(
+            self.registry_generation(),
+            state_key,
+            feature_key,
+            provider_kind,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// The act-side routing decision, through the generation barrier.
+    ///
+    /// `None` means this Router's generation may not read this key -- a
+    /// superseded Router asking about catalog-scoped truth. The caller treats it
+    /// as no verdict rather than routing on state the reload replaced.
+    /// Reached only from tests today: the production read path wants the
+    /// generation alongside the decision and calls
+    /// `acting_negative_with_generation`. Kept because it is the narrower of the
+    /// two and the barrier tests assert on it directly.
+    #[cfg(test)]
+    pub(crate) fn acting_negative_for_generation(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> Option<crate::learned_capability::RoutingDecision> {
+        self.learned_capabilities
+            .acting_negative_in_generation(
+                self.registry_generation(),
+                state_key,
+                feature_key,
+                provider_kind,
+                now,
+            )
+            .map(|(decision, _generation)| decision)
+    }
+
+    /// Clear a keyed entry (the probe settlement) through the generation
+    /// barrier. A stale settlement on a catalog-scoped key is a no-op and
+    /// reports `Stale`, so no cleared event rides out to the ledger.
+    pub fn clear_learned_capability(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+    ) -> crate::learned_capability::GenerationOutcome<bool> {
+        self.learned_capabilities.remove_keyed_in_generation(
+            self.registry_generation(),
+            state_key,
+            feature_key,
+            provider_kind,
+        )
+    }
+
+    /// Whether the capability is verified-working, or `false` when this
+    /// Router's generation may not read it.
+    ///
+    /// A superseded Router must not treat catalog-scoped positive truth as its
+    /// own; `false` falls through to the ordinary no-positive path.
+    pub fn is_verified_working_or_false(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> bool {
+        self.learned_capabilities
+            .is_verified_working_in_generation(
+                self.registry_generation(),
+                state_key,
+                feature_key,
+                provider_kind,
+                now,
+            )
+            .unwrap_or(false)
+    }
+
+    /// The act-side routing decision AND the effective persistence generation it
+    /// was read under.
+    ///
+    /// The generation is paired with the read under one guard, so a probe
+    /// admission derived from this decision settles against the generation that
+    /// GRANTED it -- not one sampled later, which a boundary could have moved.
+    /// A stale read yields `Allow` and the live generation: there is no verdict
+    /// to act on, so nothing will be admitted from it.
+    pub(crate) fn acting_negative_with_generation(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> (crate::learned_capability::RoutingDecision, u64) {
+        match self.learned_capabilities.acting_negative_in_generation(
+            self.registry_generation(),
+            state_key,
+            feature_key,
+            provider_kind,
+            now,
+        ) {
+            Some((decision, generation)) => (decision, generation),
+            None => (
+                crate::learned_capability::RoutingDecision::Allow,
+                self.registry_generation(),
+            ),
+        }
+    }
+
+    /// Every resident learned entry whose truth does NOT depend on the catalog
+    /// revision, in the shape a persisted restatement needs.
+    ///
+    /// Membership is the shared catalog-scope predicate's call, so a
+    /// catalog-scoped entry is absent by construction -- restating one would
+    /// resurrect exactly what a revision change must evict. Each survivor
+    /// carries its observation time and evidence fields verbatim so a
+    /// restatement preserves them rather than minting a fresh observation:
+    /// a survivor is the SAME fact re-appended past a new boundary, not new
+    /// evidence, so its decay age must not be refreshed.
+    pub fn catalog_independent_survivors(&self) -> Vec<CatalogIndependentSurvivor> {
+        self.learned_capabilities
+            .snapshot()
+            .into_iter()
+            .filter(|entry| {
+                !crate::field_capability::capability_key_is_catalog_scoped(&entry.feature_key)
+            })
+            .map(|entry| CatalogIndependentSurvivor {
+                provider_kind: self
+                    .provider_kind_for_state_key(&entry.state_key)
+                    .to_string(),
+                state_key: entry.state_key,
+                capability: entry.feature_key,
+                verdict: entry.verdict.as_str().to_string(),
+                phase: entry.phase.as_str().to_string(),
+                source: entry.source.as_str().to_string(),
+                tier: entry.signal_tier.as_str().to_string(),
+                observations: entry.observations,
+                evidence_class: entry.evidence_class.clone(),
+                first_seen: entry.first_seen,
+                last_seen: entry.last_seen,
+            })
+            .collect()
     }
 
     /// Read-only snapshot of the learned-capability registry: every resident
@@ -346,25 +637,35 @@ impl Router {
         // observation bump and expiry) instead of feeding the observe path.
         // The dedupe key is inserted too, so a same-request retry that hits
         // this arm again does not re-observe the entry the probe refreshed.
-        if probe_guard.settle_same_capability(&state_key, &feature_key, provider_kind) {
-            self.metrics.incr_probe_failures();
-            // A re-probe that reconfirms an F1 negative is F1 evidence for this
-            // capability earlier in this attempt chain (criterion (c) reads
-            // "no F1 seen", not "no F1 freshly minted"): record F1Seen so a
-            // later cross-lane F2 candidate is suppressed rather than
-            // blind-minted past the reconfirmed F1. Phase-conditional -- a
-            // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
-            // be wrongly suppressed.
-            if self.settled_negative_phase(&state_key, &feature_key) == Some(FailurePhase::F1) {
-                dedupe.insert(LearnDedupeKey::F1Seen {
-                    feature_key: feature_key.clone(),
+        match probe_guard.settle_same_capability(&state_key, &feature_key, provider_kind) {
+            // A STALE settlement released its admission but recorded nothing, so
+            // none of the consequences below may follow: no probe-failure metric
+            // (no probe failure was booked), no F1Seen marker (nothing was
+            // reconfirmed), and no dedupe key (there is no refreshed entry for a
+            // retry to avoid re-observing). Returning early also keeps it off the
+            // observe path, which would mint against a generation the daemon left.
+            super::runtime_gate::SameCapabilitySettlement::Stale => return,
+            super::runtime_gate::SameCapabilitySettlement::NoMatch => {}
+            super::runtime_gate::SameCapabilitySettlement::Applied => {
+                self.metrics.incr_probe_failures();
+                // A re-probe that reconfirms an F1 negative is F1 evidence for this
+                // capability earlier in this attempt chain (criterion (c) reads
+                // "no F1 seen", not "no F1 freshly minted"): record F1Seen so a
+                // later cross-lane F2 candidate is suppressed rather than
+                // blind-minted past the reconfirmed F1. Phase-conditional -- a
+                // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
+                // be wrongly suppressed.
+                if self.settled_negative_phase(&state_key, &feature_key) == Some(FailurePhase::F1) {
+                    dedupe.insert(LearnDedupeKey::F1Seen {
+                        feature_key: feature_key.clone(),
+                    });
+                }
+                dedupe.insert(LearnDedupeKey::Capability {
+                    state_key,
+                    feature_key,
                 });
+                return;
             }
-            dedupe.insert(LearnDedupeKey::Capability {
-                state_key,
-                feature_key,
-            });
-            return;
         }
         // F2 mint gates. A feature-naming negative is minted only on
         // self-identifying evidence of a deterministic request fault, and never
@@ -405,16 +706,35 @@ impl Router {
             return;
         }
 
-        let outcome = self.learned_capabilities.observe(
+        // Through the generation barrier: a catalog-scoped negative arriving on
+        // a superseded Router is refused, so it neither lands in the shared
+        // registry nor rides an event out to the ledger.
+        let outcome = self.observe_learned_capability(
             &state_key,
             &feature_key,
             provider_kind,
             tier,
             phase,
             EvidenceSource::Live,
+            // A learned `broken` negative carries no evidence class; the
+            // positive-detection verdicts are the ones that do.
+            None,
             Instant::now(),
         );
-        let acting = matches!(outcome, crate::learned_capability::ObserveOutcome::Acting);
+        // The generation comes FROM the mutation, paired with its outcome under
+        // one guard. Reading it separately could straddle a boundary and stamp
+        // the event with a generation that does not describe what was recorded.
+        let crate::learned_capability::GenerationOutcome::Applied {
+            value: observe_outcome,
+            generation: persistence_generation,
+        } = outcome
+        else {
+            return;
+        };
+        let acting = matches!(
+            observe_outcome,
+            crate::learned_capability::ObserveOutcome::Acting
+        );
         // An F1 negative records the cross-lane marker ONLY once it ACTS: a
         // self-identifying F1 acts on its first observation, an inferred F1 only
         // once corroborated. A still-pending inferred F1 must not suppress a
@@ -473,6 +793,7 @@ impl Router {
         if acting {
             self.metrics.incr_learned_negatives(phase);
             meta.learned_capabilities.push(CapabilityLearnEvent {
+                persistence_generation,
                 state_key,
                 capability_key: feature_key,
                 provider_kind: provider_kind.to_string(),

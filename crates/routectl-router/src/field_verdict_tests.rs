@@ -62,6 +62,7 @@ fn plant_acting_negative(learned: &LearnedCapabilityRegistry, k: &FieldVerdictKe
         first_seen: now,
         last_seen: now,
         expires_at: now + DECAY,
+        evidence_class: None,
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
         in_flight: false,
@@ -81,9 +82,10 @@ fn two_distinct_field_paths_are_distinct_entries() {
 
     // Act -- learn the display field only.
     let _ = reg
-        .admit_provisional(&display, REMOTE_BASE, t0)
+        .admit_provisional(&display, REMOTE_BASE, 1, t0)
         .expect("an unknown pair admits one repair")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- the sibling field inherits nothing.
     assert!(reg.is_negative_acting(&display, t0));
@@ -100,9 +102,10 @@ fn the_same_field_on_two_targets_is_two_distinct_entries() {
 
     // Act
     let _ = reg
-        .admit_provisional(&here, REMOTE_BASE, t0)
+        .admit_provisional(&here, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- a fact proven about one target says nothing about another.
     assert!(reg.is_negative_acting(&here, t0));
@@ -130,9 +133,10 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
 
     // Act
     let _ = reg
-        .admit_provisional(&anthropic, REMOTE_BASE, t0)
+        .admit_provisional(&anthropic, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- one row, and the single-flight slot is still per-identity: the
     // second kind is refused because the verdict now ACTS, not because it
@@ -184,7 +188,7 @@ fn the_rejection_alone_persists_nothing_before_the_repair_succeeds() {
 
     // Act
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
 
     // Assert -- nothing resident, nothing acting, no row emitted yet.
@@ -200,11 +204,13 @@ fn a_successful_repaired_retry_commits_the_field_negative() {
     let t0 = Instant::now();
     let k = key("t");
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
 
     // Act -- the repaired retry came back 2xx, so the rejection is confirmed.
-    let event = guard.commit(400, vec!["thinking".to_string()], t0);
+    let event = guard
+        .commit(400, vec!["thinking".to_string()], t0)
+        .expect("a live commit emits its row");
 
     // Assert
     assert!(reg.is_negative_acting(&k, t0));
@@ -219,12 +225,13 @@ fn a_failed_repair_leaves_resident_state_unchanged() {
     let t0 = Instant::now();
     let k = key("t");
     let _ = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, lapsed)
+        .admit_provisional(&k, REMOTE_BASE, 1, lapsed)
         .expect("a lapsed entry admits one re-verification");
 
     // Act -- the repair itself failed, so nothing was proven either way.
@@ -233,7 +240,7 @@ fn a_failed_repair_leaves_resident_state_unchanged() {
     // Assert -- neither refreshed nor cleared: the entry survives on its
     // ORIGINAL window and the next request re-verifies.
     assert!(reg.is_negative_acting(&k, t0 + DECAY / 2));
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, lapsed).is_some());
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, lapsed).is_some());
 }
 
 #[test]
@@ -243,7 +250,7 @@ fn an_unrelated_error_learns_nothing_on_an_unknown_pair() {
     let t0 = Instant::now();
     let k = key("t");
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
 
     // Act -- a timeout, a 5xx, a disconnect: not evidence about the field.
@@ -252,7 +259,7 @@ fn an_unrelated_error_learns_nothing_on_an_unknown_pair() {
     // Assert
     assert!(!reg.is_negative_acting(&k, t0));
     assert_eq!(reg.snapshot_len(), 0);
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, t0).is_some());
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some());
 }
 
 #[test]
@@ -264,14 +271,14 @@ fn dropping_an_unsettled_guard_releases_its_slot_and_learns_nothing() {
 
     // Act
     drop(
-        reg.admit_provisional(&k, REMOTE_BASE, t0)
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
             .expect("unknown pair admits"),
     );
 
     // Assert -- no learning by omission, and the slot is free again.
     assert!(!reg.is_negative_acting(&k, t0));
     assert_eq!(reg.snapshot_len(), 0);
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, t0).is_some());
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some());
 }
 
 #[test]
@@ -283,7 +290,7 @@ fn a_successful_retry_clears_a_resident_field_negative() {
     plant_acting_negative(reg.learned(), &k, t0);
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, lapsed)
+        .admit_provisional(&k, REMOTE_BASE, 1, lapsed)
         .expect("a lapsed entry admits one re-verification");
 
     // Act -- upstream now accepts the field.
@@ -306,7 +313,7 @@ fn clearing_a_pair_that_had_no_resident_entry_emits_nothing() {
     let t0 = Instant::now();
     let k = key("t");
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
 
     // Act
@@ -340,7 +347,7 @@ fn two_racing_callers_yield_exactly_one_holder() {
             let barrier = Arc::clone(&barrier);
             let k = k.clone();
             thread::spawn(move || {
-                let guard = reg.admit_provisional(&k, REMOTE_BASE, t0);
+                let guard = reg.admit_provisional(&k, REMOTE_BASE, 1, t0);
                 if guard.is_some() {
                     holders.fetch_add(1, Ordering::SeqCst);
                 }
@@ -366,17 +373,17 @@ fn a_concurrent_caller_is_refused_while_the_repair_is_unresolved() {
     let t0 = Instant::now();
     let k = key("t");
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
 
     // Act / Assert -- no negative is resident yet, and the second caller is
     // still refused rather than mounting its own repair.
     assert!(!reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, t0).is_none());
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_none());
 
     // Once the repair settles the slot reopens.
     guard.release();
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, t0).is_some());
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some());
 }
 
 #[test]
@@ -389,7 +396,7 @@ fn a_resident_acting_negative_refuses_admission() {
 
     // Act / Assert
     assert!(reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, t0).is_none());
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_none());
 }
 
 // --- loopback suppression ---
@@ -402,7 +409,7 @@ fn a_loopback_anthropic_target_cannot_mint_a_field_verdict() {
     let k = key("local-hop");
 
     // Act
-    let admitted = reg.admit_provisional(&k, LOOPBACK_BASE, t0);
+    let admitted = reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0);
 
     // Assert -- refused at admission, which is the only mint path, so no
     // rejection reaching this target can ever persist a verdict.
@@ -421,9 +428,10 @@ fn the_default_anthropic_target_can_mint_a_field_verdict() {
 
     // Act
     let event = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("the public Anthropic endpoint may mint")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
 
     // Assert
     assert!(reg.is_negative_acting(&k, t0));
@@ -441,7 +449,7 @@ fn a_non_loopback_custom_base_is_not_suppressed() {
     let k = key("mirror");
 
     // Act
-    let admitted = reg.admit_provisional(&k, "https://anthropic.upstream.example/v1", t0);
+    let admitted = reg.admit_provisional(&k, "https://anthropic.upstream.example/v1", 1, t0);
 
     // Assert
     assert!(admitted.is_some());
@@ -461,11 +469,11 @@ fn suppression_follows_the_base_url_and_not_the_configured_kind() {
         let k = FieldVerdictKey::new("t", "thinking", kind).expect("accepted");
 
         assert!(
-            reg.admit_provisional(&k, LOOPBACK_BASE, t0).is_none(),
+            reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0).is_none(),
             "a loopback target must not mint on kind {kind}"
         );
         assert!(
-            reg.admit_provisional(&k, REMOTE_BASE, t0).is_some(),
+            reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some(),
             "a remote target must mint on kind {kind}"
         );
     }
@@ -796,7 +804,7 @@ fn a_local_destination_is_refused_at_admission_not_only_by_the_predicate() {
         let k = key("local-hop");
 
         assert!(
-            reg.admit_provisional(&k, base, t0).is_none(),
+            reg.admit_provisional(&k, base, 1, t0).is_none(),
             "a local destination must be refused at admission: {base}"
         );
         assert_eq!(
@@ -830,7 +838,7 @@ fn a_local_destination_is_refused_at_admission_not_only_by_the_predicate() {
         let k = key("mirror");
 
         assert!(
-            reg.admit_provisional(&k, base, t0).is_some(),
+            reg.admit_provisional(&k, base, 1, t0).is_some(),
             "a remote target must be admitted: {base}"
         );
     }
@@ -931,7 +939,7 @@ fn a_bedrock_target_cannot_acquire_a_field_guard_for_a_dotted_path() {
         single.capability_key(),
         field_capability_key("thinking").expect("accepted")
     );
-    assert!(reg.admit_provisional(&single, REMOTE_BASE, t0).is_some());
+    assert!(reg.admit_provisional(&single, REMOTE_BASE, 1, t0).is_some());
 }
 
 // --- emission ---
@@ -943,11 +951,13 @@ fn the_committed_row_reuses_the_existing_event_shape() {
     let t0 = Instant::now();
     let k = key("prod-target");
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
 
     // Act
-    let event = guard.commit(400, vec!["thinking".to_string()], t0);
+    let event = guard
+        .commit(400, vec!["thinking".to_string()], t0)
+        .expect("a live commit emits its row");
 
     // Assert -- every field is a normalized key or a closed-set token, on the
     // same row shape the existing learn path emits: no new column, no new
@@ -975,19 +985,449 @@ fn a_repeated_confirmed_rejection_refreshes_the_same_row() {
     let t0 = Instant::now();
     let k = key("t");
     let _ = reg
-        .admit_provisional(&k, REMOTE_BASE, t0)
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0);
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
-        .admit_provisional(&k, REMOTE_BASE, lapsed)
+        .admit_provisional(&k, REMOTE_BASE, 1, lapsed)
         .expect("a lapsed entry admits one re-verification");
 
     // Act
-    let event = guard.commit(400, vec![], lapsed);
+    let event = guard
+        .commit(400, vec![], lapsed)
+        .expect("a live commit emits its row");
 
     // Assert -- one row with its history intact, acting on a fresh window.
     assert_eq!(event.observations, 2);
     assert_eq!(reg.snapshot_len(), 1);
     assert!(reg.is_negative_acting(&k, lapsed));
+}
+
+// ---- generation barrier tests -----------------------------------------------
+
+/// A field-verdict key is catalog-INDEPENDENT, so the generation barrier admits
+/// operations from ANY generation -- including a superseded one. A commit through
+/// a guard whose admission predates the live generation still persists and emits,
+/// because the upstream statement about its own request envelope is not
+/// invalidated by a catalog revision change.
+///
+/// This is a POSITIVE control against testing for a staleness that cannot happen
+/// on this key class: the generation barrier rejects only catalog-scoped keys,
+/// and a `field:` key is never scoped.
+#[test]
+fn a_field_verdict_commit_from_a_superseded_generation_still_persists() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+
+    // The reload lands between admission and settlement.
+    reg.learned().advance_generation();
+
+    let event = guard.commit(400, vec![], t0);
+
+    assert!(
+        event.is_some(),
+        "a field-verdict commit is catalog-independent and must persist from \
+         any generation",
+    );
+    assert_eq!(reg.learned().snapshot().len(), 1);
+}
+
+/// Same for the clear path: a superseded generation clears a field verdict, and
+/// the cleared event carries the persistence generation from the Applied outcome.
+#[test]
+fn a_field_verdict_clear_from_a_superseded_generation_still_clears() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+    let _ = guard.commit(400, vec![], t0);
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+        .expect("a lapsed pair admits");
+
+    reg.learned().advance_generation();
+    let cleared = guard.clear();
+
+    assert!(
+        cleared.is_some(),
+        "a field-verdict clear is catalog-independent and must clear from \
+         any generation",
+    );
+    assert!(reg.learned().snapshot().is_empty());
+}
+
+/// The event stamp comes atomically from the Applied outcome, not from a
+/// separate read. For a field key this is always the effective generation,
+/// which is the pending generation during an admitted boundary or the active
+/// one otherwise.
+#[test]
+fn the_event_generation_comes_from_the_applied_outcome() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+
+    let event = guard.commit(400, vec![], t0).expect("live commit");
+
+    assert_eq!(
+        event.persistence_generation,
+        reg.learned().generation(),
+        "the stamp must come from the Applied outcome, atomically paired \
+         with the mutation it describes",
+    );
+}
+
+/// Admission with a stale generation still succeeds for a field key, because
+/// the negative-state read goes through `negative_state_in_generation`, and the
+/// generation barrier admits catalog-independent keys from any generation.
+///
+/// This is the distinction from the replay lifecycle, whose `reasoning_replay:`
+/// key IS catalog-scoped and therefore stale-refused.
+#[test]
+fn a_stale_generation_at_admission_still_admits_a_field_key() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let stale = reg.learned().generation();
+    reg.learned().advance_generation();
+
+    let admitted = reg.admit_provisional(&k, REMOTE_BASE, stale, Instant::now());
+
+    assert!(
+        admitted.is_some(),
+        "a field key is catalog-independent, so even a stale generation admits",
+    );
+}
+
+/// The slot is always released, regardless of which generation the commit or
+/// clear ran under. This pins that a field-verdict guard from a superseded
+/// Router does not latch the slot.
+#[test]
+fn the_slot_is_released_on_commit_from_any_generation() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+    reg.learned().advance_generation();
+
+    let _ = guard.commit(400, vec![], t0);
+
+    // The commit persisted an acting entry, so re-admission at the same instant
+    // finds Acting and is correctly refused. Verify the slot itself is released by
+    // checking that the in-flight set no longer holds it: a second commit call on
+    // the same key from a LAPSED instant would be admitted if the slot were free.
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+            .is_some(),
+        "the slot must be released after a commit from any generation",
+    );
+}
+
+// ---- pending-boundary settlement ---------------------------------------------
+
+/// Take a real boundary cut and leave the pending generation installed,
+/// returning its receipt. The cut admits (the closure reports success) so the
+/// registry holds an admitted-but-uncommitted generation, which is the state a
+/// settlement must stamp against.
+fn admit_pending_boundary(
+    learned: &LearnedCapabilityRegistry,
+) -> crate::learned_capability::BoundaryReceipt {
+    let crate::learned_capability::BoundaryCut::Taken { receipt, .. } =
+        learned.with_boundary_cut(|_survivors, _pending| (), |()| true)
+    else {
+        panic!("the boundary cut must be taken");
+    };
+    receipt
+}
+
+/// A commit settling DURING an admitted boundary stamps its event with the
+/// PENDING generation, so the ledger row sorts after the boundary rather than
+/// being dropped as older than it. The verdict survives the commit and a
+/// restart.
+#[test]
+fn a_commit_during_a_pending_boundary_stamps_the_pending_generation() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted before the boundary");
+
+    // The boundary is admitted but not yet committed.
+    let receipt = admit_pending_boundary(reg.learned());
+    let pending = receipt.generation();
+    assert!(
+        pending > reg.learned().generation(),
+        "the pending generation must be ahead of the active one",
+    );
+
+    let event = guard
+        .commit(400, vec![], t0)
+        .expect("a field commit applies");
+
+    assert_eq!(
+        event.persistence_generation, pending,
+        "the event must carry the PENDING generation, or the writer drops it as \
+         older than the boundary being committed",
+    );
+
+    // The boundary commits: the verdict is still resident, because a field key
+    // is catalog-independent and the transition prunes only scoped entries.
+    let settled = reg.learned().commit_boundary_transition(&receipt);
+    assert_eq!(
+        settled,
+        crate::learned_capability::BoundarySettlement::Applied {
+            generation: pending,
+            pruned: 0,
+        },
+    );
+    assert_eq!(
+        reg.learned().snapshot().len(),
+        1,
+        "the field verdict must survive the boundary it was stamped for",
+    );
+    assert_eq!(reg.learned().generation(), pending);
+}
+
+/// The same for the CLEAR path: a clear settling during an admitted boundary
+/// stamps the pending generation, and the removal survives the commit.
+#[test]
+fn a_clear_during_a_pending_boundary_stamps_the_pending_generation() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    // Plant the verdict, then lapse it so a repair can be admitted again.
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+    let _ = guard.commit(400, vec![], t0);
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+        .expect("a lapsed identity admits");
+
+    let receipt = admit_pending_boundary(reg.learned());
+    let pending = receipt.generation();
+
+    let cleared = guard.clear().expect("a resident verdict clears");
+
+    assert_eq!(
+        cleared.persistence_generation, pending,
+        "the cleared row must carry the PENDING generation",
+    );
+    let settled = reg.learned().commit_boundary_transition(&receipt);
+    assert!(matches!(
+        settled,
+        crate::learned_capability::BoundarySettlement::Applied { .. }
+    ));
+    assert!(
+        reg.learned().snapshot().is_empty(),
+        "the clear must survive the boundary commit",
+    );
+}
+
+/// After a boundary ROLLS BACK, a settlement stamps the generation in force at
+/// SETTLEMENT time -- not the now-discarded token its guard is holding.
+///
+/// # Why the ordering in this fixture is load-bearing
+///
+/// The guard must be admitted WHILE the boundary is pending, so it stores the
+/// pending token (2). The rollback then discards that generation, leaving 1 in
+/// force. Only in that arrangement do the two candidate sources disagree:
+/// stamping from `GenerationOutcome::Applied` yields 1 (correct -- the row must
+/// sort under the generation that actually survived), while stamping from
+/// `guard.generation` yields 2, a generation no boundary ever committed, and the
+/// writer would drop the row as belonging to a boundary it never saw.
+///
+/// Admitting BEFORE the boundary makes the fixture vacuous: the guard token and
+/// the post-rollback active generation are both 1, so either source passes. That
+/// was the original shape of this test and it could not discriminate.
+#[test]
+fn a_settlement_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+
+    // The boundary is admitted FIRST, so the guard below stores its pending token.
+    let receipt = admit_pending_boundary(reg.learned());
+    let pending = receipt.generation();
+    let active = reg.learned().generation();
+    assert_ne!(
+        pending, active,
+        "the fixture needs the pending and active generations to differ",
+    );
+
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted while the boundary is pending");
+
+    // The boundary is discarded: `pending` now names no committed generation.
+    let _ = reg.learned().rollback_pending_generation(&receipt);
+    assert_eq!(reg.learned().generation(), active);
+
+    let event = guard
+        .commit(400, vec![], t0)
+        .expect("a field commit applies");
+
+    assert_eq!(
+        event.persistence_generation, active,
+        "the stamp must come from the settlement's Applied outcome, not from the \
+         guard's discarded pending token",
+    );
+    assert_ne!(
+        event.persistence_generation, pending,
+        "a rolled-back generation must never reach a persisted row",
+    );
+}
+
+/// The CLEAR twin of the rollback case: same ordering, same distinction.
+///
+/// Pinned independently because `clear` reaches the registry through
+/// `remove_keyed_in_generation` rather than `observe_in_generation`, so a
+/// regression could reintroduce guard-token stamping on one path alone.
+#[test]
+fn a_clear_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    // Plant the verdict, then lapse it so a repair can be admitted again.
+    let seed = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+    let _ = seed.commit(400, vec![], t0);
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+
+    // Boundary first, so the clear's guard stores the pending token.
+    let receipt = admit_pending_boundary(reg.learned());
+    let pending = receipt.generation();
+    let active = reg.learned().generation();
+    assert_ne!(pending, active);
+
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+        .expect("a lapsed identity admits while pending");
+
+    let _ = reg.learned().rollback_pending_generation(&receipt);
+
+    let cleared = guard.clear().expect("a resident verdict clears");
+
+    assert_eq!(
+        cleared.persistence_generation, active,
+        "the cleared row must carry the generation in force at settlement",
+    );
+    assert_ne!(
+        cleared.persistence_generation, pending,
+        "a rolled-back generation must never reach a persisted row",
+    );
+}
+
+// ---- shared single-flight identity across a rebuild -------------------------
+
+/// A guard held by the OLD facade blocks admission through the REPLACEMENT, and
+/// its release becomes visible there.
+///
+/// The in-flight set is shared by `Arc`, not copied: a fresh set on the
+/// replacement would admit a second concurrent repair for an identity the old
+/// guard still holds -- exactly the duplicate-repair cost single-flight exists to
+/// prevent. Required now rather than when the production wiring lands, because
+/// the wiring rebases onto this contract.
+#[test]
+fn an_old_guard_blocks_the_replacement_facades_admission() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("the first admission succeeds");
+
+    // The reload: a replacement facade on the same shared registry.
+    let replacement = reg.rebuilt_on(Arc::clone(reg.learned_arc()));
+    assert!(
+        replacement.shares_in_flight_with(&reg),
+        "the rebuild must carry the SAME in-flight set, not a copy",
+    );
+
+    // The old guard still holds the identity, so the replacement refuses.
+    assert!(
+        replacement
+            .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .is_none(),
+        "an outstanding repair must block the replacement facade's admission",
+    );
+
+    // Settling the old guard frees the identity for the replacement.
+    let _ = guard.commit(400, vec![], t0);
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    assert!(
+        replacement
+            .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+            .is_some(),
+        "the old guard's settlement must be visible to the replacement",
+    );
+}
+
+/// The release path (drop without settling) is equally visible across the
+/// rebuild, so an abandoned repair does not latch the identity forever.
+#[test]
+fn an_old_guards_release_is_visible_to_the_replacement_facade() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+    let replacement = reg.rebuilt_on(Arc::clone(reg.learned_arc()));
+    assert!(
+        replacement
+            .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .is_none(),
+        "held while the old guard lives",
+    );
+
+    guard.release();
+
+    assert!(
+        replacement
+            .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .is_some(),
+        "the release must free the identity for the replacement facade",
+    );
+}
+
+/// Exactly ONE holder exists across both facades: the replacement cannot mint a
+/// duplicate claim for an identity the old facade admitted.
+#[test]
+fn the_two_facades_never_hold_the_same_identity_twice() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+
+    let _held = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted");
+    let replacement = reg.rebuilt_on(Arc::clone(reg.learned_arc()));
+
+    // Neither facade may admit again while the identity is held.
+    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_none());
+    assert!(
+        replacement
+            .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .is_none(),
+        "no duplicate holder across the rebuild",
+    );
 }

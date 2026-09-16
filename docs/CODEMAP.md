@@ -2293,7 +2293,51 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `carry_over_pool_state_from` (per-POOL rotation cursors + the sticky-pin
   membership reconcile: adopts surviving pools' cursor `Arc`s into a FRESH map
   and re-picks a retired member's pins once onto a survivor) /
-  `carry_over_learned_from` reload carries +
+  `carry_over_learned_from` (ATTACHES the replacement Router to the outgoing
+  registry `Arc` rather than copying entries -- one store spans generations, so a
+  request still in flight on the pre-swap Router writes where the published
+  Router reads; also rebuilds the learned-replay facade on that same Arc
+  carrying its in-flight admissions, and adopts the shared generation. Retuning
+  the shared registry from the reloaded `[capability]` knobs -- the only path by
+  which changed tuning can take effect, since the registry outlives the Router
+  that built it -- happens HERE only for a config-only reload, where the reload
+  IS the publication. A revision-changing reload defers it to
+  `apply_capability_tuning` at publication, after the boundary has committed,
+  because a failed or abandoned boundary leaves the previous Router live and it
+  must keep the settings it was serving under. Evicts NOTHING either way: the
+  catalog-scoped eviction is the boundary transition's job, so a failed boundary
+  leaves the store untouched. The invalidation WARN + counter still fire),
+  `registry_generation` / `set_pending_registry_generation` (the generation token
+  submitted with every registry operation; the reload coordinator stamps the
+  PENDING generation between admitting a boundary batch and learning its
+  outcome, so an observation in that window sorts after the boundary rather than
+  being rejected as pre-boundary), the barrier entry points
+  `observe_learned_capability` / `observe_verified_capability` /
+  `acting_negative_with_generation` (the live act-side read: decision plus the
+  effective generation, paired under one guard) /
+  `is_verified_working_or_false` / `clear_learned_capability` (catalog-scoped work
+  from a superseded Router is refused as `Stale` and emits no event or metric; a
+  catalog-independent observation is always accepted into the live store),
+  `is_verified_working_or_false`,
+  per-event `persistence_generation` on `CapabilityLearnEvent` /
+  `CapabilityObserveEvent` / `CapabilityClearedEvent` (taken from the producing
+  operation's own `Applied`, since one request may span a boundary and its
+  earlier and later events then belong to different generations), which the
+  usage-capture drain passes per event to
+  `try_send_capability_event_in_generation` -- there is no generation-free
+  wrapper, since an unstamped event would be dropped as pre-boundary. The drain
+  itself refuses any ride-along EVENT stamped generation 0: loud via
+  `debug_assert`, fail-closed in release, because per-event silent discards are
+  the loss the barrier exists to prevent),
+  `apply_capability_tuning` (called at publication), `learned_registry`,
+  `catalog_independent_survivors` (those same entries in the shape a persisted
+  restatement needs, carrying each one's observation time, evidence tokens and
+  `evidence_class` verbatim -- the class is load-bearing, since the rebuild
+  skips a `verified` / `suspect` row that cannot state one) and `provider_kind_for_state_key` (THE single owner of
+  state_key -> provider-kind resolution, shared by restatement and the operator
+  purge surface so the two cannot compute different registry keys; resolves
+  through `override_identity_for` and yields an empty, inert kind for an
+  unresolvable key rather than guessing) +
   `install_catalog_overlay` (the
   single writer of the RETAINED accepted overlay and its revision stamp), the
   `catalog_version` / `overlay_revision` / `catalog_overlay` getters,
@@ -2791,7 +2835,56 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `context_trim::fnv1a_hash`, which must stay cross-process stable because it
   fingerprints a trimmed prefix; nothing may persist or cross-restart compare
   a value from here
-- `src/learned_capability.rs` -- bounded in-memory capability-truth registry
+- `src/learned_capability.rs` -- ONE instance is shared across Router
+  generations (a reload attaches, never copies), which the generation barrier and
+  the retunable tuning both follow from: `generation` / `advance_generation` /
+  `commit_boundary_transition` (promotes the pending generation, or advances,
+  plus the catalog-scoped prune under one acquisition), the `*_in_generation`
+  entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
+  -- `Applied` carries the EFFECTIVE persistence generation chosen under the SAME
+  guard as the read or mutation, so an event's stamp cannot drift from the state
+  it describes -- observe,
+  positive, read, verified read, keyed remove, expiry, probe settlement -- all
+  routed through the private `guarded` helper, which holds the generation READ
+  lock ACROSS the entries work so validation and the operation it guards are one
+  atomic step (a check-then-lock shape would let a catalog-scoped write land
+  after the generation advanced and the prune ran). Lock order is documented on
+  the `generation` field and is the same everywhere:
+  `generation` -> `pending_generation` -> `entries` -> `tuning`. A path needing
+  only a subset still takes what it needs in that sequence, including
+  `effective_persistence_generation`, the hand-rolled `Debug` (which SNAPSHOTS all
+  four values in order and drops every guard before formatting -- reading them
+  inline took `entries` first and held it across the builder, a real deadlock
+  against the commit, since a `Debug` on a shared registry is reachable from any
+  tracing or panic path), and `with_boundary_cut(submit, admitted) ->
+  BoundaryCut<T>` (`#[must_use]`): derives the next persistence generation under
+  its guard, refuses a second admitted boundary (`Busy`), an exhausted counter
+  (`Exhausted`), or a submit that reported failure (`Rejected` -- no receipt
+  allocated, no pending installed, no settlement obligation) before any state
+  change. `Taken` exists ONLY after a successfully admitted batch and carries an
+  opaque `BoundaryReceipt` (fields private; accessor `generation()` only for
+  tombstone stamping and diagnostics). The caller MUST commit or rollback a
+  `Taken`; `Rejected` / `Busy` / `Exhausted` carry no receipt and no obligation.
+  `commit_boundary_transition(&receipt) -> BoundarySettlement` and
+  `rollback_pending_generation(&receipt) -> BoundarySettlement` present the
+  receipt at settlement: `StaleReceipt` when it does not match (a different
+  boundary was settled already, including the ABA case where two boundaries
+  derive the same persistence generation after a rollback -- the receipt's opaque
+  monotonic ID distinguishes them). `BoundarySettlement` is `#[must_use]` so
+  `StaleReceipt` cannot be silently ignored. `advance_generation` and
+  `prune_catalog_scoped` are test-only; production transition exists only through
+  the cut + receipt settlement path. Test-only lock-acquisition hooks record the
+  acquisition order, so the ordering tests fail on a rearrangement instead of
+  merely timing out. `effective_persistence_generation` returns the pending
+  generation when a boundary is in flight, otherwise the active one; it is what
+  every event producer reads to stamp its row.
+  Also: `retune` / `decay` /
+  `inferred_window` / `max_entries` (hot-reloadable behind the same lock; applied
+  in `carry_over_learned_from` for a config-only reload, and deferred to
+  `Router::apply_capability_tuning` at publication for a revision-changing one,
+  so a failed or abandoned boundary leaves the still-live previous Router on the
+  settings it was serving under).
+  Also: bounded in-memory capability-truth registry
   keyed `(state_key, normalized feature_key) -> LearnedEntry`,
   verdict-discriminated by `EntryVerdict` (a `Verified` VerifiedWorking
   positive vs a learned `Negative`) so positives and negatives coexist on
@@ -2852,6 +2945,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
   qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
+  (default catalog-scoped; only the field namespace is carved out) and is
+  called from BOTH invalidation layers -- `Router::carry_over_learned_from`
+  in memory and `capability_rebuild::should_replay` on cold boot
 - `src/field_verdict.rs` -- the envelope-field verdict lifecycle layered over
   the learned registry, the concrete sibling of `learned_replay` rather than a
   generic over both (the two identities share no field, and only this one
@@ -2861,14 +2957,28 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   path that namespace refuses yields no identity at all, and refusing a lane
   whose capability-key normalization would REWRITE the minted key (the Stage 1
   exclusion, enforced without changing the shared normalizer).
-  `FieldVerdictRegistry::admit_provisional(key, target_base_url, now) ->
-  Option<FieldRepairGuard>` is the single-flight repair claim, refusing on a
-  local target, a resident acting verdict, or an unresolved sibling repair.
-  The guard is the two-phase learn -- `commit` persists the verdict and returns
-  the existing `CapabilityLearnEvent` row ONLY after the repaired retry
-  succeeded, `clear` drops a resident verdict when the field was accepted and
-  returns a `CapabilityClearedEvent`, and `release` (plus an unsettled `Drop`)
-  frees the slot without learning. `loopback_target_suppresses_minting` is the
+  `FieldVerdictRegistry::admit_provisional(key, target_base_url, generation,
+  now) -> Option<FieldRepairGuard>` is the single-flight repair claim, refusing
+  on a local target, a resident acting verdict, or an unresolved sibling repair;
+  it reads the decay state through `negative_state_in_generation`, so the
+  generation is validated atomically with the state the claim rests on, and the
+  guard carries the EFFECTIVE generation that read returned.
+  `rebuilt_on(learned)` rebuilds the facade onto a (possibly new) shared
+  registry carrying the in-flight set by `Arc::clone`, so a repair outstanding
+  across a reload still blocks the replacement facade's admission -- a fresh set
+  there would admit a duplicate repair for an identity a live guard holds.
+  The guard is the two-phase learn -- `commit` persists the verdict through
+  `observe_in_generation` and returns `Option<CapabilityLearnEvent>` ONLY after
+  the repaired retry succeeded, `clear` drops a resident verdict through
+  `remove_keyed_in_generation` when the field was accepted and returns a
+  `CapabilityClearedEvent`, and `release` (plus an unsettled `Drop`) frees the
+  slot without learning. Both settlements take their event's
+  `persistence_generation` from their own `Applied` outcome, so the row sorts
+  after a boundary the daemon is committing rather than being dropped as older
+  than it. A valid `field:` key is catalog-INDEPENDENT, so settlements cross a
+  catalog revision change by design; the `Stale` arms are defensive handling of
+  the shared generic registry API, not expected behavior for this key class.
+  `loopback_target_suppresses_minting` is the
   suppression predicate: keyed on the target base URL alone, never the
   configured kind and never a non-default-base heuristic. Local means a
   loopback address in any spelling, an unspecified wildcard address, the
@@ -2891,10 +3001,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   replay parses them open-set-tolerant), the `ReplayTombstone` boundary
   descriptor (`rowid` + stamped `catalog_version`/`overlay_revision`), and the
   `CapabilityRebuildSummary` tally. `should_replay(event, tombstone) ->
-  Replay|Skip` is the pure replay-boundary seam: Skip at-or-before the
-  tombstone rowid, and Skip a post-tombstone straggler whose revision differs
-  from the boundary's (post-tombstone survival is deliberately NOT
-  unconditional). `rebuild_capabilities_into(reader, registry)` replays
+  Replay|SkipBoundary|SkipRevision` is the pure replay-boundary seam:
+  `SkipBoundary` at-or-before the tombstone rowid (unconditional, every key
+  class), and `SkipRevision` for a post-tombstone straggler whose revision
+  differs from the boundary's AND whose key
+  `field_capability::capability_key_is_catalog_scoped` classifies as
+  catalog-scoped (post-tombstone survival is deliberately NOT unconditional;
+  an envelope-field verdict is catalog-independent and replays under a
+  superseded revision, matching the same predicate's use at
+  `Router::carry_over_learned_from` so a verdict surviving a reload also
+  survives the next restart). `rebuild_capabilities_into(reader, registry)`
+  replays
   survivors oldest-first (same-instant rows tie-break by rowid, so
   negative-then-cleared is deterministic): the source token is parsed once and
   threaded into the shared admission so probe and live rows run the SAME arms
@@ -2906,7 +3023,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the resident negative so a probe-settled clear does not resurrect across
   restart; a probe-sourced clear reaches the same source-agnostic removal
   arm), a probe-source row bumps the by-source `replayed_probe` tally
-  alongside its by-verdict counter, unrecognized verdict/source/tier/phase ->
+  alongside its by-verdict counter, a revision eviction bumps
+  `skipped_revision` (distinct from `skipped_unknown`, which counts an
+  unrecognized TOKEN, so an absent verdict history is distinguishable from a
+  fully evicted one), unrecognized verdict/source/tier/phase ->
   skip + WARN, never panic. A missing tombstone replays nothing (fail-closed;
   the caller writes the fresh boot tombstone)
 - `src/capability_matcher.rs` -- the single shared closed-set resolver mapping
@@ -3287,13 +3407,45 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   shape: `CapabilityEvent` (plain-type fields keeping the crate a leaf --
   `ts`, NORMALIZED `lane_key` / `capability`, open-set `verdict` / `phase` /
   `source` / `tier` tokens, nullable `evidence_class` / `upstream_token`,
-  `catalog_version` / `overlay_revision` boundary stamps), the
+  `catalog_version` / `overlay_revision` boundary stamps, `evidence_class`
+  carried verbatim -- the rebuild fails closed on a `verified` / `suspect` row
+  without a recognized class, so a restatement that dropped it would be skipped
+  at the next boot), the
   `CapabilityEvent::tombstone(ts, catalog_version, overlay_revision)`
   boundary-marker constructor (tombstone verdict, empty lane / capability, no
   phase/source/tier/evidence), and `insert_capability_event` (append-only
-  bound-parameter `INSERT`, all 11 columns bound, no dedup); the private
+  bound-parameter `INSERT`, all 11 columns bound, no dedup) plus
+  `insert_capability_events_atomic(conn, &[CapabilityEvent])` (the whole slice
+  in ONE `unchecked_transaction`, appended in slice order so the caller
+  controls rowid ordering -- either every row commits or none does, because a
+  boundary tombstone whose survivor restatements were dropped evicts the very
+  verdicts the batch was preserving); the private
   tombstone-verdict literal mirrors the read side's copy in
   `query/capability.rs` (agreement pinned by the round-trip test)
+- `src/capability_batch.rs` -- the ACKNOWLEDGED atomic capability-event batch,
+  the only non-best-effort write in the crate. `BatchCommit`
+  (`Committed{rows}` / `Unavailable` / `ChannelFull` / `Timeout` /
+  `WriteFailed` -- every non-commit is a NAMED outcome so a caller can hold
+  its old state rather than proceed on an unpersisted boundary),
+  `CapabilityBatch` (rows + the one-shot ack sender, carried as a single
+  `WriterMessage` so the batch keeps its place in the writer's append order),
+  `UsageHandle::admit_capability_batch(events, generation) ->
+  Result<BatchReceipt, BatchCommit>` (non-blocking admission, so the caller can
+  submit while holding the registry guard) plus `BatchReceipt::await_outcome`
+  (async, no timeout), and the synchronous
+  `commit_capability_events_blocking(events, generation)` for callers off the
+  runtime. All DELIBERATELY bypass the `usage.enabled` gate (a telemetry
+  preference must not destroy routing state). Admission is bounded (a full
+  channel is refused without queueing) but an ADMITTED batch is never
+  abandoned by timeout: there is no timed-out variant, because answering while
+  the queued transaction can still commit would let the boundary move behind a
+  caller that kept its old state. Dropping the receipt abandons the wait (the
+  shutdown path) without wedging the writer. `handle_over_channel` /
+  `handle_with_closed_channel` are `#[doc(hidden)]` test seams for the
+  unanswered- and closed-channel cases the real writer cannot produce
+  `handle_with_closed_channel` is a `#[doc(hidden)]` test seam: an unavailable
+  writer cannot be produced through the normal lifecycle, since `shutdown`
+  leaves the channel open while a handle holds a sender clone
 - `src/cost.rs` -- pure leaf-safe cost estimation:
   `estimate_cost(&UsageRecord, &Rates)` and the aggregate-token entry point
   `estimate_cost_tokens(input, output, reasoning, cache_read, cache_write_5m,
@@ -3454,8 +3606,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   records a keyless request too). Newest-N cap with a `rowid` tie-break,
   returned oldest-first so a replay lands in arrival order
 - `src/query/capability.rs` -- capability-ledger read queries for the  warm-rebuild replayer; exports `read_capability_events_after(conn,
-  after_rowid, limit)` (rows with rowid > `after_rowid`, ordered `ts ASC,
-  rowid ASC`, capped at `limit`) and `latest_tombstone(conn)` (the
+  after_rowid, limit)` (rows with rowid > `after_rowid`, ordered by `rowid`
+  ALONE and capped at `limit` -- the inner `rowid DESC` + `LIMIT` takes the
+  NEWEST eligible window and the outer `ASC` hands it back oldest-first.
+  Append order is authoritative: `ts` is wall-clock, so an NTP correction or
+  clock rollback can make a later-appended row carry an earlier stamp, which
+  under `ts` ordering would invert a settled negative-then-cleared pair and
+  resurrect the cleared negative. The newest window is what describes current
+  state, including survivor restatements a boundary batch just appended) and
+  `latest_tombstone(conn)` (the
   highest-rowid tombstone's boundary key + stamped revision, or `None`) with
   their row types `CapabilityEventRow` (rowid + all columns as `Option` per
   the nullable-by-DDL schema) and `TombstoneRow`; holds a private
@@ -3466,9 +3625,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   channel carries a `WriterMessage` enum (`Request(Box<UsageRecord>)` -> the
   `requests` table, `LearnEvent(CapabilityLearnEvent)` -> the
   `capability_learn_events` table, `CapabilityEvent(CapabilityEvent)` -> the
-  unified `capability_events` ledger; the record is boxed so the variants stay
-  close in size), so one actor + one connection serves every row kind with the
-  message variant selecting the destination table. The one-shot startup prune
+  unified `capability_events` ledger (carrying the producing registry
+  GENERATION -- the writer drops an event older than the generation a boundary
+  batch has committed, since such an event predates the boundary and would
+  otherwise restore evicted state on the next boot; transient in-memory
+  sequencing, never a column), `CapabilityBatch(..)` -> the same ledger as ONE
+  acknowledged transaction via `commit_capability_batch`, which raises the
+  writer's `boundary_generation` only on a COMMITTED batch; the record is
+  boxed so the variants stay close in size), so one actor + one connection
+  serves every row kind with the message variant selecting the destination
+  table. The one-shot startup prune
   runs over both `requests` (`retention::prune`) and `capability_events`
   (`retention::prune_capability_events`, tombstone-exempt)
 - `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign
@@ -3707,6 +3873,28 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   EMPTY, never partial -- a factor reduced from a half-read slice is one the
   full evidence never supported -- and the tally is logged in one info line
   with a `warn` when the row cap truncated the read
+- `src/server/capability_boundary.rs` -- the replay boundary a
+  revision-changing reload must commit BEFORE it publishes the replacement
+  router, in two phases. `admit_capability_boundary(usage, router) ->
+  Result<AdmittedBoundary, BatchCommit>` takes the CUT: under
+  `LearnedCapabilityRegistry::with_boundary_cut` (registry guard held) it
+  snapshots the catalog-independent survivors and ADMITS one atomic batch of the
+  new tombstone plus a restatement of each -- indivisible, so no observation can
+  land between snapshot and submit and be lost by both. `AdmittedBoundary::settle`
+  then runs with the guard RELEASED (a lock is never held across SQLite),
+  selecting the receipt against the shutdown signal, and only on commit runs
+  `commit_boundary_transition` (generation advance + catalog-scoped prune) as one
+  transition. `BoundaryOutcomeReport::{Committed{survivors,generation,pruned},
+  Failed(BatchCommit), Abandoned}`; `Abandoned` is shutdown winning, which
+  publishes nothing and must not resume serving. Load-bearing because the cold-boot read starts at the
+  NEWEST tombstone: moving the boundary without re-appending the survivors
+  leaves them acting for this process's life and gone at the next restart. Each
+  restatement is stamped from the entry's own `last_seen`, never the reload
+  instant, so a reload never extends a verdict's decay life. `Failed` or
+  `Abandoned` makes `handle_config_reload` reject the reload and keep the
+  previous router live, with generation, registry and published Router
+  untouched. Tests in the `#[path]`-included `capability_boundary_tests.rs` drive the
+  real writer / SQLite / reload / ledger-reader / restart path
 - `src/server/capability_rebuild.rs` -- serve-side reaction to the shared
   capability-ledger read (the reader, clock map, and boundary classification
   live in `ledger_reader.rs`). `warm_capability_registry_from_ledger` (called
@@ -3717,9 +3905,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   tombstone) or fails closed: `log_fail_closed` logs the case at its warranted
   level (debug for a cold ledger / absent tombstone, info for a revision
   mismatch, WARN only for a genuinely unreadable ledger) and
-  `enqueue_fresh_tombstone` writes exactly one fresh tombstone stamped this
-  boot's revision via `try_send_capability_event`. `emit_rebuild_log` reports
-  the per-verdict tally with WARN-on-`REBUILD_ROW_LIMIT`-truncate. Boot never
+  `commit_fresh_tombstone` commits exactly one fresh tombstone stamped this
+  boot's revision through the ACKNOWLEDGED batch path -- not best-effort and
+  not gated on `usage.enabled`, because a boot that left a stale-revision
+  tombstone in place would have every verdict this session learns land before
+  the boundary a later boot reads from, and the gate cannot be consulted since
+  a later same-revision reload can enable capture while moving no boundary of
+  its own. A failure logs at ERROR; boot never fails on the usage subsystem. `emit_rebuild_log` reports
+  the per-verdict tally plus both skip tallies (`skipped_unknown` for an
+  unrecognized token, `skipped_revision` for a revision eviction) with
+  WARN-on-`REBUILD_ROW_LIMIT`-truncate. Boot never
   fails. Tests in the `#[path]`-included `capability_rebuild_tests.rs`
 - `src/server/cc_pin_drift.rs` -- `CcPinDriftGuard`: warns once per distinct
   ingress-observed Claude Code version differing from the compiled pin.

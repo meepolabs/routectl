@@ -158,7 +158,13 @@ pub struct FieldVerdictRegistry {
     /// Identities whose repair is unresolved. Purely request-local
     /// coordination: nothing here is persisted, and every settlement path --
     /// including a dropped guard -- clears its entry.
-    in_flight: Mutex<HashSet<FieldVerdictKey>>,
+    ///
+    /// Shared behind an `Arc` so it survives a reload: a repair outstanding when
+    /// the router swap lands still holds a guard that settles against the
+    /// REPLACEMENT facade, and a fresh empty set there would admit a second
+    /// concurrent repair for the same identity -- exactly the duplicate-repair
+    /// cost single-flight exists to prevent.
+    in_flight: Arc<Mutex<HashSet<FieldVerdictKey>>>,
 }
 
 impl FieldVerdictRegistry {
@@ -167,8 +173,30 @@ impl FieldVerdictRegistry {
     pub fn new(learned: Arc<LearnedCapabilityRegistry>) -> Self {
         Self {
             learned,
-            in_flight: Mutex::new(HashSet::new()),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Rebuild this facade onto a (possibly new) shared registry, CARRYING the
+    /// in-flight identities.
+    ///
+    /// The set moves by `Arc::clone`, not by copy: an old guard's release must be
+    /// visible to the replacement facade's admission check, or the two would each
+    /// believe the identity free and admit a duplicate repair.
+    #[must_use]
+    pub fn rebuilt_on(&self, learned: Arc<LearnedCapabilityRegistry>) -> Self {
+        Self {
+            learned,
+            in_flight: Arc::clone(&self.in_flight),
+        }
+    }
+
+    /// Whether this facade shares its in-flight set with `other`. Test-only: it
+    /// is what makes "the set survived the rebuild" an assertion about identity
+    /// rather than about contents.
+    #[cfg(test)]
+    pub fn shares_in_flight_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.in_flight, &other.in_flight)
     }
 
     /// Claim the single-flight repair slot for `key` on a target reached at
@@ -185,6 +213,7 @@ impl FieldVerdictRegistry {
         &self,
         key: &FieldVerdictKey,
         target_base_url: &str,
+        generation: u64,
         now: Instant,
     ) -> Option<FieldRepairGuard<'_>> {
         // Checked before the slot is claimed: a suppressed target must not
@@ -200,7 +229,16 @@ impl FieldVerdictRegistry {
         if in_flight.contains(key) {
             return None;
         }
-        match self.negative_state(key, now) {
+        // Validated atomically with the decay read: a superseded Router must
+        // not decide to strip on state belonging to the replacement generation.
+        let (state, admitted_generation) = self.learned.negative_state_in_generation(
+            generation,
+            &key.state_key,
+            &key.capability_key,
+            &key.provider_kind,
+            now,
+        )?;
+        match state {
             NegativeState::Acting => None,
             NegativeState::Absent | NegativeState::Lapsed => {
                 in_flight.insert(key.clone());
@@ -208,6 +246,7 @@ impl FieldVerdictRegistry {
                     registry: self,
                     key: key.clone(),
                     settled: false,
+                    generation: admitted_generation,
                 })
             }
         }
@@ -219,7 +258,23 @@ impl FieldVerdictRegistry {
     /// `admit_provisional`, which reads the same state while claiming.
     #[cfg(test)]
     pub fn is_negative_acting(&self, key: &FieldVerdictKey, now: Instant) -> bool {
-        matches!(self.negative_state(key, now), NegativeState::Acting)
+        matches!(
+            self.learned.negative_state_in_generation(
+                self.learned.generation(),
+                &key.state_key,
+                &key.capability_key,
+                &key.provider_kind,
+                now,
+            ),
+            Some((NegativeState::Acting, _))
+        )
+    }
+
+    /// The wrapped registry as a shared handle, so a rebuild can be constructed
+    /// onto the same store. Test-only: production gets the `Arc` from the Router.
+    #[cfg(test)]
+    pub const fn learned_arc(&self) -> &Arc<LearnedCapabilityRegistry> {
+        &self.learned
     }
 
     /// The wrapped registry, so a test can plant a resident verdict through
@@ -235,11 +290,6 @@ impl FieldVerdictRegistry {
     #[cfg(test)]
     pub fn snapshot_len(&self) -> usize {
         self.learned.snapshot().len()
-    }
-
-    fn negative_state(&self, key: &FieldVerdictKey, now: Instant) -> NegativeState {
-        self.learned
-            .negative_state(&key.state_key, &key.capability_key, &key.provider_kind, now)
     }
 
     fn release_slot(&self, key: &FieldVerdictKey) {
@@ -271,6 +321,24 @@ pub struct FieldRepairGuard<'a> {
     /// Set by whichever settlement runs, so the subsequent `Drop` cannot free
     /// a slot a different request has since claimed.
     settled: bool,
+    /// The generation TOKEN this guard presents to the guarded registry
+    /// operations at settlement -- what the barrier validates its admission
+    /// against, captured from the guarded negative-state read.
+    ///
+    /// NOT the event's persistence generation. That always comes from the
+    /// settlement's own `GenerationOutcome::Applied`, and the two legitimately
+    /// DIFFER once a boundary has moved in between: a boundary admitted after
+    /// this guard makes `Applied` report the pending generation, and a boundary
+    /// that rolls back makes it report the active one again while this token
+    /// still names the discarded value. Stamping a row from this field would
+    /// write a generation no boundary committed, and the writer would drop it.
+    ///
+    /// A valid `field:` capability key is catalog-INDEPENDENT (see
+    /// `field_capability`), so the barrier admits this token from any generation
+    /// and a settlement crossing a catalog revision still applies -- correct,
+    /// because an upstream statement about its own request envelope is not
+    /// invalidated by a catalog revision.
+    generation: u64,
 }
 
 impl FieldRepairGuard<'_> {
@@ -288,25 +356,54 @@ impl FieldRepairGuard<'_> {
     /// `request_features` is the request's derived in-flight feature set; no
     /// request body can enter the row.
     #[must_use]
+    /// `None` only if the shared generation API reports the operation stale, in
+    /// which case the slot is released, nothing is recorded, and no event rides
+    /// out -- the caller must never emit a learn row for a verdict it did not
+    /// persist.
+    ///
+    /// For a valid `field:` key that arm is DEFENSIVE rather than expected: the
+    /// key class is catalog-independent, so the barrier admits it from any
+    /// generation. It exists because this lifecycle calls the same generic
+    /// registry API the catalog-scoped lifecycles use, and silently treating a
+    /// refusal as success there would emit a row for a mutation that never
+    /// happened.
     pub fn commit(
         mut self,
         upstream_status: u16,
         request_features: Vec<String>,
         now: Instant,
-    ) -> CapabilityLearnEvent {
+    ) -> Option<CapabilityLearnEvent> {
         self.settled = true;
         let key = self.key.clone();
-        // A rejection corroborated by a successful repaired retry is direct
-        // proof, not an inference: it acts on this one observation.
-        self.registry.learned.observe(
+        // Through the generation barrier with the admission's own generation.
+        // The persistence_generation comes from the Applied outcome, atomically
+        // paired with the mutation it describes.
+        let observed = self.registry.learned.observe_in_generation(
+            self.generation,
             &key.state_key,
             &key.capability_key,
             &key.provider_kind,
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
             EvidenceSource::Live,
+            None,
             now,
         );
+        let crate::learned_capability::GenerationOutcome::Applied {
+            generation: persistence_generation,
+            ..
+        } = observed
+        else {
+            self.registry.release_slot(&key);
+            tracing::debug!(
+                event = "field_verdict_stale",
+                state_key = %key.state_key,
+                capability_key = %key.capability_key,
+                "field-verdict commit refused: its admission predates the live \
+                 capability generation"
+            );
+            return None;
+        };
         let observations = self
             .registry
             .learned
@@ -323,7 +420,8 @@ impl FieldRepairGuard<'_> {
             observations,
             "envelope-field verdict persisted after a successful repaired retry",
         );
-        CapabilityLearnEvent {
+        Some(CapabilityLearnEvent {
+            persistence_generation,
             state_key: key.state_key,
             capability_key: key.capability_key,
             provider_kind: key.provider_kind,
@@ -334,7 +432,7 @@ impl FieldRepairGuard<'_> {
             request_features,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
-        }
+        })
     }
 
     /// The field was ACCEPTED: drop any resident verdict so the request shape
@@ -342,15 +440,27 @@ impl FieldRepairGuard<'_> {
     ///
     /// Returns a [`CapabilityClearedEvent`] when a resident entry was actually
     /// removed, so the caller rides the clear out on the dispatch meta and a
-    /// warm rebuild does not resurrect the verdict from the ledger. An
-    /// identity that had no resident entry clears nothing and returns `None`.
+    /// warm rebuild does not resurrect the verdict from the ledger. An identity
+    /// that had no resident entry clears nothing and returns `None`, and the
+    /// event's stamp comes from the removal's own `Applied` outcome.
+    ///
+    /// A `Stale` removal is likewise inert and returns `None`. As with `commit`,
+    /// that arm is DEFENSIVE generic-API handling rather than expected `field:`
+    /// behavior: a catalog-independent key is admitted from any generation.
     pub fn clear(mut self) -> Option<CapabilityClearedEvent> {
         self.settled = true;
-        let cleared = self.registry.learned.remove_keyed(
+        let removed = self.registry.learned.remove_keyed_in_generation(
+            self.generation,
             &self.key.state_key,
             &self.key.capability_key,
             &self.key.provider_kind,
         );
+        let (cleared, persistence_generation) = match removed {
+            crate::learned_capability::GenerationOutcome::Applied { value, generation } => {
+                (value, generation)
+            }
+            crate::learned_capability::GenerationOutcome::Stale => (false, 0),
+        };
         self.registry.release_slot(&self.key);
         if !cleared {
             return None;
@@ -362,6 +472,7 @@ impl FieldRepairGuard<'_> {
             "envelope-field verdict cleared by an accepted request",
         );
         Some(CapabilityClearedEvent {
+            persistence_generation,
             state_key: self.key.state_key.clone(),
             capability_key: self.key.capability_key.clone(),
             provider_kind: self.key.provider_kind.clone(),

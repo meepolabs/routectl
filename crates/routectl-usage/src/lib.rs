@@ -9,6 +9,7 @@
 //! call `try_send`, which never blocks; a dedicated OS thread owns the
 //! blocking connection and performs the INSERTs.
 
+mod capability_batch;
 mod capability_event;
 mod cost;
 mod db;
@@ -21,7 +22,12 @@ mod retention;
 mod schema;
 mod writer;
 
-pub use capability_event::{CapabilityEvent, insert_capability_event};
+pub use capability_batch::{
+    BatchCommit, BatchReceipt, CapabilityBatch, handle_over_channel, handle_with_closed_channel,
+};
+pub use capability_event::{
+    CapabilityEvent, insert_capability_event, insert_capability_events_atomic,
+};
 pub use cost::{CostBreakdown, Rates, estimate_cost, estimate_cost_tokens};
 pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, open_rw};
 pub use handle::{UsageCounters, UsageHandle};

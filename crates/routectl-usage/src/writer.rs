@@ -39,8 +39,23 @@ pub enum WriterMessage {
     /// negatives now ride out as `CapabilityEvent` `broken` rows. Retained so
     /// the legacy write path stays compilable; removal is a later change.
     LearnEvent(CapabilityLearnEvent),
-    /// A capability event bound for the unified `capability_events` ledger.
-    CapabilityEvent(CapabilityEvent),
+    /// A capability event bound for the unified `capability_events` ledger,
+    /// stamped with the registry generation that produced it.
+    ///
+    /// The generation is transient in-memory sequencing: the writer drops an
+    /// event older than the generation a boundary batch has committed, because
+    /// such an event predates the boundary and, appended after the tombstone,
+    /// would restore on the next boot exactly the state the boundary evicted.
+    /// Nothing about it is persisted.
+    CapabilityEvent(CapabilityEvent, u64),
+    /// An ACKNOWLEDGED batch of capability events, committed in one
+    /// transaction and reported back to the sender.
+    ///
+    /// Unlike every other variant this one is not best effort: the batch
+    /// carries a boundary tombstone plus the entries that must survive past
+    /// it, so a partial application would evict live routing state. See
+    /// [`crate::capability_batch`].
+    CapabilityBatch(crate::capability_batch::CapabilityBatch),
 }
 
 /// Bounded capacity of the producer -> writer channel. Sized to absorb a
@@ -252,8 +267,11 @@ fn run_writer(
         match msg {
             WriterMessage::Request(record) => state.persist(&record, &counters),
             WriterMessage::LearnEvent(event) => state.persist_learn_event(&event, &counters),
-            WriterMessage::CapabilityEvent(event) => {
-                state.persist_capability_event(&event, &counters)
+            WriterMessage::CapabilityEvent(event, generation) => {
+                state.persist_capability_event(&event, generation, &counters)
+            }
+            WriterMessage::CapabilityBatch(batch) => {
+                state.commit_capability_batch(batch, &counters)
             }
         }
     }
@@ -264,6 +282,13 @@ fn run_writer(
 struct WriterState {
     conn: Option<Connection>,
     degraded: bool,
+    /// The newest registry generation whose boundary batch has COMMITTED.
+    ///
+    /// The writer is the one place that sees every capability write in append
+    /// order, so it is the only place that can drop a pre-boundary event that
+    /// was still in flight when the boundary landed. Starts at zero: before any
+    /// boundary commits, nothing is stale.
+    boundary_generation: u64,
 }
 
 impl WriterState {
@@ -275,6 +300,7 @@ impl WriterState {
             Ok(db) => Self {
                 conn: Some(UsageDb::into_conn(db)),
                 degraded: false,
+                boundary_generation: 0,
             },
             Err(err) => {
                 counters.incr_write_errors();
@@ -286,6 +312,7 @@ impl WriterState {
                 Self {
                     conn: None,
                     degraded: true,
+                    boundary_generation: 0,
                 }
             }
         }
@@ -404,7 +431,26 @@ impl WriterState {
     /// the capability-event persisted counter. A missing connection or an
     /// insert error drops the event and routes through the shared DB-health
     /// failure path (write-error counter + degraded-transition log).
-    fn persist_capability_event(&mut self, event: &CapabilityEvent, counters: &Arc<UsageCounters>) {
+    fn persist_capability_event(
+        &mut self,
+        event: &CapabilityEvent,
+        generation: u64,
+        counters: &Arc<UsageCounters>,
+    ) {
+        // Reject an event that predates the newest committed boundary. It was
+        // produced against a superseded registry generation, so appending it
+        // after that boundary's tombstone would make the next boot replay state
+        // the boundary deliberately evicted. Dropping it is the whole point of
+        // the barrier, so it is a debug-level fact rather than a failure.
+        if generation < self.boundary_generation {
+            tracing::debug!(
+                target: "routectl_usage::writer",
+                event_generation = generation,
+                boundary_generation = self.boundary_generation,
+                "dropped a capability event older than the committed replay boundary"
+            );
+            return;
+        }
         let Some(conn) = self.conn.as_ref() else {
             self.record_failure(None, counters);
             return;
@@ -415,6 +461,57 @@ impl WriterState {
                 self.mark_healthy();
             }
             Err(err) => self.record_failure(Some(err), counters),
+        }
+    }
+
+    /// Commit an acknowledged capability-event batch in ONE transaction and
+    /// report the outcome to the caller.
+    ///
+    /// The only non-best-effort write in this crate: the batch carries a
+    /// replay-boundary tombstone plus the entries that must survive past it,
+    /// so all-or-nothing is a correctness requirement (a committed tombstone
+    /// with dropped survivors evicts live routing state). The enabled gate is
+    /// deliberately NOT consulted -- it was already bypassed on the producer
+    /// side, because a telemetry preference must not destroy routing state.
+    ///
+    /// A dropped ack receiver (the caller's budget expired) is ignored: the
+    /// writer never blocks on a caller that left, and the rows it committed
+    /// stay committed.
+    fn commit_capability_batch(
+        &mut self,
+        batch: crate::capability_batch::CapabilityBatch,
+        counters: &Arc<UsageCounters>,
+    ) {
+        use crate::capability_batch::BatchCommit;
+
+        let rows = batch.events.len();
+        let Some(conn) = self.conn.as_ref() else {
+            self.record_failure(None, counters);
+            let _ = batch.ack.send(BatchCommit::WriteFailed);
+            return;
+        };
+        match crate::capability_event::insert_capability_events_atomic(conn, &batch.events) {
+            Ok(committed) => {
+                for _ in 0..committed {
+                    counters.incr_capability_events_persisted();
+                }
+                self.mark_healthy();
+                // Only a COMMITTED boundary raises the bar. A failed batch
+                // leaves it where it was, so events from the generation that
+                // failed to move the boundary stay valid.
+                self.boundary_generation = self.boundary_generation.max(batch.generation);
+                let _ = batch.ack.send(BatchCommit::Committed { rows: committed });
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: "routectl_usage::writer",
+                    error = %err,
+                    batch_rows = rows,
+                    "capability boundary batch failed; no row committed"
+                );
+                self.record_failure(Some(err), counters);
+                let _ = batch.ack.send(BatchCommit::WriteFailed);
+            }
         }
     }
 
@@ -1555,7 +1652,7 @@ mod tests {
         let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
 
         // Act
-        handle.try_send_capability_event(capability_event("web_search"));
+        handle.try_send_capability_event_in_generation(capability_event("web_search"), 1);
         assert!(
             wait_capability_events_persisted(handle.counters(), 1),
             "capability event not persisted"
@@ -1600,7 +1697,8 @@ mod tests {
         let sends = 50usize;
         let start = std::time::Instant::now();
         for i in 0..sends {
-            handle.try_send_capability_event(capability_event(&format!("cap-{i}")));
+            handle
+                .try_send_capability_event_in_generation(capability_event(&format!("cap-{i}")), 1);
         }
         let elapsed = start.elapsed();
 
@@ -1625,7 +1723,7 @@ mod tests {
 
         // Act: disabled -> dropped at the gate (counted as a disabled-drop,
         // not a capability-event overflow).
-        handle.try_send_capability_event(capability_event("gated"));
+        handle.try_send_capability_event_in_generation(capability_event("gated"), 1);
         // Snapshot the counters and drop the handle's sender clone before
         // draining, or shutdown blocks on the deadline.
         let counters = Arc::clone(handle.counters());

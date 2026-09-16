@@ -44,7 +44,7 @@ mod status;
 mod sticky;
 mod window_gate;
 pub use capability_cleared::CapabilityClearedEvent;
-pub use capability_learn::CapabilityLearnEvent;
+pub use capability_learn::{CapabilityLearnEvent, CatalogIndependentSurvivor};
 pub use capability_observe::CapabilityObserveEvent;
 pub use dispatch::class_debits;
 use dispatch::k_query_key;
@@ -254,6 +254,20 @@ pub struct Router {
     /// persisted negative lives in the registry above, so a replay negative
     /// carries across a hot reload on the same terms as any other.
     learned_replay: Arc<crate::learned_replay::ReplayLearnRegistry>,
+    /// The shared registry generation this Router was published at.
+    ///
+    /// The registry is shared across Router generations, so an in-flight
+    /// request can submit an operation from a Router that has already been
+    /// replaced. This token is what the registry compares against its active
+    /// generation to tell a live operation from a stale one -- catalog-scoped
+    /// work from a stale Router is refused, while a catalog-independent
+    /// observation still lands in the live store.
+    ///
+    /// Atomic because the reload coordinator advances it on an already-`Arc`ed
+    /// Router: between admitting the boundary batch and learning its outcome,
+    /// observations must be stamped with the PENDING generation so their events
+    /// sort after the boundary rather than being rejected as pre-boundary.
+    registry_generation: std::sync::atomic::AtomicU64,
     /// Operator capability-override read-model, flattened from config at
     /// construction. Pure projection of `config.capability.overrides` plus
     /// the legacy provider / model `unsupported_features` lists -- no
@@ -1276,7 +1290,12 @@ impl DispatchMeta {
     /// yet (all served_* fields default to `None`, counters to zero).
     /// Callers populate the served_* fields and counters as the walk
     /// progresses.
-    fn for_alias(alias: &str) -> Self {
+    /// Test seam for a caller outside this crate that must hand a REAL
+    /// `DispatchMeta` to the production drain rather than a replica of one.
+    /// `pub` only for that reach; the router's own callers build it internally,
+    /// and no downstream consumer has any reason to construct dispatch meta.
+    #[doc(hidden)]
+    pub fn for_alias(alias: &str) -> Self {
         Self {
             attempt_count: 0,
             fallback_count: 0,
@@ -1631,6 +1650,9 @@ impl Router {
             prefix_epoch_store,
             calibration_store,
             quota_store,
+            registry_generation: std::sync::atomic::AtomicU64::new(
+                learned_capabilities.generation(),
+            ),
             learned_capabilities,
             learned_replay,
             override_registry,
@@ -2153,25 +2175,35 @@ impl Router {
     }
 
     /// Carry the previous Router's learned-capability registry into this
-    /// freshly-built Router during a hot-reload -- but ONLY when the
-    /// catalog version AND the overlay revision are both unchanged.
+    /// freshly-built Router during a hot-reload -- in full when the catalog
+    /// version AND the overlay revision are both unchanged, and narrowed to
+    /// the catalog-independent entries when either changed.
     ///
-    /// The learned negatives are inferences about how a target priced or
+    /// Most learned negatives are inferences about how a target priced or
     /// rejected a capability under the catalog / overlay in force when they
     /// were learned. If either the baked catalog version or the overlay
-    /// revision changed, that pricing / capability truth is now fresher
-    /// than anything the registry holds, so clear-on-change wins: the new
-    /// Router starts with an EMPTY registry (its construction default) and
-    /// re-learns from live traffic. Restart-re-probe is the accepted model;
-    /// a full clear trivially satisfies "fresher truth is never silently
-    /// overridden."
+    /// revision changed, that pricing / capability truth is now fresher than
+    /// anything the registry holds, so clear-on-change wins for them: they
+    /// are dropped and re-learned from live traffic. Restart-re-probe is the
+    /// accepted model.
     ///
-    /// When both are unchanged, every entry rides across at full fidelity
-    /// (decay windows, backoff counters intact) so a config-only reload does
-    /// not un-learn a valid negative. The one exception is the in-flight
-    /// probe slot: a probe outstanding against the pre-swap Router can never
-    /// clear a slot copied onto the new one, so it is carried across as free
-    /// and the next matching request re-admits a probe normally.
+    /// A wire-shape verdict is the exception, and the exception is the
+    /// predicate's, not this site's: an upstream that rejected a request by
+    /// naming a field of its own request envelope stated a fact about that
+    /// lane's accepted shape, which no catalog revision can make stale. Such
+    /// an entry therefore rides across a revision change. The cold-boot
+    /// replay honors the same predicate, so an entry that survives a reload
+    /// survives the next restart too -- carrying it here alone would only
+    /// move the loss to the next boot, where its symptom is a warning that
+    /// quietly stops appearing.
+    ///
+    /// When both revisions are unchanged, every entry rides across at full
+    /// fidelity (decay windows, backoff counters intact) so a config-only
+    /// reload does not un-learn a valid negative. The one exception is the
+    /// in-flight probe slot: a probe outstanding against the pre-swap Router
+    /// can never clear a slot copied onto the new one, so it is carried
+    /// across as free and the next matching request re-admits a probe
+    /// normally.
     ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in,
@@ -2179,7 +2211,37 @@ impl Router {
     pub fn carry_over_learned_from(&mut self, previous: &Self) {
         let catalog_changed = self.catalog_version != previous.catalog_version;
         let overlay_changed = self.overlay_revision != previous.overlay_revision;
+
+        // ATTACH to the outgoing registry rather than importing into this
+        // Router's own. One store spans generations, so a request still in
+        // flight on the pre-swap Router writes where the published Router
+        // reads. An import into a fresh registry would satisfy every
+        // value-equality check and silently drop those writes.
+        //
+        // Nothing is copied and nothing is cleared here. On a revision change
+        // the catalog-scoped eviction belongs to the boundary transition
+        // (`advance_generation` + `prune_catalog_scoped`), which runs only
+        // after the boundary batch is durable -- pruning now would discard
+        // entries that a failed boundary must leave untouched.
+        self.learned_capabilities = Arc::clone(&previous.learned_capabilities);
+        // The facade holds its own Arc; rebuilt on the shared registry, with
+        // the in-flight single-flight admissions carried across so an
+        // outstanding carry cannot be double-admitted.
+        self.learned_replay = Arc::new(
+            previous
+                .learned_replay
+                .rebuilt_on(Arc::clone(&self.learned_capabilities)),
+        );
+        self.registry_generation =
+            std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
+
         if catalog_changed || overlay_changed {
+            // Retuning is DEFERRED to the boundary commit. A revision-changing
+            // reload may still fail or be abandoned, and the previous router
+            // stays live in that case -- applying the new tempo now would leave
+            // it running under settings from a reload that never took effect.
+            // `Router::apply_capability_tuning` performs it at publication,
+            // called by the boundary's commit arm.
             self.metrics.incr_invalidations();
             tracing::warn!(
                 event = "invalidation",
@@ -2189,13 +2251,61 @@ impl Router {
                 catalog_version = self.catalog_version,
                 previous_overlay_revision = previous.overlay_revision,
                 overlay_revision = self.overlay_revision,
-                "catalog/overlay changed across reload; clearing learned-capability registry",
+                "catalog/overlay changed across reload; catalog-scoped learned capabilities \
+                 are evicted at the replay boundary",
             );
             return;
         }
-        self.learned_capabilities
-            .import_entries(previous.learned_capabilities.export_entries());
+        // No boundary is involved on a config-only reload (the revision did not
+        // move), so the reload IS the publication and the tuning applies now.
+        self.apply_capability_tuning();
         self.expire_learned_on_override_change(previous);
+    }
+
+    /// Apply this Router's `[capability]` tempo and capacity to the shared
+    /// registry.
+    ///
+    /// Separate from the carry-over because a revision-changing reload must not
+    /// retune until its boundary commits: the previous Router stays live on
+    /// failure or shutdown abandonment, and must keep the settings it was
+    /// serving under. Called at publication in that case, and directly by the
+    /// carry-over when no boundary is involved.
+    pub fn apply_capability_tuning(&self) {
+        self.learned_capabilities.retune(
+            std::time::Duration::from_hours(self.config.capability.decay_hours),
+            std::time::Duration::from_hours(self.config.capability.inferred_window_hours),
+            crate::learned_capability::DEFAULT_MAX_ENTRIES,
+        );
+    }
+
+    /// The shared registry generation this Router was published at. Submitted
+    /// with every registry operation so the barrier can tell a live call from
+    /// one arriving through a superseded Router.
+    pub fn registry_generation(&self) -> u64 {
+        self.registry_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Stamp subsequent registry operations with `generation`.
+    ///
+    /// Called once by the reload coordinator between ADMITTING a boundary batch
+    /// and learning its outcome. In that window a request still dispatching on
+    /// this Router may observe a wire-shape fact; stamping it with the pending
+    /// generation puts its ledger event AFTER the boundary being committed,
+    /// instead of having the writer reject it as older than the new boundary.
+    pub fn set_pending_registry_generation(&self, generation: u64) {
+        self.registry_generation
+            .store(generation, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The shared learned-capability registry. Handed to the reload
+    /// coordinator so it can establish the boundary transition (snapshot,
+    /// generation advance, catalog-scoped prune) on the same store the
+    /// published Router reads.
+    pub const fn learned_registry(
+        &self,
+    ) -> &Arc<crate::learned_capability::LearnedCapabilityRegistry> {
+        &self.learned_capabilities
     }
 
     /// Record one live cache-reuse observation into the per-session K
@@ -2407,6 +2517,14 @@ use routectl_core::failure_class::classify;
 use routectl_core::{ChatRequest, Error};
 #[cfg(test)]
 use std::time::Instant;
+
+#[cfg(test)]
+#[path = "probe_guard_generation_tests.rs"]
+mod probe_guard_generation_tests;
+
+#[cfg(test)]
+#[path = "generation_barrier_tests.rs"]
+mod generation_barrier_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

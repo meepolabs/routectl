@@ -1,8 +1,9 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use routectl_auth::{MemoryStore, SecretStore};
-use routectl_router::Config;
-use routectl_usage::{CHANNEL_CAPACITY, UsageWriter, latest_tombstone, open};
+use routectl_router::{Config, Router};
+use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter, latest_tombstone, open};
 use rusqlite::params;
 use tempfile::TempDir;
 
@@ -23,6 +24,31 @@ async fn default_router(tmp: &TempDir) -> Router {
 
 /// A usage handle backed by a real writer at `path`, enabled so capability
 /// events are actually persisted. Returns the owning writer for shutdown.
+/// Run the (blocking) warm on a dedicated OS thread, capturing its events.
+///
+/// The warm now commits its fail-closed boundary through the ACKNOWLEDGED batch
+/// path, which blocks on the writer's reply -- and Tokio panics outright if a
+/// worker thread blocks. Production dispatches the whole warm via
+/// `spawn_blocking` for exactly this reason; these tests must leave the runtime
+/// thread too. The tracing capture is thread-local, so the capture has to be
+/// installed INSIDE the spawned thread rather than around it.
+fn warm_off_runtime(
+    ledger: &Path,
+    router: &Router,
+    handle: &UsageHandle,
+) -> Vec<routectl_testkit::CapturedEvent> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                routectl_testkit::capture_events(|| {
+                    warm_capability_registry_from_ledger(ledger, router, handle);
+                })
+            })
+            .join()
+            .expect("warm thread")
+    })
+}
+
 fn writer_at(path: &std::path::Path) -> (UsageHandle, UsageWriter) {
     UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0, true)
 }
@@ -104,9 +130,7 @@ async fn absent_ledger_read_is_silent_and_enqueues_one_boot_tombstone() {
     // Act: the warm reads an absent ledger (NoData) and must fail closed
     // silently -- no read-failure WARN -- while still enqueuing exactly one
     // fresh tombstone.
-    let events = routectl_testkit::capture_events(|| {
-        warm_capability_registry_from_ledger(&ledger, &router, &handle);
-    });
+    let events = warm_off_runtime(&ledger, &router, &handle);
 
     // Assert: the absent-ledger read never warns (distinct from the
     // unreadable-ledger path), and nothing replayed.
@@ -170,9 +194,7 @@ async fn a_never_migrated_ledger_fails_closed_like_any_unreadable_ledger() {
     let (handle, writer) = writer_at(&scratch);
 
     // Act
-    let events = routectl_testkit::capture_events(|| {
-        warm_capability_registry_from_ledger(&ledger, &router, &handle);
-    });
+    let events = warm_off_runtime(&ledger, &router, &handle);
 
     // Assert: the unreadable-ledger WARN fired (this warm never migrates the
     // file out from under a possibly-racing writer), the registry stayed
@@ -202,7 +224,7 @@ async fn boot_tombstone_reaches_writer_through_the_production_seam() {
     let (handle, writer) = writer_at(&ledger);
 
     // Act
-    warm_capability_registry_from_ledger(&ledger, &router, &handle);
+    warm_off_runtime(&ledger, &router, &handle);
     drop(handle);
     writer.shutdown();
 
@@ -249,7 +271,7 @@ async fn matching_tombstone_replays_post_boundary_negative() {
     let (handle, writer) = writer_at(&scratch);
 
     // Act
-    warm_capability_registry_from_ledger(&ledger, &router, &handle);
+    warm_off_runtime(&ledger, &router, &handle);
 
     // Assert: the negative is resident after warm, under its lane / capability.
     let snapshot = router.learned_capability_snapshot();
@@ -306,7 +328,7 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     let (handle, writer) = writer_at(&scratch);
 
     // Act
-    warm_capability_registry_from_ledger(&ledger, &router, &handle);
+    warm_off_runtime(&ledger, &router, &handle);
 
     // Assert: the current-revision negative replays; the stale straggler does not.
     let snapshot = router.learned_capability_snapshot();
@@ -353,7 +375,7 @@ async fn revision_mismatch_fails_closed_and_writes_a_fresh_tombstone() {
     let (handle, writer) = writer_at(&ledger);
 
     // Act
-    warm_capability_registry_from_ledger(&ledger, &router, &handle);
+    warm_off_runtime(&ledger, &router, &handle);
 
     // Assert: nothing replayed (fail closed on the revision mismatch).
     assert!(
@@ -391,9 +413,7 @@ async fn unreadable_ledger_leaves_registry_empty_and_warns() {
     let (handle, writer) = writer_at(&scratch);
 
     // Act
-    let events = routectl_testkit::capture_events(|| {
-        warm_capability_registry_from_ledger(&ledger, &router, &handle);
-    });
+    let events = warm_off_runtime(&ledger, &router, &handle);
 
     // Assert: a WARN fired, the registry stayed empty, and boot did not panic.
     assert!(
@@ -427,6 +447,29 @@ fn rebuild_log_warns_when_row_cap_hit() {
         .expect("info rebuild log emitted");
     assert_eq!(info.field("replayed_negative"), Some("3"));
     assert_eq!(info.field("row_cap"), Some("5000"));
+}
+
+/// The revision-skip tally reaches the operator-visible rebuild line, and
+/// is rendered apart from the rowid-boundary and unrecognized-token skips
+/// it must be distinguishable from.
+#[test]
+fn rebuild_log_reports_the_revision_skip_tally() {
+    let summary = CapabilityRebuildSummary {
+        skipped_revision: 4,
+        skipped_unknown: 1,
+        ..CapabilityRebuildSummary::default()
+    };
+
+    let events = routectl_testkit::capture_events(|| {
+        emit_rebuild_log(&summary, 12);
+    });
+
+    let info = events
+        .iter()
+        .find(|e| e.level == tracing::Level::INFO)
+        .expect("info rebuild log emitted");
+    assert_eq!(info.field("skipped_revision"), Some("4"));
+    assert_eq!(info.field("skipped_unknown"), Some("1"));
 }
 
 #[test]

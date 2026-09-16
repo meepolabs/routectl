@@ -283,6 +283,7 @@ fn verified_positive_no_ops_when_a_negative_resides() {
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
+        None,
         Instant::now(),
     );
     let req = structured_output_request(&["name"]);
@@ -561,4 +562,66 @@ fn cache_requested_reads_top_level_and_tool_markers() {
         ..Default::default()
     };
     assert!(!cache_requested(&plain));
+}
+
+/// The RESIDENT entry retains the evidence class the observation was admitted
+/// on -- not merely the ride-along event and the WARN.
+///
+/// Load-bearing beyond forensics: the warm rebuild fails closed on a
+/// `verified` / `suspect` row whose class is absent or unrecognized, so an
+/// entry that cannot state its own class cannot be re-appended past a later
+/// replay boundary. It would be skipped on the next boot and the verdict would
+/// be evicted. Asserting only the ride-along leaves the retention unpinned,
+/// because the ledger write and the resident entry are separate paths.
+#[test]
+fn an_admitted_positive_retains_its_evidence_class_on_the_resident_entry() {
+    // Arrange
+    let router = router_with(OPENAI_P1, NoopProvider::new());
+    let target = openai_target(&router);
+    let req = structured_output_request(&["name"]);
+    let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+    let mut meta = DispatchMeta::for_alias("m1");
+
+    // Act
+    router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+
+    // Assert
+    let snap = router.learned_capabilities.snapshot();
+    assert_eq!(snap.len(), 1);
+    assert_eq!(snap[0].verdict, Verdict::VerifiedWorking);
+    assert_eq!(
+        snap[0].evidence_class.as_deref(),
+        Some(SCHEMA_PARSE),
+        "the resident entry must carry the class it was admitted on",
+    );
+}
+
+/// The same retention for a suspected-absence F3 negative, the other verdict
+/// the rebuild requires a class for. Pinning only the positive would leave
+/// half the evidence-bearing surface uncovered.
+#[test]
+fn an_admitted_suspect_absence_retains_its_evidence_class_on_the_resident_entry() {
+    // Arrange: two observations inside the inferred window, since an inferred
+    // signal acts only once corroborated.
+    let router = router_with(OPENAI_P1, NoopProvider::new());
+    let target = openai_target(&router);
+    let req = structured_output_request(&["name"]);
+    // A body that parses but omits the required key: schema mismatch.
+    let resp = clean_response(assistant_text(r#"{"other":"x"}"#), None);
+    let now = Instant::now();
+
+    // Act
+    let mut meta = DispatchMeta::for_alias("m1");
+    router.observe_capabilities(&req, &resp, &target, &mut meta, now);
+    let mut meta2 = DispatchMeta::for_alias("m1");
+    router.observe_capabilities(&req, &resp, &target, &mut meta2, now);
+
+    // Assert
+    let snap = router.learned_capabilities.snapshot();
+    assert_eq!(snap.len(), 1);
+    assert_eq!(
+        snap[0].evidence_class.as_deref(),
+        Some(SCHEMA_MISMATCH),
+        "a suspect-absence entry must carry its class too",
+    );
 }

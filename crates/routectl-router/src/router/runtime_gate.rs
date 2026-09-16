@@ -220,6 +220,37 @@ pub(super) struct ProbeAdmission {
     pub(super) state_key: String,
     pub(super) feature: String,
     pub(super) provider_kind: &'static str,
+    /// The generation the guarded feature-filter read GRANTED this admission
+    /// under.
+    ///
+    /// Carried on the admission rather than sampled when the guard is built: the
+    /// chain resolve sits between the two, and a boundary completing there would
+    /// have the settlement validated against a generation that never admitted
+    /// it.
+    pub(super) generation: u64,
+}
+
+/// What a same-capability rejection did to the held admission.
+///
+/// Three outcomes, not a boolean. The retired `bool` conflated APPLIED with
+/// STALE, so a settlement refused for staleness still made its caller bump the
+/// probe-failure metric, record the cross-lane F1Seen marker, and insert the
+/// request-local dedupe key -- observable consequences of a settlement that
+/// recorded nothing. The admission is released in both cases (the slot is
+/// request-local; leaking it would latch the pair forever), which is exactly why
+/// the caller cannot infer "something happened" from release alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SameCapabilitySettlement {
+    /// Recorded against the live generation: backoff refreshed, event emitted.
+    /// Only this outcome earns the caller's metric, marker and dedupe.
+    Applied,
+    /// Refused as stale: the admission was released, nothing was recorded, and
+    /// no event or metric may follow.
+    Stale,
+    /// This guard held no admission for the `(state_key, feature, provider_kind)`
+    /// triple, so the rejection is not a probe settlement at all and falls
+    /// through to the ordinary observe path.
+    NoMatch,
 }
 
 /// Settles the learned-capability re-probes a target's dispatch was admitted
@@ -286,15 +317,31 @@ impl LearnedProbeGuard {
         if let Some(registry) = self.registry.take() {
             let now = Instant::now();
             for probe in self.probes.drain(..) {
-                registry.record_probe_outcome(
+                let settled = registry.record_probe_outcome_in_generation(
+                    probe.generation,
                     &probe.state_key,
                     &probe.feature,
                     probe.provider_kind,
                     crate::learned_capability::ProbeOutcome::Success,
                     now,
                 );
+                // The generation comes FROM the settlement, under its guard: a
+                // separately-sampled value could straddle a boundary and stamp
+                // the cleared row with a generation that does not match the
+                // removal it describes.
+                let crate::learned_capability::GenerationOutcome::Applied {
+                    generation: persistence_generation,
+                    ..
+                } = settled
+                else {
+                    // A reload landed between admission and settlement: mutate
+                    // nothing, emit nothing, ride no cleared event out.
+                    emit_stale_probe_settlement(&probe, self.surface, "success");
+                    continue;
+                };
                 emit_probe_settlement(&probe, self.surface, "success", true, "success");
                 cleared.push(super::CapabilityClearedEvent {
+                    persistence_generation,
                     state_key: probe.state_key,
                     capability_key: probe.feature,
                     provider_kind: probe.provider_kind.to_string(),
@@ -312,39 +359,52 @@ impl LearnedProbeGuard {
         state_key: &str,
         feature: &str,
         provider_kind: &str,
-    ) -> bool {
+    ) -> SameCapabilitySettlement {
         if self.registry.is_none() {
-            return false;
+            return SameCapabilitySettlement::NoMatch;
         }
         let Some(pos) = self.probes.iter().position(|probe| {
             probe.state_key == state_key
                 && probe.feature == feature
                 && probe.provider_kind == provider_kind
         }) else {
-            return false;
+            return SameCapabilitySettlement::NoMatch;
         };
+        // The admission is RELEASED either way -- for a stale settlement too,
+        // because the slot is request-local coordination and leaking it would
+        // latch the pair forever. What differs is whether anything was recorded.
         let probe = self.probes.remove(pos);
+        let mut outcome = SameCapabilitySettlement::NoMatch;
         if let Some(registry) = &self.registry {
-            registry.record_probe_outcome(
-                &probe.state_key,
-                &probe.feature,
-                probe.provider_kind,
-                crate::learned_capability::ProbeOutcome::SameCapabilityRejection,
-                Instant::now(),
-            );
-            emit_probe_settlement(
-                &probe,
-                self.surface,
-                "same_capability",
-                true,
-                "same_capability",
-            );
+            if matches!(
+                registry.record_probe_outcome_in_generation(
+                    probe.generation,
+                    &probe.state_key,
+                    &probe.feature,
+                    probe.provider_kind,
+                    crate::learned_capability::ProbeOutcome::SameCapabilityRejection,
+                    Instant::now(),
+                ),
+                crate::learned_capability::GenerationOutcome::Stale
+            ) {
+                emit_stale_probe_settlement(&probe, self.surface, "same_capability");
+                outcome = SameCapabilitySettlement::Stale;
+            } else {
+                emit_probe_settlement(
+                    &probe,
+                    self.surface,
+                    "same_capability",
+                    true,
+                    "same_capability",
+                );
+                outcome = SameCapabilitySettlement::Applied;
+            }
         }
         // Once the last held admission settles, disarm so drop is a no-op.
         if self.probes.is_empty() {
             self.registry = None;
         }
-        true
+        outcome
     }
 }
 
@@ -353,13 +413,20 @@ impl Drop for LearnedProbeGuard {
         if let Some(registry) = &self.registry {
             let now = Instant::now();
             for probe in &self.probes {
-                registry.record_probe_outcome(
-                    &probe.state_key,
-                    &probe.feature,
-                    probe.provider_kind,
-                    crate::learned_capability::ProbeOutcome::OtherError,
-                    now,
-                );
+                if matches!(
+                    registry.record_probe_outcome_in_generation(
+                        probe.generation,
+                        &probe.state_key,
+                        &probe.feature,
+                        probe.provider_kind,
+                        crate::learned_capability::ProbeOutcome::OtherError,
+                        now,
+                    ),
+                    crate::learned_capability::GenerationOutcome::Stale
+                ) {
+                    emit_stale_probe_settlement(probe, self.surface, "other_error");
+                    continue;
+                }
                 emit_probe_settlement(probe, self.surface, "other_error", true, "terminal");
             }
         }
@@ -430,17 +497,39 @@ impl Drop for ProbeAdmissionSet {
         let now = Instant::now();
         for admissions in self.pending.values() {
             for admission in admissions {
-                self.registry.record_probe_outcome(
-                    &admission.state_key,
-                    &admission.feature,
-                    admission.provider_kind,
-                    crate::learned_capability::ProbeOutcome::OtherError,
-                    now,
-                );
+                if matches!(
+                    self.registry.record_probe_outcome_in_generation(
+                        admission.generation,
+                        &admission.state_key,
+                        &admission.feature,
+                        admission.provider_kind,
+                        crate::learned_capability::ProbeOutcome::OtherError,
+                        now,
+                    ),
+                    crate::learned_capability::GenerationOutcome::Stale
+                ) {
+                    emit_stale_probe_settlement(admission, self.surface, "other_error");
+                    continue;
+                }
                 emit_probe_settlement(admission, self.surface, "other_error", false, "unreached");
             }
         }
     }
+}
+
+/// Record that a settlement was refused because its admission generation is
+/// stale. DEBUG: routine per-request bookkeeping like its sibling, and it
+/// deliberately does NOT emit the ordinary settlement event -- a stale
+/// settlement mutated nothing, so claiming a disposition would misreport it.
+fn emit_stale_probe_settlement(probe: &ProbeAdmission, surface: &str, attempted: &str) {
+    tracing::debug!(
+        event = "probe_settlement_stale",
+        surface,
+        state_key = %probe.state_key,
+        capability_key = %probe.feature,
+        attempted_outcome = attempted,
+        "probe settlement refused: its admission predates the live capability generation"
+    );
 }
 
 /// Emit the probe-settlement observability event for one admission. DEBUG
