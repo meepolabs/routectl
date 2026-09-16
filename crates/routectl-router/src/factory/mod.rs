@@ -6,6 +6,7 @@ mod installation_id;
 mod validate;
 mod warnings;
 
+pub use build::ipv4_compatible_embedded;
 #[cfg(test)]
 pub use build::resolve_max_thinking_entry_bytes_for_test;
 pub use build::{
