@@ -16,37 +16,31 @@
 //! ceiling and by nothing else. With a per-target budget the same fixture
 //! yields one repair per target; the assertions below distinguish the two.
 //!
-//! ## Which walks are covered BEHAVIORALLY, and why not all of them
+//! ## Which walks THIS file covers, and where the rest lives
 //!
-//! `complete` and `stream` pre-content are covered end-to-end: a repair
-//! genuinely fires in them, so the repair count is observable and the
-//! ceiling is what bounds it.
+//! This file is about the REASONING-REPLAY repair kind. `complete` and
+//! `stream` pre-content are covered end-to-end here: that repair genuinely
+//! fires in them, so the count is observable and the ceiling is what bounds
+//! it.
 //!
-//! `count_tokens` is NOT, and the difference is a property of the current
-//! code rather than a gap in the fixture. It admits only `anthropic-api`
-//! seats and Anthropic-family `bedrock` seats (`seat_can_count_tokens`),
-//! while the classifier's replay-rejection lift is closed over the kinds
-//! with a captured envelope -- today only `openai-responses`. Both sets
-//! read the SAME `DispatchTarget::provider_kind`, so they are disjoint: no
-//! seat the token-count walk can dispatch to can reach the replay class,
-//! and the walk's repair arm is therefore INERT for the only repair kind
-//! that exists today. That is verified here rather than assumed
-//! (`the_replay_lift_and_count_tokens_capable_kinds_are_disjoint_today`),
-//! because it is exactly the kind of premise that rots.
+//! `count_tokens` is not covered here, and the reason is a property of the
+//! current code rather than a gap in the fixture. It admits only
+//! `anthropic-api` seats and Anthropic-family `bedrock` seats
+//! (`seat_can_count_tokens`), while the classifier's replay-rejection lift is
+//! closed over the kinds with a captured envelope -- today only
+//! `openai-responses`. Both sets read the SAME
+//! `DispatchTarget::provider_kind`, so they are disjoint: no seat that walk
+//! can dispatch to can reach the replay class. That is verified rather than
+//! assumed (`the_replay_lift_and_count_tokens_capable_kinds_are_disjoint_today`),
+//! because it is exactly the kind of premise that rots. So for that walk this
+//! file asserts only what a run can OBSERVE -- every capable seat visited
+//! once, and zero replay repairs under the current disjointness.
 //!
-//! So for `count_tokens` this file asserts only what a run can OBSERVE:
-//! that every count-capable seat is visited once, and that the current
-//! provider/classifier disjointness yields zero repairs. It deliberately
-//! does NOT claim the budget is threaded -- a threaded budget and a
-//! per-seat budget both produce zero repairs against an unreachable class,
-//! so no fixture here can distinguish them. Every wiring claim for that
-//! walk (threading, condition order, the calibration re-stamp, probe-slot
-//! ordering, the body scrub, the absent settlement) belongs solely to the
-//! source guards in `count_tokens_repair_structure_tests`, which are
-//! mutation-verified against exactly those edits. When a repair kind lands
-//! whose lane a capable seat reaches, `count_tokens` gets a real N-seat
-//! behavioral test here and those structural guards are deleted rather
-//! than kept alongside it.
+//! The token-count walk's own N-SEAT ceiling coverage is real and lives in
+//! `field_repair_tests`: the envelope-field repair acts on the
+//! `anthropic-api` lane, which is exactly the lane that walk admits, so a
+//! repair genuinely fires there and the shared ceiling is measurable. Nothing
+//! about that walk rests on source guards any more.
 
 use super::super::Router;
 use super::repair_budget::{REPAIRS_PER_REQUEST, RepairBudget};
@@ -395,15 +389,15 @@ async fn every_count_capable_seat_is_visited_once_and_none_repairs_today() {
     // Arrange -- the token-count walk over a chain of count-capable seats,
     // each answering a capability error so the walk runs to exhaustion.
     //
-    // SCOPE: this claims only what the run can OBSERVE. It does not claim the
-    // budget is threaded -- a threaded budget and a per-seat budget produce
-    // the same zero repairs here, because no capable seat can reach today's
-    // only repair class, so this fixture cannot distinguish them. The
-    // threading claim belongs solely to the source guards in
-    // `count_tokens_repair_structure_tests`, which fail on exactly that
-    // mutation. What this DOES establish is the premise those guards rest on:
-    // the walk really visits every capable seat, and the observed repair count
-    // really is zero under the current provider/classifier disjointness.
+    // SCOPE: this claims only what the run can OBSERVE about the REPLAY kind.
+    // A threaded budget and a per-seat budget produce the same zero replay
+    // repairs here, because no capable seat can reach that class, so this
+    // fixture cannot distinguish them -- and it does not try. The token-count
+    // walk's threading IS measured, behaviorally, by the N-seat ceiling test in
+    // `field_repair_tests`, whose repair kind that walk can reach. What this
+    // establishes is the premise the disjointness rests on: the walk really
+    // visits every capable seat, and the observed replay-repair count really is
+    // zero.
     let (router, mocks) = capable_rejecting_chain("chain");
 
     // Act
@@ -589,16 +583,12 @@ async fn both_messages_walks_agree_on_one_ceiling() {
     // identical. A walk that kept a per-target budget (or lost its repair
     // position) reads as a different number here.
     //
-    // SCOPE: this asserts the two walks a repair can actually be OBSERVED in.
-    // `count_tokens` is deliberately absent -- its capable seats cannot reach
-    // today's only repair kind, so any number measured for it would be zero
-    // for a reason unrelated to the ceiling, and reading a standalone
-    // `RepairBudget` here would assert the budget type against itself rather
-    // than the walk. Its observable share is covered by
-    // `every_count_capable_seat_is_visited_once_and_none_repairs_today`, and
-    // its wiring by the structural guards in
-    // `count_tokens_repair_structure_tests`; it joins this test once a repair
-    // kind exists whose lane a capable seat reaches.
+    // SCOPE: this asserts the two walks the REPLAY repair can be observed in.
+    // `count_tokens` is absent because its capable seats cannot reach that
+    // kind, so any number measured for it here would be zero for a reason
+    // unrelated to the ceiling. That walk's ceiling is asserted behaviorally
+    // against the envelope-field kind instead, in `field_repair_tests`, which
+    // carries the three-walk agreement for the kind that can reach all three.
     let (complete_router, complete_mocks) = rejecting_chain("chain");
     let (stream_router, stream_mocks) = rejecting_chain("chain");
 

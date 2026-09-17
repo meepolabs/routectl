@@ -1074,6 +1074,7 @@ pub routectl_router::config::ProviderEntry::OpenaiResponses::runtime: routectl_r
 pub routectl_router::config::ProviderEntry::OpenaiResponses::user_agent: core::option::Option<alloc::string::String>
 impl routectl_router::ProviderEntry
 pub fn routectl_router::ProviderEntry::anthropic_api(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_router::ProviderEntry::anthropic_api_base_url(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::anthropic_beta_floor(&self) -> &[alloc::string::String]
 pub fn routectl_router::ProviderEntry::api_key_ref(&self) -> core::option::Option<&str>
 pub const fn routectl_router::ProviderEntry::auto_emit_per_block_breakpoints(&self) -> core::option::Option<bool>
@@ -3615,6 +3616,42 @@ impl<T> typenum::type_operators::Same for routectl_router::CatalogIndependentSur
 pub type routectl_router::CatalogIndependentSurvivor::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CatalogIndependentSurvivor where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CatalogIndependentSurvivor::into_shared(self) -> Shared
+pub struct routectl_router::router::CountedTokens
+pub routectl_router::router::CountedTokens::meta: routectl_router::router::DispatchMeta
+pub routectl_router::router::CountedTokens::result: routectl_core::error::Result<routectl_core::schema::TokenCount>
+impl core::marker::Freeze for routectl_router::router::CountedTokens
+impl core::marker::Send for routectl_router::router::CountedTokens
+impl core::marker::Sync for routectl_router::router::CountedTokens
+impl core::marker::Unpin for routectl_router::router::CountedTokens
+impl core::marker::UnsafeUnpin for routectl_router::router::CountedTokens
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::CountedTokens
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::router::CountedTokens
+impl<T, U> core::convert::Into<U> for routectl_router::router::CountedTokens where U: core::convert::From<T>
+pub fn routectl_router::router::CountedTokens::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::CountedTokens where U: core::convert::Into<T>
+pub type routectl_router::router::CountedTokens::Error = core::convert::Infallible
+pub fn routectl_router::router::CountedTokens::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::CountedTokens where U: core::convert::TryFrom<T>
+pub type routectl_router::router::CountedTokens::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::CountedTokens::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_router::router::CountedTokens where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::CountedTokens::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::CountedTokens where T: ?core::marker::Sized
+pub fn routectl_router::router::CountedTokens::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::CountedTokens where T: ?core::marker::Sized
+pub fn routectl_router::router::CountedTokens::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_router::router::CountedTokens
+pub fn routectl_router::router::CountedTokens::from(T) -> T
+impl<T> either::into_either::IntoEither for routectl_router::router::CountedTokens
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::CountedTokens where T: ?core::marker::Sized
+pub fn routectl_router::router::CountedTokens::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::CountedTokens::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::CountedTokens
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::CountedTokens
+impl<T> typenum::type_operators::Same for routectl_router::router::CountedTokens
+pub type routectl_router::router::CountedTokens::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::CountedTokens where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::CountedTokens::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::DispatchMeta
 pub routectl_router::router::DispatchMeta::attempt_count: u32
 pub routectl_router::router::DispatchMeta::cache_front_decision: core::option::Option<&'static str>
@@ -3624,6 +3661,7 @@ pub routectl_router::router::DispatchMeta::calib_estimated_tokens: core::option:
 pub routectl_router::router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::router::DispatchMeta::fallback_count: u32
+pub routectl_router::router::DispatchMeta::field_repair: core::option::Option<routectl_router::router::FieldRepair>
 pub routectl_router::router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
 pub routectl_router::router::DispatchMeta::prefix_epoch_event: core::option::Option<i64>
 pub routectl_router::router::DispatchMeta::reduction_bytes_saved: core::option::Option<u64>
@@ -3772,6 +3810,61 @@ impl<T> typenum::type_operators::Same for routectl_router::router::DispatchedStr
 pub type routectl_router::router::DispatchedStream::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::DispatchedStream where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::DispatchedStream::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::FieldRepair
+pub routectl_router::router::FieldRepair::action: &'static str
+pub routectl_router::router::FieldRepair::field_path: &'static str
+pub routectl_router::router::FieldRepair::learned: bool
+pub routectl_router::router::FieldRepair::reason: &'static str
+pub routectl_router::router::FieldRepair::repair_attempted: bool
+pub routectl_router::router::FieldRepair::repair_succeeded: bool
+pub routectl_router::router::FieldRepair::state_key: alloc::string::String
+impl core::clone::Clone for routectl_router::router::FieldRepair
+pub fn routectl_router::router::FieldRepair::clone(&self) -> routectl_router::router::FieldRepair
+impl core::fmt::Debug for routectl_router::router::FieldRepair
+pub fn routectl_router::router::FieldRepair::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::router::FieldRepair
+impl core::marker::Send for routectl_router::router::FieldRepair
+impl core::marker::Sync for routectl_router::router::FieldRepair
+impl core::marker::Unpin for routectl_router::router::FieldRepair
+impl core::marker::UnsafeUnpin for routectl_router::router::FieldRepair
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::FieldRepair
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::FieldRepair
+impl<T, U> core::convert::Into<U> for routectl_router::router::FieldRepair where U: core::convert::From<T>
+pub fn routectl_router::router::FieldRepair::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::FieldRepair where U: core::convert::Into<T>
+pub type routectl_router::router::FieldRepair::Error = core::convert::Infallible
+pub fn routectl_router::router::FieldRepair::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::FieldRepair where U: core::convert::TryFrom<T>
+pub type routectl_router::router::FieldRepair::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::FieldRepair::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::FieldRepair where T: core::clone::Clone
+pub type routectl_router::router::FieldRepair::Owned = T
+pub fn routectl_router::router::FieldRepair::clone_into(&self, &mut T)
+pub fn routectl_router::router::FieldRepair::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::FieldRepair where T: core::clone::Clone
+pub fn routectl_router::router::FieldRepair::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::FieldRepair where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::FieldRepair::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::FieldRepair where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldRepair::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::FieldRepair where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldRepair::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::FieldRepair where T: core::clone::Clone
+pub unsafe fn routectl_router::router::FieldRepair::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::FieldRepair
+pub fn routectl_router::router::FieldRepair::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::FieldRepair where T: core::clone::Clone
+pub fn routectl_router::router::FieldRepair::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::FieldRepair
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::FieldRepair where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldRepair::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::FieldRepair::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::FieldRepair
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::FieldRepair
+impl<T> typenum::type_operators::Same for routectl_router::router::FieldRepair
+pub type routectl_router::router::FieldRepair::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldRepair where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::FieldRepair::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::ReplayDegradation
 pub routectl_router::router::ReplayDegradation::action: &'static str
 pub routectl_router::router::ReplayDegradation::artifact_count: usize
@@ -3986,6 +4079,7 @@ pub fn routectl_router::router::Router::context_window_for(&self, &str) -> core:
 pub fn routectl_router::router::Router::first_target_oauth_id(&self, &str) -> core::option::Option<alloc::string::String>
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
+pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
@@ -6937,6 +7031,7 @@ pub routectl_router::ProviderEntry::OpenaiResponses::runtime: routectl_router::P
 pub routectl_router::ProviderEntry::OpenaiResponses::user_agent: core::option::Option<alloc::string::String>
 impl routectl_router::ProviderEntry
 pub fn routectl_router::ProviderEntry::anthropic_api(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_router::ProviderEntry::anthropic_api_base_url(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::anthropic_beta_floor(&self) -> &[alloc::string::String]
 pub fn routectl_router::ProviderEntry::api_key_ref(&self) -> core::option::Option<&str>
 pub const fn routectl_router::ProviderEntry::auto_emit_per_block_breakpoints(&self) -> core::option::Option<bool>
@@ -9660,6 +9755,7 @@ pub routectl_router::DispatchMeta::calib_estimated_tokens: core::option::Option<
 pub routectl_router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::DispatchMeta::fallback_count: u32
+pub routectl_router::DispatchMeta::field_repair: core::option::Option<routectl_router::router::FieldRepair>
 pub routectl_router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
 pub routectl_router::DispatchMeta::prefix_epoch_event: core::option::Option<i64>
 pub routectl_router::DispatchMeta::reduction_bytes_saved: core::option::Option<u64>
@@ -12657,6 +12753,7 @@ pub fn routectl_router::router::Router::context_window_for(&self, &str) -> core:
 pub fn routectl_router::router::Router::first_target_oauth_id(&self, &str) -> core::option::Option<alloc::string::String>
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
+pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>

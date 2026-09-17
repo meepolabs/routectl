@@ -452,6 +452,25 @@ pub struct LearnedCapabilityRegistry {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     acquire_hook: Mutex<Option<Box<dyn Fn(&'static str) + Send + Sync>>>,
+    /// Test-only hook fired by `observe_in_generation_with_observations`
+    /// itself, AFTER its own `guarded_for` call has returned (every lock it
+    /// took already released) and BEFORE the outcome goes back to the
+    /// caller.
+    ///
+    /// Unlike `pause_hook`/`probe_hook`, which fire while locks are held and so
+    /// need a spawned sibling thread to exercise safely, this point is
+    /// lock-free: a test closure may call back into the registry directly to
+    /// run a sibling mutation on the same key, proving the caller's emitted
+    /// event carries its OWN captured count rather than a value re-read after
+    /// a sibling changed it. One-shot: firing takes the closure out of the
+    /// mutex rather than reading a reference to it, so a sibling mutation the
+    /// hook triggers -- which re-enters this same method on the same thread
+    /// -- finds nothing installed and does not re-fire it (`parking_lot::Mutex`
+    /// is not reentrant, so holding the guard across the call would
+    /// self-deadlock on that nested acquisition too).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    post_observe_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for LearnedCapabilityRegistry {
@@ -848,6 +867,8 @@ impl LearnedCapabilityRegistry {
             probe_hook: Mutex::new(None),
             #[cfg(test)]
             acquire_hook: Mutex::new(None),
+            #[cfg(test)]
+            post_observe_hook: Mutex::new(None),
         }
     }
 
@@ -1698,6 +1719,36 @@ impl LearnedCapabilityRegistry {
         *self.probe_hook.lock() = Some(hook);
     }
 
+    /// Install a one-shot test hook fired by
+    /// `observe_in_generation_with_observations` itself, after its own guard
+    /// releases and before it returns. Test-only; see the
+    /// `post_observe_hook` field.
+    #[cfg(test)]
+    pub(crate) fn set_post_observe_test_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        *self.post_observe_hook.lock() = Some(hook);
+    }
+
+    /// Fire the post-observe hook, if one is installed, and clear it: a
+    /// one-shot hook that never fires twice for the same test.
+    ///
+    /// Takes the `Box` out of the mutex (dropping the guard) before calling
+    /// it: the hook itself may re-enter
+    /// `observe_in_generation_with_observations` on a sibling key, which
+    /// calls this same method again from the same thread, and the take
+    /// leaves nothing installed for that nested call to re-fire.
+    #[cfg(test)]
+    pub(crate) fn fire_post_observe_test_hook(&self) {
+        let hook = self.post_observe_hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// No-op when not testing.
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) const fn fire_post_observe_test_hook(&self) {}
+
     /// Record a negative observation on behalf of `generation`.
     ///
     /// Returns [`GenerationOutcome::Stale`] when the submitting generation has
@@ -1736,6 +1787,58 @@ impl LearnedCapabilityRegistry {
                 )
             },
         )
+    }
+
+    /// [`Self::observe_in_generation`], additionally reporting the entry's
+    /// resulting observation count from INSIDE the same critical section the
+    /// mutation ran under.
+    ///
+    /// A caller that needs the post-mutation count for an emitted event (for
+    /// example a ledger row's `observations` field) must read it before the
+    /// guard releases: a second, unguarded `snapshot()` call after this
+    /// method returns could race a concurrent purge or sibling mutation on
+    /// the same key and report a count the committing mutation never
+    /// produced.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_in_generation_with_observations(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<(ObserveOutcome, u32)> {
+        let result = self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                let outcome = self.observe_in(
+                    entries,
+                    leased,
+                    &key,
+                    tier,
+                    phase,
+                    source,
+                    evidence_class,
+                    now,
+                );
+                let observations = entries.get(&key).map_or(0, |entry| entry.observations);
+                (outcome, observations)
+            },
+        );
+        // `guarded_for` has already released every lock it took by the time it
+        // returns, so this fires with no lock held: the exact point a test
+        // needs to run a sibling mutation on the same key and prove THIS
+        // call's captured `observations` survives it unread-back.
+        self.fire_post_observe_test_hook();
+        result
     }
 
     /// Record a positive observation on behalf of `generation`, with the same

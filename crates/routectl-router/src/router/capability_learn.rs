@@ -515,6 +515,19 @@ impl Router {
         &self.learned_replay
     }
 
+    /// The envelope-field verdict lifecycle riding on the SAME
+    /// learned-capability registry. `&self` delegate over the private field,
+    /// exactly as [`Router::learned_replay`] is, so the repair arm admits and
+    /// settles without reaching inside.
+    ///
+    /// Sharing the registry is what makes a field verdict carry across a hot
+    /// reload, reach the doctor surfaces, and replay from the ledger on the
+    /// same terms as every other capability key -- this type owns only the
+    /// in-flight coordination.
+    pub(crate) fn field_verdicts(&self) -> &crate::field_verdict::FieldVerdictRegistry {
+        &self.field_verdicts
+    }
+
     /// Learn-path capture, called from both dispatch error arms beside
     /// [`Router::emit_class_observability`]. On an eligible, deduped
     /// capability rejection it records a learned negative in the registry,
@@ -754,32 +767,42 @@ impl Router {
         // Through the generation barrier: a catalog-scoped negative arriving on
         // a superseded Router is refused, so it neither lands in the shared
         // registry nor rides an event out to the ledger.
-        let outcome = self.observe_learned_capability(
-            &state_key,
-            &feature_key,
-            provider_kind,
-            tier,
-            phase,
-            EvidenceSource::Live,
-            // A learned `broken` negative carries no evidence class; the
-            // positive-detection verdicts are the ones that do.
-            None,
-            Instant::now(),
-        );
-        // The generation comes FROM the mutation, paired with its outcome under
-        // one guard. Reading it separately could straddle a boundary and stamp
-        // the event with a generation that does not describe what was recorded.
-        // Both refusals return without an event: a stale observation describes a
-        // catalog revision the daemon left, and a lease-refused one would refresh
-        // an entry a purge already captured. Neither may bump an ordinary metric
-        // or record a dedupe entry either -- a dedupe entry for a mutation that
-        // never happened would suppress the retry that should replace it.
+        let outcome = self
+            .learned_capabilities
+            .observe_in_generation_with_observations(
+                self.registry_generation(),
+                &state_key,
+                &feature_key,
+                provider_kind,
+                tier,
+                phase,
+                EvidenceSource::Live,
+                // A learned `broken` negative carries no evidence class; the
+                // positive-detection verdicts are the ones that do.
+                None,
+                Instant::now(),
+            );
+        // The generation, the outcome, and the observation count all come FROM
+        // the mutation under one guard. Reading the count separately (a second
+        // snapshot after this guard releases) could straddle a sibling
+        // observation on the same key and stamp this event with a count it never
+        // captured. Both refusals return without an event: a stale observation
+        // describes a catalog revision the daemon left, and a lease-refused one
+        // would refresh an entry a purge already captured. Neither may leave the
+        // dedupe entry installed either -- the mutation this request attempted
+        // never happened, so the entry must not block a same-request retry once
+        // the refusal condition clears (a released lease, a caught-up
+        // generation); undo the speculative insert above on every refusal arm.
         let crate::learned_capability::GenerationOutcome::Applied {
-            value: observe_outcome,
+            value: (observe_outcome, observations),
             generation: persistence_generation,
             incarnation,
         } = outcome
         else {
+            dedupe.remove(&LearnDedupeKey::Capability {
+                state_key,
+                feature_key,
+            });
             return;
         };
         let acting = matches!(
@@ -797,13 +820,6 @@ impl Router {
                 feature_key: feature_key.clone(),
             });
         }
-        let observations = self
-            .learned_capabilities
-            .snapshot()
-            .into_iter()
-            .find(|entry| entry.state_key == state_key && entry.feature_key == feature_key)
-            .map_or(0, |entry| entry.observations);
-
         let upstream_param = crate::capability_matcher::upstream_param(err);
         // Emit `upstream_param` ONLY when the sanitizer deemed it safe to log
         // verbatim (bounded, single-token, no whitespace/control bytes). An

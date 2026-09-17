@@ -528,7 +528,7 @@ async fn count_tokens_class_path_emits_one_observability_event() {
     let provider: Arc<dyn Provider> = Arc::new(HealthErrorProvider { status: 500 });
     let router = build_router(provider, false);
 
-    let (result, events) = with_capture(router.count_tokens(plain_count_request())).await;
+    let (result, events) = Box::pin(with_capture(router.count_tokens(plain_count_request()))).await;
 
     assert!(result.is_err(), "the 500 health error surfaces terminal");
     let emitted: Vec<_> = events
@@ -563,7 +563,7 @@ async fn count_tokens_clean_passthrough_emits_no_class_event() {
     });
     let router = build_router(provider, false);
 
-    let (result, events) = with_capture(router.count_tokens(plain_count_request())).await;
+    let (result, events) = Box::pin(with_capture(router.count_tokens(plain_count_request()))).await;
 
     assert!(result.is_ok(), "a clean count_tokens passthrough succeeds");
     assert!(

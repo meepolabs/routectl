@@ -494,131 +494,151 @@ impl UsageCapture {
         catalog_version: u32,
         overlay_revision: u64,
     ) {
-        let catalog_version = i64::from(catalog_version);
-        let overlay_revision = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
-        let ts = epoch_ms_now();
-        // Each event carries its OWN generation, taken from the registry
-        // operation that produced it. Not one request-wide figure: a request can
-        // span a boundary, and then its earlier and later events legitimately
-        // belong to different generations.
-        // Generation 0 is never a live generation (they are 1-based), so a
-        // non-empty ride-along carrying it means a producer forgot to stamp the
-        // meta. Such events would be older than every boundary and the writer
-        // would drop them ONE BY ONE, silently -- the failure mode this whole
-        // barrier exists to prevent, arriving through the back door.
-        //
-        // Loud in debug so a new producer cannot land unstamped; fail-CLOSED in
-        // release, dropping the batch with a single ERROR rather than emitting
-        // rows whose fate is a silent per-event discard.
-        // Per EVENT, because each carries its own stamp now: one unstamped event
-        // among stamped siblings is exactly the case a request-wide check would
-        // miss.
-        let unstamped = meta
-            .learned_capabilities
-            .iter()
-            .map(|ev| ev.persistence_generation)
-            .chain(
-                meta.capability_observations
-                    .iter()
-                    .map(|ev| ev.persistence_generation),
-            )
-            .chain(
-                meta.cleared_capabilities
-                    .iter()
-                    .map(|ev| ev.persistence_generation),
-            )
-            .any(|generation| generation == 0);
-        if unstamped {
-            debug_assert!(
-                false,
-                "capability ride-along events were not stamped with a registry \
+        drain_capability_events(&self.usage, meta, catalog_version, overlay_revision);
+    }
+}
+
+/// The drain itself, as a free function over a `UsageHandle`.
+///
+/// Separated from [`UsageCapture`] because one dispatch surface carries
+/// capability events WITHOUT carrying a usage row: the token-count walk settles
+/// envelope-field verdicts but records no `UsageRecord`. Its settlement rows
+/// still have to reach the ledger -- a registry mutation whose event row was
+/// dropped is exactly what a warm rebuild resurrects a verdict from -- so that
+/// handler calls this directly rather than constructing a row it does not want,
+/// and no second copy of the mapping exists to drift from this one.
+pub(crate) fn drain_capability_events(
+    usage: &UsageHandle,
+    meta: &DispatchMeta,
+    catalog_version: u32,
+    overlay_revision: u64,
+) {
+    let catalog_version = i64::from(catalog_version);
+    let overlay_revision = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
+    let ts = epoch_ms_now();
+    // Each event carries its OWN generation, taken from the registry
+    // operation that produced it. Not one request-wide figure: a request can
+    // span a boundary, and then its earlier and later events legitimately
+    // belong to different generations.
+    // Generation 0 is never a live generation (they are 1-based), so a
+    // non-empty ride-along carrying it means a producer forgot to stamp the
+    // meta. Such events would be older than every boundary and the writer
+    // would drop them ONE BY ONE, silently -- the failure mode this whole
+    // barrier exists to prevent, arriving through the back door.
+    //
+    // Loud in debug so a new producer cannot land unstamped; fail-CLOSED in
+    // release, dropping the batch with a single ERROR rather than emitting
+    // rows whose fate is a silent per-event discard.
+    // Per EVENT, because each carries its own stamp now: one unstamped event
+    // among stamped siblings is exactly the case a request-wide check would
+    // miss.
+    let unstamped = meta
+        .learned_capabilities
+        .iter()
+        .map(|ev| ev.persistence_generation)
+        .chain(
+            meta.capability_observations
+                .iter()
+                .map(|ev| ev.persistence_generation),
+        )
+        .chain(
+            meta.cleared_capabilities
+                .iter()
+                .map(|ev| ev.persistence_generation),
+        )
+        .any(|generation| generation == 0);
+    if unstamped {
+        debug_assert!(
+            false,
+            "capability ride-along events were not stamped with a registry \
                  generation; each event must carry the one its own registry \
                  operation returned"
-            );
-            tracing::error!(
-                learned = meta.learned_capabilities.len(),
-                observed = meta.capability_observations.len(),
-                cleared = meta.cleared_capabilities.len(),
-                "capability events carried no registry generation; dropping them \
+        );
+        tracing::error!(
+            learned = meta.learned_capabilities.len(),
+            observed = meta.capability_observations.len(),
+            cleared = meta.cleared_capabilities.len(),
+            "capability events carried no registry generation; dropping them \
                  rather than persisting rows the replay boundary would discard"
-            );
-            return;
-        }
-        for ev in &meta.learned_capabilities {
-            self.usage.try_send_capability_event_at(
-                CapabilityEvent {
-                    ts,
-                    lane_key: ev.state_key.clone(),
-                    capability: ev.capability_key.clone(),
-                    verdict: Verdict::LearnedBroken(ev.phase).as_str().to_string(),
-                    phase: ev.phase.as_str().to_string(),
-                    source: ev.source.as_str().to_string(),
-                    tier: ev.signal_tier.as_str().to_string(),
-                    evidence_class: None,
-                    upstream_token: None,
-                    catalog_version,
-                    overlay_revision,
-                },
-                ev.persistence_generation,
-                // The event's OWN incarnation, from the guarded mutation that
-                // produced it: the writer compares it against the key's purge
-                // floor, so a row delayed past a purge of the same key is dropped
-                // while a genuine post-purge relearn still lands.
-                ev.incarnation,
-            );
-        }
-        for ev in &meta.capability_observations {
-            let verdict = match ev.direction {
-                ObservationDirection::Verified => Verdict::VerifiedWorking,
-                ObservationDirection::SuspectAbsence => Verdict::SuspectIgnored,
-            };
-            self.usage.try_send_capability_event_at(
-                CapabilityEvent {
-                    ts,
-                    lane_key: ev.state_key.clone(),
-                    capability: ev.capability_key.clone(),
-                    verdict: verdict.as_str().to_string(),
-                    phase: FailurePhase::F3.as_str().to_string(),
-                    source: ev.source.as_str().to_string(),
-                    tier: ev.signal_tier.as_str().to_string(),
-                    evidence_class: Some(ev.evidence_class.clone()),
-                    upstream_token: None,
-                    catalog_version,
-                    overlay_revision,
-                },
-                ev.persistence_generation,
-                // The event's OWN incarnation, from the guarded mutation that
-                // produced it: the writer compares it against the key's purge
-                // floor, so a row delayed past a purge of the same key is dropped
-                // while a genuine post-purge relearn still lands.
-                ev.incarnation,
-            );
-        }
-        for ev in &meta.cleared_capabilities {
-            self.usage.try_send_capability_event_at(
-                CapabilityEvent {
-                    ts,
-                    lane_key: ev.state_key.clone(),
-                    capability: ev.capability_key.clone(),
-                    verdict: Verdict::Cleared.as_str().to_string(),
-                    phase: String::new(),
-                    source: EvidenceSource::Live.as_str().to_string(),
-                    tier: String::new(),
-                    evidence_class: None,
-                    upstream_token: None,
-                    catalog_version,
-                    overlay_revision,
-                },
-                ev.persistence_generation,
-                // The event's OWN incarnation, from the guarded mutation that
-                // produced it: the writer compares it against the key's purge
-                // floor, so a row delayed past a purge of the same key is dropped
-                // while a genuine post-purge relearn still lands.
-                ev.incarnation,
-            );
-        }
+        );
+        return;
     }
+    for ev in &meta.learned_capabilities {
+        usage.try_send_capability_event_at(
+            CapabilityEvent {
+                ts,
+                lane_key: ev.state_key.clone(),
+                capability: ev.capability_key.clone(),
+                verdict: Verdict::LearnedBroken(ev.phase).as_str().to_string(),
+                phase: ev.phase.as_str().to_string(),
+                source: ev.source.as_str().to_string(),
+                tier: ev.signal_tier.as_str().to_string(),
+                evidence_class: None,
+                upstream_token: None,
+                catalog_version,
+                overlay_revision,
+            },
+            ev.persistence_generation,
+            // The event's OWN incarnation, from the guarded mutation that
+            // produced it: the writer compares it against the key's purge
+            // floor, so a row delayed past a purge of the same key is dropped
+            // while a genuine post-purge relearn still lands.
+            ev.incarnation,
+        );
+    }
+    for ev in &meta.capability_observations {
+        let verdict = match ev.direction {
+            ObservationDirection::Verified => Verdict::VerifiedWorking,
+            ObservationDirection::SuspectAbsence => Verdict::SuspectIgnored,
+        };
+        usage.try_send_capability_event_at(
+            CapabilityEvent {
+                ts,
+                lane_key: ev.state_key.clone(),
+                capability: ev.capability_key.clone(),
+                verdict: verdict.as_str().to_string(),
+                phase: FailurePhase::F3.as_str().to_string(),
+                source: ev.source.as_str().to_string(),
+                tier: ev.signal_tier.as_str().to_string(),
+                evidence_class: Some(ev.evidence_class.clone()),
+                upstream_token: None,
+                catalog_version,
+                overlay_revision,
+            },
+            ev.persistence_generation,
+            // The event's OWN incarnation, from the guarded mutation that
+            // produced it: the writer compares it against the key's purge
+            // floor, so a row delayed past a purge of the same key is dropped
+            // while a genuine post-purge relearn still lands.
+            ev.incarnation,
+        );
+    }
+    for ev in &meta.cleared_capabilities {
+        usage.try_send_capability_event_at(
+            CapabilityEvent {
+                ts,
+                lane_key: ev.state_key.clone(),
+                capability: ev.capability_key.clone(),
+                verdict: Verdict::Cleared.as_str().to_string(),
+                phase: String::new(),
+                source: EvidenceSource::Live.as_str().to_string(),
+                tier: String::new(),
+                evidence_class: None,
+                upstream_token: None,
+                catalog_version,
+                overlay_revision,
+            },
+            ev.persistence_generation,
+            // The event's OWN incarnation, from the guarded mutation that
+            // produced it: the writer compares it against the key's purge
+            // floor, so a row delayed past a purge of the same key is dropped
+            // while a genuine post-purge relearn still lands.
+            ev.incarnation,
+        );
+    }
+}
 
+impl UsageCapture {
     /// Stamp the token / quota / finish columns from a non-streaming
     /// `ChatResponse`. HTTP status is fixed at 200 for a delivered body.
     pub(crate) fn observe_response(&mut self, resp: &routectl_core::ChatResponse) {

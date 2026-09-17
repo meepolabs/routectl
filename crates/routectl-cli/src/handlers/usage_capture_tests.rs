@@ -1069,6 +1069,74 @@ async fn observe_meta_probe_clear_maps_to_cleared_row() {
     assert!(ec.is_none(), "cleared row carries no evidence class");
 }
 
+#[tokio::test]
+async fn the_free_drain_persists_rows_for_a_surface_that_records_no_usage_row() {
+    // The token-count endpoint settles envelope-field verdicts but writes no
+    // `UsageRecord`, so it calls the free `drain_capability_events` directly
+    // rather than through a `UsageCapture`. Both routes must produce the SAME
+    // ledger rows: a settlement whose event row never persisted is what a warm
+    // rebuild resurrects a verdict from, and that is exactly the bug a
+    // no-usage-row surface would reintroduce silently.
+    let mut meta = any_dispatch_meta().await;
+    // A plain capability key: the drain maps whatever key it is handed, and it
+    // has no field-namespace behavior to exercise. Spelling a field key here
+    // would be a second compiled copy of that permanent prefix, which the
+    // namespace owner's uniqueness scan refuses -- correctly, since a drifting
+    // copy could re-partition persisted keys.
+    meta.cleared_capabilities = vec![cleared_event("web_search")];
+
+    // Act -- the free function, with NO capture and no draft in sight.
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = routectl_usage::UsageWriter::start(
+        db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+        true,
+    );
+    drain_capability_events(&handle, &meta, 3, 7);
+    assert!(
+        wait_capability_persisted(&handle, 1),
+        "the free drain must enqueue the capability row",
+    );
+    drop(handle);
+    writer.shutdown();
+
+    // Assert -- the same row shape the capture route writes, boundary stamps
+    // included (a rebuild filters on them).
+    let conn = rusqlite::Connection::open(&db_path).expect("read db");
+    let (lane, cap_key, verdict, source, catalog, overlay): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    ) = conn
+        .query_row(
+            "SELECT lane_key, capability, verdict, source, catalog_version, overlay_revision \
+             FROM capability_events",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .expect("one cleared row");
+    assert_eq!(lane, "prov");
+    assert_eq!(cap_key, "web_search");
+    assert_eq!(verdict, "cleared");
+    assert_eq!(source, "live");
+    assert_eq!(catalog, 3, "the boundary stamps ride the free drain too");
+    assert_eq!(overlay, 7);
+}
+
 fn minimal_request() -> routectl_core::ChatRequest {
     routectl_core::ChatRequest {
         model: "m".to_string(),

@@ -1,36 +1,35 @@
 //! Token-counting dispatch path (no reducer/cache; independent of the would-trim seam).
 //!
-//! # The reactive-repair position here is currently UNREACHABLE
+//! # The two reactive-repair kinds at this walk's repair position
 //!
-//! This walk carries the third reasoning-replay repair position, wired at
-//! the same seam the two messages walks use and drawing the same
-//! per-request ceiling. It cannot fire today, and the reason is structural
-//! rather than a missing piece of wiring: [`seat_can_count_tokens`] admits
-//! only `anthropic-api` and Anthropic-family `bedrock` seats, while the
-//! classifier's replay-rejection lift is closed over the provider kinds
-//! with a captured envelope -- today only `openai-responses`. Both read the
-//! same `DispatchTarget::provider_kind`, so no seat this walk can dispatch
-//! to can produce the class the repair arm gates on.
+//! This walk carries the third reactive-repair position, wired at the same
+//! seam the two messages walks use and drawing the same per-request ceiling.
+//! The two repair kinds differ in whether a seat here can reach them, and the
+//! difference is structural rather than a gap in wiring:
 //!
-//! Two consequences a reader must not "fix" without changing that:
-//!
-//! - The arm settles its carry by DROPPING the plan (releasing the
-//!   single-flight slots, learning nothing) rather than running the
-//!   two-phase `commit` / `settle_success` the messages walks run. Those
-//!   mutate the shared learned registry AND return event rows the caller is
-//!   expected to drain to the capability-event ledger; this walk's
-//!   `DispatchMeta` is request-local with no such sink, so the mutation
-//!   would persist while its row was dropped -- the state a warm rebuild
-//!   resurrects a negative from. The degradation summary stays honest by
-//!   recording that the repair happened and claiming nothing was learned.
-//! - The arm's properties are pinned by source guards
-//!   (`count_tokens_repair_structure_tests`), not by a behavioral test: a
-//!   behavioral test of an unreachable arm passes with the arm deleted.
-//!
-//! Both are temporary. The task that lands a repair kind whose lane a
-//! capable seat reaches owns the reachable two-phase settlement plus its
-//! persistence path, and replaces those source guards with real per-seat
-//! behavioral coverage.
+//! - **Envelope-field repair is REACHABLE and behaviorally covered.** It acts
+//!   on the `anthropic-api` lane, which is exactly the lane
+//!   [`seat_can_count_tokens`] admits unconditionally, so a repair genuinely
+//!   fires here. Whether it SETTLES depends on the entry point: through
+//!   [`Router::count_tokens_with_meta`] the walk runs the full two-phase
+//!   settlement and both a committed and a cleared verdict ride out on the
+//!   returned [`DispatchMeta`]; through the result-only
+//!   [`Router::count_tokens`] it repairs for the answer it returns and settles
+//!   nothing, because that caller keeps no meta and a settlement whose event
+//!   row never reached the ledger would leave the shared registry mutated with
+//!   no record of it -- the state a warm rebuild resurrects a verdict from.
+//! - **Reasoning-replay repair is UNREACHABLE from here.** The classifier's
+//!   replay-rejection lift is closed over the provider kinds with a captured
+//!   envelope -- today only `openai-responses` -- and that set is disjoint
+//!   from the kinds this walk admits (both read the same
+//!   `DispatchTarget::provider_kind`). So no seat this walk can dispatch to
+//!   can produce the class its replay arm gates on. That arm therefore
+//!   settles its carry by DROPPING the plan -- releasing the single-flight
+//!   slots, learning nothing -- and the degradation summary stays honest by
+//!   recording that the repair happened without claiming anything was
+//!   learned. Do not "fix" that to match the field arm's settlement without
+//!   first making the class reachable: a behavioral test of an unreachable
+//!   arm passes with the arm deleted.
 
 use std::time::Instant;
 
@@ -44,12 +43,15 @@ use super::dispatch::{
     log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
     replay_rejection_body_free, upstream_status_for_remap,
 };
+use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::{
-    DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision, apply_layered_overlays,
+    CountedTokens, DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision,
+    apply_layered_overlays,
 };
 use crate::anthropic_family::{AnthropicFamily, anthropic_family};
+use crate::feature_keys::derive_feature_keys;
 
 /// Whether one dispatch seat can serve a token count, decided from its
 /// egress kind together with the upstream model id that kind would be
@@ -96,15 +98,6 @@ pub(super) enum CountSeatOutcome {
     /// without a breaker debit; advance to the next capable seat.
     Capability,
 }
-
-/// Greppable anchor for the strip-repair arm in
-/// [`Router::count_tokens_try_seat`]. The structural guards in
-/// `count_tokens_repair_structure_tests` locate the arm by this marker
-/// rather than by matching its body text, which drifts. The literal itself
-/// lives in a comment on the arm; this constant is the single place the
-/// guards and the arm agree on its spelling.
-#[cfg(test)]
-const REPAIR_ARM_MARKER: &str = "count_tokens_strip_repair_arm";
 
 impl Router {
     /// Probe call: route a request to a count_tokens-CAPABLE provider in
@@ -162,6 +155,67 @@ impl Router {
     /// to bypass an operator rate limit or an open breaker.
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        // NON-SETTLING deliberately, and this is a behavioral difference from
+        // `count_tokens_with_meta`, not a convenience wrapper over it. The
+        // caller of this signature keeps no `DispatchMeta`, so a settlement's
+        // event row would be produced and dropped -- a persisted verdict with
+        // no ledger record, which is what a warm rebuild resurrects from. The
+        // walk still computes (and may still repair) for the count it returns;
+        // it just cannot learn or clear. A caller that wants the verdict
+        // lifecycle uses `count_tokens_with_meta` and drains its rows.
+        self.count_tokens_settling(req, FieldSettlementMode::NonSettling)
+            .await
+            .result
+    }
+
+    /// Route a token count and return the result paired with its
+    /// router-scoped [`DispatchMeta`] -- the SETTLING variant of this walk.
+    /// [`Router::count_tokens`] is not a thin wrapper over it: that one is
+    /// non-settling, which is a behavioral difference rather than a convenience.
+    ///
+    /// The meta is what carries this walk's reactive-repair settlement rows out
+    /// to the capability-event ledger. `commit` / `clear` mutate the SHARED
+    /// learned registry, so a caller that produced those rows and dropped them
+    /// would leave a persisted verdict with no ledger record -- exactly the
+    /// state a warm rebuild resurrects a cleared verdict from. A caller of THIS
+    /// signature must therefore drain the meta, the same way the messages
+    /// walks' callers drain theirs; a caller that will not is asking for
+    /// [`Router::count_tokens`], which settles nothing by construction.
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
+    pub async fn count_tokens_with_meta(&self, req: ChatRequest) -> CountedTokens {
+        self.count_tokens_settling(req, FieldSettlementMode::Settling)
+            .await
+    }
+
+    /// The walk both public entry points share, parameterized by whether the
+    /// caller can drain a settlement row.
+    ///
+    /// The mode is threaded to the admission rather than checked at the
+    /// settlement: a non-settling walk then never claims a single-flight slot
+    /// at all, so it cannot take one from a sibling request that could have
+    /// settled it, and cannot learn by forgetting to drop a plan.
+    async fn count_tokens_settling(
+        &self,
+        req: ChatRequest,
+        mode: FieldSettlementMode,
+    ) -> CountedTokens {
+        let mut meta = DispatchMeta::for_alias(&req.model);
+        let result = self.count_tokens_inner(req, mode, &mut meta).await;
+        emit_replay_degradation(&meta);
+        emit_field_repair(&meta);
+        CountedTokens { meta, result }
+    }
+
+    /// The walk body for [`Router::count_tokens_with_meta`]. Mutates `meta` as
+    /// the seats are visited, so the caller's `meta` is correct at every
+    /// return -- including the terminal 501 path.
+    async fn count_tokens_inner(
+        &self,
+        req: ChatRequest,
+        mode: FieldSettlementMode,
+        meta: &mut DispatchMeta,
+    ) -> Result<TokenCount> {
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
         // A token-count is not a messages-capability test, so a re-probe the
         // filter admitted here settles OtherError: release the in_flight slot
@@ -203,16 +257,16 @@ impl Router {
         // inside `count_tokens_try_seat` would be the per-seat reset the shared
         // ceiling exists to remove.
         let mut repair_budget = RepairBudget::per_request();
-        // Request-scoped meta for the seat walk. The token-count path has no
-        // caller-visible meta, but the repair arm's calibration re-stamp and
-        // the degradation summary are recorded on one, so the walk owns it and
-        // emits the aggregated WARN when the walk ends -- one per request,
-        // mirroring `complete_with_options`.
-        let mut meta = DispatchMeta::for_alias(&req.model);
         let outcome = self
-            .count_tokens_walk(&req, chain, &mut saw_capable, &mut repair_budget, &mut meta)
+            .count_tokens_walk(
+                &req,
+                chain,
+                &mut saw_capable,
+                &mut repair_budget,
+                mode,
+                meta,
+            )
             .await;
-        emit_replay_degradation(&meta);
         if let Some(result) = outcome {
             return result;
         }
@@ -245,6 +299,7 @@ impl Router {
         chain: Vec<DispatchTarget>,
         saw_capable: &mut bool,
         repair_budget: &mut RepairBudget,
+        mode: FieldSettlementMode,
         meta: &mut DispatchMeta,
     ) -> Option<Result<TokenCount>> {
         for candidate in chain {
@@ -261,7 +316,7 @@ impl Router {
             }
             *saw_capable = true;
             match self
-                .count_tokens_try_seat(req, candidate, repair_budget, meta)
+                .count_tokens_try_seat(req, candidate, repair_budget, mode, meta)
                 .await
             {
                 CountSeatOutcome::Count(tc) => return Some(Ok(tc)),
@@ -297,6 +352,7 @@ impl Router {
         req: &ChatRequest,
         target: DispatchTarget,
         repair_budget: &mut RepairBudget,
+        mode: FieldSettlementMode,
         meta: &mut DispatchMeta,
     ) -> CountSeatOutcome {
         let provider = match target.provider.clone() {
@@ -348,6 +404,15 @@ impl Router {
         let now_admit = Instant::now();
         let mut replay_plan = self.plan_replay_carry(&target, &mut attempt_req, meta, now_admit);
         let mut replay_repair_attempted = false;
+        // Envelope-field carry admission at the SAME position: the closed
+        // table plus this attempt's own fields decide the identity, so the
+        // guard is claimed before dispatch and both settlements stay reachable
+        // (commit on a repaired success, clear when the field is accepted).
+        // Nothing is mutated here -- an acting verdict simply refuses the slot
+        // and the attempt dispatches unchanged.
+        let mut field_plan = self.plan_field_carry(&target, &attempt_req, mode, now_admit);
+        let mut field_repair_attempted = false;
+        let mut field_reject_status: u16 = 0;
 
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
@@ -385,20 +450,57 @@ impl Router {
                     // holds and leaves any resident entry exactly as it was.
                     //
                     // Deliberately NOT the two-phase settle the messages walks
-                    // run. `commit` / `settle_success` mutate the shared
-                    // learned registry AND return rows the caller is expected
-                    // to drain onto its dispatch meta -- and this walk's meta
-                    // is request-local with no ledger sink behind it, so those
-                    // rows would be produced and dropped. A registry mutation
-                    // whose event row never reaches the ledger is exactly the
-                    // state a warm rebuild resurrects from, i.e. a persistence
-                    // bug rather than a missing feature. So this walk learns
-                    // nothing until the settlement has a real sink; the
-                    // degradation summary below stays honest by claiming the
-                    // repair happened and NOT claiming anything was learned.
+                    // run, and the reason is REACHABILITY, not a missing sink: a
+                    // settling caller of this walk does drain its meta (the
+                    // field carry below settles through exactly that path). What
+                    // stops this one is that no seat this walk admits can
+                    // produce the replay-rejection class at all, so the carry
+                    // here is never the optimistic probe the two-phase learn
+                    // exists to settle -- committing off it would persist a
+                    // conclusion nothing tested. The degradation summary stays
+                    // honest by recording that the repair happened and claiming
+                    // nothing was learned.
                     drop(replay_plan.take());
                     if replay_repair_attempted && let Some(deg) = meta.replay_degradation.as_mut() {
                         deg.repair_succeeded = true;
+                    }
+                    // Settle the envelope-field carry through the two-phase
+                    // guard. Unlike the replay carry above, this class IS
+                    // reachable from a capable seat, so the carry really is the
+                    // optimistic probe the two-phase learn settles. Both
+                    // settlements are no-ops unless the plan holds a guard,
+                    // which only a SETTLING entry point admits -- so a
+                    // result-only caller reaches this code and persists nothing,
+                    // while a with-meta caller's row reaches the
+                    // capability-event ledger and a warm rebuild sees the same
+                    // outcome this process reached:
+                    //
+                    // - repaired success -> commit the verdict (the rejection
+                    //   is confirmed as a real field incompatibility);
+                    // - unrepaired success -> the field is ACCEPTED, so clear
+                    //   any resident verdict and ride the clear out, or a warm
+                    //   rebuild would resurrect a verdict this request
+                    //   disproved.
+                    if let Some(plan) = field_plan.take() {
+                        if field_repair_attempted {
+                            let features = derive_feature_keys(
+                                req.tools.as_deref().unwrap_or(&[]),
+                                req.provider_extras.as_ref(),
+                                req.response_format.as_ref(),
+                            );
+                            // The `learned` claim is derived from what the commit
+                            // actually PERSISTED, never asserted alongside it: a
+                            // non-settling plan commits nothing, and a summary that
+                            // claimed otherwise would be a false persistence claim on
+                            // the surface built to make such claims trustworthy.
+                            let learned =
+                                plan.commit(field_reject_status, features, Instant::now());
+                            let persisted = learned.is_some();
+                            meta.learned_capabilities.extend(learned);
+                            self.note_field_repair_succeeded(meta, persisted);
+                        } else {
+                            meta.cleared_capabilities.extend(plan.settle_success());
+                        }
                     }
                     return CountSeatOutcome::Count(tc);
                 }
@@ -415,6 +517,10 @@ impl Router {
                         }
                         None => classify(&e, target.provider_kind),
                     };
+                    // Retained before the remap: the field-repair arm below
+                    // reads what the UPSTREAM said, while routing reads the
+                    // operator's override (see that arm).
+                    let original_class = native_cf.class.clone();
                     let (cf, remapped) = apply_remap(
                         native_cf,
                         upstream_status_for_remap(&e),
@@ -483,7 +589,6 @@ impl Router {
                     // request that never repairs is never charged and an
                     // exhausted request budget leaves the rejection on the
                     // ordinary settle path below.
-                    // count_tokens_strip_repair_arm
                     if !replay_repair_attempted
                         && let Some(plan) = replay_plan.as_ref()
                         && Self::is_replay_rejection_class(&cf.class)
@@ -503,6 +608,45 @@ impl Router {
                             learned: false,
                         });
                         strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
+                        self.release_probe_slot(&target.state_key);
+                        probe_guard.disarm();
+                        continue;
+                    }
+
+                    // Envelope-field L0 repair, at the SAME dispatch position
+                    // the replay repair occupies: after auth recovery, before
+                    // the capability and health settles. On a rejection naming
+                    // the carried field, DROP that field from this seat's
+                    // attempt request and re-dispatch it once. Because the loop
+                    // dispatches `attempt_req`, the repaired body is the one
+                    // sent upstream and the one whose count is returned.
+                    //
+                    // The class read here is the NATIVE one, never the remapped
+                    // `cf.class`: an operator `[class_overrides]` entry says how
+                    // a status should be ROUTED, not what the upstream said, so
+                    // reading it would let an override turn a 429 into a field
+                    // repair. Routing below still reads the override.
+                    //
+                    // `apply` owns the budget draw together with the mutation,
+                    // so a drop that removes nothing charges nothing; every
+                    // repaired-state flag is set only on its `Some`. Slot
+                    // handling mirrors the arm above: release the half-open
+                    // probe slot before the `continue` re-gates, and never debit
+                    // the breaker -- a repairable envelope rejection is a
+                    // caller-shaped fault, not this seat's health signal.
+                    if !field_repair_attempted
+                        && let Some(plan) = field_plan.as_ref()
+                        && Self::rejection_names_planned_field(
+                            plan,
+                            &original_class,
+                            &e,
+                            target.provider_kind.unwrap_or(""),
+                        )
+                        && let Some(status) = plan.apply(&mut attempt_req, meta, repair_budget, &e)
+                    {
+                        field_repair_attempted = true;
+                        field_reject_status = status;
+                        self.note_field_repair(meta, &target.state_key, plan.path());
                         self.release_probe_slot(&target.state_key);
                         probe_guard.disarm();
                         continue;
@@ -603,7 +747,3 @@ impl Router {
 #[cfg(test)]
 #[path = "count_tokens_tests.rs"]
 mod count_tokens_tests;
-
-#[cfg(test)]
-#[path = "count_tokens_repair_structure_tests.rs"]
-mod count_tokens_repair_structure_tests;

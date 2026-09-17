@@ -1,4 +1,4 @@
-use super::{CacheCapability, Config, ProviderEntry, ReductionConfig};
+use super::{CacheCapability, Config, ProviderEntry, ReductionConfig, default_anthropic_base};
 #[cfg(feature = "gemini")]
 use routectl_providers::gemini::GeminiAuthMode;
 
@@ -661,6 +661,107 @@ api_key_ref = "literal:sk-ant-test"
 /// An `anthropic-api` entry on a NON-default base_url (an Anthropic-
 /// compatible third party), with no operator override, fails closed:
 /// auto-emit must never break a host that may not honor cache_control.
+/// `anthropic_api_base_url` answers only for a lane whose CONFIGURED base is
+/// the one it will actually egress to. Its caller is the envelope-field mint
+/// suppression, so a wrong answer here is a permanent verdict minted against
+/// the wrong upstream.
+#[test]
+fn anthropic_api_base_url_reports_a_plain_entrys_configured_base() {
+    // The positive control: a plain direct-to-Anthropic entry DOES answer, so
+    // the refusals below are about their sub-lanes rather than about an accessor
+    // that never answers.
+    let toml_text = r#"
+[providers.direct]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-test"
+"#;
+    let cfg: Config = toml::from_str(toml_text).expect("parse direct anthropic");
+    let entry = cfg.providers.get("direct").expect("direct provider");
+    assert_eq!(
+        entry.anthropic_api_base_url(),
+        Some(default_anthropic_base().as_str()),
+        "a plain anthropic-api entry egresses to its configured base, so it is reportable",
+    );
+}
+
+#[test]
+fn anthropic_api_base_url_reports_a_plain_entrys_custom_base() {
+    // A custom remote base is still the effective egress, so it is reportable
+    // too -- a remote mirror's rejections ARE attributable to it. Included so
+    // the mantle refusal cannot be mistaken for "anything non-default refuses".
+    let toml_text = r#"
+[providers.mirror]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-test"
+base_url = "https://api.example.com/anthropic"
+"#;
+    let cfg: Config = toml::from_str(toml_text).expect("parse custom base");
+    let entry = cfg.providers.get("mirror").expect("mirror provider");
+    assert_eq!(
+        entry.anthropic_api_base_url(),
+        Some("https://api.example.com/anthropic"),
+        "a custom REMOTE base is the effective egress and stays reportable",
+    );
+}
+
+#[cfg(feature = "bedrock")]
+#[test]
+fn anthropic_api_base_url_refuses_the_bedrock_mantle_sub_lane() {
+    // The case a bare variant match gets wrong. Mantle validation REQUIRES
+    // `base_url` at its default, and the factory derives the real endpoint from
+    // the region -- so the configured value is not the effective egress, and
+    // reporting it would classify a Bedrock upstream as a remote Anthropic one.
+    let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+api_key_ref = ""
+
+[providers.mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.mantle.bedrock_mantle.creds]
+kind = "bearer-key"
+key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+"#;
+    let cfg: Config = toml::from_str(toml_text).expect("parse mantle lane");
+    let entry = cfg.providers.get("mantle").expect("mantle provider");
+    // Premise: the entry really does carry the default base, so the refusal
+    // cannot be passing because the base was empty or odd.
+    assert!(
+        matches!(
+            entry,
+            ProviderEntry::AnthropicApi { base_url, .. } if base_url == &default_anthropic_base()
+        ),
+        "premise: a mantle entry keeps the DEFAULT anthropic base, which is exactly why a bare \
+         variant match would report it as an attributable remote host",
+    );
+    assert_eq!(
+        entry.anthropic_api_base_url(),
+        None,
+        "the mantle sub-lane egresses through Bedrock, which Stage 1 excludes, so its \
+         configured base must not be reported to the mint suppression",
+    );
+}
+
+#[test]
+fn anthropic_api_base_url_refuses_every_other_kind() {
+    let toml_text = r#"
+[providers.compat]
+kind = "openai-compat"
+base_url = "https://api.example.com/v1"
+api_key_ref = "literal:sk-test"
+"#;
+    let cfg: Config = toml::from_str(toml_text).expect("parse openai-compat");
+    assert_eq!(
+        cfg.providers
+            .get("compat")
+            .expect("compat provider")
+            .anthropic_api_base_url(),
+        None,
+        "a lane this stage has captured no rejection envelope for must fail closed",
+    );
+}
+
 #[test]
 fn cache_capability_anthropic_custom_base_fails_closed() {
     let toml_text = r#"

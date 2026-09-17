@@ -15,12 +15,16 @@
 //! nothing and an exhausted budget leaves the ordinary error path
 //! untouched (no breaker debit, no extra upstream call).
 //!
-//! All three walks thread it, but only two can currently be OBSERVED
-//! spending it: the token-count walk's repair arm cannot reach today's only
-//! repair class (its capable provider kinds and the classifier's
-//! fixture-backed kinds are disjoint -- see `count_tokens`), so its share of
-//! this ceiling is covered by threading and source guards until a reachable
-//! repair kind exists.
+//! All three walks thread it, and all three are covered BEHAVIORALLY -- by
+//! two different fixtures, because the two repair kinds differ in which
+//! walks they can reach. The envelope-field kind acts on the lane the
+//! token-count walk admits, so `field_repair_tests` measures the ceiling in
+//! every walk including an N-SEAT token-count test. The reasoning-replay
+//! kind cannot reach that walk (its capable provider kinds and the
+//! classifier's fixture-backed kinds are disjoint -- see `count_tokens`), so
+//! `repair_budget_cross_walk_tests` measures it on the two messages walks
+//! and pins the disjointness rather than asserting a count that would be
+//! zero for an unrelated reason.
 
 /// Reactive repair re-dispatches one client request may spend, summed
 /// across repair kinds and across every target in its fallback chain.
@@ -43,6 +47,20 @@ impl RepairBudget {
         Self {
             remaining: REPAIRS_PER_REQUEST,
         }
+    }
+
+    /// Whether an allowance remains, WITHOUT spending it.
+    ///
+    /// Exists so a repair arm can order its steps as "check, mutate, then
+    /// charge": a caller that must not charge for a mutation it failed to make
+    /// cannot use [`Self::draw`] as its gate, because a draw it then abandons
+    /// is a charge for a repair the wire never saw. Pairing this read with a
+    /// later draw keeps the check cheap and the charge truthful.
+    ///
+    /// Read-only, so nothing about it can be forgotten or double-counted; the
+    /// draw remains the only mutating operation.
+    pub(super) const fn can_draw(&self) -> bool {
+        self.remaining > 0
     }
 
     /// Spend one repair, or refuse when the request's allowance is gone.

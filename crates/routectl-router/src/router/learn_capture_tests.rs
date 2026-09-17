@@ -1121,6 +1121,260 @@ fn f2_all_gates_pass_mints_a_phase_f2_negative() {
 }
 
 #[test]
+fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_pause() {
+    // Arrange -- a mint-eligible F1 rejection, plus a hook that runs a sibling
+    // observation on the SAME (state_key, feature, provider) after this
+    // commit's own guarded observe has returned but before it builds its
+    // emitted event.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+    let sibling_registry = Arc::clone(&router.learned_capabilities);
+    let state_key = target.state_key.clone();
+    let generation = router.registry_generation();
+    router
+        .learned_capabilities
+        .set_post_observe_test_hook(Box::new({
+            let state_key = state_key.clone();
+            move || {
+                let _ = sibling_registry.observe_in_generation_with_observations(
+                    generation,
+                    &state_key,
+                    "web_search",
+                    "anthropic-api",
+                    SignalTier::SelfIdentifying,
+                    FailurePhase::F1,
+                    EvidenceSource::Live,
+                    None,
+                    Instant::now(),
+                );
+            }
+        }));
+
+    // Act
+    router.commit_learned_observation(
+        (
+            "web_search".to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ),
+        &FailureClass::BadRequest,
+        &err,
+        400,
+        None,
+        "anthropic-api",
+        &target,
+        &req,
+        false,
+        &mut dedupe,
+        &mut meta,
+        &mut guard,
+    );
+
+    // Assert -- the emitted event keeps its own captured count, while the
+    // resident count reflects the sibling's later bump.
+    assert_eq!(meta.learned_capabilities.len(), 1);
+    assert_eq!(
+        meta.learned_capabilities[0].observations, 1,
+        "the emitted event must retain its own captured count"
+    );
+    let resident = router
+        .learned_capabilities
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == state_key && entry.feature_key == "web_search")
+        .expect("a resident entry after both observations");
+    assert_eq!(
+        resident.observations, 2,
+        "the sibling observation must have bumped the resident count"
+    );
+}
+
+#[test]
+fn a_reserved_refusal_removes_the_dedupe_key_so_a_released_retry_applies() {
+    // Arrange -- a prior, unrelated commit leaves a resident row for the
+    // target capability, then a purge lease reserves that same key so this
+    // request's own observe attempt is refused.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let state_key = target.state_key.clone();
+
+    let mut seed_dedupe = HashSet::new();
+    let mut seed_meta = DispatchMeta::for_alias("m1");
+    let mut seed_guard = LearnedProbeGuard::inert();
+    router.commit_learned_observation(
+        (
+            "web_search".to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ),
+        &FailureClass::BadRequest,
+        &err,
+        400,
+        None,
+        "anthropic-api",
+        &target,
+        &req,
+        false,
+        &mut seed_dedupe,
+        &mut seed_meta,
+        &mut seed_guard,
+    );
+    assert_eq!(
+        seed_meta.learned_capabilities.len(),
+        1,
+        "the seed commit must leave a resident row for the purge to reserve"
+    );
+
+    let lease = match router.learned_capabilities.prepare_purge(
+        router.registry_generation(),
+        &state_key,
+        "web_search",
+        "anthropic-api",
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    // Act -- the request's own attempt hits the lease and is refused.
+    router.commit_learned_observation(
+        (
+            "web_search".to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ),
+        &FailureClass::BadRequest,
+        &err,
+        400,
+        None,
+        "anthropic-api",
+        &target,
+        &req,
+        false,
+        &mut dedupe,
+        &mut meta,
+        &mut guard,
+    );
+
+    // Assert -- the refusal emits no event and leaves no dedupe entry behind
+    // to block a retry once the lease clears.
+    assert!(
+        meta.learned_capabilities.is_empty(),
+        "a lease-refused observe must emit no event"
+    );
+    assert!(
+        !dedupe.contains(&LearnDedupeKey::Capability {
+            state_key: state_key.clone(),
+            feature_key: "web_search".to_string(),
+        }),
+        "a refused mutation must not leave the dedupe key installed"
+    );
+
+    router.learned_capabilities.restore_purge(lease);
+
+    // Act -- the SAME request retries the SAME key against the SAME dedupe
+    // set once the lease releases.
+    router.commit_learned_observation(
+        (
+            "web_search".to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ),
+        &FailureClass::BadRequest,
+        &err,
+        400,
+        None,
+        "anthropic-api",
+        &target,
+        &req,
+        false,
+        &mut dedupe,
+        &mut meta,
+        &mut guard,
+    );
+
+    // Assert -- the retry applies and emits its own event.
+    assert_eq!(
+        meta.learned_capabilities.len(),
+        1,
+        "the retry must apply and emit its own event once the lease releases"
+    );
+}
+
+/// Exhaustion control for the same dedupe-on-refusal fix: the incarnation
+/// sequence refuses the mutation before any entry is touched, so this
+/// refusal must ALSO leave no dedupe entry and no resident row behind.
+///
+/// A generation-mismatch (`Stale`) control is not exercised here: the
+/// commit path reads the current registry generation immediately before
+/// calling the guarded observe, so the two can never disagree on this call
+/// path outside of a live cross-thread race, which this synchronous test
+/// cannot construct deterministically.
+#[test]
+fn an_exhausted_refusal_removes_the_dedupe_key_and_leaves_no_resident_row() {
+    // Arrange
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let state_key = target.state_key.clone();
+    router
+        .learned_capabilities
+        .force_incarnation_ceiling_for_tests();
+
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    // Act
+    router.commit_learned_observation(
+        (
+            "web_search".to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ),
+        &FailureClass::BadRequest,
+        &err,
+        400,
+        None,
+        "anthropic-api",
+        &target,
+        &req,
+        false,
+        &mut dedupe,
+        &mut meta,
+        &mut guard,
+    );
+
+    // Assert
+    assert!(
+        meta.learned_capabilities.is_empty(),
+        "an exhausted observe must emit no event"
+    );
+    assert!(
+        !dedupe.contains(&LearnDedupeKey::Capability {
+            state_key: state_key.clone(),
+            feature_key: "web_search".to_string(),
+        }),
+        "an exhausted refusal must not leave the dedupe key installed"
+    );
+    assert!(
+        router.learned_capabilities.snapshot().is_empty(),
+        "an exhausted mutation must leave no resident row"
+    );
+}
+
+#[test]
 fn f2_candidate_with_same_chain_f1_is_suppressed_not_minted() {
     // An F1 negative for `web_search` was already minted earlier in this
     // attempt chain (F1Seen is resident in the dedupe set). A later F2

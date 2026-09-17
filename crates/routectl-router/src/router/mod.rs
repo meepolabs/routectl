@@ -16,8 +16,8 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
-    ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, VolatileKind,
-    failure_class::FailureClass,
+    ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, TokenCount,
+    VolatileKind, failure_class::FailureClass,
 };
 use serde_json::Value;
 
@@ -36,6 +36,7 @@ mod class_observe;
 mod count_tokens;
 mod dispatch;
 mod feature_filter;
+mod field_repair;
 mod overlays;
 mod prefix_rewrite;
 mod repair_budget;
@@ -270,6 +271,21 @@ pub struct Router {
     /// observations must be stamped with the PENDING generation so their events
     /// sort after the boundary rather than being rejected as pre-boundary.
     registry_generation: std::sync::atomic::AtomicU64,
+    /// Envelope-field verdict lifecycle over the SAME `learned_capabilities`
+    /// registry: per-identity single-flight admission, the loopback mint
+    /// suppression, and the two-phase learn the reactive field-repair arm
+    /// drives. Holds only in-flight coordination -- every persisted verdict
+    /// lives in the registry above, so a field verdict carries across a hot
+    /// reload and replays from the ledger on the same terms as any other
+    /// capability key.
+    ///
+    /// Shared across Router generations via the same `Arc` as
+    /// `learned_replay`: an admission outstanding at swap time settles
+    /// through the OLD facade and must release the slot the replacement
+    /// admits from. Settlement goes through the generation-aware registry
+    /// APIs using the generation this Router was published at
+    /// (`registry_generation`), never a freshly sampled one.
+    field_verdicts: Arc<crate::field_verdict::FieldVerdictRegistry>,
     /// Operator capability-override read-model, flattened from config at
     /// construction. Pure projection of `config.capability.overrides` plus
     /// the legacy provider / model `unsupported_features` lists -- no
@@ -515,6 +531,24 @@ struct RouterMetrics {
     /// only signal that a credential change scattered live conversations off
     /// their warm-cache accounts.
     pool_removed_pin_repick_total: AtomicU64,
+    /// Reactive envelope-field repairs that FIRED: an upstream rejection
+    /// named a field in the closed repair table, the attempt carried it, and
+    /// the mapped field was dropped for a same-target re-dispatch. Bumped
+    /// once per repair in every dispatch walk. Zero while no rejection parser
+    /// is grounded, so a nonzero count is itself the signal that the arm has
+    /// become reachable.
+    field_repair_attempted_total: AtomicU64,
+    /// The subset of [`field_repair_attempted_total`](Self::field_repair_attempted_total)
+    /// whose repaired re-dispatch actually succeeded. The pair is what makes
+    /// the arm answerable: a rising attempted count with a flat succeeded
+    /// count means the dropped field was not what the upstream objected to,
+    /// which is a spent budget buying nothing.
+    field_repair_succeeded_total: AtomicU64,
+    /// Envelope-field verdicts persisted after a confirmed repair -- the
+    /// two-phase learn's commits. Never exceeds the succeeded count: a
+    /// suppressed (loopback) target repairs nothing at all, so it cannot
+    /// contribute a success either.
+    field_verdicts_learned_total: AtomicU64,
 }
 
 /// Running quota-placement totals, partitioned by the partition's arms.
@@ -675,6 +709,39 @@ impl RouterMetrics {
 
     fn incr_f3_suspect(&self) {
         self.f3_suspect_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one fired envelope-field repair.
+    fn incr_field_repair_attempted(&self) {
+        self.field_repair_attempted_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one fired repair whose re-dispatch succeeded.
+    fn incr_field_repair_succeeded(&self) {
+        self.field_repair_succeeded_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one envelope-field verdict persisted after a confirmed repair.
+    fn incr_field_verdicts_learned(&self) {
+        self.field_verdicts_learned_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the cumulative fired-field-repair count.
+    fn field_repair_attempted_total(&self) -> u64 {
+        self.field_repair_attempted_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative succeeded-field-repair count.
+    fn field_repair_succeeded_total(&self) -> u64 {
+        self.field_repair_succeeded_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative persisted-field-verdict count.
+    fn field_verdicts_learned_total(&self) -> u64 {
+        self.field_verdicts_learned_total.load(Ordering::Relaxed)
     }
 
     /// Bump the window-gate skip count, returning the new running total so
@@ -898,6 +965,9 @@ impl RouterMetrics {
             rc_feature_naming_unmatched_total = self.feature_naming_unmatched_total(),
             rc_verified_working_total = self.verified_working_total(),
             rc_f3_suspect_total = self.f3_suspect_total(),
+            rc_field_repair_attempted_total = self.field_repair_attempted_total(),
+            rc_field_repair_succeeded_total = self.field_repair_succeeded_total(),
+            rc_field_verdicts_learned_total = self.field_verdicts_learned_total(),
             rc_window_gate_skips_total = self.window_gate_skips_total(),
             rc_context_window_overflow_total = self.context_window_overflow_total(),
             rc_quota_placement_below_cap_total = quota.below_cap,
@@ -938,6 +1008,9 @@ impl RouterMetrics {
             rc_feature_naming_unmatched_total = self.feature_naming_unmatched_total(),
             rc_verified_working_total = self.verified_working_total(),
             rc_f3_suspect_total = self.f3_suspect_total(),
+            rc_field_repair_attempted_total = self.field_repair_attempted_total(),
+            rc_field_repair_succeeded_total = self.field_repair_succeeded_total(),
+            rc_field_verdicts_learned_total = self.field_verdicts_learned_total(),
             rc_window_gate_skips_total = self.window_gate_skips_total(),
             rc_context_window_overflow_total = self.context_window_overflow_total(),
             rc_quota_placement_below_cap_total = quota.below_cap,
@@ -1251,6 +1324,45 @@ pub struct DispatchMeta {
     /// closed-set tokens and counts -- never the artifact bytes, an item
     /// id, a hash, the session key, or the upstream body, at any level.
     pub replay_degradation: Option<ReplayDegradation>,
+    /// Envelope-field repair record for the whole walk. `Some` exactly when
+    /// the reactive L0 field repair fired for this request -- an upstream
+    /// rejection named a field in the closed repair table and the mapped
+    /// field was dropped for a same-target re-dispatch. The single
+    /// aggregated field-repair WARN reads it ONCE at request resolution;
+    /// `None` means no repair fired (no WARN). Carries only closed-set
+    /// tokens, a code-authored field path, and booleans -- never the
+    /// upstream body, the rejected value, or the session key.
+    pub field_repair: Option<FieldRepair>,
+}
+
+/// Closed-set facts about a reactive L0 envelope-field repair that fired
+/// during a walk, aggregated onto [`DispatchMeta`] for the single
+/// per-request WARN.
+///
+/// Every field is a stable token, a code-authored literal, or a boolean:
+/// deliberately NO upstream body, no rejected field VALUE, no session key.
+/// `field_path` is the closed table's own path literal, not text read out of
+/// a rejection, so it cannot carry upstream content into a log line.
+///
+/// `#[non_exhaustive]` so a future repair class can add fields without
+/// breaking downstream construction.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct FieldRepair {
+    /// What the router did (closed token).
+    pub action: &'static str,
+    /// Sanitized `[providers]` state key of the repaired target.
+    pub state_key: String,
+    /// The closed-table qualified dotted path that was repaired.
+    pub field_path: &'static str,
+    /// Why the repair fired (closed token).
+    pub reason: &'static str,
+    /// The repair arm fired.
+    pub repair_attempted: bool,
+    /// The repaired re-dispatch reached success / a first chunk / a count.
+    pub repair_succeeded: bool,
+    /// The confirmed verdict was persisted to the learned registry.
+    pub learned: bool,
 }
 
 /// Closed-set facts about a reasoning-replay strip-repair that fired
@@ -1334,6 +1446,7 @@ impl DispatchMeta {
             capability_observations: Vec::new(),
             cleared_capabilities: Vec::new(),
             replay_degradation: None,
+            field_repair: None,
         }
     }
 
@@ -1393,6 +1506,24 @@ pub struct DispatchedStream {
     pub meta: DispatchMeta,
     /// The streaming dispatch result.
     pub result: Result<BoxStream<'static, Result<ChatChunk>>>,
+}
+
+/// `count_tokens_with_meta` return: the token-count result paired with its
+/// router-scoped [`DispatchMeta`].
+///
+/// The token-count walk needs the same shape the two messages walks have for
+/// one specific reason: its reactive-repair settlement persists a verdict in
+/// the shared learned registry, and the matching event row has to reach the
+/// capability-event ledger. Without a returned meta the row would be produced
+/// and dropped, which is the state a warm rebuild resurrects a cleared
+/// verdict from -- a persistence bug rather than a missing feature.
+///
+/// A fixed two-field pair for the same reason as [`Dispatched`].
+pub struct CountedTokens {
+    /// Router-scoped metadata, valid on both the `Ok` and `Err` arms.
+    pub meta: DispatchMeta,
+    /// The token-count result.
+    pub result: Result<TokenCount>,
 }
 
 /// One hop in the resolved dispatch chain. Built from either a
@@ -1633,6 +1764,9 @@ impl Router {
         let learned_replay = Arc::new(crate::learned_replay::ReplayLearnRegistry::new(Arc::clone(
             &learned_capabilities,
         )));
+        let field_verdicts = Arc::new(crate::field_verdict::FieldVerdictRegistry::new(Arc::clone(
+            &learned_capabilities,
+        )));
         let has_forwarded_provider = config
             .providers
             .values()
@@ -1657,6 +1791,7 @@ impl Router {
             ),
             learned_capabilities,
             learned_replay,
+            field_verdicts,
             override_registry,
             pool_reports: Vec::new(),
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
@@ -2232,6 +2367,14 @@ impl Router {
         self.learned_replay = Arc::new(
             previous
                 .learned_replay
+                .rebuilt_on(Arc::clone(&self.learned_capabilities)),
+        );
+        // Same attach-not-copy discipline as `learned_replay` above: a field
+        // repair outstanding at swap time settles through the OLD facade and
+        // must release the slot the replacement admits from.
+        self.field_verdicts = Arc::new(
+            previous
+                .field_verdicts
                 .rebuilt_on(Arc::clone(&self.learned_capabilities)),
         );
         self.registry_generation =

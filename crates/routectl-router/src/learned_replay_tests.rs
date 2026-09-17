@@ -429,6 +429,339 @@ fn a_live_replay_commit_persists_and_emits() {
     assert_eq!(reg.learned().snapshot().len(), 1);
 }
 
+/// The emitted event's observation count matches the registry's own
+/// resident count at the moment `commit` returns, pinning that the count
+/// rides out of the SAME guarded mutation rather than a later, separately
+/// taken snapshot. A second commit on the same lapsed pair (see
+/// `a_lapsed_carry_hitting_the_same_rejection_refreshes_the_negative` above)
+/// already exercises this across repeated commits; this test additionally
+/// asserts the emitted count against a snapshot taken immediately after
+/// settlement, so a regression that decoupled the two (e.g. reverting to a
+/// second, unguarded `snapshot()` lookup) has an assertion that can fail on
+/// its own.
+#[test]
+fn the_emitted_observation_count_matches_the_registrys_resident_count() {
+    // Arrange
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits");
+
+    // Act
+    let event = guard
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+
+    // Assert
+    let resident = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.lane_key() && entry.feature_key == k.capability_key())
+        .expect("the commit left a resident row");
+    assert_eq!(event.observations, resident.observations);
+}
+
+/// A commit's emitted event carries the count ITS OWN guarded observe
+/// captured, even when a sibling observation lands on the same pair after
+/// that observe returns but before the event is built. Exercised via a
+/// test-only hook fired from exactly that point -- lock-free by then, so
+/// the sibling mutation runs synchronously inline rather than needing a
+/// spawned thread.
+#[test]
+fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_pause() {
+    // Arrange
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits");
+    let sibling_reg = Arc::clone(&reg);
+    let generation = reg.learned().generation();
+    let lane_key = k.lane_key().to_string();
+    let capability_key = k.capability_key().to_string();
+    reg.learned().set_post_observe_test_hook(Box::new(move || {
+        let _ = sibling_reg
+            .learned()
+            .observe_in_generation_with_observations(
+                generation,
+                &lane_key,
+                &capability_key,
+                PROVIDER,
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+                EvidenceSource::Live,
+                None,
+                t0,
+            );
+    }));
+
+    // Act
+    let event = guard
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+
+    // Assert -- the emitted event keeps its own captured count, while the
+    // resident count reflects the sibling's later bump.
+    assert_eq!(
+        event.observations, 1,
+        "the emitted event must retain its own captured count"
+    );
+    let resident = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.lane_key() && entry.feature_key == k.capability_key())
+        .expect("a resident entry after both observations");
+    assert_eq!(
+        resident.observations, 2,
+        "the sibling observation must have bumped the resident count"
+    );
+}
+
+/// A purge lease taken on the pair's key blocks a concurrent commit: the
+/// commit is refused, the leased row is left untouched, and the in-flight
+/// slot is still released so the same pair can admit again once the lease
+/// clears.
+#[test]
+fn a_purge_lease_blocks_a_concurrent_replay_commit_and_leaves_the_entry_untouched() {
+    // Arrange -- a prior successful commit leaves a resident row for the
+    // purge to capture, then lapses so a second carry may admit.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let _ = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits")
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+    let before = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.lane_key() && entry.feature_key == k.capability_key())
+        .expect("the commit left a resident row");
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t_lapsed)
+        .admitted()
+        .expect("a lapsed pair admits one carry");
+    let lease = match reg.learned().prepare_purge(
+        reg.learned().generation(),
+        k.lane_key(),
+        k.capability_key(),
+        PROVIDER,
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    // Act
+    let outcome = guard.commit(400, vec![], t_lapsed);
+
+    // Assert -- refused, and the leased row is untouched.
+    assert!(
+        outcome.is_none(),
+        "a commit racing a purge lease must emit no event",
+    );
+    let after = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.lane_key() && entry.feature_key == k.capability_key())
+        .expect("the leased row is left resident, not removed");
+    assert_eq!(
+        before.observations, after.observations,
+        "a refused commit must not mutate the leased entry",
+    );
+
+    reg.learned().restore_purge(lease);
+
+    // The commit's refusal arm must have released the in-flight slot: the
+    // same lapsed pair admits again once the lease is gone.
+    assert!(
+        reg.admit_provisional(&k, reg.learned().generation(), t_lapsed)
+            .admitted()
+            .is_some(),
+        "the same lapsed pair must admit again once the purge lease is released",
+    );
+}
+
+/// A commit refused by a held purge lease emits its OWN distinct debug
+/// event, not the generic stale one -- Reserved and Stale name different
+/// truths and must not share a diagnostic.
+#[test]
+fn a_reserved_replay_commit_emits_its_own_debug_event() {
+    // Arrange -- a resident row for the lease to capture, then a lapsed
+    // second carry racing that lease.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let _ = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits")
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t_lapsed)
+        .admitted()
+        .expect("a lapsed pair admits one carry");
+    let lease = match reg.learned().prepare_purge(
+        reg.learned().generation(),
+        k.lane_key(),
+        k.capability_key(),
+        PROVIDER,
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let _ = guard.commit(400, vec![], t_lapsed);
+    });
+
+    // Assert
+    let reserved: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("event") == Some("replay_learn_reserved"))
+        .collect();
+    assert_eq!(
+        reserved.len(),
+        1,
+        "exactly one reserved-refusal debug event"
+    );
+
+    reg.learned().restore_purge(lease);
+}
+
+/// A commit refused because the incarnation sequence is exhausted emits its
+/// own distinct debug event.
+#[test]
+fn an_exhausted_replay_commit_emits_its_own_debug_event() {
+    // Arrange
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits");
+    reg.learned().force_incarnation_ceiling_for_tests();
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let _ = guard.commit(400, vec![], t0);
+    });
+
+    // Assert
+    let exhausted: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("event") == Some("replay_learn_exhausted"))
+        .collect();
+    assert_eq!(
+        exhausted.len(),
+        1,
+        "exactly one exhaustion-refusal debug event"
+    );
+}
+
+/// A clear refused by a held purge lease emits its own distinct debug
+/// event.
+#[test]
+fn a_reserved_replay_clear_emits_its_own_debug_event() {
+    // Arrange -- a lapsed resident row, then a second carry admitted and a
+    // purge lease taken on the same key before the first guard clears.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let _ = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits")
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t_lapsed)
+        .admitted()
+        .expect("a lapsed pair admits one carry");
+    let lease = match reg.learned().prepare_purge(
+        reg.learned().generation(),
+        k.lane_key(),
+        k.capability_key(),
+        PROVIDER,
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let _ = guard.clear();
+    });
+
+    // Assert
+    let reserved: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("event") == Some("replay_clear_reserved"))
+        .collect();
+    assert_eq!(
+        reserved.len(),
+        1,
+        "exactly one reserved-refusal debug event"
+    );
+
+    reg.learned().restore_purge(lease);
+}
+
+/// A clear refused because the incarnation sequence is exhausted emits its
+/// own distinct debug event.
+#[test]
+fn an_exhausted_replay_clear_emits_its_own_debug_event() {
+    // Arrange -- a resident row, lapsed, then a carry admitted for the
+    // clear itself.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("lane-a");
+    let _ = reg
+        .admit_provisional(&k, reg.learned().generation(), t0)
+        .admitted()
+        .expect("unknown pair admits")
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+    let guard = reg
+        .admit_provisional(&k, reg.learned().generation(), t_lapsed)
+        .admitted()
+        .expect("a lapsed pair admits one carry");
+    reg.learned().force_incarnation_ceiling_for_tests();
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let _ = guard.clear();
+    });
+
+    // Assert
+    let exhausted: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("event") == Some("replay_clear_exhausted"))
+        .collect();
+    assert_eq!(
+        exhausted.len(),
+        1,
+        "exactly one exhaustion-refusal debug event"
+    );
+}
+
 /// A stale CLEAR removes nothing and emits no cleared event.
 #[test]
 fn a_stale_replay_clear_removes_nothing_and_emits_nothing() {

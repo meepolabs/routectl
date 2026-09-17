@@ -2385,6 +2385,86 @@ fn carry_over_learned_from_retunes_the_shared_registry() {
     );
 }
 
+/// The field-verdict facade is rebuilt against the SAME shared registry AND
+/// carries the SAME in-flight set as the outgoing facade -- and a guard held
+/// on the outgoing Router blocks the replacement's admission for that
+/// identity until the guard settles.
+///
+/// A rebuild that forgot this statement (a fresh `FieldVerdictRegistry` built
+/// from scratch, or one missing the `rebuilt_on` carry) would leave the
+/// replacement admitting a second, concurrent repair for an identity the old
+/// guard still holds -- exactly the duplicate-repair cost single-flight
+/// exists to prevent.
+#[test]
+fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight() {
+    use crate::field_verdict::FieldVerdictKey;
+    use std::time::{Duration, Instant};
+
+    let mut config = Config::default();
+    config.capability.decay_hours = 1;
+    let config = Arc::new(config);
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    let key = FieldVerdictKey::new("prod-target", "thinking.enabled.display", "anthropic-api")
+        .expect("a qualified path mints a key");
+    let t0 = Instant::now();
+    let guard = before
+        .field_verdicts()
+        .admit_provisional(
+            &key,
+            "https://api.anthropic.com",
+            before.registry_generation(),
+            t0,
+        )
+        .expect("the first admission on the outgoing facade succeeds");
+
+    after.carry_over_learned_from(&before);
+
+    assert!(
+        Arc::ptr_eq(&after.learned_capabilities, &before.learned_capabilities),
+        "the replacement Router must share the outgoing registry Arc",
+    );
+    assert!(
+        after
+            .field_verdicts()
+            .shares_in_flight_with(before.field_verdicts()),
+        "the rebuild must carry the SAME in-flight set as the outgoing facade, \
+         not a copy",
+    );
+
+    assert!(
+        after
+            .field_verdicts()
+            .admit_provisional(
+                &key,
+                "https://api.anthropic.com",
+                after.registry_generation(),
+                t0,
+            )
+            .is_none(),
+        "an outstanding guard on the OLD facade must block the REPLACEMENT's \
+         admission for the same identity",
+    );
+
+    let _ = guard.commit(400, vec![], t0);
+    let t_lapsed = t0 + Duration::from_hours(1) + Duration::from_secs(1);
+
+    assert!(
+        after
+            .field_verdicts()
+            .admit_provisional(
+                &key,
+                "https://api.anthropic.com",
+                after.registry_generation(),
+                t_lapsed,
+            )
+            .is_some(),
+        "once the old guard settles, the replacement facade admits the same \
+         identity",
+    );
+}
+
 /// The Router carries the generation it was published at, and a fresh Router
 /// adopts the shared registry's active generation on attach.
 #[test]

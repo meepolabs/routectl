@@ -40,7 +40,6 @@ use routectl_core::{
     ChatRequest, ReasoningDetail, ReplayScheme, Replayability, is_replayable, scheme_of,
 };
 
-use crate::context_trim::estimate_total_tokens;
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
@@ -119,14 +118,12 @@ impl ReplayCarryPlan<'_> {
 /// actually go upstream. THE dispatch-path entry point for the strip: every
 /// site that mutates a live `attempt_req` goes through here.
 ///
-/// `record_would_trim` stamps `meta.calib_estimated_tokens` once, before the
-/// retry loop, from the request as it stood then. A strip -- proactive
-/// (a resident negative or a peer probe) or on-retry (the strip repair) --
-/// makes the dispatched payload SMALLER than that stamp describes, while the
-/// provider's reported prompt total reflects the smaller payload. Left
-/// uncorrected the evidence ratio comes out too low, and a low correction
-/// factor shrinks a corrected estimate until the window gate admits requests
-/// the static estimate had correctly judged too large.
+/// The re-stamp goes through the shared
+/// `restamp_calibration_estimate`, which every dispatch-path payload
+/// mutation uses and whose doc carries why an uncorrected stamp biases the
+/// calibration evidence. A strip here is either proactive (a resident
+/// negative or a peer probe) or on-retry (the strip repair); both shrink the
+/// dispatched payload, so both re-stamp.
 ///
 /// The re-estimate runs ONLY when the strip actually removed something, so
 /// the overwhelming majority of dispatches -- which carry no artifact the
@@ -141,7 +138,7 @@ pub(super) fn strip_replay_artifacts_recalibrating(
     if !strip_replay_artifacts(attempt_req, lane) {
         return false;
     }
-    meta.calib_estimated_tokens = Some(estimate_total_tokens(attempt_req));
+    super::dispatch::restamp_calibration_estimate(attempt_req, meta);
     true
 }
 

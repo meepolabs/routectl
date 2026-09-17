@@ -57,11 +57,6 @@
 //! them is a normalized key or a closed-set token; nothing in this module's
 //! API can accept a request body.
 
-// The lifecycle is staged ahead of its dispatch caller: the repair action that
-// admits through it lands in a later change, so until then only the tests
-// call in.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -124,29 +119,32 @@ impl FieldVerdictKey {
     }
 
     /// The routing state key this identity is keyed on.
+    ///
+    /// Test-only, like its two siblings below: the dispatch path passes the
+    /// identity whole and never reads a half out of it, so these accessors exist
+    /// for the tests that assert the key's composition. Gated rather than
+    /// blanket-allowed, so a future production reader has to ungate one
+    /// deliberately.
+    #[cfg(test)]
     #[must_use]
     pub fn state_key(&self) -> &str {
         &self.state_key
     }
 
     /// The normalized field capability key this identity is keyed on.
+    /// Test-only -- see [`Self::state_key`].
+    #[cfg(test)]
     #[must_use]
     pub fn capability_key(&self) -> &str {
         &self.capability_key
     }
 
     /// The provider-kind token this identity is keyed on.
+    /// Test-only -- see [`Self::state_key`].
+    #[cfg(test)]
     #[must_use]
     pub fn provider_kind(&self) -> &str {
         &self.provider_kind
-    }
-
-    /// Whether a registry snapshot row names this identity. The registry's own
-    /// row key is `(state_key, normalized feature key)` -- the provider kind is
-    /// the input that normalization consumed, not a third component -- so the
-    /// comparison is over exactly those two halves.
-    fn matches_registry_row(&self, state_key: &str, feature_key: &str) -> bool {
-        self.state_key == state_key && self.capability_key == feature_key
     }
 }
 
@@ -356,10 +354,11 @@ impl FieldRepairGuard<'_> {
     /// `request_features` is the request's derived in-flight feature set; no
     /// request body can enter the row.
     #[must_use]
-    /// `None` only if the shared generation API reports the operation stale, in
-    /// which case the slot is released, nothing is recorded, and no event rides
-    /// out -- the caller must never emit a learn row for a verdict it did not
-    /// persist.
+    /// `None` covers any refused guarded mutation reported by the shared
+    /// generation API -- Stale, Reserved, or Exhausted, not stale alone. In
+    /// every case the slot is released, nothing is recorded, and no event
+    /// rides out -- the caller must never emit a learn row for a verdict it
+    /// did not persist.
     ///
     /// For a valid `field:` key that arm is DEFENSIVE rather than expected: the
     /// key class is catalog-independent, so the barrier admits it from any
@@ -377,45 +376,70 @@ impl FieldRepairGuard<'_> {
         let key = self.key.clone();
         // Through the generation barrier with the admission's own generation.
         // The persistence_generation comes from the Applied outcome, atomically
-        // paired with the mutation it describes.
-        let observed = self.registry.learned.observe_in_generation(
-            self.generation,
-            &key.state_key,
-            &key.capability_key,
-            &key.provider_kind,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
-            now,
-        );
-        let crate::learned_capability::GenerationOutcome::Applied {
-            generation: persistence_generation,
-            incarnation,
-            ..
-        } = observed
-        else {
-            self.registry.release_slot(&key);
-            tracing::debug!(
-                event = "field_verdict_stale",
-                state_key = %key.state_key,
-                capability_key = %key.capability_key,
-                "field-verdict commit refused: its admission predates the live \
-                 capability generation"
-            );
-            return None;
-        };
-        let observations = self
+        // paired with the mutation it describes. `observations` rides out of
+        // the SAME critical section the mutation ran under, via
+        // `observe_in_generation_with_observations`, rather than a second,
+        // unguarded `snapshot()` call after the guard releases -- a
+        // concurrent purge or sibling mutation between those two calls could
+        // otherwise report a count this mutation never produced.
+        let observed = self
             .registry
             .learned
-            .snapshot()
-            .into_iter()
-            .find(|entry| key.matches_registry_row(&entry.state_key, &entry.feature_key))
-            .map_or(0, |entry| entry.observations);
+            .observe_in_generation_with_observations(
+                self.generation,
+                &key.state_key,
+                &key.capability_key,
+                &key.provider_kind,
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+                EvidenceSource::Live,
+                None,
+                now,
+            );
+        let (observations, persistence_generation, incarnation) = match observed {
+            crate::learned_capability::GenerationOutcome::Applied {
+                value: (_, observations),
+                incarnation,
+                generation,
+            } => (observations, generation, incarnation),
+            crate::learned_capability::GenerationOutcome::Stale => {
+                self.registry.release_slot(&key);
+                tracing::debug!(
+                    event = "field_verdict_commit_stale",
+                    state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                    capability_key = %key.capability_key,
+                    "field-verdict commit refused: its admission predates the live \
+                     capability generation"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Reserved => {
+                self.registry.release_slot(&key);
+                tracing::debug!(
+                    event = "field_verdict_commit_reserved",
+                    state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                    capability_key = %key.capability_key,
+                    "field-verdict commit refused: an operator purge holds this \
+                     key's lease"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Exhausted => {
+                self.registry.release_slot(&key);
+                tracing::debug!(
+                    event = "field_verdict_commit_exhausted",
+                    state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                    capability_key = %key.capability_key,
+                    "field-verdict commit refused: the incarnation sequence is \
+                     exhausted"
+                );
+                return None;
+            }
+        };
         self.registry.release_slot(&key);
         tracing::info!(
             event = "field_verdict_commit",
-            state_key = %key.state_key,
+            state_key = %routectl_core::sanitize_for_log(&key.state_key),
             capability_key = %key.capability_key,
             upstream_status,
             observations,
@@ -446,9 +470,11 @@ impl FieldRepairGuard<'_> {
     /// that had no resident entry clears nothing and returns `None`, and the
     /// event's stamp comes from the removal's own `Applied` outcome.
     ///
-    /// A `Stale` removal is likewise inert and returns `None`. As with `commit`,
-    /// that arm is DEFENSIVE generic-API handling rather than expected `field:`
-    /// behavior: a catalog-independent key is admitted from any generation.
+    /// A `Stale`, `Reserved`, or `Exhausted` removal is likewise inert and
+    /// returns `None`, each logged with a diagnostic naming its own refusal
+    /// rather than a generic one. As with `commit`, this is DEFENSIVE
+    /// generic-API handling rather than expected `field:` behavior: a
+    /// catalog-independent key is admitted from any generation.
     pub fn clear(mut self) -> Option<CapabilityClearedEvent> {
         self.settled = true;
         let removed = self.registry.learned.remove_keyed_in_generation(
@@ -457,21 +483,56 @@ impl FieldRepairGuard<'_> {
             &self.key.capability_key,
             &self.key.provider_kind,
         );
-        // A lease-refused or stale removal clears nothing and emits nothing: both
-        // are refusals, so neither may produce an event.
-        let Some(applied) = removed.applied() else {
-            self.registry.release_slot(&self.key);
-            return None;
+        // A lease-refused, stale, or exhausted removal clears nothing and
+        // emits nothing: all three are refusals, so none may produce an
+        // event.
+        let (cleared, persistence_generation, incarnation) = match removed {
+            crate::learned_capability::GenerationOutcome::Applied {
+                value,
+                incarnation,
+                generation,
+            } => (value, generation, incarnation),
+            crate::learned_capability::GenerationOutcome::Stale => {
+                self.registry.release_slot(&self.key);
+                tracing::debug!(
+                    event = "field_verdict_clear_stale",
+                    state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+                    capability_key = %self.key.capability_key,
+                    "field-verdict clear refused: its admission predates the live \
+                     capability generation"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Reserved => {
+                self.registry.release_slot(&self.key);
+                tracing::debug!(
+                    event = "field_verdict_clear_reserved",
+                    state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+                    capability_key = %self.key.capability_key,
+                    "field-verdict clear refused: an operator purge holds this \
+                     key's lease"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Exhausted => {
+                self.registry.release_slot(&self.key);
+                tracing::debug!(
+                    event = "field_verdict_clear_exhausted",
+                    state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+                    capability_key = %self.key.capability_key,
+                    "field-verdict clear refused: the incarnation sequence is \
+                     exhausted"
+                );
+                return None;
+            }
         };
-        let (cleared, persistence_generation, incarnation) =
-            (applied.value, applied.generation, applied.incarnation);
         self.registry.release_slot(&self.key);
         if !cleared {
             return None;
         }
         tracing::info!(
             event = "field_verdict_clear",
-            state_key = %self.key.state_key,
+            state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
             capability_key = %self.key.capability_key,
             "envelope-field verdict cleared by an accepted request",
         );
@@ -487,8 +548,14 @@ impl FieldRepairGuard<'_> {
     /// Settle WITHOUT learning: the repair failed, or the request hit an error
     /// unrelated to the field. Any resident entry is left exactly as it was,
     /// so the next request re-verifies rather than inheriting a conclusion
-    /// nothing proved. The dispatch path reaches this same no-learn settlement
-    /// by dropping an unsettled guard (see [`Drop`]).
+    /// nothing proved.
+    ///
+    /// Test-only as an explicit CALL, because the dispatch path reaches this
+    /// exact settlement by dropping an unsettled guard (see [`Drop`]) rather
+    /// than by naming it -- which is what makes an early return, a `?`, or a
+    /// client disconnect settle correctly without a call site to forget. The
+    /// tests call it directly to pin that the explicit and implicit paths agree.
+    #[cfg(test)]
     pub fn release(mut self) {
         self.settled = true;
         self.registry.release_slot(&self.key);
