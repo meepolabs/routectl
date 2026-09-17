@@ -110,11 +110,7 @@ impl Router {
         let Some(provider_kind) = target.provider_kind else {
             return;
         };
-        let request_features = crate::feature_keys::derive_feature_keys(
-            req.tools.as_deref().unwrap_or(&[]),
-            req.provider_extras.as_ref(),
-            req.response_format.as_ref(),
-        );
+        let request_features = super::field_repair::request_feature_keys(req);
         let ctx = detector_context(req, &request_features);
         let observations = capability_detect::detect(&ctx, resp);
         if observations.is_empty() {
@@ -251,9 +247,10 @@ const fn direction_token(direction: ObservationDirection) -> &'static str {
 }
 
 /// Build the per-capability [`DetectorContext`] from the request. Strict
-/// output rides the same `derive_feature_keys` membership the act side uses;
-/// the schema keys, forced-search directive, reasoning intent, and cache
-/// markers are bounded, syntactic reads of the request in hand.
+/// output rides the same `super::field_repair::request_feature_keys`
+/// catalog+field membership the act side uses; the schema keys,
+/// forced-search directive, reasoning intent, and cache markers are bounded,
+/// syntactic reads of the request in hand.
 fn detector_context(req: &ChatRequest, request_features: &[String]) -> DetectorContext {
     let has_web_search = request_features.iter().any(|k| k == WEB_SEARCH);
     DetectorContext {

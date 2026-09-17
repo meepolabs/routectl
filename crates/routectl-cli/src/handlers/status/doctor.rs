@@ -28,6 +28,8 @@ use routectl_core::failure_class::LastOutcome;
 use routectl_router::DoctorReport;
 use routectl_router::router::RouteTargetStatus;
 
+use super::field_verdict_log::log_field_verdict_snapshot;
+use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
@@ -76,6 +78,24 @@ fn map_reachability(target: RouteTargetStatus) -> TargetReachability {
     }
 }
 
+/// Fold the gathered no-network report and the pinned router snapshot into
+/// the panel data, emitting the shared field-verdict snapshot log along the
+/// way. Split out from [`build_from_path`] so the wiring is directly
+/// testable without going through the `spawn_blocking` builder.
+fn build_panel_data(report: DoctorReport, view: &StatusRouterView) -> DoctorPanel {
+    let learned = view.learned_capabilities();
+    log_field_verdict_snapshot(view, &learned);
+    let reachability = view
+        .route_targets(Instant::now())
+        .into_iter()
+        .map(map_reachability)
+        .collect();
+    DoctorPanel {
+        report,
+        reachability,
+    }
+}
+
 /// Build the panel from an on-disk config path. The gather runs inside the
 /// `spawn_blocking` builder (via a runtime handle) so its disk I/O never blocks
 /// an async worker; reachability is read from the SAME live router snapshot
@@ -92,20 +112,9 @@ async fn build_from_path(state: &StatusState, config_path: PathBuf) -> Panel<Doc
         move || {
             let ctx = handle.block_on(gather_context_no_network(&config_path));
             let report = build_report_no_network(&ctx);
-            let reachability = view
-                .route_targets(Instant::now())
-                .into_iter()
-                .map(map_reachability)
-                .collect();
             let schema_version = report.schema_version;
-            Panel::available(
-                schema_version,
-                as_of,
-                DoctorPanel {
-                    report,
-                    reachability,
-                },
-            )
+            let data = build_panel_data(report, &view);
+            Panel::available(schema_version, as_of, data)
         },
     )
     .await
@@ -210,6 +219,38 @@ mod tests {
         assert!(
             !production.contains(concat!("section", "_probe(")),
             "doctor panel must not render the probe section"
+        );
+    }
+
+    /// `build_panel_data` wires the shared field-verdict snapshot log into
+    /// the doctor build path -- the log's own behavior is pinned by
+    /// `field_verdict_log`'s tests; this pins only that the doctor build
+    /// actually calls it. Exercised directly rather than through
+    /// `build_from_path`: that entry point always runs its build inside
+    /// `guard_panel`'s `spawn_blocking`, a thread `capture_events` cannot see.
+    #[tokio::test]
+    async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+        )
+        .unwrap();
+        let state = state_with_config(Some(config_path.clone()));
+        let view = state.router.view();
+        let ctx = gather_context_no_network(&config_path).await;
+        let report = build_report_no_network(&ctx);
+
+        let events = routectl_testkit::capture_events(|| {
+            build_panel_data(report, &view);
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message == "envelope field verdict snapshot"),
+            "doctor panel build must emit the field verdict snapshot log"
         );
     }
 

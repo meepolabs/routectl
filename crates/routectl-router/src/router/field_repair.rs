@@ -175,6 +175,45 @@ fn closed_table_row(path: &str) -> Option<(&'static str, FieldSurface)> {
         .find_map(|&(known, surface)| (known == path).then_some((known, surface)))
 }
 
+/// The request-side field-verdict feature keys `req` currently grounds.
+///
+/// Widens the chain's feature-key vocabulary with the ONE grounded
+/// `field:<path>` key the closed table can mint today, so an acting field
+/// verdict participates in the existing stable partition
+/// ([`super::feature_filter::filter_chain_by_features`]) the same way a
+/// catalog capability does, through the same table and the same
+/// carrier-presence check a repair itself uses -- no second detector, no
+/// duplicated carrier logic. A request grounding no closed-table surface
+/// yields an empty vector, leaving every caller's derived key list exactly
+/// as it was before this function existed.
+pub(super) fn grounded_field_feature_keys(req: &ChatRequest) -> Vec<String> {
+    FIELD_REPAIRS
+        .iter()
+        .filter(|(_, surface)| surface.present_in(req))
+        .filter_map(|(path, _)| crate::field_capability::field_capability_key(path))
+        .collect()
+}
+
+/// The full act-side feature-key vocabulary for `req`: the pure catalog keys
+/// [`crate::feature_keys::derive_feature_keys`] derives, plus the one
+/// grounded field key [`grounded_field_feature_keys`] can mint for it.
+///
+/// This is the widened vocabulary every routing, learn, observe, and count
+/// call site that must treat a catalog capability and a field verdict alike
+/// uses. The diagnostic-only feature-naming-drift path is deliberately NOT
+/// one of those call sites: a field verdict is never a feature-naming-table
+/// candidate, so that diagnostic stays on the bare catalog derivation.
+pub(super) fn request_feature_keys(req: &ChatRequest) -> Vec<String> {
+    crate::feature_keys::derive_feature_keys(
+        req.tools.as_deref().unwrap_or(&[]),
+        req.provider_extras.as_ref(),
+        req.response_format.as_ref(),
+    )
+    .into_iter()
+    .chain(grounded_field_feature_keys(req))
+    .collect()
+}
+
 /// The CLOSED-TABLE path an upstream rejection named, or `None` when this
 /// build can attribute none -- which is EVERY real rejection in this stage.
 ///

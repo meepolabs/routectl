@@ -541,8 +541,9 @@ impl Router {
     /// did not carry a forwarded bearer; the resolver attributes the fault
     /// to a canonical capability; that capability is not the
     /// operator-remap provenance token; and the capability is a member of
-    /// the request's derived feature set (`derive_feature_keys`). The
-    /// resolver keys on the request-capability namespace, so this final
+    /// the request's derived feature set
+    /// (`super::field_repair::request_feature_keys`'s catalog+field
+    /// vocabulary). The resolver keys on the request-capability namespace, so this final
     /// membership check learns a negative ONLY for a capability the request
     /// actually carried -- a misbehaving upstream naming an off-request
     /// param never plants a routing entry.
@@ -645,7 +646,8 @@ impl Router {
         }
         // Request-membership gate: learn a negative ONLY for a capability the
         // request actually carried. `request_features` is the act-side lookup
-        // vocabulary (`derive_feature_keys` output); the resolver now emits
+        // vocabulary (`super::field_repair::request_feature_keys`'s
+        // catalog+field output); the resolver now emits
         // canonical act-side keys, so a genuine rejection is a member by
         // construction -- `response_format` -> `structured_output` for a
         // request whose `output_config.format` was set, and a tool-type
@@ -656,11 +658,7 @@ impl Router {
         // misbehaving upstream cannot plant a routing entry the act side could
         // never look up. This is the gate the original cross-namespace check
         // meant to be: correct now that both sides meet on identical keys.
-        let request_features = crate::feature_keys::derive_feature_keys(
-            req.tools.as_deref().unwrap_or(&[]),
-            req.provider_extras.as_ref(),
-            req.response_format.as_ref(),
-        );
+        let request_features = super::field_repair::request_feature_keys(req);
         if !request_features.contains(&feature_key) {
             return;
         }

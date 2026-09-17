@@ -468,12 +468,7 @@ impl Router {
             &req.model,
             req.routectl_internal.inbound_session_key.as_deref(),
         )?;
-        let tools = req.tools.as_deref().unwrap_or(&[]);
-        let features = crate::feature_keys::derive_feature_keys(
-            tools,
-            req.provider_extras.as_ref(),
-            req.response_format.as_ref(),
-        );
+        let features = super::field_repair::request_feature_keys(req);
         let mut admissions = Vec::new();
         let chain = self.filter_chain_by_features(chain, &features, &req.model, &mut admissions)?;
         // Window pass AFTER the feature filter, never before: "the last

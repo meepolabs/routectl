@@ -16,7 +16,9 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use routectl_router::router::RouteTargetStatus;
-use routectl_router::{EffectiveView, LearnedRegistryEntry, Router, derive_effective_view};
+use routectl_router::{
+    EffectiveView, FieldRepairCounters, LearnedRegistryEntry, Router, derive_effective_view,
+};
 use routectl_usage::{AggRow, RowCost};
 
 use crate::commands::usage::cost_for_row;
@@ -74,10 +76,10 @@ impl QueryPricer {
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is
-/// private, so the only router state a panel can observe is what the three
-/// methods below expose -- route health, learned negatives, and the derived
-/// effective config view (which is computed here so panels never handle raw
-/// `Config`).
+/// private, so the only router state a panel can observe is what the four
+/// methods below expose -- route health, learned negatives, the live
+/// envelope-field repair counters, and the derived effective config view
+/// (which is computed here so panels never handle raw `Config`).
 pub struct StatusRouterView {
     router: Arc<Router>,
 }
@@ -91,6 +93,12 @@ impl StatusRouterView {
     /// The learned-capability registry snapshot for the health panel.
     pub fn learned_capabilities(&self) -> Vec<LearnedRegistryEntry> {
         self.router.learned_capability_snapshot()
+    }
+
+    /// The live process-lifetime envelope-field repair counters, for the
+    /// health panel to log at INFO.
+    pub fn field_repair_counters(&self) -> FieldRepairCounters {
+        self.router.field_repair_counters()
     }
 
     /// The derived effective-config view for the config panel, folding the
@@ -117,16 +125,18 @@ mod tests {
     }
 
     #[test]
-    fn view_exposes_only_the_three_read_methods() {
+    fn view_exposes_only_the_four_read_methods() {
         let handle = handle();
         let view = handle.view();
 
-        // The full read surface: route health, learned negatives, effective
-        // view. If a future edit widens this surface (e.g. exposes `&Router`
-        // or a dispatch method), it lands here in review against a facade
-        // whose contract is these three calls.
+        // The full read surface: route health, learned negatives, live
+        // field-repair counters, effective view. If a future edit widens
+        // this surface (e.g. exposes `&Router` or a dispatch method), it
+        // lands here in review against a facade whose contract is these
+        // four calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _learned: Vec<LearnedRegistryEntry> = view.learned_capabilities();
+        let _counters: FieldRepairCounters = view.field_repair_counters();
         let _effective: EffectiveView = view.effective_view();
     }
 

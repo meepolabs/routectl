@@ -21,6 +21,7 @@ use routectl_router::LearnedRegistryEntry;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 
+use super::field_verdict_log::log_field_verdict_snapshot;
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -188,8 +189,9 @@ fn build_from_view(view: &StatusRouterView) -> HealthPanel {
         .into_iter()
         .map(|target| map_target(target, now_ms))
         .collect();
-    let learned_negatives = view
-        .learned_capabilities()
+    let entries = view.learned_capabilities();
+    log_field_verdict_snapshot(view, &entries);
+    let learned_negatives = entries
         .into_iter()
         .map(|entry| map_learned(entry, now, now_ms))
         .collect();
@@ -612,6 +614,27 @@ mod tests {
         assert!(obj.contains_key(vocabulary::STATE_KEY));
         assert!(obj.contains_key(vocabulary::CAPABILITY_KEY));
         assert!(obj.contains_key(vocabulary::SIGNAL_TIER));
+    }
+
+    /// `build_from_view` wires the shared field-verdict snapshot log into
+    /// its build path -- the log's own behavior (counters, acting filter,
+    /// provenance) is pinned by `field_verdict_log`'s tests; this pins only
+    /// that the health build actually calls it.
+    #[test]
+    fn build_from_view_emits_the_field_verdict_snapshot_log() {
+        let state = test_state();
+        let view = state.router.view();
+
+        let events = routectl_testkit::capture_events(|| {
+            build_from_view(&view);
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message == "envelope field verdict snapshot"),
+            "health panel build must emit the field verdict snapshot log"
+        );
     }
 
     #[test]

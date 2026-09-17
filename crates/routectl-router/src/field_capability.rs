@@ -112,14 +112,6 @@ fn field_capability_path(key: &str) -> Option<&str> {
 /// This is a namespace test, not a validity test: it answers only whether
 /// the key sits inside the field namespace, and never re-checks the
 /// grammar of a key already persisted.
-// Staged ahead of its own callers: the two catalog-invalidation sites that read
-// this predicate are a separate change, and the mint path (which DOES call in
-// now) does not need it. Scoped to this one item rather than the whole module,
-// so nothing else here can go dead unnoticed.
-#[allow(
-    dead_code,
-    reason = "read by the catalog-invalidation sites, which land separately"
-)]
 pub fn capability_key_is_catalog_scoped(key: &str) -> bool {
     field_capability_path(key).is_none()
 }
