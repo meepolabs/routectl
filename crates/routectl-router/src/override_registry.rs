@@ -297,11 +297,29 @@ fn collect_contributions(config: &Config) -> Vec<Contribution> {
     out
 }
 
+/// Split a two-tier target spec (`"provider_name"` or
+/// `"provider_name:nickname"`) into its provider segment and, when present,
+/// its nickname segment.
+///
+/// The split is on the FIRST `:` only: a model nickname may itself contain
+/// `:` (nothing in the `[models]` table or in [`OverrideRegistry::resolve`]
+/// bans it), so everything after the first colon is the nickname, not a
+/// second delimiter. This is the one place that decision is made; both
+/// override extraction ([`provider_of_spec`]) and the `[fidelity]`
+/// `prefix_impact_opt_in` validator call through here so the two stay in
+/// lockstep with how `resolve` itself reads a spec.
+pub fn split_target_spec(spec: &str) -> (&str, Option<&str>) {
+    match spec.split_once(':') {
+        Some((provider, nickname)) => (provider, Some(nickname)),
+        None => (spec, None),
+    }
+}
+
 /// The provider name a two-tier override spec targets: the segment
 /// before the first `:` for a model-scoped spec, or the whole string for
 /// a provider-scoped spec.
 fn provider_of_spec(spec: &str) -> &str {
-    spec.split_once(':').map_or(spec, |(provider, _)| provider)
+    split_target_spec(spec).0
 }
 
 /// Provider kind (`kind_str`) for `provider_name`, or `""` when the

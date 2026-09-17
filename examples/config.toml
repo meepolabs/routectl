@@ -286,6 +286,17 @@ decay_hours           = 48      # how long a learned negative acts before a re-p
 inferred_window_hours = 1       # window for a second observation to confirm an inferred signal
 staleness_hint_days   = 14      # age past which a verified capability reads as stale in diagnostics
 
+# ---- Pre-flight fidelity opt-in (server-wide, dormant by default) ----
+# Opts specific targets into prefix-impacting pre-flight repair and caps
+# per-provider paid-probe calls. Both are empty/zero by default, which
+# permits no paid probes and no prefix-impacting pre-flight action.
+# See docs/CONFIGURATION.md "Fidelity pre-flight opt-in ([fidelity])".
+
+# [fidelity]
+# prefix_impact_opt_in = []      # e.g. ["anthropic", "openrouter:some-model"]
+# [fidelity.paid_probe_daily_caps]
+# anthropic = 0
+
 # ---- Bedrock global filters (operator-owned allowlists) ----
 # Empty list (or section omitted) = pass-through. See
 # examples/bedrock.toml for the empirical baseline (16 betas + 16

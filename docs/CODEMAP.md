@@ -1425,7 +1425,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   is the hot-reloadable kill switch for quota-aware birth placement (off is
   byte-identical to the pre-quota birth chooser for an unpinned session, and
   following `CalibrationConfig` it retains and keeps aging the collected
-  readings). The whole
+  readings); `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
+  Vec<String>` reusing the `[capability.overrides]` two-tier target-spec
+  grammar, `paid_probe_daily_caps: BTreeMap<String, u32>` keyed by provider
+  name only) is fully defaulted (empty list, empty map) with no active
+  runtime behavior yet -- an inert opt-in surface; the re-verification
+  cadence and confirmation quorum it will gate are the code constants
+  `CANARY_INTERVAL` (100) and `PREFIX_QUORUM` (2), never read from the
+  environment. The whole
   `Config` tree derives `schemars::JsonSchema` alongside serde so
   `schema_gen.rs` can render the committed `routectl.schema.json`
   (`class_overrides`, a `BTreeMap<u16, _>`, carries a `#[schemars(with)]`
@@ -1754,7 +1761,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   pools, a non-`oauth://` member (milestone-scoped wording), a pool name held
   by a provider entry or a model nickname, an empty `members`, and more than
   `MAX_POOL_MEMBERS` (32) members; the `[mitm]` validator is deliberately
-  excluded (router-build-specific)
+  excluded (router-build-specific); `validate_fidelity_config` walks
+  `[fidelity] prefix_impact_opt_in` through
+  `validate_prefix_impact_target_spec` (rejects a malformed entry -- empty
+  provider or empty nickname segment, via
+  `override_registry::split_target_spec`'s first-colon-only parse, so a
+  nickname containing `:` is not a second delimiter -- and an entry naming an
+  unknown provider or an unknown model nickname; a bare pool name is
+  rejected as an unknown provider, since a pool is never itself a
+  dispatch's `provider_name`; a nickname-scoped entry whose provider segment
+  differs from the model's own `provider` is accepted, not rejected, when
+  the model's `provider` names a pool and the segment is one of that pool's
+  members -- pool dispatch resolves to a concrete member, which is exactly
+  what reaches capability-override resolution) and `[fidelity]
+  paid_probe_daily_caps` keys (rejects a model-scoped key -- the cap is a
+  provider-only budget -- and a key naming an unknown provider; no pool
+  consideration here, since a paid-probe budget is a concrete-provider
+  property)
 - `src/factory/warnings.rs` -- non-fatal config warnings;
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
   the same surface (never fails): a `class_overrides` remap whose SOURCE
@@ -3274,7 +3297,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   capability)` cell carries contradictory `RouteAway` + `ForceSupported`
   verdicts, naming the cell and both sources; identical duplicates pass.
   `snapshot()` returns rows. The routing consult that reads this model lives
-  in `router.rs`
+  in `router.rs`. `split_target_spec(spec) -> (provider, Option<nickname>)`
+  is the ONE first-colon-only parser for the two-tier grammar (a nickname may
+  itself contain `:`); `provider_of_spec` and
+  `factory::validate::validate_prefix_impact_target_spec` (the `[fidelity]
+  prefix_impact_opt_in` directory-membership check) both delegate to it so
+  the two sites can never read a spec differently
 - `src/capability_display.rs` -- ONE pure read-only display resolver
   `resolve_display_verdict(override_cell, learned, prior) -> DisplayVerdict`
   pinning the within-target precedence `override > learned > verified-working
@@ -5466,8 +5494,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reorders members without changing which credentials are in play, so it is
   not in the set). A coverage-tripwire test walks the schema's
   top-level properties and fails on any unclassified new `Config` section; the
-  `[capability]` section classifies as plain hot-reloadable (neither
-  restart-required nor high-consequence) and `[pools]` as high-consequence
+  `[capability]` and `[fidelity]` sections classify as plain hot-reloadable
+  (neither restart-required nor high-consequence -- `[fidelity]` has no
+  active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by `proxy::metrics::WarnOnce` and

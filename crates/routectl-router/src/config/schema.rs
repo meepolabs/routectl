@@ -423,6 +423,61 @@ impl Default for SeatQuotaConfig {
     }
 }
 
+/// Canary re-verification cadence: every Nth eligible non-streaming
+/// complete request for an acting learned verdict carries the tested
+/// field unrepaired instead of applying the repair. A code constant, not
+/// an operator knob or an environment override -- a re-verification
+/// interval tuned per deployment turns a safety parameter into a support
+/// surface.
+pub const CANARY_INTERVAL: u32 = 100;
+
+/// Confirmed repair-cycle quorum a prefix-impacting transform needs
+/// before it may act pre-flight (in addition to the target's explicit
+/// opt-in below). A code constant for the same reason as
+/// [`CANARY_INTERVAL`].
+pub const PREFIX_QUORUM: u32 = 2;
+
+/// Operator-facing `[fidelity]` config block. Fully defaulted: a missing
+/// `[fidelity]` table deserializes to `FidelityConfig::default()`, which
+/// permits no paid probes and no prefix-impacting pre-flight -- current
+/// behavior is unchanged until the operator opts in.
+///
+/// `prefix_impact_opt_in` reuses the same two-tier target-spec grammar as
+/// `[capability.overrides]`: `"provider_name"` opts in every model on
+/// that provider, `"provider_name:nickname"` opts in a single model. A
+/// prefix-impacting transform still requires the confirmed-repair quorum
+/// ([`PREFIX_QUORUM`]) on top of listing here; this field alone never
+/// makes one act.
+///
+/// `paid_probe_daily_caps` is keyed by provider name only (no model
+/// tier -- the daily budget is a provider-account property, not a
+/// per-model one) and caps the number of paid probe calls issued against
+/// that provider per UTC day. A provider absent from this map, or listed
+/// with the default `0`, permits no paid probe calls; only free
+/// validators may still run for it.
+///
+/// The re-verification cadence and confirmation quorum are code constants
+/// ([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are
+/// hard safety parameters, never read from the environment.
+///
+/// `#[non_exhaustive]` leaves room for later knobs without breaking
+/// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
+/// config-load time instead of silently ignoring it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct FidelityConfig {
+    /// Target specs opted into prefix-impacting pre-flight, using the
+    /// `"provider_name"` / `"provider_name:nickname"` grammar shared with
+    /// `[capability.overrides]`. Default empty -- no target is opted in.
+    #[serde(default)]
+    pub prefix_impact_opt_in: Vec<String>,
+    /// Per-provider paid-probe daily call cap, keyed by provider name. A
+    /// provider absent from this map defaults to `0` (no paid probes).
+    #[serde(default)]
+    pub paid_probe_daily_caps: BTreeMap<String, u32>,
+}
+
 /// Operator-facing `[log]` config block. Each field mirrors a
 /// well-known env var:
 ///
@@ -3177,6 +3232,10 @@ mod calibration_config_tests;
 #[cfg(test)]
 #[path = "seat_quota_config_tests.rs"]
 mod seat_quota_config_tests;
+
+#[cfg(test)]
+#[path = "fidelity_config_tests.rs"]
+mod fidelity_config_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]
