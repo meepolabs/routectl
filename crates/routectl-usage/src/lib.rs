@@ -25,6 +25,10 @@ mod writer;
 pub use capability_batch::{
     BatchCommit, BatchReceipt, CapabilityBatch, handle_over_channel, handle_with_closed_channel,
 };
+// The writer's message type, for the test seams above only: a caller supplying
+// its own channel to `handle_over_channel` has to name what flows over it.
+// `#[doc(hidden)]` because the message vocabulary is this crate's internal
+// sequencing, not a surface for a downstream producer to construct.
 pub use capability_event::{
     CapabilityEvent, insert_capability_event, insert_capability_events_atomic,
 };
@@ -49,4 +53,6 @@ pub use record::{
     UsageRecord,
 };
 pub use schema::SCHEMA_VERSION;
+#[doc(hidden)]
+pub use writer::WriterMessage;
 pub use writer::{CHANNEL_CAPACITY, UsageWriter};

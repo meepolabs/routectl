@@ -182,7 +182,10 @@ fn full_channel_reports_channel_full() {
     let (tx, _rx) = tokio::sync::mpsc::channel::<crate::writer::WriterMessage>(1);
     tx.try_send(crate::writer::WriterMessage::CapabilityEvent(
         CapabilityEvent::tombstone(900, 8, 1),
-        1,
+        crate::writer::EventStamp {
+            generation: 1,
+            incarnation: 0,
+        },
     ))
     .expect("the empty slot accepts one message");
     let handle = UsageHandle::new(
@@ -441,5 +444,293 @@ async fn an_event_older_than_the_committed_generation_is_rejected() {
     assert!(
         capabilities.iter().any(|c| c == "computer_use"),
         "an event at the committed generation must persist: {capabilities:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The per-key purge floor: delayed pre-purge metadata is superseded
+// ---------------------------------------------------------------------------
+
+/// A `cleared` purge row raises that KEY's floor, and an event queued BEFORE the
+/// purge is then dropped.
+///
+/// This is the case a generation cannot catch. A purge and a later relearn of one
+/// key both happen inside a single generation, so a stale event queued before the
+/// purge carries the same generation as the purge itself -- the boundary floor
+/// admits it, and it lands in the ledger AFTER the clear. The next boot then
+/// replays the negative the operator was told was removed.
+#[test]
+fn an_event_queued_before_a_purge_is_dropped_after_the_clear_commits() {
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let key = wire_shape_key("thinking.enabled.display");
+
+    // The purge's clear commits, carrying the incarnation it captured.
+    let cleared = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative("nick", &key)
+    };
+    let outcome = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+    assert!(
+        matches!(outcome, BatchCommit::Committed { .. }),
+        "premise: the clear must commit, since only a committed clear raises a floor",
+    );
+
+    // A pre-purge event now arrives late, carrying an OLDER incarnation and the
+    // same generation the purge ran under.
+    handle.try_send_capability_event_at(negative("nick", &key), 1, 5);
+    drop(handle);
+    writer.shutdown();
+
+    let verdicts: Vec<String> = ledger_rows(&path)
+        .into_iter()
+        .map(|(_, verdict, _)| verdict)
+        .collect();
+    assert_eq!(
+        verdicts,
+        vec!["cleared".to_string()],
+        "the superseded pre-purge event must be dropped: appended after the clear it would \
+         make the next boot replay the negative the operator removed",
+    );
+}
+
+/// An event describing EXACTLY the cleared version is superseded.
+///
+/// The boundary case, and the reason the comparison is `<=` rather than `<`: the
+/// floor IS the incarnation the purge cleared, so an event carrying that same
+/// value describes precisely the version the operator removed. Admitting it would
+/// re-append the cleared negative -- the one row a purge exists to remove.
+#[test]
+fn an_event_at_exactly_the_cleared_incarnation_is_superseded() {
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let key = wire_shape_key("thinking.enabled.display");
+
+    let cleared = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative("nick", &key)
+    };
+    let _ = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+
+    // The SAME incarnation the clear carried.
+    handle.try_send_capability_event_at(negative("nick", &key), 1, 7);
+    drop(handle);
+    writer.shutdown();
+
+    let verdicts: Vec<String> = ledger_rows(&path)
+        .into_iter()
+        .map(|(_, verdict, _)| verdict)
+        .collect();
+    assert_eq!(
+        verdicts,
+        vec!["cleared".to_string()],
+        "an event at exactly the cleared incarnation describes the version the purge removed, \
+         so it must be dropped -- a `<` comparison would re-append it",
+    );
+}
+
+/// A GENUINE post-purge relearn is accepted.
+///
+/// The other half, and the reason the floor compares incarnations rather than
+/// dropping everything for a purged key: a relearn is a fresh observation the
+/// daemon made after the purge, it carries a newly allocated greater incarnation,
+/// and it must persist -- otherwise a purge would permanently blind the daemon to
+/// a capability that really is broken.
+#[test]
+fn a_post_purge_relearn_with_a_greater_incarnation_is_accepted() {
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let key = wire_shape_key("thinking.enabled.display");
+
+    let cleared = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative("nick", &key)
+    };
+    let _ = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+
+    // A relearn AFTER the purge: a greater incarnation, because the registry
+    // allocated it from the same monotonic sequence after the clear.
+    handle.try_send_capability_event_at(negative("nick", &key), 1, 9);
+    drop(handle);
+    writer.shutdown();
+
+    let verdicts: Vec<String> = ledger_rows(&path)
+        .into_iter()
+        .map(|(_, verdict, _)| verdict)
+        .collect();
+    assert_eq!(
+        verdicts,
+        vec!["cleared".to_string(), "broken".to_string()],
+        "a genuine post-purge relearn must persist: dropping it would make one purge blind \
+         the daemon to that capability for the rest of the process",
+    );
+}
+
+/// The floor is PER KEY: purging one key does not suppress another's events.
+#[test]
+fn a_purge_floor_does_not_suppress_a_different_key() {
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let purged = wire_shape_key("thinking.enabled.display");
+    let other = wire_shape_key("thinking.budget_tokens");
+
+    let cleared = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative("nick", &purged)
+    };
+    let _ = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+
+    // An OLDER-incarnation event on a DIFFERENT key: nothing about the purge of
+    // one key says anything about another's truth.
+    handle.try_send_capability_event_at(negative("nick", &other), 1, 5);
+    drop(handle);
+    writer.shutdown();
+
+    let capabilities: Vec<String> = ledger_rows(&path)
+        .into_iter()
+        .map(|(_, _, capability)| capability)
+        .collect();
+    assert!(
+        capabilities.contains(&other),
+        "a floor on one key must not suppress another key's event; rows were {capabilities:?}",
+    );
+}
+
+/// The same lane key on a different STATE key is also distinct.
+#[test]
+fn a_purge_floor_is_keyed_on_both_halves_of_the_registry_key() {
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let key = wire_shape_key("thinking.enabled.display");
+
+    let cleared = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative("nick", &key)
+    };
+    let _ = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+
+    // Same capability, DIFFERENT lane: a purge on one target says nothing about
+    // the same capability on another.
+    handle.try_send_capability_event_at(negative("other-nick", &key), 1, 5);
+    drop(handle);
+    writer.shutdown();
+
+    let lanes: Vec<String> = {
+        let conn = rusqlite::Connection::open(&path).expect("read open");
+        let mut stmt = conn
+            .prepare("SELECT lane_key FROM capability_events ORDER BY rowid")
+            .expect("prepare");
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+    };
+    assert!(
+        lanes.contains(&"other-nick".to_string()),
+        "the floor is keyed on (state_key, capability): a different lane is a different key; \
+         lanes were {lanes:?}",
+    );
+}
+
+/// A NON-purge batch does not raise any key's floor.
+///
+/// Only a committed `cleared` row from a purge supersedes earlier metadata. A
+/// boundary batch's survivors are restatements of state that still holds, so
+/// treating them as floors would drop the very events they exist to preserve.
+#[test]
+fn a_boundary_batch_raises_no_per_key_floor() {
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let key = wire_shape_key("thinking.enabled.display");
+
+    // A boundary batch: a tombstone plus a restated survivor on this key.
+    let _ = handle.commit_capability_events_blocking_at(
+        vec![
+            CapabilityEvent::tombstone(900, 8, 1),
+            negative("nick", &key),
+        ],
+        1,
+        7,
+    );
+
+    // An event with a LOWER incarnation on the same key still lands: no purge
+    // has superseded it.
+    handle.try_send_capability_event_at(negative("nick", &key), 1, 5);
+    drop(handle);
+    writer.shutdown();
+
+    assert_eq!(
+        ledger_rows(&path).len(),
+        3,
+        "a boundary batch must raise no per-key floor: its survivors restate state that still \
+         holds, so suppressing later events for those keys would drop what it preserved",
+    );
+}
+
+/// A floor SURVIVES more purges than the former LRU could hold.
+///
+/// The regression for the eviction hole. With a 1024-entry LRU, purging 1025
+/// distinct keys evicted the first key's floor -- and an event for that key,
+/// delayed past the eviction, was then admitted and re-appended the negative the
+/// operator had removed. A non-evicting map keeps every floor for the life of the
+/// process, so the delayed event is still recognized as superseded.
+///
+/// 1025 purges is deliberately one past the old capacity: the test would pass
+/// against an LRU at 1024 and fails only at the boundary the bug lived on.
+#[test]
+fn a_purge_floor_survives_more_purges_than_the_former_cache_held() {
+    const FORMER_CAPACITY: usize = 1024;
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let first = wire_shape_key("thinking.enabled.display");
+
+    // The FIRST key is purged at incarnation 7.
+    let cleared_first = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative("nick", &first)
+    };
+    let outcome = handle.commit_capability_events_blocking_at(vec![cleared_first], 1, 7);
+    assert!(
+        matches!(outcome, BatchCommit::Committed { .. }),
+        "premise: the first key's clear must commit, since only a committed clear sets a floor",
+    );
+
+    // Then 1025 OTHER keys are purged -- one past the old cache's capacity, which
+    // is what used to evict the first key's floor.
+    for idx in 0..=FORMER_CAPACITY {
+        let other = wire_shape_key(&format!("thinking.spill{idx}"));
+        let cleared = CapabilityEvent {
+            verdict: "cleared".to_string(),
+            ..negative("nick", &other)
+        };
+        let _ = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+    }
+
+    // The first key's DELAYED pre-purge event now arrives.
+    handle.try_send_capability_event_at(negative("nick", &first), 1, 5);
+    drop(handle);
+    writer.shutdown();
+
+    let rows = ledger_rows(&path);
+    let first_negatives = rows
+        .iter()
+        .filter(|(_, verdict, capability)| verdict == "broken" && capability == &first)
+        .count();
+    assert_eq!(
+        first_negatives,
+        0,
+        "the first key's floor must survive {} later purges: an evicted floor re-admits the \
+         delayed event and re-appends the negative the operator removed, so the next boot \
+         resurrects it",
+        FORMER_CAPACITY + 1,
+    );
+    // And the ledger holds exactly the clears -- nothing was resurrected.
+    let broken = rows
+        .iter()
+        .filter(|(_, verdict, _)| verdict == "broken")
+        .count();
+    assert_eq!(
+        broken, 0,
+        "no negative may be appended after its purge, for any of the purged keys",
     );
 }

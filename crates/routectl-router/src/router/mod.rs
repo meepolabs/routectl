@@ -30,6 +30,7 @@ mod cache_plan;
 mod capability_cleared;
 mod capability_learn;
 mod capability_observe;
+mod capability_purge;
 mod chain;
 mod class_observe;
 mod count_tokens;
@@ -46,6 +47,7 @@ mod window_gate;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_learn::{CapabilityLearnEvent, CatalogIndependentSurvivor};
 pub use capability_observe::CapabilityObserveEvent;
+pub use capability_purge::{PurgeOutcome, ReservedPurge};
 pub use dispatch::class_debits;
 use dispatch::k_query_key;
 #[cfg(test)]
@@ -2561,3 +2563,7 @@ mod prefix_rewrite_dispatch_tests;
 #[cfg(test)]
 #[path = "repair_budget_cross_walk_tests.rs"]
 mod repair_budget_cross_walk_tests;
+
+#[cfg(test)]
+#[path = "capability_purge_tests.rs"]
+mod capability_purge_tests;

@@ -720,6 +720,7 @@ fn learn_event(
 ) -> routectl_router::router::CapabilityLearnEvent {
     routectl_router::router::CapabilityLearnEvent {
         persistence_generation: 1,
+        incarnation: 1,
         state_key: "prov".to_string(),
         capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
@@ -740,6 +741,7 @@ fn observe_event(
 ) -> routectl_router::router::CapabilityObserveEvent {
     routectl_router::router::CapabilityObserveEvent {
         persistence_generation: 1,
+        incarnation: 1,
         state_key: "prov".to_string(),
         capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
@@ -754,6 +756,7 @@ fn observe_event(
 fn cleared_event(capability_key: &str) -> routectl_router::router::CapabilityClearedEvent {
     routectl_router::router::CapabilityClearedEvent {
         persistence_generation: 1,
+        incarnation: 1,
         state_key: "prov".to_string(),
         capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
@@ -848,6 +851,7 @@ async fn observe_meta_empty_capability_events_enqueues_nothing() {
 fn replay_learn_event() -> routectl_router::router::CapabilityLearnEvent {
     routectl_router::router::CapabilityLearnEvent {
         persistence_generation: 1,
+        incarnation: 1,
         state_key: "lane-target#mantle".to_string(),
         capability_key: "reasoning_replay:codex".to_string(),
         provider_kind: "openai-responses".to_string(),

@@ -859,8 +859,15 @@ fn the_boundary_cut_acquires_its_locks_in_the_documented_order() {
 
     assert_eq!(
         *order.lock().expect("order"),
-        vec!["generation", "pending_generation", "entries"],
-        "the cut must acquire generation, then pending_generation, then entries",
+        vec![
+            "generation",
+            "pending_generation",
+            "entries",
+            "purge_leases"
+        ],
+        "the cut must acquire generation, then pending_generation, then entries, then \
+         purge_leases -- the documented order, which is what makes the cut deadlock-free \
+         against every path that takes any two of them",
     );
 }
 

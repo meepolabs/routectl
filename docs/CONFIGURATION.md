@@ -3249,6 +3249,157 @@ rather than a new top-level section. A missing `[capability]` block
 deserializes to the defaults above, and an unknown key inside the block
 fails config load rather than being silently ignored.
 
+### `[capability.overrides]` IS the durable-decision surface
+
+`[capability.overrides]` is where a capability decision **persists**.
+Everything the daemon learns from live traffic is an OBSERVATION: it
+lives in the running process's registry, is replayed from the usage
+ledger at boot, and decays on its own schedule. An entry in
+`[capability.overrides]` is an operator DECISION: it is re-read on every
+router build, it never decays, and no amount of traffic can teach around
+it.
+
+That distinction is what the purge command below is scoped by, and it is
+deliberate that there is no runtime store on the other side of it.
+A second place to record the same intent would be a second place for it
+to disagree with the config file, and the config file is the one an
+operator can read, review, and put in version control.
+
+```toml
+# Pin a decision: this target does not support this capability, forever,
+# regardless of what live traffic later suggests.
+[capability.overrides."anthropic:sonnet"]
+unsupported = ["web_search"]
+
+# Or the other direction, on another target: mask a learned negative you
+# believe is wrong. Both lists may also sit in one entry.
+[capability.overrides."anthropic:opus"]
+force_supported = ["prompt_caching"]
+```
+
+### Dropping ONE learned observation (`routectl capability purge`)
+
+To make the daemon forget one thing it learned -- without pinning
+anything -- ask the running daemon:
+
+```bash
+routectl capability purge <target> <capability>
+# e.g.
+routectl capability purge sonnet web_search
+```
+
+`<target>` is a `[models]` nickname, a pooled seat's `nickname#label`,
+or a `[providers]` name -- whichever the learned entry is keyed on.
+
+What it does and does not do:
+
+- **It removes ONE observation, not a decision.** The next request
+  re-evaluates that capability from scratch, and traffic that provokes
+  the same rejection teaches the same negative again. If you want the
+  decision to stick, write it under `[capability.overrides]` above --
+  the command's own output says so.
+- **It succeeds only once the removal is DURABLE.** The daemon writes the
+  matching `cleared` row to its capability ledger and waits for that
+  write to commit *before* it removes the entry from memory and reports
+  success. That ordering is the whole guarantee: a purge reported as done
+  has already been persisted, so the next restart cannot bring the
+  verdict back. When the write cannot commit -- the usage database is
+  unavailable or failing, or the command is interrupted mid-commit --
+  nothing is removed, the entry keeps acting, and the command exits
+  non-zero telling you to retry. Three outcomes are reported distinctly,
+  because they need different responses from you:
+  - **could not persist** -- check the daemon's usage database, then run
+    the command again. Nothing changed.
+  - **busy** -- another purge of the same key is in flight. Wait for it,
+    then run the command again if the entry is still there. Nothing
+    changed.
+  - **configuration reloaded** -- the daemon reloaded while the command
+    ran, so it acted on configuration that is no longer live. Run it
+    again. Nothing changed.
+  - **superseded** -- the entry changed while the command ran, so the
+    daemon refused to delete a newer observation than the one you asked
+    about. The clear was written, but nothing was removed.
+  Retrying is always safe: every one of those leaves the entry exactly as
+  it was, and a purge of an already-purged key is a clean no-op rather
+  than a second removal.
+- **Interrupting the command does not interrupt the purge.** Once the
+  daemon has accepted the work it owns it: closing the connection, or
+  Ctrl-C-ing the CLI, leaves the daemon to finish committing and to
+  either complete the removal or leave the entry untouched. You lose the
+  answer, not the outcome -- run the command again to see where it
+  landed. A purge in flight briefly reports *busy* for that same key,
+  which is the daemon telling you its own settlement still holds it.
+- **A purge and a configuration reload exclude each other.** Whichever
+  starts first wins; the other is told to retry, and neither leaves
+  partial state. This is why a reload during a purge (or the reverse) can
+  report busy rather than simply queueing.
+- **It goes through the daemon, and requires one to be running.** The
+  verdict lives in the daemon's memory, so an offline edit of the usage
+  database would remove nothing that is currently steering routing, and
+  writing to a database the daemon holds open risks the database itself.
+  The command never opens it. With no daemon reachable, the command
+  reports that clearly and exits non-zero, having changed nothing.
+- **It is loopback-only, on the daemon's existing auth.** The control
+  route sits on the same server, the same port, and the same
+  `[server.auth]` gate as `/v1/*` -- it introduces no credential scheme
+  of its own. Three checks narrow it further, none of them
+  authentication, and each buying a DIFFERENT property (no one of them
+  substitutes for another):
+  - **a non-loopback caller is refused outright**, even on an
+    `--unsafe-public` bind -- that flag exposes inference, not
+    administration;
+  - **an authority that does not name a loopback endpoint is refused.**
+    This is the anti-DNS-rebinding check, the same one the `/status*`
+    subtree carries. It is what stops an attacker who controls a hostname
+    from pointing it at `127.0.0.1`: a page on that name is then
+    *same-origin* with the daemon, so it needs no preflight, its caller
+    really is loopback, and nothing about its body distinguishes it --
+    only the authority it claims does. Every claim is checked and each
+    must pass: every `Host` header value (a request may send the header
+    more than once), and the request URI's authority (HTTP/2 sends
+    `:authority` there and no `Host` at all). A `Host` value routectl
+    cannot read as text is refused rather than ignored -- a claim it
+    cannot evaluate has not been checked. A request carrying no authority
+    at all -- plain origin-form from a hand-rolled client -- is
+    permitted, because it makes no claim and the rebinding vector is a
+    browser, which always sends one. Bracketed authorities must hold a
+    real IPv6 literal, and a ZONE-SCOPED one (`[fe80::1%eth0]`) is
+    deliberately unsupported: a zone index names a local interface rather
+    than an endpoint, so it cannot be compared against the address
+    routectl bound. Such a request is refused -- reach the daemon by its
+    loopback or bound literal instead. The read-only `/status*` subtree
+    checks the same claim sites with the same fail-closed handling, but
+    against a WIDER allowlist: it also admits the address routectl is
+    bound to, and under a wildcard bind (`0.0.0.0` / `::`) it degrades to
+    accepting any well-formed authority naming the bound port -- on such
+    a bind the listener token above carries the real access decision;
+  - **a non-JSON `content-type` is refused.** This buys exactly one
+    thing: a browser's preflight-free *simple* cross-origin request
+    (`text/plain`, a form encoding) cannot reach the mutation, because
+    requiring JSON forces a preflight the daemon never answers. It says
+    nothing about the rebound same-origin case above.
+- **The command always talks to loopback.** `[server] host` names what
+  the daemon BINDS, so the command derives its destination from it rather
+  than dialing it as written: a literal loopback address is used exactly
+  as bound, a wildcard bind (`0.0.0.0` / `::`) becomes the matching
+  family's loopback address. Anything else is refused locally, before your
+  listener token is even read, and nothing is sent. That includes a
+  specific non-loopback bind -- a daemon bound only to `10.20.30.40` is
+  not listening on loopback, so quietly retargeting the call would send
+  your token to whatever *other* process holds that port -- and it
+  includes every hostname, `localhost` among them: a name picks no
+  address family (`localhost` may be `127.0.0.1`, `::1`, or both), and
+  resolving it would hand the choice of destination to a resolver. Set
+  `[server] host` to an explicit `127.0.0.1` / `::1`, or to a wildcard. The command also
+  bypasses any configured HTTP proxy and never follows a redirect, for
+  the same reason: a control call is a conversation with a process on
+  this machine.
+- **Purging something that is not there is a clean no-op**, reported as
+  such and exiting zero, so re-running it is safe.
+- **It touches learned entries only.** It never edits your config, your
+  `[capability.overrides]` cells, or the baked catalog.
+
+
 ## Context reduction (`[reduction]`)
 
 routectl can strip insignificant whitespace from JSON-formatted string

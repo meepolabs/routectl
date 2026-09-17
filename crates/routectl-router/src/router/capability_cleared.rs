@@ -30,6 +30,15 @@ pub struct CapabilityClearedEvent {
     /// single request legitimately spans a boundary, so events on one request
     /// may carry DIFFERENT generations.
     pub persistence_generation: u64,
+    /// The INCARNATION of the key's state this event describes, from the same
+    /// guarded mutation.
+    ///
+    /// What the generation cannot express: a purge and a later relearn of ONE key
+    /// both happen inside one generation, so a stale event queued before the
+    /// purge and a genuine post-purge relearn are indistinguishable by generation
+    /// alone. The writer compares this against the key's purge floor and drops
+    /// only the superseded one.
+    pub incarnation: u64,
 
     /// Routing state key (nickname-or-provider) of the re-probed target.
     pub state_key: String,

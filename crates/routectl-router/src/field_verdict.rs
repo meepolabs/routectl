@@ -391,6 +391,7 @@ impl FieldRepairGuard<'_> {
         );
         let crate::learned_capability::GenerationOutcome::Applied {
             generation: persistence_generation,
+            incarnation,
             ..
         } = observed
         else {
@@ -422,6 +423,7 @@ impl FieldRepairGuard<'_> {
         );
         Some(CapabilityLearnEvent {
             persistence_generation,
+            incarnation,
             state_key: key.state_key,
             capability_key: key.capability_key,
             provider_kind: key.provider_kind,
@@ -455,12 +457,14 @@ impl FieldRepairGuard<'_> {
             &self.key.capability_key,
             &self.key.provider_kind,
         );
-        let (cleared, persistence_generation) = match removed {
-            crate::learned_capability::GenerationOutcome::Applied { value, generation } => {
-                (value, generation)
-            }
-            crate::learned_capability::GenerationOutcome::Stale => (false, 0),
+        // A lease-refused or stale removal clears nothing and emits nothing: both
+        // are refusals, so neither may produce an event.
+        let Some(applied) = removed.applied() else {
+            self.registry.release_slot(&self.key);
+            return None;
         };
+        let (cleared, persistence_generation, incarnation) =
+            (applied.value, applied.generation, applied.incarnation);
         self.registry.release_slot(&self.key);
         if !cleared {
             return None;
@@ -473,6 +477,7 @@ impl FieldRepairGuard<'_> {
         );
         Some(CapabilityClearedEvent {
             persistence_generation,
+            incarnation,
             state_key: self.key.state_key.clone(),
             capability_key: self.key.capability_key.clone(),
             provider_kind: self.key.provider_kind.clone(),

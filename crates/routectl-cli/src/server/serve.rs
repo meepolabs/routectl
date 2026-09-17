@@ -439,12 +439,23 @@ pub async fn serve_on_listener_with_secrets(
     // nonce guards). See `crate::ingress::MitmSeamNonce`.
     let mitm_seam_nonce = Arc::new(crate::ingress::MitmSeamNonce::generate());
 
+    // Purge settlements are daemon-owned: the tracker is built here, shared with
+    // the control route through `AppState`, and closed-and-awaited in the
+    // shutdown sequence below BEFORE the writer drains. `ambiguous_settlements`
+    // fires when a settlement cannot be accounted for after its batch was
+    // admitted, which is terminal -- the daemon then cannot say whether its
+    // registry agrees with its ledger for that key.
+    let (purge_settlements, mut ambiguous_settlements) =
+        crate::server::purge_settlement::SettlementTracker::new();
+    let purge_settlements = Arc::new(purge_settlements);
+
     let state = Arc::new(AppState {
         router: router_swap.clone(),
         usage: usage_handle.clone(),
         activation: activation_swap.clone(),
         mitm_seam_nonce: mitm_seam_nonce.clone(),
         cc_pin_drift: crate::server::cc_pin_drift::CcPinDriftGuard::new(),
+        purge_settlements: Arc::clone(&purge_settlements),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is
@@ -505,6 +516,26 @@ pub async fn serve_on_listener_with_secrets(
         daemon_meta,
     );
 
+    // An UNACCOUNTED settlement is terminal: after its batch was admitted, the
+    // daemon cannot say whether the clear committed, so it cannot say whether its
+    // registry agrees with its ledger for that key. Continuing to serve would
+    // route on state it cannot account for, so the shutdown channel is flipped
+    // and the server stops accepting -- a restart reads the ledger and is
+    // authoritative again. Spawned rather than selected inline so the serve loop
+    // keeps its existing shape.
+    {
+        let shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if ambiguous_settlements.recv().await.is_some() {
+                tracing::error!(
+                    "a capability purge settlement could not be accounted for; stopping the \
+                     daemon rather than serving on routing state it cannot verify",
+                );
+                let _ = shutdown_tx.send(());
+            }
+        });
+    }
+
     let serve_result = serve_with_bounded_drain(listener, app).await;
 
     // Graceful-shutdown ordering matters for a clean usage drain. The
@@ -521,6 +552,15 @@ pub async fn serve_on_listener_with_secrets(
     //      drain-and-exit well within its bounded deadline.
     let _ = shutdown_tx.send(());
     await_reload_tasks(reload_handles).await;
+
+    // Purge settlements are awaited HERE: after the server stopped accepting (so
+    // no new ones start) and BEFORE the writer drains (because each in-flight
+    // settlement is waiting on a commit that needs the writer alive). Draining
+    // first would strand one holding a lease, leaving the registry and the ledger
+    // disagreeing for that key until the next boot.
+    purge_settlements
+        .close_and_wait(PURGE_SETTLEMENT_DEADLINE)
+        .await;
 
     // Drain queued usage rows after the server stops accepting and every
     // producer-side handle is gone. The blocking 5s drain MUST run off a
@@ -587,6 +627,17 @@ pub(super) fn build_usage_writer(config: &Config) -> (UsageHandle, UsageWriter) 
     )
 }
 
+/// How long shutdown waits for in-flight purge settlements.
+///
+/// A CHOSEN ceiling, not derived from a writer bound: the acknowledged batch has
+/// no timeout by design (answering while its transaction can still commit would
+/// let a caller act on a boundary state that does not match the ledger), so there
+/// is no upstream deadline to size this against. Ten seconds is generous for one
+/// SQLite transaction on a healthy database and short enough that a wedged one
+/// does not hold shutdown open indefinitely. Exceeding it is reported as the same
+/// ambiguity a panic is -- the lease is unsettled either way.
+const PURGE_SETTLEMENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Flush queued usage rows on graceful shutdown. `UsageWriter::shutdown`
 /// blocks up to ~5s draining and joining the writer thread, so it must
 /// not run on a runtime worker -- dispatch it via `spawn_blocking`. A
@@ -634,7 +685,15 @@ async fn serve_with_bounded_drain(listener: TcpListener, app: AxumRouter) -> Res
         let _ = signal_tx.send(true);
     });
 
-    let graceful = axum::serve(listener, app).with_graceful_shutdown(async move {
+    // `into_make_service_with_connect_info` rather than the bare app: the
+    // mutating control route refuses a non-loopback PEER, and the peer address
+    // is only reachable through this extension. Every other route ignores it;
+    // it costs one extension insert per connection.
+    let graceful = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         // Resolve once the channel flips to `true`. `changed()` also
         // returns Err if every sender dropped, which only happens at
         // process teardown -- treat that as "shut down" too.
@@ -796,6 +855,12 @@ pub(super) const PUBLIC_ROUTES: &[&str] = &["/health"];
 ///     tokens-configured case is exactly the `/v1/*` condition; the extra
 ///     no-tokens + non-loopback cell is pinned separately by
 ///     `status_requires_auth_covers_the_four_cells`.
+///   * `/control/*` -- the mutating control surface. Gated on exactly the
+///     `/v1/*` condition because it sits on the same builder and under the
+///     same layer, and it carries no scheme of its own. It is additionally
+///     narrower than every other entry here: it refuses a non-loopback PEER
+///     outright, so the token-less loopback dev path is the only case where an
+///     unauthenticated caller reaches it at all.
 #[cfg(test)]
 pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
     "/v1/models",
@@ -803,6 +868,7 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
     "/v1/messages",
     "/v1/messages/count_tokens",
     "/v1/responses",
+    "/control/capability/purge",
     "/",
     "/status",
     "/status/usage",
@@ -822,6 +888,11 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
 ///     channel.
 ///   * `/v1/chat/completions`, `/v1/responses` -- direct-client ingress
 ///     dialects (OpenAI-shaped), not Anthropic-dialect.
+///   * `/control/capability/purge` -- routectl's own control surface, reached
+///     by the routectl CLI over loopback. Claude Code never sends it to
+///     `api.anthropic.com`, so it never arrives through the MITM channel; and
+///     re-injecting a mutating route through that seam would give a proxied
+///     client a path to it.
 ///
 /// Together with `ANTHROPIC_INFERENCE_PATHS` this partitions the served
 /// surface, which is what closes the reverse direction of MITM drift: a
@@ -836,6 +907,7 @@ pub(super) const NON_MITM_INFERENCE_ROUTES: &[&str] = &[
     "/health",
     "/v1/chat/completions",
     "/v1/responses",
+    "/control/capability/purge",
     "/",
     "/status",
     "/status/usage",
@@ -881,10 +953,14 @@ pub(super) const VERSION_OBSERVING_ROUTES: &[&str] = &[
 ///     A client version seen here says nothing about the bytes routectl
 ///     puts on an inference wire, and observing it would let a poll loop
 ///     dominate the signal.
+///   * `/control/capability/purge` -- an operator control call from the
+///     routectl CLI. Its caller is not a proxied LLM client at all, so a
+///     version read here would describe the wrong program.
 #[cfg(test)]
 pub(super) const NON_OBSERVING_ROUTES: &[&str] = &[
     "/health",
     "/v1/models",
+    "/control/capability/purge",
     "/",
     "/status",
     "/status/usage",
@@ -947,6 +1023,15 @@ fn build_axum_router(
             post(handlers::messages_count_tokens::count_tokens),
         )
         .route("/v1/responses", post(handlers::responses::responses))
+        // The one MUTATING route on this server: it removes a single resident
+        // learned-capability entry. It rides the SAME auth layer as `/v1/*`
+        // (no bespoke scheme -- see `handlers::control`'s module docs) and adds
+        // its own non-loopback peer refusal on top, which the inference routes
+        // deliberately do not carry.
+        .route(
+            "/control/capability/purge",
+            post(handlers::control::purge_capability),
+        )
         .layer(DefaultBodyLimit::max(max_body_bytes));
 
     // Mount the auth middleware only when tokens are configured.

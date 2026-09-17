@@ -2649,6 +2649,31 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format.schema` or a strict tool's `input_schema`),
   `forces_web_search` (bounded `tool_choice` directive read),
   `reasoning_requested`, `cache_requested`
+- `src/router/capability_purge.rs` -- operator-initiated purge of ONE keyed
+  learned entry, as a TWO-PHASE protocol whose ORDER is the contract (a purge is
+  a memory mutation plus a SQLite transaction, and the transaction must not be
+  awaited under a registry lock, so it cannot be one step):
+  `Router::reserve_learned_capability_purge` validates the generation, captures
+  the entry and LEASES the key while LEAVING it resident and acting, returning a
+  `PurgeOutcome` (`Reserved(ReservedPurge)` / `Absent` / `Busy` / `Stale` -- four
+  answers, because "already gone" is not "ask the current router" and neither is
+  "someone else is purging this"); the caller commits `ReservedPurge::settlement`
+  durably (`UsageHandle::admit_capability_batch` + `BatchReceipt::await_outcome`,
+  never a best-effort send) holding NO lock; and only on a committed
+  acknowledgement does `Router::finalize_learned_capability_purge` remove the
+  entry, release the lease, and emit the one content-free `purge` audit record.
+  Every other outcome goes to `Router::abandon_learned_capability_purge`, which
+  releases the lease, leaves the entry untouched and still acting, and logs
+  `purge_abandoned`; `Router::audit_absent_purge` audits the no-op so an operator
+  can tell it from a removal. `ReservedPurge::generation` carries the EFFECTIVE
+  generation out of the reservation, so the settlement is stamped with the
+  generation the removal runs under rather than a value sampled across a possible
+  reload boundary. The provider kind that normalizes the registry key is derived
+  HERE from the config tables (per-model nickname, then a pooled seat's
+  `nickname#label` base, then a provider-scoped key; empty = identity
+  normalization for a target the operator has since removed) rather than accepted
+  from the caller, so no caller can address a key the learn path never minted.
+  Learned entries only: never the override registry, never a baked prior
 - `src/router/capability_cleared.rs` -- `CapabilityClearedEvent`, the additive
   `DispatchMeta.cleared_capabilities` ride-along row (state_key,
   capability_key, provider_kind -- the registry key of a resident negative a
@@ -2845,12 +2870,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   guard as the read or mutation, so an event's stamp cannot drift from the state
   it describes -- observe,
   positive, read, verified read, keyed remove, expiry, probe settlement -- all
-  routed through the private `guarded` helper, which holds the generation READ
-  lock ACROSS the entries work so validation and the operation it guards are one
-  atomic step (a check-then-lock shape would let a catalog-scoped write land
-  after the generation advanced and the prune ran). Lock order is documented on
-  the `generation` field and is the same everywhere:
-  `generation` -> `pending_generation` -> `entries` -> `tuning`. A path needing
+  routed through the private `guarded_keyed` helper, which takes `entries`
+  (WRITE, for both a read and a mutate intent, so a purge reservation taking
+  the same two locks in the same order can never interleave) then
+  `purge_leases` (READ) in one acquisition, refuses a keyed operation against
+  a leased key (`GenerationOutcome::Reserved`), reserves the entry's next
+  incarnation BEFORE calling `op` so an exhausted counter mutates nothing, and
+  hands `op` the write guard's map directly alongside the held lease set so
+  nothing it calls needs to re-acquire either lock. Every mutating operation
+  also has an `_in` inner variant (`observe_in`, `observe_positive_in`,
+  `record_probe_outcome_in`, `expire_keyed_in`, `remove_keyed_in`) that acts
+  only on a supplied `&mut HashMap` and never reacquires `self.entries` --
+  `guarded_keyed` calls these directly under its own guard, and the
+  public/rebuild/test wrappers acquire `entries` once and delegate. Holding
+  the generation READ lock ACROSS the entries work makes validation and the
+  operation it guards one atomic step (a check-then-lock shape would let a
+  catalog-scoped write land after the generation advanced and the prune ran).
+  Lock order is documented on the `generation` field and is the same
+  everywhere: `generation` -> `pending_generation` -> `entries` ->
+  `purge_leases` -> `tuning`. A path needing
   only a subset still takes what it needs in that sequence, including
   `effective_persistence_generation`, the hand-rolled `Debug` (which SNAPSHOTS all
   four values in order and drops every guard before formatting -- reading them
@@ -3442,10 +3480,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   caller that kept its old state. Dropping the receipt abandons the wait (the
   shutdown path) without wedging the writer. `handle_over_channel` /
   `handle_with_closed_channel` are `#[doc(hidden)]` test seams for the
-  unanswered- and closed-channel cases the real writer cannot produce
-  `handle_with_closed_channel` is a `#[doc(hidden)]` test seam: an unavailable
-  writer cannot be produced through the normal lifecycle, since `shutdown`
-  leaves the channel open while a handle holds a sender clone
+  unanswered- and closed-channel cases the real writer cannot produce (an
+  unavailable writer has no normal-lifecycle route: `shutdown` leaves the
+  channel open while a handle holds a sender clone), and `WriterMessage` is
+  re-exported `#[doc(hidden)]` beside them so a caller supplying its own channel
+  can name what flows over it. THE durable-commit seam the operator purge route
+  uses: a purge reports success only after `Committed`. `CapabilityBatch` also
+  carries the `incarnation` a `cleared` row establishes as its key's PURGE FLOOR,
+  which the writer records in a NON-EVICTING per-key map (an LRU was a
+  correctness hole: an evicted floor re-admits a delayed pre-purge event and
+  re-appends the negative the operator removed; the map's bound is the number of
+  distinct keys an operator purges in one process lifetime)
 - `src/cost.rs` -- pure leaf-safe cost estimation:
   `estimate_cost(&UsageRecord, &Rates)` and the aggregate-token entry point
   `estimate_cost_tokens(input, output, reasoning, cache_read, cache_write_5m,
@@ -4002,13 +4047,49 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the parent dirs of `config.toml` / `credentials.json`, basename-routes
   events back to a `ReloadRequest::{Config,Credentials}` channel; debounce
   coalesces tempfile + rename bursts
+- `src/server/purge_settlement.rs` -- DAEMON-OWNED settlement of admitted
+  capability purges: `SettlementTracker` (in-flight count + `Notify` +
+  closed flag + an unaccounted-settlement channel), `SettlementOutcome`
+  (`Purged` / `Superseded` / `Failed(BatchCommit)` -- three answers, because a
+  committed clear whose finalize found a changed entry removed nothing and is
+  neither a success nor a durability failure), and the private `settle_owned`
+  that awaits the receipt then finalizes or abandons. `settle` takes ownership of
+  the reservation, the receipt and an `Arc<Router>` and spawns BEFORE the first
+  await, so an HTTP future cancelled by a vanishing client cannot drop a receipt
+  mid-commit and strand a lease; the handler keeps only a result receiver.
+  `close_and_wait` is called in `serve.rs` AFTER the server stops accepting and
+  BEFORE the writer drains (an in-flight settlement needs the writer alive), and
+  a closed tracker refuses new settlements rather than spawning one that could
+  outlive it. `AccountingGuard` decrements and notifies on every path including
+  a panic unwind, and reports an unaccounted settlement -- which triggers
+  terminal daemon shutdown, since the daemon then cannot say whether its
+  registry agrees with its ledger for that key
 - `src/server/request_id.rs` -- request-id middleware (`x-request-id` echo +
   `tracing` span field with allowlist sanitization)
 - `src/server/status_gate.rs` -- status-subtree-ONLY middleware (`/v1/*`
   carries none of it). `StatusHostAllowlist` + `host_guard`
-  (anti-DNS-rebinding: rejects a `Host` outside {loopback literals
-  with/without port, the bound `host:port`} with a fixed 403 `forbidden_host`;
-  a missing `Host` is permitted). Under a wildcard bind (`0.0.0.0` / `::`) no
+  (anti-DNS-rebinding: rejects a claimed authority outside {loopback literals
+  with/without port, the bound `host:port`} with a fixed 403 `forbidden_host`).
+  It validates EVERY claim the request makes, sharing all three rules with the
+  mutating control route (`handlers::control`): every `Host` header value via
+  `get_all` (not just the first), a non-UTF-8 `Host` value as a fail-CLOSED
+  refusal (present but unevaluable), and the request URI's authority (HTTP/2
+  carries `:authority` there with no `Host` at all). Only a request claiming no
+  authority anywhere is permitted; a refusal logs a closed `claim_site`
+  (`host_header` / `uri_authority`) so an operator learns WHERE to look without
+  the caller's value ever being logged. `parse_authority` is the ONE authority
+  parser -- `split_host_port` and `port_of` are projections of it, which is what
+  stops the port answer from disagreeing with the host answer. Accepted grammar:
+  a nonempty host; no userinfo `@` anywhere; BRACKETED contents that parse as an
+  `Ipv6Addr` (brackets delimit an IPv6 literal and nothing else, so a bracketed
+  domain or IPv4 value is refused rather than given a second spelling the
+  predicate would treat as equivalent); after a bracketed literal only `]` or
+  `]:<u16>`; and a bare port only as a `u16`. A zone-scoped literal
+  (`[fe80::1%eth0]`) is deliberately UNSUPPORTED and fails closed -- see
+  `parse_authority`'s own docs. Every other shape yields None rather than a
+  partial host, so a malformed authority is never answered from a fragment of
+  itself. Under a wildcard bind
+  (`0.0.0.0` / `::`) no
   client can name the unspecified address literally, so the guard degrades to
   a PORT-only check -- a `Host` is allowed iff its parsed port equals the
   bound port (a portless Host fails closed); the token auth layer now sits
@@ -4048,6 +4129,45 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 ### handlers
 
 - `src/handlers/mod.rs` -- groups per-route HTTP handlers
+- `src/handlers/control.rs` -- `POST /control/capability/purge`, the server's
+  one MUTATING route: removes a single resident learned-capability entry through
+  the two-phase reserve / durably-commit / finalize protocol in
+  `src/router/capability_purge.rs`. Success is reported ONLY after an
+  acknowledged durable commit of the `cleared` row (without that row the next
+  boot's warm rebuild resurrects the negative, so reporting success first would
+  tell the operator a still-acting verdict was gone). Every failure to persist --
+  an unavailable writer, a full channel, a failed transaction, or a caller that
+  cancelled mid-commit -- releases the lease, leaves the entry acting, and
+  answers a non-2xx `durability_failed`; a leased key answers `purge_busy` and a
+  superseded Router answers `purge_stale` after ONE bounded retry against the
+  current `ArcSwap` (safe because a stale reservation took no lease and committed
+  nothing, so there is no partial state to collide with). `generation` rides the
+  success envelope only -- absent, busy and failed answers carry no sampled
+  value. Carries NO credential scheme of
+  its own -- same socket, same `[server.auth]` layer as `/v1/*` -- and adds three
+  narrowing checks ahead of the body read, each buying a distinct property:
+  (1) a non-loopback PEER refusal via the shared `server::is_loopback` predicate
+  (so an IPv4-mapped loopback peer from a dual-stack listener is accepted while a
+  mapped public address is not; read off the `ConnectInfo` extension `serve.rs`
+  installs); (2) an anti-DNS-rebinding AUTHORITY refusal via the shared
+  `status_gate::is_loopback_authority`, applied to every `Host` header value
+  (`get_all`, so a hostile duplicate cannot ride along) and to the request URI's
+  authority (HTTP/2 carries `:authority` there with no `Host` at all, so a
+  Host-only check would admit an h2c request), with a non-UTF-8 `Host` value
+  failing CLOSED and only a request claiming no authority anywhere permitted --
+  the check a content-type gate cannot substitute for, since a rebound hostname
+  makes a page same-origin; and (3) a JSON `content-type` requirement via the
+  shared `ingress_handle::is_json_content_type`, which buys only that a
+  preflight-free simple cross-origin request cannot mutate. The authority check
+  precedes the content-type check so a refusal is not an oracle for the body
+  vocabulary. The read-only `/status*` subtree applies the SAME claim sites and
+  the same fail-closed handling through the same predicate, differing only in its
+  wider allowlist (loopback plus the bound address, or port-only under a wildcard
+  bind) -- see `src/server/status_gate.rs`.
+  Closed two-field request vocabulary with `deny_unknown_fields`; every body
+  rejection collapses to one fixed `invalid_request` code so a refusal cannot
+  report which validation failed. A clean no-op on an absent key answers 200 with
+  `purged: false` and writes nothing
 - `src/handlers/health.rs` -- `GET /health` returning version + status
 - `src/handlers/models.rs` -- `GET /v1/models` listing aliases + `[models]`
   keys (skips `default`, skips `selectable=false`), each entry emitted through
@@ -5870,6 +5990,30 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   non-empty. Consumed by BOTH `server`'s deprecation WARN
   (`warn_deprecated_capability_lists`) and `doctor`'s capability migrate
   nudge, so the two surfaces never diverge on which keys count
+- `src/commands/capability_purge.rs` -- `routectl capability purge <target>
+  <capability>`: POSTs the two keys to the daemon's loopback purge route and
+  maps the answer to an exit code (0 on a purge or a clean no-op, non-zero on
+  an unreachable daemon, a refusal, a 3xx, or an unrecognized body). `control_url`
+  derives the destination from `[server] host`: a loopback bind verbatim, a
+  wildcard or public bind translated to the matching loopback address, anything
+  underivable refused LOCALLY before a credential is resolved or a socket is
+  touched -- which includes a SPECIFIC non-loopback bind (rewriting it would dial
+  whatever other process holds that port) and EVERY hostname, `localhost`
+  included (a name picks no address family, and resolving it would let a resolver
+  choose the destination). The authority is rendered through `SocketAddr` so an
+  IPv6 literal is bracketed. An untrusted
+  `error.code` from the daemon is sanitized and capped by `render_refusal_code`
+  before it reaches a terminal (a raw newline or ANSI run would forge routectl's
+  own diagnostics). `build_client` pins `.no_proxy()` (reqwest reads
+  `HTTP_PROXY` / `ALL_PROXY` from the env by default, and a loopback control call
+  must not hand its token to an outbound hop) and `redirect::Policy::none()`
+  (`x-api-key` is not on reqwest's cross-host strip list), matching the
+  `routectl-providers::http_client` posture. Sends the first configured
+  `[server.auth]` token as `x-api-key` when one is set, since the control route
+  sits behind the same listener gate as `/v1/*`. Holds NO database or registry
+  API by design -- pinned by a source-text guard beside the behavioral ones -- so
+  a learned verdict is never edited out from under a running daemon; on a purge
+  it points the operator at `[capability.overrides]` for a durable decision
 
 ### Tests
 

@@ -57,6 +57,9 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
         activation: Arc::new(ArcSwap::from_pointee(ActivationState::default())),
         mitm_seam_nonce: Arc::new(MitmSeamNonce::generate()),
         cc_pin_drift: routectl_cli::server::cc_pin_drift::CcPinDriftGuard::new(),
+        purge_settlements: std::sync::Arc::new(
+            routectl_cli::server::purge_settlement::SettlementTracker::new().0,
+        ),
     });
     (state, dir)
 }

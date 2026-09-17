@@ -82,6 +82,13 @@ pub struct CapabilityBatch {
     /// would restore state the boundary evicted. Transient in-memory
     /// sequencing only -- never persisted.
     pub generation: u64,
+    /// The INCARNATION this batch establishes for any key it clears.
+    ///
+    /// Only a `cleared` row uses it: on commit the writer records it as that
+    /// key's purge floor, so a pre-purge event delayed past the clear is dropped
+    /// while a genuine post-purge relearn (a strictly greater incarnation) is
+    /// accepted. Zero for a batch that clears nothing.
+    pub incarnation: u64,
 }
 
 /// A pending acknowledged batch: admitted to the writer, outcome not yet
@@ -137,11 +144,27 @@ impl UsageHandle {
         events: Vec<CapabilityEvent>,
         generation: u64,
     ) -> Result<BatchReceipt, BatchCommit> {
+        self.admit_capability_batch_at(events, generation, 0)
+    }
+
+    /// [`Self::admit_capability_batch`] carrying the INCARNATION any `cleared`
+    /// row in the batch establishes as its key's purge floor.
+    ///
+    /// The purge path uses this one: its clear supersedes exactly the version of
+    /// the key the operator approved removing, and the floor is what makes a
+    /// delayed pre-purge event drop while a genuine relearn still lands.
+    pub fn admit_capability_batch_at(
+        &self,
+        events: Vec<CapabilityEvent>,
+        generation: u64,
+        incarnation: u64,
+    ) -> Result<BatchReceipt, BatchCommit> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<BatchCommit>();
         let batch = CapabilityBatch {
             events,
             ack: ack_tx,
             generation,
+            incarnation,
         };
         match self
             .sender()
@@ -169,7 +192,23 @@ impl UsageHandle {
         events: Vec<CapabilityEvent>,
         generation: u64,
     ) -> BatchCommit {
-        match self.admit_capability_batch(events, generation) {
+        self.commit_capability_events_blocking_at(events, generation, 0)
+    }
+
+    /// [`Self::commit_capability_events_blocking`] carrying the purge-floor
+    /// incarnation. Synchronous callers only -- see the blocking note above.
+    ///
+    /// # Blocking
+    ///
+    /// Blocks until the writer reports back. MUST NOT be called on a Tokio
+    /// worker.
+    pub fn commit_capability_events_blocking_at(
+        &self,
+        events: Vec<CapabilityEvent>,
+        generation: u64,
+        incarnation: u64,
+    ) -> BatchCommit {
+        match self.admit_capability_batch_at(events, generation, incarnation) {
             Ok(receipt) => receipt
                 .ack
                 .blocking_recv()

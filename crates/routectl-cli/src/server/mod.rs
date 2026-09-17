@@ -22,6 +22,7 @@ mod config_load;
 pub mod file_watch;
 pub mod k_rebuild;
 pub mod ledger_reader;
+pub mod purge_settlement;
 mod reload;
 pub mod request_id;
 mod router_build;
@@ -86,6 +87,15 @@ pub struct AppState {
     /// version already reported, and on the instance rather than in a
     /// process global so each test's traffic is its own.
     pub cc_pin_drift: cc_pin_drift::CcPinDriftGuard,
+    /// Tracks in-flight capability-purge settlements.
+    ///
+    /// A SIBLING of `router`, like `activation`: the settlement is the daemon's
+    /// obligation rather than any request's, so it must outlive the handler that
+    /// started it (a cancelled client would otherwise abandon a lease
+    /// mid-commit). Shutdown closes and awaits this before draining the writer,
+    /// because an in-flight settlement is waiting on a commit that needs the
+    /// writer alive.
+    pub purge_settlements: Arc<purge_settlement::SettlementTracker>,
 }
 
 impl AppState {
@@ -107,6 +117,7 @@ impl AppState {
             activation: Arc::new(ArcSwap::from_pointee(ActivationState::default())),
             mitm_seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
             cc_pin_drift: cc_pin_drift::CcPinDriftGuard::new(),
+            purge_settlements: Arc::new(purge_settlement::SettlementTracker::new().0),
         });
         (state, dir)
     }

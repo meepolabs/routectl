@@ -5,6 +5,7 @@
 //! called from `main.rs`'s clap match arms.
 
 pub mod capability_legacy;
+pub mod capability_purge;
 pub mod catalog;
 pub mod catalog_import;
 pub mod config;
