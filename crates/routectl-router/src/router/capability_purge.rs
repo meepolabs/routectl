@@ -163,8 +163,23 @@ impl Router {
     ///
     /// Returns whether an entry was removed; `false` would mean the entry
     /// vanished under an open lease, which nothing can currently do.
+    ///
+    /// A removed field-namespace key also drops its canary/quorum state, the
+    /// same reset `FieldRepairGuard::clear` performs -- otherwise a later
+    /// re-learn of the purged identity would inherit a stale cadence, claim,
+    /// or confirmation count from the incarnation the operator just removed.
     pub fn finalize_learned_capability_purge(&self, reserved: Box<ReservedPurge>) -> bool {
         let removed = self.learned_capabilities.finalize_purge(reserved.lease);
+        if removed
+            && !crate::field_capability::capability_key_is_catalog_scoped(&reserved.capability_key)
+        {
+            let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+                reserved.state_key.clone(),
+                reserved.capability_key.clone(),
+                reserved.provider_kind.clone(),
+            );
+            self.field_verdicts.canaries().reset(&key);
+        }
         tracing::info!(
             event = "purge",
             state_key = %routectl_core::sanitize_for_log(&reserved.state_key),

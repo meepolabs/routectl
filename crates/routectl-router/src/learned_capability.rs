@@ -304,6 +304,20 @@ pub struct LearnedRegistryEntry {
     pub source: EvidenceSource,
 }
 
+/// The identity and incarnation-scoped facts a cold-rebuild canary seed
+/// needs for one resident field-namespace entry. See
+/// [`LearnedCapabilityRegistry::field_seed_snapshot`].
+pub struct FieldSeedEntry {
+    pub state_key: String,
+    pub capability_key: String,
+    pub incarnation: u64,
+    pub observations: u32,
+    /// Whether this entry currently routes traffic away from its target
+    /// (a `RouteAway` acting decision), the seed condition for a canary
+    /// due on the very next eligible request rather than a full cadence.
+    pub acting: bool,
+}
+
 /// Full-fidelity entry for carrying the registry across a hot reload:
 /// [`LearnedCapabilityRegistry::export_entries`] then
 /// [`LearnedCapabilityRegistry::import_entries`] round-trips identically.
@@ -1247,6 +1261,33 @@ impl LearnedCapabilityRegistry {
                 evidence_class: entry.evidence_class.clone(),
                 phase: entry.phase,
                 source: entry.source,
+            })
+            .collect()
+    }
+
+    /// Snapshot every resident field-namespace entry with the identity and
+    /// incarnation a cold-rebuild canary seed needs.
+    ///
+    /// Narrow and crate-private by design: this is a read for exactly one
+    /// caller (the cold-rebuild canary seed) and carries only what that
+    /// caller needs, rather than widening the general-purpose
+    /// [`LearnedRegistryEntry`] snapshot with a field this class alone
+    /// uses. `capability_key` here is `RegistryKey::feature_key`, already
+    /// normalized -- the same string a [`crate::field_verdict::FieldVerdictKey`]
+    /// carries for the same identity.
+    pub(crate) fn field_seed_snapshot(&self) -> Vec<FieldSeedEntry> {
+        self.entries
+            .read()
+            .iter()
+            .filter(|(key, _)| {
+                !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+            })
+            .map(|(key, entry)| FieldSeedEntry {
+                state_key: key.state_key.clone(),
+                capability_key: key.feature_key.clone(),
+                incarnation: entry.incarnation,
+                observations: entry.observations,
+                acting: matches!(entry.acting_decision(), RoutingDecision::RouteAway { .. }),
             })
             .collect()
     }

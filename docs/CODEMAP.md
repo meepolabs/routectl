@@ -2369,7 +2369,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   pool-backed model is not silently omitted) and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
-  registry so it stays encapsulated),
+  registry so it stays encapsulated, then calls the private
+  `seed_field_canaries_from_ledger`, which reads
+  `LearnedCapabilityRegistry::field_seed_snapshot` for every resident
+  `field:` entry the replay just produced, resolves each one's provider kind
+  through `provider_kind_for_state_key` -- the same resolver a purge
+  finalization uses -- and seeds `FieldCanaryRegistry::seed_from_rebuild`
+  with the entry's real incarnation, observation count, and acting decision,
+  so a cold boot restores confirmation history and due-canary state instead
+  of starting every field verdict at a fresh cadence),
   `rebuild_calibration_from_ledger` (the same shape for the PRIVATE
   calibration store, supplying the resolved-model predicate that drops a
   renamed nickname), `register`, `record_k_sample`,
@@ -2807,7 +2815,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `nickname#label` base, then a provider-scoped key; empty = identity
   normalization for a target the operator has since removed) rather than accepted
   from the caller, so no caller can address a key the learn path never minted.
-  Learned entries only: never the override registry, never a baked prior
+  Learned entries only: never the override registry, never a baked prior.
+  `finalize_learned_capability_purge` also drops the purged key's resident
+  canary/quorum state (`FieldCanaryRegistry::reset`, see `src/field_canary.rs`)
+  when the removed key is field-namespace, the same reset a probe-settled
+  clear performs -- otherwise a later re-learn of the purged identity would
+  inherit a stale cadence, claim, or confirmation count from the incarnation
+  the operator just removed
 - `src/router/capability_cleared.rs` -- `CapabilityClearedEvent`, the additive
   `DispatchMeta.cleared_capabilities` ride-along row (state_key,
   capability_key, provider_kind -- the registry key of a resident negative a
@@ -3150,6 +3164,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   than it. A valid `field:` key is catalog-INDEPENDENT, so settlements cross a
   catalog revision change by design; the `Stale` arms are defensive handling of
   the shared generic registry API, not expected behavior for this key class.
+  `commit` does NOT touch the canary confirmation count: the `Applied`
+  outcome it reads off `observe_in_generation` is in-memory admission through
+  the generation barrier, not a durable writer acknowledgment, so reconciling
+  a confirmation count off it alone would let a later eligibility check treat
+  a verdict as confirmed before its event write ever landed. That
+  reconciliation is `FieldCanaryRegistry::acknowledge_confirmation` (see
+  `src/field_canary.rs`), an explicit state-only API for a caller holding the
+  durable ack; no such caller exists yet in this build.
   An operator purge lease on the guard's own key refuses `commit`/`clear` the
   same way through the shared `purge_leases` guard the lease reserved --
   `Reserved`, not `Stale` -- releasing the slot and mutating and emitting
@@ -3168,6 +3190,42 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   deliberately outside the contract -- no resolver enters dispatch. Inferring
   an address from a name's SHAPE was tried and removed as wrong in both
   directions; the anti-regression test pins those names as remote
+- `src/field_canary.rs` -- per-`FieldVerdictKey` canary and confirmation-quorum
+  state, shared behind an `Arc` alongside `FieldVerdictRegistry`'s own
+  in-flight set. STATE ONLY, one `Mutex<HashMap<FieldVerdictKey, CanaryState>>`
+  under one lock per identity per critical section: no new table, schema
+  version, or parallel store, since every field is either reconciled from the
+  learned row's own `observations` counter or is request-local coordination a
+  cold boot correctly starts empty. `acknowledge_confirmation(key,
+  incarnation, observations)` is the sole write path for the confirmation
+  count, and it exists for a caller holding a DURABLE writer acknowledgment
+  for `observations` -- not the in-memory `Applied` outcome
+  `FieldRepairGuard::commit` (see `src/field_verdict.rs`) reads; no caller
+  holds that ack yet, so this is state-only surface for a follow-up change.
+  `tick_cadence`, `begin_modified_request` (RAII `ModifiedRequestGuard`,
+  saturating rather than wrapping since the outstanding count is diagnostic,
+  not divided into anything), and `claim_canary` (RAII `CanaryClaimGuard`,
+  settling only if the guard's incarnation still matches the resident state,
+  so a stale settlement or an unsettled `Drop` both release without mutating
+  verdict-facing state) all `reseed_if_stale` the identity's slot when the
+  caller's incarnation differs from the resident one -- a fresh verdict
+  lifecycle for the same identity replaces the old cadence/claim/confirmation
+  state wholesale rather than patching it. `seed_from_rebuild(key,
+  incarnation, confirmations, due_immediately)` is the cold-rebuild entry
+  point `Router::seed_field_canaries_from_ledger` (see `src/router/mod.rs`)
+  calls for every resident `field:` entry right after
+  `capability_rebuild::rebuild_capabilities_into` replays the ledger; it
+  always replaces resident state wholesale (a rebuild is itself an
+  incarnation-defining event) and forces the cadence countdown to `1` --
+  the very next eligible request -- when the rebuilt entry is already acting
+  (routing traffic away), rather than making a live route-away wait a full
+  cadence cycle before its first post-boot canary. `reset(key)` drops all
+  resident state for a key, called from both a probe-settled clear
+  (`FieldVerdictRegistry::clear`) and a completed operator purge
+  (`Router::finalize_learned_capability_purge`, see
+  `src/router/capability_purge.rs`), so a later re-learn of the same identity
+  never inherits a stale cadence, claim, or confirmation count from an
+  incarnation that no longer exists
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait

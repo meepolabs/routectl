@@ -1731,6 +1731,172 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
     assert_eq!(summary.skipped_revision, 1);
 }
 
+/// A cold rebuild must reseed the field canary registry from the resident
+/// learned entries it just replayed: an acting (route-away) field verdict is
+/// due for a canary on the very next eligible request, a non-acting one
+/// starts at the normal cadence, and both carry over the real incarnation
+/// and observation count the replay produced -- never the zero-valued,
+/// empty-registry defaults a fresh boot would otherwise leave behind.
+#[test]
+fn cold_rebuild_seeds_field_canary_state_from_the_replayed_entries() {
+    use crate::capability_rebuild::{CapabilityEventRow, CapabilityLedgerReader, ReplayTombstone};
+    use crate::field_verdict::FieldVerdictKey;
+    use std::time::Instant;
+
+    struct FieldLedger {
+        rows: Vec<CapabilityEventRow>,
+    }
+
+    impl CapabilityLedgerReader for FieldLedger {
+        fn tombstone(&self) -> Option<ReplayTombstone> {
+            Some(ReplayTombstone::new(0, 0, 0))
+        }
+
+        fn read_events(&self) -> Vec<CapabilityEventRow> {
+            self.rows.clone()
+        }
+    }
+
+    /// A provider that is never invoked: this test reads and mutates the
+    /// learned registry only, so the resolved table needs a placeholder to
+    /// be well-formed.
+    struct FieldSeedNoopProvider;
+
+    #[async_trait::async_trait]
+    impl routectl_core::Provider for FieldSeedNoopProvider {
+        fn id(&self) -> &'static str {
+            "field-seed-noop"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> routectl_core::Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(
+            &self,
+            _: serde_json::Value,
+        ) -> routectl_core::Result<routectl_core::ChatResponse> {
+            Err(Error::normalize_response("field-seed-noop", "unused"))
+        }
+        async fn complete(
+            &self,
+            _: ChatRequest,
+        ) -> routectl_core::Result<routectl_core::ChatResponse> {
+            unreachable!("cold-rebuild seeding tests never dispatch")
+        }
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> routectl_core::Result<
+            futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+        > {
+            unreachable!("cold-rebuild seeding tests never dispatch")
+        }
+    }
+
+    let acting_path = "thinking.enabled.display";
+    let quiet_path = "thinking.budget_tokens";
+    let acting_key = crate::field_capability::field_capability_key(acting_path)
+        .expect("a qualified dotted path mints a key");
+    let quiet_key = crate::field_capability::field_capability_key(quiet_path)
+        .expect("a qualified dotted path mints a key");
+    let at = Instant::now();
+
+    let row = |rowid: i64, capability: &str, phase: &str| {
+        CapabilityEventRow::new(
+            rowid,
+            at,
+            "broken".to_string(),
+            Some(phase.to_string()),
+            "live".to_string(),
+            Some("self-identifying".to_string()),
+            None,
+            capability.to_string(),
+            "sonnet".to_string(),
+            "anthropic-api".to_string(),
+            0,
+            0,
+        )
+    };
+
+    let mut config = Config::default();
+    config.providers.insert(
+        "anthropic".to_string(),
+        crate::config::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+    );
+    config.models.insert(
+        "sonnet".to_string(),
+        crate::config::ModelEntry::new("anthropic", "claude-sonnet-4-5"),
+    );
+    let mut router = Router::new(Arc::new(config));
+    // The RESOLVED table, not just the config tables: `provider_kind_for_state_key`
+    // (which the seed path uses to resolve "sonnet") reads resolved models first,
+    // the same table the learn path keys on when it mints these entries.
+    let provider: Arc<dyn routectl_core::Provider> = Arc::new(FieldSeedNoopProvider);
+    let mut models: BTreeMap<String, Arc<crate::resolved::ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "sonnet".to_string(),
+        Arc::new(crate::resolved::ResolvedModel::new(
+            "sonnet",
+            "anthropic",
+            provider,
+            "claude-sonnet-4-5",
+        )),
+    );
+    router.install_resolved_models(models);
+    let summary = router.rebuild_learned_from_ledger(&FieldLedger {
+        // F1 + live is a `RouteAway` acting decision; F3 + live is advisory
+        // (`Allow`), so the two rows pin both branches of the seed's
+        // `due_immediately` rule in one rebuild.
+        rows: vec![row(1, &acting_key, "f1"), row(2, &quiet_key, "f3")],
+    });
+    assert_eq!(summary.replayed_negative, 2);
+
+    let acting_canary_key = FieldVerdictKey::new("sonnet", acting_path, "anthropic-api")
+        .expect("a qualified path mints a canary key");
+    let quiet_canary_key = FieldVerdictKey::new("sonnet", quiet_path, "anthropic-api")
+        .expect("a qualified path mints a canary key");
+
+    let acting_snap = router
+        .field_verdicts
+        .canaries()
+        .snapshot(&acting_canary_key)
+        .expect("the acting entry must be seeded");
+    let acting_resident_incarnation = router.learned_capabilities.resident_incarnation_for_tests(
+        "sonnet",
+        &acting_key,
+        "anthropic-api",
+    );
+    assert_eq!(
+        acting_snap.cadence, 1,
+        "an acting (route-away) verdict must be due on the very next eligible request"
+    );
+    assert_eq!(
+        acting_snap.confirmations, 1,
+        "carries over the replayed observation count"
+    );
+    assert_eq!(
+        acting_snap.incarnation, acting_resident_incarnation,
+        "the seed must carry over the entry's own stamped incarnation, not invent one"
+    );
+
+    let quiet_snap = router
+        .field_verdicts
+        .canaries()
+        .snapshot(&quiet_canary_key)
+        .expect("the non-acting entry must be seeded too");
+    let quiet_resident_incarnation = router.learned_capabilities.resident_incarnation_for_tests(
+        "sonnet",
+        &quiet_key,
+        "anthropic-api",
+    );
+    assert_eq!(
+        quiet_snap.cadence,
+        crate::config::CANARY_INTERVAL,
+        "a non-acting verdict starts at the normal cadence, not forced due"
+    );
+    assert_eq!(quiet_snap.confirmations, 1);
+    assert_eq!(quiet_snap.incarnation, quiet_resident_incarnation);
+}
+
 #[test]
 fn record_k_sample_skips_keyless_and_records_keyed() {
     use crate::k_estimator::KSessionKey;

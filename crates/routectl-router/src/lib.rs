@@ -49,6 +49,7 @@ pub(crate) mod cost_gate;
 pub(crate) mod doctor;
 pub(crate) mod factory;
 pub(crate) mod feature_keys;
+pub(crate) mod field_canary;
 pub(crate) mod field_capability;
 pub(crate) mod field_verdict;
 pub(crate) mod glob;
