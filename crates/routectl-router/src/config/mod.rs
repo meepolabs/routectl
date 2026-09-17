@@ -18,11 +18,12 @@ pub(crate) use schema::default_anthropic_base;
 pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::routectl_config_dir;
 pub use schema::{
-    AliasValue, BedrockGlobalConfig, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
-    CalibrationConfig, CapabilityConfig, CredentialSource, HistoryReasoning, LogConfig, MitmConfig,
-    ModelEntry, NicknameIter, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
-    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection,
-    ServerAuth, ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
+    AliasValue, BedrockGlobalConfig, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability,
+    CacheConfig, CalibrationConfig, CapabilityConfig, CredentialSource, FidelityConfig,
+    HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry,
+    PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
+    ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection, ServerAuth,
+    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -197,6 +198,18 @@ pub struct Config {
     /// Hot-reloadable -- the flag is read per birth pick.
     #[serde(default)]
     pub seat_quota: SeatQuotaConfig,
+
+    /// Operator-facing `[fidelity]` block. Opt-in surface for
+    /// prefix-impacting pre-flight repair and per-provider paid-probe
+    /// daily caps. A missing block keeps `FidelityConfig::default()`:
+    /// no target opted into prefix-impacting pre-flight and every
+    /// provider's paid-probe cap at zero, so no config change permits any
+    /// paid probe or prefix-impacting pre-flight action by itself. Carries
+    /// no active runtime behavior yet -- see `FidelityConfig` for the
+    /// fixed cadence/quorum constants this block deliberately does not
+    /// expose.
+    #[serde(default)]
+    pub fidelity: FidelityConfig,
 
     /// Operator-facing LEGACY `[cache_pricing]` field-level override table
     /// for the baked catalog economics rows (`crate::catalog`). Slated for

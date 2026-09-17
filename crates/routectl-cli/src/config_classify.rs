@@ -47,6 +47,7 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "seat_quota",
     "cache_pricing",
     "capability",
+    "fidelity",
 ];
 
 /// Diff the previous config against the new one and return the names of

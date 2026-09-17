@@ -548,6 +548,31 @@
         }
       ]
     },
+    "FidelityConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[fidelity]` config block. Fully defaulted: a missing\n`[fidelity]` table deserializes to `FidelityConfig::default()`, which\npermits no paid probes and no prefix-impacting pre-flight -- current\nbehavior is unchanged until the operator opts in.\n\n`prefix_impact_opt_in` reuses the same two-tier target-spec grammar as\n`[capability.overrides]`: `\"provider_name\"` opts in every model on\nthat provider, `\"provider_name:nickname\"` opts in a single model. A\nprefix-impacting transform still requires the confirmed-repair quorum\n([`PREFIX_QUORUM`]) on top of listing here; this field alone never\nmakes one act.\n\n`paid_probe_daily_caps` is keyed by provider name only (no model\ntier -- the daily budget is a provider-account property, not a\nper-model one) and caps the number of paid probe calls issued against\nthat provider per UTC day. A provider absent from this map, or listed\nwith the default `0`, permits no paid probe calls; only free\nvalidators may still run for it.\n\nThe re-verification cadence and confirmation quorum are code constants\n([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are\nhard safety parameters, never read from the environment.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time instead of silently ignoring it.",
+      "properties": {
+        "paid_probe_daily_caps": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Per-provider paid-probe daily call cap, keyed by provider name. A\nprovider absent from this map defaults to `0` (no paid probes).",
+          "type": "object"
+        },
+        "prefix_impact_opt_in": {
+          "default": [],
+          "description": "Target specs opted into prefix-impacting pre-flight, using the\n`\"provider_name\"` / `\"provider_name:nickname\"` grammar shared with\n`[capability.overrides]`. Default empty -- no target is opted in.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "GeminiAuthMode": {
       "description": "Selects which Gemini wire dialect a provider speaks.",
       "oneOf": [
@@ -2104,6 +2129,14 @@
         "staleness_hint_days": 14
       },
       "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
+    },
+    "fidelity": {
+      "$ref": "#/$defs/FidelityConfig",
+      "default": {
+        "paid_probe_daily_caps": {},
+        "prefix_impact_opt_in": []
+      },
+      "description": "Operator-facing `[fidelity]` block. Opt-in surface for\nprefix-impacting pre-flight repair and per-provider paid-probe\ndaily caps. A missing block keeps `FidelityConfig::default()`:\nno target opted into prefix-impacting pre-flight and every\nprovider's paid-probe cap at zero, so no config change permits any\npaid probe or prefix-impacting pre-flight action by itself. Carries\nno active runtime behavior yet -- see `FidelityConfig` for the\nfixed cadence/quorum constants this block deliberately does not\nexpose."
     },
     "log": {
       "$ref": "#/$defs/LogConfig",

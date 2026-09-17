@@ -58,6 +58,7 @@ overlays merge, what's reserved.
 - [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
   ([retired `[cache_pricing]`](#retired-cache_pricing))
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
+- [Fidelity pre-flight opt-in (`[fidelity]`)](#fidelity-pre-flight-opt-in-fidelity)
 
 **Operating the daemon**
 - [Log knobs (`[log]`)](#log-knobs-log)
@@ -3399,6 +3400,62 @@ What it does and does not do:
 - **It touches learned entries only.** It never edits your config, your
   `[capability.overrides]` cells, or the baked catalog.
 
+## Fidelity pre-flight opt-in (`[fidelity]`)
+
+The optional `[fidelity]` block is the operator opt-in surface for
+prefix-impacting pre-flight repair and for per-provider paid capability
+probes. A missing block deserializes to the defaults below, which
+permit no paid probe calls and no prefix-impacting pre-flight action --
+an existing config needs no migration.
+
+```toml
+[fidelity]
+# Target specs opted into prefix-impacting pre-flight, using the same
+# "provider_name" / "provider_name:nickname" grammar as
+# [capability.overrides], but restricted to configured providers/models
+# (a bare pool name is not accepted -- see below). Default empty -- no
+# target is opted in.
+prefix_impact_opt_in = []
+
+# Per-provider paid-probe daily call cap, keyed by provider name. A
+# provider absent from this map defaults to 0 (no paid probes).
+[fidelity.paid_probe_daily_caps]
+# anthropic = 5
+```
+
+- **`prefix_impact_opt_in`** (list of target specs, default empty) --
+  each entry uses the same two-tier grammar as `[capability.overrides]`
+  (`provider_name`, or `provider_name:nickname` with the nickname taking
+  everything after the first `:`). Unlike `[capability.overrides]` --
+  which accepts any string as a target spec -- this list also enforces
+  directory membership: a malformed entry, or one naming a provider or
+  model nickname that is not configured, fails config load naming the
+  entry. Listing a target here is necessary but not sufficient for
+  prefix-impacting pre-flight to act on it -- the target also needs its
+  confirmed-repair quorum. The provider segment is always a concrete
+  `[providers.X]` name -- a bare `[pools.<name>]` name is rejected as an
+  unknown provider, since a pool is never itself the provider a
+  dispatch resolves to. For a model-scoped entry (`provider:nickname`),
+  the named provider does not have to match the model's own `provider`
+  field verbatim: it is also accepted when the model's `provider` names
+  a pool and the named provider is one of that pool's members, because
+  pool dispatch always resolves to a concrete member, and that member
+  name is exactly what reaches capability-override resolution.
+- **`paid_probe_daily_caps`** (table of provider name to non-negative
+  call count, default empty) -- caps the number of paid probe calls
+  issued against that provider per UTC day. Unlike
+  `prefix_impact_opt_in`, this table is single-tier: it is keyed by bare
+  provider name only, because the daily budget is a provider-account
+  property, not a per-model one. A key carrying a `:` or naming a
+  provider that is not configured fails config load. A provider absent
+  from the table, or present with the value `0`, permits no paid probe
+  call against it.
+- **The re-verification cadence and confirmation quorum are fixed, not
+  configurable** -- both are hard safety parameters baked into the
+  binary and read from no environment variable, so they cannot drift
+  per deployment or be raised past their tested values.
+- **No active runtime behavior yet.** This block is presently read-only
+  config surface: it carries no wired dispatch-path effect on its own.
 
 ## Context reduction (`[reduction]`)
 

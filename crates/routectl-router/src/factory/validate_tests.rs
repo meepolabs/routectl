@@ -2181,6 +2181,265 @@ mod collect_config_validation_tests {
                 .collect::<Vec<_>>(),
         );
     }
+
+    /// Config surface for a `[fidelity] prefix_impact_opt_in` entry. Parsed
+    /// through the real serde path so the operator-written TOML shape is
+    /// what the validator sees.
+    fn prefix_impact_config(entries: &str) -> Config {
+        toml::from_str(&format!(
+            "[providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [models.sonnet]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude-sonnet\"\n\
+             [fidelity]\n\
+             prefix_impact_opt_in = [{entries}]\n"
+        ))
+        .expect("fixture must parse")
+    }
+
+    #[test]
+    fn a_missing_fidelity_block_permits_no_probes_or_opt_in() {
+        let validation = collect_config_validation(&Config::default());
+        assert!(
+            validation.errors.is_empty(),
+            "a missing [fidelity] block must validate clean: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn collects_the_malformed_prefix_impact_target_spec_error() {
+        let validation = collect_config_validation(&prefix_impact_config("\"anthropic:\""));
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("malformed"),
+            "error should call out the malformed spec: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_unknown_provider_prefix_impact_target_error() {
+        let validation = collect_config_validation(&prefix_impact_config("\"ghost\""));
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("ghost") && validation.errors[0].contains("unknown"),
+            "error should name the unknown provider: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_unknown_model_prefix_impact_target_error() {
+        let validation = collect_config_validation(&prefix_impact_config("\"anthropic:ghost\""));
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("ghost") && validation.errors[0].contains("unknown"),
+            "error should name the unknown model nickname: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_cross_provider_model_prefix_impact_target_error() {
+        let config: Config = toml::from_str(
+            "[providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [providers.other]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [models.sonnet]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude-sonnet\"\n\
+             [fidelity]\n\
+             prefix_impact_opt_in = [\"other:sonnet\"]\n",
+        )
+        .expect("fixture must parse");
+
+        let validation = collect_config_validation(&config);
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("belongs to provider"),
+            "error should name the mismatched provider: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn accepts_well_formed_prefix_impact_targets() {
+        let validation =
+            collect_config_validation(&prefix_impact_config("\"anthropic\", \"anthropic:sonnet\""));
+        assert!(
+            validation.errors.is_empty(),
+            "a known provider and a known provider:model spec must both pass: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn accepts_a_prefix_impact_target_naming_a_colon_bearing_model_nickname() {
+        let config: Config = toml::from_str(
+            "[providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [models.\"claude:v2\"]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude-sonnet\"\n\
+             [fidelity]\n\
+             prefix_impact_opt_in = [\"anthropic:claude:v2\"]\n",
+        )
+        .expect("fixture must parse");
+        let validation = collect_config_validation(&config);
+        assert!(
+            validation.errors.is_empty(),
+            "a model nickname containing `:` must not be rejected as a malformed \
+             target spec -- only the FIRST `:` delimits provider from nickname: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn accepts_a_pool_member_prefix_impact_target_for_a_pool_backed_model() {
+        let config: Config = toml::from_str(
+            "[providers.anthropic-a]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic-a\"\n\
+             [providers.anthropic-b]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic-b\"\n\
+             [pools.anthropic-pool]\n\
+             members = [\"anthropic-a\", \"anthropic-b\"]\n\
+             [models.sonnet]\n\
+             provider = \"anthropic-pool\"\n\
+             upstream = \"claude-sonnet\"\n\
+             [fidelity]\n\
+             prefix_impact_opt_in = [\"anthropic-a:sonnet\"]\n",
+        )
+        .expect("fixture must parse");
+        let validation = collect_config_validation(&config);
+        assert!(
+            validation.errors.is_empty(),
+            "a concrete pool member naming a pool-backed model's nickname is a real, \
+             reachable dispatch target and must be accepted: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_a_prefix_impact_target_naming_a_provider_outside_the_models_pool() {
+        let config: Config = toml::from_str(
+            "[providers.anthropic-a]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic-a\"\n\
+             [providers.anthropic-b]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic-b\"\n\
+             [providers.anthropic-c]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic-c\"\n\
+             [pools.anthropic-pool]\n\
+             members = [\"anthropic-a\", \"anthropic-b\"]\n\
+             [models.sonnet]\n\
+             provider = \"anthropic-pool\"\n\
+             upstream = \"claude-sonnet\"\n\
+             [fidelity]\n\
+             prefix_impact_opt_in = [\"anthropic-c:sonnet\"]\n",
+        )
+        .expect("fixture must parse");
+        let validation = collect_config_validation(&config);
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("belongs to provider")
+                && validation.errors[0].contains("not a member of that pool"),
+            "error should name the model's actual pool and note the named provider is not one \
+             of its members: {}",
+            validation.errors[0]
+        );
+    }
+
+    /// Config surface for a `[fidelity.paid_probe_daily_caps]` table.
+    fn paid_probe_cap_config(entries: &str) -> Config {
+        toml::from_str(&format!(
+            "[providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [fidelity.paid_probe_daily_caps]\n\
+             {entries}\n"
+        ))
+        .expect("fixture must parse")
+    }
+
+    #[test]
+    fn collects_the_unknown_provider_paid_probe_cap_error() {
+        let validation = collect_config_validation(&paid_probe_cap_config("ghost = 5\n"));
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("ghost") && validation.errors[0].contains("unknown"),
+            "error should name the unknown provider: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_model_scoped_paid_probe_cap_key_error() {
+        let validation =
+            collect_config_validation(&paid_probe_cap_config("\"anthropic:sonnet\" = 5\n"));
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("provider-only"),
+            "error should call out the model-scoped key: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn accepts_a_known_provider_paid_probe_cap() {
+        let validation = collect_config_validation(&paid_probe_cap_config("anthropic = 5\n"));
+        assert!(
+            validation.errors.is_empty(),
+            "a known provider cap must pass: {:?}",
+            validation.errors
+        );
+    }
 }
 
 #[cfg(all(test, feature = "bedrock"))]
