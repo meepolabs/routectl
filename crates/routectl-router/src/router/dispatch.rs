@@ -40,6 +40,7 @@ use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
+use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::overlays::apply_layered_overlays;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
@@ -154,6 +155,24 @@ pub(super) fn replay_rejection_body_free(
 /// sibling rather than blocking on a multi-minute (or hostile) hint.
 const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 
+/// Bring `meta.calib_estimated_tokens` back in line with `attempt_req` after
+/// a dispatch-path mutation shrank the payload.
+///
+/// `record_would_trim` stamps the estimate ONCE, before the retry loop, from
+/// the request as it stood then. A reactive repair -- dropping a rejected
+/// envelope field, stripping a rejected artifact -- makes the dispatched
+/// payload smaller than that stamp describes, while the provider's reported
+/// prompt total reflects the smaller payload. Left uncorrected the evidence
+/// ratio comes out too low, and a low correction factor shrinks a corrected
+/// estimate until the window gate admits requests the static estimate had
+/// correctly judged too large.
+///
+/// THE single re-stamp entry point for every such mutation, so a new repair
+/// class cannot land on this path without going through it.
+pub(super) fn restamp_calibration_estimate(attempt_req: &ChatRequest, meta: &mut DispatchMeta) {
+    meta.calib_estimated_tokens = Some(estimate_total_tokens(attempt_req));
+}
+
 impl Router {
     /// Advisory-only WARN when the region the CALLER marked cacheable carries
     /// per-request-volatile content (fresh ids/timestamps): such a prefix
@@ -223,6 +242,7 @@ impl Router {
         let mut meta = DispatchMeta::for_alias(&req.model);
         let result = self.complete_inner(req, opts, &mut meta).await;
         emit_replay_degradation(&meta);
+        emit_field_repair(&meta);
         Dispatched { meta, result }
     }
 
@@ -449,6 +469,21 @@ impl Router {
             let mut replay_repair_attempted = false;
             let mut replay_reject_status: u16 = 0;
             let mut skip_replay_backoff = false;
+            // Envelope-field carry admission, at the SAME position and for the
+            // same reason as the replay admission above: the closed table plus
+            // this attempt's own fields decide the identity, so the guard is
+            // claimed before dispatch and BOTH settlements stay reachable
+            // (commit on a repaired success, clear when the field is accepted).
+            // Nothing is mutated here -- an acting verdict simply refuses the
+            // slot and the attempt dispatches unchanged.
+            let mut field_plan = self.plan_field_carry(
+                target,
+                &attempt_req,
+                FieldSettlementMode::Settling,
+                now_admit,
+            );
+            let mut field_repair_attempted = false;
+            let mut field_reject_status: u16 = 0;
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
@@ -592,6 +627,33 @@ impl Router {
                                     deg.repair_succeeded = true;
                                     deg.learned = true;
                                 }
+                            } else {
+                                meta.cleared_capabilities.extend(plan.settle_success());
+                            }
+                        }
+                        // Settle the envelope-field carry the same way: a
+                        // repaired retry that reached success confirms the
+                        // verdict (commit); an UNREPAIRED success proves the
+                        // field is accepted, so clear any resident verdict and
+                        // ride the clear out on the meta, or a warm rebuild
+                        // would resurrect a verdict this request disproved.
+                        if let Some(plan) = field_plan.take() {
+                            if field_repair_attempted {
+                                let features = derive_feature_keys(
+                                    req.tools.as_deref().unwrap_or(&[]),
+                                    req.provider_extras.as_ref(),
+                                    req.response_format.as_ref(),
+                                );
+                                // The `learned` claim is derived from what the commit
+                                // actually PERSISTED, never asserted alongside it: a
+                                // non-settling plan commits nothing, and a summary that
+                                // claimed otherwise would be a false persistence claim on
+                                // the surface built to make such claims trustworthy.
+                                let learned =
+                                    plan.commit(field_reject_status, features, Instant::now());
+                                let persisted = learned.is_some();
+                                meta.learned_capabilities.extend(learned);
+                                self.note_field_repair_succeeded(meta, persisted);
                             } else {
                                 meta.cleared_capabilities.extend(plan.settle_success());
                             }
@@ -767,6 +829,58 @@ impl Router {
                                 replay_rejection_body_free(&e, &cf.class, provider_name)
                                     .unwrap_or(e),
                             );
+                            continue;
+                        }
+                        // Envelope-field L0 repair, at the SAME dispatch
+                        // position: after auth recovery, before the fallback
+                        // and health settles. On a rejection naming the carried
+                        // field, DROP that field from this attempt and
+                        // re-dispatch this same target exactly ONCE. The loop
+                        // dispatches `attempt_req`, so the repaired body is the
+                        // one that goes upstream.
+                        //
+                        // The class read here is the NATIVE one, never the
+                        // remapped `cf.class`: an operator `[class_overrides]`
+                        // entry says how a status should be ROUTED, not what the
+                        // upstream said, so reading it would let an override
+                        // turn a 429 or a 503 into an envelope-field repair --
+                        // dropping a field over a rate limit and minting a
+                        // permanent verdict from it. Routing below still reads
+                        // the override.
+                        //
+                        // `apply` owns the budget draw together with the
+                        // mutation, so a drop that removes nothing charges
+                        // nothing and every repaired-state flag is set only on
+                        // its `Some`. Fires at most once per target and never
+                        // nests inside the per-target retry or the fallback
+                        // walk, so the call count stays additive.
+                        if !field_repair_attempted
+                            && let Some(plan) = field_plan.as_ref()
+                            && Self::rejection_names_planned_field(
+                                plan,
+                                &original_class,
+                                &e,
+                                target.provider_kind.unwrap_or(""),
+                            )
+                            && let Some(status) =
+                                plan.apply(&mut attempt_req, meta, &mut repair_budget, &e)
+                        {
+                            field_repair_attempted = true;
+                            field_reject_status = status;
+                            self.note_field_repair(meta, state_key, plan.path());
+                            // A repair is a fixed correctness branch, not a
+                            // retry policy, so it takes no backoff sleep (the
+                            // streaming walk has none to skip).
+                            skip_replay_backoff = true;
+                            self.release_probe_slot(state_key);
+                            probe_guard.disarm();
+                            // Preserve the genuine rejection as last_err before
+                            // re-gating the repaired attempt: if the re-gate
+                            // refuses (CircuitOpen / RPM), the
+                            // `last_err.is_none()` guard keeps the real upstream
+                            // rejection rather than surfacing the synthetic
+                            // status-0 gate error.
+                            last_err = Some(e);
                             continue;
                         }
                         if let Some(body_free) =
@@ -1038,6 +1152,7 @@ impl Router {
         let mut meta = DispatchMeta::for_alias(&req.model);
         let result = self.stream_inner(req, opts, &mut meta).await;
         emit_replay_degradation(&meta);
+        emit_field_repair(&meta);
         DispatchedStream { meta, result }
     }
 
@@ -1214,6 +1329,17 @@ impl Router {
             let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, meta, now_admit);
             let mut replay_repair_attempted = false;
             let mut replay_reject_status: u16 = 0;
+            // Envelope-field carry admission -- see `complete_inner`. Same
+            // pre-dispatch position, same closed-table identity, so the
+            // streaming walk is not a second site with its own rules.
+            let mut field_plan = self.plan_field_carry(
+                target,
+                &attempt_req,
+                FieldSettlementMode::Settling,
+                now_admit,
+            );
+            let mut field_repair_attempted = false;
+            let mut field_reject_status: u16 = 0;
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
                 provider_name,
@@ -1382,6 +1508,33 @@ impl Router {
                                 meta.cleared_capabilities.extend(plan.settle_success());
                             }
                         }
+                        // Settle the envelope-field carry the same way: a
+                        // repaired retry that reached success confirms the
+                        // verdict (commit); an UNREPAIRED success proves the
+                        // field is accepted, so clear any resident verdict and
+                        // ride the clear out on the meta, or a warm rebuild
+                        // would resurrect a verdict this request disproved.
+                        if let Some(plan) = field_plan.take() {
+                            if field_repair_attempted {
+                                let features = derive_feature_keys(
+                                    req.tools.as_deref().unwrap_or(&[]),
+                                    req.provider_extras.as_ref(),
+                                    req.response_format.as_ref(),
+                                );
+                                // The `learned` claim is derived from what the commit
+                                // actually PERSISTED, never asserted alongside it: a
+                                // non-settling plan commits nothing, and a summary that
+                                // claimed otherwise would be a false persistence claim on
+                                // the surface built to make such claims trustworthy.
+                                let learned =
+                                    plan.commit(field_reject_status, features, Instant::now());
+                                let persisted = learned.is_some();
+                                meta.learned_capabilities.extend(learned);
+                                self.note_field_repair_succeeded(meta, persisted);
+                            } else {
+                                meta.cleared_capabilities.extend(plan.settle_success());
+                            }
+                        }
                         return Ok(wrap_with_breaker_accounting(
                             relabeled.boxed(),
                             state,
@@ -1520,6 +1673,52 @@ impl Router {
                                 replay_rejection_body_free(&e, &cf.class, provider_name)
                                     .unwrap_or(e),
                             );
+                            continue;
+                        }
+                        // Envelope-field L0 repair, at the SAME dispatch
+                        // position: after auth recovery, before the fallback
+                        // and health settles. On a rejection naming the carried
+                        // field, DROP that field from this attempt and
+                        // re-dispatch this same target exactly ONCE. The loop
+                        // dispatches `attempt_req`, so the repaired body is the
+                        // one that goes upstream.
+                        //
+                        // The class read here is the NATIVE one, never the
+                        // remapped `cf.class`: an operator `[class_overrides]`
+                        // entry says how a status should be ROUTED, not what the
+                        // upstream said, so reading it would let an override
+                        // turn a 429 or a 503 into an envelope-field repair.
+                        // Routing below still reads the override.
+                        //
+                        // `apply` owns the budget draw together with the
+                        // mutation, so a drop that removes nothing charges
+                        // nothing and every repaired-state flag is set only on
+                        // its `Some`. Fires at most once per target and never
+                        // nests inside the per-target retry or the fallback
+                        // walk, so the call count stays additive.
+                        if !field_repair_attempted
+                            && let Some(plan) = field_plan.as_ref()
+                            && Self::rejection_names_planned_field(
+                                plan,
+                                &original_class,
+                                &e,
+                                target.provider_kind.unwrap_or(""),
+                            )
+                            && let Some(status) =
+                                plan.apply(&mut attempt_req, meta, &mut repair_budget, &e)
+                        {
+                            field_repair_attempted = true;
+                            field_reject_status = status;
+                            self.note_field_repair(meta, state_key, plan.path());
+                            self.release_probe_slot(state_key);
+                            probe_guard.disarm();
+                            // Preserve the genuine rejection as last_err before
+                            // re-gating the repaired attempt: if the re-gate
+                            // refuses (CircuitOpen / RPM), the
+                            // `last_err.is_none()` guard keeps the real upstream
+                            // rejection rather than surfacing the synthetic
+                            // status-0 gate error.
+                            last_err = Some(e);
                             continue;
                         }
                         if let Some(body_free) =

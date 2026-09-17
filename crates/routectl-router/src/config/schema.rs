@@ -1957,6 +1957,38 @@ impl ProviderEntry {
         }
     }
 
+    /// `Some(base_url)` iff this entry is an `AnthropicApi` variant whose
+    /// configured base URL is the one it will actually egress to, `None`
+    /// otherwise.
+    ///
+    /// Answers ONLY for that lane on purpose. The caller is the
+    /// envelope-field mint suppression, whose predicate keys on the
+    /// configured base URL, and the reactive field repair acts on this lane
+    /// alone -- so a caller reaching for another kind's URL gets `None` and
+    /// fails closed rather than silently classifying a lane this stage has
+    /// captured no rejection envelope for.
+    ///
+    /// The BEDROCK MANTLE sub-lane returns `None` for the same reason, and it is
+    /// the case a bare variant match gets wrong: a mantle entry leaves
+    /// `base_url` at the Anthropic default and validation REQUIRES that, while
+    /// the factory derives the real endpoint from `bedrock_mantle.region`. So
+    /// the configured value is not the effective egress -- reading it would
+    /// classify a Bedrock upstream as a remote Anthropic one and let it mint a
+    /// verdict, which Stage 1 excludes. Refusing here keeps that exclusion a
+    /// property of this accessor rather than of Bedrock capability-key
+    /// normalization, which is untouched.
+    pub fn anthropic_api_base_url(&self) -> Option<&str> {
+        match self {
+            #[cfg(feature = "bedrock")]
+            Self::AnthropicApi {
+                bedrock_mantle: Some(_),
+                ..
+            } => None,
+            Self::AnthropicApi { base_url, .. } => Some(base_url),
+            _ => None,
+        }
+    }
+
     /// Per-provider `header_extras`. Returns a reference to the
     /// per-variant map so the dispatch-layer merge helpers can read
     /// without re-matching the enum.

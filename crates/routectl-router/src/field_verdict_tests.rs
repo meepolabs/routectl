@@ -219,6 +219,61 @@ fn a_successful_repaired_retry_commits_the_field_negative() {
 }
 
 #[test]
+fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_pause() {
+    // Arrange -- admit a guard, then install a hook that runs a sibling
+    // observation on the SAME key after the guard's own observe has
+    // returned but before its event is built.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("unknown pair admits");
+    let sibling_reg = Arc::clone(&reg);
+    let state_key = k.state_key().to_string();
+    let capability_key = k.capability_key().to_string();
+    let provider_kind = k.provider_kind().to_string();
+    reg.learned().set_post_observe_test_hook(Box::new(move || {
+        let _ = sibling_reg
+            .learned()
+            .observe_in_generation_with_observations(
+                1,
+                &state_key,
+                &capability_key,
+                &provider_kind,
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+                EvidenceSource::Live,
+                None,
+                t0,
+            );
+    }));
+
+    // Act
+    let event = guard
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+
+    // Assert -- the emitted event carries the count this commit's OWN
+    // guarded read captured, not the resident count as it stands after the
+    // sibling's later observation.
+    assert_eq!(
+        event.observations, 1,
+        "the emitted event must retain its own captured count"
+    );
+    let resident = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.state_key() && entry.feature_key == k.capability_key())
+        .expect("a resident entry after both observations");
+    assert_eq!(
+        resident.observations, 2,
+        "the sibling observation must have bumped the resident count"
+    );
+}
+
+#[test]
 fn a_failed_repair_leaves_resident_state_unchanged() {
     // Arrange -- an entry learned earlier, now lapsed and re-verifying.
     let reg = registry();
@@ -1429,5 +1484,144 @@ fn the_two_facades_never_hold_the_same_identity_twice() {
             .admit_provisional(&k, REMOTE_BASE, 1, t0)
             .is_none(),
         "no duplicate holder across the rebuild",
+    );
+}
+
+// ---- purge lease during repair settlement ------------------------------------
+
+/// An operator purge holding the key's lease blocks a concurrent commit: the
+/// commit's `observe_in_generation` call takes the same `purge_leases` guard a
+/// prepared purge holds, so it is refused rather than refreshing an entry the
+/// purge has already captured.
+#[test]
+fn a_purge_lease_blocks_a_concurrent_commit_and_leaves_the_entry_untouched() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    // Past the acting window: the resident row lapses, so a second caller may
+    // admit a fresh repair on the same identity instead of being refused by
+    // the still-acting verdict from the first commit.
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+
+    // A prior successful repair leaves a resident row for the purge to capture.
+    reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted")
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+    let before = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.state_key() && entry.feature_key == k.capability_key())
+        .expect("the commit left a resident row");
+
+    // Admitted BEFORE the lease is taken: the lease also blocks the
+    // negative-state read `admit_provisional` performs, so a second guard
+    // must already be held when the purge reserves the key.
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+        .expect("the resident verdict has lapsed, so a fresh repair may admit");
+
+    let lease = match reg.learned().prepare_purge(
+        reg.learned().generation(),
+        k.state_key(),
+        k.capability_key(),
+        k.provider_kind(),
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    let outcome = guard.commit(400, vec![], t_lapsed);
+
+    assert!(
+        outcome.is_none(),
+        "a commit racing a purge lease must emit no event",
+    );
+    let after = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == k.state_key() && entry.feature_key == k.capability_key())
+        .expect("the leased row is left resident, not removed");
+    assert_eq!(
+        before.observations, after.observations,
+        "a refused commit must not mutate the leased entry",
+    );
+
+    reg.learned().restore_purge(lease);
+
+    // The commit's refusal arm must have released the in-flight slot: the
+    // same lapsed identity admits again once the lease is gone. Without that
+    // release the slot latches forever and this assertion goes RED.
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+            .is_some(),
+        "the same lapsed identity must admit again once the purge lease is \
+         released",
+    );
+}
+
+/// The same lease blocks a concurrent clear: a `remove_keyed_in_generation`
+/// call refused by the lease removes nothing and emits nothing.
+#[test]
+fn a_purge_lease_blocks_a_concurrent_clear_and_leaves_the_entry_resident() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+    let t0 = Instant::now();
+    let t_lapsed = t0 + DECAY + Duration::from_secs(1);
+
+    reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("admitted")
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+        .expect("the resident verdict has lapsed, so a fresh repair may admit");
+
+    let lease = match reg.learned().prepare_purge(
+        reg.learned().generation(),
+        k.state_key(),
+        k.capability_key(),
+        k.provider_kind(),
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    let outcome = guard.clear();
+
+    assert!(
+        outcome.is_none(),
+        "a clear racing a purge lease must emit no event",
+    );
+    // `is_negative_acting` reads through the same lease-guarded path a real
+    // caller would, so it answers "refused" while the lease is held -- not
+    // the fact this assertion needs. `snapshot` bypasses the lease to read
+    // the raw entry, which is the only way to prove the row was left alone.
+    assert!(
+        reg.learned()
+            .snapshot()
+            .into_iter()
+            .any(|entry| entry.state_key == k.state_key()
+                && entry.feature_key == k.capability_key()
+                && matches!(
+                    entry.verdict,
+                    routectl_core::capability::Verdict::LearnedBroken(_)
+                )),
+        "the leased row must remain resident with its negative verdict intact",
+    );
+
+    reg.learned().restore_purge(lease);
+
+    // The clear's refusal arm must have released the in-flight slot: the
+    // same lapsed identity admits again once the lease is gone. Without that
+    // release the slot latches forever and this assertion goes RED.
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+            .is_some(),
+        "the same lapsed identity must admit again once the purge lease is \
+         released",
     );
 }

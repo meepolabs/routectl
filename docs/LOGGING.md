@@ -232,6 +232,109 @@ Correlate across the retry/fallback hops with the request span's
 structured error before it reaches the generic retry/fallback logs, so
 the rejection envelope never renders into an `error = ?e` line.
 
+Two verdict-lifecycle lines accompany it at INFO, both carrying
+sanitized keys only: `"replay_learn_commit"` when a stripped retry
+confirms the negative, and `"replay_learn_clear"` when a later carry
+succeeds and lifts a resident one. `state_key` is sanitized at both
+sites; `capability_key` is the closed lane-scheme token, never upstream
+text.
+
+A commit or a clear can instead be REFUSED by the generation barrier
+guarding the learned-capability registry, in which case no verdict
+event is produced and the line is a content-free DEBUG rather than the
+INFO above: `"replay_learn_stale"` / `"replay_clear_stale"` (the carry
+predates the live capability generation), `"replay_learn_reserved"` /
+`"replay_clear_reserved"` (an operator purge holds the pair's lease),
+and `"replay_learn_exhausted"` / `"replay_clear_exhausted"` (the
+incarnation sequence is exhausted). All six carry only the same
+sanitized `state_key` and `capability_key` fields as the settling lines
+-- no additional detail, since a refusal is definitionally a no-op on
+the registry.
+
+### Envelope-field repair WARN
+
+When an upstream rejects a request by naming a WIRE FIELD PATH the router
+has a grounded repair for, the router DROPS that field and re-dispatches
+the same target once (the reactive L0 field repair). Each such request
+emits EXACTLY ONE aggregated WARN at resolution --
+`"envelope_field_repaired"` -- and none when no repair fired. It fires on
+all three dispatch walks (`complete`, `stream` pre-content, and
+`count_tokens`), once per request rather than once per walk.
+
+The line is content-free by construction. `field_path` is the repair
+table's OWN path literal, not text read out of the rejection, so no
+upstream bytes can reach the line; the rejected field's VALUE, the
+upstream body, and the session key are never carried:
+
+| Field | Meaning |
+|---|---|
+| `action` | What the router did (`field_drop_repair`) |
+| `state_key` | Sanitized `[providers]` state key of the repaired target |
+| `field_path` | The closed-table qualified dotted path that was repaired |
+| `reason` | Why the repair fired (`upstream_field_rejection`) |
+| `repair_attempted` | The repair arm fired |
+| `repair_succeeded` | The repaired re-dispatch reached success / first chunk / a count |
+| `learned` | The confirmed verdict was persisted to the learned registry |
+
+Two verdict-lifecycle lines accompany it at INFO, both carrying
+normalized keys only: `"field_verdict_commit"` when a repaired retry
+confirms a verdict, and `"field_verdict_clear"` when an accepted request
+drops a resident one. `state_key` is sanitized at both sites;
+`capability_key` is the closed repair-table path literal, never upstream
+text, so it is logged as-is for consistency with the WARN line above.
+
+A commit or a clear can instead be REFUSED by the generation barrier
+guarding the learned-capability registry, in which case no verdict
+event is produced and the line is a content-free DEBUG rather than the
+INFO above: `"field_verdict_commit_stale"` /
+`"field_verdict_clear_stale"` (the admission predates the live
+capability generation), `"field_verdict_commit_reserved"` /
+`"field_verdict_clear_reserved"` (an operator purge holds the key's
+lease), and `"field_verdict_commit_exhausted"` /
+`"field_verdict_clear_exhausted"` (the incarnation sequence is
+exhausted). All six carry only the same sanitized `state_key` and
+`capability_key` fields as the settling lines -- no additional detail,
+since a refusal is definitionally a no-op on the registry.
+
+Three counters ride the router metrics snapshot (DEBUG, target
+`routectl_router::router::metrics`) so the arm is answerable without a
+log level: `rc_field_repair_attempted_total`,
+`rc_field_repair_succeeded_total`, and `rc_field_verdicts_learned_total`.
+Read them as a pair -- a rising attempted count with a flat succeeded
+count means the dropped field was not what the upstream objected to.
+
+All three are ZERO on a current build, and that is expected rather than a
+fault: no rejection parser is grounded yet, so nothing on real traffic
+resolves a field path and the repair arm never fires. A nonzero count is
+itself the signal that the arm has become reachable.
+
+One SETTLEMENT limitation to read alongside the counters, because it
+makes two token-count call paths behave differently on purpose. The
+verdict lifecycle needs the caller to drain the dispatch metadata's
+learned/cleared rows to the capability-event ledger: a verdict persisted
+in memory whose row never reached the ledger would be invisible to the
+next warm rebuild, and a verdict CLEARED without a row would be
+resurrected by it. So the result-only `count_tokens` entry point --
+which hands its caller no metadata -- neither learns nor clears. It
+still repairs, so the count it returns describes a body the upstream
+would accept; it simply records no verdict either way, and
+`rc_field_verdicts_learned_total` never moves for such a call. The
+`/v1/messages/count_tokens` endpoint uses the metadata-carrying variant
+and drains it, so operator-visible traffic does settle. The two messages
+walks always settle.
+
+Two target shapes are excluded from the repair ENTIRELY -- not merely
+from minting -- so neither appears in any of the counters and neither
+has its request body touched: a target whose `base_url` names a local
+destination (the rejection is not attributable to the wire format that
+hop was configured with), and a target authenticating with a FORWARDED
+client credential (routectl owns no credential there, and one client's
+rejection would otherwise mint a verdict that steers every other client
+through that entry). Both refusals apply on every walk, including the
+non-settling result-only token count: a target this stage cannot
+attribute a rejection to is one it must not act on, not just one it must
+not learn from.
+
 ## What's never logged
 
 - Resolved secret values (env contents, file contents, OAuth tokens,

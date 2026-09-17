@@ -396,9 +396,11 @@ impl ReplayProbeGuard<'_> {
     /// `request_features` is the request's derived in-flight feature set;
     /// no request body, artifact, or artifact id can enter the row.
     /// `None` when the carry was admitted under a generation the daemon has
-    /// since left: nothing is persisted and no row rides out, because the
-    /// negative would be attributed to a catalog revision that is gone. The
-    /// in-flight slot is released either way.
+    /// since left, when an operator purge holds this pair's lease, or when
+    /// the incarnation sequence is exhausted -- nothing is persisted and no
+    /// row rides out for any of the three, because the negative would be
+    /// attributed to a mutation that never happened. The in-flight slot is
+    /// released on every arm, including these refusals.
     #[must_use]
     pub fn commit(
         mut self,
@@ -408,54 +410,75 @@ impl ReplayProbeGuard<'_> {
     ) -> Option<CapabilityLearnEvent> {
         self.settled = true;
         let key = self.key.clone();
-        // A rejection corroborated by a successful stripped repair is
-        // direct proof, not an inference: it acts on this one observation.
-        let observed = self.registry.learned.observe_in_generation(
-            self.generation,
-            &key.lane_key,
-            &key.capability_key,
-            &key.provider_kind,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            // A `broken` verdict carries no evidence class (only the
-            // positive-detection verdicts do), matching what the ledger
-            // persists for this shape.
-            None,
-            now,
-        );
-        // The generation comes FROM the mutation, under its guard.
-        let crate::learned_capability::GenerationOutcome::Applied {
-            generation: persistence_generation,
-            incarnation,
-            ..
-        } = observed
-        else {
-            // Release the slot -- it is request-local coordination and leaking it
-            // would latch the pair forever -- then emit nothing.
-            self.registry.release_slot(&key);
-            tracing::debug!(
-                event = "replay_learn_stale",
-                state_key = %key.lane_key,
-                capability_key = %key.capability_key,
-                "reasoning-replay settlement refused: its carry predates the live \
-                 capability generation"
-            );
-            return None;
-        };
-        let observations = self
+        // A rejection corroborated by a successful stripped repair is direct
+        // proof, not an inference: it acts on this one observation. The
+        // observation count rides out of the SAME guarded critical section
+        // the mutation ran under, via `observe_in_generation_with_observations`,
+        // rather than a second, unguarded `snapshot()` call after the guard
+        // releases -- a concurrent purge or sibling mutation between those two
+        // calls could otherwise report a count this mutation never produced.
+        let observed = self
             .registry
             .learned
-            .snapshot()
-            .into_iter()
-            .find(|entry| {
-                entry.state_key == key.lane_key && entry.feature_key == key.capability_key
-            })
-            .map_or(0, |entry| entry.observations);
+            .observe_in_generation_with_observations(
+                self.generation,
+                &key.lane_key,
+                &key.capability_key,
+                &key.provider_kind,
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+                EvidenceSource::Live,
+                // A `broken` verdict carries no evidence class (only the
+                // positive-detection verdicts do), matching what the ledger
+                // persists for this shape.
+                None,
+                now,
+            );
+        // The generation comes FROM the mutation, under its guard.
+        let (observations, persistence_generation, incarnation) = match observed {
+            crate::learned_capability::GenerationOutcome::Applied {
+                value: (_, observations),
+                incarnation,
+                generation,
+            } => (observations, generation, incarnation),
+            crate::learned_capability::GenerationOutcome::Stale => {
+                self.registry.release_slot(&key);
+                tracing::debug!(
+                    event = "replay_learn_stale",
+                    state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+                    capability_key = %key.capability_key,
+                    "reasoning-replay settlement refused: its carry predates the live \
+                     capability generation"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Reserved => {
+                self.registry.release_slot(&key);
+                tracing::debug!(
+                    event = "replay_learn_reserved",
+                    state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+                    capability_key = %key.capability_key,
+                    "reasoning-replay settlement refused: an operator purge holds \
+                     this pair's lease"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Exhausted => {
+                self.registry.release_slot(&key);
+                tracing::debug!(
+                    event = "replay_learn_exhausted",
+                    state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+                    capability_key = %key.capability_key,
+                    "reasoning-replay settlement refused: the incarnation sequence \
+                     is exhausted"
+                );
+                return None;
+            }
+        };
         self.registry.release_slot(&key);
         tracing::info!(
             event = "replay_learn_commit",
-            state_key = %key.lane_key,
+            state_key = %routectl_core::sanitize_for_log(&key.lane_key),
             capability_key = %key.capability_key,
             upstream_status,
             observations,
@@ -486,6 +509,10 @@ impl ReplayProbeGuard<'_> {
     /// and a warm rebuild does not resurrect the negative from the ledger. A
     /// carry that never had a resident entry (an absent pair admitted for its
     /// first probe) clears nothing and returns `None`.
+    ///
+    /// A `Stale`, `Reserved`, or `Exhausted` removal is likewise inert and
+    /// returns `None`, each logged with a diagnostic naming its own refusal
+    /// rather than a generic one. The in-flight slot is released on every arm.
     pub fn clear(mut self) -> Option<CapabilityClearedEvent> {
         self.settled = true;
         let removed = self.registry.learned.remove_keyed_in_generation(
@@ -494,47 +521,66 @@ impl ReplayProbeGuard<'_> {
             &self.key.capability_key,
             &self.key.provider_kind,
         );
-        // A stale clear releases the slot (request-local coordination; leaking it
-        // would latch the pair) and emits nothing.
-        if removed.is_stale() {
-            self.registry.release_slot(&self.key);
-            tracing::debug!(
-                event = "replay_clear_stale",
-                state_key = %self.key.lane_key,
-                capability_key = %self.key.capability_key,
-                "reasoning-replay clear refused: its carry predates the live \
-                 capability generation"
-            );
-            return None;
-        }
-        // Both refusals answer the same way: no clear, no event. Written as a
-        // refusal rather than an `unreachable!` because a lease can refuse here
-        // even though staleness was handled above -- a purge may have taken the
-        // key between the two.
-        let Some(applied) = removed.applied() else {
-            self.registry.release_slot(&self.key);
-            return None;
-        };
-        let (cleared, persistence_generation, incarnation) =
-            (applied.value, applied.generation, applied.incarnation);
-        self.registry.release_slot(&self.key);
-        if cleared {
-            tracing::info!(
-                event = "replay_learn_clear",
-                state_key = %self.key.lane_key,
-                capability_key = %self.key.capability_key,
-                "lapsed reasoning-replay negative cleared by a successful carry",
-            );
-            Some(CapabilityClearedEvent {
-                persistence_generation,
+        // A lease-refused, stale, or exhausted removal clears nothing and
+        // emits nothing: all three are refusals, so none may produce an
+        // event.
+        let (cleared, persistence_generation, incarnation) = match removed {
+            crate::learned_capability::GenerationOutcome::Applied {
+                value,
                 incarnation,
-                state_key: self.key.lane_key.clone(),
-                capability_key: self.key.capability_key.clone(),
-                provider_kind: self.key.provider_kind.clone(),
-            })
-        } else {
-            None
+                generation,
+            } => (value, generation, incarnation),
+            crate::learned_capability::GenerationOutcome::Stale => {
+                self.registry.release_slot(&self.key);
+                tracing::debug!(
+                    event = "replay_clear_stale",
+                    state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+                    capability_key = %self.key.capability_key,
+                    "reasoning-replay clear refused: its carry predates the live \
+                     capability generation"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Reserved => {
+                self.registry.release_slot(&self.key);
+                tracing::debug!(
+                    event = "replay_clear_reserved",
+                    state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+                    capability_key = %self.key.capability_key,
+                    "reasoning-replay clear refused: an operator purge holds this \
+                     pair's lease"
+                );
+                return None;
+            }
+            crate::learned_capability::GenerationOutcome::Exhausted => {
+                self.registry.release_slot(&self.key);
+                tracing::debug!(
+                    event = "replay_clear_exhausted",
+                    state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+                    capability_key = %self.key.capability_key,
+                    "reasoning-replay clear refused: the incarnation sequence is \
+                     exhausted"
+                );
+                return None;
+            }
+        };
+        self.registry.release_slot(&self.key);
+        if !cleared {
+            return None;
         }
+        tracing::info!(
+            event = "replay_learn_clear",
+            state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+            capability_key = %self.key.capability_key,
+            "lapsed reasoning-replay negative cleared by a successful carry",
+        );
+        Some(CapabilityClearedEvent {
+            persistence_generation,
+            incarnation,
+            state_key: self.key.lane_key.clone(),
+            capability_key: self.key.capability_key.clone(),
+            provider_kind: self.key.provider_kind.clone(),
+        })
     }
 
     /// Settle WITHOUT learning: the stripped repair failed, or the request

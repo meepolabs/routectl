@@ -36,6 +36,7 @@ use crate::handlers::ingress_handle::{
     is_json_content_type, map_error, render_body_rejection, render_malformed_body,
     render_unsupported_media_type,
 };
+use crate::handlers::usage_capture::drain_capability_events;
 use crate::ingress::IngressAdapter;
 use crate::ingress::anthropic::AnthropicIngress;
 use crate::server::AppState;
@@ -78,7 +79,21 @@ pub async fn count_tokens(
     // still uses the snapshot's routing surface, not a half-applied
     // mix.
     let router = state.router.load_full();
-    match router.count_tokens(req).await {
+    // `count_tokens_with_meta`, not `count_tokens`: this walk can settle an
+    // envelope-field verdict, and a settlement's event row has to reach the
+    // capability-event ledger. Dropping the meta would leave the shared
+    // learned registry mutated with no ledger record of it -- the state a warm
+    // rebuild resurrects a cleared verdict from. The drain is the SAME mapping
+    // the messages handlers use (no usage row is recorded here: this endpoint
+    // has none, and the capability rows do not need one).
+    let counted = router.count_tokens_with_meta(req).await;
+    drain_capability_events(
+        &state.usage,
+        &counted.meta,
+        router.catalog_version(),
+        router.overlay_revision(),
+    );
+    match counted.result {
         Ok(tc) => {
             // Anthropic's wire shape is `{"input_tokens": N, ...}`.
             // `TokenCount` serializes back to that exact shape with

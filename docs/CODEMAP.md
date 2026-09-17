@@ -2365,8 +2365,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   declares the per-concern submodules: `dispatch`, `class_observe`, `chain`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
   `capability_cleared`, `cache_plan`, `prefix_rewrite`, `runtime_gate`,
-  `sticky`, `count_tokens`, `status`, `replay_repair`, `repair_budget`,
-  `window_gate`
+  `sticky`, `count_tokens`, `status`, `replay_repair`, `field_repair`,
+  `repair_budget`, `window_gate`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -2463,10 +2463,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and retries once; `replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
   (`pub(super)`, also called by the token-count walk) fires the single
-  per-request degradation WARN. Both chain loops declare the shared
-  `repair_budget::RepairBudget` above themselves, and each repair arm draws
-  it as its LAST condition, so the repair count is bounded per REQUEST and
-  not per target. Reasoning-dialect fidelity
+  per-request degradation WARN. There is no shared repair abstraction: each of
+  `complete_inner`, `stream_inner` and `count_tokens_try_seat` owns its OWN
+  replay and field branches, and each branch owns its transform (the replay one
+  strips artifacts, the field one drops a mapped envelope field) -- three hot
+  paths were deliberately not unified, and the cross-walk tests are what catch
+  drift between them. Both chain loops declare the shared
+  `repair_budget::RepairBudget` above themselves; every arm's own conditions
+  gate first and the CHARGE happens inside the transform
+  (`FieldRepairPlan::apply` for the field kind), so the repair count is bounded
+  per REQUEST rather than per target and a transform that changed nothing costs
+  nothing. Reasoning-dialect fidelity
   guard (moved here from the providers crate so per-egress normalize's
   clone/retry/fallback can no longer repeat it):
   `warn_dropped_reasoning_dialect` +
@@ -2496,6 +2503,66 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   byte-identical (prompt-cache affinity). Private so no dispatch call site can
   strip without the re-stamp; its direct behavior coverage lives in
   `src/router/replay_strip_tests.rs`
+- `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
+  three dispatch arms drive, and the counterpart of `replay_repair` for the
+  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (one
+  grounded row today: the qualified dotted path a real captured rejection
+  named -> the private `FieldSurface` enum naming the request-side carriers
+  that produce that wire field), and `closed_table_row`, THE single lookup:
+  it returns the table's own `&'static str`, so no upstream bytes reach any
+  downstream consumer or the operator WARN, and a path with no row mutates
+  nothing. `Router::plan_field_carry` admits BEFORE dispatch and without
+  touching the request, in this order: kill switch -> `anthropic-api` lane ->
+  NOT a forwarded-credential target -> a carried table surface -> loopback
+  suppression (`field_verdict::loopback_target_suppresses_minting` over
+  `ProviderEntry::anthropic_api_base_url`) -> settlement mode ->
+  `field_verdict::FieldVerdictKey` -> the single-flight guard. Suppression sits
+  ABOVE the settlement-mode branch deliberately: the guard's own admission also
+  refuses a local target, but only a SETTLING walk reaches that admission, so
+  checking it there alone let a result-only walk mutate the body, spend the
+  shared allowance, and re-dispatch a target this stage cannot attribute a
+  rejection to. The forwarded exclusion is its own refusal for the same class of
+  reason: that target authenticates with the CLIENT's bearer, so one client's
+  rejection must not mint a permanent verdict steering every other client
+  through the same entry. Suppression stays keyed on loopback `base_url` ONLY --
+  deliberately not widened to private / link-local ranges, since an arbitrary
+  private address can be a real upstream; pre-dispatch admission is what keeps BOTH
+  settlements reachable, since a request whose field is accepted clears a
+  resident verdict while a rejected one commits. It is NOT a pre-flight
+  rewrite: an acting verdict refuses the slot and the request dispatches
+  unchanged. `rejection_names_planned_field` is the arm's repair condition and reads the
+  NATIVE failure class, never the operator-remapped one -- a
+  `[class_overrides]` entry states how a status is ROUTED, so reading it would
+  let an override turn a 429 or 503 into a field repair.
+  `FieldRepairPlan::apply` owns the whole effect transactionally, ordered
+  check-mutate-charge: re-check presence, CHECK the allowance
+  (`RepairBudget::can_draw`, a read), drop the field (both carriers, or the
+  egress re-derives it), then DRAW, re-stamp the estimate through
+  `dispatch::restamp_calibration_estimate`, and return the rejection status. The
+  draw follows the mutation so a drop that removes nothing charges nothing, and
+  every repaired-state flag is set only on the returned `Some`. A `drop_from`
+  that unexpectedly removes nothing FAILS CLOSED -- returns `None`, having
+  mutated and charged nothing -- with a `debug_assert` naming the divergence;
+  release behavior deliberately does not rest on that assertion being compiled,
+  and a `cfg(not(debug_assertions))` test exercises the branch through a
+  test-only divergent surface. `commit` / `settle_success` are the two-phase
+  settlement (both `Option`, both no-ops without a guard), release-by-drop
+  otherwise.
+  `note_field_repair` / `note_field_repair_succeeded` record the
+  `DispatchMeta.field_repair` summary and bump the three counters together,
+  and `emit_field_repair` fires the single per-request content-free WARN.
+  `rejected_field_path` reads the class first and then the
+  `parse_rejected_field_path` seam, whose PRODUCTION body resolves nothing (no
+  envelope parser ships in this stage) -- so the whole arm is inert on real
+  traffic by construction. That claim cannot be made behaviorally (the
+  `cfg(not(test))` body is absent from the test binary), so it is a SOURCE
+  contract: the body's normalized text must EXACTLY equal "discard the two
+  parameters, return None". An exact contract rather than a substring denylist,
+  because an arbitrary `helper(err)?` returning `Option<String>` passes every
+  such needle while making the parser live; the locator fails closed on any
+  missing needle, and both properties are mutation-verified. Under `cfg(test)`
+  that one seam reads a thread-local provisional resolution, which is how
+  `field_repair_tests.rs` covers every arm downstream of it
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
@@ -2543,35 +2610,46 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   seat; the bound is `2 * chain.len() + REPAIRS_PER_REQUEST` (single visit
   per seat, plus a per-seat 401 retry, plus the per-REQUEST repair
   allowance).
-  TEMPORARY SEAM, stated because the code reads as if it were live: this arm
-  is UNREACHABLE today. `seat_can_count_tokens` admits `anthropic-api` and
-  Anthropic-family `bedrock`, while the classifier's replay lift is closed
-  over the kinds with a captured envelope (`openai-responses`); both read the
-  same `DispatchTarget::provider_kind`, so the sets are disjoint. So the arm
-  deliberately does NOT run the two-phase settlement -- `commit` /
-  `settle_success` mutate the shared learned registry and return rows this
-  walk has no ledger sink for, and a mutation whose event row is dropped is
-  what a warm rebuild resurrects from. It records `repair_attempted` /
-  `repair_succeeded` and claims no `learned`. Its wiring is pinned by
-  source-scanning guards in
-  `src/router/count_tokens_repair_structure_tests.rs` (mutation-verified)
-  rather than a behavioral test that would pass with the arm deleted; the
-  disjointness itself is pinned in
-  `src/router/repair_budget_cross_walk_tests.rs`. When a repair kind lands
-  whose lane a capable seat reaches, that task owns the reachable
-  settlement plus persistence through the existing capability-event sink,
-  and replaces these guards with real N-seat behavioral coverage
+  TWO public entry points that differ BEHAVIORALLY, not just in return shape:
+  `count_tokens_with_meta` -> `CountedTokens` (result + `DispatchMeta`) is
+  SETTLING, and the result-only `Router::count_tokens` is NON-SETTLING. Both
+  share `count_tokens_settling`, which threads a
+  `field_repair::FieldSettlementMode` down to the admission. The returned meta
+  is what carries a settlement row to the capability-event sink, so a caller
+  that keeps none cannot settle: a persisted verdict whose row was dropped is
+  what a warm rebuild resurrects from, and a CLEARED verdict without a row is
+  resurrected by it. A non-settling walk still repairs (its count must describe
+  a body the upstream would accept) but holds no single-flight guard at all --
+  `FieldRepairPlan::guard` is `None`, so both settlements are structurally
+  no-ops rather than a mode flag re-checked at each settlement site.
+  Both repair kinds sit at this one position, and they differ in
+  reachability rather than wiring. The ENVELOPE-FIELD repair is reachable
+  (it acts on `anthropic-api`, exactly the lane `seat_can_count_tokens`
+  admits unconditionally), so it runs the full two-phase settlement and is
+  covered behaviorally in `src/router/field_repair_tests.rs`, including the
+  N-seat shared-ceiling test. The REASONING-REPLAY repair is not:
+  `seat_can_count_tokens` admits `anthropic-api` and Anthropic-family
+  `bedrock`, while the classifier's replay lift is closed over the kinds
+  with a captured envelope (`openai-responses`), and both read the same
+  `DispatchTarget::provider_kind`, so the sets are disjoint. That arm
+  therefore settles its carry by DROPPING the plan (releasing slots,
+  learning nothing) and records `repair_attempted` / `repair_succeeded`
+  without claiming `learned`; the disjointness itself is pinned in
+  `src/router/repair_budget_cross_walk_tests.rs`. Do not align it with the
+  field arm's settlement before making the class reachable -- a behavioral
+  test of an unreachable arm passes with the arm deleted
 - `src/router/repair_budget.rs` -- the per-request reactive-repair ceiling
   (`RepairBudget` + `REPAIRS_PER_REQUEST`) shared by all three dispatch
   walks: declared ABOVE each chain / seat loop beside the other
   request-scoped locals and threaded by `&mut`, so an N-target fallback
   chain pays the request's allowance rather than one repair per target.
   Complements each repair kind's own at-most-once-per-target gate; every
-  arm draws it LAST, after its own conditions hold. Cross-walk coverage
-  lives in `src/router/repair_budget_cross_walk_tests.rs`, which is
-  behavioral for `complete` and `stream` (a repair genuinely fires there)
-  and asserts only the threading for `count_tokens`, whose arm is currently
-  unreachable -- see that module's row
+  arm draws it LAST, after its own conditions hold. Cross-walk coverage is
+  in two places: `src/router/repair_budget_cross_walk_tests.rs` for the
+  replay kind (behavioral on `complete` and `stream`; that kind cannot reach
+  `count_tokens`), and `src/router/field_repair_tests.rs` for the field
+  kind, which IS behavioral on all three walks and carries the N-seat
+  token-count ceiling test
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (per-target header/payload/beta/reasoning
   overlays), `operator_betas`, the `pub
@@ -3016,6 +3094,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   than it. A valid `field:` key is catalog-INDEPENDENT, so settlements cross a
   catalog revision change by design; the `Stale` arms are defensive handling of
   the shared generic registry API, not expected behavior for this key class.
+  An operator purge lease on the guard's own key refuses `commit`/`clear` the
+  same way through the shared `purge_leases` guard the lease reserved --
+  `Reserved`, not `Stale` -- releasing the slot and mutating and emitting
+  nothing, so a purge in flight and a repair settling the same identity never
+  race each other's write.
   `loopback_target_suppresses_minting` is the
   suppression predicate: keyed on the target base URL alone, never the
   configured kind and never a non-default-base heuristic. Local means a
