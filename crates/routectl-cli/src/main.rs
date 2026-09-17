@@ -339,6 +339,34 @@ enum Cmd {
         #[command(subcommand)]
         action: RcCmd,
     },
+    /// Inspect or purge what the daemon has LEARNED about a target's
+    /// capabilities. Requires a running `routectl serve`.
+    Capability {
+        #[command(subcommand)]
+        action: CapabilityCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CapabilityCmd {
+    /// Ask the running daemon to drop ONE learned capability entry for a
+    /// target, so the next request re-evaluates that capability from scratch.
+    ///
+    /// Goes through the daemon rather than the usage database: the verdict
+    /// lives in the daemon's memory, so an offline edit would leave it
+    /// steering routing until the next restart. Exits non-zero when the daemon
+    /// is unreachable.
+    ///
+    /// A purge removes one OBSERVATION, not a decision -- live traffic can
+    /// teach the same negative again. To make the decision durable, set it
+    /// under `[capability.overrides]` in your config.
+    Purge {
+        /// The target to purge on: a `[models]` nickname, a pooled seat's
+        /// `nickname#label`, or a `[providers]` name.
+        target: String,
+        /// The capability key to purge (e.g. `web_search`).
+        capability: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1043,6 +1071,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+        }
+        Cmd::Capability { action } => {
+            let config = load_config(cli.config.as_deref())?;
+            let code = match action {
+                CapabilityCmd::Purge { target, capability } => {
+                    commands::capability_purge::run(&config, &target, &capability).await
+                }
+            };
+            std::process::exit(code);
         }
     }
 

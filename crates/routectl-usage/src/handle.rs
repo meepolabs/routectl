@@ -35,6 +35,15 @@ pub struct UsageCounters {
     learn_events_dropped_full: AtomicU64,
     learn_events_persisted: AtomicU64,
     capability_events_enqueued: AtomicU64,
+    /// Capability events the writer dropped because an operator purge of the same
+    /// key had already superseded them.
+    ///
+    /// Expected to be zero on a daemon nobody purges, and small and bounded on
+    /// one that does: it counts genuinely delayed pre-purge metadata, not
+    /// failures. A LARGE value means events are queueing for long enough to
+    /// straddle purges, which is a throughput signal rather than a correctness
+    /// one -- the drop itself is the protection working.
+    capability_events_superseded: AtomicU64,
     capability_events_dropped_full: AtomicU64,
     capability_events_persisted: AtomicU64,
 }
@@ -99,6 +108,12 @@ impl UsageCounters {
     }
 
     /// Capability-event rows successfully persisted by the consumer thread.
+    /// Capability events dropped as superseded by an operator purge of the same
+    /// key. See the field's own note on how to read a nonzero value.
+    pub fn capability_events_superseded(&self) -> u64 {
+        self.capability_events_superseded.load(Ordering::Relaxed)
+    }
+
     pub fn capability_events_persisted(&self) -> u64 {
         self.capability_events_persisted.load(Ordering::Relaxed)
     }
@@ -142,6 +157,11 @@ impl UsageCounters {
 
     pub(crate) fn incr_capability_events_enqueued(&self) {
         self.capability_events_enqueued
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn incr_capability_events_superseded(&self) {
+        self.capability_events_superseded
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -255,14 +275,31 @@ impl UsageHandle {
     /// its tombstone -- restoring state the boundary evicted. Nothing about the
     /// generation is persisted.
     pub fn try_send_capability_event_in_generation(&self, event: CapabilityEvent, generation: u64) {
+        self.try_send_capability_event_at(event, generation, 0);
+    }
+
+    /// [`Self::try_send_capability_event_in_generation`] carrying the event's own
+    /// INCARNATION, so the writer can drop it if a purge of the same key has
+    /// since superseded it. Every producer that has an incarnation passes it;
+    /// zero means "no per-key ordering claim", which the floor treats as
+    /// superseded by any purge.
+    pub fn try_send_capability_event_at(
+        &self,
+        event: CapabilityEvent,
+        generation: u64,
+        incarnation: u64,
+    ) {
         if !self.is_enabled() {
             self.counters.incr_dropped_disabled();
             return;
         }
-        match self
-            .sender
-            .try_send(WriterMessage::CapabilityEvent(event, generation))
-        {
+        match self.sender.try_send(WriterMessage::CapabilityEvent(
+            event,
+            crate::writer::EventStamp {
+                generation,
+                incarnation,
+            },
+        )) {
             Ok(()) => self.counters.incr_capability_events_enqueued(),
             Err(_) => self.note_capability_event_overflow_drop(),
         }

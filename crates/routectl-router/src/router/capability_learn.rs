@@ -135,6 +135,15 @@ pub struct CapabilityLearnEvent {
     /// single request legitimately spans a boundary, so events on one request
     /// may carry DIFFERENT generations.
     pub persistence_generation: u64,
+    /// The INCARNATION of the key's state this event describes, from the same
+    /// guarded mutation.
+    ///
+    /// What the generation cannot express: a purge and a later relearn of ONE key
+    /// both happen inside one generation, so a stale event queued before the
+    /// purge and a genuine post-purge relearn are indistinguishable by generation
+    /// alone. The writer compares this against the key's purge floor and drops
+    /// only the superseded one.
+    pub incarnation: u64,
 
     /// Breaker state key (nickname-or-provider) of the rejecting target.
     pub state_key: String,
@@ -252,11 +261,47 @@ impl Router {
     /// (only the exact `bedrock` token reduces a key), so it reconstructs the
     /// identical key instead of corrupting it.
     pub fn provider_kind_for_state_key(&self, state_key: &str) -> &str {
-        let (provider_name, _nickname) = self.override_identity_for(state_key);
+        // Resolved identity first: a live row is the truth a dispatch would use,
+        // so a reload that repointed a nickname is honoured over the config
+        // tables.
+        let (provider_name, nickname) = self.override_identity_for(state_key);
+        if !nickname.is_empty()
+            && let Some(kind) = self.kind_of_provider(&provider_name)
+        {
+            return kind;
+        }
+        // A model CONFIGURED but absent from the resolved table -- what a
+        // provider that failed to build leaves behind. The learn path still keys
+        // entries on such a target, so its kind must still resolve: falling
+        // through to the provider-name lookup below would yield the empty kind,
+        // which silently changes the registry key on any provider whose
+        // normalization is not the identity (only `bedrock` today). Both the
+        // exact nickname and a pooled seat's base are tried, in that order.
+        if let Some(kind) = self.configured_model_kind(state_key).or_else(|| {
+            state_key
+                .split_once('#')
+                .and_then(|(base, _label)| self.configured_model_kind(base))
+        }) {
+            return kind;
+        }
+        // A provider-scoped key (legacy or direct construction, no model scope).
+        // Last, so a model shape never resolves through a same-named provider.
+        self.kind_of_provider(state_key).unwrap_or("")
+    }
+
+    /// The kind of the provider a CONFIGURED model names, or `None` when the
+    /// nickname is not in `[models]` or its provider is not in `[providers]`.
+    fn configured_model_kind(&self, nickname: &str) -> Option<&str> {
+        let model = self.config.models.get(nickname)?;
+        self.kind_of_provider(&model.provider)
+    }
+
+    /// The stable kind token of a configured provider, or `None` when absent.
+    fn kind_of_provider(&self, provider_name: &str) -> Option<&str> {
         self.config
             .providers
-            .get(&provider_name)
-            .map_or("", |p| p.kind_str())
+            .get(provider_name)
+            .map(|p| p.kind_str())
     }
 
     /// Record a learned negative through the generation barrier.
@@ -724,9 +769,15 @@ impl Router {
         // The generation comes FROM the mutation, paired with its outcome under
         // one guard. Reading it separately could straddle a boundary and stamp
         // the event with a generation that does not describe what was recorded.
+        // Both refusals return without an event: a stale observation describes a
+        // catalog revision the daemon left, and a lease-refused one would refresh
+        // an entry a purge already captured. Neither may bump an ordinary metric
+        // or record a dedupe entry either -- a dedupe entry for a mutation that
+        // never happened would suppress the retry that should replace it.
         let crate::learned_capability::GenerationOutcome::Applied {
             value: observe_outcome,
             generation: persistence_generation,
+            incarnation,
         } = outcome
         else {
             return;
@@ -794,6 +845,7 @@ impl Router {
             self.metrics.incr_learned_negatives(phase);
             meta.learned_capabilities.push(CapabilityLearnEvent {
                 persistence_generation,
+                incarnation,
                 state_key,
                 capability_key: feature_key,
                 provider_kind: provider_kind.to_string(),

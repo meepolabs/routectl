@@ -9,10 +9,12 @@
 //! by the replayer no matter what the replay predicate decides.
 
 use super::*;
+use crate::handlers::control::cleared_event;
 use crate::server::test_support::{isolate_usage_db, overlay_at_revision};
 use crate::server::{capability_rebuild, ledger_reader};
 use routectl_router::Config;
 use routectl_router::Router;
+use routectl_router::router::PurgeOutcome;
 use routectl_usage::{CHANNEL_CAPACITY, CapabilityEvent, UsageWriter};
 use std::sync::Arc;
 
@@ -1332,6 +1334,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
     let routectl_router::GenerationOutcome::Applied {
         value: was_resident,
         generation: clear_generation,
+        incarnation: clear_incarnation,
     } = removed
     else {
         panic!("a wire-shape clear must be accepted mid-boundary");
@@ -1357,6 +1360,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
     meta.cleared_capabilities
         .push(routectl_router::router::CapabilityClearedEvent {
             persistence_generation: clear_generation,
+            incarnation: clear_incarnation,
             state_key: "nick".to_string(),
             capability_key: field_key(),
             provider_kind: "anthropic-api".to_string(),
@@ -1737,4 +1741,240 @@ async fn a_second_boundary_admission_is_refused_while_the_first_is_in_flight() {
             .effective_persistence_generation(),
         first.pending_generation(),
     );
+}
+
+/// An open purge lease refuses a racing boundary; once the purge settles and
+/// releases it, the retried boundary commits -- both durable, on a real
+/// ledger, across two restarts.
+///
+/// Reserving before admitting is what exercises the ORDER, not just the
+/// refusal: the boundary's own cut takes `entries` before it reads
+/// `purge_leases`, so a lease opened first must still be visible to it.
+#[tokio::test]
+async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit() {
+    let mut config = Config::default();
+    let _dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, writer) = UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        0,
+        config.usage.enabled,
+    );
+
+    let before = seeded_router_with_both_classes(&config, 1, &usage);
+    let mut reloaded = Router::new(config.clone());
+    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    reloaded.carry_over_learned_from(&before);
+    let reloaded = Arc::new(reloaded);
+
+    // Reserve the purge FIRST: the lease it opens must outlive the boundary
+    // attempt below.
+    let reserved = match before.reserve_learned_capability_purge("nick", &field_key()) {
+        PurgeOutcome::Reserved(reserved) => reserved,
+        _ => panic!("premise: the wire-shape entry must be resident to reserve a purge on it"),
+    };
+
+    // A boundary admitted while that lease is open must be refused, before
+    // any row is queued.
+    let rows_before = ledger_capability_rows(&config.usage.db_path).len();
+    let refused = commit_capability_boundary(&usage, &reloaded).await;
+    assert!(
+        matches!(refused, BoundaryOutcomeReport::Failed(_)),
+        "a boundary must not be admitted while a purge holds a key's lease, got {refused:?}",
+    );
+    assert_eq!(
+        ledger_capability_rows(&config.usage.db_path).len(),
+        rows_before,
+        "the refused boundary must queue no row",
+    );
+
+    // Commit the purge's own settlement, then finalize it -- releasing the
+    // lease.
+    let event = cleared_event(&reserved.settlement(), &before);
+    let receipt = usage
+        .admit_capability_batch_at(
+            vec![event],
+            reserved.generation(),
+            reserved.generation_incarnation(),
+        )
+        .expect("the purge settlement is admitted");
+    assert_eq!(
+        receipt.await_outcome().await,
+        routectl_usage::BatchCommit::Committed { rows: 1 },
+        "the purge settlement must persist before the entry is removed",
+    );
+    assert!(
+        before.finalize_learned_capability_purge(reserved),
+        "the reserved entry must still be resident to finalize",
+    );
+
+    // The lease is gone: the retried boundary now commits, restating nothing
+    // for the purged key.
+    let outcome = commit_capability_boundary(&usage, &reloaded).await;
+    assert!(
+        matches!(
+            outcome,
+            BoundaryOutcomeReport::Committed { survivors: 0, .. }
+        ),
+        "the retried boundary must commit once the lease clears, got {outcome:?}",
+    );
+    assert_eq!(
+        resident_keys(&reloaded),
+        Vec::<String>::new(),
+        "the purged key must stay absent through the boundary that follows it",
+    );
+
+    // The ledger holds the clear ahead of the retried boundary's tombstone,
+    // and neither restates the purged key.
+    let rows = ledger_capability_rows(&config.usage.db_path);
+    let cleared_at = rows
+        .iter()
+        .rposition(|(_, verdict, capability)| verdict == "cleared" && *capability == field_key())
+        .expect("the clear must be durable");
+    let last_tombstone = rows
+        .iter()
+        .rposition(|(_, verdict, _)| verdict == "tombstone")
+        .expect("the retried boundary must append a tombstone");
+    assert!(
+        cleared_at < last_tombstone,
+        "the clear must land before the retried boundary's tombstone",
+    );
+    assert!(
+        rows[last_tombstone + 1..]
+            .iter()
+            .all(|(_, _, capability)| *capability != field_key()),
+        "the retried boundary must not restate the key its own predecessor's refusal protected",
+    );
+
+    // Durable across two consecutive cold boots.
+    let restarted = restart_from_ledger(&config, 2, &usage);
+    assert_eq!(
+        resident_keys(&restarted),
+        Vec::<String>::new(),
+        "the purge must survive the first restart",
+    );
+    let restarted_again = restart_from_ledger(&config, 2, &usage);
+    assert_eq!(
+        resident_keys(&restarted_again),
+        Vec::<String>::new(),
+        "and survive a second consecutive restart",
+    );
+
+    drop(usage);
+    writer.shutdown();
+}
+
+/// A purge attempted while a boundary is admitted but unsettled is refused;
+/// once the boundary settles, the retried purge succeeds -- both durable, on
+/// a real ledger, across two restarts.
+#[tokio::test]
+async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried_successfully() {
+    let mut config = Config::default();
+    let _dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, writer) = UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        0,
+        config.usage.enabled,
+    );
+
+    let before = seeded_router_with_both_classes(&config, 1, &usage);
+    let mut reloaded = Router::new(config.clone());
+    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    reloaded.carry_over_learned_from(&before);
+    let reloaded = Arc::new(reloaded);
+
+    // Admit the boundary but do not settle it yet: the registry now carries a
+    // pending generation, which refuses every purge attempt while it stands.
+    let admitted = admit_capability_boundary(&usage, &reloaded).expect("the boundary is admitted");
+
+    let refused = before.reserve_learned_capability_purge("nick", &field_key());
+    assert!(
+        matches!(refused, PurgeOutcome::Busy),
+        "a purge must be refused while a boundary is admitted and unsettled",
+    );
+
+    // Settle the boundary for real, over the real ledger.
+    let (_tx, mut never) = tokio::sync::watch::channel(());
+    let outcome = admitted.settle(&mut never).await;
+    assert!(
+        matches!(
+            outcome,
+            BoundaryOutcomeReport::Committed { survivors: 1, .. }
+        ),
+        "the boundary must commit once nothing refuses it, got {outcome:?}",
+    );
+    assert_eq!(
+        resident_keys(&reloaded),
+        vec![field_key()],
+        "the wire-shape entry must be restated past the boundary",
+    );
+
+    // The retried purge now succeeds, against the router the boundary
+    // published.
+    let reserved = match reloaded.reserve_learned_capability_purge("nick", &field_key()) {
+        PurgeOutcome::Reserved(reserved) => reserved,
+        _ => panic!("premise: the restated entry must still be resident to reserve a purge on it"),
+    };
+    let event = cleared_event(&reserved.settlement(), &reloaded);
+    let receipt = usage
+        .admit_capability_batch_at(
+            vec![event],
+            reserved.generation(),
+            reserved.generation_incarnation(),
+        )
+        .expect("the purge settlement is admitted");
+    assert_eq!(
+        receipt.await_outcome().await,
+        routectl_usage::BatchCommit::Committed { rows: 1 },
+        "the purge settlement must persist before the entry is removed",
+    );
+    assert!(
+        reloaded.finalize_learned_capability_purge(reserved),
+        "the reserved entry must still be resident to finalize",
+    );
+    assert_eq!(
+        resident_keys(&reloaded),
+        Vec::<String>::new(),
+        "the purge must remove the entry once its settlement is durable",
+    );
+
+    // The ledger holds the restatement, then the clear, in that order.
+    let rows = ledger_capability_rows(&config.usage.db_path);
+    let last_tombstone = rows
+        .iter()
+        .rposition(|(_, verdict, _)| verdict == "tombstone")
+        .expect("the boundary must append a tombstone");
+    let restated_at = rows[last_tombstone + 1..]
+        .iter()
+        .position(|(_, verdict, capability)| verdict == "broken" && *capability == field_key())
+        .map(|offset| last_tombstone + 1 + offset)
+        .expect("the boundary must restate the wire-shape entry past its tombstone");
+    let cleared_at = rows
+        .iter()
+        .rposition(|(_, verdict, capability)| verdict == "cleared" && *capability == field_key())
+        .expect("the clear must be durable");
+    assert!(
+        restated_at < cleared_at,
+        "the clear must follow the restatement it supersedes",
+    );
+
+    // Durable across two consecutive cold boots.
+    let restarted = restart_from_ledger(&config, 2, &usage);
+    assert_eq!(
+        resident_keys(&restarted),
+        Vec::<String>::new(),
+        "the purge must survive the first restart",
+    );
+    let restarted_again = restart_from_ledger(&config, 2, &usage);
+    assert_eq!(
+        resident_keys(&restarted_again),
+        Vec::<String>::new(),
+        "and survive a second consecutive restart",
+    );
+
+    drop(usage);
+    writer.shutdown();
 }

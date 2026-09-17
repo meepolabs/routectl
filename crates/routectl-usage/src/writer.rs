@@ -47,14 +47,14 @@ pub enum WriterMessage {
     /// such an event predates the boundary and, appended after the tombstone,
     /// would restore on the next boot exactly the state the boundary evicted.
     /// Nothing about it is persisted.
-    CapabilityEvent(CapabilityEvent, u64),
+    CapabilityEvent(CapabilityEvent, EventStamp),
     /// An ACKNOWLEDGED batch of capability events, committed in one
     /// transaction and reported back to the sender.
     ///
     /// Unlike every other variant this one is not best effort: the batch
     /// carries a boundary tombstone plus the entries that must survive past
-    /// it, so a partial application would evict live routing state. See
-    /// [`crate::capability_batch`].
+    /// it, so a partial application would evict live routing state. See the
+    /// `capability_batch` module for the acknowledged-commit contract.
     CapabilityBatch(crate::capability_batch::CapabilityBatch),
 }
 
@@ -267,8 +267,8 @@ fn run_writer(
         match msg {
             WriterMessage::Request(record) => state.persist(&record, &counters),
             WriterMessage::LearnEvent(event) => state.persist_learn_event(&event, &counters),
-            WriterMessage::CapabilityEvent(event, generation) => {
-                state.persist_capability_event(&event, generation, &counters)
+            WriterMessage::CapabilityEvent(event, stamp) => {
+                state.persist_capability_event(&event, stamp, &counters)
             }
             WriterMessage::CapabilityBatch(batch) => {
                 state.commit_capability_batch(batch, &counters)
@@ -277,11 +277,63 @@ fn run_writer(
     }
 }
 
+/// The in-memory sequencing metadata a capability event carries to the writer.
+///
+/// Two independent floors, because they answer different questions and neither
+/// subsumes the other:
+///
+/// - `generation` is REGISTRY-WIDE and moves on a reload boundary. It drops an
+///   event produced against a superseded catalog revision.
+/// - `incarnation` is PER KEY and moves on every mutation of that key. It drops
+///   an event superseded by a purge of the same key -- which the generation
+///   cannot see, because a purge and a later relearn of one key both happen
+///   inside a single generation and therefore carry the same generation value.
+///
+/// Transient in-memory sequencing only. Neither is persisted, and neither needs
+/// to be: a restart loses every in-flight message along with the process, so
+/// there is nothing left for a floor to adjudicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventStamp {
+    /// The registry generation the producing mutation ran under.
+    pub generation: u64,
+    /// The incarnation of the key's state the event describes.
+    pub incarnation: u64,
+}
+
+/// The `cleared` verdict token, as this crate writes it.
+///
+/// A local constant rather than a dependency on the capability vocabulary crate:
+/// `routectl-usage` deliberately has NO internal crate dependencies (the row
+/// shape is dumb on purpose), and the token is already a persisted open-set
+/// string this crate reads and writes. Pinned equal to the producer's spelling by
+/// a test in the crate that owns it.
+const CLEARED_VERDICT: &str = "cleared";
+
+/// An empty per-key purge-floor map.
+///
+/// A plain map, NEVER evicting. An LRU was wrong here: eviction is a correctness
+/// hole, not a memory trade-off -- once a key's floor is gone, an event delayed
+/// past the eviction is admitted again and re-appends the negative the operator
+/// removed. The bound is the OPERATOR's: an entry exists only for a key someone
+/// purged, so the map's size is the number of distinct purged keys for the life
+/// of the process. A daemon nobody purges holds none, and an operator would have
+/// to purge distinct keys by the million to make this a memory question -- at
+/// which point the purge rate, not the map, is the fault.
+fn fresh_purge_floors() -> std::collections::HashMap<(String, String), u64> {
+    std::collections::HashMap::new()
+}
+
 /// Per-thread mutable state: the (optional) connection plus the
 /// healthy/degraded flag for transition logging.
 struct WriterState {
     conn: Option<Connection>,
     degraded: bool,
+    /// Per-key purge floors: the incarnation each purged key was cleared at.
+    ///
+    /// NEVER evicted (see `fresh_purge_floors`) and updated ONLY after a
+    /// `cleared` purge row has committed -- a floor recorded for a clear that
+    /// failed would suppress events describing state that is still live.
+    purge_floors: std::collections::HashMap<(String, String), u64>,
     /// The newest registry generation whose boundary batch has COMMITTED.
     ///
     /// The writer is the one place that sees every capability write in append
@@ -301,6 +353,7 @@ impl WriterState {
                 conn: Some(UsageDb::into_conn(db)),
                 degraded: false,
                 boundary_generation: 0,
+                purge_floors: fresh_purge_floors(),
             },
             Err(err) => {
                 counters.incr_write_errors();
@@ -313,6 +366,7 @@ impl WriterState {
                     conn: None,
                     degraded: true,
                     boundary_generation: 0,
+                    purge_floors: fresh_purge_floors(),
                 }
             }
         }
@@ -434,7 +488,7 @@ impl WriterState {
     fn persist_capability_event(
         &mut self,
         event: &CapabilityEvent,
-        generation: u64,
+        stamp: EventStamp,
         counters: &Arc<UsageCounters>,
     ) {
         // Reject an event that predates the newest committed boundary. It was
@@ -442,12 +496,34 @@ impl WriterState {
         // after that boundary's tombstone would make the next boot replay state
         // the boundary deliberately evicted. Dropping it is the whole point of
         // the barrier, so it is a debug-level fact rather than a failure.
-        if generation < self.boundary_generation {
+        if stamp.generation < self.boundary_generation {
             tracing::debug!(
                 target: "routectl_usage::writer",
-                event_generation = generation,
+                event_generation = stamp.generation,
                 boundary_generation = self.boundary_generation,
                 "dropped a capability event older than the committed replay boundary"
+            );
+            return;
+        }
+        // The PER-KEY floor, which the boundary check above cannot substitute
+        // for: a purge and a later relearn of one key both happen inside a single
+        // generation, so a pre-purge event delayed past the clear carries a
+        // generation the boundary admits. Appending it after the clear would make
+        // the next boot replay the negative the operator was told was removed.
+        //
+        // `<=` because the floor IS the cleared incarnation: an event describing
+        // that same version is exactly what the purge superseded. A genuine
+        // post-purge relearn allocated a strictly greater incarnation and passes.
+        let key = (event.lane_key.clone(), event.capability.clone());
+        if let Some(&floor) = self.purge_floors.get(&key)
+            && stamp.incarnation <= floor
+        {
+            counters.incr_capability_events_superseded();
+            tracing::debug!(
+                target: "routectl_usage::writer",
+                event_incarnation = stamp.incarnation,
+                purge_floor = floor,
+                "dropped a capability event superseded by an operator purge of the same key"
             );
             return;
         }
@@ -500,6 +576,30 @@ impl WriterState {
                 // leaves it where it was, so events from the generation that
                 // failed to move the boundary stay valid.
                 self.boundary_generation = self.boundary_generation.max(batch.generation);
+                // Per-key purge floors, raised in the SAME step as the commit.
+                // Atomic from the writer's perspective: this thread processes one
+                // message at a time, so the floor is in place before any later
+                // queued event is examined -- there is no window in which a
+                // superseded event could slip past a floor whose clear had
+                // already committed.
+                //
+                // Only a `cleared` row raises a floor, and only from a batch that
+                // committed. A boundary batch's survivors are restatements of
+                // state that still holds, so treating them as floors would drop
+                // the very events the boundary exists to preserve.
+                for event in &batch.events {
+                    if event.verdict == CLEARED_VERDICT {
+                        let key = (event.lane_key.clone(), event.capability.clone());
+                        // MAX, never overwrite: a later purge of the same key at
+                        // a lower incarnation must not lower the floor, or events
+                        // the earlier purge superseded would be admitted again.
+                        let raised = self
+                            .purge_floors
+                            .get(&key)
+                            .map_or(batch.incarnation, |&floor| floor.max(batch.incarnation));
+                        self.purge_floors.insert(key, raised);
+                    }
+                }
                 let _ = batch.ack.send(BatchCommit::Committed { rows: committed });
             }
             Err(err) => {

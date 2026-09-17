@@ -22,12 +22,21 @@
 //!
 //! # Concurrency
 //!
-//! State lives behind a single [`RwLock`]. The dispatch hot path
-//! ([`LearnedCapabilityRegistry::acting_negative_for`]) takes a shared
-//! read lock for the overwhelmingly common non-expired case and never
-//! contends; it upgrades to an exclusive write only to claim the single
-//! re-probe slot on the rare lapse, mirroring the circuit breaker's
-//! half-open discipline.
+//! State lives behind a family of locks taken in one fixed order --
+//! `generation -> pending_generation -> entries -> purge_leases` -- enforced by
+//! [`LearnedCapabilityRegistry::guarded_keyed`], the single choke point every
+//! generation-validated, per-key operation runs through. Calling
+//! [`LearnedCapabilityRegistry::acting_negative_for`] directly (bypassing
+//! generation validation) still takes a shared read lock for the
+//! overwhelmingly common non-expired case and never contends, upgrading to
+//! an exclusive write only to claim the single re-probe slot on the rare
+//! lapse. The generation-guarded entry point
+//! ([`LearnedCapabilityRegistry::acting_negative_in_generation`]) does NOT get
+//! that fast path: `guarded_keyed` takes the `entries` write lock
+//! unconditionally for every generation-validated call (read or mutate), since
+//! a purge reservation (`prepare_purge`) needs the same two locks in the same
+//! order and a read-then-maybe-write shape here would reopen the AB/BA hazard
+//! this module exists to close.
 //!
 //! # Time
 //!
@@ -38,6 +47,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -93,6 +103,18 @@ pub enum EntryVerdict {
 /// [`ExportedEntry`] (carry-over).
 #[derive(Debug, Clone)]
 struct LearnedEntry {
+    /// The mutation that produced this version of the entry, from the
+    /// registry's monotonic sequence.
+    ///
+    /// What a generation cannot express: a reload advances the generation for
+    /// every key at once, while a purge-and-relearn of ONE key happens entirely
+    /// inside one generation. So an event queued before a purge and an event from
+    /// a genuine relearn after it are indistinguishable by generation alone --
+    /// and the writer has to reject the first while accepting the second. The
+    /// incarnation is the discriminator, and it is also the identity a purge
+    /// finalizes against: removing a key whose incarnation moved would delete
+    /// state the operator never saw.
+    incarnation: u64,
     /// Which side of the ledger this entry records. A `Verified` positive
     /// never decays, never claims a re-probe slot, and routes nothing;
     /// a `Negative` runs the full decay / re-probe / backoff machinery.
@@ -335,7 +357,8 @@ pub struct LearnedCapabilityRegistry {
     ///
     /// # Lock order (the ONE order every path uses)
     ///
-    /// `generation` -> `pending_generation` -> `entries` -> `tuning`.
+    /// `generation` -> `pending_generation` -> `entries` -> `purge_leases` ->
+    /// `tuning`.
     ///
     /// Every generation-validated operation acquires `generation` FIRST and holds
     /// it across the `entries` work, so validation and the operation it guards
@@ -367,6 +390,39 @@ pub struct LearnedCapabilityRegistry {
     /// no two boundaries share a receipt even if they derive the same persistence
     /// generation (the ABA case after a rollback).
     next_receipt_id: RwLock<u64>,
+    /// Keys with a PURGE LEASE open: an operator purge has captured the entry and
+    /// is committing its durable clear.
+    ///
+    /// A purge cannot be atomic -- the removal is a memory mutation and the clear
+    /// is a SQLite transaction that must not be awaited under a lock -- so the
+    /// window between them is observable. The lease makes the key's state
+    /// immovable for that window: a same-key observation, removal, or probe
+    /// settlement is refused while it is open, so the capture the restore path
+    /// holds cannot go stale and the finalize cannot remove state the operator
+    /// never saw.
+    ///
+    /// Taken in the documented order AFTER `entries` (it is only ever acquired
+    /// together with `entries`, never alone), so it introduces no new pair and
+    /// cannot invert against a boundary transition. Per-key rather than
+    /// registry-wide: one operator purge must not stall unrelated learning.
+    purge_leases: Arc<RwLock<std::collections::HashSet<RegistryKey>>>,
+    /// Monotonic incarnation sequence, shared by every key.
+    ///
+    /// ONE sequence rather than a per-key counter: a consumer comparing two
+    /// events has to order them without knowing whether they name the same key,
+    /// and per-key counters would collide on equal values across keys. Allocated
+    /// under the same guard as the mutation it stamps (see `guarded_keyed`), so
+    /// the value and the state it describes cannot drift.
+    ///
+    /// Slots into the documented order AFTER `entries` -- it is only ever taken
+    /// alongside it -- so it introduces no invertible pair.
+    next_incarnation: RwLock<u64>,
+    /// Incarnation allocations that failed because the sequence was exhausted.
+    ///
+    /// Zero on every realistic run (the space outlives the process by centuries
+    /// at one mutation per nanosecond), so a nonzero value means the counter is
+    /// being driven by something other than real traffic.
+    exhausted_incarnations: std::sync::atomic::AtomicU64,
     /// Test-only hook fired between generation validation and the entries
     /// operation, to prove the two are ATOMIC.
     ///
@@ -533,6 +589,119 @@ pub enum BoundarySettlement {
     StaleReceipt,
 }
 
+/// An open PURGE LEASE: one key reserved, its resident entry captured, and the
+/// effective generation the removal will be stamped with.
+///
+/// Holding one is a settlement OBLIGATION. Finalize removes the entry; restore
+/// puts the capture back unchanged. Dropping it without settling restores, which
+/// is the safe default for an abandoned handler: the ledger still holds the
+/// negative, so clearing memory alone would disagree with it until the next boot.
+///
+/// The captured entry is the exact resident value, not a re-read: the restore
+/// path needs the original observation count and decay clock, or a failed purge
+/// would itself be destructive (an entry restored with a reset clock acts for a
+/// fresh window; one restored with a lower count can fall below its acting
+/// threshold).
+#[derive(Debug)]
+#[must_use = "a purge lease must be finalized, restored, or deliberately dropped"]
+pub struct PurgeLease {
+    /// The incarnation of the captured entry -- the identity the finalize
+    /// matches against and the floor the durable clear records.
+    incarnation: u64,
+    key: RegistryKey,
+    /// The entry as it was at capture time, for the audit record and for proving
+    /// the entry did not change under the lease. Informational: the entry itself
+    /// stays in the map, so nothing is reconstructed from this.
+    captured: Option<LearnedEntry>,
+    /// The generation selected under the same guard as the capture.
+    generation: u64,
+    /// Back-reference used only to release the lease.
+    ///
+    /// The lease needs no entries handle: prepare LEAVES the entry resident, so
+    /// "restore" is a pure release and there is nothing to put back. That is what
+    /// makes the failure path trivially correct -- the entry never moved, so it
+    /// cannot be restored wrongly.
+    leases: Arc<RwLock<std::collections::HashSet<RegistryKey>>>,
+    /// Cleared once the caller settles explicitly, so `Drop` does not
+    /// double-release.
+    settled: bool,
+}
+
+impl PurgeLease {
+    /// The effective generation the removal runs under. The caller stamps its
+    /// durable clear with exactly this value.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The INCARNATION of the entry this lease captured.
+    ///
+    /// Two uses, and both need the captured value rather than a fresh read: the
+    /// durable clear carries it so the writer can record it as this key's purge
+    /// floor, and the finalize compares it to what is resident so a purge cannot
+    /// delete state that changed after the operator approved the removal.
+    pub const fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// The captured entry, in the fixed snapshot shape, for assertions and for
+    /// the audit record.
+    pub fn captured_entry(&self) -> Option<LearnedRegistryEntry> {
+        self.captured.as_ref().map(|entry| LearnedRegistryEntry {
+            state_key: self.key.state_key.clone(),
+            feature_key: self.key.feature_key.clone(),
+            verdict: entry.read_verdict(),
+            signal_tier: entry.signal,
+            observations: entry.observations,
+            first_seen: entry.first_seen,
+            last_seen: entry.last_seen,
+            expires_at: entry.expires_at,
+            evidence_class: entry.evidence_class.clone(),
+            phase: entry.phase,
+            source: entry.source,
+        })
+    }
+}
+
+impl Drop for PurgeLease {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        // Abandoned without settling -- a handler cancelled mid-commit. Release
+        // the lease and leave the entry exactly where it is: it was never
+        // removed, and the ledger still holds the negative, so keeping it acting
+        // is the only state consistent with what is on disk.
+        self.leases.write().remove(&self.key);
+        tracing::warn!(
+            "capability purge lease abandoned without settlement; the entry \
+             remains acting"
+        );
+    }
+}
+
+/// The outcome of asking to reserve a key for purge.
+///
+/// Four outcomes, and collapsing any two loses something the caller needs: a
+/// refused stale purge is NOT the same answer as an absent entry (one says "ask
+/// the current router", the other says "it is already gone"), and a busy key is
+/// neither.
+#[derive(Debug)]
+#[must_use = "a Reserved preparation carries a settlement obligation"]
+pub enum PurgePreparation {
+    /// Reserved: the entry is captured and the key is leased.
+    Reserved(PurgeLease),
+    /// No such entry is resident. Nothing reserved, nothing to commit, and the
+    /// caller answers a clean no-op.
+    Absent,
+    /// Another purge holds the lease for this key.
+    Busy,
+    /// The submitting generation is stale for a catalog-scoped key: this purge
+    /// arrived through a superseded Router, whose registry the published Router
+    /// no longer reads.
+    Stale,
+}
+
 /// Hot-reloadable registry tempo and capacity.
 #[derive(Debug, Clone, Copy)]
 struct RegistryTuning {
@@ -549,11 +718,15 @@ struct RegistryTuning {
 /// truth from a catalog revision the daemon has already left behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationOutcome<T> {
-    /// Applied, carrying the inner outcome and the EFFECTIVE persistence
-    /// generation the operation ran under.
+    /// Applied, carrying the inner outcome plus the EFFECTIVE persistence
+    /// generation AND the incarnation the mutation produced.
     Applied {
         /// The operation's own result.
         value: T,
+        /// The incarnation this mutation allocated, or the resident entry's for a
+        /// read. Stamped on any event the caller derives, so a consumer can order
+        /// two versions of the same key's truth.
+        incarnation: u64,
         /// The generation any persistence metadata for this operation must be
         /// stamped with.
         ///
@@ -568,20 +741,83 @@ pub enum GenerationOutcome<T> {
     /// Refused: the submitting generation is stale and the key is
     /// catalog-scoped.
     Stale,
+    /// Refused: the incarnation sequence is exhausted.
+    ///
+    /// DISTINCT from every other refusal: nothing is wrong with the generation,
+    /// the lease, or the request -- the process has run out of ordering space. The
+    /// mutation did NOT happen (the value is reserved before any entry is
+    /// touched), so the caller emits no event and the registry is unchanged.
+    Exhausted,
+    /// Refused: an operator purge holds this key's lease.
+    ///
+    /// A REFUSAL, not a no-op result: the caller must emit no ledger event, bump
+    /// no ordinary metric, and record no dedupe entry. Applying the mutation
+    /// would refresh the entry the purge captured and is about to remove, so the
+    /// operator would be told a purge succeeded on state that had since been
+    /// relearned. The refusal lasts one SQLite transaction, and a later
+    /// observation relearns normally -- which is the correct outcome for evidence
+    /// that genuinely still holds.
+    Reserved,
+}
+
+/// Whether a guarded operation produces a new version of a key's state.
+///
+/// Only a mutation consumes an incarnation. Kept explicit at the two internal
+/// entry points rather than inferred, so a new operation has to say which it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Intent {
+    /// Produces a new version: reserves and stamps an incarnation.
+    Mutate,
+    /// Produces no new version: reports the resident incarnation, consuming none.
+    Read,
+}
+
+/// An applied mutation's result plus the metadata every consumer of it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedMutation<T> {
+    /// The operation's own result.
+    pub value: T,
+    /// The incarnation the mutation produced.
+    pub incarnation: u64,
+    /// The effective persistence generation it ran under.
+    pub generation: u64,
 }
 
 impl<T> GenerationOutcome<T> {
-    /// The inner value when applied.
-    pub fn applied(self) -> Option<T> {
+    /// The applied result with its metadata, or `None` for either refusal.
+    pub fn applied(self) -> Option<AppliedMutation<T>> {
         match self {
-            Self::Applied { value, .. } => Some(value),
-            Self::Stale => None,
+            Self::Applied {
+                value,
+                incarnation,
+                generation,
+            } => Some(AppliedMutation {
+                value,
+                incarnation,
+                generation,
+            }),
+            Self::Stale | Self::Reserved | Self::Exhausted => None,
         }
+    }
+
+    /// The applied result alone, for a caller that needs no metadata.
+    pub fn value(self) -> Option<T> {
+        self.applied().map(|applied| applied.value)
     }
 
     /// Whether the operation was refused as stale.
     pub const fn is_stale(&self) -> bool {
         matches!(self, Self::Stale)
+    }
+
+    /// Whether a purge lease refused the operation.
+    pub const fn is_reserved(&self) -> bool {
+        matches!(self, Self::Reserved)
+    }
+
+    /// Whether the incarnation sequence was exhausted.
+    pub const fn is_exhausted(&self) -> bool {
+        matches!(self, Self::Exhausted)
     }
 }
 
@@ -603,6 +839,9 @@ impl LearnedCapabilityRegistry {
             generation: RwLock::new(1),
             pending_generation: RwLock::new(None),
             next_receipt_id: RwLock::new(1),
+            purge_leases: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            next_incarnation: RwLock::new(0),
+            exhausted_incarnations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             pause_hook: Mutex::new(None),
             #[cfg(test)]
@@ -643,7 +882,37 @@ impl LearnedCapabilityRegistry {
     ) -> ObserveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let mut entries = self.entries.write();
-        if let Some(existing) = entries.get_mut(&key) {
+        let leased = self.purge_leases.read();
+        self.observe_in(
+            &mut entries,
+            &leased,
+            &key,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// [`Self::observe`]'s body, operating on an already-held `entries` write
+    /// guard and an already-held `leased` read guard rather than acquiring
+    /// its own -- so [`Self::guarded_keyed`] can run this under the single
+    /// critical section it holds, without a reentrant second acquisition of
+    /// either lock on the same thread.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_in(
+        &self,
+        entries: &mut HashMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> ObserveOutcome {
+        if let Some(existing) = entries.get_mut(key) {
             return match existing.verdict {
                 // A resident negative runs the normal observe path.
                 EntryVerdict::Negative => self.observe_existing(existing, tier, now),
@@ -668,9 +937,9 @@ impl LearnedCapabilityRegistry {
                 },
             };
         }
-        self.evict_if_full(&mut entries);
+        self.evict_if_full(entries, leased);
         let (entry, outcome) = self.fresh_entry(tier, phase, source, evidence_class, now);
-        entries.insert(key, entry);
+        entries.insert(key.clone(), entry);
         outcome
     }
 
@@ -697,7 +966,22 @@ impl LearnedCapabilityRegistry {
     ) -> PositiveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let mut entries = self.entries.write();
-        if let Some(existing) = entries.get_mut(&key) {
+        let leased = self.purge_leases.read();
+        self.observe_positive_in(&mut entries, &leased, &key, source, evidence_class, now)
+    }
+
+    /// [`Self::observe_positive`]'s body, operating on already-held guards;
+    /// see [`Self::observe_in`].
+    fn observe_positive_in(
+        &self,
+        entries: &mut HashMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> PositiveOutcome {
+        if let Some(existing) = entries.get_mut(key) {
             return match existing.verdict {
                 EntryVerdict::Negative => PositiveOutcome::SuppressedByNegative,
                 EntryVerdict::Verified => {
@@ -707,14 +991,23 @@ impl LearnedCapabilityRegistry {
                 }
             };
         }
-        self.evict_if_full(&mut entries);
-        entries.insert(key, Self::fresh_positive(source, evidence_class, now));
+        self.evict_if_full(entries, leased);
+        entries.insert(
+            key.clone(),
+            Self::fresh_positive(source, evidence_class, now),
+        );
         PositiveOutcome::Recorded
     }
 
     /// Dispatch-path query. Returns the routing decision for this target
     /// and feature, admitting exactly one re-probe when the decay window
     /// has lapsed.
+    ///
+    /// The generation-guarded dispatch path calls [`Self::acting_negative_for_in`]
+    /// directly to avoid reacquiring `entries` under `guarded_keyed`; this
+    /// ungated, self-locking form stays crate-visible for callers with no
+    /// generation to validate against (see `UNGATED_REGISTRY_CALLS`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn acting_negative_for(
         &self,
         state_key: &str,
@@ -752,7 +1045,23 @@ impl LearnedCapabilityRegistry {
         // Slow path: claim the single re-probe slot, re-checking under the
         // exclusive lock (the entry may have changed since the read).
         let mut entries = self.entries.write();
-        match entries.get_mut(&key) {
+        self.acting_negative_for_in(&mut entries, &key, now)
+    }
+
+    /// [`Self::acting_negative_for`]'s claim-the-probe-slot logic, operating
+    /// on an already-held `entries` write guard.
+    ///
+    /// [`Self::guarded_keyed`] holds `entries` for WRITE across every
+    /// generation-validated call, including reads, so the fast read-only path
+    /// above does not apply there: this is the body the generation-guarded
+    /// read entry point runs directly.
+    fn acting_negative_for_in(
+        &self,
+        entries: &mut HashMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> RoutingDecision {
+        match entries.get_mut(key) {
             None => RoutingDecision::Allow,
             Some(entry) => {
                 if !entry.is_acting() {
@@ -782,6 +1091,12 @@ impl LearnedCapabilityRegistry {
     /// re-probe slot. For callers that own their own admission discipline;
     /// the ordinary dispatch path uses [`Self::acting_negative_for`], which
     /// both reads and claims.
+    ///
+    /// The generation-guarded read path calls [`Self::negative_state_in`]
+    /// directly to avoid reacquiring `entries` under `guarded_keyed`; this
+    /// ungated, self-locking form stays crate-visible for callers with no
+    /// generation to validate against (see `UNGATED_REGISTRY_CALLS`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn negative_state(
         &self,
         state_key: &str,
@@ -791,7 +1106,16 @@ impl LearnedCapabilityRegistry {
     ) -> NegativeState {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let entries = self.entries.read();
-        let Some(entry) = entries.get(&key) else {
+        Self::negative_state_in(&entries, &key, now)
+    }
+
+    /// [`Self::negative_state`]'s body, reading from an already-held guard.
+    fn negative_state_in(
+        entries: &HashMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> NegativeState {
+        let Some(entry) = entries.get(key) else {
             return NegativeState::Absent;
         };
         if !matches!(entry.verdict, EntryVerdict::Negative) || !entry.is_acting() {
@@ -818,7 +1142,15 @@ impl LearnedCapabilityRegistry {
         _now: Instant,
     ) -> bool {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-        self.entries.read().get(&key).is_some_and(|entry| {
+        Self::is_verified_working_in(&self.entries.read(), &key)
+    }
+
+    /// [`Self::is_verified_working`]'s body, reading from an already-held guard.
+    fn is_verified_working_in(
+        entries: &HashMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+    ) -> bool {
+        entries.get(key).is_some_and(|entry| {
             matches!(entry.verdict, EntryVerdict::Verified) && entry.is_acting()
         })
     }
@@ -834,9 +1166,21 @@ impl LearnedCapabilityRegistry {
     ) {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let mut entries = self.entries.write();
+        self.record_probe_outcome_in(&mut entries, &key, outcome, now);
+    }
+
+    /// [`Self::record_probe_outcome`]'s body, operating on an already-held
+    /// `entries` write guard.
+    fn record_probe_outcome_in(
+        &self,
+        entries: &mut HashMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+        outcome: ProbeOutcome,
+        now: Instant,
+    ) {
         match outcome {
             ProbeOutcome::Success => {
-                if let Some(entry) = entries.remove(&key) {
+                if let Some(entry) = entries.remove(key) {
                     tracing::info!(
                         event = "clear",
                         state_key = %key.state_key,
@@ -847,18 +1191,18 @@ impl LearnedCapabilityRegistry {
                 }
             }
             ProbeOutcome::SameCapabilityRejection => {
-                if let Some(entry) = entries.get_mut(&key) {
+                if let Some(entry) = entries.get_mut(key) {
                     entry.consecutive_failed_probes =
                         entry.consecutive_failed_probes.saturating_add(1);
                     entry.observations = entry.observations.saturating_add(1);
                     entry.last_seen = now;
                     entry.in_flight = false;
-                    let window = self.backoff_window(&key, entry.consecutive_failed_probes);
+                    let window = self.backoff_window(key, entry.consecutive_failed_probes);
                     entry.expires_at = now + window;
                 }
             }
             ProbeOutcome::OtherError => {
-                if let Some(entry) = entries.get_mut(&key) {
+                if let Some(entry) = entries.get_mut(key) {
                     entry.in_flight = false;
                 }
             }
@@ -912,6 +1256,7 @@ impl LearnedCapabilityRegistry {
     /// Bulk-load previously exported entries, honoring the cap.
     pub fn import_entries(&self, entries: Vec<ExportedEntry>) {
         let mut map = self.entries.write();
+        let leased = self.purge_leases.read();
         for exported in entries {
             // The exported feature key is already normalized (every insert
             // path runs `normalize_capability_key`, which is idempotent),
@@ -921,11 +1266,16 @@ impl LearnedCapabilityRegistry {
                 feature_key: exported.feature_key,
             };
             if !map.contains_key(&key) {
-                self.evict_if_full(&mut map);
+                self.evict_if_full(&mut map, &leased);
             }
             map.insert(
                 key,
                 LearnedEntry {
+                    // A carried-over entry starts a fresh incarnation in the new
+                    // registry: the value is process-local in-memory sequencing,
+                    // never persisted, so importing one would compare against a
+                    // sequence it did not come from.
+                    incarnation: 0,
                     verdict: exported.verdict,
                     signal: exported.signal,
                     observations: exported.observations,
@@ -971,7 +1321,17 @@ impl LearnedCapabilityRegistry {
     ) -> bool {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let mut entries = self.entries.write();
-        match entries.get_mut(&key) {
+        Self::expire_keyed_in(&mut entries, &key, now)
+    }
+
+    /// [`Self::expire_keyed`]'s body, operating on an already-held `entries`
+    /// write guard.
+    fn expire_keyed_in(
+        entries: &mut HashMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> bool {
+        match entries.get_mut(key) {
             Some(entry) => {
                 entry.expires_at = now;
                 entry.in_flight = false;
@@ -1002,7 +1362,16 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
     ) -> bool {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-        self.entries.write().remove(&key).is_some()
+        Self::remove_keyed_in(&mut self.entries.write(), &key)
+    }
+
+    /// [`Self::remove_keyed`]'s body, operating on an already-held `entries`
+    /// write guard.
+    fn remove_keyed_in(
+        entries: &mut HashMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+    ) -> bool {
+        entries.remove(key).is_some()
     }
 
     /// The ACTIVE router generation.
@@ -1076,47 +1445,207 @@ impl LearnedCapabilityRegistry {
     /// observing a fact. A catalog-scoped key is admissible only from the active
     /// generation, or from the PENDING generation a boundary has installed (see
     /// `install_pending_generation`, which is test-only).
-    fn guarded<T>(
+    /// The per-key guarded operation: [`Self::guarded_keyed`] with the key built
+    /// from the same three components the operation itself keys on, so the lease
+    /// validated is the lease for the entry being mutated.
+    ///
+    /// EVERY per-key generation-validated path goes through this rather than
+    /// through `guarded`, which is what makes lease-awareness structural: a path
+    /// that forgets would have to pass `None` explicitly, and the only callers
+    /// entitled to do that are the whole-registry ones.
+    fn guarded_for<T>(
         &self,
         generation: u64,
-        feature_key: &str,
-        op: impl FnOnce() -> T,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        op: impl FnOnce(
+            &mut HashMap<RegistryKey, LearnedEntry>,
+            &std::collections::HashSet<RegistryKey>,
+        ) -> T,
     ) -> GenerationOutcome<T> {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        self.guarded_keyed(generation, Some(&key), Intent::Mutate, feature_key_raw, op)
+    }
+
+    /// [`Self::guarded_for`] for a READ: same validation and same lease refusal,
+    /// but it consumes no incarnation.
+    ///
+    /// An incarnation names a VERSION of a key's state, and a read produces none.
+    /// Minting one would advance the sequence for nothing -- and on a read-heavy
+    /// daemon it would burn ordering space that only mutations should consume,
+    /// eventually exhausting a sequence no mutation had used.
+    fn guarded_read<T>(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        op: impl FnOnce(
+            &mut HashMap<RegistryKey, LearnedEntry>,
+            &std::collections::HashSet<RegistryKey>,
+        ) -> T,
+    ) -> GenerationOutcome<T> {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        self.guarded_keyed(generation, Some(&key), Intent::Read, feature_key_raw, op)
+    }
+
+    /// [`Self::guarded`] with the full registry key, so the purge lease can be
+    /// validated in the SAME acquisition as the generation.
+    ///
+    /// The lease check lives HERE rather than at each call site, and that is the
+    /// point: a check-then-lock at the caller (the shape this replaces) leaves a
+    /// window where a lease is taken between the check and the mutation, so the
+    /// mutation refreshes an entry a purge has already captured. Folding it in
+    /// means every path reaching this primitive is lease-aware by construction,
+    /// and a new path cannot forget.
+    ///
+    /// `key` is `None` only for the whole-registry operations that name no single
+    /// key (there is nothing for a per-key lease to say about them).
+    ///
+    /// Locks in the documented order, once, top to bottom:
+    /// `generation -> pending_generation -> entries -> purge_leases`.
+    ///
+    /// `entries` is taken for WRITE unconditionally, for both `Intent::Mutate`
+    /// and `Intent::Read`: [`Self::prepare_purge`] takes `entries` then
+    /// `purge_leases` in that same order, so a read-then-maybe-write shape
+    /// here (matching the entries lock mode to the intent) would reopen
+    /// exactly the AB/BA hazard this ordering exists to close -- a purge
+    /// reservation contending with a generation-guarded READ (reachable on
+    /// the live dispatch path via `acting_negative_in_generation`) just as
+    /// readily as with a mutation. `op` is handed the write guard's `&mut`
+    /// map directly, plus the already-held lease set, so nothing it calls
+    /// needs -- or is tempted -- to re-acquire either lock on this thread.
+    fn guarded_keyed<T>(
+        &self,
+        generation: u64,
+        key: Option<&RegistryKey>,
+        intent: Intent,
+        feature_key: &str,
+        op: impl FnOnce(
+            &mut HashMap<RegistryKey, LearnedEntry>,
+            &std::collections::HashSet<RegistryKey>,
+        ) -> T,
+    ) -> GenerationOutcome<T> {
+        // ONE critical section. Every guard taken here is HELD across `op`, in
+        // the documented order, and released together at the end -- so
+        // validation, the lease check, the incarnation reservation and the
+        // mutation are indivisible.
         let active = self.generation.read();
+        self.note_acquired("generation");
+        let pending = self.pending_generation.read();
+        self.note_acquired("pending_generation");
         let admitted = !crate::field_capability::capability_key_is_catalog_scoped(feature_key)
             || generation == *active
             // A caller stamped with the admitted-but-uncommitted generation is
             // acting for the boundary that is landing, not against it.
-            || self.pending_generation.read().is_some_and(|r| r.generation == generation);
-        // Between validation and the operation. Inert under this shape: a
-        // competing boundary blocks on the lock still held above.
+            || pending.is_some_and(|r| r.generation == generation);
+        if !admitted {
+            return GenerationOutcome::Stale;
+        }
+        // `entries` before `purge_leases`, the documented order, held across
+        // `op` below -- so `prepare_purge` (which takes the same two locks in
+        // the same order) cannot interleave at all while this runs.
+        let mut entries = self.entries.write();
+        self.note_acquired("entries");
+        let leases = self.purge_leases.read();
+        self.note_acquired("purge_leases");
+        if let Some(key) = key
+            && leases.contains(key)
+        {
+            return GenerationOutcome::Reserved;
+        }
+        // Fired with EVERY guard held, immediately before the operation, to prove
+        // they are one critical section: a competing boundary or purge needs a
+        // write lock on state held here, so it cannot interleave.
         #[cfg(test)]
         if let Some(hook) = self.pause_hook.lock().as_ref() {
             hook();
         }
-        if !admitted {
-            return GenerationOutcome::Stale;
-        }
+        // RESERVED BEFORE the mutation, so exhaustion mutates nothing. The
+        // previous shape allocated afterwards and turned exhaustion into a
+        // refusal for a mutation that had already happened -- the entry moved
+        // while the caller was told nothing did, and no event described it.
+        //
+        // A read or no-op operation allocates nothing (`key` is `None`, or the
+        // caller asks for no stamp): an incarnation names a VERSION of a key's
+        // state, so minting one for an operation that produced no new version
+        // would advance the sequence without anything to describe.
+        let reserved = match (key, intent) {
+            (Some(_), Intent::Mutate) => match self.reserve_incarnation() {
+                Some(reserved) => Some(reserved),
+                None => return GenerationOutcome::Exhausted,
+            },
+            // A read, or a whole-registry operation naming no key: no version is
+            // produced, so none is named.
+            _ => None,
+        };
         // Reports the generation active AT operation time; still under the
         // guard, so it equals what was validated.
         #[cfg(test)]
         if let Some(probe) = self.probe_hook.lock().as_ref() {
             probe(*active);
         }
-        let out = op();
+        let out = op(&mut entries, &leases);
+        // Stamped from the value reserved above, so the entry carries exactly the
+        // incarnation this call was promised. Applied directly on the guard
+        // already held here, rather than through a standalone method that
+        // would have to re-lock `entries` on the same thread.
+        let incarnation = match (key, reserved) {
+            (Some(key), Some(reserved)) => {
+                if let Some(entry) = entries.get_mut(key) {
+                    entry.incarnation = reserved;
+                }
+                reserved
+            }
+            // A read: reports the resident entry's own incarnation, or zero when
+            // the key holds nothing.
+            _ => key.map_or(0, |key| entries.get(key).map_or(0, |e| e.incarnation)),
+        };
         // The effective generation, chosen while the guard still holds: pending
-        // when a boundary is admitted-but-uncommitted, otherwise active. Read
-        // here rather than by the caller so it cannot drift from the state this
-        // operation just produced.
-        let generation = self
-            .pending_generation
-            .read()
-            .map_or(*active, |r| r.generation);
+        // when a boundary is admitted-but-uncommitted, otherwise active.
+        let generation = pending.map_or(*active, |r| r.generation);
+        drop(leases);
+        drop(entries);
+        drop(pending);
         drop(active);
         GenerationOutcome::Applied {
             value: out,
+            incarnation,
             generation,
         }
+    }
+
+    /// Reserve the next incarnation WITHOUT touching any entry.
+    ///
+    /// `None` on exhaustion, which the caller turns into a distinct refusal
+    /// before it mutates anything. Checked rather than wrapping: a wrapped value
+    /// would let a superseded event compare as newer than the purge that
+    /// superseded it.
+    fn reserve_incarnation(&self) -> Option<u64> {
+        let mut next = self.next_incarnation.write();
+        let Some(allocated) = next.checked_add(1) else {
+            drop(next);
+            self.exhausted_incarnations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!(
+                event = "incarnation_exhausted",
+                "the learned-capability incarnation sequence is exhausted; refusing the \
+                 mutation rather than wrapping, since a wrapped value would order a superseded \
+                 event as newer than the purge that superseded it",
+            );
+            return None;
+        };
+        *next = allocated;
+        Some(allocated)
+    }
+
+    /// The resident entry's incarnation, or zero when the key holds nothing.
+    /// Test-only direct query; production reads the incarnation off the
+    /// `GenerationOutcome` [`Self::guarded_keyed`] returns.
+    #[cfg(test)]
+    fn resident_incarnation(&self, key: &RegistryKey) -> u64 {
+        self.entries.read().get(key).map_or(0, |e| e.incarnation)
     }
 
     /// Install a test hook fired between generation validation and the guarded
@@ -1188,18 +1717,25 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> GenerationOutcome<ObserveOutcome> {
-        self.guarded(generation, feature_key_raw, || {
-            self.observe(
-                state_key,
-                feature_key_raw,
-                provider_kind,
-                tier,
-                phase,
-                source,
-                evidence_class,
-                now,
-            )
-        })
+        self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                self.observe_in(
+                    entries,
+                    leased,
+                    &key,
+                    tier,
+                    phase,
+                    source,
+                    evidence_class,
+                    now,
+                )
+            },
+        )
     }
 
     /// Record a positive observation on behalf of `generation`, with the same
@@ -1217,16 +1753,16 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> GenerationOutcome<PositiveOutcome> {
-        self.guarded(generation, feature_key_raw, || {
-            self.observe_positive(
-                state_key,
-                feature_key_raw,
-                provider_kind,
-                source,
-                evidence_class,
-                now,
-            )
-        })
+        self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                self.observe_positive_in(entries, leased, &key, source, evidence_class, now)
+            },
+        )
     }
 
     /// The routing decision for `generation`, or `None` when that generation
@@ -1243,12 +1779,208 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         now: Instant,
     ) -> Option<(RoutingDecision, u64)> {
-        match self.guarded(generation, feature_key_raw, || {
-            self.acting_negative_for(state_key, feature_key_raw, provider_kind, now)
-        }) {
-            GenerationOutcome::Applied { value, generation } => Some((value, generation)),
-            GenerationOutcome::Stale => None,
+        match self.guarded_read(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                self.acting_negative_for_in(entries, &key, now)
+            },
+        ) {
+            // A read reports the resident entry's own metadata; `Reserved` and
+            // `Stale` are both refusals and answer `None`, so a caller cannot act
+            // on a key a purge has captured.
+            GenerationOutcome::Applied {
+                value, generation, ..
+            } => Some((value, generation)),
+            GenerationOutcome::Stale
+            | GenerationOutcome::Reserved
+            | GenerationOutcome::Exhausted => None,
         }
+    }
+
+    /// Remove a keyed entry on behalf of `generation` (the probe-settlement
+    /// clear), with the same staleness rule.
+    ///
+    /// A stale settlement is a no-op AND emits nothing: the probe it settles
+    /// was issued against a catalog revision the daemon has left, so treating
+    /// it as authoritative would clear an entry the live generation still
+    /// believes.
+    /// Reserve `(state_key, feature_key)` for an operator purge: validate the
+    /// generation, capture the resident entry, and take the key's lease.
+    ///
+    /// The entry is LEFT RESIDENT. Nothing is removed until
+    /// [`Self::finalize_purge`], which the caller reaches only after its durable
+    /// clear has committed -- so a purge that fails to persist leaves both memory
+    /// and the ledger exactly as they were, and the operator is told it failed.
+    /// The alternative (remove now, re-insert on failure) has to reconstruct the
+    /// entry from a capture, and any drift in that reconstruction is itself a
+    /// silent mutation.
+    ///
+    /// Takes the documented locks in the documented order, once, top to bottom,
+    /// so a boundary transition cannot land between the generation check and the
+    /// capture. Returns while still holding nothing: the caller awaits SQLite with
+    /// no registry lock held, which is the whole point of splitting prepare from
+    /// finalize.
+    pub fn prepare_purge(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) -> PurgePreparation {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        let active = self.generation.read();
+        self.note_acquired("generation");
+        let pending = self.pending_generation.read();
+        self.note_acquired("pending_generation");
+        // Same admission rule as every other generation-validated operation: a
+        // wire-shape fact is catalog-independent and admitted regardless of age; a
+        // catalog-scoped one belongs to the generation that learned it.
+        let admitted = !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+            || generation == *active
+            || pending.is_some_and(|r| r.generation == generation);
+        if !admitted {
+            return PurgePreparation::Stale;
+        }
+        // An ADMITTED-BUT-UNSETTLED boundary refuses the purge, in the same
+        // acquisition as the staleness check above. A purge admitted now would
+        // commit its clear stamped with a generation whose promotion is still
+        // undecided: if the boundary then rolls back, the writer rejects that row
+        // as belonging to a generation that never landed, and the operator would
+        // have been told a purge succeeded on a clear nothing reads.
+        //
+        // BUSY rather than stale: the request is well-formed and retrying it in a
+        // moment is the right move, which is not what stale means.
+        if pending.is_some() {
+            return PurgePreparation::Busy;
+        }
+        let effective = pending.map_or(*active, |r| r.generation);
+        let entries = self.entries.read();
+        self.note_acquired("entries");
+        let Some(entry) = entries.get(&key) else {
+            return PurgePreparation::Absent;
+        };
+        let captured = entry.clone();
+        let mut leases = self.purge_leases.write();
+        self.note_acquired("purge_leases");
+        if !leases.insert(key.clone()) {
+            return PurgePreparation::Busy;
+        }
+        PurgePreparation::Reserved(PurgeLease {
+            incarnation: captured.incarnation,
+            key,
+            captured: Some(captured),
+            generation: effective,
+            leases: Arc::clone(&self.purge_leases),
+            settled: false,
+        })
+    }
+
+    /// Whether the purge-lease set is write-lockable right now. Test-only.
+    ///
+    /// Exists so the atomicity test can assert the lease set is NOT available
+    /// mid-mutation without blocking on it: a blocking acquire would hang the
+    /// test rather than report, which is the same fact stated uselessly.
+    #[cfg(test)]
+    pub(crate) fn purge_leases_try_write_for_tests(&self) -> bool {
+        self.purge_leases.try_write().is_some()
+    }
+
+    /// Drive the incarnation sequence to its ceiling. Test-only.
+    ///
+    /// The sequence cannot be exhausted by real traffic (at one mutation per
+    /// nanosecond the space outlives the process by centuries), so the
+    /// fail-closed branch is unreachable without this -- and an unreachable
+    /// refusal that is never exercised is the kind that rots into a silent
+    /// mutation.
+    #[cfg(test)]
+    pub(crate) fn force_incarnation_ceiling_for_tests(&self) {
+        *self.next_incarnation.write() = u64::MAX;
+    }
+
+    /// A resident entry's stamped incarnation. Test-only.
+    #[cfg(test)]
+    pub(crate) fn resident_incarnation_for_tests(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) -> u64 {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        self.resident_incarnation(&key)
+    }
+
+    /// Force a resident entry's incarnation forward, WITHOUT the guard.
+    ///
+    /// Test-only, and it exists because nothing in production can reach the
+    /// mismatch branch in `finalize_purge`: every mutation path is lease-refused,
+    /// which is exactly the property that makes the branch unreachable. An
+    /// unreachable safety branch that is never exercised is the kind that rots
+    /// into a silent deletion, so this manufactures the divergence.
+    #[cfg(test)]
+    pub(crate) fn bump_incarnation_for_tests(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        if let Some(entry) = self.entries.write().get_mut(&key) {
+            entry.incarnation += 1;
+        }
+    }
+
+    /// Finalize a reserved purge: remove the entry and release the lease.
+    ///
+    /// Called ONLY after the durable clear has committed, so the removal and the
+    /// ledger agree from this instant on. Returns whether an entry was removed --
+    /// `false` would mean the entry vanished under an open lease, which nothing
+    /// can currently do.
+    pub fn finalize_purge(&self, mut lease: PurgeLease) -> bool {
+        let mut entries = self.entries.write();
+        self.note_acquired("entries");
+        // Removes ONLY the exact version the reservation captured. A mismatch
+        // means newer state is resident under the lease -- nothing in production
+        // can produce it, since every mutation path is lease-refused, so reaching
+        // here is a bug. Deleting anyway would destroy a truth the operator never
+        // saw and never approved removing, so the mismatch refuses instead and the
+        // caller reports a failure.
+        let matches = entries
+            .get(&lease.key)
+            .is_some_and(|entry| entry.incarnation == lease.incarnation);
+        let removed = if matches {
+            entries.remove(&lease.key).is_some()
+        } else {
+            tracing::error!(
+                event = "purge_incarnation_mismatch",
+                state_key = %routectl_core::sanitize_for_log(&lease.key.state_key),
+                capability_key = %routectl_core::sanitize_for_log(&lease.key.feature_key),
+                "a purge finalize found the entry changed under its lease; refusing to remove \
+                 state the operator did not approve",
+            );
+            false
+        };
+        drop(entries);
+        let mut leases = self.purge_leases.write();
+        self.note_acquired("purge_leases");
+        leases.remove(&lease.key);
+        lease.settled = true;
+        removed
+    }
+
+    /// Release a reserved purge WITHOUT removing anything: the durable clear did
+    /// not commit, so the entry stays exactly as it was and keeps acting.
+    ///
+    /// There is nothing to put back -- prepare never removed it -- which is why
+    /// this path cannot restore the entry wrongly.
+    pub fn restore_purge(&self, mut lease: PurgeLease) {
+        let mut leases = self.purge_leases.write();
+        self.note_acquired("purge_leases");
+        leases.remove(&lease.key);
+        lease.settled = true;
     }
 
     /// Remove a keyed entry on behalf of `generation` (the probe-settlement
@@ -1265,9 +1997,16 @@ impl LearnedCapabilityRegistry {
         feature_key_raw: &str,
         provider_kind: &str,
     ) -> GenerationOutcome<bool> {
-        self.guarded(generation, feature_key_raw, || {
-            self.remove_keyed(state_key, feature_key_raw, provider_kind)
-        })
+        self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                Self::remove_keyed_in(entries, &key)
+            },
+        )
     }
 
     /// The generation an event produced NOW must be stamped with to survive.
@@ -1404,6 +2143,17 @@ impl LearnedCapabilityRegistry {
                 in_flight: in_flight.generation,
             };
         }
+        // An OPEN PURGE LEASE refuses the boundary, BEFORE any snapshot,
+        // submission or state change. The cut restates every catalog-independent
+        // survivor past its new tombstone, and a leased entry is one an operator
+        // is in the middle of removing -- restating it would re-append the verdict
+        // the purge is clearing, past the boundary, where the next boot reads it.
+        // So the refusal has to precede the snapshot: a captured survivor is
+        // already that restatement.
+        //
+        // Taken in the documented order (entries then purge_leases) via a read of
+        // the lease set alone, which is only ever acquired alongside entries
+        // elsewhere, so no new pair is introduced.
         // `checked_add`, not saturating: at `u64::MAX` a saturating add would hand
         // back the active generation as the "next" one, and every later comparison
         // would read wrongly. Refused before the batch is built.
@@ -1425,6 +2175,33 @@ impl LearnedCapabilityRegistry {
         // cut a true quiescent point rather than merely serializing writers.
         let entries = self.entries.write();
         self.note_acquired("entries");
+
+        // An OPEN PURGE LEASE refuses the boundary. Placed AFTER the entries
+        // acquisition to honour the documented order
+        // (generation -> pending_generation -> entries -> purge_leases) -- taking
+        // it earlier inverted that pair, which the lock-order test correctly
+        // rejected. It still precedes the SNAPSHOT below, which is the property
+        // that matters: the cut restates every catalog-independent survivor past
+        // its new tombstone, and a leased entry is one an operator is in the
+        // middle of removing, so restating it would re-append the verdict the
+        // purge is clearing -- past the boundary, where the next boot reads it. A
+        // captured survivor is already that restatement, so nothing may be
+        // captured first.
+        let leased = self.purge_leases.read();
+        self.note_acquired("purge_leases");
+        if !leased.is_empty() {
+            let open = leased.len();
+            drop(leased);
+            tracing::warn!(
+                open_purge_leases = open,
+                "capability boundary refused: an operator purge holds a key's lease, and \
+                 restating survivors now could re-append the verdict it is clearing"
+            );
+            return BoundaryCut::Busy {
+                in_flight: *generation,
+            };
+        }
+        drop(leased);
 
         let survivors: Vec<LearnedRegistryEntry> = entries
             .iter()
@@ -1542,11 +2319,25 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         now: Instant,
     ) -> Option<(NegativeState, u64)> {
-        match self.guarded(generation, feature_key_raw, || {
-            self.negative_state(state_key, feature_key_raw, provider_kind, now)
-        }) {
-            GenerationOutcome::Applied { value, generation } => Some((value, generation)),
-            GenerationOutcome::Stale => None,
+        match self.guarded_read(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                Self::negative_state_in(entries, &key, now)
+            },
+        ) {
+            // A read reports the resident entry's own metadata; `Reserved` and
+            // `Stale` are both refusals and answer `None`, so a caller cannot act
+            // on a key a purge has captured.
+            GenerationOutcome::Applied {
+                value, generation, ..
+            } => Some((value, generation)),
+            GenerationOutcome::Stale
+            | GenerationOutcome::Reserved
+            | GenerationOutcome::Exhausted => None,
         }
     }
 
@@ -1562,9 +2353,16 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         now: Instant,
     ) -> GenerationOutcome<bool> {
-        self.guarded(generation, feature_key_raw, || {
-            self.expire_keyed(state_key, feature_key_raw, provider_kind, now)
-        })
+        self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                Self::expire_keyed_in(entries, &key, now)
+            },
+        )
     }
 
     /// Settle a re-probe on behalf of `generation`, under the same atomic guard.
@@ -1582,9 +2380,16 @@ impl LearnedCapabilityRegistry {
         outcome: ProbeOutcome,
         now: Instant,
     ) -> GenerationOutcome<()> {
-        self.guarded(generation, feature_key_raw, || {
-            self.record_probe_outcome(state_key, feature_key_raw, provider_kind, outcome, now);
-        })
+        self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                self.record_probe_outcome_in(entries, &key, outcome, now);
+            },
+        )
     }
 
     /// True when `feature_key` is verified-working for `generation`, or `None`
@@ -1595,13 +2400,24 @@ impl LearnedCapabilityRegistry {
         state_key: &str,
         feature_key_raw: &str,
         provider_kind: &str,
-        now: Instant,
+        _now: Instant,
     ) -> Option<bool> {
-        match self.guarded(generation, feature_key_raw, || {
-            self.is_verified_working(state_key, feature_key_raw, provider_kind, now)
-        }) {
+        match self.guarded_read(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                Self::is_verified_working_in(entries, &key)
+            },
+        ) {
             GenerationOutcome::Applied { value, .. } => Some(value),
-            GenerationOutcome::Stale => None,
+            // Both refusals answer `None`: a caller must not read through a
+            // generation it does not own, nor act on a key a purge has captured.
+            GenerationOutcome::Stale
+            | GenerationOutcome::Reserved
+            | GenerationOutcome::Exhausted => None,
         }
     }
 
@@ -1704,6 +2520,10 @@ impl LearnedCapabilityRegistry {
             SignalTier::Inferred => (now, ObserveOutcome::Pending),
         };
         let entry = LearnedEntry {
+            // Stamped by `allocate_incarnation` under the same guard as the
+            // insert; a constructor reaching for the counter itself would
+            // allocate outside that guard.
+            incarnation: 0,
             verdict: EntryVerdict::Negative,
             signal: tier,
             observations: 1,
@@ -1730,6 +2550,8 @@ impl LearnedCapabilityRegistry {
         now: Instant,
     ) -> LearnedEntry {
         LearnedEntry {
+            // See `fresh_negative`: stamped by the guard, not here.
+            incarnation: 0,
             verdict: EntryVerdict::Verified,
             signal: SignalTier::SelfIdentifying,
             observations: 1,
@@ -1746,12 +2568,28 @@ impl LearnedCapabilityRegistry {
 
     /// Evict the entry with the oldest `last_seen` when the map is at cap,
     /// emitting a structured WARN. A safety valve, not a cache policy.
-    fn evict_if_full(&self, map: &mut HashMap<RegistryKey, LearnedEntry>) {
+    ///
+    /// Takes the leased-key set BY REFERENCE rather than acquiring
+    /// `purge_leases` itself: every caller already holds it (either directly,
+    /// or via [`Self::guarded_keyed`]'s single critical section), and a
+    /// second same-thread acquisition of a `parking_lot::RwLock` read guard
+    /// can deadlock if a writer is queued in between the two reads.
+    fn evict_if_full(
+        &self,
+        map: &mut HashMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+    ) {
         if map.len() < self.max_entries() {
             return;
         }
+        // A LEASED key is never the victim: a purge has captured that entry and
+        // is committing its clear, so evicting it would delete the captured state
+        // behind the purge's back -- the finalize would then find nothing, and a
+        // caller reading `removed` could not tell a completed purge from an
+        // eviction.
         let victim = map
             .iter()
+            .filter(|(key, _)| !leased.contains(*key))
             .min_by_key(|(_, entry)| entry.last_seen)
             .map(|(key, _)| key.clone());
         if let Some(key) = victim {
@@ -1978,6 +2816,38 @@ mod tests {
                 signal: SignalTier::SelfIdentifying,
                 phase: FailurePhase::F1,
             }
+        );
+    }
+
+    #[test]
+    fn negative_state_reads_without_claiming_the_probe_slot() {
+        // Arrange
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            t0,
+        );
+        let expired = t0 + DECAY + Duration::from_secs(1);
+
+        // Act -- a read of the decay state repeated twice must not consume
+        // the single re-probe slot the way `acting_negative_for` does.
+        let first = reg.negative_state("nick", "web_search", "openai-compat", expired);
+        let second = reg.negative_state("nick", "web_search", "openai-compat", expired);
+
+        // Assert
+        assert_eq!(first, NegativeState::Lapsed);
+        assert_eq!(second, NegativeState::Lapsed);
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", expired),
+            RoutingDecision::ProbeAdmitted,
+            "the slot must still be open for the first real claimant"
         );
     }
 
@@ -2983,3 +3853,7 @@ mod tests {
 #[cfg(test)]
 #[path = "learned_capability_generation_tests.rs"]
 mod generation_tests;
+
+#[cfg(test)]
+#[path = "learned_capability_purge_tests.rs"]
+mod purge_tests;

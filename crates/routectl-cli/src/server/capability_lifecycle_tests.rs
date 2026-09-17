@@ -937,3 +937,133 @@ async fn future_dated_event_clamps_to_now_and_replays_fresh() {
     );
     assert_eq!(acting_decision(entry, clock), ActingDecision::RouteAway);
 }
+
+// --- Scenario 9: an operator purge survives a warm rebuild ---------------
+
+/// The durability half of the purge contract, composed end to end: a negative
+/// is learned and persisted, the operator purges it through the REAL router
+/// delegate, the cleared settlement it returns is persisted through the same
+/// writer the live drain uses, and a fresh process warms from that ledger.
+///
+/// This is what a router-only purge test cannot show. Removing the entry from
+/// the live registry is necessary and insufficient: without the persisted
+/// settlement the next boot replays the original `broken` row and the operator's
+/// purge silently un-does itself. The negative control below proves the
+/// settlement is load-bearing rather than decorative -- the same ledger without
+/// it resurrects the negative.
+#[tokio::test]
+async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
+    // Arrange: a matching tombstone and one self-identifying negative.
+    let tmp = TempDir::new().expect("tempdir");
+    let live = default_router(&tmp).await;
+    let (cat, overlay) = revision_of(&live);
+    let ts = now_ms();
+    let ledger = tmp.path().join("usage.db");
+    let (handle, writer) = writer_at(&ledger);
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, overlay),
+        1,
+    );
+
+    // Bring the negative into the live registry the way a real boot does, so
+    // the purge below acts on genuinely resident state.
+    drop(handle);
+    writer.shutdown();
+    let scratch = tmp.path().join("scratch.db");
+    let resident = warm_and_snapshot(&ledger, &live, &scratch);
+    assert!(
+        find(&resident, "gpt-nick", WEB_SEARCH).is_some(),
+        "premise: the negative must be resident before the purge, else the \
+         durability assertion is vacuous"
+    );
+
+    // Act 1: the operator purges it, and the settlement is persisted through
+    // the same sink the live drain uses.
+    // Through the real protocol: reserve, commit the clear DURABLY, then
+    // finalize. The order is the contract -- the entry is removed only after the
+    // row is committed, so a rebuild can never see the removal without the clear.
+    let reserved = match live.reserve_learned_capability_purge("gpt-nick", WEB_SEARCH) {
+        routectl_router::router::PurgeOutcome::Reserved(reserved) => reserved,
+        _ => panic!("a resident entry on the live generation must reserve"),
+    };
+    let settlement = reserved.settlement();
+    let (h2, w2) = writer_at(&ledger);
+    // The ASYNC commit path: this test runs on a Tokio worker, and the blocking
+    // variant is documented as forbidden there (it panics rather than deadlocks,
+    // which is how this surfaced).
+    let receipt = h2
+        .admit_capability_batch(
+            vec![cap_event(
+                now_ms(),
+                &settlement.state_key,
+                &settlement.capability_key,
+                Verdict::Cleared.as_str(),
+                "",
+                EvidenceSource::Live.as_str(),
+                "",
+                None,
+                cat,
+                overlay,
+            )],
+            // The generation the reservation carries, so the settlement is
+            // sequenced with the removal it describes rather than a value
+            // sampled here.
+            reserved.generation(),
+        )
+        .expect("the batch must be admitted to a live writer");
+    let committed = receipt.await_outcome().await;
+    assert!(
+        matches!(committed, routectl_usage::BatchCommit::Committed { .. }),
+        "premise: the clear must commit durably, or the purge below must not finalize"
+    );
+    assert!(
+        live.finalize_learned_capability_purge(reserved),
+        "the finalize must remove the entry it reserved"
+    );
+    drop(h2);
+    w2.shutdown();
+
+    // Act 2: a fresh process warms from that ledger.
+    let restarted = default_router(&tmp).await;
+    let snap = warm_and_snapshot(&ledger, &restarted, &tmp.path().join("scratch2.db"));
+
+    // Assert: the purge is durable -- the negative does not come back.
+    assert!(
+        find(&snap, "gpt-nick", WEB_SEARCH).is_none(),
+        "a purged negative must not be resurrected by the warm rebuild"
+    );
+}
+
+/// The negative control for the scenario above, and the reason that scenario
+/// is evidence at all: the SAME ledger MINUS the cleared settlement replays the
+/// negative on the next boot. Without this, a warm rebuild that happened to
+/// replay nothing (a boundary mismatch, an unparsed row) would satisfy the
+/// durability assertion for entirely the wrong reason.
+#[tokio::test]
+async fn without_a_persisted_settlement_the_warm_rebuild_does_resurrect_it() {
+    // Arrange: the identical ledger, with no cleared row appended.
+    let tmp = TempDir::new().expect("tempdir");
+    let router = default_router(&tmp).await;
+    let (cat, overlay) = revision_of(&router);
+    let ts = now_ms();
+    let ledger = tmp.path().join("usage.db");
+    let (handle, writer) = writer_at(&ledger);
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
+    handle.try_send_capability_event_in_generation(
+        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, overlay),
+        1,
+    );
+    drop(handle);
+    writer.shutdown();
+
+    // Act
+    let snap = warm_and_snapshot(&ledger, &router, &tmp.path().join("scratch.db"));
+
+    // Assert: the negative IS resident, so the sibling scenario's absence is
+    // attributable to the settlement and to nothing else.
+    assert!(
+        find(&snap, "gpt-nick", WEB_SEARCH).is_some(),
+        "control: the same ledger without a settlement must replay the negative"
+    );
+}

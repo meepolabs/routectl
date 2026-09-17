@@ -75,7 +75,7 @@ pub(super) enum BoundaryOutcomeReport {
 /// holding the registry lock across SQLite. The snapshot and the submission
 /// happen together under the registry guard; this value is what survives the
 /// guard's release.
-pub(super) struct AdmittedBoundary {
+pub(crate) struct AdmittedBoundary {
     batch_receipt: BatchReceipt,
     registry: Arc<LearnedCapabilityRegistry>,
     /// Held so the deferred capability retune can be applied at publication --
@@ -95,7 +95,7 @@ pub(super) struct AdmittedBoundary {
 ///
 /// Nothing is mutated on failure: the generation does not move and no entry is
 /// pruned, so an admission refusal leaves the live state byte-identical.
-pub(super) fn admit_capability_boundary(
+pub(crate) fn admit_capability_boundary(
     usage: &UsageHandle,
     router: &Arc<Router>,
 ) -> Result<AdmittedBoundary, BatchCommit> {
@@ -240,6 +240,16 @@ impl AdmittedBoundary {
     /// The generation this boundary will establish if it commits. Field
     /// observations made after admission are stamped with it, so their events
     /// sort after the boundary rather than being rejected by it.
+    /// Commit this boundary's transition, for tests that need a boundary to
+    /// SETTLE mid-request (the reload race the purge retry exists for).
+    ///
+    /// Production settles inside the reload pipeline, which owns the publication
+    /// ordering; this exposes only the registry half.
+    #[cfg(test)]
+    pub(crate) fn commit_for_tests(&self) {
+        let _ = self.registry.commit_boundary_transition(&self.receipt);
+    }
+
     pub(super) const fn pending_generation(&self) -> u64 {
         self.receipt.generation()
     }

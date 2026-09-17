@@ -331,6 +331,7 @@ impl LearnedProbeGuard {
                 // removal it describes.
                 let crate::learned_capability::GenerationOutcome::Applied {
                     generation: persistence_generation,
+                    incarnation,
                     ..
                 } = settled
                 else {
@@ -342,6 +343,7 @@ impl LearnedProbeGuard {
                 emit_probe_settlement(&probe, self.surface, "success", true, "success");
                 cleared.push(super::CapabilityClearedEvent {
                     persistence_generation,
+                    incarnation,
                     state_key: probe.state_key,
                     capability_key: probe.feature,
                     provider_kind: probe.provider_kind.to_string(),

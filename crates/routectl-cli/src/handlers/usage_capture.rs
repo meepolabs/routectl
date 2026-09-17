@@ -545,7 +545,7 @@ impl UsageCapture {
             return;
         }
         for ev in &meta.learned_capabilities {
-            self.usage.try_send_capability_event_in_generation(
+            self.usage.try_send_capability_event_at(
                 CapabilityEvent {
                     ts,
                     lane_key: ev.state_key.clone(),
@@ -560,6 +560,11 @@ impl UsageCapture {
                     overlay_revision,
                 },
                 ev.persistence_generation,
+                // The event's OWN incarnation, from the guarded mutation that
+                // produced it: the writer compares it against the key's purge
+                // floor, so a row delayed past a purge of the same key is dropped
+                // while a genuine post-purge relearn still lands.
+                ev.incarnation,
             );
         }
         for ev in &meta.capability_observations {
@@ -567,7 +572,7 @@ impl UsageCapture {
                 ObservationDirection::Verified => Verdict::VerifiedWorking,
                 ObservationDirection::SuspectAbsence => Verdict::SuspectIgnored,
             };
-            self.usage.try_send_capability_event_in_generation(
+            self.usage.try_send_capability_event_at(
                 CapabilityEvent {
                     ts,
                     lane_key: ev.state_key.clone(),
@@ -582,10 +587,15 @@ impl UsageCapture {
                     overlay_revision,
                 },
                 ev.persistence_generation,
+                // The event's OWN incarnation, from the guarded mutation that
+                // produced it: the writer compares it against the key's purge
+                // floor, so a row delayed past a purge of the same key is dropped
+                // while a genuine post-purge relearn still lands.
+                ev.incarnation,
             );
         }
         for ev in &meta.cleared_capabilities {
-            self.usage.try_send_capability_event_in_generation(
+            self.usage.try_send_capability_event_at(
                 CapabilityEvent {
                     ts,
                     lane_key: ev.state_key.clone(),
@@ -600,6 +610,11 @@ impl UsageCapture {
                     overlay_revision,
                 },
                 ev.persistence_generation,
+                // The event's OWN incarnation, from the guarded mutation that
+                // produced it: the writer compares it against the key's purge
+                // floor, so a row delayed past a purge of the same key is dropped
+                // while a genuine post-purge relearn still lands.
+                ev.incarnation,
             );
         }
     }

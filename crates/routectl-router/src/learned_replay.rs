@@ -427,6 +427,7 @@ impl ReplayProbeGuard<'_> {
         // The generation comes FROM the mutation, under its guard.
         let crate::learned_capability::GenerationOutcome::Applied {
             generation: persistence_generation,
+            incarnation,
             ..
         } = observed
         else {
@@ -462,6 +463,7 @@ impl ReplayProbeGuard<'_> {
         );
         Some(CapabilityLearnEvent {
             persistence_generation,
+            incarnation,
             state_key: key.lane_key,
             capability_key: key.capability_key,
             provider_kind: key.provider_kind,
@@ -505,13 +507,16 @@ impl ReplayProbeGuard<'_> {
             );
             return None;
         }
-        let crate::learned_capability::GenerationOutcome::Applied {
-            value: cleared,
-            generation: persistence_generation,
-        } = removed
-        else {
-            unreachable!("staleness was handled above")
+        // Both refusals answer the same way: no clear, no event. Written as a
+        // refusal rather than an `unreachable!` because a lease can refuse here
+        // even though staleness was handled above -- a purge may have taken the
+        // key between the two.
+        let Some(applied) = removed.applied() else {
+            self.registry.release_slot(&self.key);
+            return None;
         };
+        let (cleared, persistence_generation, incarnation) =
+            (applied.value, applied.generation, applied.incarnation);
         self.registry.release_slot(&self.key);
         if cleared {
             tracing::info!(
@@ -522,6 +527,7 @@ impl ReplayProbeGuard<'_> {
             );
             Some(CapabilityClearedEvent {
                 persistence_generation,
+                incarnation,
                 state_key: self.key.lane_key.clone(),
                 capability_key: self.key.capability_key.clone(),
                 provider_kind: self.key.provider_kind.clone(),

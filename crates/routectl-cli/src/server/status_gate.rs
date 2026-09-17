@@ -207,61 +207,127 @@ impl StatusHostAllowlist {
     }
 }
 
-/// Strip an optional `:port` (and IPv6 brackets) from an HTTP `Host` authority,
-/// yielding the bare host for a loopback check. A bracketed IPv6 literal
-/// (`[::1]` / `[::1]:8080`) yields `::1`; an `host:port` yields `host` only
-/// when the suffix is a numeric port (so a colon inside a bare hostname is not
-/// mistaken for a port separator).
-fn split_host_port(authority: &str) -> &str {
+/// One HTTP `Host` authority, split into host and optional port, or `None` when
+/// the authority is not well-formed.
+///
+/// THE single authority parser for this module. [`split_host_port`] and
+/// [`port_of`] are thin projections of it, and that is the point: they used to be
+/// two independent walks over the same grammar, which is how the port side came
+/// to accept `[::1]evil:8080` (bracket contents discarded, trailing junk ignored)
+/// while the host side rejected it. Under a WILDCARD bind the allowlist degrades
+/// to a port-only check, so that port parse WAS the access decision -- a foreign
+/// authority was admitted on a port match alone. One parser makes the two
+/// answers agree by construction.
+///
+/// The accepted grammar, deliberately narrow:
+///
+///   * a nonempty host, either bracketed (`[...]`) or bare;
+///   * a BRACKETED host must parse as an `Ipv6Addr` -- brackets delimit an IPv6
+///     literal and nothing else, so a bracketed domain or IPv4 value is refused
+///     rather than given a second spelling this parser treats as equivalent;
+///   * a bracketed authority is followed by nothing or by `:` plus a `u16`;
+///   * a bare authority's port, when present, is `:` plus a `u16`; a bare
+///     multi-colon IPv6 literal (`::1`, `2001:db8::10`) has no port at all, so
+///     its trailing group is never read as one;
+///   * an authority carrying a userinfo `@` is rejected outright, before any host
+///     parsing. That rule lives HERE rather than in one caller because every
+///     consumer needs it: the wildcard port check reached `@:8080` without ever
+///     consulting the loopback predicate that used to own the rule.
+///
+/// Everything else -- an empty authority or host, an unterminated `[`, an empty
+/// bracket, text after `]`, a non-numeric or out-of-range port -- is `None`
+/// rather than a partial host.
+///
+/// # Zone-scoped IPv6 is unsupported, and fails closed
+///
+/// A zone-scoped literal (`[fe80::1%eth0]`, RFC 6874's `%25`-escaped form
+/// included) does NOT parse as an `Ipv6Addr`, so it is refused. That is
+/// deliberate and not an omission to fix by widening the grammar:
+///
+///   * a zone index is meaningful only to the host that owns it -- it names a
+///     local interface, not an endpoint -- so it cannot be compared against a
+///     bound address the way every other authority here can;
+///   * the addresses it scopes are link-local, which is neither loopback nor an
+///     address routectl binds, so a zone-scoped authority would be refused by the
+///     allowlist even if it parsed;
+///   * accepting the syntax would mean deciding whether `%eth0` and `%2` name the
+///     same interface, which is a question this predicate has no business
+///     answering while a credential is on the line.
+///
+/// Failing closed costs nothing real: an operator reaching the daemon over a
+/// link-local address states the loopback or bound literal instead.
+fn parse_authority(authority: &str) -> Option<(&str, Option<u16>)> {
+    /// Parse a written port: nonempty, all digits, and inside the `u16` range.
+    fn port(raw: &str) -> Option<u16> {
+        (!raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| raw.parse().ok())
+            .flatten()
+    }
+
+    // Userinfo makes the reachable host ambiguous, and a legitimate `Host`
+    // never carries it (RFC 7230 forbids it), so the whole shape is refused
+    // rather than parsed.
+    if authority.contains('@') {
+        return None;
+    }
     if let Some(rest) = authority.strip_prefix('[') {
-        return match rest.find(']') {
-            Some(idx) => &rest[..idx],
-            None => authority,
-        };
+        let close = rest.find(']')?;
+        let (host, after) = (&rest[..close], &rest[close + 1..]);
+        // Brackets delimit an IPv6 literal and nothing else (RFC 3986), so the
+        // contents must PARSE as one. A bracketed domain or IPv4 value is a shape
+        // no conforming client sends, and accepting it would give a host a second
+        // spelling this predicate treats as equivalent while a client would not:
+        // `[localhost]` and `[127.0.0.1]` passed the loopback check here without
+        // naming that host to any browser.
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+        if after.is_empty() {
+            return Some((host, None));
+        }
+        return Some((host, Some(port(after.strip_prefix(':')?)?)));
     }
     match authority.rsplit_once(':') {
-        // An unbracketed head that still carries a colon marks a bare
-        // (multi-colon) IPv6 literal like `::1` or `2001:db8::10`, not a
-        // `host:port` -- return it whole so the loopback check sees the real
-        // address rather than a trailing group mistaken for a port.
-        Some((host, _)) if host.contains(':') => authority,
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
-        _ => authority,
+        // A bare multi-colon literal is an address, not `host:port`.
+        Some((head, _)) if head.contains(':') => Some((authority, None)),
+        Some((host, raw)) => (!host.is_empty()).then_some(()).and_then(|()| {
+            let parsed = port(raw)?;
+            Some((host, Some(parsed)))
+        }),
+        None => (!authority.is_empty()).then_some((authority, None)),
     }
 }
 
-/// Parse the `:port` suffix of an HTTP `Host` authority, mirroring
-/// [`split_host_port`]'s IPv6-bracket + numeric-suffix handling: a bracketed
-/// IPv6 literal reads the port after the closing `]`; a bare `host:port` reads
-/// the digits after the final colon. Returns `None` when the authority carries
-/// no port (or a non-numeric / out-of-range one), so a portless Host fails
-/// closed under a wildcard bind.
+/// The bare host of an HTTP `Host` authority, or `None` when the authority is
+/// not well-formed. A projection of [`parse_authority`]; see it for the grammar
+/// and for why the two projections must not diverge.
+fn split_host_port(authority: &str) -> Option<&str> {
+    parse_authority(authority).map(|(host, _)| host)
+}
+
+/// The port written in an HTTP `Host` authority, or `None` when none is written
+/// or the authority is not well-formed. A projection of [`parse_authority`], so
+/// it cannot accept an authority whose host [`split_host_port`] rejects -- which
+/// matters because under a wildcard bind this answer IS the access decision.
 fn port_of(authority: &str) -> Option<u16> {
-    let after_host = if let Some(rest) = authority.strip_prefix('[') {
-        let close = rest.find(']')?;
-        &rest[close + 1..]
-    } else {
-        authority
-    };
-    match after_host.rsplit_once(':') {
-        // An unbracketed head that still carries a colon marks a bare
-        // (multi-colon) IPv6 literal like `2001:db8::10` -- it has no port, so
-        // its trailing group must not be parsed as one. Bracketed authorities
-        // never reach this arm with a colon in the head (the head after `]` is
-        // empty), so the guard scopes to the bare-IPv6 case.
-        Some((head, _)) if head.contains(':') => None,
-        Some((_, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
-            port.parse().ok()
-        }
-        _ => None,
-    }
+    parse_authority(authority).and_then(|(_, port)| port)
 }
 
-/// Whether an HTTP `Host` authority names a loopback endpoint. Reuses the
-/// server's shared loopback predicate (covers the full `127.0.0.0/8` range,
-/// `::1`, IPv4-mapped IPv6, and `localhost`) after stripping any port.
-fn is_loopback_authority(authority: &str) -> bool {
-    is_loopback(split_host_port(authority))
+/// Whether an HTTP `Host` authority names a loopback endpoint: a WELL-FORMED
+/// authority (per [`parse_authority`]) whose host satisfies the server's shared
+/// loopback predicate (the full `127.0.0.0/8` range, `::1`, IPv4-mapped IPv6, and
+/// `localhost`).
+///
+/// A malformed authority is not loopback, because it has no host to test --
+/// userinfo, trailing junk after `]`, an empty bracket, a bad port. Those rules
+/// live in the parser rather than here, so the port projection cannot disagree
+/// with this one.
+///
+/// `pub(crate)` for a SECOND anti-rebinding consumer, not for general use: the
+/// mutating control route (`handlers::control`) carries the same guard for the
+/// same reason. Sharing the predicate rather than re-deriving it is what keeps
+/// the two surfaces from disagreeing about what loopback means; a re-derivation
+/// would miss exactly the details the parser's own docs enumerate.
+pub(crate) fn is_loopback_authority(authority: &str) -> bool {
+    split_host_port(authority).is_some_and(is_loopback)
 }
 
 /// Process-wide count of `/status*` requests rejected by the host guard for a
@@ -270,37 +336,94 @@ fn is_loopback_authority(authority: &str) -> bool {
 /// observable.
 static HOST_403_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Reject a request whose `Host` names an endpoint outside the allowlist
-/// (anti-DNS-rebinding). A missing `Host` is permitted: the rebinding vector
-/// is a browser sending an attacker-controlled hostname, which always carries
-/// one. Applied ONLY to the status subtree -- `/v1/*` never sees it.
+/// Reject a request whose claimed authority falls outside the allowlist
+/// (anti-DNS-rebinding). Applied ONLY to the status subtree -- `/v1/*` never
+/// sees it.
 ///
-/// A rejection is counted and logged SAMPLED (1st + every Nth, reusing the
-/// shed sampler) at warn, so an operator can tell a wrong-`Host` rejection
-/// apart from a bad-token one. Only the running total is logged, never the
-/// `Host` value itself (it is attacker-controlled).
+/// Mirrors the mutating control route (`handlers::control`), which carries the
+/// same three rules for the same reason. Every claim the request makes is
+/// checked, and an unreadable claim fails closed:
+///
+///   * every `Host` header VALUE, not just the first -- a request may carry the
+///     header twice, and which duplicate a downstream reader honors is not this
+///     guard's call to assume;
+///   * a `Host` value that is not valid UTF-8 -- PRESENT but unevaluable. The
+///     client did claim an authority; this build cannot read it, and a claim that
+///     cannot be evaluated has not been validated;
+///   * the request URI's authority -- HTTP/2 puts `:authority` there and sends no
+///     `Host` at all, so a Host-only guard sees nothing on an h2c request and the
+///     absent-authority allowance becomes a bypass.
+///
+/// A request claiming NO authority anywhere is permitted: the rebinding vector is
+/// a browser, which always sends one, while a hand-rolled origin-form client
+/// legitimately omits it.
+///
+/// A rejection is counted and logged SAMPLED (1st + every Nth, reusing the shed
+/// sampler) at warn, so an operator can tell a wrong-authority rejection apart
+/// from a bad-token one. Only the running total is logged, never the claimed
+/// value (it is attacker-controlled).
 pub async fn host_guard(
     State(allowlist): State<StatusHostAllowlist>,
     req: Request,
     next: Next,
 ) -> Response {
-    let host = req
+    let host_claims_ok = req
         .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok());
-    match host {
-        Some(host) if !allowlist.allows(host) => {
-            let host_403_total = HOST_403_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if should_log_shed(host_403_total) {
-                tracing::warn!(
-                    target: SHED_TARGET,
-                    host_403_total,
-                    "status surface rejected a request with a disallowed Host header",
-                );
-            }
-            forbidden_host()
+        .get_all(header::HOST)
+        .iter()
+        .all(|value| value.to_str().is_ok_and(|host| allowlist.allows(host)));
+    let uri_claim_ok = req
+        .uri()
+        .authority()
+        .is_none_or(|authority| allowlist.allows(authority.as_str()));
+    let claim_site = if host_claims_ok {
+        if uri_claim_ok {
+            return next.run(req).await;
         }
-        _ => next.run(req).await,
+        ClaimSite::UriAuthority
+    } else {
+        ClaimSite::HostHeader
+    };
+    let host_403_total = HOST_403_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if should_log_shed(host_403_total) {
+        tracing::warn!(
+            target: SHED_TARGET,
+            host_403_total,
+            claim_site = claim_site.as_str(),
+            "status surface rejected a request with a disallowed authority claim",
+        );
+    }
+    forbidden_host()
+}
+
+/// Which claim a refusal fired on. A CLOSED set of two compile-time tokens, so
+/// the log line can say where to look without carrying a byte of
+/// caller-controlled input.
+///
+/// `pub(crate)` because the mutating control route refuses for the same reasons
+/// through the same predicate and reports the same field: an operator
+/// correlating a rejection across the two surfaces reads ONE vocabulary, and a
+/// second copy of these tokens could drift from this one.
+///
+/// The refusal used to be described as a "disallowed Host header", which is wrong
+/// two ways now: it also fires on a URI authority, where no header exists, and on
+/// an unreadable value, where there is nothing to quote. An operator needs the
+/// SITE to know where to look; they never need the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimSite {
+    /// One of the request's `Host` header values was disallowed or unreadable.
+    HostHeader,
+    /// The request URI's authority (HTTP/2 `:authority`) was disallowed.
+    UriAuthority,
+}
+
+impl ClaimSite {
+    /// The stable log token for this site.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::HostHeader => "host_header",
+            Self::UriAuthority => "uri_authority",
+        }
     }
 }
 
@@ -457,6 +580,212 @@ mod tests {
         assert!(!al.allows("[fe80::1]:9999"));
     }
 
+    /// Bracket contents must be a real IPv6 literal. A bracketed domain or IPv4
+    /// value is refused.
+    ///
+    /// Brackets exist in an authority for exactly one purpose -- to delimit an
+    /// IPv6 literal whose colons would otherwise read as a port separator (RFC
+    /// 3986). Accepting anything else inside them means the parser recognizes a
+    /// shape no conforming client sends, and each accepted oddity is a second
+    /// spelling of a host: `[localhost]` and `[127.0.0.1]` passed the loopback
+    /// check here while a browser would not treat them as that host at all. One
+    /// spelling per host is what keeps this predicate's answer the same answer a
+    /// client's own resolution would give.
+    #[test]
+    fn bracket_contents_must_be_an_ipv6_literal() {
+        for hostile in [
+            // A bracketed domain, with and without a port.
+            "[localhost]",
+            "[localhost]:8787",
+            "[evil.example]",
+            "[evil.example]:8787",
+            // A bracketed IPv4 literal: legal-looking, still not IPv6.
+            "[127.0.0.1]",
+            "[127.0.0.1]:8787",
+            "[192.168.1.5]:8787",
+            // Not an address at all.
+            "[]",
+            "[ ]",
+            "[::1 ]",
+        ] {
+            assert!(
+                split_host_port(hostile).is_none(),
+                "`{hostile}` does not hold an IPv6 literal, so the brackets are \
+                 not a delimiter this parser recognizes"
+            );
+            assert!(
+                !is_loopback_authority(hostile),
+                "`{hostile}` must not classify as loopback"
+            );
+        }
+    }
+
+    /// A ZONE-SCOPED IPv6 literal is refused, and that is the documented
+    /// behavior rather than an accident of the parse.
+    ///
+    /// A zone index names a local interface, not an endpoint, so it cannot be
+    /// compared against the address routectl bound -- and the link-local
+    /// addresses it scopes are neither loopback nor bound, so such an authority
+    /// would be refused by the allowlist even if the syntax were accepted.
+    /// Pinned so a future widening of the grammar has to come here and argue
+    /// with the reasoning rather than silently admit the shape.
+    #[test]
+    fn a_zone_scoped_ipv6_authority_fails_closed() {
+        for scoped in [
+            "[fe80::1%eth0]",
+            "[fe80::1%eth0]:8787",
+            // RFC 6874's percent-escaped spelling.
+            "[fe80::1%25eth0]",
+            // A numeric zone index.
+            "[fe80::1%2]",
+            // Loopback with a zone is still refused: the zone is what makes it
+            // unanswerable, not the address.
+            "[::1%eth0]",
+        ] {
+            assert!(
+                split_host_port(scoped).is_none(),
+                "`{scoped}` carries a zone index, which names a local interface \
+                 rather than an endpoint, so it must fail closed"
+            );
+            assert!(
+                !is_loopback_authority(scoped),
+                "`{scoped}` must not classify as loopback"
+            );
+        }
+        // Control: the same address WITHOUT a zone parses, so the refusals above
+        // are attributable to the zone and not to the literal.
+        assert_eq!(split_host_port("[fe80::1]"), Some("fe80::1"));
+    }
+
+    /// The paired positive: every real bracketed IPv6 literal still parses,
+    /// including the IPv4-MAPPED form a dual-stack listener produces.
+    #[test]
+    fn bracketed_ipv6_literals_still_parse() {
+        for (benign, host, port) in [
+            ("[::1]", "::1", None),
+            ("[::1]:8787", "::1", Some(8787)),
+            ("[::ffff:127.0.0.1]", "::ffff:127.0.0.1", None),
+            ("[::ffff:127.0.0.1]:8787", "::ffff:127.0.0.1", Some(8787)),
+            ("[2001:db8::10]:8787", "2001:db8::10", Some(8787)),
+            ("[::]", "::", None),
+        ] {
+            assert_eq!(
+                parse_authority(benign),
+                Some((host, port)),
+                "`{benign}` is a well-formed bracketed IPv6 authority"
+            );
+        }
+        // And the loopback ones still classify as loopback.
+        for benign in ["[::1]", "[::1]:8787", "[::ffff:127.0.0.1]:8787"] {
+            assert!(
+                is_loopback_authority(benign),
+                "`{benign}` names loopback and must still pass"
+            );
+        }
+    }
+
+    /// A WILDCARD allowlist must not salvage a port out of a malformed
+    /// authority.
+    ///
+    /// Under a wildcard bind the allowlist degrades to a port-only check, so the
+    /// port parse IS the access decision -- and it was reached through a separate
+    /// parser that accepted shapes the host parser rejects. `[::1]evil:8080`
+    /// yielded port 8080 (bracket contents discarded, trailing junk ignored),
+    /// `:8080` yielded 8080 with NO host at all, and `[]:8080` yielded 8080 from
+    /// an empty bracket. Each is a foreign or nonsense authority admitted on a
+    /// port match alone.
+    #[test]
+    fn a_wildcard_allowlist_salvages_no_port_from_a_malformed_authority() {
+        let al = allowlist("0.0.0.0:8080");
+        for hostile in [
+            // Trailing junk after a bracketed literal, with the bound port.
+            "[::1]evil:8080",
+            "[::1].evil:8080",
+            "[127.0.0.1]evil:8080",
+            // No host at all.
+            ":8080",
+            // Empty bracketed host.
+            "[]:8080",
+            "[]",
+            // Userinfo shapes carrying the bound port.
+            "@:8080",
+            "user@evil.example:8080",
+            // An unterminated bracket.
+            "[::1:8080",
+            // Empty authority.
+            "",
+        ] {
+            assert!(
+                !al.allows(hostile),
+                "`{hostile}` is not a well-formed authority, so no port may be \
+                 salvaged from it -- under a wildcard bind the port parse IS the \
+                 access decision"
+            );
+        }
+    }
+
+    /// A port outside the u16 range is not a port. It previously read as
+    /// `None`-by-overflow, which happened to fail closed; now it is refused by
+    /// the parser itself, so the behavior is stated rather than incidental.
+    #[test]
+    fn an_out_of_range_port_is_not_a_port() {
+        let al = allowlist("0.0.0.0:8080");
+        for hostile in ["192.168.1.5:99999", "192.168.1.5:65536", "[::1]:99999"] {
+            assert!(!al.allows(hostile), "`{hostile}` has no valid port");
+        }
+        assert_eq!(port_of("192.168.1.5:99999"), None);
+        assert_eq!(port_of("192.168.1.5:65536"), None);
+        // The boundary value is legal.
+        assert_eq!(port_of("192.168.1.5:65535"), Some(65535));
+    }
+
+    /// `split_host_port` and `port_of` agree on what is well-formed: for every
+    /// authority, either both answer or neither does.
+    ///
+    /// They were two independent parsers over the same grammar, which is how the
+    /// port side came to accept `[::1]evil:8080` while the host side rejected it.
+    /// This pins the shared contract rather than each half separately.
+    #[test]
+    fn the_host_and_port_parsers_agree_on_well_formedness() {
+        for authority in [
+            // Well-formed, with and without a port.
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "localhost",
+            "localhost:8080",
+            "[::1]",
+            "[::1]:8080",
+            "::1",
+            "2001:db8::10",
+            "evil.example",
+            "evil.example:8080",
+            // Malformed in every way the grammar can be.
+            "[::1]evil",
+            "[::1]evil:8080",
+            "[::1]:8080evil",
+            "[]:8080",
+            "[]",
+            "[::1",
+            ":8080",
+            "",
+            "127.0.0.1:evil",
+            "127.0.0.1:99999",
+        ] {
+            let host = split_host_port(authority);
+            let port = port_of(authority);
+            // A well-formed authority always yields a host; a port only when one
+            // is written. A malformed one yields neither.
+            if host.is_none() {
+                assert_eq!(
+                    port, None,
+                    "`{authority}` has no parseable host, so it must have no \
+                     parseable port either -- a port salvaged from an \
+                     unparseable authority is exactly the wildcard-bind bypass"
+                );
+            }
+        }
+    }
+
     #[test]
     fn loopback_literals_pass_under_wildcard_bind() {
         let al = allowlist("0.0.0.0:8080");
@@ -475,18 +804,166 @@ mod tests {
         }
     }
 
+    /// Everything AFTER a bracketed literal's `]` must be empty or a numeric
+    /// `:port`, or the authority is rejected.
+    ///
+    /// This closes a bypass of the same family as the userinfo one:
+    /// `split_host_port` returned the bracket contents and DISCARDED the rest, so
+    /// `[::1]evil.example` yielded `::1` and read as loopback -- while a client
+    /// resolving that authority goes wherever the trailing text names. Same for a
+    /// junk port suffix (`[::1]:8791evil`), which is not a port at all.
+    #[test]
+    fn a_bracketed_authority_with_trailing_junk_is_never_loopback() {
+        for hostile in [
+            // Trailing text directly after the bracket.
+            "[::1]evil",
+            "[::1]evil.example",
+            "[::1].evil",
+            "[::1].evil.example",
+            // A port-looking suffix that is not all digits.
+            "[::1]:8791evil",
+            "[::1]:80:evil",
+            "[::1]:evil",
+            "[::1]:",
+            // Bracketed IPv4 carries the same shape.
+            "[127.0.0.1]evil",
+            "[127.0.0.1].evil",
+            "[127.0.0.1]:8791evil",
+            // An unterminated bracket is not an authority this guard accepts.
+            "[::1",
+        ] {
+            assert!(
+                !is_loopback_authority(hostile),
+                "`{hostile}` carries text after the bracketed literal that is not \
+                 a numeric port, so the host a client reaches is not the literal \
+                 inside the brackets"
+            );
+        }
+    }
+
+    /// The paired positive: the two legitimate bracketed shapes still pass, so
+    /// the rejection above is about the SUFFIX and not about brackets.
+    #[test]
+    fn well_formed_bracketed_loopback_authorities_still_pass() {
+        for benign in ["[::1]", "[::1]:8787", "[::1]:0", "[::ffff:127.0.0.1]:8787"] {
+            assert!(
+                is_loopback_authority(benign),
+                "`{benign}` is a well-formed bracketed loopback authority"
+            );
+        }
+    }
+
+    /// An authority carrying USERINFO is rejected outright, never parsed for a
+    /// host.
+    ///
+    /// This closes a real bypass: `split_host_port` strips IPv6 brackets by
+    /// finding the first `]`, so `[::1]@evil.example` yielded `::1` and
+    /// classified as LOOPBACK -- while a browser resolving that authority
+    /// connects to `evil.example`, with `[::1]` as a userinfo field the host
+    /// never sees. The rebinding guard would have read the attacker's authority
+    /// as its own.
+    ///
+    /// A legitimate `Host` header carries no userinfo (RFC 7230 forbids it), so
+    /// rejecting the whole shape costs nothing and needs no per-position
+    /// reasoning about where the `@` sits.
+    #[test]
+    fn an_authority_carrying_userinfo_is_never_loopback() {
+        for hostile in [
+            // The bracket-parse bypass, both with and without a port.
+            "[::1]@evil.example",
+            "[::1]@evil.example:8791",
+            "[::1]:8791@evil.example",
+            // The IPv4 shapes, for symmetry -- these already failed the host
+            // check, and must keep failing for the explicit reason.
+            "127.0.0.1@evil.example",
+            "127.0.0.1:8791@evil.example",
+            "localhost@evil.example",
+            // Userinfo with a password field.
+            "[::1]:pw@evil.example",
+            "user:pw@127.0.0.1",
+            // A trailing `@` is still userinfo syntax.
+            "127.0.0.1@",
+            "@127.0.0.1",
+        ] {
+            assert!(
+                !is_loopback_authority(hostile),
+                "`{hostile}` carries a userinfo separator, so the loopback-looking \
+                 text in it is not necessarily the host a client reaches; the \
+                 whole shape is refused rather than parsed"
+            );
+        }
+    }
+
+    /// The paired positive: every userinfo-free loopback authority still passes.
+    /// Without this, rejecting on any `@` would be indistinguishable from
+    /// rejecting everything, which would break the status surface and the
+    /// control route together.
+    #[test]
+    fn userinfo_free_loopback_authorities_still_pass() {
+        for benign in [
+            "127.0.0.1",
+            "127.0.0.1:8787",
+            "127.0.0.5:8787",
+            "localhost",
+            "localhost:8787",
+            "[::1]",
+            "[::1]:8787",
+            "::1",
+        ] {
+            assert!(
+                is_loopback_authority(benign),
+                "`{benign}` is a plain loopback authority and must still pass"
+            );
+        }
+    }
+
+    /// A non-loopback authority stays rejected, so the acceptance above is not a
+    /// predicate that accepts everything.
+    #[test]
+    fn plain_non_loopback_authorities_stay_rejected() {
+        for foreign in [
+            "evil.example",
+            "evil.example:8791",
+            "10.20.30.40:8791",
+            "[2001:db8::1]:8791",
+        ] {
+            assert!(
+                !is_loopback_authority(foreign),
+                "`{foreign}` must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn split_host_port_handles_ipv6_and_bare_hosts() {
-        assert_eq!(split_host_port("[::1]:8787"), "::1");
-        assert_eq!(split_host_port("[::1]"), "::1");
-        assert_eq!(split_host_port("127.0.0.1:8787"), "127.0.0.1");
-        assert_eq!(split_host_port("localhost"), "localhost");
-        assert_eq!(split_host_port("example.com"), "example.com");
+        assert_eq!(split_host_port("[::1]:8787"), Some("::1"));
+        assert_eq!(split_host_port("[::1]"), Some("::1"));
+        assert_eq!(split_host_port("127.0.0.1:8787"), Some("127.0.0.1"));
+        assert_eq!(split_host_port("localhost"), Some("localhost"));
+        assert_eq!(split_host_port("example.com"), Some("example.com"));
         // A bare (unbracketed) multi-colon IPv6 literal has no port: its
         // trailing group must not be stripped. `::1` must survive whole so the
         // loopback check recognizes it.
-        assert_eq!(split_host_port("::1"), "::1");
-        assert_eq!(split_host_port("2001:db8::10"), "2001:db8::10");
+        assert_eq!(split_host_port("::1"), Some("::1"));
+        assert_eq!(split_host_port("2001:db8::10"), Some("2001:db8::10"));
+    }
+
+    /// A malformed authority yields NO host rather than a salvaged fragment.
+    /// Returning a fragment is what let a trailing-junk authority read as its
+    /// bracketed literal, so the parse now refuses instead of guessing.
+    #[test]
+    fn split_host_port_refuses_a_malformed_authority() {
+        // Trailing text or a non-numeric port after a bracketed literal.
+        assert_eq!(split_host_port("[::1]evil"), None);
+        assert_eq!(split_host_port("[::1].evil"), None);
+        assert_eq!(split_host_port("[::1]:8791evil"), None);
+        assert_eq!(split_host_port("[::1]:"), None);
+        assert_eq!(split_host_port("[127.0.0.1]evil"), None);
+        // An unterminated bracket.
+        assert_eq!(split_host_port("[::1"), None);
+        // A non-numeric port on a bare host.
+        assert_eq!(split_host_port("localhost:evil"), None);
+        assert_eq!(split_host_port("127.0.0.1:evil"), None);
     }
 
     #[test]
@@ -1144,11 +1621,336 @@ mod tests {
         }
     }
 
+    /// A guarded app over the loopback allowlist, for the authority-validation
+    /// tests below.
+    #[cfg(test)]
+    fn guarded_app() -> axum::Router {
+        use axum::middleware::from_fn_with_state;
+
+        axum::Router::new()
+            .route("/status", get(|| async { StatusCode::OK }))
+            .layer(from_fn_with_state(allowlist("127.0.0.1:8787"), host_guard))
+    }
+
+    /// Drive one request at the guarded app, returning its status.
+    #[cfg(test)]
+    async fn guarded_status(request: HttpRequest<Body>) -> StatusCode {
+        guarded_app()
+            .oneshot(request)
+            .await
+            .expect("guard must respond")
+            .status()
+    }
+
+    /// EVERY `Host` value is validated, not just the first.
+    ///
+    /// The status subtree read `HeaderMap::get`, which returns only the first
+    /// value, so a request carrying the header twice had its second value
+    /// unchecked. Which duplicate a downstream reader honors is not this guard's
+    /// call to assume: all of them are claims and all must pass. Mirrors the
+    /// mutating control route, which carries the same rule.
+    /// Holds `status_host_403`: this test drives status refusals, which bump the
+    /// process-global counter the sampled log reads. The key covers every test
+    /// that MOVES that counter, not only those asserting on it.
+    #[tokio::test]
+    #[serial_test::serial(status_host_403)]
+    async fn host_guard_validates_every_duplicate_host_value() {
+        for (first, second) in [
+            ("127.0.0.1:8787", "rebind.evil"),
+            ("rebind.evil", "127.0.0.1:8787"),
+            ("127.0.0.1:8787", "[::1]@evil.example"),
+            ("127.0.0.1:8787", "[::1]evil.example"),
+        ] {
+            let request = HttpRequest::builder()
+                .method("GET")
+                .uri("/status")
+                .header(header::HOST, first)
+                .header(header::HOST, second)
+                .body(Body::empty())
+                .unwrap();
+
+            assert_eq!(
+                guarded_status(request).await,
+                StatusCode::FORBIDDEN,
+                "Host values ({first:?}, {second:?}) include a disallowed claim \
+                 and must be rejected -- reading only the first leaves the other \
+                 unchecked"
+            );
+        }
+    }
+
+    /// The paired positive: duplicated values that are ALL allowed are served, so
+    /// the rejection above is about the VALUE rather than the duplication.
+    #[tokio::test]
+    async fn host_guard_serves_duplicate_allowed_hosts() {
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri("/status")
+            .header(header::HOST, "127.0.0.1:8787")
+            .header(header::HOST, "127.0.0.1:8787")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(guarded_status(request).await, StatusCode::OK);
+    }
+
+    /// A PRESENT but non-UTF-8 `Host` fails CLOSED.
+    ///
+    /// Treating it as absent read a client's authority claim as no claim at all.
+    /// The client did claim an authority; this build simply cannot read it, and a
+    /// claim that cannot be evaluated has not been validated.
+    /// Holds `status_host_403`: this test drives status refusals, which bump the
+    /// process-global counter the sampled log reads. The key covers every test
+    /// that MOVES that counter, not only those asserting on it.
+    #[tokio::test]
+    #[serial_test::serial(status_host_403)]
+    async fn host_guard_fails_closed_on_a_non_utf8_host() {
+        for raw in [&b"\xff\xfe"[..], &b"127.0.0.1\xff"[..], &b"\xc3"[..]] {
+            let mut request = HttpRequest::builder()
+                .method("GET")
+                .uri("/status")
+                .body(Body::empty())
+                .unwrap();
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_bytes(raw)
+                    .expect("non-UTF-8 bytes are still a legal header value"),
+            );
+
+            assert_eq!(
+                guarded_status(request).await,
+                StatusCode::FORBIDDEN,
+                "a present but unreadable Host ({raw:?}) must fail closed"
+            );
+        }
+    }
+
+    /// An HTTP/2 request carries its authority on the request URI, with no `Host`
+    /// header at all -- so a Host-only guard sees nothing and admits it. The
+    /// status subtree is reachable over h2c on the same cleartext port as the
+    /// control route, so it needs the same URI check.
+    /// Holds `status_host_403`: this test drives status refusals, which bump the
+    /// process-global counter the sampled log reads. The key covers every test
+    /// that MOVES that counter, not only those asserting on it.
+    #[tokio::test]
+    #[serial_test::serial(status_host_403)]
+    async fn host_guard_rejects_a_foreign_uri_authority() {
+        for authority in ["rebind.evil", "rebind.evil:8787", "10.20.30.40:8787"] {
+            let request = HttpRequest::builder()
+                .method("GET")
+                .uri(format!("http://{authority}/status"))
+                .body(Body::empty())
+                .unwrap();
+
+            assert_eq!(
+                guarded_status(request).await,
+                StatusCode::FORBIDDEN,
+                "URI authority `{authority}` is foreign and must be rejected: on \
+                 HTTP/2 this is where the authority lives"
+            );
+        }
+    }
+
+    /// The paired positive for the URI check, plus the two shapes that must keep
+    /// working: an allowed URI authority, and a genuinely authority-less
+    /// origin-form request (which makes no claim to validate).
+    #[tokio::test]
+    async fn host_guard_serves_allowed_and_absent_authorities() {
+        for authority in ["127.0.0.1:8787", "[::1]:8787", "localhost:8787"] {
+            let request = HttpRequest::builder()
+                .method("GET")
+                .uri(format!("http://{authority}/status"))
+                .body(Body::empty())
+                .unwrap();
+
+            assert_eq!(
+                guarded_status(request).await,
+                StatusCode::OK,
+                "URI authority `{authority}` is allowed and must be served"
+            );
+        }
+
+        let origin_form = HttpRequest::builder()
+            .method("GET")
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            origin_form.uri().authority(),
+            None,
+            "premise: this fixture must really carry no authority"
+        );
+        assert_eq!(
+            guarded_status(origin_form).await,
+            StatusCode::OK,
+            "an authority-less origin-form request makes no claim and is permitted"
+        );
+    }
+
+    /// A foreign URI authority is rejected even when a benign `Host` sits beside
+    /// it: satisfying the guard with the half an attacker does not need must not
+    /// vouch for the half it does.
+    /// Holds `status_host_403`: this test drives status refusals, which bump the
+    /// process-global counter the sampled log reads. The key covers every test
+    /// that MOVES that counter, not only those asserting on it.
+    #[tokio::test]
+    #[serial_test::serial(status_host_403)]
+    async fn host_guard_rejects_a_foreign_authority_beside_an_allowed_host() {
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri("http://rebind.evil/status")
+            .header(header::HOST, "127.0.0.1:8787")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(guarded_status(request).await, StatusCode::FORBIDDEN);
+    }
+
+    /// The malformed-authority shapes are refused at the GUARD, not merely by the
+    /// predicate's own unit tests -- including under a wildcard bind, where the
+    /// port check is the access decision.
+    /// Holds `status_host_403`: this test drives status refusals, which bump the
+    /// process-global counter the sampled log reads. The key covers every test
+    /// that MOVES that counter, not only those asserting on it.
+    #[tokio::test]
+    #[serial_test::serial(status_host_403)]
+    async fn host_guard_rejects_malformed_authorities_under_a_wildcard_bind() {
+        use axum::middleware::from_fn_with_state;
+
+        let app = axum::Router::new()
+            .route("/status", get(|| async { StatusCode::OK }))
+            .layer(from_fn_with_state(allowlist("0.0.0.0:8787"), host_guard));
+
+        for hostile in [
+            "[::1]evil:8787",
+            "[]:8787",
+            ":8787",
+            "@:8787",
+            "[::1]:8787evil",
+            "192.168.1.5:99999",
+        ] {
+            let request = HttpRequest::builder()
+                .method("GET")
+                .uri("/status")
+                .header(header::HOST, hostile)
+                .body(Body::empty())
+                .unwrap();
+            let status = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("guard must respond")
+                .status();
+
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "`{hostile}` is malformed and must be refused even under a \
+                 wildcard bind, where a salvaged port would BE the access decision"
+            );
+        }
+
+        // Control: a well-formed foreign Host on the bound port is still allowed
+        // under a wildcard bind (that is the documented degradation), so the
+        // refusals above are about well-formedness rather than about the guard
+        // refusing everything.
+        let allowed = HttpRequest::builder()
+            .method("GET")
+            .uri("/status")
+            .header(header::HOST, "192.168.1.5:8787")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(allowed).await.unwrap().status(),
+            StatusCode::OK,
+            "control: a well-formed authority on the bound port is allowed under \
+             a wildcard bind"
+        );
+    }
+
+    /// The sampled refusal line names the CLAIM SITE from a closed set, and still
+    /// carries no caller value.
+    ///
+    /// The old message said "disallowed Host header", which is now wrong twice
+    /// over: the refusal also fires on a URI authority (where there is no header)
+    /// and on an unreadable value (where there is nothing to name). An operator
+    /// reading it needs to know WHICH claim failed to know where to look, and a
+    /// closed token gives them that without echoing attacker-controlled bytes.
+    ///
+    /// The 403 counter is process-GLOBAL and the log is sampled off it, so a
+    /// single refusal is not guaranteed to emit. Each site is therefore driven a
+    /// full sampling window so at least one of its lines must land, rather than
+    /// asserting on a count a concurrent sibling can move.
+    ///
+    /// `#[serial(status_host_403)]` because the sampled line is derived from the
+    /// process-global [`HOST_403_COUNT`]: a concurrent sibling driving refusals
+    /// shifts this test's position in the sampling window, so every test that
+    /// MOVES that counter holds the same key -- not only the ones asserting on it.
+    #[tokio::test]
+    #[serial_test::serial(status_host_403)]
+    async fn the_refusal_line_names_the_claim_site_without_the_value() {
+        use axum::middleware::from_fn_with_state;
+        use routectl_testkit::capture_lines;
+
+        let app = axum::Router::new()
+            .route("/status", get(|| async { StatusCode::OK }))
+            .layer(from_fn_with_state(allowlist("127.0.0.1:8787"), host_guard));
+
+        // Each site, driven its own window, in its own capture.
+        let window = SHED_LOG_SAMPLE_N + 1;
+        for (site, build) in [("host_header", true), ("uri_authority", false)] {
+            let ((), lines) = capture_lines(async {
+                for _ in 0..window {
+                    let request = if build {
+                        HttpRequest::builder()
+                            .method("GET")
+                            .uri("/status")
+                            .header(header::HOST, "evil-LEAKED.example:8787")
+                            .body(Body::empty())
+                            .unwrap()
+                    } else {
+                        HttpRequest::builder()
+                            .method("GET")
+                            .uri("http://evil-LEAKED.example/status")
+                            .body(Body::empty())
+                            .unwrap()
+                    };
+                    let resp = app.clone().oneshot(request).await.unwrap();
+                    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+                }
+            })
+            .await;
+
+            let joined = lines.join("\n");
+            assert!(
+                !lines.is_empty(),
+                "a full sampling window must emit at least one {site} line"
+            );
+            assert!(
+                joined.contains("disallowed authority claim"),
+                "the message must describe an authority CLAIM, not a Host header: \
+                 {joined}"
+            );
+            assert!(
+                joined.contains(&format!("claim_site=\"{site}\"")),
+                "a {site} refusal must name that site: {joined}"
+            );
+            assert!(
+                !joined.contains("LEAKED") && !joined.contains("evil-"),
+                "the refusal line leaked a caller-controlled value: {joined}"
+            );
+        }
+    }
+
     /// The host guard counts every disallowed-`Host` 403 but logs SAMPLED, and
     /// never logs the raw (attacker-controlled) `Host` value -- only the fixed
     /// message + running total. Driven on the default current-thread runtime so
     /// the thread-local capture sees the warn emitted inline by the middleware.
+    /// Holds the same `status_host_403` key as the sibling claim-site test: both
+    /// drive the process-global 403 counter the sampler reads, so running them
+    /// concurrently moves each other's window.
     #[tokio::test]
+    #[serial_test::serial(status_host_403)]
     async fn host_guard_403_is_sampled_and_never_leaks_host() {
         use axum::middleware::from_fn_with_state;
         use routectl_testkit::capture_lines;
@@ -1191,7 +1993,7 @@ mod tests {
                 "host-403 log leaked the raw Host: {line}"
             );
             assert!(
-                line.contains("disallowed Host header"),
+                line.contains("disallowed authority claim"),
                 "unexpected host-403 line: {line}"
             );
         }

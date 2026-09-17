@@ -55,6 +55,15 @@ pub struct CapabilityObserveEvent {
     /// single request legitimately spans a boundary, so events on one request
     /// may carry DIFFERENT generations.
     pub persistence_generation: u64,
+    /// The INCARNATION of the key's state this event describes, from the same
+    /// guarded mutation.
+    ///
+    /// What the generation cannot express: a purge and a later relearn of ONE key
+    /// both happen inside one generation, so a stale event queued before the
+    /// purge and a genuine post-purge relearn are indistinguishable by generation
+    /// alone. The writer compares this against the key's purge floor and drops
+    /// only the superseded one.
+    pub incarnation: u64,
 
     /// Routing state key (nickname-or-provider) of the served target.
     pub state_key: String,
@@ -164,11 +173,13 @@ impl Router {
                     GenerationOutcome::Applied {
                         value: PositiveOutcome::Recorded,
                         generation,
+                        incarnation,
                     } => {
                         self.metrics.incr_verified_working();
-                        Some(generation)
+                        Some((generation, incarnation))
                     }
-                    // Not recorded, or refused as stale: no metric, no event.
+                    // Not recorded, refused as stale, or refused by a purge
+                    // lease: no metric, no event.
                     _ => None,
                 }
             }
@@ -189,17 +200,18 @@ impl Router {
                     GenerationOutcome::Applied {
                         value: ObserveOutcome::Acting,
                         generation,
+                        incarnation,
                     } => {
                         self.metrics.incr_f3_suspect();
-                        Some(generation)
+                        Some((generation, incarnation))
                     }
                     _ => None,
                 }
             }
         };
-        // `Some(generation)` means the observation acted AND carries the
-        // generation its own mutation ran under.
-        let Some(persistence_generation) = acting else {
+        // `Some(..)` means the observation acted AND carries the generation and
+        // incarnation its own mutation ran under.
+        let Some((persistence_generation, incarnation)) = acting else {
             return;
         };
         tracing::warn!(
@@ -215,6 +227,7 @@ impl Router {
         );
         meta.capability_observations.push(CapabilityObserveEvent {
             persistence_generation,
+            incarnation,
             state_key: state_key.to_string(),
             capability_key: obs.capability_key.to_string(),
             provider_kind: provider_kind.to_string(),

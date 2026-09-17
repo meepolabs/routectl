@@ -3341,8 +3341,47 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::pricing::PricingSource::into_shared(self) -> Shared
 pub fn routectl_router::pricing::effective_pricing(&routectl_router::config::Config, &routectl_router::CatalogOverlay, &str, &str, &str) -> core::option::Option<(routectl_router::PricingConfig, routectl_router::pricing::PricingSource)>
 pub mod routectl_router::router
+pub enum routectl_router::router::PurgeOutcome
+pub routectl_router::router::PurgeOutcome::Absent
+pub routectl_router::router::PurgeOutcome::Busy
+pub routectl_router::router::PurgeOutcome::Reserved(alloc::boxed::Box<routectl_router::router::ReservedPurge>)
+pub routectl_router::router::PurgeOutcome::Stale
+impl core::marker::Freeze for routectl_router::router::PurgeOutcome
+impl core::marker::Send for routectl_router::router::PurgeOutcome
+impl core::marker::Sync for routectl_router::router::PurgeOutcome
+impl core::marker::Unpin for routectl_router::router::PurgeOutcome
+impl core::marker::UnsafeUnpin for routectl_router::router::PurgeOutcome
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::PurgeOutcome
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::router::PurgeOutcome
+impl<T, U> core::convert::Into<U> for routectl_router::router::PurgeOutcome where U: core::convert::From<T>
+pub fn routectl_router::router::PurgeOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::PurgeOutcome where U: core::convert::Into<T>
+pub type routectl_router::router::PurgeOutcome::Error = core::convert::Infallible
+pub fn routectl_router::router::PurgeOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::PurgeOutcome where U: core::convert::TryFrom<T>
+pub type routectl_router::router::PurgeOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::PurgeOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_router::router::PurgeOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::PurgeOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::PurgeOutcome where T: ?core::marker::Sized
+pub fn routectl_router::router::PurgeOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::PurgeOutcome where T: ?core::marker::Sized
+pub fn routectl_router::router::PurgeOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_router::router::PurgeOutcome
+pub fn routectl_router::router::PurgeOutcome::from(T) -> T
+impl<T> either::into_either::IntoEither for routectl_router::router::PurgeOutcome
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::PurgeOutcome where T: ?core::marker::Sized
+pub fn routectl_router::router::PurgeOutcome::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::PurgeOutcome::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::PurgeOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::PurgeOutcome
+impl<T> typenum::type_operators::Same for routectl_router::router::PurgeOutcome
+pub type routectl_router::router::PurgeOutcome::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::PurgeOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::PurgeOutcome::into_shared(self) -> Shared
 pub struct routectl_router::router::CapabilityClearedEvent
 pub routectl_router::router::CapabilityClearedEvent::capability_key: alloc::string::String
+pub routectl_router::router::CapabilityClearedEvent::incarnation: u64
 pub routectl_router::router::CapabilityClearedEvent::persistence_generation: u64
 pub routectl_router::router::CapabilityClearedEvent::provider_kind: alloc::string::String
 pub routectl_router::router::CapabilityClearedEvent::state_key: alloc::string::String
@@ -3395,6 +3434,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::router::CapabilityClearedEvent::into_shared(self) -> Shared
 pub struct routectl_router::router::CapabilityLearnEvent
 pub routectl_router::router::CapabilityLearnEvent::capability_key: alloc::string::String
+pub routectl_router::router::CapabilityLearnEvent::incarnation: u64
 pub routectl_router::router::CapabilityLearnEvent::observations: u32
 pub routectl_router::router::CapabilityLearnEvent::persistence_generation: u64
 pub routectl_router::router::CapabilityLearnEvent::phase: routectl_core::capability::FailurePhase
@@ -3456,6 +3496,7 @@ pub struct routectl_router::router::CapabilityObserveEvent
 pub routectl_router::router::CapabilityObserveEvent::capability_key: alloc::string::String
 pub routectl_router::router::CapabilityObserveEvent::direction: routectl_router::ObservationDirection
 pub routectl_router::router::CapabilityObserveEvent::evidence_class: alloc::string::String
+pub routectl_router::router::CapabilityObserveEvent::incarnation: u64
 pub routectl_router::router::CapabilityObserveEvent::persistence_generation: u64
 pub routectl_router::router::CapabilityObserveEvent::provider_kind: alloc::string::String
 pub routectl_router::router::CapabilityObserveEvent::request_features: alloc::vec::Vec<alloc::string::String>
@@ -3788,6 +3829,47 @@ impl<T> typenum::type_operators::Same for routectl_router::router::ReplayDegrada
 pub type routectl_router::router::ReplayDegradation::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ReplayDegradation where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::ReplayDegradation::into_shared(self) -> Shared
+pub struct routectl_router::router::ReservedPurge
+pub routectl_router::router::ReservedPurge::capability_key: alloc::string::String
+pub routectl_router::router::ReservedPurge::provider_kind: alloc::string::String
+pub routectl_router::router::ReservedPurge::state_key: alloc::string::String
+impl routectl_router::router::ReservedPurge
+pub const fn routectl_router::router::ReservedPurge::generation(&self) -> u64
+pub const fn routectl_router::router::ReservedPurge::generation_incarnation(&self) -> u64
+pub fn routectl_router::router::ReservedPurge::settlement(&self) -> routectl_router::router::CapabilityClearedEvent
+impl core::marker::Freeze for routectl_router::router::ReservedPurge
+impl core::marker::Send for routectl_router::router::ReservedPurge
+impl core::marker::Sync for routectl_router::router::ReservedPurge
+impl core::marker::Unpin for routectl_router::router::ReservedPurge
+impl core::marker::UnsafeUnpin for routectl_router::router::ReservedPurge
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::ReservedPurge
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::router::ReservedPurge
+impl<T, U> core::convert::Into<U> for routectl_router::router::ReservedPurge where U: core::convert::From<T>
+pub fn routectl_router::router::ReservedPurge::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::ReservedPurge where U: core::convert::Into<T>
+pub type routectl_router::router::ReservedPurge::Error = core::convert::Infallible
+pub fn routectl_router::router::ReservedPurge::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::ReservedPurge where U: core::convert::TryFrom<T>
+pub type routectl_router::router::ReservedPurge::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::ReservedPurge::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_router::router::ReservedPurge where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::ReservedPurge::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::ReservedPurge where T: ?core::marker::Sized
+pub fn routectl_router::router::ReservedPurge::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::ReservedPurge where T: ?core::marker::Sized
+pub fn routectl_router::router::ReservedPurge::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_router::router::ReservedPurge
+pub fn routectl_router::router::ReservedPurge::from(T) -> T
+impl<T> either::into_either::IntoEither for routectl_router::router::ReservedPurge
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::ReservedPurge where T: ?core::marker::Sized
+pub fn routectl_router::router::ReservedPurge::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::ReservedPurge::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::ReservedPurge
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::ReservedPurge
+impl<T> typenum::type_operators::Same for routectl_router::router::ReservedPurge
+pub type routectl_router::router::ReservedPurge::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ReservedPurge where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::ReservedPurge::into_shared(self) -> Shared
 pub struct routectl_router::router::RouteTargetStatus
 pub routectl_router::router::RouteTargetStatus::gate: routectl_router::runtime_state::ProviderGateStatus
 pub routectl_router::router::RouteTargetStatus::nickname: alloc::string::String
@@ -3848,6 +3930,11 @@ pub fn routectl_router::router::RouteTargetStatus::into_shared(self) -> Shared
 pub struct routectl_router::router::Router
 pub routectl_router::router::Router::config: alloc::sync::Arc<routectl_router::config::Config>
 pub routectl_router::router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::abandon_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>)
+pub fn routectl_router::router::Router::audit_absent_purge(&self, &str, &str)
+pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
+pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &str, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::apply_capability_tuning(&self)
 pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
@@ -5664,11 +5751,17 @@ pub fn routectl_router::GateDecision::into_shared(self) -> Shared
 pub enum routectl_router::GenerationOutcome<T>
 pub routectl_router::GenerationOutcome::Applied
 pub routectl_router::GenerationOutcome::Applied::generation: u64
+pub routectl_router::GenerationOutcome::Applied::incarnation: u64
 pub routectl_router::GenerationOutcome::Applied::value: T
+pub routectl_router::GenerationOutcome::Exhausted
+pub routectl_router::GenerationOutcome::Reserved
 pub routectl_router::GenerationOutcome::Stale
 impl<T> routectl_router::GenerationOutcome<T>
-pub fn routectl_router::GenerationOutcome<T>::applied(self) -> core::option::Option<T>
+pub fn routectl_router::GenerationOutcome<T>::applied(self) -> core::option::Option<routectl_router::learned_capability::AppliedMutation<T>>
+pub const fn routectl_router::GenerationOutcome<T>::is_exhausted(&self) -> bool
+pub const fn routectl_router::GenerationOutcome<T>::is_reserved(&self) -> bool
 pub const fn routectl_router::GenerationOutcome<T>::is_stale(&self) -> bool
+pub fn routectl_router::GenerationOutcome<T>::value(self) -> core::option::Option<T>
 impl<T: core::clone::Clone> core::clone::Clone for routectl_router::GenerationOutcome<T>
 pub fn routectl_router::GenerationOutcome<T>::clone(&self) -> routectl_router::GenerationOutcome<T>
 impl<T: core::cmp::Eq> core::cmp::Eq for routectl_router::GenerationOutcome<T>
@@ -10519,6 +10612,7 @@ pub fn routectl_router::LearnedCapabilityRegistry::effective_persistence_generat
 pub fn routectl_router::LearnedCapabilityRegistry::expire_keyed(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::LearnedCapabilityRegistry::expire_keyed_in_generation(&self, u64, &str, &str, &str, std::time::Instant) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::LearnedCapabilityRegistry::export_entries(&self) -> alloc::vec::Vec<routectl_router::learned_capability::ExportedEntry>
+pub fn routectl_router::LearnedCapabilityRegistry::finalize_purge(&self, routectl_router::learned_capability::PurgeLease) -> bool
 pub fn routectl_router::LearnedCapabilityRegistry::from_capability_config(&routectl_router::CapabilityConfig) -> Self
 pub fn routectl_router::LearnedCapabilityRegistry::generation(&self) -> u64
 pub fn routectl_router::LearnedCapabilityRegistry::import_entries(&self, alloc::vec::Vec<routectl_router::learned_capability::ExportedEntry>)
@@ -10532,10 +10626,12 @@ pub fn routectl_router::LearnedCapabilityRegistry::observe(&self, &str, &str, &s
 pub fn routectl_router::LearnedCapabilityRegistry::observe_in_generation(&self, u64, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
 pub fn routectl_router::LearnedCapabilityRegistry::observe_positive(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::learned_capability::PositiveOutcome
 pub fn routectl_router::LearnedCapabilityRegistry::observe_positive_in_generation(&self, u64, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
+pub fn routectl_router::LearnedCapabilityRegistry::prepare_purge(&self, u64, &str, &str, &str) -> routectl_router::learned_capability::PurgePreparation
 pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome(&self, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant)
 pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome_in_generation(&self, u64, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant) -> routectl_router::GenerationOutcome<()>
 pub fn routectl_router::LearnedCapabilityRegistry::remove_keyed(&self, &str, &str, &str) -> bool
 pub fn routectl_router::LearnedCapabilityRegistry::remove_keyed_in_generation(&self, u64, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
+pub fn routectl_router::LearnedCapabilityRegistry::restore_purge(&self, routectl_router::learned_capability::PurgeLease)
 pub fn routectl_router::LearnedCapabilityRegistry::retune(&self, core::time::Duration, core::time::Duration, usize)
 pub fn routectl_router::LearnedCapabilityRegistry::rollback_pending_generation(&self, &routectl_router::BoundaryReceipt) -> routectl_router::BoundarySettlement
 pub fn routectl_router::LearnedCapabilityRegistry::snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
@@ -10548,7 +10644,7 @@ impl core::marker::Sync for routectl_router::LearnedCapabilityRegistry
 impl core::marker::Unpin for routectl_router::LearnedCapabilityRegistry
 impl core::marker::UnsafeUnpin for routectl_router::LearnedCapabilityRegistry
 impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::LearnedCapabilityRegistry
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::LearnedCapabilityRegistry
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::LearnedCapabilityRegistry
 impl<T, U> core::convert::Into<U> for routectl_router::LearnedCapabilityRegistry where U: core::convert::From<T>
 pub fn routectl_router::LearnedCapabilityRegistry::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for routectl_router::LearnedCapabilityRegistry where U: core::convert::Into<T>
@@ -12505,6 +12601,11 @@ pub fn routectl_router::RetryPolicy::into_shared(self) -> Shared
 pub struct routectl_router::Router
 pub routectl_router::Router::config: alloc::sync::Arc<routectl_router::config::Config>
 pub routectl_router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::abandon_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>)
+pub fn routectl_router::router::Router::audit_absent_purge(&self, &str, &str)
+pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
+pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &str, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::apply_capability_tuning(&self)
 pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>

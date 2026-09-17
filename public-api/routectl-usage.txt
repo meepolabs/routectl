@@ -630,6 +630,7 @@ pub struct routectl_usage::CapabilityBatch
 pub routectl_usage::CapabilityBatch::ack: tokio::sync::oneshot::Sender<routectl_usage::BatchCommit>
 pub routectl_usage::CapabilityBatch::events: alloc::vec::Vec<routectl_usage::CapabilityEvent>
 pub routectl_usage::CapabilityBatch::generation: u64
+pub routectl_usage::CapabilityBatch::incarnation: u64
 impl core::marker::Freeze for routectl_usage::CapabilityBatch
 impl core::marker::Send for routectl_usage::CapabilityBatch
 impl core::marker::Sync for routectl_usage::CapabilityBatch
@@ -1748,11 +1749,14 @@ impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageDb
 pub struct routectl_usage::UsageHandle
 impl routectl_usage::UsageHandle
 pub fn routectl_usage::UsageHandle::admit_capability_batch(&self, alloc::vec::Vec<routectl_usage::CapabilityEvent>, u64) -> core::result::Result<routectl_usage::BatchReceipt, routectl_usage::BatchCommit>
+pub fn routectl_usage::UsageHandle::admit_capability_batch_at(&self, alloc::vec::Vec<routectl_usage::CapabilityEvent>, u64, u64) -> core::result::Result<routectl_usage::BatchReceipt, routectl_usage::BatchCommit>
 pub fn routectl_usage::UsageHandle::commit_capability_events_blocking(&self, alloc::vec::Vec<routectl_usage::CapabilityEvent>, u64) -> routectl_usage::BatchCommit
+pub fn routectl_usage::UsageHandle::commit_capability_events_blocking_at(&self, alloc::vec::Vec<routectl_usage::CapabilityEvent>, u64, u64) -> routectl_usage::BatchCommit
 impl routectl_usage::UsageHandle
 pub fn routectl_usage::UsageHandle::is_enabled(&self) -> bool
 pub fn routectl_usage::UsageHandle::set_enabled(&self, bool)
 pub fn routectl_usage::UsageHandle::try_send(&self, routectl_usage::UsageRecord)
+pub fn routectl_usage::UsageHandle::try_send_capability_event_at(&self, routectl_usage::CapabilityEvent, u64, u64)
 pub fn routectl_usage::UsageHandle::try_send_capability_event_in_generation(&self, routectl_usage::CapabilityEvent, u64)
 pub fn routectl_usage::UsageHandle::try_send_learn_event(&self, routectl_usage::CapabilityLearnEvent)
 impl core::clone::Clone for routectl_usage::UsageHandle

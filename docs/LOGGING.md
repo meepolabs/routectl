@@ -404,6 +404,40 @@ No secret values, ever:
 
 Both rows share the message string `"upstream auth failed"`; the `context` field distinguishes the call site.
 
+## Rejected authority claims (anti-DNS-rebinding)
+
+Two surfaces validate the authority a request CLAIMS before serving it: the
+read-only `/status*` subtree and the mutating control route
+(`POST /control/capability/purge`). Both refuse with a fixed 403
+`forbidden_host` envelope and both report the refusal the same way, so a
+rejection can be correlated across them without learning two vocabularies.
+
+| Surface | Level | Target | Message |
+|---|---|---|---|
+| `/status*` | WARN (SAMPLED) | `routectl::status::gate` | `status surface rejected a request with a disallowed authority claim` |
+| control route | WARN | `routectl_cli::handlers::control` | `capability purge refused a request with a disallowed authority claim` |
+
+| Field | Type | Meaning |
+|---|---|---|
+| `claim_site` | string | Which claim failed, from a CLOSED set: `host_header` (a `Host` header value was disallowed, or was not valid UTF-8 and so could not be evaluated) or `uri_authority` (the request URI's authority -- HTTP/2's `:authority` -- was disallowed). |
+| `host_403_total` | integer | Running process-wide total of status-surface authority rejections. Present on the `/status*` line only, and it is what the sampling is keyed on. |
+
+```
+WARN routectl::status::gate host_403_total=1 claim_site="host_header"
+  "status surface rejected a request with a disallowed authority claim"
+```
+
+**The claimed value is never logged.** It is attacker-controlled, and the SITE
+is the only part an operator needs in order to know where to look. Requests
+carrying no authority at all (origin-form HTTP/1) make no claim and are not
+refused, so they produce no line.
+
+**The status line is SAMPLED** (first, then every Nth) off `host_403_total`, so
+a rejection burst does not emit one line per request -- the count is the
+complete record, the lines are a readable sample. Do not read the line count as
+an event count. The control-route line is not sampled: an operator-initiated
+control call is not a traffic source.
+
 ## Usage accounting log shapes
 
 The `routectl-usage` writer subsystem emits the following lines.
@@ -780,8 +814,8 @@ event vocabulary was unified on `event` / `state_key` / `capability_key`;
 the tail-demotion event was renamed to `route_away` with INFO/WARN
 levels; the `learn` event gained the `provider_kind` / `upstream_status`
 / `upstream_code` / `upstream_param` enrichment fields; `clear`,
-`expire_probe`, and `count_tokens` were added). The field names and
-`outcome` / `signal_tier` / `event` tokens below are a stable
+`expire_probe`, `count_tokens`, and `purge` were added). The field names
+and `outcome` / `signal_tier` / `event` tokens below are a stable
 contract; new fields may be added between releases.
 
 **Not the stable API.** `routectl doctor --json` surfaces the capability
@@ -798,6 +832,7 @@ Summary (grep the `event` field to isolate a kind):
 |---|---|---|---|
 | `learn` | WARN | `routectl_router::router` | `learned-capability negative observed` |
 | `clear` | INFO | `routectl_router::learned_capability` | `learned-capability negative cleared by successful re-probe` |
+| `purge` | INFO | `routectl_router::router::capability_purge` | `operator purged a learned-capability entry` |
 | `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
 | `route_away` | INFO / WARN | `routectl_router::router` | `learned-capability negative de-prioritized this target to the tail` (INFO) / `... routed this target away; request survives only via the de-prioritized learned tail` (WARN) |
@@ -854,6 +889,101 @@ INFO routectl_router::learned_capability event=clear state_key=nick
   capability_key=web_search signal_tier=self-identifying
   "learned-capability negative cleared by successful re-probe"
 ```
+
+### `purge` (INFO)
+
+Emitted once per operator purge request the daemon accepts -- one line
+per call to the loopback-only capability-purge control route (see
+CONFIGURATION.md, "Dropping ONE learned observation"), whether or not the
+key held anything. `removed` is what tells the two apart, so an operator
+reading the log can distinguish "I removed a verdict" from "there was
+nothing there".
+
+Content-free by construction: the four fields below are the whole record.
+The state key and the normalized capability key are the same
+display-safe discriminants every sibling event carries, and both are run
+through the shared log sanitizer since the caller supplies them. No
+request body, prompt, upstream text, or caller address ever appears.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `purge`. |
+| `state_key` | string | The target's session/target key, as requested. |
+| `capability_key` | string | The NORMALIZED capability token the purge was keyed on. |
+| `removed` | bool | `true` when a resident entry was removed; `false` for a clean no-op on a key that held nothing. |
+
+```
+INFO routectl_router::router::capability_purge event=purge state_key=sonnet
+  capability_key=web_search removed=true
+  "operator purged a learned-capability entry"
+```
+
+A `removed=true` line is emitted only AFTER the `cleared` row has durably
+committed to the capability-event ledger -- that row is what stops the next
+boot's warm rebuild from replaying the negative, and the ordering is what
+makes the log trustworthy: a `removed=true` line can never describe a
+removal the ledger did not receive. A `removed=false` line writes no row.
+
+### `purge_abandoned` (WARN)
+
+Emitted when a purge could NOT persist its clear. Nothing was removed: the
+entry is unchanged and still acting, and the operator received a non-2xx
+answer telling them to retry.
+
+Carries the same two display-safe key fields and nothing else. The wire
+answer collapses every cause to one code, but this line names the cause
+for the operator reading their own daemon's log, via a companion WARN
+carrying an `outcome` token (`writer_unavailable`, `writer_channel_full`,
+or `write_failed`).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `purge_abandoned`. |
+| `state_key` | string | The target's session/target key, as requested. |
+| `capability_key` | string | The NORMALIZED capability token the purge was keyed on. |
+
+A `purge_abandoned` line is never accompanied by a `cleared` row, which is
+the property that makes the pair readable: exactly one of
+`purge`/`removed=true` and `purge_abandoned` is emitted per attempted
+removal.
+
+Both are emitted by a DAEMON-OWNED task rather than by the request, so a
+client that disconnects mid-purge still produces exactly one of them. Two
+further lines belong to that ownership:
+
+- `purge_incarnation_mismatch` (ERROR) -- the clear committed, but the
+  resident entry was no longer the version the operator approved
+  removing, so nothing was deleted. Nothing in normal operation produces
+  this; it means a mutation reached a leased key.
+- an ERROR naming an unaccounted-for settlement, which also stops the
+  daemon. After a batch is admitted, a settlement that neither finalizes
+  nor abandons leaves the daemon unable to say whether its registry
+  agrees with its ledger for that key, so it stops serving rather than
+  routing on state it cannot verify. A restart reads the ledger and is
+  authoritative again.
+
+### `incarnation_exhausted` (ERROR)
+
+Emitted when the per-key ordering sequence a purge floor compares against
+has no values left. The mutation that hit it is REFUSED, having changed
+nothing: the value is reserved before any entry is touched, so exhaustion
+cannot leave a mutated entry that no event describes.
+
+Carries no fields. Nothing an operator does causes it -- the sequence is
+64-bit and advances once per learned-capability mutation, so at one
+mutation per nanosecond it outlives the process by centuries. A line here
+means something is driving the registry far outside real traffic, and the
+daemon is refusing to wrap rather than let a superseded event compare as
+newer than the purge that superseded it. A restart resets the sequence.
+
+The refusal is also counted, so it is visible without a log level.
+
+One writer-side counter accompanies the per-key purge floor:
+`capability_events_superseded` counts events dropped because a purge of
+the same key had already superseded them. Zero on a daemon nobody purges.
+A large value is a throughput signal (events queueing long enough to
+straddle purges), not a correctness one -- the drop is the protection
+working.
 
 ### `expire_probe` (INFO)
 
