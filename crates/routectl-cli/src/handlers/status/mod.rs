@@ -20,6 +20,7 @@ pub(crate) mod builder_probe;
 mod config;
 mod daemon_meta;
 mod doctor;
+mod field_verdict_log;
 mod health;
 mod page;
 #[cfg(test)]

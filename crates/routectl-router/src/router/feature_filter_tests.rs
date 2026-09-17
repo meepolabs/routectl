@@ -1261,6 +1261,272 @@ fn filter_chain_keeps_stripped_target_and_tails_route_away() {
     );
 }
 
+// --- field verdicts through the existing stable partition ---
+
+/// The one grounded field capability key this stage can mint, read through
+/// the namespace owner rather than spelled out a second time.
+fn field_key() -> String {
+    crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("the grounded path is well-formed")
+}
+
+#[test]
+fn a_resident_field_verdict_soft_tails_its_target_like_any_other_negative() {
+    // A target carrying an acting `field:` negative is demoted to the tail
+    // by the SAME partition a catalog capability negative uses -- no new
+    // reorderer, no hard drop.
+    let router = Router::new(Arc::new(Config::default()));
+    let field_t = strip_target("field-nick");
+    let clean_t = strip_target("clean-nick");
+    let base = Instant::now();
+    router
+        .learned_capabilities
+        .import_entries(vec![acting_negative("field-nick", &field_key(), base)]);
+
+    let mut admissions = Vec::new();
+    let out = router
+        .filter_chain_by_features(
+            vec![field_t, clean_t],
+            &[field_key()],
+            "alias",
+            &mut admissions,
+        )
+        .unwrap();
+
+    assert_eq!(
+        out.len(),
+        2,
+        "the field negative soft-tails, never hard-drops"
+    );
+    assert_eq!(
+        out[0].state_key, "clean-nick",
+        "the unaffected target leads"
+    );
+    assert_eq!(
+        out[1].state_key, "field-nick",
+        "the field verdict's target tails"
+    );
+}
+
+#[test]
+fn multiple_acting_negatives_on_distinct_targets_compose_without_duplication() {
+    // Two DIFFERENT acting negatives -- one a field verdict, one an
+    // ordinary catalog capability -- each pinned to its own target. Both
+    // must tail exactly once; neither crosses onto the other's target.
+    let router = Router::new(Arc::new(Config::default()));
+    let field_t = strip_target("field-nick");
+    let catalog_t = strip_target("catalog-nick");
+    let clean_t = strip_target("clean-nick");
+    let base = Instant::now();
+    router.learned_capabilities.import_entries(vec![
+        acting_negative("field-nick", &field_key(), base),
+        acting_negative("catalog-nick", "web_search", base),
+    ]);
+
+    let mut admissions = Vec::new();
+    let out = router
+        .filter_chain_by_features(
+            vec![field_t, catalog_t, clean_t],
+            &[field_key(), "web_search".to_string()],
+            "alias",
+            &mut admissions,
+        )
+        .unwrap();
+
+    let state_keys: Vec<&str> = out.iter().map(|t| t.state_key.as_str()).collect();
+    assert_eq!(
+        state_keys.len(),
+        3,
+        "three targets in, three targets out -- no add, drop, or duplicate",
+    );
+    assert_eq!(
+        state_keys[0], "clean-nick",
+        "the target with neither negative leads",
+    );
+    assert!(
+        state_keys[1..].contains(&"field-nick") && state_keys[1..].contains(&"catalog-nick"),
+        "both demoted targets land in the tail, composing coherently: {state_keys:?}",
+    );
+    for t in &out {
+        assert!(
+            t.strip_capabilities.is_empty(),
+            "a route-away negative (field or catalog) carries no strip keys",
+        );
+    }
+}
+
+/// Every permutation of a fixed target list, indexed 0..n.
+///
+/// Small, hand-rolled Heap's algorithm: no permutation-generation crate is a
+/// dependency of this workspace, and n stays small enough (4) that this
+/// runs in negligible time.
+fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    fn heap<T: Clone>(k: usize, items: &mut Vec<T>, out: &mut Vec<Vec<T>>) {
+        if k == 1 {
+            out.push(items.clone());
+            return;
+        }
+        for i in 0..k {
+            heap(k - 1, items, out);
+            if k.is_multiple_of(2) {
+                items.swap(i, k - 1);
+            } else {
+                items.swap(0, k - 1);
+            }
+        }
+    }
+    let mut items = items.to_vec();
+    let mut out = Vec::new();
+    heap(items.len(), &mut items, &mut out);
+    out
+}
+
+#[test]
+fn filter_chain_is_a_bijection_that_never_crosses_operators_under_any_input_order() {
+    // Four targets: two carry no acting negative for the requested
+    // features ("a", "c"), one carries the field verdict ("field"), one
+    // carries an ordinary catalog negative ("catalog"). Under EVERY
+    // permutation of the input chain, the output must be exactly the same
+    // set of targets (bijection), the two unaffected targets must always
+    // land in the supported prefix, the two demoted targets must always
+    // land in the tail, and neither demoted target's identity ever crosses
+    // onto the other's -- soft-tail only, never hard-drop/add/duplicate.
+    let base = Instant::now();
+    let nicknames = ["a", "field", "c", "catalog"];
+
+    for order in permutations(&nicknames) {
+        let router = Router::new(Arc::new(Config::default()));
+        router.learned_capabilities.import_entries(vec![
+            acting_negative("field", &field_key(), base),
+            acting_negative("catalog", "web_search", base),
+        ]);
+        let chain: Vec<DispatchTarget> = order.iter().map(|n| strip_target(n)).collect();
+
+        let mut admissions = Vec::new();
+        let out = router
+            .filter_chain_by_features(
+                chain,
+                &[field_key(), "web_search".to_string()],
+                "alias",
+                &mut admissions,
+            )
+            .unwrap();
+
+        let out_keys: Vec<&str> = out.iter().map(|t| t.state_key.as_str()).collect();
+        let mut sorted_out = out_keys.clone();
+        sorted_out.sort_unstable();
+        let mut sorted_in = nicknames.to_vec();
+        sorted_in.sort_unstable();
+        assert_eq!(
+            sorted_out, sorted_in,
+            "order {order:?}: output must be a bijection over the input targets",
+        );
+
+        let tail_start = out_keys
+            .iter()
+            .position(|k| *k == "field" || *k == "catalog")
+            .unwrap_or(out_keys.len());
+        for (idx, key) in out_keys.iter().enumerate() {
+            let is_demoted = *key == "field" || *key == "catalog";
+            assert_eq!(
+                idx >= tail_start,
+                is_demoted,
+                "order {order:?}: {key} at position {idx} violates the \
+                 supported-then-tail partition (never crosses)",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_target_carrying_both_a_field_and_a_catalog_negative_tails_exactly_once_and_recovers() {
+    // ARRANGE: one target with BOTH an acting field verdict AND an acting
+    // catalog negative at the same time, alongside an unaffected target.
+    let router = Router::new(Arc::new(Config::default()));
+    let mixed_t = strip_target("mixed-nick");
+    let clean_t = strip_target("clean-nick");
+    let base = Instant::now();
+    let requested_features = [field_key(), "web_search".to_string()];
+    router.learned_capabilities.import_entries(vec![
+        acting_negative("mixed-nick", &field_key(), base),
+        acting_negative("mixed-nick", "web_search", base),
+    ]);
+
+    // ACT: filter with both negatives resident.
+    let mut admissions = Vec::new();
+    let out = router
+        .filter_chain_by_features(
+            vec![mixed_t.clone(), clean_t.clone()],
+            &requested_features,
+            "alias",
+            &mut admissions,
+        )
+        .unwrap();
+
+    // ASSERT: the mixed target appears exactly once, demoted to the tail --
+    // the same-target composition never duplicates, drops, or adds a target.
+    assert_eq!(out.len(), 2, "two targets in, two targets out");
+    let mixed_count = out.iter().filter(|t| t.state_key == "mixed-nick").count();
+    assert_eq!(
+        mixed_count, 1,
+        "a target with two simultaneous acting negatives tails exactly once, \
+         not once per negative",
+    );
+    assert_eq!(
+        out[0].state_key, "clean-nick",
+        "the unaffected target leads"
+    );
+    assert_eq!(out[1].state_key, "mixed-nick", "the mixed target tails");
+
+    // ACT: purge the field verdict alone; the catalog negative remains.
+    router.learned_capabilities.clear_all();
+    router
+        .learned_capabilities
+        .import_entries(vec![acting_negative("mixed-nick", "web_search", base)]);
+    let mut admissions = Vec::new();
+    let out = router
+        .filter_chain_by_features(
+            vec![mixed_t.clone(), clean_t.clone()],
+            &requested_features,
+            "alias",
+            &mut admissions,
+        )
+        .unwrap();
+
+    // ASSERT: the target still tails exactly once on the surviving catalog
+    // negative alone -- clearing one of two negatives does not restore it,
+    // and does not tail it a second time.
+    assert_eq!(out.len(), 2);
+    let mixed_count = out.iter().filter(|t| t.state_key == "mixed-nick").count();
+    assert_eq!(
+        mixed_count, 1,
+        "still tails exactly once with one negative left"
+    );
+    assert_eq!(out[0].state_key, "clean-nick");
+    assert_eq!(out[1].state_key, "mixed-nick");
+
+    // ACT: clear both negatives.
+    router.learned_capabilities.clear_all();
+    let mut admissions = Vec::new();
+    let out = router
+        .filter_chain_by_features(
+            vec![mixed_t, clean_t],
+            &requested_features,
+            "alias",
+            &mut admissions,
+        )
+        .unwrap();
+
+    // ASSERT: with no acting negative left, the target is restored to its
+    // original (leading) chain position.
+    assert_eq!(out.len(), 2);
+    assert_eq!(
+        out[0].state_key, "mixed-nick",
+        "clearing both negatives restores the original chain position",
+    );
+    assert_eq!(out[1].state_key, "clean-nick");
+}
+
 // --- [capability] essential: the global droppability override ---
 
 /// Router whose `[capability] essential` list names `keys`, parsed through

@@ -51,7 +51,6 @@ use super::{
     apply_layered_overlays,
 };
 use crate::anthropic_family::{AnthropicFamily, anthropic_family};
-use crate::feature_keys::derive_feature_keys;
 
 /// Whether one dispatch seat can serve a token count, decided from its
 /// egress kind together with the upstream model id that kind would be
@@ -483,11 +482,7 @@ impl Router {
                     //   disproved.
                     if let Some(plan) = field_plan.take() {
                         if field_repair_attempted {
-                            let features = derive_feature_keys(
-                                req.tools.as_deref().unwrap_or(&[]),
-                                req.provider_extras.as_ref(),
-                                req.response_format.as_ref(),
-                            );
+                            let features = super::field_repair::request_feature_keys(req);
                             // The `learned` claim is derived from what the commit
                             // actually PERSISTED, never asserted alongside it: a
                             // non-settling plan commits nothing, and a summary that

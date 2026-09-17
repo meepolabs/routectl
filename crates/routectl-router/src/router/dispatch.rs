@@ -639,11 +639,7 @@ impl Router {
                         // would resurrect a verdict this request disproved.
                         if let Some(plan) = field_plan.take() {
                             if field_repair_attempted {
-                                let features = derive_feature_keys(
-                                    req.tools.as_deref().unwrap_or(&[]),
-                                    req.provider_extras.as_ref(),
-                                    req.response_format.as_ref(),
-                                );
+                                let features = super::field_repair::request_feature_keys(&req);
                                 // The `learned` claim is derived from what the commit
                                 // actually PERSISTED, never asserted alongside it: a
                                 // non-settling plan commits nothing, and a summary that
@@ -1516,11 +1512,7 @@ impl Router {
                         // would resurrect a verdict this request disproved.
                         if let Some(plan) = field_plan.take() {
                             if field_repair_attempted {
-                                let features = derive_feature_keys(
-                                    req.tools.as_deref().unwrap_or(&[]),
-                                    req.provider_extras.as_ref(),
-                                    req.response_format.as_ref(),
-                                );
+                                let features = super::field_repair::request_feature_keys(&req);
                                 // The `learned` claim is derived from what the commit
                                 // actually PERSISTED, never asserted alongside it: a
                                 // non-settling plan commits nothing, and a summary that

@@ -186,6 +186,7 @@ pub use pool_build::{PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolRe
 pub use pricing::{PricingSource, effective_pricing};
 pub use resolved::ResolvedModel;
 pub use router::{
-    ALIAS_MAX_RECURSION_DEPTH, CatalogIndependentSurvivor, DispatchMeta, Dispatched,
-    DispatchedStream, Router, RouterOptions, class_debits,
+    ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CatalogIndependentSurvivor, DispatchMeta,
+    Dispatched, DispatchedStream, FieldRepairCounters, Router, RouterOptions,
+    acting_field_verdicts, class_debits,
 };

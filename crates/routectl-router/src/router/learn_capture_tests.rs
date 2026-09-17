@@ -193,6 +193,24 @@ fn req_with_tool(tool_type: &str) -> ChatRequest {
     }
 }
 
+/// A request that grounds the ONE closed-table field key (via the
+/// `reasoning.exclude` carrier) and carries no tool, no `provider_extras`,
+/// and no `response_format` -- so the catalog-only vocabulary is empty
+/// while the field-widened vocabulary is not.
+fn req_grounding_a_field_key_only() -> ChatRequest {
+    ChatRequest {
+        model: "m1".into(),
+        messages: vec![].into(),
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: None,
+            max_tokens: None,
+            exclude: Some(true),
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    }
+}
+
 fn learn_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
     events
         .iter()
@@ -1972,6 +1990,62 @@ async fn unmatched_feature_naming_warns_and_counts_once() {
     assert_eq!(router.metrics.feature_naming_unmatched_total(), 1);
 }
 
+/// This module's own source, for the source-level guard below. `capability_learn.rs`
+/// sits one directory level up from this file's own module tree in the same
+/// directory, so the relative include matches the one `field_repair.rs`
+/// already uses for its own production-body guard.
+const CAPABILITY_LEARN_SOURCE: &str = include_str!("capability_learn.rs");
+
+/// The body of `observe_feature_naming_drift`, from its signature's opening
+/// brace to the closing brace at its own (method) indentation.
+///
+/// # Panics
+///
+/// If the signature or the closing brace is absent -- failing closed, since a
+/// locator that returned an empty body would make the guard below pass
+/// vacuously.
+fn observe_feature_naming_drift_body(source: &str) -> &str {
+    const SIGNATURE: &str = "fn observe_feature_naming_drift(";
+    const OPEN: &str = "    ) {";
+    let sig_at = source
+        .find(SIGNATURE)
+        .expect("observe_feature_naming_drift must exist under this exact name");
+    let after_sig = &source[sig_at..];
+    let open = after_sig
+        .find(OPEN)
+        .expect("the signature must be followed by its body");
+    let body = &after_sig[open + OPEN.len()..];
+    let end = body
+        .find("\n    }")
+        .expect("the body must close at its own method indentation");
+    &body[..end]
+}
+
+#[test]
+fn observe_feature_naming_drift_never_widens_through_the_field_vocabulary() {
+    // The diagnostic must stay catalog-only: it can call the pure
+    // `derive_feature_keys`, but never the field-widened helpers -- reading
+    // either name in its body is exactly the regression this fixes.
+    let body = observe_feature_naming_drift_body(CAPABILITY_LEARN_SOURCE);
+    assert!(
+        !body.contains("request_feature_keys"),
+        "observe_feature_naming_drift must never call the catalog+field helper; body was: \
+         {body}",
+    );
+    assert!(
+        !body.contains("grounded_field_feature_keys"),
+        "observe_feature_naming_drift must never call the field-key widener directly either; \
+         body was: {body}",
+    );
+    // Positive control: the guarded body is not vacuous -- it does call the
+    // catalog-only derivation, so the negatives above are about the field
+    // widening and not about a locator that found an empty function.
+    assert!(
+        body.contains("derive_feature_keys"),
+        "control: the body must still derive the catalog-only feature keys; body was: {body}",
+    );
+}
+
 #[tokio::test]
 async fn unmatched_feature_naming_skips_non_feature_carrying_request() {
     // A deterministic 400 with NO derived features is not a feature-naming
@@ -1989,6 +2063,34 @@ async fn unmatched_feature_naming_skips_non_feature_carrying_request() {
     assert!(dispatched.result.is_err());
     assert!(feature_naming_unmatched_warns(&events).is_empty());
     assert_eq!(router.metrics.feature_naming_unmatched_total(), 0);
+}
+
+#[tokio::test]
+async fn unmatched_feature_naming_ignores_a_request_that_only_grounds_a_field_key() {
+    // A request whose only derivable feature is the closed-table field key
+    // (never a feature-naming-table candidate) hits a deterministic 400 the
+    // catalog table cannot attribute either. The diagnostic must judge this
+    // request as carrying NO feature at all, not treat the grounded field
+    // key as membership: the drift signal is catalog-scoped only and must
+    // stay silent.
+    let router = router_with(ANTHROPIC_P1, generic_anthropic_400_provider());
+
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_grounding_a_field_key_only(), RouterOptions::default()),
+    )
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(
+        feature_naming_unmatched_warns(&events).is_empty(),
+        "a request that grounds only a closed-table field key must not fire the \
+         catalog feature-naming-drift WARN",
+    );
+    assert_eq!(
+        router.metrics.feature_naming_unmatched_total(),
+        0,
+        "the field-grounded-only request must not count as a feature-naming-drift candidate",
+    );
 }
 
 #[tokio::test]

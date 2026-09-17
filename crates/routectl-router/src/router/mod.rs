@@ -37,6 +37,7 @@ mod count_tokens;
 mod dispatch;
 mod feature_filter;
 mod field_repair;
+mod field_verdict_observability;
 mod overlays;
 mod prefix_rewrite;
 mod repair_budget;
@@ -54,6 +55,9 @@ use dispatch::k_query_key;
 #[cfg(test)]
 use feature_filter::FilterSource;
 use feature_filter::{StripDecision, catalog_capabilities};
+pub use field_verdict_observability::{
+    ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
+};
 use overlays::{apply_layered_overlays, operator_betas};
 pub use overlays::{merge_header_extras, merge_payload_extras};
 use routectl_core::capability::FailurePhase;
@@ -2710,3 +2714,7 @@ mod repair_budget_cross_walk_tests;
 #[cfg(test)]
 #[path = "capability_purge_tests.rs"]
 mod capability_purge_tests;
+
+#[cfg(test)]
+#[path = "field_verdict_observability_tests.rs"]
+mod field_verdict_observability_tests;

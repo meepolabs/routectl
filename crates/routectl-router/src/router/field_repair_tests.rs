@@ -23,6 +23,7 @@
 //! is what makes deleting the arm, or giving each seat its own budget, go
 //! RED.
 
+use super::super::PurgeOutcome;
 use super::super::Router;
 use super::super::repair_budget::REPAIRS_PER_REQUEST;
 use super::provisional;
@@ -1814,6 +1815,183 @@ async fn without_an_injection_no_walk_repairs_anything() {
             seen.calls(),
             1,
             "{surface}: and the rejection stands after one attempt",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: mint, then a durable purge, then the chain preference stops
+// acting -- all in one process, all through the landed protocol.
+// ---------------------------------------------------------------------------
+
+/// A two-target chain whose legs answer independently, so a chain-preference
+/// assertion can tell "the demoted leg was skipped" from "the demoted leg
+/// happened to succeed anyway".
+fn two_seat_chain(
+    alias: &str,
+    first: Answer,
+    second: Answer,
+) -> (Router, Arc<Observed>, Arc<Observed>) {
+    let config = chain_config(alias, 2);
+    let mut router = Router::new(Arc::new(config));
+    let seen0 = Arc::new(Observed::default());
+    let seen1 = Arc::new(Observed::default());
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "m0".to_string(),
+        Arc::new(ResolvedModel::new(
+            "m0",
+            "p0",
+            Arc::new(MockSeat::new(first, seen0.clone())) as Arc<dyn Provider>,
+            "wire-0",
+        )),
+    );
+    models.insert(
+        "m1".to_string(),
+        Arc::new(ResolvedModel::new(
+            "m1",
+            "p1",
+            Arc::new(MockSeat::new(second, seen1.clone())) as Arc<dyn Provider>,
+            "wire-1",
+        )),
+    );
+    router.install_resolved_models(models);
+    (router, seen0, seen1)
+}
+
+#[tokio::test]
+async fn a_durably_purged_field_verdict_stops_tailing_its_target() {
+    // Mint through a genuine dispatch on leg `m0`: the field is carried, the
+    // carried attempt is rejected, and the repaired retry is served -- the
+    // confirmed-repair shape `a_successful_repaired_retry_commits_one_
+    // learned_verdict` already pins as the one that commits a verdict. `m1`
+    // never rejects, so it is the clean leg every chain-preference assertion
+    // below reads against.
+    let _injection = provisional::inject(REJECTED_PATH);
+    let (router, seen0, seen1) =
+        two_seat_chain(ALIAS, Answer::ServeRepaired, Answer::ServeImmediately);
+
+    let minted = router
+        .complete_with_options(req_on(ALIAS), RouterOptions::new())
+        .await;
+    assert!(minted.result.is_ok(), "premise: the mint's repair served");
+    assert_eq!(
+        minted.meta.learned_capabilities.len(),
+        1,
+        "premise: the mint committed exactly one verdict"
+    );
+    assert_eq!(seen1.calls(), 0, "premise: m0 alone served the mint");
+    assert!(
+        verdict_resident(&router, "m0"),
+        "premise: the minted verdict is resident before the purge"
+    );
+
+    // Before the purge: the chain preference is already acting on the
+    // resident negative, so a request carrying the same field tries the
+    // clean leg first and never reaches the tailed one.
+    let before = router
+        .complete_with_options(req_on(ALIAS), RouterOptions::new())
+        .await;
+    assert!(before.result.is_ok());
+    assert_eq!(
+        seen1.calls(),
+        1,
+        "the resident negative tails m0, so m1 is tried first"
+    );
+    assert_eq!(
+        seen0.calls(),
+        2,
+        "m0 is not attempted again while its negative is acting"
+    );
+
+    // Mint -> durable purge: the landed two-phase protocol, not a shortcut
+    // removal. The reservation's settlement is exactly what a caller commits
+    // durably before finalizing; finalizing without that commit is what the
+    // protocol forbids in production, but the commit's own durability is
+    // covered where the capability key can be spelled on the wire.
+    let capability_key = rejected_key();
+    let reserved = match router.reserve_learned_capability_purge("m0", &capability_key) {
+        PurgeOutcome::Reserved(reserved) => reserved,
+        other => panic!(
+            "premise: a resident entry under a live generation must reserve; got {}",
+            match other {
+                PurgeOutcome::Absent => "absent",
+                PurgeOutcome::Busy => "busy",
+                PurgeOutcome::Stale => "stale",
+                PurgeOutcome::Reserved(_) => unreachable!(),
+            }
+        ),
+    };
+    let _settlement = reserved.settlement();
+    let removed = router.finalize_learned_capability_purge(reserved);
+    assert!(removed, "the purge must report the entry removed");
+    assert!(
+        !verdict_resident(&router, "m0"),
+        "the purged verdict must no longer be resident"
+    );
+
+    // After the purge: the SAME chain preference no longer demotes m0 -- no
+    // new reorderer, the existing partition simply has nothing acting to
+    // read.
+    let after = router
+        .complete_with_options(req_on(ALIAS), RouterOptions::new())
+        .await;
+    assert!(after.result.is_ok());
+    assert_eq!(
+        seen0.calls(),
+        4,
+        "m0 is tried first again: one carried attempt plus one repair"
+    );
+    assert_eq!(
+        seen1.calls(),
+        1,
+        "m1 is not reached once m0 is no longer tailed"
+    );
+}
+
+mod grounded_field_feature_keys_tests {
+    use super::super::grounded_field_feature_keys;
+    use super::{ALIAS, rejected_key, req_on};
+
+    #[test]
+    fn a_request_carrying_the_grounded_surface_yields_its_minted_key() {
+        let req = req_on(ALIAS);
+
+        let keys = grounded_field_feature_keys(&req);
+
+        assert_eq!(
+            keys,
+            vec![rejected_key()],
+            "the one grounded surface present on the request must mint its closed-table key",
+        );
+    }
+
+    #[test]
+    fn a_request_without_the_surface_yields_no_field_keys() {
+        let mut req = req_on(ALIAS);
+        req.routectl_internal.anthropic_thinking_display = None;
+        req.reasoning = None;
+
+        let keys = grounded_field_feature_keys(&req);
+
+        assert!(
+            keys.is_empty(),
+            "a request carrying neither canonical carrier must derive no field key, \
+             preserving current call sites' output when the surface is absent",
+        );
+    }
+
+    #[test]
+    fn only_the_exclude_carrier_still_yields_the_minted_key() {
+        let mut req = req_on(ALIAS);
+        req.routectl_internal.anthropic_thinking_display = None;
+
+        let keys = grounded_field_feature_keys(&req);
+
+        assert_eq!(
+            keys,
+            vec![rejected_key()],
+            "the derived `reasoning.exclude` carrier alone is still a grounded presence",
         );
     }
 }

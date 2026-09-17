@@ -2562,7 +2562,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   such needle while making the parser live; the locator fails closed on any
   missing needle, and both properties are mutation-verified. Under `cfg(test)`
   that one seam reads a thread-local provisional resolution, which is how
-  `field_repair_tests.rs` covers every arm downstream of it
+  `field_repair_tests.rs` covers every arm downstream of it.
+  `grounded_field_feature_keys(req)` mints the one grounded `field:<path>`
+  key `FIELD_REPAIRS` can produce for a request (empty when the request
+  grounds no closed-table surface). `request_feature_keys(req)` is the
+  single centralizing helper -- catalog keys from `derive_feature_keys` plus
+  `grounded_field_feature_keys` -- used by the six routing/learn/observe/count
+  call sites (chain resolution, dispatch x2, count_tokens, and both
+  learn/observe sites) that must treat a catalog capability and a field
+  verdict alike, so each can feed an acting field verdict through the
+  existing `filter_chain_by_features` stable partition without a second
+  detector. The diagnostic-only feature-naming-drift path
+  (`observe_feature_naming_drift` in `capability_learn.rs`) is deliberately
+  NOT one of those call sites: it stays on the bare `derive_feature_keys`
+  catalog vocabulary alone, since a field verdict is never a
+  feature-naming-template candidate
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
@@ -2671,6 +2685,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `apply_strip_interceptor` (the pre-dispatch strip hook -> `StripDecision`),
   the `FilterSource`/`StripDecision` enums, and the
   `catalog_capabilities`/`emit_feature_unsupported` helpers
+- `src/router/field_verdict_observability.rs` -- derives the currently ACTING
+  field verdicts out of a `learned_capabilities()` snapshot, for live
+  visibility rather than routing: `acting_field_verdicts(entries)` keeps only
+  rows inside the field namespace (`capability_key_is_catalog_scoped` is
+  `false`), still `Verdict::LearnedBroken` (not cleared), and excludes the one
+  (phase, source) combination the learned-capability registry's own routing
+  decision (`LearnedEntry::acting_decision`) treats as advisory-only -- an F3
+  negative sourced from live traffic, which awaits a probe rather than
+  routing away on its own. An F3 negative sourced from a probe carries
+  routing authority and is included like any other acting negative. Matching
+  rows map to the public `ActingFieldVerdict { state_key, feature_key, phase,
+  source }`.
+  `Router::field_repair_counters() -> FieldRepairCounters` reads the same
+  three atomics the repair WARN section of LOGGING.md documents
+  (`repair_attempted`/`repair_succeeded`/`verdicts_learned`) without the
+  metrics-snapshot DEBUG line. Both are re-exported crate-root `pub` and
+  consumed by `routectl-cli`'s `handlers::status::field_verdict_log` -- this
+  module owns the "which learned rows count as acting" predicate so the
+  cli-crate log and any future consumer cannot restate it differently
 - `src/router/capability_learn.rs` -- learned-capability observation, expiry,
   and snapshot: `CapabilityLearnEvent` (the ledger event),
   `observe_for_learning` (the 400/422 capture gate: kill switch + status +
@@ -4495,8 +4528,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
-  which exposes ONLY three read methods -- `route_targets(now)`,
-  `learned_capabilities()`, and `effective_view()` (runs
+  which exposes ONLY four read methods -- `route_targets(now)`,
+  `learned_capabilities()`, `field_repair_counters()` (the live Stage-1
+  rebuild/repair/acting counters, read for the field-verdict snapshot log --
+  see `field_verdict_log.rs`), and `effective_view()` (runs
   `derive_effective_view` against the live config AND the overlay retained on
   the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
   derivation can never pair mismatched config / overlay generations), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
@@ -4561,7 +4596,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   monotonic elapsed ages (`None` == closed/never-seen, never a 0/epoch
   sentinel); `last_outcome` renders the derived `circuit_open` when the phase
   is open, else the stored outcome token; `feature_key` is renamed to the
-  contract token `capability_key`. No dial, no mutation
+  contract token `capability_key`. No dial, no mutation. Also calls the
+  shared `field_verdict_log::log_field_verdict_snapshot` once per build with
+  the same fetched `learned_capabilities()` snapshot
+- `src/handlers/status/field_verdict_log.rs` -- shared live-visibility log
+  line for acting field verdicts, called from both `health.rs` and
+  `doctor.rs` so a field repair or a durably purged verdict stays observable
+  at INFO without a response-body change. `log_field_verdict_snapshot(view,
+  learned)` reads `view.field_repair_counters()` plus
+  `acting_field_verdicts(learned)` (the router's own acting-row derivation)
+  and emits one aggregated INFO, `"envelope field verdict snapshot"`, with
+  the three repair counters, `rc_acting_field_verdicts_total`, and the acting
+  rows themselves under `rc_acting_field_verdicts` for provenance. Pure
+  function of its two read-only inputs -- no state, no mutation, log-only
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
   provenance-annotated EFFECTIVE (live, in-effect) config view: snapshots the
   router through the read-only facade and folds its config together with the
@@ -4598,7 +4645,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `build_report_no_network(&ctx)` (never
   `gather_probe_results`/`section_probe`); the async disk-I/O gather runs
   under `guard_panel`'s `spawn_blocking` via `Handle::current().block_on`.
-  Embeds the resulting `DoctorReport` (its own `schema_version`, reused
+  The synchronous fold from the gathered report plus the pinned router
+  snapshot into `DoctorPanel` -- including the shared
+  `field_verdict_log::log_field_verdict_snapshot` call -- is split into
+  `build_panel_data(report, view)`, called once the gather resolves, so the
+  log wiring is testable without going through `spawn_blocking`. Embeds the
+  resulting `DoctorReport` (its own `schema_version`, reused
   verbatim; the panel re-exports it as `DOCTOR_SCHEMA_VERSION`) and
   a reachability summary DERIVED from one live `route_targets(...)` read of
   each target's last settled outcome (`ok` -> `reachable`, none-yet ->

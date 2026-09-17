@@ -3380,6 +3380,64 @@ impl<T> typenum::type_operators::Same for routectl_router::router::PurgeOutcome
 pub type routectl_router::router::PurgeOutcome::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::PurgeOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::PurgeOutcome::into_shared(self) -> Shared
+pub struct routectl_router::router::ActingFieldVerdict
+pub routectl_router::router::ActingFieldVerdict::feature_key: alloc::string::String
+pub routectl_router::router::ActingFieldVerdict::phase: routectl_core::capability::FailurePhase
+pub routectl_router::router::ActingFieldVerdict::source: routectl_core::capability::EvidenceSource
+pub routectl_router::router::ActingFieldVerdict::state_key: alloc::string::String
+impl core::clone::Clone for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::clone(&self) -> routectl_router::ActingFieldVerdict
+impl core::cmp::Eq for routectl_router::ActingFieldVerdict
+impl core::cmp::PartialEq for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::eq(&self, &routectl_router::ActingFieldVerdict) -> bool
+impl core::fmt::Debug for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::ActingFieldVerdict
+impl core::marker::Freeze for routectl_router::ActingFieldVerdict
+impl core::marker::Send for routectl_router::ActingFieldVerdict
+impl core::marker::Sync for routectl_router::ActingFieldVerdict
+impl core::marker::Unpin for routectl_router::ActingFieldVerdict
+impl core::marker::UnsafeUnpin for routectl_router::ActingFieldVerdict
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ActingFieldVerdict
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ActingFieldVerdict
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::ActingFieldVerdict where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::ActingFieldVerdict where U: core::convert::From<T>
+pub fn routectl_router::ActingFieldVerdict::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ActingFieldVerdict where U: core::convert::Into<T>
+pub type routectl_router::ActingFieldVerdict::Error = core::convert::Infallible
+pub fn routectl_router::ActingFieldVerdict::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ActingFieldVerdict where U: core::convert::TryFrom<T>
+pub type routectl_router::ActingFieldVerdict::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ActingFieldVerdict::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub type routectl_router::ActingFieldVerdict::Owned = T
+pub fn routectl_router::ActingFieldVerdict::clone_into(&self, &mut T)
+pub fn routectl_router::ActingFieldVerdict::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub fn routectl_router::ActingFieldVerdict::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ActingFieldVerdict where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ActingFieldVerdict where T: ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ActingFieldVerdict where T: ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub unsafe fn routectl_router::ActingFieldVerdict::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub fn routectl_router::ActingFieldVerdict::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ActingFieldVerdict
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ActingFieldVerdict where T: ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ActingFieldVerdict::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ActingFieldVerdict
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ActingFieldVerdict
+impl<T> typenum::type_operators::Same for routectl_router::ActingFieldVerdict
+pub type routectl_router::ActingFieldVerdict::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ActingFieldVerdict where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ActingFieldVerdict::into_shared(self) -> Shared
 pub struct routectl_router::router::CapabilityClearedEvent
 pub routectl_router::router::CapabilityClearedEvent::capability_key: alloc::string::String
 pub routectl_router::router::CapabilityClearedEvent::incarnation: u64
@@ -3865,6 +3923,66 @@ impl<T> typenum::type_operators::Same for routectl_router::router::FieldRepair
 pub type routectl_router::router::FieldRepair::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldRepair where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::FieldRepair::into_shared(self) -> Shared
+pub struct routectl_router::router::FieldRepairCounters
+pub routectl_router::router::FieldRepairCounters::repair_attempted: u64
+pub routectl_router::router::FieldRepairCounters::repair_succeeded: u64
+pub routectl_router::router::FieldRepairCounters::verdicts_learned: u64
+impl core::clone::Clone for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::clone(&self) -> routectl_router::FieldRepairCounters
+impl core::cmp::Eq for routectl_router::FieldRepairCounters
+impl core::cmp::PartialEq for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::eq(&self, &routectl_router::FieldRepairCounters) -> bool
+impl core::fmt::Debug for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::FieldRepairCounters
+impl core::marker::StructuralPartialEq for routectl_router::FieldRepairCounters
+impl core::marker::Freeze for routectl_router::FieldRepairCounters
+impl core::marker::Send for routectl_router::FieldRepairCounters
+impl core::marker::Sync for routectl_router::FieldRepairCounters
+impl core::marker::Unpin for routectl_router::FieldRepairCounters
+impl core::marker::UnsafeUnpin for routectl_router::FieldRepairCounters
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FieldRepairCounters
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FieldRepairCounters
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::FieldRepairCounters where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::FieldRepairCounters where U: core::convert::From<T>
+pub fn routectl_router::FieldRepairCounters::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FieldRepairCounters where U: core::convert::Into<T>
+pub type routectl_router::FieldRepairCounters::Error = core::convert::Infallible
+pub fn routectl_router::FieldRepairCounters::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FieldRepairCounters where U: core::convert::TryFrom<T>
+pub type routectl_router::FieldRepairCounters::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FieldRepairCounters::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub type routectl_router::FieldRepairCounters::Owned = T
+pub fn routectl_router::FieldRepairCounters::clone_into(&self, &mut T)
+pub fn routectl_router::FieldRepairCounters::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub fn routectl_router::FieldRepairCounters::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FieldRepairCounters where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FieldRepairCounters where T: ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FieldRepairCounters where T: ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub unsafe fn routectl_router::FieldRepairCounters::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub fn routectl_router::FieldRepairCounters::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FieldRepairCounters
+impl<T> outref::AsOut<T> for routectl_router::FieldRepairCounters where T: core::marker::Copy
+pub fn routectl_router::FieldRepairCounters::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FieldRepairCounters where T: ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FieldRepairCounters::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FieldRepairCounters
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FieldRepairCounters
+impl<T> typenum::type_operators::Same for routectl_router::FieldRepairCounters
+pub type routectl_router::FieldRepairCounters::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldRepairCounters where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FieldRepairCounters::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::ReplayDegradation
 pub routectl_router::router::ReplayDegradation::action: &'static str
 pub routectl_router::router::ReplayDegradation::artifact_count: usize
@@ -4081,6 +4199,8 @@ impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
+impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
 impl !core::marker::Freeze for routectl_router::router::Router
@@ -4170,6 +4290,7 @@ pub type routectl_router::router::RouterOptions::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::RouterOptions where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::RouterOptions::into_shared(self) -> Shared
 pub const routectl_router::router::ALIAS_MAX_RECURSION_DEPTH: usize
+pub fn routectl_router::router::acting_field_verdicts(&[routectl_router::LearnedRegistryEntry]) -> alloc::vec::Vec<routectl_router::ActingFieldVerdict>
 pub const fn routectl_router::router::class_debits(&routectl_core::failure_class::FailureClass) -> bool
 pub fn routectl_router::router::merge_header_extras(&str, core::option::Option<&alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &mut routectl_core::schema::ChatRequest)
 pub fn routectl_router::router::merge_payload_extras(&str, core::option::Option<&serde_json::value::Value>, core::option::Option<&serde_json::value::Value>, &mut routectl_core::schema::ChatRequest)
@@ -7697,6 +7818,64 @@ impl<T> typenum::type_operators::Same for routectl_router::WriteKind
 pub type routectl_router::WriteKind::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::WriteKind where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::WriteKind::into_shared(self) -> Shared
+pub struct routectl_router::ActingFieldVerdict
+pub routectl_router::ActingFieldVerdict::feature_key: alloc::string::String
+pub routectl_router::ActingFieldVerdict::phase: routectl_core::capability::FailurePhase
+pub routectl_router::ActingFieldVerdict::source: routectl_core::capability::EvidenceSource
+pub routectl_router::ActingFieldVerdict::state_key: alloc::string::String
+impl core::clone::Clone for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::clone(&self) -> routectl_router::ActingFieldVerdict
+impl core::cmp::Eq for routectl_router::ActingFieldVerdict
+impl core::cmp::PartialEq for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::eq(&self, &routectl_router::ActingFieldVerdict) -> bool
+impl core::fmt::Debug for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::ActingFieldVerdict
+impl core::marker::Freeze for routectl_router::ActingFieldVerdict
+impl core::marker::Send for routectl_router::ActingFieldVerdict
+impl core::marker::Sync for routectl_router::ActingFieldVerdict
+impl core::marker::Unpin for routectl_router::ActingFieldVerdict
+impl core::marker::UnsafeUnpin for routectl_router::ActingFieldVerdict
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ActingFieldVerdict
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ActingFieldVerdict
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::ActingFieldVerdict where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::ActingFieldVerdict where U: core::convert::From<T>
+pub fn routectl_router::ActingFieldVerdict::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ActingFieldVerdict where U: core::convert::Into<T>
+pub type routectl_router::ActingFieldVerdict::Error = core::convert::Infallible
+pub fn routectl_router::ActingFieldVerdict::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ActingFieldVerdict where U: core::convert::TryFrom<T>
+pub type routectl_router::ActingFieldVerdict::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ActingFieldVerdict::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub type routectl_router::ActingFieldVerdict::Owned = T
+pub fn routectl_router::ActingFieldVerdict::clone_into(&self, &mut T)
+pub fn routectl_router::ActingFieldVerdict::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub fn routectl_router::ActingFieldVerdict::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ActingFieldVerdict where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ActingFieldVerdict where T: ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ActingFieldVerdict where T: ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub unsafe fn routectl_router::ActingFieldVerdict::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ActingFieldVerdict
+pub fn routectl_router::ActingFieldVerdict::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ActingFieldVerdict where T: core::clone::Clone
+pub fn routectl_router::ActingFieldVerdict::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ActingFieldVerdict
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ActingFieldVerdict where T: ?core::marker::Sized
+pub fn routectl_router::ActingFieldVerdict::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ActingFieldVerdict::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ActingFieldVerdict
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ActingFieldVerdict
+impl<T> typenum::type_operators::Same for routectl_router::ActingFieldVerdict
+pub type routectl_router::ActingFieldVerdict::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ActingFieldVerdict where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ActingFieldVerdict::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::ActivatedChange
 pub routectl_router::ActivatedChange::provider_id: alloc::string::String
 pub routectl_router::ActivatedChange::provider_kind: &'static str
@@ -10249,6 +10428,66 @@ impl<T> typenum::type_operators::Same for routectl_router::ElisionMark
 pub type routectl_router::ElisionMark::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ElisionMark where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ElisionMark::into_shared(self) -> Shared
+pub struct routectl_router::FieldRepairCounters
+pub routectl_router::FieldRepairCounters::repair_attempted: u64
+pub routectl_router::FieldRepairCounters::repair_succeeded: u64
+pub routectl_router::FieldRepairCounters::verdicts_learned: u64
+impl core::clone::Clone for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::clone(&self) -> routectl_router::FieldRepairCounters
+impl core::cmp::Eq for routectl_router::FieldRepairCounters
+impl core::cmp::PartialEq for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::eq(&self, &routectl_router::FieldRepairCounters) -> bool
+impl core::fmt::Debug for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::FieldRepairCounters
+impl core::marker::StructuralPartialEq for routectl_router::FieldRepairCounters
+impl core::marker::Freeze for routectl_router::FieldRepairCounters
+impl core::marker::Send for routectl_router::FieldRepairCounters
+impl core::marker::Sync for routectl_router::FieldRepairCounters
+impl core::marker::Unpin for routectl_router::FieldRepairCounters
+impl core::marker::UnsafeUnpin for routectl_router::FieldRepairCounters
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FieldRepairCounters
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FieldRepairCounters
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::FieldRepairCounters where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::FieldRepairCounters where U: core::convert::From<T>
+pub fn routectl_router::FieldRepairCounters::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FieldRepairCounters where U: core::convert::Into<T>
+pub type routectl_router::FieldRepairCounters::Error = core::convert::Infallible
+pub fn routectl_router::FieldRepairCounters::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FieldRepairCounters where U: core::convert::TryFrom<T>
+pub type routectl_router::FieldRepairCounters::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FieldRepairCounters::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub type routectl_router::FieldRepairCounters::Owned = T
+pub fn routectl_router::FieldRepairCounters::clone_into(&self, &mut T)
+pub fn routectl_router::FieldRepairCounters::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub fn routectl_router::FieldRepairCounters::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FieldRepairCounters where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FieldRepairCounters where T: ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FieldRepairCounters where T: ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub unsafe fn routectl_router::FieldRepairCounters::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FieldRepairCounters
+pub fn routectl_router::FieldRepairCounters::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FieldRepairCounters where T: core::clone::Clone
+pub fn routectl_router::FieldRepairCounters::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FieldRepairCounters
+impl<T> outref::AsOut<T> for routectl_router::FieldRepairCounters where T: core::marker::Copy
+pub fn routectl_router::FieldRepairCounters::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FieldRepairCounters where T: ?core::marker::Sized
+pub fn routectl_router::FieldRepairCounters::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FieldRepairCounters::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FieldRepairCounters
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FieldRepairCounters
+impl<T> typenum::type_operators::Same for routectl_router::FieldRepairCounters
+pub type routectl_router::FieldRepairCounters::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldRepairCounters where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FieldRepairCounters::into_shared(self) -> Shared
 pub struct routectl_router::Finding
 pub routectl_router::Finding::detail: alloc::string::String
 pub routectl_router::Finding::name: alloc::string::String
@@ -12755,6 +12994,8 @@ impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
+impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
 impl !core::marker::Freeze for routectl_router::router::Router
@@ -14079,6 +14320,7 @@ impl routectl_router::KEstimator for routectl_router::LedgerBackedK
 pub fn routectl_router::LedgerBackedK::estimate(&self, &routectl_router::KQuery<'_>) -> routectl_router::KEstimate
 pub trait routectl_router::LedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::LedgerReader::read_reuse_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::LedgerSampleRow>
+pub fn routectl_router::acting_field_verdicts(&[routectl_router::LearnedRegistryEntry]) -> alloc::vec::Vec<routectl_router::ActingFieldVerdict>
 pub fn routectl_router::apply_catalog_overlay(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, &routectl_router::config::Config, &routectl_router::CatalogOverlay) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>
 pub fn routectl_router::apply_config_transforms(&mut toml_edit::document::DocumentMut, u32) -> core::result::Result<alloc::vec::Vec<routectl_router::StepOutcome>, routectl_router::Refusal>
 pub fn routectl_router::apply_seat_pool_move(&mut toml_edit::document::DocumentMut, &routectl_router::SeatPoolMove)
