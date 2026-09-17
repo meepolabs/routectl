@@ -576,6 +576,94 @@ fn an_unknown_state_key_resolves_to_the_inert_empty_kind() {
     assert_eq!(router.provider_kind_for_state_key("nothing-like-this"), "");
 }
 
+// --- Canary-state reset on finalize (field-namespace keys only) ---
+
+/// A finalized purge of a field-namespace key must drop its resident canary
+/// state -- otherwise a later re-learn of the same identity would inherit a
+/// stale confirmation count or cadence from the incarnation the operator just
+/// removed.
+#[test]
+fn purging_a_field_negative_resets_its_canary_state() {
+    use crate::field_capability::field_capability_key;
+    use crate::field_verdict::FieldVerdictKey;
+
+    // Arrange
+    let router = router_with_models(&["sonnet"]);
+    let field_key = field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+    plant_negative(&router, "sonnet", &field_key);
+    let canary_key = FieldVerdictKey::new("sonnet", "thinking.enabled.display", ANTHROPIC_API)
+        .expect("a qualified path mints a canary key");
+    router
+        .field_verdicts
+        .canaries()
+        .acknowledge_confirmation(&canary_key, 1, 3);
+    assert!(
+        router
+            .field_verdicts
+            .canaries()
+            .snapshot(&canary_key)
+            .is_some(),
+        "premise: canary state must be resident before the purge, or the \
+         assertion below passes for the wrong reason"
+    );
+
+    // Act
+    let report = purge(&router, "sonnet", &field_key);
+
+    // Assert
+    assert!(report.removed, "premise: the field negative must be purged");
+    assert!(
+        router
+            .field_verdicts
+            .canaries()
+            .snapshot(&canary_key)
+            .is_none(),
+        "finalizing a field-key purge must drop its resident canary state"
+    );
+}
+
+/// A finalized purge of a catalog-scoped key must leave canary state alone:
+/// canary state exists only for field-namespace identities, and the reset
+/// must be scoped to those, never widen to a capability-key coincidence.
+#[test]
+fn purging_a_catalog_scoped_key_does_not_touch_canary_state() {
+    use crate::field_verdict::FieldVerdictKey;
+
+    // Arrange: canary state resident under a directly-constructed key that
+    // shares the purged identity's `(state_key, provider_kind)` but carries
+    // the catalog-scoped capability name -- a shape only reachable directly
+    // in a test, since the normal constructor rejects a non-field path, but
+    // exactly the shape the scope guard in `finalize_learned_capability_purge`
+    // must reject on the capability key alone.
+    let router = router_with_models(&["sonnet"]);
+    plant_negative(&router, "sonnet", WEB_SEARCH);
+    let canary_key = FieldVerdictKey::from_capability_key(
+        "sonnet".to_string(),
+        WEB_SEARCH.to_string(),
+        ANTHROPIC_API.to_string(),
+    );
+    router
+        .field_verdicts
+        .canaries()
+        .acknowledge_confirmation(&canary_key, 1, 3);
+
+    // Act
+    let report = purge(&router, "sonnet", WEB_SEARCH);
+
+    // Assert
+    assert!(
+        report.removed,
+        "premise: the catalog-scoped negative must purge"
+    );
+    let snap = router
+        .field_verdicts
+        .canaries()
+        .snapshot(&canary_key)
+        .expect("a catalog-scoped purge must not reset canary state");
+    assert_eq!(snap.confirmations, 3);
+}
+
 /// THE regression this resolution exists for: a Bedrock learned key survives
 /// into a Router where its model is configured but unresolved, and a purge by
 /// the RAW dotted key still removes it.

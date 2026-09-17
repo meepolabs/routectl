@@ -2312,7 +2312,43 @@ impl Router {
         &self,
         reader: &dyn crate::capability_rebuild::CapabilityLedgerReader,
     ) -> crate::capability_rebuild::CapabilityRebuildSummary {
-        crate::capability_rebuild::rebuild_capabilities_into(reader, &self.learned_capabilities)
+        let summary = crate::capability_rebuild::rebuild_capabilities_into(
+            reader,
+            &self.learned_capabilities,
+        );
+        self.seed_field_canaries_from_ledger();
+        summary
+    }
+
+    /// Seed the field canary registry from every resident `field:` entry
+    /// the ledger replay above just produced, so a cold boot restores real
+    /// incarnation, confirmation, and due-canary state rather than starting
+    /// every field verdict at a fresh cadence with no confirmation history.
+    ///
+    /// Runs unconditionally after every rebuild rather than as a call the
+    /// daemon makes separately, so every existing boot-path caller of
+    /// `rebuild_learned_from_ledger` benefits without a second wiring site.
+    /// An entry the rebuild found already acting seeds with its cadence
+    /// forced due on the very next eligible request (countdown of one) --
+    /// the identity is already routing traffic away, so a cold boot must
+    /// not wait a full cadence cycle before re-verifying it.
+    fn seed_field_canaries_from_ledger(&self) {
+        for entry in self.learned_capabilities.field_seed_snapshot() {
+            let provider_kind = self
+                .provider_kind_for_state_key(&entry.state_key)
+                .to_string();
+            let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+                entry.state_key,
+                entry.capability_key,
+                provider_kind,
+            );
+            self.field_verdicts.canaries().seed_from_rebuild(
+                &key,
+                entry.incarnation,
+                entry.observations,
+                entry.acting,
+            );
+        }
     }
 
     /// Carry the previous Router's learned-capability registry into this

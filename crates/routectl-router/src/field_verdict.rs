@@ -66,6 +66,7 @@ use routectl_core::capability::{
     EvidenceSource, FailurePhase, SignalTier, normalize_capability_key,
 };
 
+use crate::field_canary::FieldCanaryRegistry;
 use crate::field_capability::field_capability_key;
 use crate::learned_capability::{LearnedCapabilityRegistry, NegativeState};
 use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
@@ -118,6 +119,26 @@ impl FieldVerdictKey {
         })
     }
 
+    /// Rebuild the identity from components already minted and normalized
+    /// by an earlier call to [`Self::new`] -- a cold-rebuild seed or a
+    /// purge-finalization read, both of which already hold the exact
+    /// resident row's key rather than a raw unqualified path. Skips the
+    /// namespace mint and the normalization re-check `new` performs, since
+    /// re-running the grammar on an already-resident key can only ever
+    /// agree with the check that admitted it the first time.
+    #[must_use]
+    pub(crate) const fn from_capability_key(
+        state_key: String,
+        capability_key: String,
+        provider_kind: String,
+    ) -> Self {
+        Self {
+            state_key,
+            capability_key,
+            provider_kind,
+        }
+    }
+
     /// The routing state key this identity is keyed on.
     ///
     /// Test-only, like its two siblings below: the dispatch path passes the
@@ -163,6 +184,14 @@ pub struct FieldVerdictRegistry {
     /// concurrent repair for the same identity -- exactly the duplicate-repair
     /// cost single-flight exists to prevent.
     in_flight: Arc<Mutex<HashSet<FieldVerdictKey>>>,
+    /// Per-identity canary claim, cadence countdown, outstanding-repair
+    /// count, and confirmation-quorum state -- see [`FieldCanaryRegistry`].
+    ///
+    /// Shared behind an `Arc` for the same reason as `in_flight`: a canary
+    /// claimed or a countdown mid-cycle when the router swap lands must stay
+    /// visible to the replacement facade, or a reload would silently admit a
+    /// second concurrent canary or double-count an eligible request.
+    canaries: Arc<FieldCanaryRegistry>,
 }
 
 impl FieldVerdictRegistry {
@@ -172,20 +201,22 @@ impl FieldVerdictRegistry {
         Self {
             learned,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            canaries: Arc::new(FieldCanaryRegistry::new()),
         }
     }
 
     /// Rebuild this facade onto a (possibly new) shared registry, CARRYING the
-    /// in-flight identities.
+    /// in-flight identities and the canary/quorum state.
     ///
-    /// The set moves by `Arc::clone`, not by copy: an old guard's release must be
-    /// visible to the replacement facade's admission check, or the two would each
-    /// believe the identity free and admit a duplicate repair.
+    /// Both sets move by `Arc::clone`, not by copy: an old guard's release must
+    /// be visible to the replacement facade's admission check, or the two would
+    /// each believe the identity free and admit a duplicate repair or canary.
     #[must_use]
     pub fn rebuilt_on(&self, learned: Arc<LearnedCapabilityRegistry>) -> Self {
         Self {
             learned,
             in_flight: Arc::clone(&self.in_flight),
+            canaries: Arc::clone(&self.canaries),
         }
     }
 
@@ -195,6 +226,25 @@ impl FieldVerdictRegistry {
     #[cfg(test)]
     pub fn shares_in_flight_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.in_flight, &other.in_flight)
+    }
+
+    /// Whether this facade shares its canary/quorum state with `other`.
+    /// Test-only, mirroring [`Self::shares_in_flight_with`].
+    #[cfg(test)]
+    pub fn shares_canaries_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.canaries, &other.canaries)
+    }
+
+    /// The shared canary/quorum registry, so downstream eligibility and
+    /// canary-dispatch logic reads and mutates the same state this facade's
+    /// settlements reconcile.
+    ///
+    /// Not yet read outside tests: the dispatch-side eligibility rule that
+    /// consumes it lands in a follow-up change; this module is state-only.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const fn canaries(&self) -> &Arc<FieldCanaryRegistry> {
+        &self.canaries
     }
 
     /// Claim the single-flight repair slot for `key` on a target reached at
@@ -437,6 +487,13 @@ impl FieldRepairGuard<'_> {
             }
         };
         self.registry.release_slot(&key);
+        // This admission is IN-MEMORY only: `Applied` means the shared
+        // registry accepted the mutation through the generation barrier,
+        // not that the event below has been durably written. The
+        // confirmation count a later eligibility check reads is reconciled
+        // separately, by a caller holding that durable acknowledgment (see
+        // `FieldCanaryRegistry::acknowledge_confirmation`) -- never from
+        // this in-memory admission alone.
         tracing::info!(
             event = "field_verdict_commit",
             state_key = %routectl_core::sanitize_for_log(&key.state_key),
@@ -527,6 +584,10 @@ impl FieldRepairGuard<'_> {
             }
         };
         self.registry.release_slot(&self.key);
+        // The identity's verdict is gone: drop its canary/quorum state too,
+        // so a later re-learn starts a clean incarnation rather than
+        // inheriting a stale cadence, claim, or confirmation count.
+        self.registry.canaries.reset(&self.key);
         if !cleared {
             return None;
         }

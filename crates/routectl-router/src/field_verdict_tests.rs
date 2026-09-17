@@ -1033,6 +1033,35 @@ fn the_committed_row_reuses_the_existing_event_shape() {
     assert_eq!(event.observations, 1);
 }
 
+/// `commit` is an IN-MEMORY admission through the generation barrier, not a
+/// durable writer acknowledgment: the canary registry's confirmation count
+/// must stay at zero until a caller holding that separate acknowledgment
+/// calls `acknowledge_confirmation` explicitly. Nothing in this build wires
+/// `commit` to that call.
+#[test]
+fn a_bare_commit_leaves_the_canary_confirmation_count_at_zero() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    let guard = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .expect("unknown pair admits");
+
+    let event = guard
+        .commit(400, vec![], t0)
+        .expect("a live commit emits its row");
+
+    assert_eq!(
+        event.observations, 1,
+        "the resident row still learns the observation"
+    );
+    assert!(
+        reg.canaries().snapshot(&k).is_none(),
+        "an in-memory admission must not itself confirm the canary count; \
+         only a durable writer acknowledgment may"
+    );
+}
+
 #[test]
 fn a_repeated_confirmed_rejection_refreshes_the_same_row() {
     // Arrange -- learned once, lapsed, and rejected again.
@@ -1462,6 +1491,34 @@ fn an_old_guards_release_is_visible_to_the_replacement_facade() {
             .is_some(),
         "the release must free the identity for the replacement facade",
     );
+}
+
+/// A confirmation acknowledged through the OLD facade's canary registry is
+/// visible through the REPLACEMENT's, and both share the same underlying
+/// `Arc` -- the same attach-not-copy discipline `shares_in_flight_with`
+/// proves for the single-flight set, extended to the canary/quorum state.
+///
+/// Acknowledges directly rather than through a bare `commit`: `commit` is an
+/// in-memory admission, not a durable writer acknowledgment, so it must not
+/// itself move the confirmation count (see
+/// `a_bare_commit_leaves_the_canary_confirmation_count_at_zero`).
+#[test]
+fn a_commits_confirmation_is_visible_to_the_replacement_facade() {
+    let reg = registry();
+    let k = key("thinking.enabled.display");
+
+    reg.canaries().acknowledge_confirmation(&k, 1, 3);
+
+    let replacement = reg.rebuilt_on(Arc::clone(reg.learned_arc()));
+    assert!(
+        replacement.shares_canaries_with(&reg),
+        "the rebuild must carry the SAME canary registry, not a copy",
+    );
+    let snap = replacement
+        .canaries()
+        .snapshot(&k)
+        .expect("resident after the old facade's acknowledgment");
+    assert_eq!(snap.confirmations, 3);
 }
 
 /// Exactly ONE holder exists across both facades: the replacement cannot mint a
