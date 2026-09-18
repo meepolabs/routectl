@@ -36,13 +36,14 @@ use std::time::Instant;
 use routectl_core::failure_class::{LastOutcome, classify, classify_with_attempt};
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
-use super::class_observe::{class_label, matched_by_label, upstream_facts};
+use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
 use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
     emit_replay_degradation, forwarded_terminal_status, is_capability_error,
     log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
     replay_rejection_body_free, upstream_status_for_remap,
 };
+use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
@@ -203,6 +204,7 @@ impl Router {
         let result = self.count_tokens_inner(req, mode, &mut meta).await;
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
+        emit_field_preflight(&meta);
         CountedTokens { meta, result }
     }
 
@@ -393,6 +395,24 @@ impl Router {
             StripDecision::StrictReject(err) => return CountSeatOutcome::Terminal(err),
             StripDecision::RouteAway(_) => return CountSeatOutcome::Capability,
         }
+
+        // Envelope-field pre-flight (see `complete_inner`): same seam,
+        // `CountTokens` surface. `attempt_req` at this point carries only
+        // this seat's overlay + strip, never a prior seat's clone or a
+        // reactive repair, so it is the same "original for this target"
+        // base the messages walks plan from. The returned request REPLACES
+        // `attempt_req`, so from here on this seat has exactly one body:
+        // the remote count dispatches it, and every local read of it (the
+        // calibration re-stamp on the replay-strip branch below) measures
+        // that same body rather than an unplanned one.
+        let (preflighted_req, field_preflight) = self.plan_field_preflight(
+            &attempt_req,
+            &target,
+            DispatchSurface::CountTokens,
+            &*repair_budget,
+        );
+        attempt_req = preflighted_req;
+        meta.field_preflight.push(field_preflight);
 
         // Reasoning-replay carry admission at the ANALOGOUS position the two
         // messages walks use: after every request-shaping step and before the

@@ -2397,7 +2397,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
   `capability_cleared`, `cache_plan`, `prefix_rewrite`, `runtime_gate`,
   `sticky`, `count_tokens`, `status`, `replay_repair`, `field_repair`,
-  `repair_budget`, `window_gate`
+  `field_preflight`, `repair_budget`, `window_gate`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -2608,6 +2608,63 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   NOT one of those call sites: it stays on the bare `derive_feature_keys`
   catalog vocabulary alone, since a field verdict is never a
   feature-naming-template candidate
+- `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
+  planner all three dispatch walks share, and the proactive counterpart of
+  `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
+  target, surface, budget)` takes the request by shared reference and returns
+  an owned `(ChatRequest, FieldPreflight)` pair, so mutating the caller's
+  request is impossible by signature and every fallback target plans from the
+  same original rather than from a sibling target's clone. Called from
+  `complete_inner`, `stream_inner`, and `count_tokens_try_seat` at one
+  position: after the layered overlays and the strip interceptor, before
+  provider translation, the context reduction, and the calibration stamp --
+  so the planned body is the one both a remote count and every local read of
+  the request measure. Admission order mirrors `plan_field_carry`, and mirrors
+  its ATTRIBUTION refusals for the same reason rather than by analogy (a target
+  whose rejection this stage could not attribute is one whose verdict it must
+  not act on): closed-table presence (`field_repair::first_present_row`, the
+  shared single scan) -> capability kill switch -> `anthropic-api` lane -> NOT
+  a forwarded-credential target -> an attributable
+  `ProviderEntry::anthropic_api_base_url` (a Bedrock Mantle entry reports none
+  and is refused here) -> NOT `loopback_target_suppresses_minting` ->
+  `FieldVerdictKey` -> NOT `override_forces_supported` for the identity's own
+  capability key, through the same two-tier resolver the act and learn sides
+  share -> `FieldVerdictRegistry::preflight_eligible`.
+  It applies the transform through `field_repair`'s own `FieldSurface::drop_from`
+  rather than a second implementation, against a SCRATCH clone adopted only on
+  a reported success plus a post-condition re-check, so a transform that
+  removes nothing (or mutates and then reports failure) yields a request
+  byte-equivalent to the original rather than a half-mutated one. Every other
+  outcome FAILS OPEN to a fresh clone of the unchanged original plus one
+  closed-set reason token (`no_grounded_field` / `unsupported_lane` /
+  `unattributable_target` / `masked_by_override` / `no_identity` /
+  `not_eligible` / `ambiguous_mutation`); the record carries only tokens, a
+  code-authored path literal, a `sanitize_for_log`-sanitized state key (an
+  operator-controlled `[models]` nickname, sanitized at EVERY construction
+  site including the test driver), and a boolean, never upstream bytes. The
+  transform itself goes through ONE production helper (`apply_transform` ->
+  `TransformOutcome`), shared by the planner and its test driver so a mutation
+  to adoption or failure behavior cannot leave a duplicate test copy green.
+  `emit_field_preflight` splits by severity from the three PUBLIC wrappers (not
+  the chain loops), so a walk leaving by any exit still reports: every retained
+  per-target decision emits at DEBUG (a fail-open is the routine case, so a
+  WARN each would bury the reportable one), plus exactly ONE request-level WARN
+  and only when at least one target acted. `action = field_preflight_drop` is
+  attached only to a record that ACTED -- labelling a fail-open with it would
+  name an action the walk did not take. `scripts/check-log-display.sh` scans
+  this file for a raw `state_key` through its own `STATE_KEY_PATHS` tier
+  (scoped to one file deliberately: widening `CONFIG_KEY_FIELDS` flags 29
+  pre-existing sites across ten other modules, which is separate work).
+  Read-only on the verdict: it draws no `RepairBudget` and claims no
+  single-flight slot, because it acts on a verdict already resident and settled
+  rather than one this attempt is establishing -- `surface` and `budget` are
+  threaded so a later prefix-impacting transform can consult them without a
+  signature change. The closed table has ONE row in this build, so the planner
+  plans the single present row rather than iterating a set: a deliberate scope
+  boundary (multi-transform planning belongs to the prefix-impacting task,
+  which also needs the opt-in and quorum this stage lacks), with the extension
+  seam kept clean -- shared scan, scratch-clone transform, per-decision record.
+  Behavior lives in `src/router/field_preflight_tests.rs`
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
@@ -3172,6 +3229,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reconciliation is `FieldCanaryRegistry::acknowledge_confirmation` (see
   `src/field_canary.rs`), an explicit state-only API for a caller holding the
   durable ack; no such caller exists yet in this build.
+  `preflight_eligible(key, generation, now)` is the READ-ONLY predicate the
+  pre-flight planner (see `src/router/field_preflight.rs`) consults instead of
+  `admit_provisional`: resident and ACTING under the generation, plus at least
+  one acknowledged confirmation whose incarnation equals the ACTING entry's OWN
+  incarnation (via `LearnedCapabilityRegistry::field_acting_incarnation_in_generation`
+  and `FieldCanaryRegistry::snapshot`), so a count left over from a
+  since-relearned incarnation can never back the current verdict. The acting
+  incarnation is read TWICE, and authorization requires it unchanged after the
+  confirmation was observed: the two reads take different locks, so a clear,
+  purge, lapse or relearn landing between them would otherwise yield a decision
+  assembled from two states that never coexisted. A compare-recheck, not a lock
+  -- a change landing after the return is fine, because the caller's decision is
+  per-attempt and fails open. The window is exercised deterministically through
+  a `cfg(test)` interposition seam (`eligibility_interpose`) whose production
+  body is empty. It claims no slot and consumes nothing, which is why a
+  pre-flight rewrite and the reactive repair never compete for one guard. Note
+  a `field:` key is catalog-INDEPENDENT, so the barrier admits it from any
+  generation -- this predicate is generation-TOLERANT for that key class by
+  design, not generation-blind.
   An operator purge lease on the guard's own key refuses `commit`/`clear` the
   same way through the shared `purge_leases` guard the lease reserved --
   `Reserved`, not `Stale` -- releasing the slot and mutating and emitting
@@ -3201,7 +3277,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   count, and it exists for a caller holding a DURABLE writer acknowledgment
   for `observations` -- not the in-memory `Applied` outcome
   `FieldRepairGuard::commit` (see `src/field_verdict.rs`) reads; no caller
-  holds that ack yet, so this is state-only surface for a follow-up change.
+  holds that ack yet, so on live traffic the cold-rebuild seed below is the
+  only writer that can raise the count. `snapshot(key) ->
+  Option<CanaryStateSnapshot>` is the read side, consumed by
+  `FieldVerdictRegistry::preflight_eligible`.
   `tick_cadence`, `begin_modified_request` (RAII `ModifiedRequestGuard`,
   saturating rather than wrapping since the outstanding count is diagnostic,
   not divided into anything), and `claim_canary` (RAII `CanaryClaimGuard`,

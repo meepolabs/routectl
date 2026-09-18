@@ -40,6 +40,7 @@ use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
+use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::overlays::apply_layered_overlays;
 use super::repair_budget::RepairBudget;
@@ -243,6 +244,7 @@ impl Router {
         let result = self.complete_inner(req, opts, &mut meta).await;
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
+        emit_field_preflight(&meta);
         Dispatched { meta, result }
     }
 
@@ -394,6 +396,20 @@ impl Router {
                     continue;
                 }
             }
+            // Envelope-field pre-flight: after overlays and the strip
+            // interceptor, before provider translation. Plans from THIS
+            // target's already-overlaid, already-stripped clone -- no
+            // reactive repair has touched it yet at this point in the
+            // loop, so it is exactly the base every fallback target
+            // plans from independently.
+            let (preflighted_req, field_preflight) = self.plan_field_preflight(
+                &attempt_req,
+                target,
+                DispatchSurface::Complete,
+                &repair_budget,
+            );
+            attempt_req = preflighted_req;
+            meta.field_preflight.push(field_preflight);
             let provider_cfg = self.config.providers.get(provider_name);
             apply_context_reduction(
                 &self.config,
@@ -1149,6 +1165,7 @@ impl Router {
         let result = self.stream_inner(req, opts, &mut meta).await;
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
+        emit_field_preflight(&meta);
         DispatchedStream { meta, result }
     }
 
@@ -1265,6 +1282,16 @@ impl Router {
                     continue;
                 }
             }
+            // Envelope-field pre-flight (see `complete_inner`): same seam,
+            // `Stream` surface.
+            let (preflighted_req, field_preflight) = self.plan_field_preflight(
+                &attempt_req,
+                target,
+                DispatchSurface::Stream,
+                &repair_budget,
+            );
+            attempt_req = preflighted_req;
+            meta.field_preflight.push(field_preflight);
             let provider_cfg = self.config.providers.get(provider_name);
             apply_context_reduction(
                 &self.config,

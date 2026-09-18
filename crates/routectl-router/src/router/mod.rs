@@ -36,6 +36,7 @@ mod class_observe;
 mod count_tokens;
 mod dispatch;
 mod feature_filter;
+mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
 mod overlays;
@@ -1337,6 +1338,42 @@ pub struct DispatchMeta {
     /// tokens, a code-authored field path, and booleans -- never the
     /// upstream body, the rejected value, or the session key.
     pub field_repair: Option<FieldRepair>,
+    /// Envelope-field pre-flight records, ONE PER TARGET PLANNED, in the
+    /// order the walk planned them. A fallback chain therefore reports every
+    /// target's decision rather than only the last: overwriting a single slot
+    /// discards exactly the fallback behavior an operator needs to see, since
+    /// the interesting case is a chain where one target acted and another did
+    /// not.
+    ///
+    /// Empty when the walk planned nothing (no target reached the seam).
+    /// Distinct from [`Self::field_repair`]: that field records the REACTIVE
+    /// post-rejection repair, these the PROACTIVE pre-dispatch rewrite, and
+    /// the two are never conflated into one record or one budget charge.
+    pub field_preflight: Vec<FieldPreflight>,
+}
+
+/// Closed-set facts about one canonical pre-flight planning decision,
+/// aggregated onto [`DispatchMeta`] for the per-request diagnostic.
+///
+/// Every field is a stable token, a code-authored literal, a sanitized state
+/// key, or a boolean: deliberately no upstream body, no request value, no
+/// rejected value, no credential, no session key. Carried even when the
+/// planner did not act, so an operator can distinguish "no grounded field
+/// present" from "eligible but declined" from "acted".
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct FieldPreflight {
+    /// Whether the planner rewrote the per-target request.
+    pub acted: bool,
+    /// Sanitized `[providers]` state key of the target this decision was
+    /// planned for -- what makes a per-target record attributable in a
+    /// fallback chain.
+    pub state_key: String,
+    /// The closed-table qualified dotted path the planner considered, if
+    /// the attempt carried any grounded field at all.
+    pub field_path: Option<&'static str>,
+    /// Closed-set token naming why the planner acted or fell open.
+    pub reason: &'static str,
 }
 
 /// Closed-set facts about a reactive L0 envelope-field repair that fired
@@ -1451,6 +1488,7 @@ impl DispatchMeta {
             cleared_capabilities: Vec::new(),
             replay_degradation: None,
             field_repair: None,
+            field_preflight: Vec::new(),
         }
     }
 

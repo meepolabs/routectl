@@ -93,9 +93,10 @@ impl CanaryState {
 /// that need more than one field at once without holding the lock across
 /// several calls.
 ///
-/// Not yet read outside tests: the eligibility rule and dispatch decision
-/// that consume it land in a follow-up change; this module is state-only.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Read by the field pre-flight eligibility check
+/// ([`crate::field_verdict::FieldVerdictRegistry::preflight_eligible`]) and
+/// by tests that need more than one field at once without holding the lock
+/// across several calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanaryStateSnapshot {
     pub incarnation: u64,
@@ -228,6 +229,12 @@ impl FieldCanaryRegistry {
         }
     }
 
+    /// Deferred production caller: the canary settlement change owns the
+    /// dispatch-path call. Until it lands the only non-test reachability is
+    /// through `ModifiedRequestGuard::drop`, which a non-test lib build can
+    /// see as unreachable, so the allowance is scoped to THIS method and is
+    /// removed by that change rather than being a standing module-wide grant.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn end_modified_request(&self, key: &FieldVerdictKey) {
         if let Some(entry) = self.states.lock().get_mut(key) {
             entry.outstanding = entry.outstanding.saturating_sub(1);
@@ -275,6 +282,9 @@ impl FieldCanaryRegistry {
         }
     }
 
+    /// Deferred production caller: see [`Self::end_modified_request`]. Scoped
+    /// to this method, removed by the canary settlement change.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn release_canary_claim(&self, key: &FieldVerdictKey) {
         if let Some(entry) = self.states.lock().get_mut(key) {
             entry.canary_claimed = false;
@@ -307,7 +317,6 @@ impl FieldCanaryRegistry {
     /// A read-only snapshot of `key`'s resident state, or `None` when
     /// nothing is resident for it.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn snapshot(&self, key: &FieldVerdictKey) -> Option<CanaryStateSnapshot> {
         self.states.lock().get(key).map(|s| CanaryStateSnapshot {
             incarnation: s.incarnation,
