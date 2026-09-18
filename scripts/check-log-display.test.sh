@@ -43,6 +43,12 @@ run_source() {
         : >crates/routectl-cli/src/commands/.keep
         : >crates/routectl-cli/src/proxy/.keep
         : >crates/routectl-router/src/.keep
+        # STATE_KEY_PATHS names a FILE and the scanner fails closed when it is
+        # absent, so every case needs it present. Empty by default: a case that
+        # is not about this tier then scans a file with nothing to find, while a
+        # state_key case overwrites it via extra_setup.
+        mkdir -p crates/routectl-router/src/router
+        : >crates/routectl-router/src/router/field_preflight.rs
         if [[ -n "$extra_setup" ]]; then
             eval "$extra_setup" || exit 2
         fi
@@ -375,6 +381,160 @@ assert_commands_caught "commands/ is in the wire tier too" \
     'fn probe(v: &str) {
     tracing::warn!(type_tag = %v, "probe capture");
 }'
+
+# --- the state_key tier ------------------------------------------------
+#
+# Scoped to one FILE rather than a directory (see the scanner's own comment for
+# why: widening CONFIG_KEY_FIELDS turns 29 pre-existing sites red). That scoping
+# is exactly what makes these assertions necessary -- a one-file path list is
+# easy to leave behind on a rename, and a scan that matches nothing PASSES.
+
+# The throwaway repo needs the scanned file to exist, carrying the case under
+# test, since the scanner fails closed on its absence.
+run_state_key_source() {
+    local source="$1" allowlist_body="${2:-}"
+    run_source "fn unrelated() {}" "$allowlist_body" \
+        "mkdir -p crates/routectl-router/src/router
+         printf '%s\\n' ${source@Q} >crates/routectl-router/src/router/field_preflight.rs"
+}
+
+assert_state_key_caught() {
+    local desc="$1" source="$2" allowlist="${3:-}"
+    if run_state_key_source "$source" "$allowlist"; then
+        echo "FAIL: expected CAUGHT but passed -- $desc"
+        fails=$((fails + 1))
+    else
+        echo "PASS: caught -- $desc"
+    fi
+}
+
+assert_state_key_clean() {
+    local desc="$1" source="$2" allowlist="${3:-}"
+    if run_state_key_source "$source" "$allowlist"; then
+        echo "PASS: clean -- $desc"
+    else
+        echo "FAIL: expected CLEAN but caught -- $desc"
+        fails=$((fails + 1))
+    fi
+}
+
+assert_state_key_caught "a raw state_key on the pre-flight surface" \
+    'fn probe(v: &str) {
+    tracing::warn!(state_key = %v, "preflight");
+}'
+
+# The ACCEPT control, paired with the reject above: without it a tier that
+# refused every state_key line would satisfy the assertion while being useless.
+assert_state_key_clean "a sanitized state_key on the same surface" \
+    'fn probe(v: &str) {
+    tracing::warn!(state_key = %sanitize_for_log(v), "preflight");
+}'
+
+assert_state_key_clean "a state_key bound once from a sanitizer and reused" \
+    'fn probe(v: &str) {
+    let state_key_safe = sanitize_for_log(v);
+    tracing::warn!(state_key = %state_key_safe, "preflight");
+}'
+
+# `-H` regression. ripgrep omits the filename when handed exactly ONE file, so
+# a single-file tier emitted `<line>:<field>` and every consumer that splits on
+# the first colon read the LINE NUMBER as the path. These two cases pin the
+# consumers that silently stopped working: a comment-only line could not be
+# recognized as a comment (the skip reads the file), and an allowlist entry
+# keyed on the real path could never match.
+assert_state_key_clean "a commented-out state_key line is prose, not a call site" \
+    '// tracing::warn!(state_key = %v, "preflight");
+fn probe() {}'
+
+assert_state_key_clean "a tier allowlist entry exempts the state_key surface" \
+    'fn probe(v: &str) {
+    tracing::warn!(state_key = %v, "preflight");
+}' \
+    'crates/routectl-router/src/router/field_preflight.rs:state_key  # test'
+
+# Control for the pair above: the SAME source with no allowlist entry is still
+# caught, so the clean result is the entry working rather than the tier having
+# gone blind.
+assert_state_key_caught "the same raw state_key without an allowlist entry is caught" \
+    'fn probe(v: &str) {
+    tracing::warn!(state_key = %v, "preflight");
+}'
+
+# `scan_safe_locals` on this tier: a `_safe`-suffixed name is a CLAIM, checked
+# back to a `let` that really calls a sanitizer. Rejection and accept as a pair,
+# because a tier that refused every `_safe` binding (or accepted every one)
+# would satisfy either assertion alone.
+assert_state_key_caught "an unbacked _safe state_key binding is a finding" \
+    'fn probe(v: &str) {
+    let state_key_safe = v.to_string();
+    tracing::warn!(state_key = %state_key_safe, "preflight");
+}'
+
+assert_state_key_clean "a sanitizer-backed _safe state_key binding passes" \
+    'fn probe(v: &str) {
+    let state_key_safe = sanitize_for_log(v);
+    tracing::warn!(state_key = %state_key_safe, "preflight");
+}'
+
+# The POSITIONAL shape (`%state_key` after a `(` or `,`) on the same tier.
+# Its scanner is a separate ripgrep invocation from the assigned one, so it gets
+# its own path-resolving trio rather than inheriting confidence from the
+# assigned shape's.
+assert_state_key_caught "a positional %state_key on the pre-flight surface" \
+    'fn probe(v: &str) {
+    tracing::warn!("preflight", %state_key);
+}'
+
+# Path resolution, shape 3: a commented-out positional line is prose. This can
+# only pass when the consumer can open the file the hit names, so it fails if
+# this scanner loses `-H`.
+assert_state_key_clean "a commented-out positional %state_key line is prose, not a call site" \
+    '// tracing::warn!("preflight", %state_key);
+fn probe() {}'
+
+assert_state_key_clean "a tier allowlist entry exempts a positional %state_key" \
+    'fn probe(v: &str) {
+    tracing::warn!("preflight", %state_key);
+}' \
+    'crates/routectl-router/src/router/field_preflight.rs:state_key  # test'
+
+# No-allowlist control for the pair above: the same active line with no entry is
+# still caught, so the two clean results are the comment skip and the allowlist
+# working -- not the positional scanner having gone blind on this tier.
+assert_state_key_caught "the same positional %state_key without an allowlist entry is caught" \
+    'fn probe(v: &str) {
+    tracing::warn!("preflight", %state_key);
+}'
+
+# The MESSAGE-BODY shape (`{state_key}` interpolated into the message) on the
+# same tier. A third separate ripgrep invocation, so it gets the same
+# path-resolving trio: the two CLEAN results below are only reachable when the
+# consumer can open the file the hit names.
+assert_state_key_caught "an interpolated {state_key} in a message body" \
+    'fn probe(v: &str) {
+    tracing::warn!("preflight {state_key}");
+}'
+
+assert_state_key_clean "a commented-out {state_key} message body is prose, not a call site" \
+    '// tracing::warn!("preflight {state_key}");
+fn probe() {}'
+
+assert_state_key_clean "a tier allowlist entry exempts an interpolated {state_key}" \
+    'fn probe(v: &str) {
+    tracing::warn!("preflight {state_key}");
+}' \
+    'crates/routectl-router/src/router/field_preflight.rs:state_key  # test'
+
+# No-allowlist control: the same active body with no entry is still caught, so
+# the two CLEAN results above are the comment skip and the allowlist working
+# rather than this scanner having gone blind on the tier.
+assert_state_key_caught "the same {state_key} body without an allowlist entry is caught" \
+    'fn probe(v: &str) {
+    tracing::warn!("preflight {state_key}");
+}'
+
+assert_fail_closed "a renamed state_key-tier FILE is a gate failure, not a vacuous PASS" \
+    'rm -f crates/routectl-router/src/router/field_preflight.rs'
 
 assert_fail_closed "a missing search path is a gate failure, not a vacuous PASS" \
     'rm -rf crates/routectl-cli/src/ingress'

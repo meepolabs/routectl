@@ -15,6 +15,10 @@ use routectl_core::failure_class::{FailureClass, MatchedBy};
 pub(super) enum DispatchSurface {
     Complete,
     Stream,
+    /// The count_tokens walk. Carries no canary cadence today -- see the
+    /// pre-flight planner's own docs for why only `Complete` will ever
+    /// decrement or claim a canary.
+    CountTokens,
 }
 
 impl DispatchSurface {
@@ -22,6 +26,7 @@ impl DispatchSurface {
         match self {
             Self::Complete => "complete",
             Self::Stream => "stream",
+            Self::CountTokens => "count_tokens",
         }
     }
 }

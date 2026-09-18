@@ -153,8 +153,13 @@ impl FieldVerdictKey {
     }
 
     /// The normalized field capability key this identity is keyed on.
-    /// Test-only -- see [`Self::state_key`].
-    #[cfg(test)]
+    ///
+    /// Ungated (unlike its two siblings): the pre-flight planner reads it to
+    /// consult the operator `force_supported` resolver, which keys on the
+    /// capability token. Reading it off the identity rather than re-minting
+    /// the key at the call site is what makes the mask consult the SAME
+    /// normalized token the registry lookup uses, so a mask cannot be honored
+    /// against one spelling and missed against another.
     #[must_use]
     pub fn capability_key(&self) -> &str {
         &self.capability_key
@@ -245,6 +250,74 @@ impl FieldVerdictRegistry {
     #[cfg_attr(not(test), allow(dead_code))]
     pub const fn canaries(&self) -> &Arc<FieldCanaryRegistry> {
         &self.canaries
+    }
+
+    /// Whether `key` is currently pre-flight eligible: resident, ACTING,
+    /// and its incarnation has at least one acknowledged confirmation in
+    /// the shared canary registry.
+    ///
+    /// Read-only, and deliberately NOT routed through [`Self::admit_provisional`]:
+    /// that call claims the single-flight REACTIVE repair slot and refuses
+    /// outright on an acting verdict, because reacting to an already-acting
+    /// verdict is a routing decision, not a repair. A pre-flight rewrite acts
+    /// on the SAME acting verdict from the other side -- before dispatch, not
+    /// after a rejection -- so it reads the verdict directly rather than
+    /// competing with the reactive path for its slot.
+    ///
+    /// The confirmation count is compared against the ACTING entry's own
+    /// incarnation, never merely "some confirmations exist": a canary state
+    /// left over from a since-relearned incarnation (the verdict lapsed,
+    /// cleared, and was re-learned) must never be read as backing the
+    /// current one. Today, live traffic can only produce a non-zero count
+    /// through a cold-rebuild seed (see [`FieldCanaryRegistry::seed_from_rebuild`]);
+    /// [`FieldCanaryRegistry::acknowledge_confirmation`] is reserved for a
+    /// durable-writer-ack caller that lands separately, so this predicate
+    /// naturally stays dormant on live traffic until that caller exists.
+    ///
+    /// # Why the verdict is read TWICE
+    ///
+    /// The two reads this predicate needs -- the acting verdict and the
+    /// canary confirmation -- take different locks, so nothing holds them
+    /// still together. A concurrent clear, purge, lapse, relearn, or
+    /// generation boundary landing BETWEEN them yields a decision assembled
+    /// from two states that never coexisted: the confirmation matched an
+    /// incarnation the entry had already left. The re-read closes that by
+    /// requiring the acting incarnation to be unchanged AFTER the
+    /// confirmation was observed, which makes the authorization rest on one
+    /// consistent (generation, incarnation) pair rather than on the ordering
+    /// of two independent reads. It cannot manufacture a false negative that
+    /// matters: a verdict that moved under the read is exactly a verdict this
+    /// request has no settled grounds to act on, so refusing is the correct
+    /// answer rather than a lost opportunity.
+    ///
+    /// This is a compare-recheck, not a lock: it does not prevent a change
+    /// landing after the return, and it does not need to -- the caller's
+    /// decision is per-attempt and fails open.
+    #[must_use]
+    pub fn preflight_eligible(&self, key: &FieldVerdictKey, generation: u64, now: Instant) -> bool {
+        let acting_incarnation = |()| {
+            self.learned.field_acting_incarnation_in_generation(
+                generation,
+                &key.state_key,
+                &key.capability_key,
+                &key.provider_kind,
+                now,
+            )
+        };
+        let Some(before) = acting_incarnation(()) else {
+            return false;
+        };
+        let confirmed = self
+            .canaries
+            .snapshot(key)
+            .is_some_and(|snap| snap.incarnation == before && snap.confirmations >= 1);
+        if !confirmed {
+            return false;
+        }
+        between_eligibility_reads();
+        // Re-read under the same generation: the confirmation above is only
+        // authorization if the verdict it backs is STILL the acting one.
+        acting_incarnation(()) == Some(before)
     }
 
     /// Claim the single-flight repair slot for `key` on a target reached at
@@ -758,6 +831,75 @@ fn is_local_domain(domain: &str) -> bool {
         || LOCAL_HOST_ALIASES
             .iter()
             .any(|alias| name.eq_ignore_ascii_case(alias))
+}
+
+/// Production build: nothing sits between the two eligibility reads.
+///
+/// The re-read in [`FieldVerdictRegistry::preflight_eligible`] closes a real
+/// race, and a race is only demonstrably closed by a test that can land a
+/// mutation INSIDE the window. This seam is that interposition point and
+/// nothing else: the production body is empty, so the window is exactly as
+/// wide as the two reads make it and no production path can widen it.
+#[cfg(not(test))]
+const fn between_eligibility_reads() {}
+
+/// Test build: run whatever this thread parked in the interposition slot.
+///
+/// Substituted at exactly this seam and nowhere else, the same shape the
+/// reactive arm's absent-parser seam uses. Thread-local, so a barrier a test
+/// installs is visible to the dispatch that test drives and invisible to every
+/// sibling test running concurrently.
+#[cfg(test)]
+fn between_eligibility_reads() {
+    eligibility_interpose::run();
+}
+
+/// Test-only interposition between the two eligibility reads.
+///
+/// The window this parks in is invisible from outside: a concurrency test that
+/// merely spawns threads and hopes to hit it proves nothing when it passes,
+/// because a green run and an unreachable window are indistinguishable. A
+/// barrier installed HERE makes the interleaving deterministic, so the
+/// regression test fails every run against the single-read version rather
+/// than occasionally.
+#[cfg(test)]
+pub mod eligibility_interpose {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn Fn()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run this thread's installed hook, if any.
+    pub(super) fn run() {
+        // The hook is taken out for the call so a hook that itself reaches
+        // `preflight_eligible` cannot recurse into itself, and restored
+        // afterwards so one installation serves repeated reads.
+        let hook = HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+            HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+        }
+    }
+
+    /// Install `hook` to run between the two reads, for this thread, until the
+    /// returned guard drops.
+    pub fn install(hook: impl Fn() + 'static) -> Guard {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Guard
+    }
+
+    /// Clears the installed hook on drop, so one test cannot leak its
+    /// interposition into another running on the same thread.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
 }
 
 #[cfg(test)]

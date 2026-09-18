@@ -119,6 +119,24 @@ CONFIG_KEY_PATHS=(
     crates/routectl-router/src
 )
 
+# `state_key` is an operator-controlled config name (a `[models]` nickname, via
+# `DispatchTarget::state_key`), so rendering it raw is the same log-injection
+# hazard the fields above cover. It is scanned on its OWN path list rather than
+# being added to CONFIG_KEY_FIELDS, and that is a measurement, not a
+# preference: adding it to the list above reports 29 PRE-EXISTING sites across
+# ten other modules (dispatch, sticky, capability_learn, feature_filter,
+# learned_capability, count_tokens, window_gate, capability_observe,
+# field_repair, replay_repair, runtime_gate). Widening the field list would put
+# the gate red on code this change does not touch, which blocks every commit in
+# the repo. Those sites are real and still unfixed; fixing them is separate
+# work, tracked outside this file. Scoped coverage closes the rule on the
+# surface added here and can be widened one module at a time.
+STATE_KEY_FIELDS='state_key'
+
+STATE_KEY_PATHS=(
+    crates/routectl-router/src/router/field_preflight.rs
+)
+
 # Every `.rs` file under the two request-graph crates must sit in a tier
 # above or be named here WITH a reason -- see the tier-drift check below.
 # A new module directory is therefore a deliberate choice ("scan it" or
@@ -160,9 +178,20 @@ for p in "${SEARCH_PATHS[@]}" "${CONFIG_KEY_PATHS[@]}"; do
         missing_paths+="  $p"$'\n'
     fi
 done
+# STATE_KEY_PATHS names FILES, not directories, so it needs its own existence
+# test: `-d` on a file path is false, and folding it into the loop above would
+# report every entry as missing. Without this the file could be renamed and its
+# scan would silently match nothing -- a vacuous PASS, which is the failure mode
+# this whole block exists to prevent.
+for p in "${STATE_KEY_PATHS[@]}"; do
+    if [[ ! -e "$p" ]]; then
+        missing_paths+="  $p"$'\n'
+    fi
+done
 if [[ -n "$missing_paths" ]]; then
     echo "log-display: FAIL search path(s) missing -- moved or renamed code would" >&2
-    echo "log-display: go unscanned. Update SEARCH_PATHS / CONFIG_KEY_PATHS in $0:" >&2
+    echo "log-display: go unscanned. Update SEARCH_PATHS / CONFIG_KEY_PATHS /" >&2
+    echo "log-display: STATE_KEY_PATHS in $0:" >&2
     printf '%s' "$missing_paths" >&2
     exit 1
 fi
@@ -216,13 +245,25 @@ fi
 # Each scanner takes the field alternation as `$1` and the paths to scan as
 # the remaining arguments, so the wire tier and the config-key tier share
 # one implementation over their two different scopes.
+#
+# `-H` is REQUIRED on every scanner below, not decoration: ripgrep omits the
+# filename when it is given exactly one file path, so a single-FILE tier
+# (STATE_KEY_PATHS) emits `<line>:<field>` instead of `<path>:<line>:<field>`.
+# Every consumer below splits on the first colon, so without `-H` the line
+# number is parsed as the path -- which makes the allowlist lookup, the
+# comment-line skip and the `_safe` binding check all read a file that does not
+# exist, and a real finding renders as `368:state_key`.
+#
+# Each scanner carries its OWN self-test asserting a resolvable path (comment
+# skip, allowlist, sanitized binding), so a scanner added or edited without
+# `-H` fails rather than silently scanning by line number.
 
 # `field = %expr` (shapes 1 and 2): one multiline pattern, whitespace and
 # newlines tolerated around the `=` and the `%`.
 scan_assigned() {
     local fields="$1"
     shift
-    rg -U -P --no-heading --line-number --only-matching --replace '$1' \
+    rg -H -U -P --no-heading --line-number --only-matching --replace '$1' \
         -e "(?<![A-Za-z0-9_])($fields)[ \t\r\n]*=[ \t\r\n]*%[ \t\r\n]*(?!$SANITIZERS|$SAFE_LOCAL)" \
         "$@" || true
 }
@@ -237,7 +278,7 @@ scan_assigned() {
 scan_safe_locals() {
     local fields="$1"
     shift
-    rg -U -P --no-heading --line-number --only-matching --replace '$1:$2' \
+    rg -H -U -P --no-heading --line-number --only-matching --replace '$1:$2' \
         -e "(?<![A-Za-z0-9_])($fields)[ \t\r\n]*=[ \t\r\n]*%[ \t\r\n]*($SAFE_LOCAL)" \
         "$@" || true
 }
@@ -271,7 +312,7 @@ has_sanitized_binding() {
 scan_positional() {
     local fields="$1"
     shift
-    rg -P --no-heading --line-number --only-matching --replace '$1' \
+    rg -H -P --no-heading --line-number --only-matching --replace '$1' \
         -e "(?:^|[(,])[ \t]*%($fields)\b" \
         "$@" || true
 }
@@ -288,7 +329,7 @@ scan_positional() {
 scan_message_body() {
     local fields="$1"
     shift
-    rg -U -P --no-heading --line-number --only-matching --replace '$1' \
+    rg -H -U -P --no-heading --line-number --only-matching --replace '$1' \
         -e "tracing::(?:warn|error|info)!\((?:[^;]*?)\"[^\"]*\{($fields)\}" \
         "$@" || true
 }
@@ -324,6 +365,9 @@ done < <(
     scan_assigned "$CONFIG_KEY_FIELDS" "${CONFIG_KEY_PATHS[@]}"
     scan_positional "$CONFIG_KEY_FIELDS" "${CONFIG_KEY_PATHS[@]}"
     scan_message_body "$CONFIG_KEY_FIELDS" "${CONFIG_KEY_PATHS[@]}"
+    scan_assigned "$STATE_KEY_FIELDS" "${STATE_KEY_PATHS[@]}"
+    scan_positional "$STATE_KEY_FIELDS" "${STATE_KEY_PATHS[@]}"
+    scan_message_body "$STATE_KEY_FIELDS" "${STATE_KEY_PATHS[@]}"
 )
 
 while IFS= read -r hit; do
@@ -347,6 +391,7 @@ while IFS= read -r hit; do
 done < <(
     scan_safe_locals "$WIRE_FIELDS" "${SEARCH_PATHS[@]}"
     scan_safe_locals "$CONFIG_KEY_FIELDS" "${CONFIG_KEY_PATHS[@]}"
+    scan_safe_locals "$STATE_KEY_FIELDS" "${STATE_KEY_PATHS[@]}"
 )
 
 if [[ -n "$FINDINGS" ]]; then

@@ -62,7 +62,7 @@ use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, Dispatch
 /// whose keys would be rewritten must never mint one. The verdict key
 /// refuses such a lane independently ([`FieldVerdictKey::new`]) -- two
 /// independent refusals for one irreversible mistake.
-const ANTHROPIC_API_KIND: &str = "anthropic-api";
+pub(super) const ANTHROPIC_API_KIND: &str = "anthropic-api";
 
 /// Action token for the field-repair WARN: the L0 repair dropped the mapped
 /// envelope field and re-dispatched the same target once. Closed set.
@@ -78,7 +78,7 @@ pub(super) const FIELD_REASON_UPSTREAM_REJECTION: &str = "upstream_field_rejecti
 /// a wire field, so a repair's effect can be reviewed at the surface rather
 /// than inferred from a path string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FieldSurface {
+pub(super) enum FieldSurface {
     /// The Anthropic `thinking.display` wire field.
     ///
     /// TWO canonical carriers produce it and both must go, or the drop is a
@@ -106,6 +106,36 @@ enum FieldSurface {
     /// is compiled out, so an ungated variant here would be dead code.
     #[cfg(all(test, not(debug_assertions)))]
     DivergentForTests,
+    /// Test-only surface that MUTATES and then reports failure.
+    ///
+    /// Distinct from `DivergentForTests`, which removes nothing: a surface that
+    /// removes nothing cannot distinguish a transform applied to a scratch
+    /// clone from one applied in place, so it cannot pin the pre-flight
+    /// planner's byte-safety contract at all (measured -- reverting the scratch
+    /// clone left every assertion green against the divergent variant). This
+    /// one drops one of the two carriers and then returns `false`, which is the
+    /// actual hazard: an in-place transform on that path hands its caller a
+    /// half-mutated body while reporting it did nothing.
+    ///
+    /// Gated to `test` alone rather than `not(debug_assertions)` too, because
+    /// the byte-safety property it exists to pin holds in every build.
+    #[cfg(test)]
+    PartialDropForTests,
+    /// Test-only surface that reports a SUCCESSFUL removal while its own
+    /// presence predicate still reports the field present.
+    ///
+    /// The third distinct shape, and the only one that reaches the pre-flight
+    /// planner's POST-CONDITION branch: `PartialDropForTests` fails the
+    /// `drop_from` check and never gets that far, and the grounded surface
+    /// passes both. Without this variant the post-condition is unreachable, and
+    /// an unreachable safety check is one whose removal no test would notice.
+    ///
+    /// It removes nothing and returns `true`, which is the hazard in question:
+    /// a transform claiming success over a field the request still carries
+    /// would have the planner report `field_preflight_drop` for a body that
+    /// still emits the field to the upstream.
+    #[cfg(test)]
+    ClaimsRemovalForTests,
 }
 
 impl FieldSurface {
@@ -115,7 +145,7 @@ impl FieldSurface {
     /// attempt does not carry is not repairable by dropping it, and a
     /// request that mutates nothing must not claim a guard slot, spend
     /// budget, or learn.
-    fn present_in(&self, req: &ChatRequest) -> bool {
+    pub(super) fn present_in(&self, req: &ChatRequest) -> bool {
         match self {
             Self::AnthropicThinkingDisplay => {
                 req.routectl_internal.anthropic_thinking_display.is_some()
@@ -123,11 +153,17 @@ impl FieldSurface {
             }
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => true,
+            #[cfg(test)]
+            Self::PartialDropForTests => req.routectl_internal.anthropic_thinking_display.is_some(),
+            // Always present: that is the point -- a successful drop still
+            // leaves this surface readable.
+            #[cfg(test)]
+            Self::ClaimsRemovalForTests => true,
         }
     }
 
     /// Drop this surface from `req`, returning whether anything was removed.
-    fn drop_from(&self, req: &mut ChatRequest) -> bool {
+    pub(super) fn drop_from(&self, req: &mut ChatRequest) -> bool {
         match self {
             Self::AnthropicThinkingDisplay => {
                 let carrier = req
@@ -144,6 +180,17 @@ impl FieldSurface {
             }
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => false,
+            #[cfg(test)]
+            Self::PartialDropForTests => {
+                // Mutates, then reports failure -- the hazard the scratch
+                // clone exists to contain.
+                req.routectl_internal.anthropic_thinking_display.take();
+                false
+            }
+            // Removes nothing and claims success -- the hazard the
+            // post-condition re-check exists to catch.
+            #[cfg(test)]
+            Self::ClaimsRemovalForTests => true,
         }
     }
 }
@@ -169,10 +216,25 @@ const FIELD_REPAIRS: &[(&str, FieldSurface)] = &[(
 /// row and therefore to no mutation. Returning the table's literal rather than
 /// the caller's string is what keeps upstream bytes out of every downstream
 /// consumer, including the operator-facing WARN.
-fn closed_table_row(path: &str) -> Option<(&'static str, FieldSurface)> {
+pub(super) fn closed_table_row(path: &str) -> Option<(&'static str, FieldSurface)> {
     FIELD_REPAIRS
         .iter()
         .find_map(|&(known, surface)| (known == path).then_some((known, surface)))
+}
+
+/// The closed table's first row whose surface `req` actually carries, or
+/// `None` when `req` carries none of them.
+///
+/// The single scan every pre-dispatch caller that needs "which grounded
+/// field, if any, does this request carry" shares -- [`Router::plan_field_carry`]
+/// inlines the same scan for its own admission; this is that scan pulled out
+/// so the pre-flight planner reads the identical table through the identical
+/// order rather than re-deriving it.
+pub(super) fn first_present_row(req: &ChatRequest) -> Option<(&'static str, FieldSurface)> {
+    FIELD_REPAIRS
+        .iter()
+        .find(|(_, surface)| surface.present_in(req))
+        .copied()
 }
 
 /// The request-side field-verdict feature keys `req` currently grounds.
@@ -512,10 +574,7 @@ impl Router {
         // actually carries. One row ships today, so "first" is total; the
         // table is scanned in source order so a later second row makes the
         // precedence a deliberate edit rather than an accident.
-        let (path, surface) = FIELD_REPAIRS
-            .iter()
-            .find(|(_, surface)| surface.present_in(attempt_req))
-            .copied()?;
+        let (path, surface) = first_present_row(attempt_req)?;
         // Read from the operator's own provider entry rather than from the
         // dispatch target: the suppression predicate keys on the configured
         // base URL, and the target carries none. The accessor answers only

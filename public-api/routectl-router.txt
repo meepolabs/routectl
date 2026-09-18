@@ -3790,6 +3790,7 @@ pub routectl_router::router::DispatchMeta::calib_estimated_tokens: core::option:
 pub routectl_router::router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::router::DispatchMeta::fallback_count: u32
+pub routectl_router::router::DispatchMeta::field_preflight: alloc::vec::Vec<routectl_router::router::FieldPreflight>
 pub routectl_router::router::DispatchMeta::field_repair: core::option::Option<routectl_router::router::FieldRepair>
 pub routectl_router::router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
 pub routectl_router::router::DispatchMeta::prefix_epoch_event: core::option::Option<i64>
@@ -3939,6 +3940,58 @@ impl<T> typenum::type_operators::Same for routectl_router::router::DispatchedStr
 pub type routectl_router::router::DispatchedStream::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::DispatchedStream where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::DispatchedStream::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::FieldPreflight
+pub routectl_router::router::FieldPreflight::acted: bool
+pub routectl_router::router::FieldPreflight::field_path: core::option::Option<&'static str>
+pub routectl_router::router::FieldPreflight::reason: &'static str
+pub routectl_router::router::FieldPreflight::state_key: alloc::string::String
+impl core::clone::Clone for routectl_router::router::FieldPreflight
+pub fn routectl_router::router::FieldPreflight::clone(&self) -> routectl_router::router::FieldPreflight
+impl core::fmt::Debug for routectl_router::router::FieldPreflight
+pub fn routectl_router::router::FieldPreflight::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::router::FieldPreflight
+impl core::marker::Send for routectl_router::router::FieldPreflight
+impl core::marker::Sync for routectl_router::router::FieldPreflight
+impl core::marker::Unpin for routectl_router::router::FieldPreflight
+impl core::marker::UnsafeUnpin for routectl_router::router::FieldPreflight
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::FieldPreflight
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::FieldPreflight
+impl<T, U> core::convert::Into<U> for routectl_router::router::FieldPreflight where U: core::convert::From<T>
+pub fn routectl_router::router::FieldPreflight::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::FieldPreflight where U: core::convert::Into<T>
+pub type routectl_router::router::FieldPreflight::Error = core::convert::Infallible
+pub fn routectl_router::router::FieldPreflight::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::FieldPreflight where U: core::convert::TryFrom<T>
+pub type routectl_router::router::FieldPreflight::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::FieldPreflight::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub type routectl_router::router::FieldPreflight::Owned = T
+pub fn routectl_router::router::FieldPreflight::clone_into(&self, &mut T)
+pub fn routectl_router::router::FieldPreflight::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflight::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::FieldPreflight where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::FieldPreflight where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::FieldPreflight where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub unsafe fn routectl_router::router::FieldPreflight::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::FieldPreflight
+pub fn routectl_router::router::FieldPreflight::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflight::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::FieldPreflight
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::FieldPreflight where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::FieldPreflight::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::FieldPreflight
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::FieldPreflight
+impl<T> typenum::type_operators::Same for routectl_router::router::FieldPreflight
+pub type routectl_router::router::FieldPreflight::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldPreflight where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::FieldPreflight::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FieldRepair
 pub routectl_router::router::FieldRepair::action: &'static str
 pub routectl_router::router::FieldRepair::field_path: &'static str
@@ -10006,6 +10059,7 @@ pub routectl_router::DispatchMeta::calib_estimated_tokens: core::option::Option<
 pub routectl_router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::DispatchMeta::fallback_count: u32
+pub routectl_router::DispatchMeta::field_preflight: alloc::vec::Vec<routectl_router::router::FieldPreflight>
 pub routectl_router::DispatchMeta::field_repair: core::option::Option<routectl_router::router::FieldRepair>
 pub routectl_router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
 pub routectl_router::DispatchMeta::prefix_epoch_event: core::option::Option<i64>

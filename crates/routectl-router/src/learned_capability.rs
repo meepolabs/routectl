@@ -2485,6 +2485,42 @@ impl LearnedCapabilityRegistry {
         }
     }
 
+    /// The resident entry's own incarnation when it is currently ACTING
+    /// under `generation`, or `None` when it is absent, lapsed, or the
+    /// generation may not read the key.
+    ///
+    /// Distinct from the barrier-generation `u64` [`Self::negative_state_in_generation`]
+    /// returns: this is the entry's OWN incarnation, the value a canary-quorum
+    /// snapshot is seeded and compared against, so a stale canary state left
+    /// over from a since-relearned incarnation can never be read as backing
+    /// the current verdict.
+    pub(crate) fn field_acting_incarnation_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> Option<u64> {
+        match self.guarded_read(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                let state = Self::negative_state_in(entries, &key, now);
+                (state, entries.get(&key).map(|e| e.incarnation))
+            },
+        ) {
+            GenerationOutcome::Applied {
+                value: (NegativeState::Acting, Some(incarnation)),
+                ..
+            } => Some(incarnation),
+            _ => None,
+        }
+    }
+
     /// Lapse an entry into a single re-probe on behalf of `generation`, under
     /// the same atomic guard. A stale catalog-scoped expiry is refused: the
     /// entry belongs to a catalog revision the daemon has left, so resetting its
