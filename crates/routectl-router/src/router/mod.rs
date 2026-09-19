@@ -2792,3 +2792,7 @@ mod capability_purge_tests;
 #[cfg(test)]
 #[path = "field_verdict_observability_tests.rs"]
 mod field_verdict_observability_tests;
+
+#[cfg(test)]
+#[path = "field_canary_settlement_tests.rs"]
+mod field_canary_settlement_tests;

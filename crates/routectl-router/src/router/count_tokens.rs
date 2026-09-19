@@ -405,7 +405,11 @@ impl Router {
         // the remote count dispatches it, and every local read of it (the
         // calibration re-stamp on the replay-strip branch below) measures
         // that same body rather than an unplanned one.
-        let (preflighted_req, field_preflight) = self.plan_field_preflight(
+        // The plan is held rather than discarded so the modified-request
+        // accounting guard lives for this seat's whole attempt loop; a token
+        // count never claims a canary (the surface is excluded upstream of the
+        // cadence tick), so there is no settlement to owe here.
+        let (preflighted_req, field_preflight, _field_preflight_plan) = self.plan_field_preflight(
             &attempt_req,
             &target,
             DispatchSurface::CountTokens,

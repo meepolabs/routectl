@@ -411,10 +411,18 @@ fn success_response() -> ChatResponse {
 }
 
 /// Plan one decision for `state_key`'s target, from `req`.
+///
+/// The returned plan is DROPPED immediately, which is correct for every case
+/// here: these tests assert the decision, and a canary plan's own settlement is
+/// the subject of `field_canary_settlement_tests` instead. A cadence that came
+/// due inside one of these calls therefore settles inconclusive on the drop,
+/// which moves no verdict.
 fn plan(router: &Router, req: &ChatRequest, state_key: &str) -> (ChatRequest, FieldPreflight) {
     let target = target_for(router, state_key, "p0");
     let budget = RepairBudget::per_request();
-    router.plan_field_preflight(req, &target, DispatchSurface::Complete, &budget)
+    let (planned, decision, _plan) =
+        router.plan_field_preflight(req, &target, DispatchSurface::Complete, &budget);
+    (planned, decision)
 }
 
 /// Drive `fut` to completion on a current-thread runtime WITH timers.
@@ -1680,7 +1688,7 @@ fn the_state_key_is_sanitized_on_every_record() {
     );
     let budget = RepairBudget::per_request();
 
-    let (_planned, decision) =
+    let (_planned, decision, _plan) =
         router.plan_field_preflight(&req_on(ALIAS), &target, DispatchSurface::Complete, &budget);
 
     // This record is a NON-acting one (no verdict planted), which is the tier
@@ -1709,7 +1717,7 @@ fn the_state_key_is_sanitized_on_every_record() {
     // assertion -- a sanitizer on one site and not the other is exactly the
     // drift this pins.
     plant_eligible(&router, HOSTILE);
-    let (_planned, acting) =
+    let (_planned, acting, _acting_plan) =
         router.plan_field_preflight(&req_on(ALIAS), &target, DispatchSurface::Complete, &budget);
     assert!(acting.acted, "premise: the acting site is now reached");
     assert!(!acting.state_key.contains('\n'));
