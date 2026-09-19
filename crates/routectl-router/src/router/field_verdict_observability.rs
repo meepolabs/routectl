@@ -14,7 +14,18 @@ use super::Router;
 ///
 /// Read fresh from the live [`Router`] on every call rather than cached, so
 /// a status/doctor read never lags the counters it reports.
+///
+/// `#[non_exhaustive]`: a growth type -- each new observable the field pipeline
+/// gains lands here as another counter, so adding one stays a non-breaking
+/// change for readers. Adding one DOES oblige updating the places that enumerate
+/// the counters by hand, none of which compilation will force: the status
+/// reporter (`log_field_verdict_snapshot` in the CLI), the `rc_field_*` table in
+/// `docs/LOGGING.md`, and the CODEMAP passages describing this set
+/// (`rg -i field_repair_counters docs/CODEMAP.md` -- several passages describe
+/// it, so grep for them rather than trusting a remembered list). Miss them and
+/// the counter exists but is never reported and nowhere documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FieldRepairCounters {
     /// Cumulative fired envelope-field repairs.
     pub repair_attempted: u64,
@@ -22,6 +33,19 @@ pub struct FieldRepairCounters {
     pub repair_succeeded: u64,
     /// Cumulative envelope-field verdicts persisted after a confirmed repair.
     pub verdicts_learned: u64,
+    /// Requests currently riding on a verdict no canary has re-confirmed yet,
+    /// summed over every resident identity -- the OUTSTANDING half of the
+    /// wrong-repair alarm.
+    ///
+    /// Exposure that might later be disproved. Reported beside the lifetime
+    /// total below rather than alone, because either number on its own reads as
+    /// the other.
+    pub outstanding_unconfirmed: u64,
+    /// Lifetime count of requests that applied a pre-flight repair a canary
+    /// later DISPROVED. Monotonic, and counts REQUESTS AFFECTED rather than
+    /// canary attempts: one disproof of a verdict that had repaired forty
+    /// requests charges forty.
+    pub disproved_requests: u64,
 }
 
 impl Router {
@@ -29,10 +53,13 @@ impl Router {
     /// surfaces to log at INFO. `&self` delegate over the private metrics
     /// counters, mirroring [`Router::learned_capability_snapshot`].
     pub fn field_repair_counters(&self) -> FieldRepairCounters {
+        let canaries = self.field_verdicts().canaries();
         FieldRepairCounters {
             repair_attempted: self.metrics.field_repair_attempted_total(),
             repair_succeeded: self.metrics.field_repair_succeeded_total(),
             verdicts_learned: self.metrics.field_verdicts_learned_total(),
+            outstanding_unconfirmed: canaries.outstanding_unconfirmed_total(),
+            disproved_requests: canaries.disproved_requests_total(),
         }
     }
 }

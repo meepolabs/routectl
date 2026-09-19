@@ -997,6 +997,366 @@ fn a_bedrock_target_cannot_acquire_a_field_guard_for_a_dotted_path() {
     assert!(reg.admit_provisional(&single, REMOTE_BASE, 1, t0).is_some());
 }
 
+// --- canary suspension gates eligibility ---
+
+/// Plant the ONE state `preflight_eligible` may authorize: a resident acting
+/// negative whose own incarnation carries an acknowledged confirmation.
+fn plant_eligible(reg: &FieldVerdictRegistry, k: &FieldVerdictKey, now: Instant) {
+    plant_acting_negative(reg.learned(), k, now);
+    let incarnation = reg.learned().resident_incarnation_for_tests(
+        k.state_key(),
+        k.capability_key(),
+        k.provider_kind(),
+    );
+    reg.canaries().acknowledge_confirmation(k, incarnation, 1);
+    assert!(
+        reg.preflight_eligible(k, reg.learned().generation(), now),
+        "fixture premise: the identity must start pre-flight eligible",
+    );
+}
+
+#[test]
+fn a_canary_disproved_identity_is_refused_pre_flight_before_its_clear_lands() {
+    // The window this closes is the one between a canary proving the verdict
+    // wrong and the durable clear that removes it -- a clear that can be
+    // REFUSED (a purge lease, a stale generation). While that is negotiated
+    // the resident row is still acting and still confirmed, so nothing else in
+    // the predicate refuses it; the suspension is the only thing that does.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+
+    // Act -- an unrepaired canary succeeded.
+    reg.canaries()
+        .claim_canary(
+            &k,
+            reg.canaries().snapshot(&k).expect("resident").incarnation,
+        )
+        .expect("claim admitted")
+        .settle(crate::field_canary::CanaryOutcome::Regressed);
+
+    // Assert
+    assert!(
+        reg.is_negative_acting(&k, t0),
+        "premise: the row is STILL resident and acting -- the clear has not run",
+    );
+    assert!(
+        !reg.preflight_eligible(&k, reg.learned().generation(), t0),
+        "a verdict a canary disproved must stop moving traffic at once, without \
+         waiting for the durable clear to be accepted",
+    );
+}
+
+/// A disproof whose removal ran but removed NOTHING must not drop the canary
+/// state. `Applied { value: false }` passes the generation barrier, so it is not
+/// a refusal, but it did not clear a verdict either -- and the settlement that
+/// preceded it has already suspended pre-flight and charged the alarm. Dropping
+/// the state here would lift that suspension for an identity whose row may still
+/// be resident under another writer, re-admitting traffic to a verdict a canary
+/// proved wrong.
+///
+/// Mutation check: move `self.canaries.reset(key)` above the `if !cleared`
+/// early return in `record_canary_disproof` and this test goes red.
+#[test]
+fn a_disproof_that_removed_nothing_keeps_the_identity_suspended() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+
+    // One request applied this verdict's repair, so the disproof has something
+    // to charge: without it the alarm assertion below would pass on zero.
+    drop(reg.canaries().begin_modified_request(&k, incarnation));
+
+    // The claim the disproof will settle. Settling is now part of the disproof
+    // itself, so it is handed over rather than consumed here.
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, incarnation)
+        .expect("claim admitted");
+    // Remove the row out from under the disproof, so its own guarded removal
+    // finds nothing resident: Applied, but with `value: false`.
+    assert!(
+        reg.learned()
+            .remove_keyed(&k.state_key, &k.capability_key, &k.provider_kind),
+        "fixture premise: the row was resident before this removal",
+    );
+
+    let cleared = reg.record_canary_disproof(&k, claim, reg.learned().generation());
+
+    assert!(
+        cleared.is_none(),
+        "no row was removed, so no clear event may ride out to the ledger",
+    );
+    let snap = reg
+        .canaries()
+        .snapshot(&k)
+        .expect("the canary state must survive a removal that removed nothing");
+    assert!(
+        snap.preflight_suspended,
+        "the suspension the settlement set must still stand",
+    );
+    // NOT asserted here: that the identity is refused pre-flight. The row was
+    // removed to manufacture this case, so that assertion would hold with or
+    // without the retained state -- it cannot fail, so it is not evidence.
+    // What the retention actually protects is the accounting below.
+    assert_eq!(
+        snap.modified_since_confirmation, 0,
+        "the settlement transferred the tally rather than copying it",
+    );
+    assert_eq!(
+        reg.canaries().disproved_requests_total(),
+        1,
+        "and the request the disproved verdict rewrote stays charged to the \
+         lifetime alarm, which dropping the state would have discarded",
+    );
+}
+
+/// A confirmation REFUSED by the guarded mutation vouches for nothing, so the
+/// claim must settle INCONCLUSIVE, not Confirmed. Confirmed zeroes
+/// `modified_since_confirmation` -- the count of requests the verdict has
+/// already rewritten -- and a later disproof charges that tally to the lifetime
+/// alarm. Zeroing it on a confirmation that never persisted silently forgives
+/// every request the verdict modified.
+///
+/// Mutation check: settle `Confirmed` on the refusal arm of
+/// `record_canary_confirmation` and this goes red on the FIRST assertion to
+/// fail, `last_outcome` (`Some(Confirmed)` vs `Some(Inconclusive)`); the tally
+/// and alarm assertions below it pin the consequence that outcome carries.
+#[test]
+fn a_refused_confirmation_preserves_the_affected_request_tally() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+
+    // Two requests applied this verdict's repair, so the tally stands at two.
+    let g1 = reg.canaries().begin_modified_request(&k, incarnation);
+    let g2 = reg.canaries().begin_modified_request(&k, incarnation);
+    drop(g1);
+    drop(g2);
+    assert_eq!(
+        reg.canaries()
+            .snapshot(&k)
+            .expect("resident")
+            .modified_since_confirmation,
+        2,
+        "fixture premise: two requests were modified since the last confirmation",
+    );
+
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, incarnation)
+        .expect("claim admitted");
+    // A purge lease on the identity's own key refuses the confirmation's
+    // guarded observation: Reserved, so nothing is recorded.
+    let lease = match reg.learned().prepare_purge(
+        reg.learned().generation(),
+        k.state_key(),
+        k.capability_key(),
+        k.provider_kind(),
+    ) {
+        crate::learned_capability::PurgePreparation::Reserved(lease) => lease,
+        other => panic!("expected the resident row to reserve a lease, got {other:?}"),
+    };
+
+    let event =
+        reg.record_canary_confirmation(&k, claim, reg.learned().generation(), 400, vec![], t0);
+
+    assert!(
+        event.is_none(),
+        "premise: the lease refused the confirmation, so nothing persisted",
+    );
+    let snap = reg.canaries().snapshot(&k).expect("resident");
+    assert_eq!(
+        snap.last_outcome,
+        Some(crate::field_canary::CanaryOutcome::Inconclusive),
+        "a confirmation that did not persist proves nothing",
+    );
+    assert_eq!(
+        snap.modified_since_confirmation, 2,
+        "and the requests the verdict already rewrote are still charged against it",
+    );
+    assert!(!snap.canary_claimed, "the claim is released either way");
+
+    // The tally's purpose: a later disproof must charge exactly those requests.
+    reg.learned().restore_purge(lease);
+    reg.canaries()
+        .claim_canary(&k, incarnation)
+        .expect("reclaimable after an inconclusive settlement")
+        .settle(crate::field_canary::CanaryOutcome::Regressed);
+    assert_eq!(
+        reg.canaries().disproved_requests_total(),
+        2,
+        "the preserved tally is what the alarm charges when the verdict is disproved",
+    );
+}
+
+/// A settlement planned at a SUPERSEDED incarnation must not drag a newer
+/// resident lifecycle backward. The carry moves the identity's incarnation, so
+/// an unguarded version would rewrite a lifecycle this canary never tested --
+/// and reseed its cadence and confirmation state with it.
+///
+/// Mutation check: drop the `entry.incarnation != planned_incarnation` guard
+/// from `settle_confirmed_and_carry` and this goes red.
+#[test]
+fn a_stale_planned_incarnation_cannot_move_a_newer_lifecycle() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let stale_incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, stale_incarnation)
+        .expect("claim admitted");
+
+    // The identity moves to a new lifecycle while this canary is in flight.
+    let fresh_incarnation = stale_incarnation + 7;
+    reg.canaries()
+        .acknowledge_confirmation(&k, fresh_incarnation, 3);
+
+    claim.settle_confirmed_and_carry(fresh_incarnation + 99);
+
+    let snap = reg.canaries().snapshot(&k).expect("resident");
+    assert_eq!(
+        snap.incarnation, fresh_incarnation,
+        "the stale settlement must not move the resident lifecycle",
+    );
+    assert_eq!(
+        snap.confirmations, 3,
+        "nor reseed the confirmation count the fresh lifecycle acknowledged",
+    );
+    assert_eq!(
+        snap.last_outcome, None,
+        "and it records no outcome against a lifecycle it never tested",
+    );
+}
+
+/// A suspension retained because the clear removed nothing is STICKY: a relearn
+/// of the same identity does NOT lift it, and this pins that real behavior rather
+/// than an aspirational one.
+///
+/// Learned incarnations are per-entry and start at zero, so a row removed and
+/// relearned comes back on the SAME incarnation the suspension was recorded
+/// against. The monotonic admission reads that as `Current`, not `Newer`, so
+/// nothing is reseeded. The documented recovery paths are a clear that actually
+/// applies, a completed operator purge, or a restart's cold rebuild -- and the
+/// last assertion here exercises the `reset` those all funnel through.
+#[test]
+fn a_retained_suspension_survives_a_relearn_until_the_state_is_dropped() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let disproved_incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+
+    // Disprove the verdict, then have the clear remove nothing: the suspension
+    // is retained against the incarnation it disproved.
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, disproved_incarnation)
+        .expect("claim admitted");
+    assert!(
+        reg.learned()
+            .remove_keyed(&k.state_key, &k.capability_key, &k.provider_kind),
+        "fixture premise: the row was resident before this removal",
+    );
+    assert!(
+        reg.record_canary_disproof(&k, claim, reg.learned().generation())
+            .is_none(),
+        "premise: the clear removed nothing, so the suspension is retained",
+    );
+
+    // A production relearn: a fresh acting negative for the same identity,
+    // through the same import seam real carry-over uses.
+    plant_acting_negative(reg.learned(), &k, t0);
+    let relearned = reg.learned().resident_incarnation_for_tests(
+        k.state_key(),
+        k.capability_key(),
+        k.provider_kind(),
+    );
+    assert_eq!(
+        relearned, disproved_incarnation,
+        "premise, and the whole point: a relearn reuses the incarnation, so it is \
+         not a newer lifecycle and reseeds nothing",
+    );
+    reg.canaries().acknowledge_confirmation(&k, relearned, 1);
+
+    assert!(
+        reg.canaries()
+            .snapshot(&k)
+            .expect("resident")
+            .preflight_suspended,
+        "the suspension SURVIVES the relearn: it is lifted by dropping the state, \
+         not by learning the identity again",
+    );
+    assert!(
+        !reg.preflight_eligible(&k, reg.learned().generation(), t0),
+        "so the identity stays out of pre-flight -- the safe direction, since \
+         reactive forward-and-repair still serves every request",
+    );
+
+    // The documented recovery: dropping the state outright, which a clear that
+    // applies, an operator purge, and a cold rebuild all funnel through.
+    reg.canaries().reset(&k);
+    reg.canaries().acknowledge_confirmation(&k, relearned, 1);
+
+    assert!(
+        reg.preflight_eligible(&k, reg.learned().generation(), t0),
+        "and pre-flight returns once the state is dropped and the identity is \
+         confirmed afresh",
+    );
+}
+
+#[test]
+fn a_confirmed_canary_leaves_the_identity_pre_flight_eligible() {
+    // The positive control for the suspension above: the same settlement seam
+    // on the CONFIRMED arm must leave the verdict acting, or the assertion
+    // above would pass against a settlement that suspends unconditionally.
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+
+    reg.canaries()
+        .claim_canary(
+            &k,
+            reg.canaries().snapshot(&k).expect("resident").incarnation,
+        )
+        .expect("claim admitted")
+        .settle(crate::field_canary::CanaryOutcome::Confirmed);
+
+    assert!(
+        reg.preflight_eligible(&k, reg.learned().generation(), t0),
+        "a re-confirmed verdict keeps acting",
+    );
+}
+
+#[test]
+fn an_inconclusive_canary_leaves_the_identity_pre_flight_eligible() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+
+    reg.canaries()
+        .claim_canary(
+            &k,
+            reg.canaries().snapshot(&k).expect("resident").incarnation,
+        )
+        .expect("claim admitted")
+        .settle(crate::field_canary::CanaryOutcome::Inconclusive);
+
+    assert!(
+        reg.preflight_eligible(&k, reg.learned().generation(), t0),
+        "an outcome that proved nothing must not suspend a verdict",
+    );
+}
+
 // --- emission ---
 
 #[test]
@@ -1680,5 +2040,227 @@ fn a_purge_lease_blocks_a_concurrent_clear_and_leaves_the_entry_resident() {
             .is_some(),
         "the same lapsed identity must admit again once the purge lease is \
          released",
+    );
+}
+
+/// A claim whose lifecycle was carried forward while it was in flight must
+/// settle with NO observation: observing refreshes the learned row's decay and
+/// increments its `observations`, so a straggler reaching that call would
+/// corroborate a lifecycle it never tested.
+///
+/// Mutation check: delete the `owns_current_incarnation` gate at the top of
+/// `record_canary_confirmation` and this goes red on the observation count.
+#[test]
+fn a_stale_claim_confirms_nothing_and_observes_nothing() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let planned = reg.canaries().snapshot(&k).expect("resident").incarnation;
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, planned)
+        .expect("claim admitted");
+
+    let before = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|e| e.state_key == k.state_key() && e.feature_key == k.capability_key())
+        .expect("fixture premise: the verdict row is resident");
+
+    // The identity is carried forward while this canary is still out.
+    reg.canaries().acknowledge_confirmation(&k, planned + 1, 1);
+
+    let event =
+        reg.record_canary_confirmation(&k, claim, reg.learned().generation(), 400, vec![], t0);
+
+    assert!(
+        event.is_none(),
+        "a stale claim rides no learn row out to the ledger",
+    );
+    let after = reg
+        .learned()
+        .snapshot()
+        .into_iter()
+        .find(|e| e.state_key == k.state_key() && e.feature_key == k.capability_key())
+        .expect("the row is untouched, not removed");
+    assert_eq!(
+        after.observations, before.observations,
+        "the stale confirmation must not increment the row's observations",
+    );
+    assert_eq!(
+        after.expires_at, before.expires_at,
+        "nor refresh its decay deadline",
+    );
+    let snap = reg.canaries().snapshot(&k).expect("resident");
+    assert_eq!(
+        snap.incarnation,
+        planned + 1,
+        "the carried lifecycle is left exactly where it was",
+    );
+    assert_eq!(
+        snap.last_outcome, None,
+        "and no outcome is recorded against a lifecycle this canary never tested",
+    );
+}
+
+/// A DISPROOF from a superseded canary must touch nothing: it must not remove a
+/// row, and it must not free the identity's canary slot.
+///
+/// The removal is the first exposure: presenting only a generation token, it
+/// names the identity without naming the lifecycle, so it removes whatever row is
+/// currently resident. That row belongs to the lifecycle that REPLACED the one
+/// this canary tested, and a canary that proved a superseded verdict wrong has no
+/// evidence about it. The removal is therefore gated on the claim's ownership,
+/// which is why the claim is handed to the registry rather than settled at the
+/// call site.
+///
+/// The SLOT is the second exposure, and the ordering inside the settlement is
+/// what closes it: the release must come BELOW the ownership check, or a stale
+/// settlement frees the claim a live canary of the current lifecycle holds and
+/// admits the second concurrent canary the slot exists to prevent. This test
+/// holds exactly that live claim, so the slot assertions can fail -- without it
+/// `canary_claimed` reads `false` whether or not the stale path touched it, and
+/// the check would be vacuous.
+///
+/// Deterministic rather than timing-based: the carry is performed directly while
+/// the claim is held, which is exactly the interleaving a real race produces.
+///
+/// Mutation checks, two, each red on a different assertion: (a) drop the
+/// `settle_disproved_if_current` gate at the top of `record_canary_disproof` --
+/// red on the clear event; (b) move `entry.canary_claimed = false` ABOVE the
+/// `entry.incarnation != incarnation` check in
+/// `FieldCanaryRegistry::settle_disproved_if_current` -- red on the retained
+/// slot.
+#[test]
+fn a_stale_disproof_cannot_clear_the_current_lifecycles_verdict() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let stale_incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, stale_incarnation)
+        .expect("claim admitted");
+
+    // A request the CURRENT lifecycle repaired, so a wrongly-charged alarm would
+    // be visible rather than passing on zero.
+    let carried_incarnation = stale_incarnation + 5;
+    reg.canaries()
+        .acknowledge_confirmation(&k, carried_incarnation, 1);
+    drop(
+        reg.canaries()
+            .begin_modified_request(&k, carried_incarnation)
+            .expect("accounts at the carried incarnation"),
+    );
+    // A LIVE canary of the carried lifecycle, holding the identity's single slot.
+    // Without it the slot assertions below would be vacuous: the flag reads
+    // `false` whether or not the stale settlement touched it.
+    let live_claim = reg
+        .canaries()
+        .claim_canary(&k, carried_incarnation)
+        .expect("the carried lifecycle claims its own slot");
+    let alarm_before = reg.canaries().disproved_requests_total();
+
+    let cleared = reg.record_canary_disproof(&k, claim, reg.learned().generation());
+
+    assert!(
+        cleared.is_none(),
+        "a superseded canary removed nothing, so no clear event may ride out to \
+         the ledger and no warm rebuild is told to forget a live verdict",
+    );
+    assert!(
+        reg.is_negative_acting(&k, t0),
+        "and the current lifecycle's row is still resident and acting",
+    );
+    let snap = reg
+        .canaries()
+        .snapshot(&k)
+        .expect("the carried lifecycle's canary state must survive");
+    assert_eq!(
+        snap.incarnation, carried_incarnation,
+        "on the lifecycle that replaced the tested one",
+    );
+    assert!(
+        !snap.preflight_suspended,
+        "a lifecycle nothing disproved must not be suspended",
+    );
+    assert_eq!(
+        snap.modified_since_confirmation, 1,
+        "nor its exposure transferred out from under it",
+    );
+    assert_eq!(
+        reg.canaries().disproved_requests_total(),
+        alarm_before,
+        "nor charged to the lifetime alarm",
+    );
+    assert!(
+        snap.canary_claimed,
+        "and the LIVE canary of the carried lifecycle still holds the slot: a \
+         stale settlement that freed it would admit a second concurrent canary \
+         for one identity, which is exactly what the slot exists to prevent",
+    );
+    assert!(
+        reg.canaries()
+            .claim_canary(&k, carried_incarnation)
+            .is_none(),
+        "so a further request for the current lifecycle is still refused the slot",
+    );
+    // Held until here: the stale disproof above must not free a slot it does not
+    // own.
+    drop(live_claim);
+}
+
+/// The ownership gate must not turn into a blanket refusal: a disproof whose
+/// claim DOES own the current lifecycle still suspends pre-flight, charges the
+/// alarm, and durably clears the verdict -- in that order.
+///
+/// The paired positive control for the gate above. Without it, a
+/// `record_canary_disproof` that simply returned `None` would satisfy the stale
+/// test while disabling disproof entirely.
+///
+/// Mutation check: replace the ownership gate's condition with `false` (so every
+/// disproof is treated as stale) and this goes red on the clear event.
+#[test]
+fn an_owning_disproof_still_suspends_charges_and_clears() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+    drop(
+        reg.canaries()
+            .begin_modified_request(&k, incarnation)
+            .expect("accounts at the resident incarnation"),
+    );
+    let claim = reg
+        .canaries()
+        .claim_canary(&k, incarnation)
+        .expect("claim admitted");
+    let alarm_before = reg.canaries().disproved_requests_total();
+
+    let cleared = reg.record_canary_disproof(&k, claim, reg.learned().generation());
+
+    assert!(
+        cleared.is_some(),
+        "an owning disproof durably clears the verdict its canary proved wrong, \
+         and hands the event out for the ledger",
+    );
+    assert!(
+        !reg.is_negative_acting(&k, t0),
+        "so the next request for this identity forwards unchanged",
+    );
+    assert_eq!(
+        reg.canaries().disproved_requests_total(),
+        alarm_before + 1,
+        "the request the wrong verdict modified is charged to the lifetime alarm, \
+         which the suspend-and-transfer step must have run BEFORE the clear \
+         dropped the identity's state",
+    );
+    assert!(
+        reg.canaries().snapshot(&k).is_none(),
+        "and a clear that actually removed a row drops the canary state with it",
     );
 }

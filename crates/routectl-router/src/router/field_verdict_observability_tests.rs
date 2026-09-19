@@ -186,6 +186,8 @@ fn field_repair_counters_starts_at_zero() {
     assert_eq!(counters.repair_attempted, 0);
     assert_eq!(counters.repair_succeeded, 0);
     assert_eq!(counters.verdicts_learned, 0);
+    assert_eq!(counters.outstanding_unconfirmed, 0);
+    assert_eq!(counters.disproved_requests, 0);
 }
 
 /// The counters snapshot reflects the live metrics the moment they move --
@@ -203,4 +205,78 @@ fn field_repair_counters_reflects_the_live_metrics_after_they_move() {
     assert_eq!(counters.repair_attempted, 1);
     assert_eq!(counters.repair_succeeded, 1);
     assert_eq!(counters.verdicts_learned, 1);
+}
+
+/// The two wrong-repair ALARM halves come from the shared canary registry rather
+/// than the metrics counters, so they need their own drive: this reads them back
+/// through the same `field_repair_counters()` snapshot status/doctor call, after
+/// moving the registry the router actually owns.
+///
+/// Both halves are asserted NONZERO and are deliberately DIFFERENT numbers, so
+/// neither assertion can pass on the other's value and a snapshot that wired one
+/// field to the wrong source is caught.
+///
+/// Mutation checks, each red on its own named assertion: hardcode
+/// `outstanding_unconfirmed: 0` in `Router::field_repair_counters` -> red on the
+/// outstanding assertion; hardcode `disproved_requests: 0` -> red on the
+/// lifetime assertion; SWAP the two right-hand sources between the fields -> red
+/// on both, which is what the differing expected values buy (equal fixtures
+/// would let a swap pass).
+///
+/// The same swap one layer out -- between the two `rc_field_*` log field names in
+/// the CLI reporter -- is invisible here and in every trace assertion, so it is
+/// pinned by a source guard in that module
+/// (`each_alarm_log_field_reads_the_counter_it_is_named_for`).
+#[test]
+fn field_repair_counters_reports_both_nonzero_alarm_halves() {
+    let router = bare_router();
+    let canaries = router.field_verdicts().canaries();
+    let disproved_key = crate::field_verdict::FieldVerdictKey::new(
+        "anthropic-api:claude-sonnet-4-5",
+        THINKING_DISPLAY_PATH,
+        "anthropic-api",
+    )
+    .expect("a qualified path mints a key");
+    let live_key = crate::field_verdict::FieldVerdictKey::new(
+        "anthropic-api:claude-opus-4-1",
+        COMPUTER_USE_DISPLAY_PATH,
+        "anthropic-api",
+    )
+    .expect("a qualified path mints a key");
+
+    // Identity one: three repaired requests, then a canary DISPROVES the verdict,
+    // transferring all three into the lifetime alarm and leaving it holding none.
+    for _ in 0..3 {
+        drop(
+            canaries
+                .begin_modified_request(&disproved_key, 1)
+                .expect("accounts at the resident incarnation"),
+        );
+    }
+    canaries
+        .claim_canary(&disproved_key, 1)
+        .expect("claim admitted")
+        .settle(crate::field_canary::CanaryOutcome::Regressed);
+    // Identity two: two repaired requests nothing has disproved, so these stay
+    // OUTSTANDING. A different count from the three above on purpose.
+    for _ in 0..2 {
+        drop(
+            canaries
+                .begin_modified_request(&live_key, 1)
+                .expect("accounts at the resident incarnation"),
+        );
+    }
+
+    let counters = router.field_repair_counters();
+
+    assert_eq!(
+        counters.outstanding_unconfirmed, 2,
+        "the CURRENT half reports the exposure no canary has settled, and does \
+         not include the requests the disproof already transferred out",
+    );
+    assert_eq!(
+        counters.disproved_requests, 3,
+        "the LIFETIME half reports every request the disproved verdict had \
+         modified -- requests affected, not canary attempts",
+    );
 }

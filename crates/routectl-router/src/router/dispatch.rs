@@ -402,7 +402,7 @@ impl Router {
             // reactive repair has touched it yet at this point in the
             // loop, so it is exactly the base every fallback target
             // plans from independently.
-            let (preflighted_req, field_preflight) = self.plan_field_preflight(
+            let (preflighted_req, field_preflight, field_canary) = self.plan_field_preflight(
                 &attempt_req,
                 target,
                 DispatchSurface::Complete,
@@ -410,6 +410,17 @@ impl Router {
             );
             attempt_req = preflighted_req;
             meta.field_preflight.push(field_preflight);
+            // The canary plan and the modified-request accounting guard live
+            // for the whole chain ITERATION, not the attempt: a same-provider
+            // retry is still the same request riding the same decision, and a
+            // fallback hop replaces both by re-planning for the next target.
+            // Held in one binding so every exit path -- an early return, a
+            // `break 'chain`, a dropped future -- releases the claim and the
+            // in-flight count through RAII rather than through a settlement
+            // site somebody has to remember.
+            let mut field_canary = field_canary;
+            let mut canary_repair_attempted = false;
+            let mut canary_reject_status: u16 = 0;
             let provider_cfg = self.config.providers.get(provider_name);
             apply_context_reduction(
                 &self.config,
@@ -670,6 +681,29 @@ impl Router {
                                 meta.cleared_capabilities.extend(plan.settle_success());
                             }
                         }
+                        // Settle the re-verification CANARY. Two success shapes
+                        // and they mean opposite things: an UNREPAIRED success
+                        // proves the verdict wrong (the field the verdict said
+                        // was refused was accepted), while a success that
+                        // arrived only after this arm's same-field repaired
+                        // retry re-confirms it. The `canary_repair_attempted`
+                        // flag is the only thing that separates them, which is
+                        // why it is set exclusively by the repair branch below
+                        // and never inferred from the request's shape.
+                        if let Some(plan) = std::mem::take(&mut field_canary).into_canary() {
+                            if canary_repair_attempted {
+                                let features = super::field_repair::request_feature_keys(&req);
+                                meta.learned_capabilities.extend(plan.settle_confirmed(
+                                    self.field_verdicts(),
+                                    canary_reject_status,
+                                    features,
+                                    Instant::now(),
+                                ));
+                            } else {
+                                meta.cleared_capabilities
+                                    .extend(plan.settle_disproved(self.field_verdicts()));
+                            }
+                        }
                         self.observe_capabilities(&req, &resp, target, meta, Instant::now());
                         // Subscription-quota feed, the non-streaming half. The
                         // reading rides on the assembled response, and this arm
@@ -895,6 +929,47 @@ impl Router {
                             last_err = Some(e);
                             continue;
                         }
+                        // The CANARY's same-field repaired retry, and its
+                        // position is the whole point: a 400 is a terminal,
+                        // non-fallbackable class, so a retry placed after the
+                        // terminal handling below would never run and the
+                        // canary's own provoked rejection would reach the
+                        // client. The canary restored a field routectl itself
+                        // had been dropping, so the rejection it draws is one
+                        // routectl asked for -- it owes the request the repair
+                        // it would otherwise have applied pre-flight.
+                        //
+                        // No unrelated 4xx gains an exemption here: the branch
+                        // fires only when the rejection names the SAME closed-
+                        // table surface the canary restored, so an unrelated
+                        // caller error stays terminal exactly as it is for any
+                        // other request.
+                        if !canary_repair_attempted
+                            && let Some(status) = Self::canary_repaired_retry(
+                                &field_canary,
+                                &mut attempt_req,
+                                meta,
+                                &original_class,
+                                &e,
+                                target.provider_kind.unwrap_or(""),
+                            )
+                        {
+                            canary_repair_attempted = true;
+                            canary_reject_status = status;
+                            // A re-verification retry is a fixed correctness
+                            // branch, not a retry policy, so it takes no
+                            // backoff sleep.
+                            skip_replay_backoff = true;
+                            self.release_probe_slot(state_key);
+                            probe_guard.disarm();
+                            // Preserve the genuine rejection as last_err before
+                            // re-gating, so a re-gate refusal (CircuitOpen /
+                            // RPM) cannot surface the synthetic status-0 gate
+                            // error in its place.
+                            last_err = Some(e);
+                            continue;
+                        }
+
                         if let Some(body_free) =
                             replay_rejection_body_free(&e, &cf.class, provider_name)
                         {
@@ -1283,13 +1358,18 @@ impl Router {
                 }
             }
             // Envelope-field pre-flight (see `complete_inner`): same seam,
-            // `Stream` surface.
-            let (preflighted_req, field_preflight) = self.plan_field_preflight(
-                &attempt_req,
-                target,
-                DispatchSurface::Stream,
-                &repair_budget,
-            );
+            // `Stream` surface. The returned plan is held rather than
+            // discarded so the modified-request accounting guard lives for the
+            // whole chain iteration; a stream never claims a canary (the
+            // surface is excluded upstream of the cadence tick), so there is
+            // no settlement to owe here.
+            let (preflighted_req, field_preflight, _field_preflight_plan) = self
+                .plan_field_preflight(
+                    &attempt_req,
+                    target,
+                    DispatchSurface::Stream,
+                    &repair_budget,
+                );
             attempt_req = preflighted_req;
             meta.field_preflight.push(field_preflight);
             let provider_cfg = self.config.providers.get(provider_name);

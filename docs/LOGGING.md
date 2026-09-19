@@ -347,8 +347,14 @@ visible without polling metrics or reading the response body:
 | `rc_field_repair_attempted_total` | Same counter as the repair WARN section above |
 | `rc_field_repair_succeeded_total` | Same counter as the repair WARN section above |
 | `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above |
+| `rc_field_outstanding_unconfirmed_total` | CURRENT: requests riding on a verdict no canary has re-confirmed yet, summed over every resident identity. Rises and falls -- exposure that MIGHT later be disproved |
+| `rc_field_disproved_requests_total` | LIFETIME: requests that applied a repair a canary later DISPROVED. Monotonic, never falls (including across a clear or reload), and counts requests AFFECTED rather than canary attempts -- one disproof of a verdict that repaired forty requests charges forty |
 | `rc_acting_field_verdicts_total` | Count of learned rows currently steering dispatch (field-scoped, not cleared, not catalog-scoped) |
 | `rc_acting_field_verdicts` | One entry per acting row: `state_key`, `feature_key`, `phase`, `source` |
+
+The two alarm halves are reported TOGETHER deliberately: one is exposure
+that might yet be disproved, the other is exposure that was, and either
+number read alone reads as the other.
 
 The line never touches a panel's response body -- it is log-only
 provenance for an operator watching INFO, not a wire contract. Like the

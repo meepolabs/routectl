@@ -243,18 +243,39 @@ impl FieldVerdictRegistry {
     /// The shared canary/quorum registry, so downstream eligibility and
     /// canary-dispatch logic reads and mutates the same state this facade's
     /// settlements reconcile.
-    ///
-    /// Not yet read outside tests: the dispatch-side eligibility rule that
-    /// consumes it lands in a follow-up change; this module is state-only.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn canaries(&self) -> &Arc<FieldCanaryRegistry> {
         &self.canaries
     }
 
-    /// Whether `key` is currently pre-flight eligible: resident, ACTING,
-    /// and its incarnation has at least one acknowledged confirmation in
-    /// the shared canary registry.
+    /// Whether `key` is currently pre-flight eligible at all, discarding the
+    /// incarnation [`Self::preflight_eligible_incarnation`] returns.
+    ///
+    /// Test-only: the production planner needs the incarnation (a canary claim
+    /// and its settlement must carry the one the authorization was validated
+    /// against), so it calls the incarnation-returning form directly. Gated
+    /// rather than blanket-allowed, so a future production reader has to ungate
+    /// it deliberately and think about which of the two it wants.
+    #[cfg(test)]
+    #[must_use]
+    pub fn preflight_eligible(&self, key: &FieldVerdictKey, generation: u64, now: Instant) -> bool {
+        self.preflight_eligible_incarnation(key, generation, now)
+            .is_some()
+    }
+
+    /// Whether `key` is pre-flight eligible, plus the incarnation the decision
+    /// rests on -- `None` for every case that predicate refuses.
+    ///
+    /// The incarnation is what a canary claim and its later settlement must
+    /// carry: a settlement stamped with any other value would be indisputably
+    /// stale, and one stamped with a value read separately after this decision
+    /// could name an incarnation the authorization was never checked against.
+    /// Returning it from the same consistent (generation, incarnation) pair the
+    /// re-read validated is what keeps the two from disagreeing.
+    ///
+    /// ELIGIBLE means: resident, ACTING, not canary-suspended, and its
+    /// incarnation has at least one acknowledged confirmation in the shared
+    /// canary registry.
     ///
     /// Read-only, and deliberately NOT routed through [`Self::admit_provisional`]:
     /// that call claims the single-flight REACTIVE repair slot and refuses
@@ -294,7 +315,12 @@ impl FieldVerdictRegistry {
     /// landing after the return, and it does not need to -- the caller's
     /// decision is per-attempt and fails open.
     #[must_use]
-    pub fn preflight_eligible(&self, key: &FieldVerdictKey, generation: u64, now: Instant) -> bool {
+    pub fn preflight_eligible_incarnation(
+        &self,
+        key: &FieldVerdictKey,
+        generation: u64,
+        now: Instant,
+    ) -> Option<u64> {
         let acting_incarnation = |()| {
             self.learned.field_acting_incarnation_in_generation(
                 generation,
@@ -304,20 +330,285 @@ impl FieldVerdictRegistry {
                 now,
             )
         };
-        let Some(before) = acting_incarnation(()) else {
-            return false;
-        };
-        let confirmed = self
-            .canaries
-            .snapshot(key)
-            .is_some_and(|snap| snap.incarnation == before && snap.confirmations >= 1);
+        let before = acting_incarnation(())?;
+        // SUSPENSION, read before the confirmation: a canary that accepted the
+        // unrepaired field proved this verdict wrong, and the durable clear
+        // that removes it can be REFUSED (a purge lease, a stale generation).
+        // Until the row is actually gone it is still resident, still acting
+        // and still confirmed, so nothing else in this predicate would refuse
+        // it -- and every request admitted in that window is one more modified
+        // by a verdict already known to be false.
+        //
+        // Deliberately NOT incarnation-scoped, unlike the confirmation check
+        // below. Scoping it would be dead logic: a snapshot whose incarnation
+        // differs from the acting one already fails that check, so the comparison
+        // could never change an outcome.
+        //
+        // A retained suspension is therefore lifted only by dropping the
+        // identity's state outright, NOT by a relearn -- the residual case and
+        // its three recovery paths are spelled out on
+        // [`Self::record_canary_disproof`].
+        let snapshot = self.canaries.snapshot(key);
+        if snapshot.is_some_and(|snap| snap.preflight_suspended) {
+            return None;
+        }
+        let confirmed =
+            snapshot.is_some_and(|snap| snap.incarnation == before && snap.confirmations >= 1);
         if !confirmed {
-            return false;
+            return None;
         }
         between_eligibility_reads();
         // Re-read under the same generation: the confirmation above is only
         // authorization if the verdict it backs is STILL the acting one.
-        acting_incarnation(()) == Some(before)
+        (acting_incarnation(()) == Some(before)).then_some(before)
+    }
+
+    /// Persist a canary CONFIRMATION for `key` and SETTLE the caller's claim:
+    /// the tested field drew the same structured rejection unrepaired and the
+    /// repaired retry then succeeded, so the resident verdict is corroborated
+    /// afresh.
+    ///
+    /// Takes the claim by value because recording and settling are ONE
+    /// operation, not two a caller sequences. The confirmation's own
+    /// re-observation mints a new incarnation for the same verdict, and the
+    /// resident canary state moves onto it in the same critical section that
+    /// releases the claim -- see
+    /// [`FieldCanaryRegistry::settle_confirmed_and_carry`] for why a released
+    /// claim plus a not-yet-carried incarnation must never be observable.
+    ///
+    /// The observation that mints the incarnation necessarily precedes that
+    /// critical section, so a window exists in which the learned row is minted
+    /// and the canary state has not moved. Nothing reads across it destructively:
+    /// a request planned in that window carries the OLD incarnation and is
+    /// refused by the monotonic incarnation checks on every canary write path
+    /// rather than being allowed to reset the identity's state.
+    ///
+    /// A verdict whose canary state stays on the superseded incarnation is not
+    /// merely slower: pre-flight refuses it on the incarnation match, and the
+    /// reactive repair path refuses it too because the verdict is ACTING, so the
+    /// field reaches the upstream unrepaired and the request TERMINATES on the
+    /// rejection the verdict exists to avoid.
+    ///
+    /// Reuses the SAME registry observe call [`FieldRepairGuard::commit`] makes
+    /// -- one observation path, one event row shape -- and deliberately claims
+    /// no single-flight repair slot: the caller already holds this identity's
+    /// canary claim, which is what makes the confirmation single-flight. Routing
+    /// it through `admit_provisional` instead is impossible by construction,
+    /// since that call refuses an ACTING verdict, and a canary only ever runs on
+    /// one.
+    ///
+    /// Like `commit`, this is an IN-MEMORY admission: it returns the row for the
+    /// caller to drain to the ledger and does NOT advance the canary
+    /// confirmation count, which only a caller holding a durable writer
+    /// acknowledgment may do (see
+    /// [`FieldCanaryRegistry::acknowledge_confirmation`]).
+    ///
+    /// `None` for any refused guarded mutation -- Stale, Reserved, or Exhausted.
+    /// Nothing was recorded and no event may ride out, and the claim settles
+    /// INCONCLUSIVE rather than confirmed: a confirmation that did not persist
+    /// vouches for nothing, so the identity's `modified_since_confirmation`
+    /// tally must survive for a later disproof to charge to the alarm.
+    ///
+    /// `None` also for a claim whose incarnation has been SUPERSEDED, and that
+    /// check runs BEFORE the observation: observing refreshes the learned row's
+    /// decay and increments its `observations`, so a straggler reaching it would
+    /// corroborate a lifecycle it never tested. Such a claim only releases.
+    pub fn record_canary_confirmation(
+        &self,
+        key: &FieldVerdictKey,
+        claim: crate::field_canary::CanaryClaimGuard<'_>,
+        generation: u64,
+        upstream_status: u16,
+        request_features: Vec<String>,
+        now: Instant,
+    ) -> Option<CapabilityLearnEvent> {
+        // Ownership first: nothing observable may happen on behalf of a claim
+        // whose lifecycle has already been carried forward.
+        if !claim.owns_current_incarnation() {
+            tracing::debug!(
+                event = "field_canary_confirmation_stale",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                "canary confirmation abandoned: the identity moved to a new \
+                 incarnation while this canary was in flight"
+            );
+            drop(claim);
+            return None;
+        }
+        let observed = self.learned.observe_in_generation_with_observations(
+            generation,
+            &key.state_key,
+            &key.capability_key,
+            &key.provider_kind,
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            now,
+        );
+        let crate::learned_capability::GenerationOutcome::Applied {
+            value: (_, observations),
+            incarnation,
+            generation: persistence_generation,
+        } = observed
+        else {
+            tracing::debug!(
+                event = "field_canary_confirmation_refused",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                "canary confirmation refused by the generation barrier: nothing recorded"
+            );
+            // Nothing persisted, so nothing is vouched for: INCONCLUSIVE keeps
+            // the affected-request tally resident for a later disproof to charge.
+            claim.settle(crate::field_canary::CanaryOutcome::Inconclusive);
+            return None;
+        };
+        tracing::info!(
+            event = "field_canary_confirmed",
+            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            capability_key = %key.capability_key,
+            upstream_status,
+            observations,
+            "envelope-field verdict re-confirmed by a canary's repaired retry",
+        );
+        // Release the claim and move the lifecycle onto the incarnation this
+        // observation minted, in one critical section. The guard is settled
+        // through the carrying variant rather than the plain one, because the
+        // confirmed transition and the carry must not be separately observable.
+        claim.settle_confirmed_and_carry(incarnation);
+        Some(CapabilityLearnEvent {
+            persistence_generation,
+            incarnation,
+            state_key: key.state_key.clone(),
+            capability_key: key.capability_key.clone(),
+            provider_kind: key.provider_kind.clone(),
+            signal_tier: SignalTier::SelfIdentifying,
+            observations,
+            upstream_status,
+            remapped: false,
+            request_features,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+        })
+    }
+
+    /// Durably clear `key` because a canary DISPROVED its verdict: the field
+    /// the verdict said was refused was accepted unrepaired.
+    ///
+    /// Takes the claim by value because SETTLING and CLEARING are one operation.
+    /// The settlement is incarnation-scoped, but the removal names only the
+    /// identity -- no generation or incarnation token makes a guarded removal
+    /// select a lifecycle -- so a claim whose lifecycle was carried forward while
+    /// it was in flight would remove the row belonging to the lifecycle that
+    /// REPLACED the one it tested. A canary has evidence only about the verdict it
+    /// actually probed.
+    ///
+    /// The claim's settlement therefore reports whether it owned the current
+    /// lifecycle, and `None` comes back for a superseded one: it touches nothing
+    /// at all -- it suspends nothing, charges nothing, removes nothing, and does
+    /// not free the slot, which by then belongs to whatever canary the current
+    /// lifecycle is running.
+    ///
+    /// ORDER, for an owning claim: the settlement runs FIRST, because it is what
+    /// suspends pre-flight and transfers the affected-request tally into the
+    /// alarm, and both must be true before the durable clear is attempted -- the
+    /// clear can be refused, and a verdict known to be wrong must stop moving
+    /// traffic regardless.
+    ///
+    /// The removal itself is the same one [`FieldRepairGuard::clear`] performs,
+    /// for the same reason and through the same guarded call, so a disproof and an
+    /// accepted unrepaired reactive attempt cannot diverge in what they remove or
+    /// in what the ledger records. `Some` when a resident entry was actually
+    /// removed -- the caller drains it so a warm rebuild cannot resurrect the
+    /// verdict this canary disproved.
+    ///
+    /// The identity's canary state is dropped ONLY on a removal that actually
+    /// removed a row. Two distinct outcomes leave it resident, for the same
+    /// reason: a REFUSED removal (Stale, Reserved, Exhausted -- the guarded
+    /// mutation never ran) and an APPLIED removal that found nothing resident
+    /// (`Applied { value: false }`). In both, the settlement has already
+    /// suspended pre-flight for the identity and charged its affected-request
+    /// tally to the alarm; dropping the state would lift that suspension while
+    /// the row it describes may still be resident and still acting.
+    ///
+    /// A retained suspension is STICKY, and deliberately so -- but the residual
+    /// case is narrow and worth naming precisely, because a relearn does NOT
+    /// clear it on its own. Learned incarnations are per-entry and start at
+    /// zero, so a row removed and relearned typically returns on the SAME
+    /// incarnation the suspension was recorded against; the monotonic
+    /// admission then reads the relearn as `Current`, not `Newer`, and reseeds
+    /// nothing. The suspension is lifted only by dropping the state outright:
+    /// a clear that actually applies ([`Self::clear`] /
+    /// [`FieldRepairGuard::clear`]), a completed operator purge
+    /// (`Router::finalize_learned_capability_purge`), or a process restart,
+    /// whose cold rebuild seeds canary state afresh from the replayed ledger.
+    /// Residual exposure: an identity whose clear kept failing stays out of
+    /// pre-flight until one of those happens. That is the safe direction --
+    /// reactive forward-and-repair still serves every request -- but it is
+    /// stickiness, not self-healing, and a caller must not assume a relearn
+    /// restores pre-flight.
+    pub fn record_canary_disproof(
+        &self,
+        key: &FieldVerdictKey,
+        claim: crate::field_canary::CanaryClaimGuard<'_>,
+        generation: u64,
+    ) -> Option<CapabilityClearedEvent> {
+        // Ownership and the effects it authorizes, in one critical section:
+        // nothing durable may happen on behalf of a claim whose lifecycle was
+        // already carried forward.
+        if !claim.settle_disproved_if_current() {
+            tracing::debug!(
+                event = "field_canary_disproof_stale",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                "canary disproof abandoned: the identity moved to a new \
+                 incarnation while this canary was in flight"
+            );
+            return None;
+        }
+        let removed = self.learned.remove_keyed_in_generation(
+            generation,
+            &key.state_key,
+            &key.capability_key,
+            &key.provider_kind,
+        );
+        let crate::learned_capability::GenerationOutcome::Applied {
+            value: cleared,
+            incarnation,
+            generation: persistence_generation,
+        } = removed
+        else {
+            tracing::debug!(
+                event = "field_canary_clear_refused",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                "canary clear refused by the generation barrier: pre-flight stays \
+                 suspended for this identity"
+            );
+            return None;
+        };
+        if !cleared {
+            return None;
+        }
+        // Only a removal that ACTUALLY removed a row drops the canary state.
+        // `Applied { value: false }` means the guarded mutation ran but found
+        // nothing resident to remove, so the identity's suspension -- and the
+        // tally its disproof charged -- must stay exactly where the settlement
+        // put them.
+        self.canaries.reset(key);
+        tracing::info!(
+            event = "field_canary_disproved",
+            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            capability_key = %key.capability_key,
+            "envelope-field verdict cleared: a canary's unrepaired request was accepted",
+        );
+        Some(CapabilityClearedEvent {
+            persistence_generation,
+            incarnation,
+            state_key: key.state_key.clone(),
+            capability_key: key.capability_key.clone(),
+            provider_kind: key.provider_kind.clone(),
+        })
     }
 
     /// Claim the single-flight repair slot for `key` on a target reached at
@@ -835,7 +1126,7 @@ fn is_local_domain(domain: &str) -> bool {
 
 /// Production build: nothing sits between the two eligibility reads.
 ///
-/// The re-read in [`FieldVerdictRegistry::preflight_eligible`] closes a real
+/// The re-read in [`FieldVerdictRegistry::preflight_eligible_incarnation`] closes a real
 /// race, and a race is only demonstrably closed by a test that can land a
 /// mutation INSIDE the window. This seam is that interposition point and
 /// nothing else: the production body is empty, so the window is exactly as

@@ -645,15 +645,31 @@ impl Router {
         err: &Error,
         provider_kind: &str,
     ) -> bool {
+        Self::rejection_names_field_surface(plan.surface, native_class, err, provider_kind)
+    }
+
+    /// Whether the rejection `err`, natively classified as `native_class`,
+    /// names a closed-table row whose SURFACE is `surface`.
+    ///
+    /// THE single implementation of "did the upstream name this mutation", shared
+    /// by the reactive admission above and the canary's repaired retry (see
+    /// [`super::field_preflight`]). Two copies would be two answers to one
+    /// question, and the one that drifted would either repair over an unrelated
+    /// fault or decline a rejection it was built to handle.
+    ///
+    /// Compared on the surface rather than the path string: the surface is what
+    /// the drop acts on, and two rows sharing one surface would be the same
+    /// mutation under two identities.
+    pub(super) fn rejection_names_field_surface(
+        surface: FieldSurface,
+        native_class: &FailureClass,
+        err: &Error,
+        provider_kind: &str,
+    ) -> bool {
         let Some(named) = rejected_field_path(native_class, err, provider_kind) else {
             return false;
         };
-        // The rejection's row must be the row this plan holds the guard for, so
-        // a repair can never drop a field whose verdict identity belongs to a
-        // different row. Compared on the SURFACE rather than the path string:
-        // the surface is what the drop acts on, and two rows sharing one
-        // surface would be the same mutation under two identities.
-        closed_table_row(named).is_some_and(|(_, surface)| surface == plan.surface)
+        closed_table_row(named).is_some_and(|(_, row_surface)| row_surface == surface)
     }
 
     /// Record that the field repair fired for this request, for the single
@@ -738,7 +754,7 @@ const FIELD_REPAIR_EVENT: &str = "envelope_field_repaired";
 /// concurrently. That property is asserted rather than assumed
 /// (`the_injected_resolution_is_visible_inside_a_dispatch`).
 #[cfg(test)]
-pub(super) mod provisional {
+pub(in crate::router) mod provisional {
     use std::cell::RefCell;
 
     thread_local! {
@@ -752,14 +768,19 @@ pub(super) mod provisional {
 
     /// Make every field rejection on this thread resolve to `path` until the
     /// returned guard drops.
-    pub(super) fn inject(path: &str) -> Injection {
+    ///
+    /// Visible to the whole `router` module rather than to `field_repair`
+    /// alone: the canary settlement's coverage lives in a sibling sidecar and
+    /// needs the SAME seam, because a second injection point would be a second
+    /// thing a grounded parser has to displace.
+    pub(in crate::router) fn inject(path: &str) -> Injection {
         INJECTED_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_string()));
         Injection
     }
 
     /// Clears the thread's injection on drop, so one test cannot leak a
     /// resolution into another test that reuses its thread.
-    pub(super) struct Injection;
+    pub(in crate::router) struct Injection;
 
     impl Drop for Injection {
         fn drop(&mut self) {

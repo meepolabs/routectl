@@ -4047,7 +4047,9 @@ impl<T> typenum::type_operators::Same for routectl_router::router::FieldRepair
 pub type routectl_router::router::FieldRepair::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldRepair where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::FieldRepair::into_shared(self) -> Shared
-pub struct routectl_router::router::FieldRepairCounters
+#[non_exhaustive] pub struct routectl_router::router::FieldRepairCounters
+pub routectl_router::router::FieldRepairCounters::disproved_requests: u64
+pub routectl_router::router::FieldRepairCounters::outstanding_unconfirmed: u64
 pub routectl_router::router::FieldRepairCounters::repair_attempted: u64
 pub routectl_router::router::FieldRepairCounters::repair_succeeded: u64
 pub routectl_router::router::FieldRepairCounters::verdicts_learned: u64
@@ -10554,7 +10556,9 @@ impl<T> typenum::type_operators::Same for routectl_router::ElisionMark
 pub type routectl_router::ElisionMark::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ElisionMark where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ElisionMark::into_shared(self) -> Shared
-pub struct routectl_router::FieldRepairCounters
+#[non_exhaustive] pub struct routectl_router::FieldRepairCounters
+pub routectl_router::FieldRepairCounters::disproved_requests: u64
+pub routectl_router::FieldRepairCounters::outstanding_unconfirmed: u64
 pub routectl_router::FieldRepairCounters::repair_attempted: u64
 pub routectl_router::FieldRepairCounters::repair_succeeded: u64
 pub routectl_router::FieldRepairCounters::verdicts_learned: u64

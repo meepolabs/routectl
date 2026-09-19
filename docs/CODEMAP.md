@@ -2612,7 +2612,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
   target, surface, budget)` takes the request by shared reference and returns
-  an owned `(ChatRequest, FieldPreflight)` pair, so mutating the caller's
+  an owned `(ChatRequest, FieldPreflight, FieldPreflightPlan)` triple, so
+  mutating the caller's
   request is impossible by signature and every fallback target plans from the
   same original rather than from a sibling target's clone. Called from
   `complete_inner`, `stream_inner`, and `count_tokens_try_seat` at one
@@ -2629,7 +2630,43 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and is refused here) -> NOT `loopback_target_suppresses_minting` ->
   `FieldVerdictKey` -> NOT `override_forces_supported` for the identity's own
   capability key, through the same two-tier resolver the act and learn sides
-  share -> `FieldVerdictRegistry::preflight_eligible`.
+  share -> `FieldVerdictRegistry::preflight_eligible_incarnation`.
+  Past that point the CADENCE decides between two outcomes. Only
+  `DispatchSurface::Complete` ticks `FieldCanaryRegistry::tick_cadence`, and the
+  exclusion sits upstream of both the tick and the claim rather than filtering a
+  settlement: a stream or a token count that advanced the interval would consume
+  the slot a completion request is meant to fill, so the identity would be
+  re-verified on a surface whose outcome the walk cannot settle (no assembled
+  response on a stream, no envelope verdict from a count). On the hundredth
+  eligible complete request the tick trips and `claim_canary` is attempted; on a
+  successful claim the planner RESTORES the tested field -- returning a clone of
+  the unchanged original with `reason = canary_restored` and `acted = false`,
+  because claiming otherwise would be a false claim about the dispatched bytes --
+  and hands back `FieldPreflightPlan::Canary`. A trip whose claim is REFUSED (an
+  earlier interval's canary still in flight) repairs normally rather than
+  dispatching a second unrepaired request, which is what makes "exactly one
+  in-flight canary" hold under real concurrency.
+  `FieldPreflightPlan` is three-valued rather than a pair of booleans because the
+  three states own different state and settle differently: `Inert` (nothing
+  planned), `Repaired(ModifiedRequestGuard)` (the field was dropped; the guard is
+  held for its `Drop` alone, which is what keeps the identity's in-flight count
+  honest on every exit path), and `Canary(CanaryPlan)` (the arm owes exactly one
+  settlement). `CanaryPlan`'s own `Drop` settles `Inconclusive` when no outcome
+  was named -- a cancellation, a timeout, a dropped future, a walk leaving by an
+  unrouted path -- so RAII covers the claim rather than a settlement site somebody
+  has to remember; both `settle_confirmed` and `settle_disproved` HAND THE CLAIM
+  OVER to the registry rather than settling it locally, because in both cases the
+  settlement and the durable write it authorizes are one operation (the
+  confirmation needs the incarnation the write mints; the disproof must not clear
+  a row on a claim a carry already superseded).
+  `Router::canary_repaired_retry(plan, attempt_req, meta, native_class, err,
+  provider_kind)` is the canary's same-field repair, all-or-nothing like the
+  reactive `FieldRepairPlan::apply`, and it draws NO `RepairBudget`: that ceiling
+  pays for the chance a fresh rejection is repairable, while this retry is the
+  second half of a re-verification routectl itself scheduled. It reads the NATIVE
+  failure class, never the operator-remapped one, and shares
+  `Router::rejection_names_field_surface` with the reactive admission so "did the
+  upstream name this mutation" has one implementation rather than two answers.
   It applies the transform through `field_repair`'s own `FieldSurface::drop_from`
   rather than a second implementation, against a SCRATCH clone adopted only on
   a reported success plus a post-condition re-check, so a transform that
@@ -2638,7 +2675,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   outcome FAILS OPEN to a fresh clone of the unchanged original plus one
   closed-set reason token (`no_grounded_field` / `unsupported_lane` /
   `unattributable_target` / `masked_by_override` / `no_identity` /
-  `not_eligible` / `ambiguous_mutation`); the record carries only tokens, a
+  `not_eligible` / `ambiguous_mutation` / `canary_restored`); the record carries
+  only tokens, a
   code-authored path literal, a `sanitize_for_log`-sanitized state key (an
   operator-controlled `[models]` nickname, sanitized at EVERY construction
   site including the test driver), and a boolean, never upstream bytes. The
@@ -2664,7 +2702,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   boundary (multi-transform planning belongs to the prefix-impacting task,
   which also needs the opt-in and quorum this stage lacks), with the extension
   seam kept clean -- shared scan, scratch-clone transform, per-decision record.
-  Behavior lives in `src/router/field_preflight_tests.rs`
+  Behavior lives in `src/router/field_preflight_tests.rs` (the planning
+  decision) and `src/router/field_canary_settlement_tests.rs` (the cadence, the
+  three settlements, and the accounting)
+- `src/router/field_canary_settlement_tests.rs` -- behavioral coverage of the
+  re-verification canary through real dispatches, asserting on the mock seats'
+  RECORDED REQUEST BODIES rather than on decision records: "restores the field
+  under test" is a claim about what reached the upstream. Covers the cadence
+  number by dispatching all hundred requests (a seeded shortcut cannot pin the
+  count it skips), the stream / count_tokens exclusion at a countdown of one,
+  unrepaired-success clear plus the next request forwarding unchanged, the
+  same-field repaired retry preceding terminal-4xx handling (discriminated by the
+  client seeing `Ok` rather than the canary's own provoked 400), unrelated-4xx
+  and availability and failed-retry inconclusives, claim release on a dropped
+  future and across a reload, and exactly-one-canary under 64 concurrent requests
+  on a terminal non-retryable fixture (a retryable class re-dispatches the same
+  body, which is correct but makes attempts and requests differ)
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
@@ -2788,7 +2841,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::field_repair_counters() -> FieldRepairCounters` reads the same
   three atomics the repair WARN section of LOGGING.md documents
   (`repair_attempted`/`repair_succeeded`/`verdicts_learned`) without the
-  metrics-snapshot DEBUG line. Both are re-exported crate-root `pub` and
+  metrics-snapshot DEBUG line, plus the two wrong-repair alarm halves off the
+  shared canary registry (`outstanding_unconfirmed` /`disproved_requests`, see
+  `src/field_canary.rs`). Both halves are reported together deliberately: the
+  outstanding count is exposure that MIGHT later be disproved and the lifetime
+  total is exposure that WAS, so either number alone reads as the other. Both are
+  re-exported crate-root `pub` and
   consumed by `routectl-cli`'s `handlers::status::field_verdict_log` -- this
   module owns the "which learned rows count as acting" predicate so the
   cli-crate log and any future consumer cannot restate it differently
@@ -3229,13 +3287,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reconciliation is `FieldCanaryRegistry::acknowledge_confirmation` (see
   `src/field_canary.rs`), an explicit state-only API for a caller holding the
   durable ack; no such caller exists yet in this build.
-  `preflight_eligible(key, generation, now)` is the READ-ONLY predicate the
+  `preflight_eligible_incarnation(key, generation, now)` is the READ-ONLY
+  predicate the
   pre-flight planner (see `src/router/field_preflight.rs`) consults instead of
-  `admit_provisional`: resident and ACTING under the generation, plus at least
+  `admit_provisional`: resident and ACTING under the generation, NOT
+  canary-suspended, plus at least
   one acknowledged confirmation whose incarnation equals the ACTING entry's OWN
   incarnation (via `LearnedCapabilityRegistry::field_acting_incarnation_in_generation`
   and `FieldCanaryRegistry::snapshot`), so a count left over from a
-  since-relearned incarnation can never back the current verdict. The acting
+  since-relearned incarnation can never back the current verdict. It RETURNS
+  that incarnation (the `cfg(test)` `preflight_eligible` discards it): a canary
+  claim and its later settlement must carry the same incarnation the
+  authorization was validated against, so reading one separately afterwards
+  could name a lifecycle the decision never checked. The suspension check is
+  read FIRST among the canary facts -- a disproved verdict is still resident,
+  still acting and still confirmed until its durable clear lands, so nothing
+  else in the predicate would refuse it. The acting
   incarnation is read TWICE, and authorization requires it unchanged after the
   confirmation was observed: the two reads take different locks, so a clear,
   purge, lapse or relearn landing between them would otherwise yield a decision
@@ -3248,6 +3315,54 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a `field:` key is catalog-INDEPENDENT, so the barrier admits it from any
   generation -- this predicate is generation-TOLERANT for that key class by
   design, not generation-blind.
+  `record_canary_confirmation(key, claim, generation, status, features, now)` and
+  `record_canary_disproof(key, claim, generation)` are the canary's two persisting
+  settlements, reusing the SAME guarded `observe_in_generation_with_observations`
+  and `remove_keyed_in_generation` calls `commit` / `clear` make so a canary and
+  a reactive settlement cannot diverge in what they record or remove. Neither
+  claims a single-flight repair slot -- the caller already holds the identity's
+  canary claim, and `admit_provisional` refuses an ACTING verdict by
+  construction, which a canary only ever runs on. BOTH take that claim BY VALUE,
+  so each is one registry-owned operation the router never reaches through to
+  finish: the confirmation because it needs the incarnation its own observation
+  mints, the disproof because its removal names only the identity and would
+  otherwise clear the row of the lifecycle that REPLACED the tested one
+  (`CanaryClaimGuard::settle_disproved_if_current` reports ownership from the same
+  critical section that suspends pre-flight and charges the alarm, and a
+  superseded claim touches nothing, the slot included -- freeing it would release
+  the claim a live canary of the CURRENT lifecycle holds). The inconclusive
+  settlement still runs through
+  the guard's own `settle`, which is correct -- it authorizes no durable write.
+  A confirmation re-observes the row and so mints a NEW incarnation for the same
+  verdict, and `settle_confirmed_and_carry` releases the claim and moves the
+  resident state onto the minted incarnation under one lock acquisition, so the
+  release and the carry are never separately observable. The observation that
+  MINTS the incarnation necessarily precedes that section, so a window remains in
+  which the row is minted and canary state has not moved; a request planned in it
+  carries the old incarnation and is refused by the monotonic checks below rather
+  than being allowed to write. Keyed off the incarnation the canary was planned
+  at, and gated on `owns_current_incarnation` BEFORE the observation, so a
+  straggler neither refreshes the row's decay nor increments its `observations`.
+  The count is carried, never incremented: only a durable writer ack may raise
+  it. The IN-FLIGHT count is ZEROED rather than carried, because every guard still
+  outstanding was opened against the superseded incarnation and drops
+  incarnation-scoped -- carrying the number would leave a total no drop can ever
+  decrement. A refused confirmation (Stale / Reserved / Exhausted) settles
+  INCONCLUSIVE instead, preserving `modified_since_confirmation` for a later
+  disproof to charge -- a confirmation that did not persist vouches for nothing.
+  See `field_verdict.rs`'s own `record_canary_confirmation` doc for why a
+  stranded incarnation TERMINATES a request rather than merely slowing it.
+  The disproof drops the identity's canary state ONLY on a removal that actually
+  removed a row: both a REFUSED removal and an APPLIED one that found nothing
+  resident leave it, because dropping it would lift the suspension the settlement
+  just set while the row it describes may still be acting. That retained
+  suspension is STICKY and a relearn does NOT lift it -- learned incarnations are
+  per-entry and start at zero, so a relearned row typically returns on the same
+  incarnation and the monotonic admission reads it as current, reseeding nothing.
+  It is lifted by dropping the state: a clear that applies, a completed operator
+  purge, or a restart's cold rebuild. The eligibility predicate deliberately does
+  NOT compare incarnations on the suspension branch -- a stale snapshot already
+  fails its confirmation check, so the comparison would be dead logic.
   An operator purge lease on the guard's own key refuses `commit`/`clear` the
   same way through the shared `purge_leases` guard the lease reserved --
   `Reserved`, not `Stale` -- releasing the slot and mutating and emitting
@@ -3266,6 +3381,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   deliberately outside the contract -- no resolver enters dispatch. Inferring
   an address from a name's SHAPE was tried and removed as wrong in both
   directions; the anti-regression test pins those names as remote
+- `src/field_verdict_tests.rs` -- `include!`d unit coverage of the verdict
+  lifecycle: minting and clearing, the pre-flight eligibility predicate across
+  the quorum and the canary outcomes, and the refusal of a canary-disproved
+  identity in the window before its durable clear lands
 - `src/field_canary.rs` -- per-`FieldVerdictKey` canary and confirmation-quorum
   state, shared behind an `Arc` alongside `FieldVerdictRegistry`'s own
   in-flight set. STATE ONLY, one `Mutex<HashMap<FieldVerdictKey, CanaryState>>`
@@ -3280,16 +3399,45 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   holds that ack yet, so on live traffic the cold-rebuild seed below is the
   only writer that can raise the count. `snapshot(key) ->
   Option<CanaryStateSnapshot>` is the read side, consumed by
-  `FieldVerdictRegistry::preflight_eligible`.
+  `FieldVerdictRegistry::preflight_eligible_incarnation`.
+  `CanaryOutcome` is three-valued -- `Confirmed` (same rejection plus a
+  successful repaired retry), `Regressed` (the unrepaired field was accepted,
+  so the verdict is disproved), `Inconclusive` (anything that proved neither) --
+  and `settle_canary` routes each to a DIFFERENT set of state, which is why the
+  routing lives here rather than at the call site: `Confirmed` restarts the full
+  interval and zeroes `modified_since_confirmation` (those requests are now
+  vouched for), `Regressed` sets `preflight_suspended` and TRANSFERS that tally
+  into the monotonic `disproved_requests_total`, `Inconclusive` reschedules the
+  interval and moves neither. `preflight_suspended` is what stops a disproved
+  verdict routing traffic in the window before its durable clear -- which can be
+  refused -- and only `reset` lifts it. Two counts, deliberately not one:
+  `outstanding` falls on each guard's `Drop` (requests applying the repair right
+  now), `modified_since_confirmation` does not (requests the verdict has modified
+  since it was last confirmed) -- conflating them would report roughly zero
+  affected requests for every verdict. `outstanding_unconfirmed_total()` sums the
+  latter across every resident identity and `disproved_requests_total()` reads the
+  lifetime alarm; both are surfaced through `Router::field_repair_counters` (see
+  `src/router/field_verdict_observability.rs`). The alarm lives OUTSIDE the
+  per-key map because a disproved verdict's own state is dropped by the clear
+  that follows it, and it counts REQUESTS AFFECTED rather than canary attempts.
   `tick_cadence`, `begin_modified_request` (RAII `ModifiedRequestGuard`,
-  saturating rather than wrapping since the outstanding count is diagnostic,
-  not divided into anything), and `claim_canary` (RAII `CanaryClaimGuard`,
-  settling only if the guard's incarnation still matches the resident state,
-  so a stale settlement or an unsettled `Drop` both release without mutating
-  verdict-facing state) all `reseed_if_stale` the identity's slot when the
-  caller's incarnation differs from the resident one -- a fresh verdict
-  lifecycle for the same identity replaces the old cadence/claim/confirmation
-  state wholesale rather than patching it. `seed_from_rebuild(key,
+  saturating rather than wrapping since neither count is divided into anything),
+  and `claim_canary` (RAII `CanaryClaimGuard`, whose every effect -- settlement
+  AND release, including the unsettled `Drop` path -- is scoped to the
+  incarnation the claim was taken at, so a claim superseded by a reload retires
+  only its own state and can never free the slot a live canary of the new
+  incarnation holds) all route through `admit_incarnation`, which makes
+  incarnation transitions MONOTONIC: a NEWER caller reseeds the slot wholesale (a
+  fresh lifecycle inherits no cadence, claim, or confirmation count), an EQUAL one
+  continues against it, and an OLDER one is a straggler that mutates NOTHING.
+  Direction matters because the three write paths are reachable by a request
+  planned before a confirmation carried the identity forward: a direction-blind
+  reseed let such a straggler reset the live lifecycle's confirmations, tally,
+  claim, and cadence. Refusal is reported so the planner fails open -- `tick_cadence`
+  returns not-due and `begin_modified_request` returns `None`, both of which make
+  the request forward unchanged rather than apply a repair nothing would account
+  for, and `claim_canary` returns `None` so a straggler is never admitted
+  alongside the live canary. `seed_from_rebuild(key,
   incarnation, confirmations, due_immediately)` is the cold-rebuild entry
   point `Router::seed_field_canaries_from_ledger` (see `src/router/mod.rs`)
   calls for every resident `field:` entry right after
@@ -3300,11 +3448,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (routing traffic away), rather than making a live route-away wait a full
   cadence cycle before its first post-boot canary. `reset(key)` drops all
   resident state for a key, called from both a probe-settled clear
-  (`FieldVerdictRegistry::clear`) and a completed operator purge
+  (`FieldVerdictRegistry::clear`), a canary disproof
+  (`FieldVerdictRegistry::record_canary_disproof`) and a completed operator purge
   (`Router::finalize_learned_capability_purge`, see
   `src/router/capability_purge.rs`), so a later re-learn of the same identity
   never inherits a stale cadence, claim, or confirmation count from an
   incarnation that no longer exists
+- `src/field_canary_tests.rs` -- `include!`d unit coverage of the registry's
+  state machine in isolation from dispatch: the cadence arithmetic, the
+  three-way settlement routing, the two counts' differing decrement rules and
+  their saturation, and the incarnation scoping that keeps a superseded claim
+  from releasing a live one. Several tests are written as named mutation checks,
+  each documenting the edit that turns it red
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait
@@ -4771,7 +4926,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   learned)` reads `view.field_repair_counters()` plus
   `acting_field_verdicts(learned)` (the router's own acting-row derivation)
   and emits one aggregated INFO, `"envelope field verdict snapshot"`, with
-  the three repair counters, `rc_acting_field_verdicts_total`, and the acting
+  all five repair counters -- the three metrics totals plus BOTH halves of the
+  wrong-repair alarm (`rc_field_outstanding_unconfirmed_total`, current, and
+  `rc_field_disproved_requests_total`, lifetime-monotonic) --
+  `rc_acting_field_verdicts_total`, and the acting
   rows themselves under `rc_acting_field_verdicts` for provenance. Pure
   function of its two read-only inputs -- no state, no mutation, log-only
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
