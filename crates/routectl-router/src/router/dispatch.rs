@@ -402,14 +402,10 @@ impl Router {
             // reactive repair has touched it yet at this point in the
             // loop, so it is exactly the base every fallback target
             // plans from independently.
-            let (preflighted_req, field_preflight, field_canary) = self.plan_field_preflight(
-                &attempt_req,
-                target,
-                DispatchSurface::Complete,
-                &repair_budget,
-            );
+            let (preflighted_req, preflight_records, field_canary) =
+                self.plan_field_preflight(&attempt_req, target, DispatchSurface::Complete);
             attempt_req = preflighted_req;
-            meta.field_preflight.push(field_preflight);
+            meta.field_preflight.extend(preflight_records);
             // The canary plan and the modified-request accounting guard live
             // for the whole chain ITERATION, not the attempt: a same-provider
             // retry is still the same request riding the same decision, and a
@@ -897,23 +893,31 @@ impl Router {
                         // `apply` owns the budget draw together with the
                         // mutation, so a drop that removes nothing charges
                         // nothing and every repaired-state flag is set only on
-                        // its `Some`. Fires at most once per target and never
-                        // nests inside the per-target retry or the fallback
-                        // walk, so the call count stays additive.
+                        // its `Some`. It also selects WHICH admitted row to
+                        // repair -- the one the rejection names -- and releases
+                        // every other candidate's guard, so the one-repair
+                        // ceiling and the slot hygiene are properties of the
+                        // plan rather than of this condition chain. Fires at
+                        // most once per target and never nests inside the
+                        // per-target retry or the fallback walk, so the call
+                        // count stays additive.
                         if !field_repair_attempted
-                            && let Some(plan) = field_plan.as_ref()
-                            && Self::rejection_names_planned_field(
-                                plan,
+                            && let Some(plan) = field_plan.as_mut()
+                            && let Some(status) = plan.apply(
+                                &mut attempt_req,
+                                meta,
+                                &mut repair_budget,
                                 &original_class,
                                 &e,
                                 target.provider_kind.unwrap_or(""),
                             )
-                            && let Some(status) =
-                                plan.apply(&mut attempt_req, meta, &mut repair_budget, &e)
                         {
                             field_repair_attempted = true;
                             field_reject_status = status;
-                            self.note_field_repair(meta, state_key, plan.path());
+                            let repaired_path = plan
+                                .repaired_path()
+                                .expect("a reported repair names the row it dropped");
+                            self.note_field_repair(meta, state_key, repaired_path);
                             // A repair is a fixed correctness branch, not a
                             // retry policy, so it takes no backoff sleep (the
                             // streaming walk has none to skip).
@@ -1363,15 +1367,10 @@ impl Router {
             // whole chain iteration; a stream never claims a canary (the
             // surface is excluded upstream of the cadence tick), so there is
             // no settlement to owe here.
-            let (preflighted_req, field_preflight, _field_preflight_plan) = self
-                .plan_field_preflight(
-                    &attempt_req,
-                    target,
-                    DispatchSurface::Stream,
-                    &repair_budget,
-                );
+            let (preflighted_req, preflight_records, _field_preflight_plan) =
+                self.plan_field_preflight(&attempt_req, target, DispatchSurface::Stream);
             attempt_req = preflighted_req;
-            meta.field_preflight.push(field_preflight);
+            meta.field_preflight.extend(preflight_records);
             let provider_cfg = self.config.providers.get(provider_name);
             apply_context_reduction(
                 &self.config,
@@ -1792,23 +1791,28 @@ impl Router {
                         // `apply` owns the budget draw together with the
                         // mutation, so a drop that removes nothing charges
                         // nothing and every repaired-state flag is set only on
-                        // its `Some`. Fires at most once per target and never
-                        // nests inside the per-target retry or the fallback
-                        // walk, so the call count stays additive.
+                        // its `Some`. It also selects WHICH admitted row to
+                        // repair -- the one the rejection names -- and releases
+                        // every other candidate's guard. Fires at most once per
+                        // target and never nests inside the per-target retry or
+                        // the fallback walk, so the call count stays additive.
                         if !field_repair_attempted
-                            && let Some(plan) = field_plan.as_ref()
-                            && Self::rejection_names_planned_field(
-                                plan,
+                            && let Some(plan) = field_plan.as_mut()
+                            && let Some(status) = plan.apply(
+                                &mut attempt_req,
+                                meta,
+                                &mut repair_budget,
                                 &original_class,
                                 &e,
                                 target.provider_kind.unwrap_or(""),
                             )
-                            && let Some(status) =
-                                plan.apply(&mut attempt_req, meta, &mut repair_budget, &e)
                         {
                             field_repair_attempted = true;
                             field_reject_status = status;
-                            self.note_field_repair(meta, state_key, plan.path());
+                            let repaired_path = plan
+                                .repaired_path()
+                                .expect("a reported repair names the row it dropped");
+                            self.note_field_repair(meta, state_key, repaired_path);
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
                             // Preserve the genuine rejection as last_err before

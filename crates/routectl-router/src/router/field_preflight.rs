@@ -25,7 +25,7 @@
 //! (see [`Router::plan_field_carry`](super::field_repair)). This module
 //! closes that gap from the other side: when a verdict is ACTING and
 //! pre-flight ELIGIBLE (see
-//! [`crate::field_verdict::FieldVerdictRegistry::preflight_eligible_incarnation`]), the
+//! [`crate::field_verdict::FieldVerdictRegistry::preflight_authorization`]), the
 //! same closed-table transform is applied BEFORE dispatch, so the upstream
 //! never sees the rejected field at all. The two paths never compete for
 //! the same budget or the same guard: pre-flight spends no repair-budget
@@ -49,29 +49,49 @@
 //! uses for its own WARN, so a fail-open decision can never carry upstream
 //! bytes.
 //!
-//! # Extension seam for a second transform row
+//! # Every present row, each gated on its own terms
 //!
-//! The closed table (`super::field_repair`'s `FIELD_REPAIRS`) has exactly
-//! ONE row in this build, so this planner deliberately plans the single
-//! present row rather than iterating a set. That is a scope boundary, not an
-//! oversight: applying several transforms in one plan is the
-//! prefix-impacting transform's problem, and it needs the target opt-in and
-//! quorum this stage does not implement. The seam is kept clean for it --
-//! `first_present_row` is the shared scan, the transform is applied through
-//! a scratch clone that a loop can reuse verbatim, and the decision record
-//! is already a per-decision value rather than a per-request singleton. A
-//! change adding a second row must revisit exactly this function.
+//! The planner scans EVERY closed-table row the request carries, not the
+//! first one: a request can carry rows of two transform classes at once, and
+//! each class clears its own gates. One decision record is produced per
+//! CONSIDERED row, so a request whose envelope row acted and whose
+//! prefix-impacting row was blocked reports both facts rather than only the
+//! last. Table order is the enumeration order and nothing more -- each
+//! decision is computed from that row's own class, verdict, and gates, so
+//! reordering the table reorders the records without changing any of them.
+//!
+//! # The content gate
+//!
+//! An ENVELOPE-class row acts on one acknowledged confirmation. A
+//! PREFIX-IMPACTING row additionally needs the confirmation quorum
+//! ([`crate::config::PREFIX_QUORUM`]) and an explicit `[fidelity]
+//! prefix_impact_opt_in` entry for the target, resolved through the SAME
+//! two-tier target-spec grammar `[capability.overrides]` uses -- so a
+//! prefix-impacting rewrite stays dormant until the operator names the
+//! target, however well confirmed the verdict is. Both the quorum and the
+//! cadence are code constants: a knob an operator (or an agent) can turn
+//! mid-session with no diff is an unlogged exemption, not a config option.
+//!
+//! # The canary, and why it is one row's business
+//!
+//! The re-verification canary belongs to ONE identity, so it restores the
+//! row under test and leaves every other row's decision alone. A request
+//! carrying two rows can therefore dispatch one restored and one rewritten,
+//! which is the correct shape: the cadence measures a verdict, not a request.
+//! At most one canary is claimed per planning call, because the arm settles
+//! exactly one.
 
 use std::time::Instant;
 
 use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_canary::{CanaryClaimGuard, CanaryOutcome, ModifiedRequestGuard};
-use crate::field_verdict::FieldVerdictKey;
+use crate::field_verdict::{FieldVerdictKey, PreflightAuthorization};
 
 use super::class_observe::DispatchSurface;
-use super::field_repair::{ANTHROPIC_API_KIND, FieldSurface, first_present_row};
-use super::repair_budget::RepairBudget;
+use super::field_repair::{
+    ANTHROPIC_API_KIND, FieldRepairRow, FieldSurface, TransformClass, present_rows,
+};
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, FieldPreflight, Router};
 
 /// Reason token: no closed-table field is present in the request at all, so
@@ -106,6 +126,18 @@ pub(super) const FIELD_PREFLIGHT_NO_IDENTITY: &str = "no_identity";
 /// pre-flight rewrite grounds to act.
 pub(super) const FIELD_PREFLIGHT_NOT_ELIGIBLE: &str = "not_eligible";
 
+/// Reason token: the verdict is acting and acknowledged, but its
+/// acknowledged confirmation count is below the quorum this transform
+/// class requires. The prefix-impacting class needs two confirmed
+/// reject-unrepaired -> accept-repaired cycles; one is not enough.
+pub(super) const FIELD_PREFLIGHT_BELOW_QUORUM: &str = "below_quorum";
+
+/// Reason token: a prefix-impacting transform whose quorum is satisfied but
+/// whose target is not named in `[fidelity] prefix_impact_opt_in`. A content
+/// rewrite stays dormant until the operator opts the target in, however well
+/// confirmed the verdict.
+pub(super) const FIELD_PREFLIGHT_NO_TARGET_OPT_IN: &str = "no_target_opt_in";
+
 /// Reason token: the transform was authorized but removed nothing, or
 /// removed something the presence check did not predict. Fails open to a
 /// byte-equivalent original.
@@ -121,40 +153,38 @@ pub(super) const FIELD_PREFLIGHT_CANARY_RESTORED: &str = "canary_restored";
 /// from the per-target request before first dispatch.
 pub(super) const FIELD_PREFLIGHT_ACTION_DROP: &str = "field_preflight_drop";
 
-/// What one planning decision leaves the dispatch arm holding, beyond the
-/// per-target request and its record.
+/// What one planning call leaves the dispatch arm holding, beyond the
+/// per-target request and its records.
 ///
-/// A three-state type rather than two booleans, because the three states own
-/// DIFFERENT state and the arm's settlement differs per state: only the canary
-/// state carries a claim to settle, only the repaired state carries a
-/// wrong-repair tally entry, and the inert state carries neither. Encoding this
-/// as flags is how a settlement comes to fire on a request that never claimed
-/// anything.
+/// A struct rather than an enum, because the two things it carries are not
+/// alternatives: a request can both rewrite rows AND be one identity's canary,
+/// and it holds one accounting entry PER acting row. The earlier enum shape
+/// forced those into a single slot, so a second acting row's accounting had
+/// nowhere to live and was dropped on the spot -- which left the identity
+/// reporting zero requests in flight while one was.
+///
+/// At most ONE canary, however many rows are present, because the arm settles
+/// exactly one; every acting row's accounting guard is kept.
 #[derive(Debug, Default)]
-pub(super) enum FieldPreflightPlan<'a> {
-    /// Nothing was planned for this target: no grounded field, an excluded
-    /// lane, or no eligible verdict. There is nothing to settle.
-    #[default]
-    Inert,
-    /// The field was DROPPED before dispatch. The guard holds this request's
-    /// entry in the identity's wrong-repair accounting; it needs no settlement
+pub(super) struct FieldPreflightPlan<'a> {
+    /// The re-verification CANARY this request is, if any: the field was
+    /// restored and the upstream's answer re-verifies or disproves that
+    /// identity's verdict. The arm owes this exactly one settlement, and RAII
+    /// releases the claim on every path that reaches none.
+    canary: Option<Box<CanaryPlan<'a>>>,
+    /// One entry per row whose field was DROPPED before dispatch. Each holds
+    /// that identity's wrong-repair accounting; none needs a settlement,
     /// because an outcome says nothing about a repair the verdict already
     /// justified -- only the canary's outcome does.
     ///
-    /// The guard is never READ, and that is the point: holding it for the
-    /// chain iteration IS its contract, and its `Drop` is what clears the
-    /// in-flight half of the count on every exit path. Binding it to `_` at the
-    /// call site instead would drop it immediately and leave every repaired
-    /// request reporting zero in flight.
-    Repaired(
-        #[expect(dead_code, reason = "held for its Drop; see the variant docs")]
-        ModifiedRequestGuard<'a>,
-    ),
-    /// This request is the re-verification CANARY: the field was restored and
-    /// the upstream's answer re-verifies or disproves the verdict. The arm owes
-    /// this plan exactly one settlement, and RAII releases the claim on every
-    /// path that reaches none.
-    Canary(Box<CanaryPlan<'a>>),
+    /// The guards are never READ, and that is the point: holding them for the
+    /// chain iteration IS their contract, and their `Drop` is what clears the
+    /// in-flight half of each count on every exit path. Dropping one at the
+    /// planning site instead would leave that row's identity reporting zero in
+    /// flight while the request it modified was still outstanding. No
+    /// `expect(dead_code)` is needed (unlike the guard's previous single-slot
+    /// shape): the vector is written through, which is use enough for the lint.
+    accounting: Vec<ModifiedRequestGuard<'a>>,
 }
 
 /// The canary claim plus the identity and generation its settlement must carry.
@@ -200,24 +230,41 @@ impl std::fmt::Debug for CanaryPlan<'_> {
     }
 }
 
+/// What one row's planning produced: its immutable record, plus whatever that
+/// row leaves the arm holding.
+///
+/// A struct rather than a tuple because the halves are settled independently --
+/// every row contributes a record, at most one contributes a canary, and every
+/// acting row contributes an accounting guard.
+struct RowDecision<'a> {
+    record: FieldPreflight,
+    /// The canary this row claimed, if it did.
+    canary: Option<Box<CanaryPlan<'a>>>,
+    /// This row's wrong-repair accounting, if it acted.
+    accounting: Option<ModifiedRequestGuard<'a>>,
+}
+
 impl<'a> FieldPreflightPlan<'a> {
-    /// The canary plan this decision holds, if it is a canary. Taken by value
-    /// so a settlement consumes the claim -- a plan cannot be settled twice.
+    /// The canary plan this request holds, if it is one identity's canary.
+    /// Taken by value so a settlement consumes the claim -- a plan cannot be
+    /// settled twice.
     pub(super) fn into_canary(self) -> Option<Box<CanaryPlan<'a>>> {
-        match self {
-            Self::Canary(plan) => Some(plan),
-            Self::Inert | Self::Repaired(_) => None,
-        }
+        self.canary
     }
 
     /// The closed-table surface a canary restored, so the arm's repaired retry
     /// drops the SAME surface the restoration put back rather than re-deriving
     /// it from the rejection.
-    pub(super) const fn canary_surface(&self) -> Option<FieldSurface> {
-        match self {
-            Self::Canary(plan) => Some(plan.surface),
-            Self::Inert | Self::Repaired(_) => None,
-        }
+    pub(super) fn canary_surface(&self) -> Option<FieldSurface> {
+        self.canary.as_ref().map(|plan| plan.surface)
+    }
+
+    /// How many acting rows' accounting entries this plan holds. Test-only: the
+    /// production contract is that the guards are HELD, which a reader of the
+    /// count could mistake for a reason to inspect them.
+    #[cfg(test)]
+    pub(super) const fn accounting_len(&self) -> usize {
+        self.accounting.len()
     }
 }
 
@@ -276,12 +323,19 @@ impl Router {
     /// upstream of any per-attempt overlay or strip this walk has already
     /// applied for a PRIOR target in the same chain.
     ///
-    /// Returns a fresh clone, an immutable decision record, and the plan whose
-    /// settlement the caller owes (see [`FieldPreflightPlan`]). The clone
-    /// carries the pre-flight rewrite only when a resident verdict is
-    /// ACTING and pre-flight eligible for the one grounded field this
-    /// request carries AND this request is not the re-verification canary;
-    /// every other case returns a clone of the original, unchanged.
+    /// Returns a fresh clone, one immutable decision record PER CONSIDERED
+    /// closed-table row, and the plan whose settlement the caller owes (see
+    /// [`FieldPreflightPlan`]). The clone carries a row's pre-flight rewrite
+    /// only when a resident verdict is ACTING, pre-flight eligible, past every
+    /// gate that row's transform class requires, and that row is not the one
+    /// under re-verification this request; every other case leaves that row's
+    /// surface exactly as the client sent it.
+    ///
+    /// Each row's transform is applied to the request the PREVIOUS row's
+    /// decision produced, through the same scratch-clone-and-adopt helper, so
+    /// two acting rows compose onto one body while a refusal in between leaves
+    /// the accumulated body untouched rather than discarding an earlier row's
+    /// rewrite.
     ///
     /// `surface` selects whether this request participates in the canary
     /// cadence. Only [`DispatchSurface::Complete`] does, and the exclusion is
@@ -292,155 +346,373 @@ impl Router {
     /// settle (no assembled response on a stream, no envelope verdict from a
     /// token count).
     ///
-    /// `budget` remains the caller's request-scoped reactive-repair ceiling.
-    /// Neither a pre-flight rewrite nor a canary draws from it: both act on a
-    /// verdict that is already resident and settled, and the canary's own
-    /// repaired retry is the re-verification itself rather than a reactive
-    /// repair of a fresh rejection. The parameter stays so a later
-    /// prefix-impacting transform can consult it without a signature change.
+    /// At most ONE canary is claimed per call, however many rows are present,
+    /// because the dispatch arm settles exactly one. A row reached after a
+    /// canary has been claimed still gets its own decision and still advances
+    /// its own cadence -- it simply cannot claim a second canary, and a trip it
+    /// cannot claim stays DUE for the next request rather than being postponed.
+    ///
+    /// Deliberately takes NO repair budget. Neither a pre-flight rewrite nor a
+    /// canary draws from the caller's reactive ceiling -- both act on a verdict
+    /// already resident and settled, and the canary's own repaired retry is the
+    /// re-verification itself rather than a reactive repair of a fresh
+    /// rejection -- so a threaded-but-unread parameter would be a false
+    /// signal that some invariant here consults it.
     pub(super) fn plan_field_preflight<'a>(
         &'a self,
         original_req: &ChatRequest,
         target: &DispatchTarget,
         surface: DispatchSurface,
-        _budget: &RepairBudget,
-    ) -> (ChatRequest, FieldPreflight, FieldPreflightPlan<'a>) {
-        // Every refusal below returns a FRESH clone of the original rather
-        // than a partially-planned one, so no arm can hand back bytes the
-        // client did not send.
-        let unchanged = |field_path, reason| {
-            (
+    ) -> (ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan<'a>) {
+        let mut rows = present_rows(original_req).peekable();
+        if rows.peek().is_none() {
+            return (
                 original_req.clone(),
-                FieldPreflight {
-                    acted: false,
-                    state_key: sanitize_for_log(&target.state_key),
-                    field_path,
-                    reason,
-                },
-                FieldPreflightPlan::Inert,
-            )
+                vec![unchanged_record(
+                    target,
+                    None,
+                    None,
+                    FIELD_PREFLIGHT_NO_GROUNDED_FIELD,
+                )],
+                FieldPreflightPlan::default(),
+            );
+        }
+        // Accumulates the adopted rewrites. Starts as a clone of the ORIGINAL,
+        // so a walk where no row acts hands back bytes identical to what the
+        // client sent, and a row that refuses leaves whatever earlier rows
+        // adopted rather than reverting it.
+        let mut planned = original_req.clone();
+        let mut records = Vec::new();
+        let mut plan = FieldPreflightPlan::default();
+        for row in rows {
+            // The canary slot is offered to a row only while it is still free:
+            // the arm settles one plan, so a second claim could never be
+            // reported. A row denied the slot still ticks its own cadence and
+            // stays due, which is what stops a consistently-later row from
+            // being starved of re-verification.
+            let can_claim_canary = plan.canary.is_none();
+            let decided = self.plan_one_row(&mut planned, target, row, surface, can_claim_canary);
+            records.push(decided.record);
+            if let Some(canary) = decided.canary {
+                debug_assert!(
+                    plan.canary.is_none(),
+                    "a row may only claim the canary slot while it is free",
+                );
+                plan.canary = Some(canary);
+            }
+            // Every acting row's accounting is RETAINED, not just the first:
+            // each entry belongs to a different identity, and a dropped one
+            // would report zero requests in flight for an identity this
+            // request is in fact modifying.
+            plan.accounting.extend(decided.accounting);
+        }
+        (planned, records, plan)
+    }
+
+    /// Decide `row` for `target` and, when every gate clears, adopt its
+    /// transform onto `planned`.
+    ///
+    /// `planned` is mutated ONLY through [`apply_transform`], which works on
+    /// a scratch clone and is adopted whole on success -- so a refusal at any
+    /// point below, and an ambiguous transform, leave `planned` exactly as
+    /// this call received it.
+    ///
+    /// `can_claim_canary` is whether the request's sole settlement slot is still
+    /// free. A row denied it still ticks its own cadence and stays DUE, so being
+    /// second in the closed table delays a re-verification by one request rather
+    /// than starving it.
+    fn plan_one_row<'a>(
+        &'a self,
+        planned: &mut ChatRequest,
+        target: &DispatchTarget,
+        row: FieldRepairRow,
+        surface: DispatchSurface,
+        can_claim_canary: bool,
+    ) -> RowDecision<'a> {
+        let refuse = |reason| RowDecision {
+            record: unchanged_record(target, Some(row.path), Some(row.class), reason),
+            canary: None,
+            accounting: None,
         };
-        let Some((path, surface_row)) = first_present_row(original_req) else {
-            return unchanged(None, FIELD_PREFLIGHT_NO_GROUNDED_FIELD);
+        let Some(provider_kind) = self.preflight_lane_admits(target) else {
+            return refuse(FIELD_PREFLIGHT_UNSUPPORTED_LANE);
         };
+        let key = match self.preflight_identity(target, row.path, provider_kind) {
+            Ok(key) => key,
+            Err(reason) => return refuse(reason),
+        };
+        let gates = GateInputs {
+            target,
+            key: &key,
+            provider_kind,
+            class: row.class,
+            generation: self.registry_generation(),
+            now: Instant::now(),
+        };
+        let generation = gates.generation;
+        let authorization = match self.preflight_authorization_for(gates) {
+            Ok(authorization) => authorization,
+            Err(reason) => return refuse(reason),
+        };
+        let claim = self.try_claim_canary(
+            key,
+            row,
+            surface,
+            can_claim_canary,
+            authorization,
+            generation,
+        );
+        let key = match claim {
+            // RESTORED, not rewritten: THIS row's surface is left exactly as
+            // the client sent it, expressed as "decline to transform this
+            // surface" rather than as a revert of an already-planned body --
+            // which is what leaves every OTHER row's adopted rewrite standing
+            // on the accumulated body. A canary re-verifies one identity, so
+            // unrelated eligible repairs remain applied.
+            Err(canary) => return restored_decision(target, row, canary),
+            Ok(key) => key,
+        };
+        match self.adopt_row(planned, target, row, &key, authorization) {
+            Ok(decision) => decision,
+            Err(reason) => refuse(reason),
+        }
+    }
+
+    /// Apply `row`'s transform onto `planned` and open its wrong-repair
+    /// accounting -- the last step, reached only once every gate has cleared and
+    /// this row is not the canary.
+    ///
+    /// `Err(reason)` on either of two fail-open cases, each carrying its own
+    /// closed-set token because they are different operator situations: an
+    /// AMBIGUOUS transform (removed nothing, or reported success while its
+    /// surface is still readable), and a STRAGGLER whose accounting the identity
+    /// refuses because a confirmation carried it forward after the authorization
+    /// read. Both leave `planned` exactly as this call received it.
+    fn adopt_row<'a>(
+        &'a self,
+        planned: &mut ChatRequest,
+        target: &DispatchTarget,
+        row: FieldRepairRow,
+        key: &FieldVerdictKey,
+        authorization: PreflightAuthorization,
+    ) -> Result<RowDecision<'a>, &'static str> {
+        // The transform is applied through the ONE production helper below,
+        // so the scratch-clone-and-adopt discipline has a single
+        // implementation rather than a copy per caller.
+        let adopted =
+            apply_transform(planned, row.surface).ok_or(FIELD_PREFLIGHT_AMBIGUOUS_MUTATION)?;
+        // The request is now counted against this identity's wrong-repair
+        // exposure, RAII: the guard's Drop clears its in-flight half on every
+        // exit, and the tally half stands until a canary vouches for it or
+        // charges it to the alarm. The guard is RETURNED for the plan to hold,
+        // never dropped here -- a dropped one would report zero in flight for
+        // an identity whose request is outstanding.
+        //
+        // `None` here means this planner is a STRAGGLER: a confirmation carried
+        // the identity forward after the authorization read admitted this
+        // request. Fail open and forward unchanged rather than apply a repair
+        // whose exposure nothing would count -- an unaccounted repair is
+        // invisible to a later disproof's alarm.
+        let accounting = self
+            .field_verdicts()
+            .canaries()
+            .begin_modified_request(key, authorization.incarnation)
+            .ok_or(FIELD_PREFLIGHT_NOT_ELIGIBLE)?;
+        *planned = adopted;
+        Ok(RowDecision {
+            record: FieldPreflight {
+                acted: true,
+                state_key: sanitize_for_log(&target.state_key),
+                field_path: Some(row.path),
+                transform_class: Some(row.class.as_str()),
+                reason: FIELD_PREFLIGHT_ACTION_DROP,
+            },
+            canary: None,
+            accounting: Some(accounting),
+        })
+    }
+
+    /// Advance `row`'s identity cadence and, when it is due and the request's sole
+    /// settlement slot is still free, CLAIM its canary.
+    ///
+    /// `Err(plan)` is the CLAIM -- the `Result` is control flow, not an error
+    /// signal: a claimed canary is the caller's early exit, and handing the key
+    /// back on `Ok` is what makes the compiler enforce that a key consumed into a
+    /// claim cannot also plan a rewrite for the same row.
+    ///
+    /// The tick is atomic per identity (so concurrent callers cannot both observe
+    /// one trip) and the claim is atomic per identity (so concurrent callers
+    /// cannot both hold the slot). A caller that finds the identity due and then
+    /// finds the slot taken -- an earlier interval's canary still in flight --
+    /// repairs normally rather than dispatching a second unrepaired request,
+    /// which is what makes "exactly one in-flight canary" hold under real
+    /// concurrency and not merely under one thread.
+    ///
+    /// EVERY eligible complete request ticks, including one whose settlement slot
+    /// a sibling row already owns: the cadence measures this verdict's exposure,
+    /// and skipping the tick would mean a row that is consistently second in the
+    /// table never reaches its interval at all. Dueness is STICKY, so the trip
+    /// such a request observes is not spent -- the next eligible request claims
+    /// it, which bounds the delay at one request rather than one interval.
+    fn try_claim_canary(
+        &self,
+        key: FieldVerdictKey,
+        row: FieldRepairRow,
+        surface: DispatchSurface,
+        can_claim_canary: bool,
+        authorization: PreflightAuthorization,
+        generation: u64,
+    ) -> Result<FieldVerdictKey, Box<CanaryPlan<'_>>> {
+        let canaries = self.field_verdicts().canaries();
+        // The incarnation comes from the caller's ONE authorization read, never
+        // from a fresh snapshot: a claim and its later settlement must carry the
+        // incarnation the authorization was validated against.
+        let incarnation = authorization.incarnation;
+        let due = surface == DispatchSurface::Complete && canaries.tick_cadence(&key, incarnation);
+        if due
+            && can_claim_canary
+            && let Some(claim) = canaries.claim_canary(&key, incarnation)
+        {
+            return Err(Box::new(CanaryPlan {
+                claim: Some(claim),
+                key,
+                surface: row.surface,
+                generation,
+            }));
+        }
+        Ok(key)
+    }
+
+    /// The LANE gates, shared with the reactive admission's exclusions: the
+    /// capability kill switch, the one provider kind this stage acts on, and the
+    /// forwarded-credential refusal. `Some(provider_kind)` when the lane admits.
+    fn preflight_lane_admits(&self, target: &DispatchTarget) -> Option<&'static str> {
         if !self.config.capability.enabled {
-            return unchanged(Some(path), FIELD_PREFLIGHT_UNSUPPORTED_LANE);
+            return None;
         }
-        let Some(provider_kind) = target.provider_kind else {
-            return unchanged(Some(path), FIELD_PREFLIGHT_UNSUPPORTED_LANE);
-        };
+        let provider_kind = target.provider_kind?;
         if provider_kind != ANTHROPIC_API_KIND || target.use_forwarded_credential {
-            return unchanged(Some(path), FIELD_PREFLIGHT_UNSUPPORTED_LANE);
+            return None;
         }
-        // ATTRIBUTION, mirroring the reactive admission rather than
-        // paraphrasing it: read the base URL from the operator's own
-        // provider entry (the target carries none), and refuse both a lane
-        // that reports no attributable Anthropic API URL -- which is how a
-        // Bedrock Mantle entry is refused, since its accessor answers
-        // `None` -- and a URL naming a local hop. A rejection this stage
-        // could not have attributed to the upstream is a verdict this stage
-        // must not act on proactively either.
-        let Some(base_url) = self
+        Some(provider_kind)
+    }
+
+    /// The ATTRIBUTION gates plus the field identity, mirroring the reactive
+    /// admission rather than paraphrasing it: read the base URL from the
+    /// operator's own provider entry (the target carries none), and refuse both
+    /// a lane that reports no attributable Anthropic API URL -- which is how a
+    /// Bedrock Mantle entry is refused, since its accessor answers `None` -- and
+    /// a URL naming a local hop. A rejection this stage could not have
+    /// attributed to the upstream is a verdict this stage must not act on
+    /// proactively either.
+    ///
+    /// `Err(reason)` carries the closed-set token the refusal reports.
+    fn preflight_identity(
+        &self,
+        target: &DispatchTarget,
+        path: &'static str,
+        provider_kind: &'static str,
+    ) -> Result<FieldVerdictKey, &'static str> {
+        let base_url = self
             .config
             .providers
             .get(&target.provider_name)
             .and_then(crate::config::ProviderEntry::anthropic_api_base_url)
-        else {
-            return unchanged(Some(path), FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
-        };
+            .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
         if crate::field_verdict::loopback_target_suppresses_minting(base_url) {
-            return unchanged(Some(path), FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
+            return Err(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
         }
-        let Some(key) =
-            crate::field_verdict::FieldVerdictKey::new(&target.state_key, path, provider_kind)
-        else {
-            return unchanged(Some(path), FIELD_PREFLIGHT_NO_IDENTITY);
-        };
+        FieldVerdictKey::new(&target.state_key, path, provider_kind)
+            .ok_or(FIELD_PREFLIGHT_NO_IDENTITY)
+    }
+
+    /// The VERDICT gates for one row's class: the operator mask, eligibility,
+    /// this class's confirmation quorum, and the content opt-in.
+    ///
+    /// `Err(reason)` carries the closed-set token the refusal reports; each gate
+    /// has its own, because they are different operator situations and
+    /// collapsing them hides which one is holding.
+    fn preflight_authorization_for(
+        &self,
+        gates: GateInputs<'_>,
+    ) -> Result<PreflightAuthorization, &'static str> {
+        let GateInputs {
+            target,
+            key,
+            provider_kind,
+            class,
+            generation,
+            now,
+        } = gates;
         // The operator `force_supported` mask, through the SAME two-tier
         // resolver the act and learn sides share, so a masked cell cannot be
         // honored on one side and missed here. The operator has said to send
-        // this field; a learned verdict does not override that.
+        // this field; a learned verdict does not override that. Checked
+        // BEFORE the quorum so a masked cell reports the mask rather than a
+        // confirmation shortfall -- the mask is the operative reason, and it
+        // holds at any confirmation count.
         if self.override_forces_supported(target, key.capability_key(), provider_kind) {
-            return unchanged(Some(path), FIELD_PREFLIGHT_MASKED_BY_OVERRIDE);
+            return Err(FIELD_PREFLIGHT_MASKED_BY_OVERRIDE);
         }
-        let now = Instant::now();
-        let generation = self.registry_generation();
-        // The eligibility read hands back the INCARNATION its decision rests
-        // on, rather than the caller re-reading one afterwards: a canary claim
-        // and its settlement must carry the same incarnation the authorization
-        // was validated against, or a settlement could name a lifecycle the
-        // decision never checked.
-        let Some(incarnation) = self
+        // ONE authorization read backs both gates below: the incarnation a
+        // canary claim and its settlement must carry, plus the acknowledged
+        // confirmation count this class's quorum is a threshold on. Reading
+        // the count separately would let a concurrent relearn produce a
+        // confirmation shortfall the eligibility decision never saw.
+        let authorization = self
             .field_verdicts()
-            .preflight_eligible_incarnation(&key, generation, now)
-        else {
-            return unchanged(Some(path), FIELD_PREFLIGHT_NOT_ELIGIBLE);
-        };
-        let canaries = self.field_verdicts().canaries();
-        // CADENCE, and the two operations are separate for a reason the claim
-        // depends on: the tick is atomic per identity (so concurrent callers
-        // cannot both observe one trip), and the claim is atomic per identity
-        // (so concurrent callers cannot both hold the slot). A caller that
-        // trips the countdown and then finds the slot taken -- a canary from an
-        // earlier interval still in flight -- repairs normally rather than
-        // dispatching a second unrepaired request, which is what makes "exactly
-        // one in-flight canary" hold under real concurrency and not merely
-        // under a single thread.
-        let canary_due =
-            surface == DispatchSurface::Complete && canaries.tick_cadence(&key, incarnation);
-        if canary_due && let Some(claim) = canaries.claim_canary(&key, incarnation) {
-            // RESTORED, not rewritten: the returned request is a clone of the
-            // original, carrying the tested field exactly as the client sent
-            // it. Unrelated eligible repairs are not in play here because the
-            // closed table has one row -- a second row would restore only the
-            // row under test and still drop the others, which is why the
-            // restoration is expressed as "decline to transform THIS surface"
-            // rather than as a revert of an already-planned body.
-            return (
-                original_req.clone(),
-                FieldPreflight {
-                    acted: false,
-                    state_key: sanitize_for_log(&target.state_key),
-                    field_path: Some(path),
-                    reason: FIELD_PREFLIGHT_CANARY_RESTORED,
-                },
-                FieldPreflightPlan::Canary(Box::new(CanaryPlan {
-                    claim: Some(claim),
-                    key,
-                    surface: surface_row,
-                    generation,
-                })),
-            );
+            .preflight_authorization(key, generation, now)
+            .ok_or(FIELD_PREFLIGHT_NOT_ELIGIBLE)?;
+        // This class's own quorum, against the SAME acknowledged count. A
+        // verdict that is not eligible at all reports `not_eligible`; one that
+        // is eligible but short of a higher quorum reports `below_quorum`.
+        if authorization.confirmations < class.required_quorum() {
+            return Err(FIELD_PREFLIGHT_BELOW_QUORUM);
         }
-        // The transform is applied through the ONE production helper below,
-        // so the scratch-clone-and-adopt discipline has a single
-        // implementation rather than a copy per caller.
-        match apply_transform(original_req, surface_row) {
-            // The request is now counted against this identity's wrong-repair
-            // exposure, RAII: the guard's Drop clears its in-flight half on every
-            // exit, and the tally half stands until a canary vouches for it or
-            // charges it to the alarm.
-            //
-            // `None` from the accounting means this planner is a STRAGGLER: a
-            // confirmation carried the identity forward after the eligibility
-            // read authorized this request. Fail open and forward unchanged
-            // rather than apply a repair whose exposure nothing would count --
-            // an unaccounted repair is invisible to a later disproof's alarm.
-            Some(planned) => match canaries.begin_modified_request(&key, incarnation) {
-                Some(accounting) => (
-                    planned,
-                    FieldPreflight {
-                        acted: true,
-                        state_key: sanitize_for_log(&target.state_key),
-                        field_path: Some(path),
-                        reason: FIELD_PREFLIGHT_ACTION_DROP,
-                    },
-                    FieldPreflightPlan::Repaired(accounting),
-                ),
-                None => unchanged(Some(path), FIELD_PREFLIGHT_NOT_ELIGIBLE),
-            },
-            None => unchanged(Some(path), FIELD_PREFLIGHT_AMBIGUOUS_MUTATION),
+        // The CONTENT gate: a prefix-impacting rewrite additionally needs the
+        // operator to have named this target in `[fidelity]`. Last of the
+        // gates deliberately -- an opted-in target with no confirmed verdict
+        // must still report the verdict gate, so the opt-in cannot be read as
+        // the only thing standing between a target and a content rewrite.
+        if class.requires_target_opt_in() && !self.prefix_impact_opted_in(target) {
+            return Err(FIELD_PREFLIGHT_NO_TARGET_OPT_IN);
         }
+        Ok(authorization)
+    }
+
+    /// Whether the operator opted `target` into prefix-impacting pre-flight
+    /// through `[fidelity] prefix_impact_opt_in`.
+    ///
+    /// POSITIVE-ONLY MEMBERSHIP, which is what distinguishes this from
+    /// `[capability.overrides]` resolution: that surface has two verdicts
+    /// (`unsupported` / `force_supported`) and therefore needs a precedence rule
+    /// deciding which tier wins. This list has one verdict -- listed, or not --
+    /// so a target is opted in when EITHER tier matches and there is nothing for
+    /// a precedence rule to arbitrate. What is shared is the target-spec
+    /// GRAMMAR, read through the same splitter
+    /// ([`crate::override_registry::split_target_spec`]): a
+    /// `"provider:nickname"` entry names exactly that model, and a bare
+    /// `"provider"` entry names every model dispatched through that provider
+    /// entry. A model-scoped entry for a DIFFERENT model on the same provider
+    /// matches neither tier, so it opts this target in not at all.
+    ///
+    /// No second grammar and no second store: the entries are plain config
+    /// strings validated at load time against the provider/model directory,
+    /// and this is a pure read over them.
+    fn prefix_impact_opted_in(&self, target: &DispatchTarget) -> bool {
+        let nickname = target.nickname.as_deref().unwrap_or("");
+        self.config
+            .fidelity
+            .prefix_impact_opt_in
+            .iter()
+            .any(|spec| {
+                let (provider, model) = crate::override_registry::split_target_spec(spec);
+                provider == target.provider_name
+                    && match model {
+                        Some(model) => model == nickname,
+                        None => true,
+                    }
+            })
     }
 
     /// Whether `plan`'s canary may repair and re-dispatch over the rejection
@@ -499,6 +771,60 @@ impl Router {
     }
 }
 
+/// The inputs the VERDICT gates read, grouped so the call site is one argument
+/// rather than six positional ones.
+///
+/// A struct rather than a long parameter list because five of the six are
+/// borrowed or `Copy` scalars that would transpose silently at the call site --
+/// `provider_kind` and a state key are both `&str`, and `generation` is a bare
+/// `u64` beside a `TransformClass`.
+struct GateInputs<'g> {
+    target: &'g DispatchTarget,
+    key: &'g FieldVerdictKey,
+    provider_kind: &'g str,
+    class: TransformClass,
+    generation: u64,
+    now: Instant,
+}
+
+/// The decision for a row this request RESTORED as its canary.
+fn restored_decision<'a>(
+    target: &DispatchTarget,
+    row: FieldRepairRow,
+    canary: Box<CanaryPlan<'a>>,
+) -> RowDecision<'a> {
+    RowDecision {
+        record: unchanged_record(
+            target,
+            Some(row.path),
+            Some(row.class),
+            FIELD_PREFLIGHT_CANARY_RESTORED,
+        ),
+        canary: Some(canary),
+        accounting: None,
+    }
+}
+
+/// A record for a row (or a whole request) the planner did not act on.
+///
+/// A free function rather than a method: it reads nothing from the router, so a
+/// `&self` receiver would suggest the record depends on router state when the
+/// only inputs are the target's sanitized key and the row's own facts.
+fn unchanged_record(
+    target: &DispatchTarget,
+    field_path: Option<&'static str>,
+    class: Option<TransformClass>,
+    reason: &'static str,
+) -> FieldPreflight {
+    FieldPreflight {
+        acted: false,
+        state_key: sanitize_for_log(&target.state_key),
+        field_path,
+        transform_class: class.map(TransformClass::as_str),
+        reason,
+    }
+}
+
 /// Apply `surface` to a SCRATCH clone of `original_req` and adopt it only on a
 /// reported success whose post-condition holds.
 ///
@@ -542,6 +868,7 @@ pub(super) fn plan_transform_for_tests(
     state_key: &str,
 ) -> (ChatRequest, FieldPreflight) {
     let path = "thinking.enabled.display";
+    let class = Some(TransformClass::Envelope.as_str());
     match apply_transform(original_req, surface) {
         Some(planned) => (
             planned,
@@ -549,6 +876,7 @@ pub(super) fn plan_transform_for_tests(
                 acted: true,
                 state_key: sanitize_for_log(state_key),
                 field_path: Some(path),
+                transform_class: class,
                 reason: FIELD_PREFLIGHT_ACTION_DROP,
             },
         ),
@@ -558,6 +886,7 @@ pub(super) fn plan_transform_for_tests(
                 acted: false,
                 state_key: sanitize_for_log(state_key),
                 field_path: Some(path),
+                transform_class: class,
                 reason: FIELD_PREFLIGHT_AMBIGUOUS_MUTATION,
             },
         ),
@@ -575,14 +904,23 @@ const FIELD_PREFLIGHT_EVENT: &str = "envelope_field_preflight";
 /// - Every recorded decision, acting or not, emits at DEBUG. A fail-open is
 ///   the routine case -- most requests on most targets are not eligible -- so
 ///   a WARN per decision would make an ordinary request look faulty and bury
-///   the case an operator needs. The per-target records are RETAINED in full
+///   the case an operator needs. The per-decision records are RETAINED in full
 ///   (see [`super::DispatchMeta::field_preflight`]); only the routine ones are
 ///   quiet.
-/// - Exactly ONE request-level WARN, and only when at least one target
-///   actually acted. A request that rewrote a client's envelope before
+/// - Exactly ONE request-level WARN, and only when at least one decision
+///   actually acted. A request that rewrote a client's request before
 ///   dispatch is the reportable event; a request that changed nothing is not.
-///   One line per REQUEST rather than per acting target, matching the
+///   One line per REQUEST rather than per acting decision, matching the
 ///   aggregate-diagnostic contract the rest of this surface uses.
+///
+/// The WARN's counts are DECISIONS, not targets: one target contributes one
+/// decision per closed-table row it considered, so a target-named count would
+/// overstate the chain whenever a request carries rows of two classes. The line
+/// NAMES the highest-impact acting decision (prefix-impacting over envelope),
+/// because one line has to stand for the whole request and what an operator
+/// needs from it is the worst thing that happened; among equal-impact decisions
+/// it names the FIRST planned (see [`warn_headline`]). Naming one decision never
+/// narrows the counts, which always describe every decision recorded.
 ///
 /// `action` is only ever attached to a record that ACTED: labelling a
 /// fail-open `field_preflight_drop` would name an action the walk did not
@@ -606,6 +944,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 acted = true,
                 state_key = %sanitize_for_log(&record.state_key),
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
+                transform_class = record.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
                 reason = record.reason,
                 "envelope-field pre-flight decision",
             );
@@ -616,6 +955,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 acted = false,
                 state_key = %sanitize_for_log(&record.state_key),
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
+                transform_class = record.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
                 reason = record.reason,
                 "envelope-field pre-flight decision",
             );
@@ -623,25 +963,93 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
     }
     let acted: Vec<&super::FieldPreflight> =
         meta.field_preflight.iter().filter(|r| r.acted).collect();
-    let Some(first) = acted.first() else {
-        // Nothing acted: this request rewrote no envelope, so it earns no
+    if acted.is_empty() {
+        // Nothing acted: this request rewrote nothing, so it earns no
         // request-level WARN at all.
         return;
-    };
+    }
+    // The line names the HIGHEST-IMPACT acting decision, not the first one
+    // planned. One WARN has to stand for the whole request, and what an operator
+    // needs from it is the worst thing that happened: a request that rewrote a
+    // cache prefix AND an envelope field is a prefix-impacting event, and
+    // reporting the envelope row because it came first in the table would
+    // understate it -- a wrong prefix verdict degrades every later request on the
+    // lane, while a wrong envelope verdict costs one field. The AGGREGATE counts
+    // below still describe every decision, so nothing is hidden by the choice of
+    // which one to name.
+    let headline = warn_headline(&acted).expect("the non-empty check above guarantees one");
     tracing::warn!(
         event = FIELD_PREFLIGHT_EVENT,
         action = FIELD_PREFLIGHT_ACTION_DROP,
-        state_key = %sanitize_for_log(&first.state_key),
-        field_path = first.field_path.unwrap_or(FIELD_PATH_NONE),
-        targets_acted = acted.len(),
-        targets_planned = meta.field_preflight.len(),
+        state_key = %sanitize_for_log(&headline.state_key),
+        field_path = headline.field_path.unwrap_or(FIELD_PATH_NONE),
+        transform_class = headline.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
+        decisions_acted = acted.len(),
+        decisions_planned = meta.field_preflight.len(),
         "{FIELD_PREFLIGHT_WARN_MESSAGE}",
     );
+}
+
+/// The acting decision the request WARN names: the highest-impact one, and among
+/// equals the FIRST the walk planned.
+///
+/// Extracted so the tie rule is stated and testable in one place, because ties
+/// are ORDINARY here: a two-seat chain whose targets both act on the same class
+/// produces one on every such request.
+///
+/// `Iterator::max_by_key` is documented to return the LAST maximum, so the
+/// previous call site was deterministic -- but it named the last acting decision
+/// of the winning class, which is the wrong end. The DEBUG tier emits in planning
+/// order, so an operator reading a WARN and then scanning the DEBUG lines for the
+/// `state_key` it named should land on the FIRST one; naming the last made that
+/// correlation silently off by however many equal-impact decisions preceded it.
+/// This returns the first instead.
+///
+/// `None` only for an empty slice; the caller checks that separately so it can
+/// skip the WARN entirely rather than emit a line about nothing.
+fn warn_headline<'r>(acted: &[&'r super::FieldPreflight]) -> Option<&'r super::FieldPreflight> {
+    acted
+        .iter()
+        .copied()
+        // `>` rather than `>=`: a later decision of EQUAL rank does not displace
+        // the one already chosen, which is what makes first-acted-wins hold.
+        .reduce(|chosen, candidate| {
+            if warn_impact_rank(candidate.transform_class)
+                > warn_impact_rank(chosen.transform_class)
+            {
+                candidate
+            } else {
+                chosen
+            }
+        })
+}
+
+/// Operator IMPACT rank of an acting decision's transform class: higher is
+/// worse, and the request WARN names the worst.
+///
+/// Keyed on the class token rather than on a method of [`TransformClass`]
+/// because the records that reach the emitter carry the token, not the enum --
+/// `DispatchMeta` is a public, closed-token surface. An unrecognized token ranks
+/// LOWEST rather than panicking or ranking highest: a diagnostic must not become
+/// the thing that fails, and a new class added without revisiting this function
+/// should under-report rather than silently outrank a prefix rewrite. The
+/// `transform_class` round-trip is asserted in the tests, so a token that
+/// stopped matching is caught there rather than degrading quietly.
+fn warn_impact_rank(transform_class: Option<&'static str>) -> u8 {
+    match transform_class {
+        Some(token) if token == TransformClass::PrefixImpacting.as_str() => 2,
+        Some(token) if token == TransformClass::Envelope.as_str() => 1,
+        _ => 0,
+    }
 }
 
 /// Rendered `field_path` for a decision that considered no field. A literal
 /// rather than an empty string so the line is unambiguous to a reader.
 const FIELD_PATH_NONE: &str = "none";
+
+/// Rendered `transform_class` for a decision that considered no row, and so
+/// has no class. Mirrors [`FIELD_PATH_NONE`].
+const TRANSFORM_CLASS_NONE: &str = "none";
 
 /// Message of the single request-level pre-flight WARN. Stable and greppable,
 /// and named so a test can assert on it without restating the string.

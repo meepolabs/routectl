@@ -3106,6 +3106,7 @@ pub fn routectl_router::WindowGateConfig::into_shared(self) -> Shared
 pub const routectl_router::config::CANARY_INTERVAL: u32
 pub const routectl_router::config::CONFIG_PROVIDER_KINDS: &[&str]
 pub const routectl_router::config::CURRENT_CONFIG_VERSION: u32
+pub const routectl_router::config::ENVELOPE_QUORUM: u32
 pub const routectl_router::config::PREFIX_QUORUM: u32
 pub fn routectl_router::config::is_config_provider_kind(&str) -> bool
 pub fn routectl_router::config::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
@@ -3945,6 +3946,7 @@ pub routectl_router::router::FieldPreflight::acted: bool
 pub routectl_router::router::FieldPreflight::field_path: core::option::Option<&'static str>
 pub routectl_router::router::FieldPreflight::reason: &'static str
 pub routectl_router::router::FieldPreflight::state_key: alloc::string::String
+pub routectl_router::router::FieldPreflight::transform_class: core::option::Option<&'static str>
 impl core::clone::Clone for routectl_router::router::FieldPreflight
 pub fn routectl_router::router::FieldPreflight::clone(&self) -> routectl_router::router::FieldPreflight
 impl core::fmt::Debug for routectl_router::router::FieldPreflight

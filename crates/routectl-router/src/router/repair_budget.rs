@@ -75,6 +75,18 @@ impl RepairBudget {
         self.remaining -= 1;
         true
     }
+
+    /// The remaining allowance, read WITHOUT spending it.
+    ///
+    /// Test-only, and deliberately not a `Clone` on this type: a cloneable
+    /// budget is one a caller can accidentally spend a copy of, which is the
+    /// per-seat reset this type exists to remove. A test that needs to show a
+    /// refusal charged nothing compares this before and after instead of
+    /// draining a copy.
+    #[cfg(test)]
+    pub(super) const fn remaining(&self) -> u8 {
+        self.remaining
+    }
 }
 
 #[cfg(test)]

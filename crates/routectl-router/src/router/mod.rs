@@ -1338,12 +1338,26 @@ pub struct DispatchMeta {
     /// tokens, a code-authored field path, and booleans -- never the
     /// upstream body, the rejected value, or the session key.
     pub field_repair: Option<FieldRepair>,
-    /// Envelope-field pre-flight records, ONE PER TARGET PLANNED, in the
-    /// order the walk planned them. A fallback chain therefore reports every
-    /// target's decision rather than only the last: overwriting a single slot
-    /// discards exactly the fallback behavior an operator needs to see, since
-    /// the interesting case is a chain where one target acted and another did
-    /// not.
+    /// Envelope-field pre-flight records, ONE PER CONSIDERED CLOSED-TABLE ROW
+    /// PER TARGET PLANNED, in the order the walk planned them. A fallback chain
+    /// therefore reports every target's decisions rather than only the last:
+    /// overwriting a single slot discards exactly the fallback behavior an
+    /// operator needs to see, since the interesting case is a chain where one
+    /// target acted and another did not. Per ROW rather than per target because
+    /// a request can carry rows of two transform classes at once and each is
+    /// gated on its own terms, so a per-target record would report only one of
+    /// two facts.
+    ///
+    /// PUBLIC SEMANTICS, since this is an observable surface: the LENGTH is the
+    /// number of decisions the walk recorded, not the number of targets it
+    /// planned, and a reader counting targets from it will overcount whenever a
+    /// request carries more than one closed-table row. Group by
+    /// [`FieldPreflight::state_key`] to recover per-target structure, and read
+    /// [`FieldPreflight::field_path`] to tell one row's decision from another's
+    /// on the same target. In a release built today only one grounded row
+    /// exists, so every target contributes exactly one record -- that is a
+    /// property of the current closed table, NOT a contract, and a build that
+    /// adds a row changes the count without changing this field's meaning.
     ///
     /// Empty when the walk planned nothing (no target reached the seam).
     /// Distinct from [`Self::field_repair`]: that field records the REACTIVE
@@ -1372,6 +1386,11 @@ pub struct FieldPreflight {
     /// The closed-table qualified dotted path the planner considered, if
     /// the attempt carried any grounded field at all.
     pub field_path: Option<&'static str>,
+    /// Closed-set token naming the considered row's transform class
+    /// (`envelope` / `prefix_impacting`) -- what decides which gates the
+    /// decision had to clear. `None` only for a decision that considered no
+    /// row at all, since a class is a property of a row.
+    pub transform_class: Option<&'static str>,
     /// Closed-set token naming why the planner acted or fell open.
     pub reason: &'static str,
 }
