@@ -174,6 +174,52 @@ impl FieldVerdictKey {
     }
 }
 
+/// The floor every transform class shares before ANY pre-flight rewrite may
+/// act: one acknowledged confirmation. A class needing more compares
+/// [`PreflightAuthorization::confirmations`] against its own quorum -- the
+/// floor is not any class's whole gate.
+///
+/// Its RELATION to the per-class quorums (`MINIMUM_CONFIRMATIONS <=
+/// ENVELOPE_QUORUM < PREFIX_QUORUM`) is enforced beside those two, in
+/// `config::schema`, by anonymous `const _: () = assert!(...)` items. Rustc
+/// evaluates the initializer of every `const` item in a crate it compiles, so
+/// those assertions run with no consumer and no reference at all. The floor
+/// assertion reads THIS constant by path rather than a copy of its value, so
+/// there is one definition and nothing can drift.
+///
+/// What that catches is narrower than every edit: RAISING this above
+/// `ENVELOPE_QUORUM` violates the inequality and fails the build
+/// (`error[E0080]: evaluation panicked`), while an order-preserving change --
+/// lowering it to `0` -- compiles. The exact value is pinned by the named test
+/// `the_three_quorum_values_are_exactly_one_one_and_two`.
+///
+/// `pub(crate)` and no wider: the floor is an internal eligibility parameter, and
+/// the operator-facing values are `config::ENVELOPE_QUORUM` and
+/// `config::PREFIX_QUORUM`.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this module is private, so pub(crate) reads as redundant -- but \
+              `config::schema`'s floor assertion reads this path, so the \
+              visibility is load-bearing rather than cosmetic"
+)]
+pub(crate) const MINIMUM_CONFIRMATIONS: u32 = 1;
+
+/// What one consistent pre-flight eligibility read established.
+///
+/// The incarnation and the confirmation count travel TOGETHER rather than
+/// through two calls, because a transform class's quorum is a threshold on the
+/// same count eligibility was decided from: a caller re-reading it could gate
+/// one row against a state the eligibility decision never saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreflightAuthorization {
+    /// The verdict incarnation the authorization rests on. A canary claim and
+    /// its later settlement must both carry this value.
+    pub incarnation: u64,
+    /// The acknowledged confirmation count resident for that incarnation, at
+    /// least [`MINIMUM_CONFIRMATIONS`].
+    pub confirmations: u32,
+}
+
 /// Two-phase, single-flight lifecycle over the learned-capability registry for
 /// envelope-field verdicts.
 #[derive(Debug)]
@@ -249,22 +295,24 @@ impl FieldVerdictRegistry {
     }
 
     /// Whether `key` is currently pre-flight eligible at all, discarding the
-    /// incarnation [`Self::preflight_eligible_incarnation`] returns.
+    /// rest of [`Self::preflight_authorization`]'s answer.
     ///
     /// Test-only: the production planner needs the incarnation (a canary claim
     /// and its settlement must carry the one the authorization was validated
-    /// against), so it calls the incarnation-returning form directly. Gated
+    /// against) and the confirmation count (the transform class's quorum is
+    /// read from the same snapshot), so it calls the full form directly. Gated
     /// rather than blanket-allowed, so a future production reader has to ungate
     /// it deliberately and think about which of the two it wants.
     #[cfg(test)]
     #[must_use]
     pub fn preflight_eligible(&self, key: &FieldVerdictKey, generation: u64, now: Instant) -> bool {
-        self.preflight_eligible_incarnation(key, generation, now)
-            .is_some()
+        self.preflight_authorization(key, generation, now).is_some()
     }
 
-    /// Whether `key` is pre-flight eligible, plus the incarnation the decision
-    /// rests on -- `None` for every case that predicate refuses.
+    /// The pre-flight authorization for `key`: the incarnation the decision
+    /// rests on plus the acknowledged confirmation count backing it, read from
+    /// ONE snapshot of the shared canary state -- `None` when there is no
+    /// settled, acknowledged, acting verdict to authorize anything.
     ///
     /// The incarnation is what a canary claim and its later settlement must
     /// carry: a settlement stamped with any other value would be indisputably
@@ -273,9 +321,21 @@ impl FieldVerdictRegistry {
     /// Returning it from the same consistent (generation, incarnation) pair the
     /// re-read validated is what keeps the two from disagreeing.
     ///
+    /// The confirmation count rides along for the same reason rather than
+    /// through a second read: the transform class's quorum (the router's
+    /// `field_repair::TransformClass::required_quorum`) is
+    /// a threshold on THIS count, and a caller that re-read it would be
+    /// answering "is there an acting verdict" and "does it carry enough
+    /// cycles" against two states that never coexisted -- which is how an
+    /// eligible-and-confirmed identity comes to report a confirmation
+    /// shortfall it never had. One snapshot means eligibility and every
+    /// class's gate are decided from the same facts.
+    ///
     /// ELIGIBLE means: resident, ACTING, not canary-suspended, and its
     /// incarnation has at least one acknowledged confirmation in the shared
-    /// canary registry.
+    /// canary registry. A class needing MORE than one compares
+    /// [`PreflightAuthorization::confirmations`] against its own quorum; this
+    /// predicate is the floor every class shares, not any class's whole gate.
     ///
     /// Read-only, and deliberately NOT routed through [`Self::admit_provisional`]:
     /// that call claims the single-flight REACTIVE repair slot and refuses
@@ -298,7 +358,7 @@ impl FieldVerdictRegistry {
     /// # Why the verdict is read TWICE
     ///
     /// The two reads this predicate needs -- the acting verdict and the
-    /// canary confirmation -- take different locks, so nothing holds them
+    /// canary snapshot -- take different locks, so nothing holds them
     /// still together. A concurrent clear, purge, lapse, relearn, or
     /// generation boundary landing BETWEEN them yields a decision assembled
     /// from two states that never coexisted: the confirmation matched an
@@ -315,12 +375,12 @@ impl FieldVerdictRegistry {
     /// landing after the return, and it does not need to -- the caller's
     /// decision is per-attempt and fails open.
     #[must_use]
-    pub fn preflight_eligible_incarnation(
+    pub fn preflight_authorization(
         &self,
         key: &FieldVerdictKey,
         generation: u64,
         now: Instant,
-    ) -> Option<u64> {
+    ) -> Option<PreflightAuthorization> {
         let acting_incarnation = |()| {
             self.learned.field_acting_incarnation_in_generation(
                 generation,
@@ -348,19 +408,24 @@ impl FieldVerdictRegistry {
         // identity's state outright, NOT by a relearn -- the residual case and
         // its three recovery paths are spelled out on
         // [`Self::record_canary_disproof`].
-        let snapshot = self.canaries.snapshot(key);
-        if snapshot.is_some_and(|snap| snap.preflight_suspended) {
+        //
+        // ONE snapshot backs both this check and the confirmation count the
+        // caller's quorum reads, so no gate downstream can be decided against a
+        // different state than eligibility was.
+        let snapshot = self.canaries.snapshot(key)?;
+        if snapshot.preflight_suspended {
             return None;
         }
-        let confirmed =
-            snapshot.is_some_and(|snap| snap.incarnation == before && snap.confirmations >= 1);
-        if !confirmed {
+        if snapshot.incarnation != before || snapshot.confirmations < MINIMUM_CONFIRMATIONS {
             return None;
         }
         between_eligibility_reads();
         // Re-read under the same generation: the confirmation above is only
         // authorization if the verdict it backs is STILL the acting one.
-        (acting_incarnation(()) == Some(before)).then_some(before)
+        (acting_incarnation(()) == Some(before)).then_some(PreflightAuthorization {
+            incarnation: before,
+            confirmations: snapshot.confirmations,
+        })
     }
 
     /// Persist a canary CONFIRMATION for `key` and SETTLE the caller's claim:

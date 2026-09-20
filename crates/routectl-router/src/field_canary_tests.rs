@@ -429,23 +429,89 @@ fn stale_settlement_rollback_guard_is_load_bearing() {
 #[test]
 fn the_canary_cadence_is_one_hundred_eligible_requests() {
     // Mutation check for the cadence constant: change 100 to 99 and this goes
-    // red on both halves -- the 99th tick would trip, and the 100th would not.
-    // Asserted as a COUNT of ticks rather than against the constant itself,
+    // red on both halves -- the 99th tick would come due, and the 100th would
+    // not. Asserted as a COUNT of ticks rather than against the constant itself,
     // which would be a tautology while code and literal agree.
+    //
+    // Driven as a real caller drives it: a due tick CLAIMS, and the claim is
+    // what consumes the trip (dueness is sticky otherwise -- see
+    // `an_unclaimed_due_interval_stays_due_until_a_claim_consumes_it`). Reading
+    // the tick alone without claiming would report every request after the first
+    // trip, which is the sticky flag doing its job rather than a cadence defect.
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let mut tripped_on: Vec<u32> = Vec::new();
+    let mut due_on: Vec<u32> = Vec::new();
     for tick in 1..=200 {
         if registry.tick_cadence(&k, 1) {
-            tripped_on.push(tick);
+            due_on.push(tick);
+            // Settling immediately releases the slot, so the next interval's
+            // claim is admitted -- the shape of a canary that completes.
+            registry
+                .claim_canary(&k, 1)
+                .expect("the slot is free, so a due interval claims")
+                .settle(CanaryOutcome::Inconclusive);
         }
     }
 
     assert_eq!(
-        tripped_on,
+        due_on,
         vec![100, 200],
         "a canary is due on every hundredth eligible request, not the 99th or the 101st",
+    );
+}
+
+#[test]
+fn an_unclaimed_due_interval_stays_due_until_a_claim_consumes_it() {
+    // The STICKY half of dueness, and the reason it exists: a trip whose claim
+    // is unavailable must not be spent. Without this, an identity whose slot is
+    // busy at the moment it comes due -- an earlier canary still in flight, or a
+    // request whose sole settlement slot a sibling row owns -- would wait another
+    // full interval, and for a row that is consistently unable to claim, forever.
+    let registry = FieldCanaryRegistry::new();
+    let k = key("model-a");
+    // A claim held by a canary still in flight, so the trip below cannot claim.
+    let in_flight = registry.claim_canary(&k, 1).expect("first claim admitted");
+
+    // Arrange -- reach the trip.
+    for _ in 1..CANARY_INTERVAL {
+        assert!(
+            !registry.tick_cadence(&k, 1),
+            "not due before the interval elapses",
+        );
+    }
+    assert!(
+        registry.tick_cadence(&k, 1),
+        "the interval elapsed, so the identity is due",
+    );
+    assert!(
+        registry.claim_canary(&k, 1).is_none(),
+        "premise: the slot is held, so this due interval cannot be claimed",
+    );
+
+    // Act + assert -- it stays due on every subsequent request, rather than
+    // waiting out another interval.
+    for request in 1..=5 {
+        assert!(
+            registry.tick_cadence(&k, 1),
+            "request {request} after an unclaimed trip must still find the identity due",
+        );
+    }
+
+    // And the FIRST claim that succeeds consumes it: the flag clears, so the
+    // identity is not permanently due either.
+    in_flight.settle(CanaryOutcome::Inconclusive);
+    let claimed = registry
+        .claim_canary(&k, 1)
+        .expect("the released slot admits the pending due interval");
+    assert!(
+        !registry.snapshot(&k).expect("resident").due,
+        "a successful claim consumes the trip, so the identity is no longer due",
+    );
+    drop(claimed);
+    assert!(
+        !registry.tick_cadence(&k, 1),
+        "and the next request is back on a fresh interval rather than instantly due",
     );
 }
 

@@ -431,11 +431,68 @@ impl Default for SeatQuotaConfig {
 /// surface.
 pub const CANARY_INTERVAL: u32 = 100;
 
+/// Confirmed repair cycles an ENVELOPE-class transform needs before it may act
+/// pre-flight: one acknowledged confirmation.
+///
+/// Co-located with its prefix-impacting sibling and with [`CANARY_INTERVAL`]
+/// deliberately. These three are one safety parameter set -- the quorum a
+/// content rewrite needs, the quorum an envelope rewrite needs, and how often
+/// either is re-verified -- and the ORDER between the two quorums is what makes
+/// the classes distinguishable at all. Splitting them across modules is how one
+/// gets raised without the reader of the other noticing.
+pub const ENVELOPE_QUORUM: u32 = 1;
+
 /// Confirmed repair-cycle quorum a prefix-impacting transform needs
 /// before it may act pre-flight (in addition to the target's explicit
 /// opt-in below). A code constant for the same reason as
-/// [`CANARY_INTERVAL`].
+/// [`CANARY_INTERVAL`], and strictly greater than [`ENVELOPE_QUORUM`] -- the
+/// anonymous `const _` assertions below enforce that ORDER at build time, and
+/// the named test `the_three_quorum_values_are_exactly_one_one_and_two` pins this
+/// exact value (which the order assertion alone would not).
 pub const PREFIX_QUORUM: u32 = 2;
+
+/// The eligibility FLOOR cannot exceed the cheapest class's own quorum, or the
+/// floor would refuse a verdict that class considers sufficient and
+/// `below_quorum` would be unreachable for it.
+///
+/// Compares [`crate::field_verdict::MINIMUM_CONFIRMATIONS`] DIRECTLY -- not a
+/// copy of its value -- so this is a real weld: the two cannot drift, because
+/// there is only one definition in play. (`field_verdict` depends on this module
+/// and not the reverse, but a `const` path is not a dependency edge, so reading
+/// it here is fine.)
+///
+/// An anonymous `const _: ()`, the repo-standard shape for a compile-time
+/// assertion (see `config_migrate`'s migration-ladder guard). Rustc evaluates
+/// the initializer of every `const` item in a crate it compiles, so this runs
+/// with no consumer, no reference, and no name to keep alive -- and an anonymous
+/// item cannot trip `dead_code`, so it needs no lint expectation either.
+///
+/// SCOPE, because it is narrower than "the literals are protected": an edit that
+/// VIOLATES this inequality fails the BUILD (`error[E0080]: evaluation panicked`
+/// here). An ORDER-PRESERVING retune does not -- `MINIMUM_CONFIRMATIONS = 0`
+/// compiles clean. The exact values are pinned separately, by the named test
+/// `the_three_quorum_values_are_exactly_one_one_and_two`.
+const _: () = assert!(
+    crate::field_verdict::MINIMUM_CONFIRMATIONS <= ENVELOPE_QUORUM,
+    "the shared eligibility floor cannot exceed the envelope class's own quorum, or an \
+     eligible envelope verdict would be refused by the floor and `below_quorum` would be \
+     unreachable for that class",
+);
+
+/// The envelope quorum is STRICTLY smaller than the prefix-impacting one, or no
+/// confirmation count could ever separate the two classes and the whole content
+/// gate collapses into the envelope one.
+///
+/// Same anonymous-`const` mechanism, and the same SCOPE: an edit that VIOLATES
+/// the inequality fails the build, while an order-preserving retune does not --
+/// `PREFIX_QUORUM = 3` compiles clean, since 1 < 3 still holds. The exact values
+/// are pinned by `the_three_quorum_values_are_exactly_one_one_and_two`.
+const _: () = assert!(
+    ENVELOPE_QUORUM < PREFIX_QUORUM,
+    "the envelope quorum must be STRICTLY smaller than the prefix-impacting one, or no \
+     confirmation count could ever separate the two classes and the content gate would \
+     collapse into the envelope gate",
+);
 
 /// Operator-facing `[fidelity]` config block. Fully defaulted: a missing
 /// `[fidelity]` table deserializes to `FidelityConfig::default()`, which
@@ -449,12 +506,20 @@ pub const PREFIX_QUORUM: u32 = 2;
 /// ([`PREFIX_QUORUM`]) on top of listing here; this field alone never
 /// makes one act.
 ///
+/// That list is an ACTIVE dispatch gate: the pre-flight planner refuses a
+/// prefix-impacting transform for any target it does not name, so an entry added
+/// here can change what goes upstream.
+///
 /// `paid_probe_daily_caps` is keyed by provider name only (no model
 /// tier -- the daily budget is a provider-account property, not a
 /// per-model one) and caps the number of paid probe calls issued against
 /// that provider per UTC day. A provider absent from this map, or listed
 /// with the default `0`, permits no paid probe calls; only free
-/// validators may still run for it.
+/// validators may still run for it. It has no RUNTIME consumer in this build --
+/// no probe engine reads it yet, so it constrains no dispatch -- but its KEYS are
+/// validated at config load against the configured providers (a `:`-scoped key,
+/// or one naming an unknown provider, fails the load), so a typo'd entry is
+/// rejected now rather than when the probe engine lands.
 ///
 /// The re-verification cadence and confirmation quorum are code constants
 /// ([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are

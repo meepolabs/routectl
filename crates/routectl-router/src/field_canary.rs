@@ -71,6 +71,22 @@ struct CanaryState {
     /// Eligible-request countdown until the next due canary. Reset to
     /// [`CANARY_INTERVAL`] on seed and on every trip.
     cadence: u32,
+    /// Whether this identity is DUE for re-verification: the countdown has
+    /// tripped and no canary has been claimed for that trip yet.
+    ///
+    /// STICKY, which is the whole point. A trip whose claim cannot be taken --
+    /// an earlier interval's canary still in flight, or a request whose sole
+    /// settlement slot a sibling row already owns -- must leave the identity due
+    /// so the NEXT eligible request claims it. Clearing it on the trip alone
+    /// would postpone re-verification by a further full interval every time the
+    /// claim was unavailable, and for a row that is consistently second in the
+    /// table that is indefinitely.
+    ///
+    /// Cleared by exactly one event: a successful
+    /// [`FieldCanaryRegistry::claim_canary`]. A settlement does not clear it
+    /// (the claim already did) and does not need to; the settlement's own
+    /// outcome restarts the interval.
+    due: bool,
     /// How many requests are currently applying this identity's repair.
     outstanding: u64,
     /// How many requests have applied this identity's repair since its last
@@ -123,6 +139,7 @@ impl CanaryState {
             incarnation,
             confirmations,
             cadence: CANARY_INTERVAL,
+            due: false,
             outstanding: 0,
             modified_since_confirmation: 0,
             canary_claimed: false,
@@ -137,7 +154,7 @@ impl CanaryState {
 /// several calls.
 ///
 /// Read by the field pre-flight eligibility check
-/// (the field-verdict registry's `preflight_eligible_incarnation`) and
+/// (the field-verdict registry's `preflight_authorization`) and
 /// by tests that need more than one field at once without holding the lock
 /// across several calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +162,9 @@ pub struct CanaryStateSnapshot {
     pub incarnation: u64,
     pub confirmations: u32,
     pub cadence: u32,
+    /// Whether the identity has a tripped interval no claim has consumed yet.
+    /// See [`CanaryState::due`] for why this is sticky.
+    pub due: bool,
     pub outstanding: u64,
     pub modified_since_confirmation: u64,
     pub canary_claimed: bool,
@@ -269,16 +289,26 @@ impl FieldCanaryRegistry {
         self.states.lock().remove(key);
     }
 
-    /// Tick the eligible-request cadence countdown for `key` at
-    /// `incarnation`. Returns `true` exactly on the tick that trips the
-    /// countdown to zero, atomically resetting it to [`CANARY_INTERVAL`]
-    /// in the same critical section -- so two concurrent callers can never
-    /// both observe the trip for the same cycle.
+    /// Tick the eligible-request cadence countdown for `key` at `incarnation`,
+    /// and report whether the identity is now DUE for re-verification.
+    ///
+    /// EVERY eligible request advances this identity's countdown, whatever else
+    /// the request is doing: the cadence measures a verdict's exposure, not a
+    /// request's role, so a request whose sole settlement slot a sibling row
+    /// already owns must still advance this row -- otherwise a row that is
+    /// consistently second in the closed table never reaches its interval.
+    ///
+    /// Dueness is STICKY (see [`CanaryState::due`]): the trip sets it and only a
+    /// successful [`Self::claim_canary`] clears it. So a trip whose claim is
+    /// unavailable leaves the identity due for the NEXT eligible request rather
+    /// than postponing re-verification by another full interval. The countdown
+    /// itself resets on the trip, so an identity that stays due does not
+    /// re-trip on every subsequent request -- it is due once and claims once.
     ///
     /// `false` for a caller whose `incarnation` is SUPERSEDED, without touching
-    /// the countdown: a straggler from an older lifecycle must not move the
-    /// current one's cadence, and reporting "not due" makes its planner fail
-    /// open (forward the request unchanged) rather than claim a canary.
+    /// the countdown or the flag: a straggler from an older lifecycle must not
+    /// move the current one's cadence, and reporting "not due" makes its planner
+    /// fail open (forward the request unchanged) rather than claim a canary.
     pub fn tick_cadence(&self, key: &FieldVerdictKey, incarnation: u64) -> bool {
         let mut states = self.states.lock();
         let entry = states
@@ -289,11 +319,11 @@ impl FieldCanaryRegistry {
         }
         if entry.cadence <= 1 {
             entry.cadence = CANARY_INTERVAL;
-            true
+            entry.due = true;
         } else {
             entry.cadence -= 1;
-            false
         }
+        entry.due
     }
 
     /// Mark one modified (repaired) request outstanding for `key` at
@@ -356,6 +386,10 @@ impl FieldCanaryRegistry {
     /// stays sound because release and settlement are both incarnation-scoped
     /// (see [`Self::release_canary_claim`]) -- it can only ever retire its own
     /// incarnation's state, never the live slot that replaced it.
+    ///
+    /// A successful claim CLEARS the sticky due flag [`Self::tick_cadence`] set:
+    /// the claim is the one event that consumes a trip, so a refused claim
+    /// leaves the identity due for the next eligible request.
     pub fn claim_canary(
         &self,
         key: &FieldVerdictKey,
@@ -372,6 +406,7 @@ impl FieldCanaryRegistry {
             return None;
         }
         entry.canary_claimed = true;
+        entry.due = false;
         Some(CanaryClaimGuard {
             registry: self,
             key: key.clone(),
@@ -574,6 +609,7 @@ impl FieldCanaryRegistry {
             incarnation: s.incarnation,
             confirmations: s.confirmations,
             cadence: s.cadence,
+            due: s.due,
             outstanding: s.outstanding,
             modified_since_confirmation: s.modified_since_confirmation,
             canary_claimed: s.canary_claimed,

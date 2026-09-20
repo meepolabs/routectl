@@ -26,7 +26,7 @@
 use super::super::PurgeOutcome;
 use super::super::Router;
 use super::super::repair_budget::REPAIRS_PER_REQUEST;
-use super::provisional;
+use super::{ANTHROPIC_API_KIND, provisional};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
+use routectl_core::failure_class::FailureClass;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error, Message,
     MessageContent, Provider, ReasoningConfig, Result, Role, TokenCount,
@@ -1526,7 +1527,11 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
     // can see, which is why it is pinned here on the budget directly.
     //
     // Driven through the real plan: a request that does NOT carry the field is
-    // exactly the state where the drop is a no-op.
+    // exactly the state where the drop is a no-op. The injection is in scope so
+    // the rejection genuinely NAMES the admitted row -- without it `apply` would
+    // refuse on candidate selection instead, and this test would pass for the
+    // wrong reason.
+    let _injection = provisional::inject(REJECTED_PATH);
     let router = {
         let (r, _seen) = single_seat(ALIAS, Answer::ServeRepaired);
         r
@@ -1547,7 +1552,7 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
         .into_iter()
         .next()
         .expect("one target");
-    let plan = router
+    let mut plan = router
         .plan_field_carry(
             &target,
             &carrying,
@@ -1565,11 +1570,17 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
         &mut bare,
         &mut meta,
         &mut budget,
+        &FailureClass::BadRequest,
         &Error::upstream("p", 400, FIELD_REJECT_BODY),
+        ANTHROPIC_API_KIND,
     );
 
     // Assert -- no repair, no mutation, no charge.
     assert!(applied.is_none(), "a no-op drop must report no repair");
+    assert!(
+        plan.repaired_path().is_none(),
+        "and the plan records no repaired row, so no settlement can commit one",
+    );
     assert_eq!(
         serde_json::to_string(&bare).expect("serializable"),
         before,
@@ -1606,14 +1617,18 @@ fn a_surface_that_removes_nothing_fails_closed_in_release() {
     // Arrange -- a plan whose surface CLAIMS presence and removes nothing. The
     // real surface cannot diverge (its presence check and drop read the same
     // carriers), so the divergence is manufactured to reach the branch at all.
-    let plan = super::FieldRepairPlan::divergent_for_tests();
+    // That surface has no closed-table row (it reports itself present
+    // unconditionally, so a row would make every test request carry it), which
+    // is why the EFFECT half is driven directly rather than through the
+    // rejection-to-candidate selection.
+    let mut plan = super::FieldRepairPlan::divergent_for_tests();
     let mut req = req_on(ALIAS);
     let before = serde_json::to_string(&req).expect("serializable");
     let mut meta = crate::router::DispatchMeta::for_alias(ALIAS);
     let mut budget = crate::router::repair_budget::RepairBudget::per_request();
 
     // Act
-    let applied = plan.apply(
+    let applied = plan.apply_sole_candidate_for_tests(
         &mut req,
         &mut meta,
         &mut budget,

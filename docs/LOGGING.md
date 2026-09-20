@@ -335,6 +335,81 @@ non-settling result-only token count: a target this stage cannot
 attribute a rejection to is one it must not act on, not just one it must
 not learn from.
 
+### Envelope-field pre-flight decision DEBUG + WARN
+
+The PROACTIVE counterpart of the repair WARN above. When a resident learned
+verdict is settled and confirmed, the router rewrites the request BEFORE
+dispatch rather than waiting for the upstream to reject it again, and every
+such decision is reported. Two tiers, because they carry different
+information:
+
+- **DEBUG, one line per DECISION**, acting or not, event
+  `"envelope_field_preflight"`. A fail-open is the routine case -- most
+  requests on most targets have no eligible verdict -- so a WARN per decision
+  would make an ordinary request look faulty and bury the reportable one.
+- **WARN, exactly ONE per REQUEST**, and only when at least one decision
+  actually acted. A request that rewrote a client's request before dispatch is
+  the reportable event; one that changed nothing is not.
+
+A decision is per CLOSED-TABLE ROW per target, not per target: one request can
+carry rows of two transform classes at once and each clears its own gates, so a
+per-target record would report only one of two facts. A fallback chain
+therefore emits one DEBUG per row per target it planned.
+
+| Field | Meaning |
+|---|---|
+| `event` | `envelope_field_preflight` on both tiers |
+| `action` | `field_preflight_drop`, attached ONLY to a record that acted -- labelling a fail-open with it would name an action the walk did not take |
+| `acted` | DEBUG only: whether this decision rewrote the request |
+| `state_key` | Sanitized `[providers]` state key of the target the decision was planned for |
+| `field_path` | The closed-table qualified dotted path the decision considered, or `none` when the request carried no grounded field |
+| `transform_class` | `envelope` or `prefix_impacting` -- what decided which gates the decision had to clear. `none` only for a decision that considered no row |
+| `reason` | Closed-set token naming why the decision acted or fell open (below) |
+| `decisions_acted` | WARN only: how many decisions rewrote something |
+| `decisions_planned` | WARN only: how many decisions were recorded for the request |
+
+The WARN NAMES one acting decision, chosen by two rules in order:
+
+1. **Highest impact wins** -- `prefix_impacting` over `envelope`. One line
+   stands for the whole request, and what an operator needs from it is the worst
+   thing that happened: a request that rewrote a cache prefix AND an envelope
+   field is a prefix-impacting event, whatever else it did.
+2. **Among equal impact, the FIRST planned wins** -- which matches the DEBUG
+   order above. So after reading a WARN, scanning the DEBUG lines for the
+   `state_key` it named lands on the decision it meant, rather than on an
+   earlier equal-impact one the WARN skipped. Equal-impact ties are ordinary: a
+   two-seat fallback chain whose seats both act on the same class produces one
+   on every such request.
+
+Naming one decision never narrows the counts. `decisions_acted` and
+`decisions_planned` always describe every decision recorded for the request, so
+the headline choice hides nothing.
+
+The `reason` vocabulary is closed. Each token is a different operator
+situation, and they are deliberately not collapsed -- which gate is holding is
+the whole information content of a fail-open:
+
+| `reason` | Meaning |
+|---|---|
+| `field_preflight_drop` | ACTED: the mapped field was dropped from the per-target request before dispatch |
+| `no_grounded_field` | The request carries no closed-table field at all |
+| `unsupported_lane` | The capability kill switch is off, the target is not on the one lane this stage acts on, or it authenticates with a forwarded client credential |
+| `unattributable_target` | The target carries no attributable Anthropic API base URL (a Bedrock Mantle entry reports none), or the URL names a local hop |
+| `masked_by_override` | An operator `force_supported` override masks this field's capability cell for this target. The operator has said to send the field; the learned verdict is NOT deleted |
+| `no_identity` | No identity could be minted for the field on this target |
+| `not_eligible` | No settled, acknowledged, acting verdict -- covers absent, lapsed, canary-suspended, zero acknowledged confirmations, and a verdict whose state moved under the eligibility read |
+| `below_quorum` | The verdict IS eligible, but its acknowledged confirmation count is below the quorum this transform class requires. A prefix-impacting rewrite needs two confirmed cycles; one is not enough |
+| `no_target_opt_in` | A prefix-impacting transform whose quorum is satisfied but whose target is not named in `[fidelity] prefix_impact_opt_in`. A content rewrite stays dormant until the operator opts the target in |
+| `ambiguous_mutation` | The transform was authorized but removed nothing, or reported success while its field was still present. Fails open to a byte-equivalent original |
+| `canary_restored` | This request is the re-verification canary: the tested field was RESTORED rather than dropped, and the upstream's answer re-verifies or disproves the verdict |
+
+Content-free by construction, at BOTH tiers. Every field is a closed-set
+token, a code-authored path literal, a `sanitize_for_log`-sanitized state key,
+or a boolean/count. No request values, no response body, no credential, no
+session key, and no upstream text at any verbosity. That matters most for the
+`prefix_impacting` class, whose dropped value is a system prompt rather than an
+enum token: the line names the path and the class, never the content.
+
 ### Field-verdict snapshot INFO (status / doctor)
 
 Every `/status` health-panel build and every `/status/doctor` build emits

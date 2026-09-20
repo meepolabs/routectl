@@ -19,11 +19,11 @@ pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::routectl_config_dir;
 pub use schema::{
     AliasValue, BedrockGlobalConfig, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability,
-    CacheConfig, CalibrationConfig, CapabilityConfig, CredentialSource, FidelityConfig,
-    HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry,
-    PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
-    ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection, ServerAuth,
-    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
+    CacheConfig, CalibrationConfig, CapabilityConfig, CredentialSource, ENVELOPE_QUORUM,
+    FidelityConfig, HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter,
+    OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
+    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection,
+    ServerAuth, ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -204,10 +204,24 @@ pub struct Config {
     /// daily caps. A missing block keeps `FidelityConfig::default()`:
     /// no target opted into prefix-impacting pre-flight and every
     /// provider's paid-probe cap at zero, so no config change permits any
-    /// paid probe or prefix-impacting pre-flight action by itself. Carries
-    /// no active runtime behavior yet -- see `FidelityConfig` for the
-    /// fixed cadence/quorum constants this block deliberately does not
-    /// expose.
+    /// paid probe or prefix-impacting pre-flight action by itself.
+    ///
+    /// The two fields differ in whether anything reads them today:
+    ///
+    /// - `prefix_impact_opt_in` is an ACTIVE dispatch gate. The pre-flight
+    ///   planner refuses a prefix-impacting transform for any target this
+    ///   list does not name, so adding an entry can change what goes
+    ///   upstream (for a target whose verdict also clears the confirmed-
+    ///   repair quorum).
+    /// - `paid_probe_daily_caps` has no RUNTIME consumer: no probe engine
+    ///   reads it in this build, so it constrains no dispatch yet. Its keys
+    ///   ARE validated at config load, though -- a key carrying a `:` or
+    ///   naming a provider that is not configured fails the load -- so a
+    ///   typo'd entry is rejected today rather than discovered when the
+    ///   probe engine lands and starts reading it.
+    ///
+    /// See `FidelityConfig` for the fixed cadence/quorum constants this
+    /// block deliberately does not expose.
     #[serde(default)]
     pub fidelity: FidelityConfig,
 

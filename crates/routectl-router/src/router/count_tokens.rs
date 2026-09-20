@@ -409,14 +409,10 @@ impl Router {
         // accounting guard lives for this seat's whole attempt loop; a token
         // count never claims a canary (the surface is excluded upstream of the
         // cadence tick), so there is no settlement to owe here.
-        let (preflighted_req, field_preflight, _field_preflight_plan) = self.plan_field_preflight(
-            &attempt_req,
-            &target,
-            DispatchSurface::CountTokens,
-            &*repair_budget,
-        );
+        let (preflighted_req, preflight_records, _field_preflight_plan) =
+            self.plan_field_preflight(&attempt_req, &target, DispatchSurface::CountTokens);
         attempt_req = preflighted_req;
-        meta.field_preflight.push(field_preflight);
+        meta.field_preflight.extend(preflight_records);
 
         // Reasoning-replay carry admission at the ANALOGOUS position the two
         // messages walks use: after every request-shaping step and before the
@@ -648,24 +644,31 @@ impl Router {
                     //
                     // `apply` owns the budget draw together with the mutation,
                     // so a drop that removes nothing charges nothing; every
-                    // repaired-state flag is set only on its `Some`. Slot
-                    // handling mirrors the arm above: release the half-open
-                    // probe slot before the `continue` re-gates, and never debit
-                    // the breaker -- a repairable envelope rejection is a
-                    // caller-shaped fault, not this seat's health signal.
+                    // repaired-state flag is set only on its `Some`. It also
+                    // selects WHICH admitted row to repair -- the one the
+                    // rejection names -- and releases every other candidate's
+                    // guard. Slot handling mirrors the arm above: release the
+                    // half-open probe slot before the `continue` re-gates, and
+                    // never debit the breaker -- a repairable envelope
+                    // rejection is a caller-shaped fault, not this seat's
+                    // health signal.
                     if !field_repair_attempted
-                        && let Some(plan) = field_plan.as_ref()
-                        && Self::rejection_names_planned_field(
-                            plan,
+                        && let Some(plan) = field_plan.as_mut()
+                        && let Some(status) = plan.apply(
+                            &mut attempt_req,
+                            meta,
+                            repair_budget,
                             &original_class,
                             &e,
                             target.provider_kind.unwrap_or(""),
                         )
-                        && let Some(status) = plan.apply(&mut attempt_req, meta, repair_budget, &e)
                     {
                         field_repair_attempted = true;
                         field_reject_status = status;
-                        self.note_field_repair(meta, &target.state_key, plan.path());
+                        let repaired_path = plan
+                            .repaired_path()
+                            .expect("a reported repair names the row it dropped");
+                        self.note_field_repair(meta, &target.state_key, repaired_path);
                         self.release_probe_slot(&target.state_key);
                         probe_guard.disarm();
                         continue;

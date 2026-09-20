@@ -3454,8 +3454,36 @@ prefix_impact_opt_in = []
   configurable** -- both are hard safety parameters baked into the
   binary and read from no environment variable, so they cannot drift
   per deployment or be raised past their tested values.
-- **No active runtime behavior yet.** This block is presently read-only
-  config surface: it carries no wired dispatch-path effect on its own.
+- **A bare provider entry covers every model dispatched through that
+  provider.** The provider segment names a concrete `[providers.X]`
+  entry, and listing it alone opts in every model whose dispatch
+  resolves to that entry -- including a model whose own `provider` field
+  names a pool the entry is a member of, because pool dispatch always
+  resolves to a concrete member and that member name is what reaches
+  resolution. Name `provider:nickname` to opt in one model instead.
+- **Membership, not precedence.** This list shares the target-spec
+  *grammar* with `[capability.overrides]`, not its precedence rule.
+  `[capability.overrides]` has two verdicts (`unsupported` and
+  `force_supported`), so it needs a rule deciding which tier wins for a
+  target both tiers name. This list has one verdict -- listed, or not --
+  so a target is opted in when **either** tier matches, and there is
+  nothing for a precedence rule to arbitrate. Listing both
+  `"anthropic"` and `"anthropic:sonnet"` is redundant rather than
+  conflicting.
+- **`prefix_impact_opt_in` is wired, and it is one of two gates.** The
+  pre-dispatch repair planner refuses a prefix-impacting transform for
+  any target this list does not name, and refuses it for a named target
+  whose learned verdict has fewer than the fixed quorum of confirmed
+  repair cycles. Both refusals leave the request exactly as the client
+  sent it and are reported per decision with their own reason token
+  (`no_target_opt_in` / `below_quorum`), so an operator reading the
+  diagnostic can tell which gate is holding. An operator
+  `force_supported` override for the same capability key outranks both:
+  it suppresses the action without deleting the learned verdict.
+  Envelope-class repair needs neither gate -- it acts on one confirmed
+  cycle and no opt-in.
+- **`paid_probe_daily_caps` has no wired effect yet.** It is read-only
+  config surface until the probe engine lands.
 
 ## Context reduction (`[reduction]`)
 

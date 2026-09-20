@@ -121,6 +121,36 @@ pub(super) enum FieldSurface {
     /// the byte-safety property it exists to pin holds in every build.
     #[cfg(test)]
     PartialDropForTests,
+    /// Test-only PREFIX-IMPACTING surface: a system prompt whose text is the
+    /// exact sentinel [`TEST_PREFIX_SENTINEL`].
+    ///
+    /// The closed table ships no prefix-impacting row today, so the content
+    /// gates that class is subject to -- the confirmation quorum and the
+    /// target opt-in -- would have no row to act on and every one of their
+    /// branches would be unreachable. An unreachable gate is one whose
+    /// removal no test would notice, which on this surface means a
+    /// prefix-impacting rewrite could later ship with the gates silently
+    /// inert.
+    ///
+    /// Dropping the system prompt is a genuine cache-prefix rewrite rather
+    /// than a stand-in for one, so a decision made about it exercises the
+    /// same classification a real content row will carry. It is also
+    /// DISJOINT from the envelope surface's two carriers, which is what lets
+    /// one request carry both classes at once and pin that each is gated on
+    /// its own terms -- and, on the reactive side, that a rejection naming
+    /// the LATER row is attributed to that row rather than starved by the
+    /// earlier one.
+    ///
+    /// Presence is an EXACT match on that sentinel, not "the request has a
+    /// system prompt". A broad predicate would make every unrelated fixture
+    /// anywhere in the test suite that happens to set `system` carry a
+    /// closed-table row -- so those fixtures would silently acquire pre-flight
+    /// decisions, feature keys, and reactive candidates that production cannot
+    /// produce, and a test asserting "one decision" would be asserting about a
+    /// row it never meant to involve. The sentinel confines this row to the
+    /// tests that deliberately opt into it.
+    #[cfg(test)]
+    PrefixImpactingSystemForTests,
     /// Test-only surface that reports a SUCCESSFUL removal while its own
     /// presence predicate still reports the field present.
     ///
@@ -155,6 +185,13 @@ impl FieldSurface {
             Self::DivergentForTests => true,
             #[cfg(test)]
             Self::PartialDropForTests => req.routectl_internal.anthropic_thinking_display.is_some(),
+            #[cfg(test)]
+            Self::PrefixImpactingSystemForTests => {
+                matches!(
+                    req.system.as_ref(),
+                    Some(routectl_core::SystemContent::Text(text)) if text == TEST_PREFIX_SENTINEL
+                )
+            }
             // Always present: that is the point -- a successful drop still
             // leaves this surface readable.
             #[cfg(test)]
@@ -187,12 +224,101 @@ impl FieldSurface {
                 req.routectl_internal.anthropic_thinking_display.take();
                 false
             }
+            #[cfg(test)]
+            Self::PrefixImpactingSystemForTests => {
+                // Guarded by the SAME exact-sentinel predicate the presence
+                // check uses, so this surface can never remove a system prompt
+                // some unrelated fixture happened to set.
+                if !Self::PrefixImpactingSystemForTests.present_in(req) {
+                    return false;
+                }
+                req.system.take().is_some()
+            }
             // Removes nothing and claims success -- the hazard the
             // post-condition re-check exists to catch.
             #[cfg(test)]
             Self::ClaimsRemovalForTests => true,
         }
     }
+}
+
+/// What a transform's removal costs the request beyond the field itself.
+///
+/// The taxonomy is TRANSFORM-KEYED: a row carries its own class, and the
+/// class is what decides which gates a pre-flight application of that row
+/// must clear. Nothing infers a class from a path string, so a new row
+/// states its cost explicitly rather than inheriting one by resemblance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TransformClass {
+    /// Removal touches request ENVELOPE metadata only: nothing the upstream
+    /// hashes into a cache prefix, and nothing the model reads as content.
+    Envelope,
+    /// Removal rewrites content the upstream hashes into its cache prefix,
+    /// so every applied request pays a full prefix recompute and a wrong
+    /// verdict degrades every later request on that lane silently.
+    ///
+    /// Not constructed by a GROUNDED row in this build: the closed table
+    /// ships one envelope row, and the first prefix-impacting row lands with
+    /// the captured evidence that grounds it. The class, its gates, and
+    /// their enforcement ship now rather than alongside that row, so the
+    /// row's arrival is a table edit rather than a new gate -- the scoped
+    /// allowance is what that costs, and the change adding the row removes
+    /// it. The variant IS constructed in a test build, by the test-only row
+    /// that keeps every branch of those gates reachable.
+    #[cfg_attr(not(test), allow(dead_code))]
+    PrefixImpacting,
+}
+
+impl TransformClass {
+    /// Stable, closed-set token for a decision record and its diagnostic.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Envelope => "envelope",
+            Self::PrefixImpacting => "prefix_impacting",
+        }
+    }
+
+    /// Confirmed repair cycles an acting verdict needs before a pre-flight
+    /// application of this class may run.
+    ///
+    /// Both values are code constants co-located in [`crate::config`] beside
+    /// the canary cadence, never operator knobs: a quorum tuned per deployment
+    /// turns a safety parameter into a support surface. Their ORDER is enforced
+    /// beside their definitions by anonymous `const _: () = assert!(...)` items,
+    /// which rustc evaluates whenever it compiles the crate -- so nothing here
+    /// references them, and nothing needs to. Those assertions catch an edit that
+    /// VIOLATES the order, not every edit: an order-preserving retune compiles,
+    /// and the exact values are pinned by
+    /// `the_three_quorum_values_are_exactly_one_one_and_two`.
+    ///
+    /// What a test CAN pin, and what
+    /// `each_class_consumes_the_co_located_quorum_constant_for_its_own_tier`
+    /// does, is the WIRING: that each arm reads its own tier's constant. That is
+    /// a consumer mistake the compile-time check cannot see, because swapping the
+    /// arms leaves both literals -- and so the relation between them -- intact.
+    pub(super) const fn required_quorum(self) -> u32 {
+        match self {
+            Self::Envelope => crate::config::ENVELOPE_QUORUM,
+            Self::PrefixImpacting => crate::config::PREFIX_QUORUM,
+        }
+    }
+
+    /// Whether this class additionally requires an explicit `[fidelity]`
+    /// target opt-in. Prefix-impacting repair stays dormant until the
+    /// operator names the target; envelope repair never needs one.
+    pub(super) const fn requires_target_opt_in(self) -> bool {
+        matches!(self, Self::PrefixImpacting)
+    }
+}
+
+/// One row of the closed path-to-surface table: the qualified dotted path,
+/// the request-side surface whose removal drops it, and the class that
+/// decides which gates a pre-flight application must clear.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FieldRepairRow {
+    pub(super) path: &'static str,
+    pub(super) surface: FieldSurface,
+    pub(super) class: TransformClass,
 }
 
 /// The CLOSED path-to-surface table: one row per qualified dotted path this
@@ -203,10 +329,72 @@ impl FieldSurface {
 /// produces that wire field. A path outside this table resolves to no row,
 /// so it mutates nothing and repairs nothing -- the table is the whole of
 /// what an L0 repair can act on.
-const FIELD_REPAIRS: &[(&str, FieldSurface)] = &[(
-    "thinking.enabled.display",
-    FieldSurface::AnthropicThinkingDisplay,
-)];
+const FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
+    path: "thinking.enabled.display",
+    surface: FieldSurface::AnthropicThinkingDisplay,
+    class: TransformClass::Envelope,
+}];
+
+/// The qualified dotted path of the test-only prefix-impacting row. Outside
+/// the grounded table, so it can never collide with a real rejection's path.
+#[cfg(test)]
+pub(in crate::router) const TEST_PREFIX_IMPACTING_PATH: &str = "system.prompt.for.tests";
+
+/// The EXACT system-prompt text the test-only prefix-impacting row's surface
+/// recognizes.
+///
+/// A sentinel rather than "any system prompt" so this row stays confined to the
+/// tests that opt into it: a broad predicate would give every fixture in the
+/// suite that sets `system` a closed-table row it never asked for, and the
+/// decisions, feature keys, and reactive candidates that follow from one.
+/// Deliberately not a plausible prompt -- a fixture cannot match it by accident.
+#[cfg(test)]
+pub(in crate::router) const TEST_PREFIX_SENTINEL: &str =
+    "routectl-test-only-prefix-impacting-surface-sentinel";
+
+/// Rows a TEST build adds to the closed table.
+///
+/// The grounded table ships no prefix-impacting row, so without this the
+/// content gates that class is subject to would have no row to act on and
+/// every branch of them would be unreachable -- and an unreachable gate is
+/// one whose removal no test would notice. Kept as its own table rather than
+/// a `cfg`'d element inside [`FIELD_REPAIRS`] so the grounded table's SIZE
+/// stays assertable: a new permanent row must still be a deliberate edit
+/// that updates the guard on that count.
+#[cfg(test)]
+const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
+    path: TEST_PREFIX_IMPACTING_PATH,
+    surface: FieldSurface::PrefixImpactingSystemForTests,
+    class: TransformClass::PrefixImpacting,
+}];
+
+/// The whole closed table this build scans, grounded rows first.
+#[cfg(not(test))]
+pub(super) const fn closed_table() -> &'static [FieldRepairRow] {
+    FIELD_REPAIRS
+}
+
+/// Test build: the grounded rows plus [`TEST_FIELD_REPAIRS`], in that order, so
+/// a grounded row keeps its production precedence and the added row sits behind
+/// it.
+///
+/// The divergent surface is deliberately NOT a row here: its presence predicate
+/// answers `true` unconditionally, so a row for it would make every request in
+/// a test build carry it. It reaches `apply`'s fail-closed branch through
+/// [`FieldRepairPlan::apply_candidate`] instead.
+#[cfg(test)]
+pub(super) fn closed_table() -> &'static [FieldRepairRow] {
+    use std::sync::LazyLock;
+
+    static ROWS: LazyLock<Vec<FieldRepairRow>> = LazyLock::new(|| {
+        FIELD_REPAIRS
+            .iter()
+            .chain(TEST_FIELD_REPAIRS)
+            .copied()
+            .collect()
+    });
+    &ROWS
+}
 
 /// The closed table's row for `path` -- the table's OWN path literal plus its
 /// surface -- or `None` for a path this build has no grounded repair for.
@@ -217,31 +405,34 @@ const FIELD_REPAIRS: &[(&str, FieldSurface)] = &[(
 /// the caller's string is what keeps upstream bytes out of every downstream
 /// consumer, including the operator-facing WARN.
 pub(super) fn closed_table_row(path: &str) -> Option<(&'static str, FieldSurface)> {
-    FIELD_REPAIRS
+    closed_table()
         .iter()
-        .find_map(|&(known, surface)| (known == path).then_some((known, surface)))
+        .find_map(|row| (row.path == path).then_some((row.path, row.surface)))
 }
 
-/// The closed table's first row whose surface `req` actually carries, or
-/// `None` when `req` carries none of them.
+/// EVERY closed-table row whose surface `req` carries, in table order.
 ///
-/// The single scan every pre-dispatch caller that needs "which grounded
-/// field, if any, does this request carry" shares -- [`Router::plan_field_carry`]
-/// inlines the same scan for its own admission; this is that scan pulled out
-/// so the pre-flight planner reads the identical table through the identical
-/// order rather than re-deriving it.
-pub(super) fn first_present_row(req: &ChatRequest) -> Option<(&'static str, FieldSurface)> {
-    FIELD_REPAIRS
+/// The scan shared by the pre-flight planner (which considers every present
+/// row, each gated on its own terms) and the reactive admission (which
+/// repairs one row per attempt, but must be able to attribute a rejection to
+/// ANY present row rather than only the first -- see
+/// [`Router::plan_field_carry`]).
+///
+/// Table order is the ENUMERATION order and nothing else: each row's
+/// decision is computed from that row's own class, verdict, and gates, so
+/// reordering the table reorders the records without changing any of them.
+pub(super) fn present_rows(req: &ChatRequest) -> impl Iterator<Item = FieldRepairRow> + '_ {
+    closed_table()
         .iter()
-        .find(|(_, surface)| surface.present_in(req))
+        .filter(|row| row.surface.present_in(req))
         .copied()
 }
 
 /// The request-side field-verdict feature keys `req` currently grounds.
 ///
-/// Widens the chain's feature-key vocabulary with the ONE grounded
-/// `field:<path>` key the closed table can mint today, so an acting field
-/// verdict participates in the existing stable partition
+/// Widens the chain's feature-key vocabulary with the `field:<path>` keys the
+/// closed table can mint today, so an acting field verdict participates in
+/// the existing stable partition
 /// ([`super::feature_filter::filter_chain_by_features`]) the same way a
 /// catalog capability does, through the same table and the same
 /// carrier-presence check a repair itself uses -- no second detector, no
@@ -249,10 +440,8 @@ pub(super) fn first_present_row(req: &ChatRequest) -> Option<(&'static str, Fiel
 /// yields an empty vector, leaving every caller's derived key list exactly
 /// as it was before this function existed.
 pub(super) fn grounded_field_feature_keys(req: &ChatRequest) -> Vec<String> {
-    FIELD_REPAIRS
-        .iter()
-        .filter(|(_, surface)| surface.present_in(req))
-        .filter_map(|(path, _)| crate::field_capability::field_capability_key(path))
+    present_rows(req)
+        .filter_map(|row| crate::field_capability::field_capability_key(row.path))
         .collect()
 }
 
@@ -360,8 +549,18 @@ pub(super) enum FieldSettlementMode {
     NonSettling,
 }
 
-/// The admitted L0 repair for one attempt: the closed-table surface to drop
-/// and the two-phase guard whose settlement the dispatch arm owes.
+/// The admitted L0 repair for one attempt: EVERY closed-table row the attempt
+/// carries, each with the two-phase guard whose settlement the dispatch arm
+/// owes, plus which row (if any) the arm actually repaired.
+///
+/// One candidate per present row rather than only the first, because the
+/// rejection decides WHICH row is repaired and the upstream can name any of
+/// them: an admission holding only the first present row starves a rejection
+/// naming a later one -- the arm would find the plan's row unnamed, leave the
+/// rejection on its ordinary terminal path, and the repairable field would
+/// never be repaired on that lane. The one-repair-per-attempt ceiling is
+/// unchanged: exactly one candidate can be applied, and applying it RELEASES
+/// every other candidate's guard (see [`Self::apply`]).
 ///
 /// Holding this is the PROVISIONAL phase -- nothing is persisted while it
 /// lives. The dispatch arm settles it exactly once: [`Self::commit`] when
@@ -370,6 +569,16 @@ pub(super) enum FieldSettlementMode {
 /// exit (a repeat rejection, an unrelated error, a fallback hop, a client
 /// disconnect), which learns nothing and strands no slot.
 pub(super) struct FieldRepairPlan<'a> {
+    candidates: Vec<FieldRepairCandidate<'a>>,
+    /// Index into `candidates` of the row a successful [`Self::apply`] dropped.
+    /// `None` until one succeeds, which is what makes the one-repair ceiling a
+    /// property of the plan rather than of a caller's flag alone.
+    repaired: Option<usize>,
+}
+
+/// One admitted row: the closed-table path and surface, plus the guard whose
+/// settlement this row owes.
+struct FieldRepairCandidate<'a> {
     path: &'static str,
     surface: FieldSurface,
     /// `Some` only for a SETTLING walk. `None` is the non-settling plan: it
@@ -382,15 +591,22 @@ pub(super) struct FieldRepairPlan<'a> {
 }
 
 impl FieldRepairPlan<'_> {
-    /// The closed-table path this repair acts on. A code-authored literal,
+    /// The closed-table path a successful [`Self::apply`] dropped, or `None`
+    /// when this plan has not repaired anything. A code-authored literal,
     /// never upstream text, so it is safe in an operator-facing field.
-    pub(super) const fn path(&self) -> &'static str {
-        self.path
+    pub(super) fn repaired_path(&self) -> Option<&'static str> {
+        self.repaired.map(|idx| self.candidates[idx].path)
     }
 
-    /// Perform the repair: drop the mapped field from the attempt request,
-    /// re-stamp the calibration estimate, and CHARGE the shared per-request
-    /// budget -- all or nothing.
+    /// Perform the repair for whichever admitted row `err` names: drop that
+    /// row's field from the attempt request, re-stamp the calibration estimate,
+    /// CHARGE the shared per-request budget, and RELEASE every other
+    /// candidate's guard -- all or nothing.
+    ///
+    /// The rejection is matched against every admitted row rather than against
+    /// one chosen at admission time: the upstream names the field, so the row
+    /// it names is the row to repair. Matching is on the SURFACE (see
+    /// [`Router::rejection_names_field_surface`]).
     ///
     /// The budget draw lives here, inside the successful branch, rather than in
     /// the caller's condition chain. The drop can legitimately remove nothing
@@ -400,22 +616,63 @@ impl FieldRepairPlan<'_> {
     /// path either way. Ordering the two the other way means the budget and
     /// the mutation succeed or fail together.
     ///
-    /// `Some(status)` -- repaired: the mapped field is gone, the estimate
+    /// `Some(status)` -- repaired: the named row's field is gone, the estimate
     /// describes the new payload, one repair was charged, and the caller must
     /// re-dispatch and later settle this plan. `None` -- nothing happened: no
-    /// mutation, no charge, and the caller must NOT mark the attempt repaired
-    /// or select the commit settlement.
+    /// mutation, no charge, no guard released, and the caller must NOT mark the
+    /// attempt repaired or select the commit settlement.
     pub(super) fn apply(
-        &self,
+        &mut self,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+        native_class: &FailureClass,
+        rejection: &Error,
+        provider_kind: &str,
+    ) -> Option<u16> {
+        // A plan that has already repaired must not repair again: the ceiling
+        // is one drop per attempt, and a second would mutate a body the arm
+        // already re-dispatched.
+        if self.repaired.is_some() {
+            return None;
+        }
+        // WHICH row: the one the upstream named. Refusing here is
+        // pre-mutation, so an unnamed rejection leaves the request and every
+        // guard exactly as the caller handed them over.
+        let idx = self.candidates.iter().position(|candidate| {
+            Router::rejection_names_field_surface(
+                candidate.surface,
+                native_class,
+                rejection,
+                provider_kind,
+            )
+        })?;
+        self.apply_candidate(idx, attempt_req, meta, budget, rejection)
+    }
+
+    /// The EFFECT half of [`Self::apply`], for the candidate at `idx`: the
+    /// presence re-check, the allowance check, the drop, the charge, the guard
+    /// releases, and the estimate re-stamp.
+    ///
+    /// Split from the rejection-to-candidate SELECTION above so the fail-closed
+    /// branch below is reachable in a release test build: the divergent surface
+    /// that manufactures the presence/drop disagreement reports itself present
+    /// unconditionally, so giving it a closed-table row would make every request
+    /// in a test build carry it. This is the entry point that test drives.
+    #[cfg_attr(not(test), allow(clippy::needless_pass_by_ref_mut))]
+    fn apply_candidate(
+        &mut self,
+        idx: usize,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
         rejection: &Error,
     ) -> Option<u16> {
+        let surface = self.candidates[idx].surface;
         // Presence is re-read HERE rather than trusted from admission: the
         // request has been through a dispatch since, and a drop that removes
         // nothing must not consume the allowance.
-        if !self.surface.present_in(attempt_req) {
+        if !surface.present_in(attempt_req) {
             return None;
         }
         // Availability is CHECKED, not spent: an exhausted allowance must leave
@@ -426,7 +683,7 @@ impl FieldRepairPlan<'_> {
         if !budget.can_draw() {
             return None;
         }
-        if !self.surface.drop_from(attempt_req) {
+        if !surface.drop_from(attempt_req) {
             // FAIL CLOSED. `present_in` held immediately above and nothing
             // between touches the request, so reaching here means the two have
             // diverged -- a bug in this module. The debug assertion names it in
@@ -458,6 +715,18 @@ impl FieldRepairPlan<'_> {
             charged,
             "can_draw held before the mutation, so the draw after it cannot fail",
         );
+        self.repaired = Some(idx);
+        // Every OTHER candidate's guard is released now rather than held to
+        // settlement. This attempt has spent its one repair on `idx`, so no
+        // outcome it reaches can settle another row: the arm's commit speaks
+        // for the repaired row alone. Releasing frees each unused
+        // single-flight slot for a sibling request that CAN settle that row,
+        // instead of pinning it for the rest of this walk.
+        for (other, candidate) in self.candidates.iter_mut().enumerate() {
+            if other != idx {
+                drop(candidate.guard.take());
+            }
+        }
         super::dispatch::restamp_calibration_estimate(attempt_req, meta);
         Some(
             super::class_observe::upstream_facts(rejection)
@@ -470,46 +739,89 @@ impl FieldRepairPlan<'_> {
     /// `apply`'s fail-closed branch. Test-only, and deliberately not
     /// constructible any other way.
     #[cfg(all(test, not(debug_assertions)))]
-    pub(super) const fn divergent_for_tests() -> Self {
+    pub(super) fn divergent_for_tests() -> Self {
         Self {
-            path: "thinking.enabled.display",
-            surface: FieldSurface::DivergentForTests,
-            guard: None,
+            candidates: vec![FieldRepairCandidate {
+                // Outside the closed table deliberately: the surface is not a
+                // row (see `closed_table`), and this path exists only so the
+                // candidate is well formed.
+                path: "divergent.surface.for.tests",
+                surface: FieldSurface::DivergentForTests,
+                guard: None,
+            }],
+            repaired: None,
         }
     }
 
-    /// Phase two after a successful repaired retry: persist the verdict and
-    /// return the emission row for the capability-event sink, or `None` for a
-    /// non-settling plan, which persists nothing and emits nothing.
+    /// Drive [`Self::apply_candidate`] for this plan's only candidate, skipping
+    /// the rejection-to-candidate selection.
+    ///
+    /// Test-only, and the ONLY way the fail-closed branch is reachable: the
+    /// divergent surface has no closed-table row, so no rejection can select it.
+    /// The production effect path is called directly, so a mutation to the
+    /// refusal, the charge, or the mutation ordering is observable here.
+    #[cfg(all(test, not(debug_assertions)))]
+    pub(super) fn apply_sole_candidate_for_tests(
+        &mut self,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+        rejection: &Error,
+    ) -> Option<u16> {
+        assert_eq!(
+            self.candidates.len(),
+            1,
+            "the divergent fixture holds exactly one candidate",
+        );
+        self.apply_candidate(0, attempt_req, meta, budget, rejection)
+    }
+
+    /// Phase two after a successful repaired retry: persist the REPAIRED row's
+    /// verdict and return the emission row for the capability-event sink, or
+    /// `None` for a non-settling plan (which persists nothing and emits
+    /// nothing) and for a plan that repaired nothing.
+    ///
+    /// Only the repaired row commits. The rejection named that row, and the
+    /// retry that succeeded is evidence about that row alone -- every other
+    /// candidate's guard was already released by [`Self::apply`].
     ///
     /// `request_features` is taken BY VALUE: the guard stores it on the event
     /// row, so a borrow here would only be cloned one frame deeper.
     pub(super) fn commit(
-        self,
+        mut self,
         upstream_status: u16,
         request_features: Vec<String>,
         now: Instant,
     ) -> Option<CapabilityLearnEvent> {
-        self.guard?.commit(upstream_status, request_features, now)
+        let idx = self.repaired?;
+        self.candidates[idx]
+            .guard
+            .take()?
+            .commit(upstream_status, request_features, now)
     }
 
-    /// Phase two after the UNREPAIRED attempt succeeded: the field is
-    /// accepted, so drop any resident verdict and return the cleared row so
-    /// the ledger records the clear and a warm rebuild cannot resurrect it.
+    /// Phase two after the UNREPAIRED attempt succeeded: every carried field is
+    /// accepted, so drop any resident verdict for each admitted row and return
+    /// the cleared rows so the ledger records the clears and a warm rebuild
+    /// cannot resurrect them.
     ///
-    /// `None` when nothing was removed -- an identity with no resident entry,
-    /// and every non-settling plan. A non-settling walk must NOT clear: the
-    /// removal would be invisible to the ledger, so the next warm rebuild would
-    /// resurrect a verdict this process had already dropped.
-    pub(super) fn settle_success(self) -> Option<CapabilityClearedEvent> {
-        self.guard?.clear()
+    /// One event per row that actually had a resident entry removed; empty for
+    /// an attempt whose rows had none, and for every non-settling plan. A
+    /// non-settling walk must NOT clear: the removal would be invisible to the
+    /// ledger, so the next warm rebuild would resurrect a verdict this process
+    /// had already dropped.
+    pub(super) fn settle_success(mut self) -> Vec<CapabilityClearedEvent> {
+        self.candidates
+            .iter_mut()
+            .filter_map(|candidate| candidate.guard.take()?.clear())
+            .collect()
     }
 }
 
 impl Router {
-    /// Claim the envelope-field repair slot for the closed-table field the
-    /// attempt actually carries toward `target`, or `None` when this attempt
-    /// cannot settle one.
+    /// Claim the envelope-field repair slot for EVERY closed-table field the
+    /// attempt carries toward `target`, or `None` when this attempt can settle
+    /// none.
     ///
     /// Admitted BEFORE dispatch and WITHOUT touching the request, mirroring
     /// the reasoning-replay carry admission. Pre-dispatch admission is what
@@ -519,6 +831,14 @@ impl Router {
     /// field is REJECTED can commit one. An admission driven off the rejection
     /// instead could only ever commit, and a verdict that can be minted but
     /// never cleared decays instead of being disproved.
+    ///
+    /// Every present row is admitted, not only the first: the REJECTION decides
+    /// which row is repaired, and the upstream can name any carried field. An
+    /// admission holding only the first present row would leave a rejection
+    /// naming a later row unrepairable on that lane forever. The
+    /// one-repair-per-attempt ceiling is enforced by
+    /// [`FieldRepairPlan::apply`], which applies exactly one candidate and
+    /// releases every other candidate's guard.
     ///
     /// This is NOT a pre-flight rewrite: nothing here reads a resident verdict
     /// in order to modify the outgoing request. An acting verdict REFUSES the
@@ -537,11 +857,15 @@ impl Router {
     ///   change what goes upstream;
     /// - the target's base URL names a local destination, or the lane would
     ///   rewrite the minted key, so no verdict may be minted for it;
-    /// - an acting verdict is resident, or a concurrent request holds the
-    ///   single-flight slot.
+    /// - for a given row, an acting verdict is resident or a concurrent request
+    ///   holds that row's single-flight slot -- which drops that ROW from the
+    ///   plan, leaving its siblings admitted.
     ///
-    /// The returned plan holds the guard. A caller that drops it without
-    /// settling releases the slot and learns nothing, so an arm whose later
+    /// `None` when NO row survived, so a caller's `Some` always names at least
+    /// one repairable candidate.
+    ///
+    /// The returned plan holds the guards. A caller that drops it without
+    /// settling releases every slot and learns nothing, so an arm whose later
     /// conditions decline leaves no residue.
     pub(super) fn plan_field_carry<'a>(
         &'a self,
@@ -569,12 +893,6 @@ impl Router {
         if target.use_forwarded_credential {
             return None;
         }
-        // The identity comes from the CLOSED TABLE plus the request, never
-        // from upstream text: the first row whose surface this attempt
-        // actually carries. One row ships today, so "first" is total; the
-        // table is scanned in source order so a later second row makes the
-        // precedence a deliberate edit rather than an accident.
-        let (path, surface) = first_present_row(attempt_req)?;
         // Read from the operator's own provider entry rather than from the
         // dispatch target: the suppression predicate keys on the configured
         // base URL, and the target carries none. The accessor answers only
@@ -597,35 +915,56 @@ impl Router {
         if crate::field_verdict::loopback_target_suppresses_minting(base_url) {
             return None;
         }
-        // A NON-SETTLING walk stops here: it repairs for the answer it returns
-        // and can persist nothing, so it claims no single-flight slot (leaving
-        // it to a sibling that can settle), reads no resident verdict, and is
-        // structurally unable to mint or clear -- the guard it would need does
-        // not exist on its plan.
-        if mode == FieldSettlementMode::NonSettling {
-            return Some(FieldRepairPlan {
-                path,
-                surface,
-                guard: None,
-            });
+        // The identities come from the CLOSED TABLE plus the request, never
+        // from upstream text: every row whose surface this attempt actually
+        // carries, in table source order.
+        let candidates: Vec<FieldRepairCandidate<'a>> = present_rows(attempt_req)
+            .filter_map(|row| {
+                // A NON-SETTLING walk admits the row guardless: it repairs for
+                // the answer it returns and can persist nothing, so it claims
+                // no single-flight slot (leaving it to a sibling that can
+                // settle), reads no resident verdict, and is structurally
+                // unable to mint or clear -- the guard it would need does not
+                // exist on its candidate.
+                if mode == FieldSettlementMode::NonSettling {
+                    return Some(FieldRepairCandidate {
+                        path: row.path,
+                        surface: row.surface,
+                        guard: None,
+                    });
+                }
+                let key = FieldVerdictKey::new(&target.state_key, row.path, provider_kind)?;
+                let guard = self.field_verdicts().admit_provisional(
+                    &key,
+                    base_url,
+                    self.registry_generation(),
+                    now,
+                )?;
+                Some(FieldRepairCandidate {
+                    path: row.path,
+                    surface: row.surface,
+                    guard: Some(guard),
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
         }
-        let key = FieldVerdictKey::new(&target.state_key, path, provider_kind)?;
-        let guard = self.field_verdicts().admit_provisional(
-            &key,
-            base_url,
-            self.registry_generation(),
-            now,
-        )?;
         Some(FieldRepairPlan {
-            path,
-            surface,
-            guard: Some(guard),
+            candidates,
+            repaired: None,
         })
     }
 
     /// Whether the rejection `err`, natively classified as `native_class`,
-    /// names the field path `plan` holds -- the condition that turns an
-    /// admitted carry into an actual repair.
+    /// names a closed-table row whose SURFACE is `surface`.
+    ///
+    /// THE single implementation of "did the upstream name this mutation", shared
+    /// by the reactive plan's own candidate selection ([`FieldRepairPlan::apply`])
+    /// and the canary's repaired retry (see [`super::field_preflight`]). Two
+    /// copies would be two answers to one question, and the one that drifted
+    /// would either repair over an unrelated fault or decline a rejection it was
+    /// built to handle.
     ///
     /// The NATIVE class is the input, never the operator-remapped one. A
     /// `[class_overrides]` entry expresses how the operator wants a status
@@ -636,30 +975,13 @@ impl Router {
     /// the upstream actually returned and the routing decision keeps reading
     /// the override.
     ///
-    /// False for every real rejection in this stage: no envelope resolves to a
-    /// path (see [`rejected_field_path`]), so an admitted carry settles as an
-    /// ordinary success or releases, and no repair fires.
-    pub(super) fn rejection_names_planned_field(
-        plan: &FieldRepairPlan<'_>,
-        native_class: &FailureClass,
-        err: &Error,
-        provider_kind: &str,
-    ) -> bool {
-        Self::rejection_names_field_surface(plan.surface, native_class, err, provider_kind)
-    }
-
-    /// Whether the rejection `err`, natively classified as `native_class`,
-    /// names a closed-table row whose SURFACE is `surface`.
-    ///
-    /// THE single implementation of "did the upstream name this mutation", shared
-    /// by the reactive admission above and the canary's repaired retry (see
-    /// [`super::field_preflight`]). Two copies would be two answers to one
-    /// question, and the one that drifted would either repair over an unrelated
-    /// fault or decline a rejection it was built to handle.
-    ///
     /// Compared on the surface rather than the path string: the surface is what
     /// the drop acts on, and two rows sharing one surface would be the same
     /// mutation under two identities.
+    ///
+    /// False for every real rejection in this stage: no envelope resolves to a
+    /// path (see [`rejected_field_path`]), so an admitted carry settles as an
+    /// ordinary success or releases, and no repair fires.
     pub(super) fn rejection_names_field_surface(
         surface: FieldSurface,
         native_class: &FailureClass,
@@ -835,8 +1157,14 @@ mod table_tests {
         &body[..end]
     }
 
-    /// The body of `FieldRepairPlan::apply`, from its signature's opening brace
-    /// to the closing brace at its own indentation.
+    /// The body of `FieldRepairPlan::apply_candidate` -- the EFFECT half of the
+    /// repair, from its signature's opening brace to the closing brace at its
+    /// own indentation.
+    ///
+    /// Anchored on the function NAME rather than on the return type alone: the
+    /// selection half (`apply`) shares that return type, and a bare type anchor
+    /// would read the wrong body -- one that contains no mutation, so the guard
+    /// below would fail on its own premise rather than pass vacuously.
     ///
     /// # Panics
     ///
@@ -844,14 +1172,19 @@ mod table_tests {
     /// the same reason as the production-body locator: a guard reading an empty
     /// body would pass vacuously.
     fn apply_body(source: &str) -> &str {
+        const SIGNATURE: &str = "fn apply_candidate(";
         const OPEN: &str = "    ) -> Option<u16> {";
-        let open_at = source
+        let sig_at = source
+            .find(SIGNATURE)
+            .expect("the effect half must be named `apply_candidate`");
+        let after_sig = &source[sig_at..];
+        let open_at = after_sig
             .find(OPEN)
-            .expect("`apply` must carry its `-> Option<u16>` signature");
-        let body = &source[open_at + OPEN.len()..];
+            .expect("`apply_candidate` must carry its `-> Option<u16>` signature");
+        let body = &after_sig[open_at + OPEN.len()..];
         let end = body
             .find("\n    }")
-            .expect("`apply`'s body must close at its own indentation");
+            .expect("`apply_candidate`'s body must close at its own indentation");
         &body[..end]
     }
 
@@ -887,6 +1220,14 @@ mod table_tests {
 
     use routectl_core::{ReasoningConfig, ReasoningDetail, ReasoningDetailKind};
 
+    /// A bare request carrying `prompt` as its flat system prompt.
+    fn req_with_system(prompt: &str) -> ChatRequest {
+        ChatRequest {
+            system: Some(routectl_core::SystemContent::Text(prompt.to_string())),
+            ..Default::default()
+        }
+    }
+
     fn req_with(carrier: Option<&str>, exclude: Option<bool>) -> ChatRequest {
         let mut req = ChatRequest::default();
         req.routectl_internal.anthropic_thinking_display = carrier.map(str::to_string);
@@ -913,9 +1254,16 @@ mod table_tests {
              permanent commitment and updates this guard deliberately",
         );
         assert_eq!(
-            FIELD_REPAIRS[0].0, "thinking.enabled.display",
+            FIELD_REPAIRS[0].path, "thinking.enabled.display",
             "the grounded row's path is the qualified dotted path the captured rejection \
              named, byte for byte -- a permanent token cannot be respelled later",
+        );
+        assert_eq!(
+            FIELD_REPAIRS[0].class,
+            TransformClass::Envelope,
+            "the one grounded row removes envelope metadata only -- it is NOT \
+             prefix-impacting, and a row whose class changed would silently change \
+             which gates its pre-flight application must clear",
         );
     }
 
@@ -997,6 +1345,54 @@ mod table_tests {
             Some(true),
             "the drop removes the rejected field ONLY: whether thinking was requested is a \
              different field and must survive, or the repair silently disables the feature",
+        );
+    }
+
+    #[test]
+    fn the_test_prefix_surface_drop_refuses_a_non_sentinel_system_prompt() {
+        // The DROP half of the sentinel scoping, tested directly on the surface
+        // rather than through the planner. `present_in` and `drop_from` are two
+        // functions, so narrowing only the former would leave the latter able to
+        // take ANY request's system prompt -- and the planner never reaches
+        // `drop_from` for a row whose presence check refused, so no
+        // planner-level test can observe that. The internal re-check inside
+        // `drop_from` is what closes it, and removing that re-check makes this
+        // test RED while every planner test stays green.
+        let surface = FieldSurface::PrefixImpactingSystemForTests;
+        let mut req = req_with_system("you are a careful assistant");
+        let before = serde_json::to_string(&req).expect("serializable");
+
+        // Act -- ask the surface to drop a prompt it does not recognize.
+        let dropped = surface.drop_from(&mut req);
+
+        // Assert -- refused, and the prompt survives untouched.
+        assert!(
+            !dropped,
+            "the test-only prefix surface must report NO removal for a system prompt \
+             that is not its exact sentinel",
+        );
+        assert!(
+            req.system.is_some(),
+            "and must leave the prompt in place: a fixture elsewhere in the suite that \
+             happens to set `system` must not have it silently removed",
+        );
+        assert_eq!(
+            serde_json::to_string(&req).expect("serializable"),
+            before,
+            "byte-identical, since a no-op drop that moved any byte is a different \
+             request upstream",
+        );
+
+        // Positive control: the SENTINEL prompt IS removed, so the refusals above
+        // are about the predicate rather than about a surface that never drops.
+        let mut sentinel = req_with_system(TEST_PREFIX_SENTINEL);
+        assert!(
+            surface.drop_from(&mut sentinel),
+            "control: the sentinel prompt is dropped",
+        );
+        assert!(
+            sentinel.system.is_none(),
+            "control: and is gone from the request",
         );
     }
 
@@ -1122,7 +1518,7 @@ mod table_tests {
         // not be read as a violation. The region under test begins where that
         // refusal block ends.
         let body = apply_body(SOURCE);
-        let mutation = "self.surface.drop_from(attempt_req) {";
+        let mutation = "if !surface.drop_from(attempt_req) {";
         let at = body.find(mutation).unwrap_or_else(|| {
             panic!("`apply` must mutate through `{mutation}`; its body was: {body}")
         });

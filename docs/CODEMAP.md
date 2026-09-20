@@ -1428,11 +1428,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   readings); `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
   Vec<String>` reusing the `[capability.overrides]` two-tier target-spec
   grammar, `paid_probe_daily_caps: BTreeMap<String, u32>` keyed by provider
-  name only) is fully defaulted (empty list, empty map) with no active
-  runtime behavior yet -- an inert opt-in surface; the re-verification
-  cadence and confirmation quorum it will gate are the code constants
-  `CANARY_INTERVAL` (100) and `PREFIX_QUORUM` (2), never read from the
-  environment. The whole
+  name only) is fully defaulted (empty list, empty map), so a missing block
+  changes nothing -- but the two fields differ in what reads them.
+  `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight planner
+  refuses a prefix-impacting transform for any target it does not name, so an
+  entry can change what goes upstream. `paid_probe_daily_caps` has no runtime
+  probe consumer yet, though its KEYS are validated at config load against the
+  configured providers (`factory::validate`, which rejects a `:`-scoped key and
+  an unknown provider name), so a typo fails the load today. The re-verification
+  cadence and the confirmation quorums are the code constants
+  `CANARY_INTERVAL` (100), `ENVELOPE_QUORUM` (1) and `PREFIX_QUORUM` (2), never
+  read from the environment. The whole
   `Config` tree derives `schemars::JsonSchema` alongside serde so
   `schema_gen.rs` can render the committed `routectl.schema.json`
   (`class_overrides`, a `BTreeMap<u16, _>`, carries a `#[schemars(with)]`
@@ -2537,17 +2543,67 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
   three dispatch arms drive, and the counterpart of `replay_repair` for the
   field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (one
-  grounded row today: the qualified dotted path a real captured rejection
-  named -> the private `FieldSurface` enum naming the request-side carriers
-  that produce that wire field), and `closed_table_row`, THE single lookup:
+  grounded row today: `FieldRepairRow { path, surface, class }` -- the
+  qualified dotted path a real captured rejection named, the private
+  `FieldSurface` enum naming the request-side carriers that produce that wire
+  field, and the `TransformClass` deciding which pre-flight gates an
+  application of that row must clear). The taxonomy is TRANSFORM-KEYED: a row
+  STATES its class (`Envelope` / `PrefixImpacting`, plus `required_quorum` and
+  `requires_target_opt_in`), so nothing infers a cost from a path string and a
+  new row declares its own. Both quorum constants live in `config::schema`
+  beside `CANARY_INTERVAL` (`ENVELOPE_QUORUM` = 1, `PREFIX_QUORUM` = 2): they are
+  one safety-parameter set, and the ORDER between them is what makes the classes
+  distinguishable at all, so splitting them across modules is how one gets raised
+  without the reader of the other noticing. Two anonymous
+  `const _: () = assert!(...)` items beside those definitions pin
+  `MINIMUM_CONFIRMATIONS <= ENVELOPE_QUORUM` and
+  `ENVELOPE_QUORUM < PREFIX_QUORUM` (the repo-standard compile-assertion shape --
+  see `config_migrate`'s migration-ladder guard); rustc evaluates every `const`
+  item's initializer when it compiles the crate, so they need NO consumer, no
+  reference, and no name, and an anonymous item cannot trip `dead_code` so no
+  lint expectation either. The floor assertion reads
+  `field_verdict::MINIMUM_CONFIRMATIONS` by PATH rather than a copy of its value,
+  so each of the three literals is welded to one definition. Those assertions pin
+  the INEQUALITIES and nothing more: an edit that VIOLATES one is a build failure
+  (`error[E0080]: evaluation panicked` at the failing assertion), while an
+  ORDER-PRESERVING retune compiles clean -- `PREFIX_QUORUM = 3` and
+  `MINIMUM_CONFIRMATIONS = 0` both do. The EXACT values are pinned separately, by
+  `the_three_quorum_values_are_exactly_one_one_and_two`, because a silent retune
+  changes how much evidence routectl demands before rewriting a client's request
+  while leaving every inequality green. A CONSUMER mutation (an arm wired to the
+  wrong constant) compiles too, since it leaves every literal intact, and is
+  caught by `each_class_consumes_the_co_located_quorum_constant_for_its_own_tier`.
+  A TEST build appends `TEST_FIELD_REPAIRS` -- one prefix-impacting row whose
+  surface is a system prompt matching the EXACT `TEST_PREFIX_SENTINEL` text --
+  through `closed_table()`, which is what keeps every branch of those gates
+  reachable while the grounded table ships no content row. The sentinel is what
+  SCOPES it: a broad "has a system prompt" predicate would give every fixture in
+  the workspace that sets `system` a closed-table row production cannot produce,
+  plus the decisions, feature keys, and reactive candidates that follow from one
+  (pinned by `an_ordinary_system_prompt_carries_no_test_only_closed_table_row`).
+  The divergent surface is deliberately NOT a table row -- its presence predicate
+  answers `true` unconditionally, so a row would make every test request carry
+  it; it reaches `apply`'s fail-closed branch through
+  `apply_sole_candidate_for_tests` -> `apply_candidate` instead. The grounded
+  table's SIZE and its row's class both stay asserted, so a permanent row remains
+  a deliberate edit.
+  `closed_table_row` is THE single path lookup:
   it returns the table's own `&'static str`, so no upstream bytes reach any
   downstream consumer or the operator WARN, and a path with no row mutates
-  nothing. `Router::plan_field_carry` admits BEFORE dispatch and without
+  nothing. `present_rows(req)` is the scan both arms share -- every closed-table
+  row the request carries, in table order.
+  `Router::plan_field_carry` admits BEFORE dispatch and without
   touching the request, in this order: kill switch -> `anthropic-api` lane ->
-  NOT a forwarded-credential target -> a carried table surface -> loopback
+  NOT a forwarded-credential target -> loopback
   suppression (`field_verdict::loopback_target_suppresses_minting` over
-  `ProviderEntry::anthropic_api_base_url`) -> settlement mode ->
-  `field_verdict::FieldVerdictKey` -> the single-flight guard. Suppression sits
+  `ProviderEntry::anthropic_api_base_url`) -> then, PER PRESENT ROW, settlement
+  mode -> `field_verdict::FieldVerdictKey` -> the single-flight guard, yielding
+  one `FieldRepairCandidate` per row that survives (`None` when none does).
+  Every present row is admitted rather than only the first, because the
+  REJECTION decides which row is repaired and the upstream can name any carried
+  field: an admission holding one row would leave a rejection naming a later row
+  unrepairable on that lane forever. The one-repair-per-attempt ceiling is
+  enforced by `apply` instead. Suppression sits
   ABOVE the settlement-mode branch deliberately: the guard's own admission also
   refuses a local target, but only a SETTLING walk reaches that admission, so
   checking it there alone let a result-only walk mutate the body, spend the
@@ -2561,24 +2617,35 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   settlements reachable, since a request whose field is accepted clears a
   resident verdict while a rejected one commits. It is NOT a pre-flight
   rewrite: an acting verdict refuses the slot and the request dispatches
-  unchanged. `rejection_names_planned_field` is the arm's repair condition and reads the
+  unchanged. `Router::rejection_names_field_surface` is the arm's repair
+  condition and reads the
   NATIVE failure class, never the operator-remapped one -- a
   `[class_overrides]` entry states how a status is ROUTED, so reading it would
   let an override turn a 429 or 503 into a field repair.
   `FieldRepairPlan::apply` owns the whole effect transactionally, ordered
-  check-mutate-charge: re-check presence, CHECK the allowance
+  select-check-mutate-charge-release: SELECT the admitted candidate the
+  rejection names (refusing outright when it names none, and refusing a second
+  call outright once one row has been repaired), re-check presence, CHECK the
+  allowance
   (`RepairBudget::can_draw`, a read), drop the field (both carriers, or the
-  egress re-derives it), then DRAW, re-stamp the estimate through
-  `dispatch::restamp_calibration_estimate`, and return the rejection status. The
+  egress re-derives it), then DRAW, RELEASE every other candidate's guard -- this
+  attempt has spent its one repair, so no outcome can settle another row, and
+  pinning those slots would starve a sibling request that CAN settle them --
+  re-stamp the estimate through
+  `dispatch::restamp_calibration_estimate`, and return the rejection status.
+  `repaired_path()` names the row that was dropped, which is what the arm's
+  WARN renders. The
   draw follows the mutation so a drop that removes nothing charges nothing, and
   every repaired-state flag is set only on the returned `Some`. A `drop_from`
   that unexpectedly removes nothing FAILS CLOSED -- returns `None`, having
   mutated and charged nothing -- with a `debug_assert` naming the divergence;
   release behavior deliberately does not rest on that assertion being compiled,
   and a `cfg(not(debug_assertions))` test exercises the branch through a
-  test-only divergent surface. `commit` / `settle_success` are the two-phase
-  settlement (both `Option`, both no-ops without a guard), release-by-drop
-  otherwise.
+  test-only divergent surface. `commit` settles the REPAIRED row alone (the
+  rejection named it and the retry is evidence about it); `settle_success`
+  clears EVERY admitted row (an unrepaired success means every carried field was
+  accepted) and so returns a `Vec` rather than an `Option`; both are no-ops
+  without a guard, release-by-drop otherwise.
   `note_field_repair` / `note_field_repair_succeeded` record the
   `DispatchMeta.field_repair` summary and bump the three counters together,
   and `emit_field_repair` fires the single per-request content-free WARN.
@@ -2594,9 +2661,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   missing needle, and both properties are mutation-verified. Under `cfg(test)`
   that one seam reads a thread-local provisional resolution, which is how
   `field_repair_tests.rs` covers every arm downstream of it.
-  `grounded_field_feature_keys(req)` mints the one grounded `field:<path>`
-  key `FIELD_REPAIRS` can produce for a request (empty when the request
-  grounds no closed-table surface). `request_feature_keys(req)` is the
+  `grounded_field_feature_keys(req)` mints the `field:<path>`
+  key every present closed-table row can produce for a request (empty when the
+  request grounds no closed-table surface). `request_feature_keys(req)` is the
   single centralizing helper -- catalog keys from `derive_feature_keys` plus
   `grounded_field_feature_keys` -- used by the six routing/learn/observe/count
   call sites (chain resolution, dispatch x2, count_tokens, and both
@@ -2612,7 +2679,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
   target, surface, budget)` takes the request by shared reference and returns
-  an owned `(ChatRequest, FieldPreflight, FieldPreflightPlan)` triple, so
+  an owned `(ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan)` triple --
+  ONE decision record per CONSIDERED closed-table row -- so
   mutating the caller's
   request is impossible by signature and every fallback target plans from the
   same original rather than from a sibling target's clone. Called from
@@ -2620,18 +2688,53 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   position: after the layered overlays and the strip interceptor, before
   provider translation, the context reduction, and the calibration stamp --
   so the planned body is the one both a remote count and every local read of
-  the request measure. Admission order mirrors `plan_field_carry`, and mirrors
+  the request measure. It scans EVERY present row
+  (`field_repair::present_rows`) rather than the first: a request can carry
+  rows of two transform classes at once, and each clears its own gates. Each
+  row's transform is adopted onto the body the previous row's decision
+  produced, so two authorized rows compose onto one body while a refusal in
+  between leaves the accumulated body untouched. Table order is the
+  ENUMERATION order only -- each decision reads that row's own class, verdict,
+  and gates -- so reordering the table reorders the records without changing
+  any of them. Per-row admission order mirrors `plan_field_carry`, and mirrors
   its ATTRIBUTION refusals for the same reason rather than by analogy (a target
   whose rejection this stage could not attribute is one whose verdict it must
-  not act on): closed-table presence (`field_repair::first_present_row`, the
-  shared single scan) -> capability kill switch -> `anthropic-api` lane -> NOT
+  not act on): capability kill switch -> `anthropic-api` lane -> NOT
   a forwarded-credential target -> an attributable
   `ProviderEntry::anthropic_api_base_url` (a Bedrock Mantle entry reports none
   and is refused here) -> NOT `loopback_target_suppresses_minting` ->
   `FieldVerdictKey` -> NOT `override_forces_supported` for the identity's own
   capability key, through the same two-tier resolver the act and learn sides
-  share -> `FieldVerdictRegistry::preflight_eligible_incarnation`.
-  Past that point the CADENCE decides between two outcomes. Only
+  share -> `FieldVerdictRegistry::preflight_authorization` -> that
+  authorization's own confirmation count against `class.required_quorum()` ->
+  for a PREFIX-IMPACTING class only, `prefix_impact_opted_in`. The quorum reads
+  the count the SAME authorization returned rather than making a second registry
+  call, so a concurrent reconciliation cannot make a confirmed verdict report a
+  shortfall it never had. The mask is consulted
+  above the quorum (it holds at any confirmation count, so it is the operative
+  reason), and the opt-in below it (an opted-in target with an unconfirmed
+  verdict must still report the verdict gate, so the opt-in never reads as the
+  only thing between a target and a content rewrite). `prefix_impact_opted_in`
+  reads `[fidelity] prefix_impact_opt_in` through
+  `override_registry::split_target_spec` -- the SAME two-tier target-spec
+  GRAMMAR `[capability.overrides]` resolution uses, so a bare `provider` entry
+  covers every model dispatched through that provider entry (pool-backed models
+  included, since pool dispatch resolves to a concrete member) and
+  `provider:nickname` covers exactly that model, with no
+  second grammar and no second store. What it does NOT share is precedence:
+  `[capability.overrides]` has two verdicts (`unsupported` / `force_supported`)
+  and so needs a rule deciding which tier wins, while this list has one -- listed
+  or not -- so a target is opted in when EITHER tier matches and there is nothing
+  to arbitrate. Positive-only membership, not tier precedence.
+  A masked decision suppresses the ACTION
+  and never the state: the verdict stays resident, acting, and confirmed.
+  The gate chain is split across three helpers rather than one long function --
+  `preflight_lane_admits` (kill switch, lane, forwarded credential),
+  `preflight_identity` (attribution plus the `FieldVerdictKey`), and
+  `preflight_authorization_for` (mask, eligibility, quorum, opt-in) -- each
+  returning the closed-set token its refusal reports, and `unchanged_record` is a
+  free function rather than a method because it reads nothing from the router.
+  Past those gates the CADENCE decides between two outcomes for that row. Only
   `DispatchSurface::Complete` ticks `FieldCanaryRegistry::tick_cadence`, and the
   exclusion sits upstream of both the tick and the claim rather than filtering a
   settlement: a stream or a token count that advanced the interval would consume
@@ -2639,19 +2742,40 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   re-verified on a surface whose outcome the walk cannot settle (no assembled
   response on a stream, no envelope verdict from a count). On the hundredth
   eligible complete request the tick trips and `claim_canary` is attempted; on a
-  successful claim the planner RESTORES the tested field -- returning a clone of
-  the unchanged original with `reason = canary_restored` and `acted = false`,
+  successful claim the planner RESTORES the tested field -- leaving THAT ROW's
+  surface exactly as the client sent it, with `reason = canary_restored` and
+  `acted = false`,
   because claiming otherwise would be a false claim about the dispatched bytes --
-  and hands back `FieldPreflightPlan::Canary`. A trip whose claim is REFUSED (an
+  and hands back `FieldPreflightPlan::Canary`. The restoration is expressed as
+  "decline to transform this surface" rather than as a revert of a planned body,
+  which is what leaves every OTHER row's adopted rewrite standing: a canary
+  re-verifies one identity, so unrelated eligible repairs remain applied. A trip
+  whose claim is REFUSED (an
   earlier interval's canary still in flight) repairs normally rather than
   dispatching a second unrepaired request, which is what makes "exactly one
-  in-flight canary" hold under real concurrency.
-  `FieldPreflightPlan` is three-valued rather than a pair of booleans because the
-  three states own different state and settle differently: `Inert` (nothing
-  planned), `Repaired(ModifiedRequestGuard)` (the field was dropped; the guard is
-  held for its `Drop` alone, which is what keeps the identity's in-flight count
-  honest on every exit path), and `Canary(CanaryPlan)` (the arm owes exactly one
-  settlement). `CanaryPlan`'s own `Drop` settles `Inconclusive` when no outcome
+  in-flight canary" hold under real concurrency. At most ONE canary is claimed
+  per planning call however many rows are present, because the arm settles
+  exactly one -- but EVERY eligible complete request ticks EVERY present row's
+  cadence, including a row the canary slot is no longer free for. The cadence
+  measures a verdict's exposure, not a request's role, so skipping the tick would
+  mean a row that is consistently second in the table never reaches its interval
+  at all. What bounds the delay is that dueness is STICKY
+  (`FieldCanaryRegistry`'s `CanaryState::due`): the trip sets it and only a
+  successful `claim_canary` clears it, so a row denied the slot claims on the
+  NEXT eligible request rather than waiting out another full interval. Pinned by
+  `every_eligible_request_advances_both_rows_cadences` and
+  `a_row_denied_the_settlement_slot_claims_on_the_next_request`.
+  `FieldPreflightPlan` is a STRUCT, not an enum: at most one `CanaryPlan` plus a
+  `Vec<ModifiedRequestGuard>` holding one accounting entry per ACTING row. The
+  two are not alternatives -- a request can both rewrite rows and be one
+  identity's canary, and each acting row's entry belongs to a different identity,
+  so the earlier single-slot enum had to drop a later row's accounting and left
+  that identity reporting zero requests in flight while one was. Each guard is
+  held for its `Drop` alone, which is what keeps every identity's in-flight count
+  honest on every exit path; the wrong-repair TALLY survives those drops, since a
+  finished request does not un-modify the body it was sent with
+  (`every_acting_rows_accounting_guard_is_held_for_the_request`).
+  `CanaryPlan`'s own `Drop` settles `Inconclusive` when no outcome
   was named -- a cancellation, a timeout, a dropped future, a walk leaving by an
   unrouted path -- so RAII covers the claim rather than a settlement site somebody
   has to remember; both `settle_confirmed` and `settle_disproved` HAND THE CLAIM
@@ -2672,22 +2796,42 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a reported success plus a post-condition re-check, so a transform that
   removes nothing (or mutates and then reports failure) yields a request
   byte-equivalent to the original rather than a half-mutated one. Every other
-  outcome FAILS OPEN to a fresh clone of the unchanged original plus one
+  outcome FAILS OPEN, leaving that row's surface as the client sent it, plus one
   closed-set reason token (`no_grounded_field` / `unsupported_lane` /
   `unattributable_target` / `masked_by_override` / `no_identity` /
-  `not_eligible` / `ambiguous_mutation` / `canary_restored`); the record carries
+  `not_eligible` / `below_quorum` / `no_target_opt_in` /
+  `ambiguous_mutation` / `canary_restored`); the record carries
   only tokens, a
-  code-authored path literal, a `sanitize_for_log`-sanitized state key (an
+  code-authored path literal, the row's `transform_class` token, a
+  `sanitize_for_log`-sanitized state key (an
   operator-controlled `[models]` nickname, sanitized at EVERY construction
-  site including the test driver), and a boolean, never upstream bytes. The
-  transform itself goes through ONE production helper (`apply_transform` ->
-  `TransformOutcome`), shared by the planner and its test driver so a mutation
+  site including the test driver), and a boolean, never upstream bytes -- which
+  matters most for the prefix-impacting class, whose dropped value is a prompt
+  rather than an enum token. The
+  transform itself goes through ONE production helper (`apply_transform`),
+  shared by the planner and its test driver so a mutation
   to adoption or failure behavior cannot leave a duplicate test copy green.
   `emit_field_preflight` splits by severity from the three PUBLIC wrappers (not
   the chain loops), so a walk leaving by any exit still reports: every retained
-  per-target decision emits at DEBUG (a fail-open is the routine case, so a
+  per-row decision emits at DEBUG (a fail-open is the routine case, so a
   WARN each would bury the reportable one), plus exactly ONE request-level WARN
-  and only when at least one target acted. `action = field_preflight_drop` is
+  and only when at least one decision acted. Its counts are `decisions_acted` /
+  `decisions_planned`, not targets: one target contributes one decision per row
+  it considered, so a target-named count would overstate a chain whenever a
+  request carries two classes. The line NAMES one acting decision, chosen by
+  `warn_headline` over `warn_impact_rank`: highest impact first
+  (prefix-impacting over envelope), then among EQUAL impact the FIRST planned.
+  One line stands for the whole request, and a request that rewrote a cache
+  prefix AND an envelope field is a prefix-impacting event; the first-wins
+  tie-break is what makes the named `state_key` line up with the first matching
+  DEBUG line rather than the last (`max_by_key` returns the last maximum --
+  deterministic, but the wrong end). Equal-impact ties are reachable across
+  TARGETS (a two-seat chain acting on one class, pinned by
+  `the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class`) though
+  not within one target, since the closed table holds one row per class. The
+  aggregate counts still describe every decision, so naming one hides nothing.
+  Field-by-field reference in `docs/LOGGING.md` "Envelope-field pre-flight
+  decision DEBUG + WARN". `action = field_preflight_drop` is
   attached only to a record that ACTED -- labelling a fail-open with it would
   name an action the walk did not take. `scripts/check-log-display.sh` scans
   this file for a raw `state_key` through its own `STATE_KEY_PATHS` tier
@@ -2695,15 +2839,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   pre-existing sites across ten other modules, which is separate work).
   Read-only on the verdict: it draws no `RepairBudget` and claims no
   single-flight slot, because it acts on a verdict already resident and settled
-  rather than one this attempt is establishing -- `surface` and `budget` are
-  threaded so a later prefix-impacting transform can consult them without a
-  signature change. The closed table has ONE row in this build, so the planner
-  plans the single present row rather than iterating a set: a deliberate scope
-  boundary (multi-transform planning belongs to the prefix-impacting task,
-  which also needs the opt-in and quorum this stage lacks), with the extension
-  seam kept clean -- shared scan, scratch-clone transform, per-decision record.
+  rather than one this attempt is establishing. It takes NO repair budget at
+  all: a threaded-but-unread parameter would falsely signal that some invariant
+  here consults the reactive ceiling.
   Behavior lives in `src/router/field_preflight_tests.rs` (the planning
-  decision) and `src/router/field_canary_settlement_tests.rs` (the cadence, the
+  decision, the two content gates, and the reactive arm's row attribution) and
+  `src/router/field_canary_settlement_tests.rs` (the cadence, the
   three settlements, and the accounting)
 - `src/router/field_canary_settlement_tests.rs` -- behavioral coverage of the
   re-verification canary through real dispatches, asserting on the mock seats'
@@ -3287,19 +3428,32 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reconciliation is `FieldCanaryRegistry::acknowledge_confirmation` (see
   `src/field_canary.rs`), an explicit state-only API for a caller holding the
   durable ack; no such caller exists yet in this build.
-  `preflight_eligible_incarnation(key, generation, now)` is the READ-ONLY
+  `preflight_authorization(key, generation, now) ->
+  Option<PreflightAuthorization>` is the READ-ONLY
   predicate the
   pre-flight planner (see `src/router/field_preflight.rs`) consults instead of
   `admit_provisional`: resident and ACTING under the generation, NOT
   canary-suspended, plus at least
-  one acknowledged confirmation whose incarnation equals the ACTING entry's OWN
+  `MINIMUM_CONFIRMATIONS` (1, `pub(crate)` so `config::schema`'s anonymous
+  `const _` floor assertion can read it by PATH -- that visibility is
+  load-bearing; RAISING it above `ENVELOPE_QUORUM` is a build failure, while its
+  exact value is pinned by
+  `the_three_quorum_values_are_exactly_one_one_and_two`) acknowledged
+  confirmations whose incarnation equals the ACTING entry's OWN
   incarnation (via `LearnedCapabilityRegistry::field_acting_incarnation_in_generation`
   and `FieldCanaryRegistry::snapshot`), so a count left over from a
   since-relearned incarnation can never back the current verdict. It RETURNS
-  that incarnation (the `cfg(test)` `preflight_eligible` discards it): a canary
+  that incarnation AND the confirmation count it was decided from (the
+  `cfg(test)` `preflight_eligible` discards both): a canary
   claim and its later settlement must carry the same incarnation the
   authorization was validated against, so reading one separately afterwards
-  could name a lifecycle the decision never checked. The suspension check is
+  could name a lifecycle the decision never checked -- and a transform class's
+  own quorum (`field_repair::TransformClass::required_quorum`, i.e.
+  `config::ENVELOPE_QUORUM` or `config::PREFIX_QUORUM`) is a threshold on that SAME
+  count, so a caller re-reading it would answer "is there an acting verdict" and
+  "does it carry enough cycles" against two states that never coexisted. One
+  snapshot backs the eligibility floor and every class's gate alike. The
+  suspension check is
   read FIRST among the canary facts -- a disproved verdict is still resident,
   still acting and still confirmed until its durable clear lands, so nothing
   else in the predicate would refuse it. The acting
@@ -3399,7 +3553,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   holds that ack yet, so on live traffic the cold-rebuild seed below is the
   only writer that can raise the count. `snapshot(key) ->
   Option<CanaryStateSnapshot>` is the read side, consumed by
-  `FieldVerdictRegistry::preflight_eligible_incarnation`.
+  `FieldVerdictRegistry::preflight_authorization`.
   `CanaryOutcome` is three-valued -- `Confirmed` (same rejection plus a
   successful repaired retry), `Regressed` (the unrepaired field was accepted,
   so the verdict is disproved), `Inconclusive` (anything that proved neither) --
@@ -3420,6 +3574,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/field_verdict_observability.rs`). The alarm lives OUTSIDE the
   per-key map because a disproved verdict's own state is dropped by the clear
   that follows it, and it counts REQUESTS AFFECTED rather than canary attempts.
+  `tick_cadence` reports DUENESS rather than a bare trip, and the distinction is
+  what stops a later closed-table row being starved: the countdown resets on the
+  trip but the `due` flag is STICKY, cleared by exactly one event -- a successful
+  `claim_canary`. So a trip whose claim is unavailable (an earlier interval's
+  canary still in flight, or a request whose sole settlement slot a sibling row
+  owns) leaves the identity due for the NEXT eligible request instead of
+  postponing re-verification by a further full interval, which for a
+  consistently-denied row would be indefinitely. `due` rides the
+  `CanaryStateSnapshot` so a caller can read it without holding the lock.
   `tick_cadence`, `begin_modified_request` (RAII `ModifiedRequestGuard`,
   saturating rather than wrapping since neither count is divided into anything),
   and `claim_canary` (RAII `CanaryClaimGuard`, whose every effect -- settlement
