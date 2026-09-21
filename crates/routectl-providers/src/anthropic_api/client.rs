@@ -1002,11 +1002,18 @@ impl AnthropicApiProvider {
         match self.cfg.cloak.mode {
             cloak::CloakMode::Always => true,
             cloak::CloakMode::Never => false,
-            cloak::CloakMode::Auto => !req
-                .routectl_internal
-                .claude_code_headers
-                .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id")),
+            // `originating_claude_code_session` wins when STATED. A request
+            // rebuilt from an admitted one -- a background probe -- carries the
+            // originating classification as a bit rather than re-carrying the
+            // session-id capture, so it lands on the same side of this branch
+            // as the request it is probing for. Unset (every ingress and
+            // library consumer) falls back to the capture scan.
+            cloak::CloakMode::Auto => match req.routectl_internal.originating_claude_code_session {
+                Some(had_session) => !had_session,
+                None => !routectl_core::identity::anthropic::has_claude_code_session(
+                    &req.routectl_internal.claude_code_headers,
+                ),
+            },
         }
     }
 
@@ -1095,16 +1102,26 @@ impl AnthropicApiProvider {
         // operator reads in telemetry, and it refuses an expression rather
         // than skipping the call -- correctly, since a skipped call is a
         // counted action that silently leaves the census.
-        if is_non_cc {
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "cloak_classified_non_cc",
-            );
-        } else {
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "cloak_classified_genuine_cc",
-            );
+        //
+        // A BACKGROUND PROBE is excluded from the census and only from it: the
+        // cloak still applies below, so the probe reproduces the admitted
+        // request's wire shape exactly. What it must not do is move a ratio
+        // that exists to report what CLIENTS send -- a probe counted here
+        // would shift the genuine-CC / non-CC split by an amount proportional
+        // to probe scheduling, which is precisely the signal this census is
+        // read to rule out.
+        if super::counts_toward_lane_statistics(req) {
+            if is_non_cc {
+                crate::translation_drop_metrics::record_translation_policy_action(
+                    super::LANE,
+                    "cloak_classified_non_cc",
+                );
+            } else {
+                crate::translation_drop_metrics::record_translation_policy_action(
+                    super::LANE,
+                    "cloak_classified_genuine_cc",
+                );
+            }
         }
         let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc, &self.cfg.cloak);
         // Decision log: provider + non-CC gate + how many tool names were

@@ -191,6 +191,36 @@ const STAINLESS_PACKAGE_VERSION: &str = "0.94.0";
 /// Stainless JS runtime version stamped in `x-stainless-runtime-version`.
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 
+/// The inbound header whose PRESENCE identifies a genuine Claude Code client.
+///
+/// A real Claude Code client always sends it; a non-CC client routectl cloaks
+/// as one never does. Every consumer that classifies a request reads THIS
+/// literal, so a rename cannot leave one arm scanning for the old spelling
+/// while another scans for the new -- the two would then disagree about what
+/// the same request is, and a beta floor or cloak decision would be applied
+/// to one side of a request and not the other.
+pub const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
+
+/// Whether `headers` carries a genuine Claude Code session capture.
+///
+/// THE presence predicate. Case-insensitive on the header name because the
+/// capture is taken from inbound HTTP, where the name's case is not guaranteed.
+///
+/// Takes the captured pairs -- the exact shape of
+/// `RoutectlInternal::claude_code_headers` -- rather than a whole request, so
+/// the router (which classifies an admitted request at activation) and the
+/// Anthropic egress (which classifies the request it is about to send) call the
+/// same function over the same data, neither re-deriving the scan. Concrete
+/// rather than generic over `AsRef<str>`: there is exactly one carrier, and a
+/// generic parameter would let a caller pass some other pair list that merely
+/// resembles it.
+#[must_use]
+pub fn has_claude_code_session(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(CLAUDE_CODE_SESSION_HEADER))
+}
+
 /// The `anthropic-beta` flag required for OAuth to function on
 /// api.anthropic.com. Egress unions this unconditionally on the
 /// OauthBearer + api.anthropic.com surface, independent of whether the

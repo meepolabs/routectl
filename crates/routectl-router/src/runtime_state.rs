@@ -63,6 +63,58 @@ pub struct ProviderState {
     last_outcome_at: Option<Instant>,
 }
 
+/// One gate admission: the decision, plus whether this call claimed the
+/// single half-open probe slot.
+///
+/// `claimed_half_open` is an OWNERSHIP fact about the call that produced it,
+/// not a read of current state -- see
+/// [`ProviderState::try_dispatch_admitting`] for why the difference matters.
+/// `pub(crate)`: the admission token is a router-internal coordination type
+/// with no cross-crate consumer, and `runtime_state` is a public module, so a
+/// bare `pub` would widen the crate's surface for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GateAdmission {
+    /// Whether the gate admitted the dispatch, and if not, why.
+    pub(crate) decision: GateDecision,
+    /// `true` only when THIS call set the half-open bit and still holds it on
+    /// return. A refusal never claims.
+    pub(crate) claimed_half_open: bool,
+}
+
+impl GateAdmission {
+    /// A refusal, which by construction claims nothing.
+    const fn refused(decision: GateDecision) -> Self {
+        Self {
+            decision,
+            claimed_half_open: false,
+        }
+    }
+}
+
+/// Who is asking the gate for admission.
+///
+/// The two callers want DIFFERENT answers when the breaker's cooldown has
+/// lapsed, so the distinction has to reach the critical section rather than
+/// being applied afterwards by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionKind {
+    /// A real client request. Takes the half-open recovery attempt when the
+    /// cooldown has lapsed, because settling it is how the breaker learns
+    /// whether the lane is healthy for clients.
+    ClientDispatch,
+    /// A background probe. Refuses a half-open-ready lane WITHOUT claiming the
+    /// slot and WITHOUT charging an RPM token.
+    ///
+    /// The refusal must happen before both side effects, not after. A probe
+    /// that claimed and handed back would be correct on the breaker bit alone,
+    /// but the RPM debit is NOT handed back: the token is spent inside the same
+    /// section, so every declined probe would silently consume a slice of the
+    /// operator's rate budget for a request it never sent. Deferring first
+    /// leaves both the recovery attempt and the rate budget exactly as they
+    /// were.
+    BackgroundProbe,
+}
+
 /// Decision returned from the dispatch gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -105,9 +157,41 @@ impl ProviderState {
     /// MUST follow up with `record_success` or `record_failure`
     /// (the breaker depends on every Allow being closed out).
     pub fn try_dispatch(&mut self, now: Instant) -> GateDecision {
-        if let Some(opened_at) = self.circuit_opened_at {
+        self.try_dispatch_admitting(now).decision
+    }
+
+    /// [`Self::try_dispatch`], additionally reporting whether THIS call
+    /// claimed the single half-open probe slot.
+    ///
+    /// One critical section returns both facts, which is the whole point: the
+    /// half-open bit is SHARED, so a caller that admits here and then reads
+    /// `half_open_probe_in_flight()` separately can observe a claim that a
+    /// DIFFERENT caller took in between, and conclude it owns a slot it never
+    /// claimed. Releasing on that inference frees the other caller's claim and
+    /// admits a second concurrent probe past the single-probe invariant.
+    /// Ownership is therefore reported by the admission itself and carried,
+    /// never re-derived from shared state afterwards.
+    pub(crate) fn try_dispatch_admitting(&mut self, now: Instant) -> GateAdmission {
+        self.try_dispatch_inner(now, AdmissionKind::ClientDispatch)
+    }
+
+    /// [`Self::try_dispatch_admitting`] for a BACKGROUND PROBE.
+    ///
+    /// Differs in exactly one place: a lane whose cooldown has lapsed is
+    /// refused rather than claimed, and refused BEFORE the RPM check, so
+    /// neither the recovery attempt nor a rate token is consumed. See
+    /// [`AdmissionKind::BackgroundProbe`].
+    ///
+    /// Real-dispatch behavior is untouched -- both entry points share one
+    /// critical section, and only this flag differs.
+    pub(crate) fn try_dispatch_probe(&mut self, now: Instant) -> GateAdmission {
+        self.try_dispatch_inner(now, AdmissionKind::BackgroundProbe)
+    }
+
+    fn try_dispatch_inner(&mut self, now: Instant, kind: AdmissionKind) -> GateAdmission {
+        let claimed_half_open = if let Some(opened_at) = self.circuit_opened_at {
             if now.duration_since(opened_at) < self.active_cooldown {
-                return GateDecision::CircuitOpen;
+                return GateAdmission::refused(GateDecision::CircuitOpen);
             }
             // Cooldown elapsed. Allow exactly one probe through; other
             // callers see CircuitOpen until the probe records its
@@ -116,11 +200,23 @@ impl ProviderState {
             // `record_failure` mutate that state, ensuring the breaker
             // is closed only after a verified success.
             if self.half_open_in_flight {
-                return GateDecision::CircuitOpen;
+                return GateAdmission::refused(GateDecision::CircuitOpen);
+            }
+            // A BACKGROUND probe stops here, before claiming and before the
+            // RPM check below. Returning now is what leaves the recovery
+            // attempt available to the next real request AND leaves the rate
+            // budget untouched -- the RPM debit below is not refunded on any
+            // later path.
+            if matches!(kind, AdmissionKind::BackgroundProbe) {
+                return GateAdmission::refused(GateDecision::CircuitOpen);
             }
             self.half_open_in_flight = true;
-            // Fall through to RPM check below.
-        }
+            // Claimed HERE, in the same critical section that will report it.
+            // Fall through to the RPM check below, which can still hand it back.
+            true
+        } else {
+            false
+        };
 
         if let Some(capacity) = self.rpm_capacity {
             self.refill_tokens(now, capacity);
@@ -131,12 +227,17 @@ impl ProviderState {
                 if self.circuit_opened_at.is_some() {
                     self.half_open_in_flight = false;
                 }
-                return GateDecision::RateLimited;
+                // The claim was taken and immediately given back inside this
+                // same critical section, so the caller never owned it.
+                return GateAdmission::refused(GateDecision::RateLimited);
             }
             self.rpm_tokens -= 1.0;
         }
 
-        GateDecision::Allow
+        GateAdmission {
+            decision: GateDecision::Allow,
+            claimed_half_open,
+        }
     }
 
     /// Mark the most recent dispatch as successful. Resets the

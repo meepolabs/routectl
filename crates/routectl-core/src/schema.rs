@@ -368,6 +368,52 @@ pub struct RoutectlInternal {
     /// `cfg.header_extras` provider floor is the only operator source.
     pub operator_betas: Vec<String>,
 
+    /// Whether the ORIGINATING request presented a genuine Claude Code
+    /// session capture, as a single bit.
+    ///
+    /// Exists for one reader: a background probe rebuilds its own
+    /// `ChatRequest` rather than resending the admitted one, so it does not
+    /// carry `claude_code_headers` -- and the Anthropic-API egress's
+    /// `is_non_cc` decision (which gates the Claude-Code beta floor and the
+    /// identity cloak) keys on the PRESENCE of an `x-claude-code-session-id`
+    /// capture. Without this bit a probe built from a genuine-CC request
+    /// would be classified non-CC and receive the floor the admitted request
+    /// suppressed, so its beta header would differ from the one under test.
+    ///
+    /// A BIT rather than the headers themselves, deliberately: the session id
+    /// is a correlation identifier, and a background scheduler retaining it
+    /// across an arbitrary queueing delay would put it somewhere it is
+    /// neither needed nor expected. Presence is the whole of what `is_non_cc`
+    /// reads, so presence is all that is kept.
+    ///
+    /// `None` means "not stated" -- every ingress and library consumer leaves
+    /// it unset, and the egress then falls back to scanning
+    /// `claude_code_headers` exactly as before. Only the probe path sets it.
+    pub originating_claude_code_session: Option<bool>,
+
+    /// Whether this request is a BACKGROUND PROBE routectl built for itself
+    /// rather than traffic a client sent.
+    ///
+    /// The Claude-Code classification has three consumers, and a probe wants
+    /// two of them but not the third:
+    ///
+    /// - the beta floor and the cloak BODY transform are behavior. A probe
+    ///   exists to reproduce the wire shape the admitted request was about to
+    ///   send, so it must be classified and cloaked identically -- otherwise
+    ///   it asks its question under a different envelope than the one under
+    ///   test;
+    /// - the classification CENSUS is measurement of client traffic. It exists
+    ///   so an operator can see the genuine-CC / non-CC ratio move, which is
+    ///   how a Claude Code update that stops sending the session header is
+    ///   detected at all. A background probe is not a client request, and
+    ///   counting it would move that ratio by an amount proportional to probe
+    ///   scheduling rather than to anything a client did.
+    ///
+    /// So this bit does not change WHAT is sent -- it only excludes the
+    /// request from the census. Default `false`: every ingress and library
+    /// consumer is client traffic and is counted.
+    pub background_probe: bool,
+
     /// Which ingress dialect produced this canonical request. Set by the
     /// ingress adapter at parse time; defaults to `Library` for consumers
     /// that build a `ChatRequest` directly (no ingress in the loop).

@@ -98,3 +98,85 @@ fn cloak_leaves_the_thinking_object_untouched() {
         "the cloak rewrites identity and tool names, never thinking"
     );
 }
+
+/// The router's lazy probe builds its count-token body by setting the
+/// carrier plus the minimal canonical reasoning state the normalizer needs.
+/// This pins the SHAPE that body must have, through the real serializer:
+/// carrier + `reasoning.enabled` + `max_tokens`.
+///
+/// Without the reasoning state `build_thinking` returns early and the body
+/// serializes with NO `thinking` object, so the probe would send a plain
+/// token count and read its success as evidence about a field it never put
+/// on the wire. Lives here, at the serializer, because that is the only
+/// place the absence is observable -- the typed request looks correct either
+/// way.
+#[test]
+fn a_probe_shaped_body_serializes_both_thinking_type_and_display() {
+    let mut req = ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("ping".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }]
+        .into(),
+        // The minimal canonical state: thinking explicitly active plus a
+        // budget window for the legacy shape to clamp into.
+        max_tokens: Some(2048),
+        reasoning: Some(ReasoningConfig {
+            enabled: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+
+    let body = normalize("p", &req, false, &[], false, None, false, true).expect("normalize");
+
+    assert_eq!(
+        body["thinking"]["type"], "enabled",
+        "a probe body must carry an active thinking object"
+    );
+    assert_eq!(
+        body["thinking"]["display"], "summarized",
+        "a probe body must carry the display field under test"
+    );
+}
+
+/// The converse, and the reason the fix exists: the carrier ALONE puts
+/// nothing on the wire. Pins the normalizer's early return so a future
+/// change that made the carrier self-sufficient would surface here rather
+/// than silently making the probe's extra state redundant.
+#[test]
+fn the_carrier_without_a_reasoning_state_serializes_no_thinking_object() {
+    let mut req = ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("ping".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }]
+        .into(),
+        max_tokens: Some(2048),
+        reasoning: None,
+        ..Default::default()
+    };
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+
+    let body = normalize("p", &req, false, &[], false, None, false, true).expect("normalize");
+
+    assert!(
+        body.get("thinking").is_none(),
+        "the carrier alone must not synthesize a thinking object: {body}"
+    );
+}

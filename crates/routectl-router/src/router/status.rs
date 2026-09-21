@@ -65,6 +65,14 @@ impl Router {
         )
     }
 
+    /// [`Self::gate_status_for`] for tests that need the real breaker state
+    /// as an oracle. Non-mutating, like the accessor it wraps -- reading it
+    /// never claims a half-open slot.
+    #[cfg(test)]
+    pub(crate) fn gate_status_for_tests(&self, state_key: &str) -> ProviderGateStatus {
+        self.gate_status_for(state_key, Instant::now())
+    }
+
     /// Read-only health of every dispatch target, for the status surface.
     /// Iterates the resolved-model table and emits one [`RouteTargetStatus`]
     /// per dispatch target: one entry per seat for a pooled (seat-backed)

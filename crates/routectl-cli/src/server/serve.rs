@@ -16,9 +16,8 @@ use crate::handlers;
 
 use super::auth::{self, TokenSet};
 use super::config_load::compute_max_body_bytes;
-use super::reload::{
-    ActivationTrigger, apply_activation, await_reload_tasks, spawn_reload_pipeline,
-};
+use super::reload::{ActivationTrigger, apply_activation, spawn_reload_pipeline};
+use super::reload_shutdown::await_reload_tasks;
 use super::router_build::build_router_from_config_with_overlay;
 use super::{
     AppState, CompositeStore, calibration_rebuild, capability_rebuild, check_bind_safety,

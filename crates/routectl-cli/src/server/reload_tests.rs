@@ -1,4 +1,5 @@
 use routectl_router::CURRENT_CONFIG_VERSION;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::server::serve::build_usage_writer;
@@ -1881,4 +1882,587 @@ async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous
         entries_before,
         "nor prune any entry",
     );
+}
+
+// ---- Probe driver ----
+
+/// A router serving one anthropic-api lane whose provider counts its
+/// `count_tokens` calls, so a test can prove the FREE validator actually
+/// executed rather than inferring it from a counter the driver also moves.
+fn probe_router_with_counting_provider() -> (Router, Arc<AtomicUsize>) {
+    use routectl_core::{
+        ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount,
+    };
+
+    struct Counting {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Counting {
+        fn id(&self) -> &'static str {
+            "p1"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("p1", "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                model: "wire-model".to_string(),
+                ..Default::default()
+            })
+        }
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk>>> {
+            Err(Error::upstream("p1", 500, "body"))
+        }
+        async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(TokenCount {
+                input_tokens: 11,
+                extras: serde_json::Map::new(),
+            })
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut config = routectl_router::config::Config::default();
+    config.providers.insert(
+        "p1".to_string(),
+        routectl_router::config::ProviderEntry::anthropic_api("literal:k"),
+    );
+    config.models.insert(
+        "m1".to_string(),
+        routectl_router::config::ModelEntry::new("p1", "claude-sonnet-4-5"),
+    );
+    config.aliases.insert(
+        "default".to_string(),
+        routectl_router::config::AliasValue::Single("m1".to_string()),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let mut models = std::collections::BTreeMap::new();
+    models.insert(
+        "m1".to_string(),
+        Arc::new(routectl_router::ResolvedModel::new(
+            "m1",
+            "p1",
+            Arc::new(Counting {
+                calls: Arc::clone(&calls),
+            }) as Arc<dyn Provider>,
+            "claude-sonnet-4-5",
+        )),
+    );
+    router.install_resolved_models(models);
+    (router, calls)
+}
+
+/// A request grounding the one closed-table capability, so an admitted
+/// dispatch queues a probe job.
+fn probe_grounding_request() -> routectl_core::ChatRequest {
+    let mut req = routectl_core::ChatRequest::default();
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+    req
+}
+
+/// THE end-to-end boundary this driver exists for: an admitted real request
+/// queues a free probe job, and the PRODUCTION driver -- not a test calling
+/// the worker directly -- executes the free `count_tokens` validator.
+///
+/// Removing the `tokio::spawn(run_probe_driver(...))` from
+/// `spawn_reload_pipeline`, or breaking the driver's tick arm, leaves every
+/// other test green because nothing else drives this function.
+#[tokio::test(start_paused = true)]
+async fn probe_driver_executes_the_free_validator_queued_by_an_admitted_request() {
+    let (router, count_calls) = probe_router_with_counting_provider();
+    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+
+    // An admitted real request. `complete` reaches the upstream, so the
+    // lane activates and one bounded job is queued.
+    let _ = router_swap.load().complete(probe_grounding_request()).await;
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        1,
+        "premise: the admitted request must have queued exactly one job"
+    );
+    let calls_before_driver = count_calls.load(Ordering::SeqCst);
+
+    // The sender stays alive: dropping it would resolve `changed()` and let
+    // the driver exit through its shutdown arm without ever ticking.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let _ = tokio::time::timeout(
+        PROBE_DRIVER_INTERVAL * 2,
+        run_probe_driver(router_swap.clone(), shutdown_rx),
+    )
+    .await;
+
+    assert!(
+        count_calls.load(Ordering::SeqCst) > calls_before_driver,
+        "the production driver must execute the queued free count_tokens validator"
+    );
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        0,
+        "the executed job must leave the queue"
+    );
+}
+
+/// Startup and an idle status read must cost ZERO network work: with no
+/// admitted traffic the driver ticks against an empty queue and dials
+/// nothing. Paired with the test above, which proves the same driver DOES
+/// dial once a job is queued -- so this one cannot pass by the driver being
+/// broken outright.
+#[tokio::test(start_paused = true)]
+async fn probe_driver_makes_no_call_while_the_queue_is_empty() {
+    let (router, count_calls) = probe_router_with_counting_provider();
+    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+
+    // Status reads are pure: they must not activate a lane.
+    for _ in 0..5 {
+        let _ = router_swap.load().probe_scheduler_snapshot();
+    }
+    assert_eq!(
+        router_swap
+            .load()
+            .probe_scheduler_snapshot()
+            .activations_total,
+        0,
+        "premise: startup plus status reads activate nothing"
+    );
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let _ = tokio::time::timeout(
+        PROBE_DRIVER_INTERVAL * 3,
+        run_probe_driver(router_swap.clone(), shutdown_rx),
+    )
+    .await;
+
+    assert_eq!(
+        count_calls.load(Ordering::SeqCst),
+        0,
+        "an idle daemon must issue zero probe network work"
+    );
+}
+
+/// The driver stops on the shutdown signal and cancels queued work, so a
+/// job outlives neither the daemon nor its own scheduler.
+#[tokio::test(start_paused = true)]
+async fn probe_driver_stops_and_cancels_queued_work_at_shutdown() {
+    let (router, _calls) = probe_router_with_counting_provider();
+    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+    let _ = router_swap.load().complete(probe_grounding_request()).await;
+    assert_eq!(router_swap.load().probe_scheduler_snapshot().queued, 1);
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    shutdown_tx.send(()).unwrap();
+
+    // Must RETURN rather than run forever: the shutdown arm is what the
+    // serve path relies on to join this task.
+    tokio::time::timeout(
+        PROBE_DRIVER_INTERVAL,
+        run_probe_driver(router_swap.clone(), shutdown_rx),
+    )
+    .await
+    .expect("the driver must return on the shutdown signal");
+
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        0,
+        "shutdown must cancel queued probe work"
+    );
+}
+
+/// The driver reads the CURRENTLY PUBLISHED router each tick, so a
+/// publication switches it over cleanly and the replacement's incarnation
+/// retires the outgoing one's work.
+#[tokio::test(start_paused = true)]
+async fn probe_driver_follows_router_publication_and_retires_old_work() {
+    let (router, _calls) = probe_router_with_counting_provider();
+    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+    let _ = router_swap.load().complete(probe_grounding_request()).await;
+    assert_eq!(router_swap.load().probe_scheduler_snapshot().queued, 1);
+
+    // Publish a replacement, exactly as the reload coordinator does.
+    let (mut next, _next_calls) = probe_router_with_counting_provider();
+    next.carry_over_learned_from(&router_swap.load_full());
+    router_swap.store(Arc::new(next));
+    let retired = router_swap.load().publish_probe_incarnation();
+
+    assert_eq!(retired, 1, "publication retires the outgoing work");
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        0,
+        "no work from the retired incarnation survives"
+    );
+
+    // And the driver, reading the published router, runs nothing for it.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let _ = tokio::time::timeout(
+        PROBE_DRIVER_INTERVAL * 2,
+        run_probe_driver(router_swap.clone(), shutdown_rx),
+    )
+    .await;
+    assert_eq!(router_swap.load().probe_scheduler_snapshot().queued, 0);
+}
+
+/// The driver must be SPAWNED by the production pipeline, not merely exist.
+/// A source-text guard, because the pipeline spawns detached tasks whose
+/// absence no unit test observes -- the behavioral tests above drive the
+/// function directly and so stay green if the spawn is deleted.
+#[test]
+fn the_probe_driver_is_spawned_by_the_reload_pipeline() {
+    const RELOAD_SRC: &str = include_str!("reload.rs");
+    // Scanned whole: this module's tests are a `#[path]` sidecar, so none of
+    // the test text lives in reload.rs and there is nothing to cut.
+    assert!(
+        RELOAD_SRC.contains("tokio::spawn(run_probe_driver("),
+        "the probe driver must be spawned by the reload pipeline, or no queued \
+         free validator ever executes in production"
+    );
+}
+
+/// A provider whose `count_tokens` stalls far past the probe timeout,
+/// tracking how many of its calls are still LIVE. The live count is what
+/// distinguishes a cancelled future from one still running behind a driver
+/// that merely returned.
+struct StallingCountProvider {
+    live: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl routectl_core::Provider for StallingCountProvider {
+    fn id(&self) -> &'static str {
+        "p1"
+    }
+    fn normalize_request(
+        &self,
+        _: &routectl_core::ChatRequest,
+    ) -> routectl_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(
+        &self,
+        _: serde_json::Value,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        Err(routectl_core::Error::normalize_response("p1", "unused"))
+    }
+    async fn complete(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        Ok(routectl_core::ChatResponse {
+            model: "wire-model".to_string(),
+            ..Default::default()
+        })
+    }
+    async fn stream(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<
+        futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    > {
+        Err(routectl_core::Error::upstream("p1", 500, "body"))
+    }
+    async fn count_tokens(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<routectl_core::TokenCount> {
+        struct Live(Arc<AtomicUsize>);
+        impl Drop for Live {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.live.fetch_add(1, Ordering::SeqCst);
+        let _live = Live(Arc::clone(&self.live));
+        // Far past every bound: only cancellation ends this.
+        tokio::time::sleep(std::time::Duration::from_hours(1)).await;
+        Ok(routectl_core::TokenCount {
+            input_tokens: 1,
+            extras: serde_json::Map::new(),
+        })
+    }
+}
+
+/// A probe router whose lane stalls on `count_tokens`.
+fn stalling_probe_router() -> (Router, Arc<AtomicUsize>) {
+    let live = Arc::new(AtomicUsize::new(0));
+    let mut config = routectl_router::config::Config::default();
+    config.providers.insert(
+        "p1".to_string(),
+        routectl_router::config::ProviderEntry::anthropic_api("literal:k"),
+    );
+    config.models.insert(
+        "m1".to_string(),
+        routectl_router::config::ModelEntry::new("p1", "claude-sonnet-4-5"),
+    );
+    config.aliases.insert(
+        "default".to_string(),
+        routectl_router::config::AliasValue::Single("m1".to_string()),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let mut models = std::collections::BTreeMap::new();
+    models.insert(
+        "m1".to_string(),
+        Arc::new(routectl_router::ResolvedModel::new(
+            "m1",
+            "p1",
+            Arc::new(StallingCountProvider {
+                live: Arc::clone(&live),
+            }) as Arc<dyn routectl_core::Provider>,
+            "claude-sonnet-4-5",
+        )),
+    );
+    router.install_resolved_models(models);
+    (router, live)
+}
+
+/// The driver must observe shutdown WHILE a probe operation is in flight,
+/// cancel it, cancel queued work, and return -- within the server's wait
+/// bound rather than after the per-operation timeout.
+///
+/// A driver that awaited the run to completion before checking shutdown
+/// would hold the graceful drain for the whole probe timeout; with a
+/// stalling provider it would not return at all inside this bound.
+#[tokio::test(start_paused = true)]
+async fn probe_driver_cancels_an_in_flight_probe_at_shutdown_within_the_wait_bound() {
+    let (router, live) = stalling_probe_router();
+    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+    let _ = router_swap.load().complete(probe_grounding_request()).await;
+    assert_eq!(router_swap.load().probe_scheduler_snapshot().queued, 1);
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let driver = tokio::spawn(run_probe_driver(router_swap.clone(), shutdown_rx));
+
+    // Let the first tick fire and the stalled operation get under way.
+    tokio::time::sleep(PROBE_DRIVER_INTERVAL + std::time::Duration::from_secs(1)).await;
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        1,
+        "premise: a probe operation must be in flight when shutdown fires"
+    );
+
+    shutdown_tx.send(()).unwrap();
+    // The bound: comfortably inside the server's own drain deadline, and far
+    // below the per-operation probe timeout the stalled call would otherwise
+    // hold.
+    tokio::time::timeout(crate::server::serve::DRAIN_DEADLINE, driver)
+        .await
+        .expect("the driver must return within the server's wait bound")
+        .expect("the driver task must not panic");
+
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "the in-flight validator future must be dropped, not left running"
+    );
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        0,
+        "shutdown must cancel queued work"
+    );
+}
+
+/// The incarnation must be stamped and old work retired BEFORE
+/// the ArcSwap store, so no request can observe the published router while
+/// it still carries the outgoing incarnation.
+///
+/// A controlled interleaving: activate through the router exactly as a
+/// request landing in that window would, at the point the replacement is
+/// published but before any later stamp could run. With the ordering
+/// correct the activation lands on the NEW incarnation and survives; with
+/// the stamp after the store it would be retired out from under the caller.
+#[tokio::test(start_paused = true)]
+async fn a_replacement_router_is_stamped_before_it_is_published() {
+    // A controlled interleaving, driven through the PUBLIC surface: queue
+    // work under the outgoing incarnation, then publish in the production
+    // order (stamp + retire, then store) and check that a request landing
+    // after the store lands on live, leasable work.
+    //
+    // With the stamp AFTER the store there is a window where the published
+    // router still carries the outgoing incarnation: an activation in that
+    // window is queued and then immediately retired, leaving the lane
+    // un-probed with nothing recording why.
+    let (previous, _live) = stalling_probe_router();
+    let previous = Arc::new(previous);
+    let router_swap = Arc::new(ArcSwap::from_pointee({
+        let (r, _l) = stalling_probe_router();
+        r
+    }));
+    router_swap.store(Arc::clone(&previous));
+
+    // An admitted request queues work under the outgoing incarnation.
+    let _ = previous.complete(probe_grounding_request()).await;
+    assert_eq!(previous.probe_scheduler_snapshot().queued, 1);
+
+    // Production ordering: stamp + retire, THEN store.
+    let (mut next, _l) = stalling_probe_router();
+    next.carry_over_learned_from(&previous);
+    let retired = next.publish_probe_incarnation();
+    let next = Arc::new(next);
+    router_swap.store(Arc::clone(&next));
+
+    assert_eq!(retired, 1, "the outgoing incarnation's work is retired");
+    assert_eq!(
+        next.probe_scheduler_snapshot().queued,
+        0,
+        "no work from the retired incarnation survives the publication"
+    );
+
+    // A request arriving now sees a router already stamped, so its work
+    // belongs to the live incarnation -- it is queued AND runnable, which a
+    // retired job would not be.
+    let _ = router_swap.load().complete(probe_grounding_request()).await;
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        1,
+        "work activated after publication must survive"
+    );
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    // Past the driver's first tick, so it actually leases.
+    let _ = tokio::time::timeout(
+        PROBE_DRIVER_INTERVAL * 2,
+        run_probe_driver(router_swap.clone(), shutdown_rx),
+    )
+    .await;
+    // The driver leased it (the stalled provider holds it in flight), which
+    // a job from a retired incarnation could never be.
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        0,
+        "live-incarnation work must be leasable by the driver"
+    );
+}
+
+/// Structural guard: every reload path must publish through the ONE helper
+/// that stamps before storing, and that helper must stamp first.
+///
+/// A behavioral test cannot observe the ordering inside the coordinator (the
+/// window is a single synchronous stretch), so this reads the source. Now
+/// stronger than before the extraction: rather than checking three copies each
+/// stamp first, it checks that no copy EXISTS -- `reload.rs` performs no store
+/// of its own, so a future path cannot reintroduce an unstamped one without
+/// tripping this.
+#[test]
+fn every_reload_path_publishes_through_the_stamping_helper() {
+    const RELOAD_SRC: &str = include_str!("reload.rs");
+    const PUBLISH_SRC: &str = include_str!("router_publish.rs");
+
+    // The coordinator stores nothing directly; it delegates.
+    assert_eq!(
+        RELOAD_SRC.matches("router_swap.store(").count(),
+        0,
+        "a reload path stores the router directly, bypassing the stamping helper"
+    );
+    let calls = RELOAD_SRC.matches("publish_router(").count();
+    assert_eq!(
+        calls, 3,
+        "expected the three publication sites to call the helper, found {calls}"
+    );
+
+    // And the helper itself stamps before it stores.
+    let helper_at = PUBLISH_SRC
+        .find("pub(super) fn publish_router(")
+        .expect("the publication helper must exist");
+    let helper = &PUBLISH_SRC[helper_at..];
+    let stamp_at = helper
+        .find("publish_probe_incarnation()")
+        .expect("the helper must stamp the incarnation");
+    let store_at = helper
+        .find("router_swap.store(")
+        .expect("the helper must store the router");
+    assert!(
+        stamp_at < store_at,
+        "the publication helper stores before stamping the incarnation"
+    );
+}
+
+/// Simultaneous tick + shutdown: no provider call may START after the
+/// shutdown signal is ready.
+///
+/// `select!` picks randomly among ready branches by default, so with the
+/// signal flipped BEFORE the driver is first polled and the tick deadline
+/// already elapsed, an unbiased select would sometimes take the tick branch
+/// and begin a fresh batch of dials on a daemon that is shutting down.
+/// `biased` makes the shutdown branch win deterministically -- and the
+/// provider's call counter is what proves nothing started.
+#[tokio::test(start_paused = true)]
+async fn probe_driver_starts_no_call_when_shutdown_and_tick_are_both_ready() {
+    let (router, live) = stalling_probe_router();
+    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+    let _ = router_swap.load().complete(probe_grounding_request()).await;
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        1,
+        "premise: work must be queued, so a tick WOULD dial"
+    );
+
+    // Let the tick deadline elapse, then flip shutdown, then poll the driver
+    // for the first time -- both branches ready in the same poll.
+    tokio::time::advance(PROBE_DRIVER_INTERVAL * 2).await;
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    shutdown_tx.send(()).unwrap();
+
+    tokio::time::timeout(
+        crate::server::serve::DRAIN_DEADLINE,
+        run_probe_driver(router_swap.clone(), shutdown_rx),
+    )
+    .await
+    .expect("the driver must take the shutdown branch and return");
+
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "no probe call may START once shutdown is ready"
+    );
+    assert_eq!(
+        router_swap.load().probe_scheduler_snapshot().queued,
+        0,
+        "the shutdown branch must still cancel queued work"
+    );
+}
+
+/// Both shutdown selects in the driver must be `biased`. A behavioral test
+/// cannot reliably observe a random-choice bug (it passes whenever the
+/// scheduler happens to pick the right branch), so the ordering is pinned in
+/// the source: `biased` present, and the shutdown arm written first.
+#[test]
+fn both_driver_selects_are_biased_with_shutdown_first() {
+    const DRIVER_SRC: &str = include_str!("probe_driver.rs");
+    let driver_at = DRIVER_SRC
+        .find("async fn run_probe_driver(")
+        .expect("the driver must exist");
+    let driver = &DRIVER_SRC[driver_at..];
+    let driver_end = driver.find("\n}\n").expect("the driver body must close");
+    let driver = &driver[..driver_end];
+
+    let selects = driver.matches("tokio::select!").count();
+    assert_eq!(
+        selects, 2,
+        "expected the outer tick select and the inner run select"
+    );
+    assert_eq!(
+        driver.matches("biased;").count(),
+        selects,
+        "every shutdown select in the driver must be biased"
+    );
+    // And in each one the shutdown arm precedes the work arm.
+    for (select_at, _) in driver.match_indices("biased;") {
+        let after = &driver[select_at..];
+        let shutdown_at = after
+            .find("shutdown.changed()")
+            .expect("each biased select must carry the shutdown arm");
+        let work_at = after
+            .find("tick.tick()")
+            .or_else(|| after.find("ran = run"))
+            .expect("each biased select must carry a work arm");
+        assert!(
+            shutdown_at < work_at,
+            "a biased select lists its work arm before shutdown, which defeats the bias"
+        );
+    }
 }

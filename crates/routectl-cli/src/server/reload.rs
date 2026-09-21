@@ -15,6 +15,13 @@ use tokio::sync::{mpsc, watch};
 use super::build_router_from_config_with_overlay;
 use super::config_load::read_parse_validate_config;
 use super::file_watch::{self, ReloadRequest, WatchTarget};
+#[cfg(test)]
+use super::metrics_driver::ROUTER_METRICS_SNAPSHOT_INTERVAL;
+use super::metrics_driver::run_router_metrics_snapshot_driver;
+#[cfg(test)]
+use super::probe_driver::PROBE_DRIVER_INTERVAL;
+use super::probe_driver::run_probe_driver;
+use super::router_publish::publish_router;
 
 #[cfg(test)]
 use super::{CompositeStore, build_router_from_config};
@@ -22,69 +29,6 @@ use super::{CompositeStore, build_router_from_config};
 use routectl_auth::MemoryStore;
 #[cfg(test)]
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
-
-/// Upper bound on how long graceful shutdown waits for a single
-/// reload-side task (file watcher, SIGHUP listener, coordinator) to
-/// observe the shutdown signal and return. Each task selects on the
-/// shutdown `watch` channel and exits promptly, so this is a safety
-/// cap, not the expected wait. Awaiting (not just dropping) the
-/// coordinator handle is what releases its `UsageHandle` clone before
-/// the usage drain runs.
-const RELOAD_TASK_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Await each reload-side task to completion under a bounded per-task
-/// deadline so their owned state -- notably the coordinator's
-/// `UsageHandle` clone -- is dropped before the usage drain begins. A
-/// `JoinError` or an elapsed timeout is logged and skipped; a wedged
-/// task is left detached rather than blocking shutdown.
-pub(super) async fn await_reload_tasks(handles: Vec<tokio::task::JoinHandle<()>>) {
-    for handle in handles {
-        match tokio::time::timeout(RELOAD_TASK_SHUTDOWN_DEADLINE, handle).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "reload task join failed during shutdown");
-            }
-            Err(_) => {
-                tracing::warn!(
-                    deadline_secs = RELOAD_TASK_SHUTDOWN_DEADLINE.as_secs(),
-                    "reload task did not stop within deadline; detaching and continuing",
-                );
-            }
-        }
-    }
-}
-
-/// How often the router-metrics driver flushes a snapshot to `tracing`.
-/// Mirrors the front-proxy's own snapshot-interval discipline
-/// (`crate::proxy::listener`): a sibling constant rather than a shared one,
-/// since the two live in different crates with no public seam between them.
-const ROUTER_METRICS_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
-
-/// Periodically flush the live `Router`'s metrics snapshot to `tracing`
-/// until `shutdown` fires, then flush once more before returning -- so a
-/// session shorter than one interval still surfaces its totals. Skips the
-/// immediate t=0 tick `interval` would otherwise fire (an all-zero startup
-/// snapshot carries no signal), matching the front-proxy's own driver.
-async fn run_router_metrics_snapshot_driver(
-    router_swap: Arc<ArcSwap<Router>>,
-    mut shutdown: watch::Receiver<()>,
-) {
-    let mut snapshot_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + ROUTER_METRICS_SNAPSHOT_INTERVAL,
-        ROUTER_METRICS_SNAPSHOT_INTERVAL,
-    );
-    loop {
-        tokio::select! {
-            _ = shutdown.changed() => {
-                router_swap.load().log_metrics_snapshot();
-                return;
-            }
-            _ = snapshot_tick.tick() => {
-                router_swap.load().log_metrics_snapshot();
-            }
-        }
-    }
-}
 
 /// Spawn the file-watch task, the SIGHUP listener (cfg(unix)), and
 /// the reload coordinator. The returned vector keeps the
@@ -128,6 +72,14 @@ pub(super) fn spawn_reload_pipeline(
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadRequest>(16);
 
     handles.push(tokio::spawn(run_router_metrics_snapshot_driver(
+        router_swap.clone(),
+        shutdown_rx.clone(),
+    )));
+
+    // Bounded probe driver. Spawned unconditionally and idle by
+    // construction: it dials nothing until an admitted real request has
+    // queued a job, so a daemon that never serves traffic never probes.
+    handles.push(tokio::spawn(run_probe_driver(
         router_swap.clone(),
         shutdown_rx.clone(),
     )));
@@ -586,7 +538,9 @@ async fn rebuild_router_for_seat_change(
     // pins against the new pool membership and counts each re-pick.
     new_router.carry_over_pool_state_from(&router_swap.load_full());
     new_router.carry_over_learned_from(&router_swap.load_full());
-    router_swap.store(Arc::new(new_router));
+    // Stamps then stores, in that order -- see `publish_router`. This is the
+    // commit point: every failure and abandonment path above has returned.
+    publish_router(router_swap, Arc::new(new_router));
     tracing::info!(
         seats_before = before.len(),
         seats_after = after.len(),
@@ -729,9 +683,11 @@ pub(super) async fn handle_config_reload(
                 return None;
             }
         }
-        router_swap.store(boundary_router);
+        // Past every failure and abandonment return, so this is the commit
+        // point for the boundary-rebuilt router.
+        publish_router(router_swap, boundary_router);
     } else {
-        router_swap.store(Arc::new(new_router));
+        publish_router(router_swap, Arc::new(new_router));
     }
 
     // Flip the usage capture gate live. `db_path` and `retention_days` are

@@ -139,6 +139,18 @@ impl FieldVerdictKey {
         }
     }
 
+    /// The routing state key this identity is keyed on, for the probe
+    /// worker's target resolution.
+    ///
+    /// A probe must reach the SAME lane the identity was minted against,
+    /// and the state key is what names it. Exposed as its own accessor
+    /// (rather than ungating the test-only `state_key` below) so this one
+    /// production reader is explicit about why it needs the half.
+    #[must_use]
+    pub(crate) fn probe_state_key(&self) -> &str {
+        &self.state_key
+    }
+
     /// The routing state key this identity is keyed on.
     ///
     /// Test-only, like its two siblings below: the dispatch path passes the

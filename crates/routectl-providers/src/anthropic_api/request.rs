@@ -124,8 +124,10 @@ impl ClientFingerprintStripTally {
         self.stripped = true;
     }
 
-    fn flush(&self) {
-        if self.stripped {
+    /// Takes the request so a background probe records nothing -- see
+    /// `super::probe_aware_metrics`.
+    fn flush(&self, req: &ChatRequest) {
+        if self.stripped && super::counts_toward_lane_statistics(req) {
             crate::translation_drop_metrics::record_translation_policy_action(
                 super::LANE,
                 "client_fingerprint_stripped",
@@ -922,7 +924,19 @@ pub(crate) fn normalize(
     // figure behind it cannot tell a lane that withholds on every request
     // from one that withheld once all week. Exactly one call site per lane; a
     // second anywhere would understate the rate for the whole lane.
-    crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
+    //
+    // A BACKGROUND PROBE is excluded, for the same reason it is excluded from
+    // the classification numerators: every rate on this lane must divide one
+    // population, and that population is CLIENT traffic. Counting probes in the
+    // denominator while excluding them from the numerators would drag every
+    // rate down by an amount set by probe scheduling; counting them in both
+    // would report routectl's own traffic as if a client had sent it. So the
+    // request leaves this lane's statistics entirely -- it still translates and
+    // still ships, since the probe's whole purpose is to reproduce the wire
+    // shape under test.
+    if super::counts_toward_lane_statistics(req) {
+        crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
+    }
     let mut fingerprint = ClientFingerprintStripTally::default();
     let assembled = normalize_deferring_format_key_warn(
         id,
@@ -941,7 +955,7 @@ pub(crate) fn normalize(
     // its replay-invariant walk was still counted by this lane's denominator.
     // Either shape missing from the numerator reads the action rate low for
     // precisely the requests that withhold the most.
-    fingerprint.flush();
+    fingerprint.flush(req);
     let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)

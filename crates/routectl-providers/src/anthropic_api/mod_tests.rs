@@ -808,6 +808,127 @@ fn lookalike_anthropic_base_stamps_no_session_identity_headers() {
 
 // -- Beta floor tests --------------------------------------------------
 
+/// A background probe carries no Claude-Code session capture of its own, so the
+/// `is_non_cc` classification has to travel with it as a BIT or the probe lands
+/// on the wrong side of the floor gate.
+///
+/// Genuine CC traffic SUPPRESSES the floor. A probe built for such a request
+/// therefore must not receive it -- otherwise the probe's beta header is wider
+/// than the header under test, and its answer is still attributed to the field.
+#[test]
+fn a_probe_for_genuine_claude_code_traffic_is_classified_cc_and_gets_no_floor() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+
+    // The admitted request: a genuine CC client, identified by its session
+    // capture.
+    let mut admitted = ChatRequest::default();
+    admitted.routectl_internal.claude_code_headers =
+        vec![("x-claude-code-session-id".into(), "sess-1".into())];
+    let admitted_header =
+        outbound_header_value(&provider, &admitted, "anthropic-beta").unwrap_or_default();
+
+    // The probe request rebuilt for that lane: NO session capture (a scheduler
+    // does not retain a correlation id), only the classification bit.
+    let mut probe = ChatRequest::default();
+    probe.routectl_internal.originating_claude_code_session = Some(true);
+    let probe_header =
+        outbound_header_value(&provider, &probe, "anthropic-beta").unwrap_or_default();
+
+    assert_eq!(
+        probe_header, admitted_header,
+        "a probe for genuine-CC traffic must be classified the same way, so its \
+         floor decision -- and header -- must match"
+    );
+    // The pinned FLOOR is suppressed. `OAUTH_ANTHROPIC_BETA` is excluded from
+    // this check because it is not part of the floor: it is unioned
+    // unconditionally on this surface (OAuth does not function on
+    // api.anthropic.com without it), so its presence says nothing about the
+    // classification either way.
+    for pinned in routectl_core::identity::anthropic::default_claude_code_anthropic_betas()
+        .iter()
+        .filter(|b| **b != routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA)
+    {
+        assert!(
+            !probe_header.split(',').any(|b| b.trim() == *pinned),
+            "genuine-CC traffic suppresses the floor, so {pinned} must not appear: \
+             {probe_header}"
+        );
+    }
+}
+
+/// The POSITIVE CONTROL: on the same lane, a NON-CC request receives the floor,
+/// and a probe carrying that classification receives the same applied floor.
+///
+/// Without this pairing the suppression test above would pass on a build whose
+/// floor never fires at all.
+#[test]
+fn a_probe_for_non_claude_code_traffic_is_classified_non_cc_and_gets_the_floor() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+
+    // Admitted: no session capture, so the egress cloaks it and applies the
+    // floor.
+    let admitted = ChatRequest::default();
+    let admitted_header = outbound_header_value(&provider, &admitted, "anthropic-beta")
+        .expect("the floor must produce a header");
+
+    let mut probe = ChatRequest::default();
+    probe.routectl_internal.originating_claude_code_session = Some(false);
+    let probe_header = outbound_header_value(&provider, &probe, "anthropic-beta")
+        .expect("the floor must produce a header");
+
+    assert_eq!(
+        probe_header, admitted_header,
+        "a probe for non-CC traffic must carry the same applied floor"
+    );
+    for pinned in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+        assert!(
+            probe_header.split(',').any(|b| b.trim() == *pinned),
+            "non-CC traffic receives the floor, so {pinned} must appear: {probe_header}"
+        );
+    }
+
+    // And the two classifications DIFFER on this lane, which is what makes both
+    // tests discriminate: on a build where the gate were inert they would emit
+    // identical headers.
+    let mut cc = ChatRequest::default();
+    cc.routectl_internal.originating_claude_code_session = Some(true);
+    let cc_header = outbound_header_value(&provider, &cc, "anthropic-beta").unwrap_or_default();
+    assert_ne!(
+        probe_header, cc_header,
+        "premise: the classification must actually change the header"
+    );
+}
+
+/// The bit wins over the capture ONLY when stated. Unset -- every ingress and
+/// library consumer -- must still be classified by the capture scan, or this
+/// change would silently alter the classification of ordinary traffic.
+#[test]
+fn an_unstated_classification_still_falls_back_to_the_session_capture() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+
+    let mut cc_by_capture = ChatRequest::default();
+    cc_by_capture.routectl_internal.claude_code_headers =
+        vec![("x-claude-code-session-id".into(), "sess-1".into())];
+    assert!(
+        cc_by_capture
+            .routectl_internal
+            .originating_claude_code_session
+            .is_none(),
+        "premise: the bit must be unset for this to test the fallback"
+    );
+    let by_capture =
+        outbound_header_value(&provider, &cc_by_capture, "anthropic-beta").unwrap_or_default();
+
+    let mut cc_by_bit = ChatRequest::default();
+    cc_by_bit.routectl_internal.originating_claude_code_session = Some(true);
+    let by_bit = outbound_header_value(&provider, &cc_by_bit, "anthropic-beta").unwrap_or_default();
+
+    assert_eq!(
+        by_capture, by_bit,
+        "the capture-scan fallback and the stated bit must agree for the same lane"
+    );
+}
+
 /// On OauthBearer + api.anthropic.com, all pinned floor betas
 /// appear in the outbound `anthropic-beta` header.
 #[test]
@@ -4388,6 +4509,204 @@ fn cloak_split_count(class: &str) -> u64 {
         .into_iter()
         .find(|e| e.lane == LANE && e.policy_class == class)
         .map_or(0, |e| e.action_count)
+}
+
+/// The eligibility predicate: client traffic counts, a background probe does not.
+///
+/// A UNIT pin on the one decision every recorder call on this lane gates on.
+/// Kept separate from the delta tests below because it needs no registry at all
+/// -- so it cannot flake on a process-global counter, and it fails for exactly
+/// one reason.
+#[test]
+fn only_client_traffic_counts_toward_this_lanes_statistics() {
+    let client = req_with_claude_code_headers(Vec::new());
+    assert!(
+        super::counts_toward_lane_statistics(&client),
+        "ordinary client traffic must count"
+    );
+
+    let mut probe = req_with_claude_code_headers(Vec::new());
+    probe.routectl_internal.background_probe = true;
+    assert!(
+        !super::counts_toward_lane_statistics(&probe),
+        "a background probe must not count"
+    );
+}
+
+/// EVERY recorder call on this lane is gated on that predicate -- the denominator
+/// and all six numerators.
+///
+/// A source guard, because the property is coverage: a call added later without
+/// the gate would count probes into one counter while the others exclude them,
+/// skewing the rates against each other. That divergence is invisible to a
+/// behavioral test that happens not to trip the new class.
+#[test]
+fn every_recorder_call_on_this_lane_is_probe_gated() {
+    const REQUEST: &str = include_str!("request.rs");
+    const CLIENT: &str = include_str!("client.rs");
+    const CLOAK: &str = include_str!("cloak.rs");
+
+    // Each file's recorder-call count and how many gates must dominate them.
+    //
+    // Counting GATES, not merely asserting the predicate appears: a file with two
+    // recorder calls and one gate would satisfy a `contains` check while leaving
+    // the other call ungated. Measured -- removing the denominator's gate from
+    // `request.rs` left a `contains`-based version of this guard green, because
+    // the file's other call still named the predicate.
+    //
+    // `cloak.rs` gates all four of its calls with ONE early return, which is why
+    // its expected gate count is 1 rather than 4.
+    for (name, src, expected_calls, expected_gates) in [
+        ("request.rs", REQUEST, 2usize, 2usize),
+        ("client.rs", CLIENT, 2, 1),
+        ("cloak.rs", CLOAK, 4, 1),
+    ] {
+        let calls = src.matches("record_translation_lane_seen(").count()
+            + src.matches("record_translation_policy_action(").count();
+        assert_eq!(
+            calls, expected_calls,
+            "{name} has {calls} recorder call(s), expected {expected_calls}; a new \
+             call must be gated on `counts_toward_lane_statistics` and counted here"
+        );
+        let gates = src.matches("counts_toward_lane_statistics(req)").count();
+        assert_eq!(
+            gates, expected_gates,
+            "{name} has {gates} eligibility gate(s), expected {expected_gates}; an \
+             ungated recorder call would count background probes into one counter \
+             while the others exclude them"
+        );
+    }
+}
+
+/// The predicate reaches the real recorders: a probe moves neither classification
+/// numerator.
+///
+/// Scoped to the CLASSIFICATION classes deliberately. Those two are written only
+/// by the cloak split, which every test touching them serializes on, so exact
+/// deltas here are deterministic.
+///
+/// The `lane_seen` denominator is NOT asserted here and that is not an omission:
+/// it is bumped by every anthropic-api translation in the crate, on any thread,
+/// so no assertion about it on the SHARED lane is stable -- both an exact version
+/// and a margin version of this test flaked at `--test-threads=512` (2 in 12, and
+/// 2 in 20). The denominator's exclusion is pinned deterministically instead, by
+/// `only_client_traffic_counts_toward_this_lanes_statistics` (the decision) and
+/// `every_recorder_call_on_this_lane_is_probe_gated` (that the denominator's call
+/// site consults it).
+#[test]
+#[serial_test::serial(anthropic_api_cloak_split)]
+fn a_background_probe_moves_neither_classification_numerator() {
+    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("session-stable-123".into()),
+        Vec::new(),
+        false,
+    ));
+
+    let non_cc_before = cloak_split_count("cloak_classified_non_cc");
+    let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
+
+    let mut probe = req_with_claude_code_headers(Vec::new());
+    probe.routectl_internal.background_probe = true;
+    let mut body = cloak_test_body();
+    provider
+        .normalize_request(&probe)
+        .expect("the probe body must still translate");
+    provider.cloak_body(&mut body, &probe);
+
+    assert_eq!(
+        cloak_split_count("cloak_classified_non_cc"),
+        non_cc_before,
+        "a background probe must not enter the non-CC numerator"
+    );
+    assert_eq!(
+        cloak_split_count("cloak_classified_genuine_cc"),
+        genuine_before,
+        "nor the genuine-CC numerator"
+    );
+}
+
+/// A BACKGROUND PROBE is excluded from the classification census on BOTH arms.
+///
+/// The census reports what CLIENTS send: the genuine-CC / non-CC ratio is how a
+/// Claude Code update that stops sending the session header is noticed at all.
+/// A probe is routectl's own traffic, scheduled on its own cadence, so counting
+/// it would move that ratio by an amount proportional to probe scheduling
+/// rather than to anything a client did.
+///
+/// Both arms are driven in one act, because excluding only one would still
+/// skew the ratio -- in the other direction.
+#[test]
+#[serial_test::serial(anthropic_api_cloak_split)]
+fn a_background_probe_is_counted_on_neither_classification_arm() {
+    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("session-stable-123".into()),
+        Vec::new(),
+        false,
+    ));
+
+    let non_cc_before = cloak_split_count("cloak_classified_non_cc");
+    let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
+
+    // Non-CC shape, marked as a probe.
+    let mut probe_non_cc = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
+    probe_non_cc.routectl_internal.background_probe = true;
+    let mut body = cloak_test_body();
+    provider.cloak_body(&mut body, &probe_non_cc);
+
+    // Genuine-CC shape, marked as a probe.
+    let mut probe_cc = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sess-1")]);
+    probe_cc.routectl_internal.background_probe = true;
+    let mut body = cloak_test_body();
+    provider.cloak_body(&mut body, &probe_cc);
+
+    assert_eq!(
+        cloak_split_count("cloak_classified_non_cc"),
+        non_cc_before,
+        "a background probe must not count the non-CC arm"
+    );
+    assert_eq!(
+        cloak_split_count("cloak_classified_genuine_cc"),
+        genuine_before,
+        "a background probe must not count the genuine-CC arm"
+    );
+}
+
+/// The exclusion is CENSUS-ONLY: a probe is still cloaked, and still
+/// classified, exactly as the client request it probes for.
+///
+/// This is the half that keeps the exclusion from becoming a behavior change.
+/// A probe exists to reproduce the wire shape the admitted request was about to
+/// send, so skipping the transform -- rather than only the counter -- would
+/// make it ask its question under a different envelope than the one under test.
+#[test]
+#[serial_test::serial(anthropic_api_cloak_split)]
+fn a_background_probe_is_still_cloaked_like_the_traffic_it_probes_for() {
+    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("session-stable-123".into()),
+        Vec::new(),
+        false,
+    ));
+
+    let client = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
+    let mut client_body = cloak_test_body();
+    let client_result = provider.cloak_body(&mut client_body, &client);
+
+    let mut probe = client.clone();
+    probe.routectl_internal.background_probe = true;
+    let mut probe_body = cloak_test_body();
+    let probe_result = provider.cloak_body(&mut probe_body, &probe);
+
+    assert!(
+        client_result.is_some() && probe_result.is_some(),
+        "premise: the cloak must actually run on both, or this compares nothing"
+    );
+    assert_eq!(
+        probe_body, client_body,
+        "the probe's cloaked body must be byte-identical to the client's"
+    );
 }
 
 /// SINGLE-ARM pin on the non-CC classification. A request with no captured

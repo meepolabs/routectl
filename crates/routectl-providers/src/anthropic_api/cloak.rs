@@ -244,7 +244,15 @@ impl CloakPolicyTally {
         self.tool_sort_stood_down |= outcome.stood_down;
     }
 
-    fn flush(&self) {
+    /// Takes the request so a background probe records nothing -- see
+    /// `super::probe_aware_metrics`.
+    fn flush(&self, req: &ChatRequest) {
+        // A background probe contributes to no numerator on this lane -- see
+        // `super::counts_toward_lane_statistics`. Checked once for all four
+        // classes: they are one flush of one request.
+        if !super::counts_toward_lane_statistics(req) {
+            return;
+        }
         // One call site per class rather than a loop over a table: the census
         // harvest resolves each class to the literal an operator reads in
         // telemetry, and an expression it cannot resolve takes the call out of
@@ -294,7 +302,7 @@ impl CloakPolicyTally {
 /// cloak transforms.
 pub fn cloak_oauth_egress(
     body: &mut Value,
-    _req: &ChatRequest,
+    req: &ChatRequest,
     identity: &ClaudeCodeIdentity,
     is_non_cc: bool,
     config: &CloakConfig,
@@ -327,7 +335,7 @@ pub fn cloak_oauth_egress(
     if is_non_cc && config.normalize_tools {
         tally.absorb_tool_sort(sort_custom_tools_by_name(body));
     }
-    tally.flush();
+    tally.flush(req);
     CloakResult { tool_reverse }
 }
 

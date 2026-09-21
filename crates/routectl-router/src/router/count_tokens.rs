@@ -458,6 +458,14 @@ impl Router {
             // outcome arm settles it.
             let mut probe_guard = self.probe_slot_guard(&target.state_key);
 
+            // Lazy probe activation at the ADMITTED boundary, the same
+            // position and for the same reasons as the two messages walks:
+            // the gate has cleared, every request-shaping step has run, and
+            // this seat is about to be dialed. A count_tokens request is
+            // real admitted traffic on this lane, so a lane that only ever
+            // sees counting still activates -- and it reads `attempt_req`,
+            // the per-target post-pre-flight body actually being sent.
+            self.on_admitted_request(&target, &attempt_req);
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;
             match result {

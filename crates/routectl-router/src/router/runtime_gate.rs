@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use routectl_core::{ChatRequest, Error, failure_class::LastOutcome};
 
 use crate::config::RetryPolicy;
-use crate::runtime_state::{GateDecision, ProviderState};
+use crate::runtime_state::{AdmissionKind, GateDecision, ProviderState};
 
 use super::Router;
 
@@ -53,14 +53,105 @@ impl Router {
     /// the operator-facing provider name and lands in the resulting
     /// error so callers see WHICH provider was gate-blocked, not the
     /// internal nickname.
+    ///
+    /// MUTATING, which matters for any caller reaching for it to "just look":
+    /// it charges an RPM token and can claim the half-open probe slot. A caller
+    /// that only wants to OBSERVE breaker phase reads `gate_status_for`
+    /// instead, which is non-mutating; this one is for callers whose subject is
+    /// the admission decision itself.
     pub(super) fn gate_check(
         &self,
         state_key: &str,
         provider_name_for_err: &str,
     ) -> Option<(&'static str, Error)> {
-        let state = self.state.get(state_key)?.clone();
-        let mut s = state.lock();
-        match s.try_dispatch(Instant::now()) {
+        // Compatible wrapper over the admission API. The ownership token is
+        // DISARMED rather than dropped: these callers keep the claim across
+        // their own walk (a stream holds it until first content) and settle it
+        // through `record_success` / `record_failure` / their own
+        // `probe_slot_guard`, so releasing it here would hand the slot back
+        // while the dispatch is still using it. Correct for them because they
+        // claim and settle inside one synchronous stretch with no window for
+        // another caller to take the slot in between.
+        //
+        // The probe worker DOES have such a window -- its dial is an await
+        // point in a background task -- so it calls `admit_dispatch` and
+        // carries the token instead of re-deriving ownership later.
+        let (refusal, mut guard) = self.admit_dispatch(state_key, provider_name_for_err);
+        guard.disarm();
+        refusal
+    }
+
+    /// Run the RPM bucket + circuit breaker for `state_key` and return both
+    /// the refusal (if any) and a guard that OWNS whatever half-open claim
+    /// this admission took.
+    ///
+    /// The guard is armed only when THIS admission set the half-open bit, as
+    /// reported by the single `ProviderState` critical section that set it.
+    /// That is the whole reason this API exists: the bit is SHARED, so a caller
+    /// that admits and then reads it back can observe a claim a different
+    /// caller took in between and release what it never owned -- freeing that
+    /// caller's claim and admitting a second concurrent probe past the
+    /// single-probe invariant. Ownership is carried, never re-derived.
+    ///
+    /// A refusal, and an admission through a CLOSED breaker, both yield an
+    /// inert guard whose drop is a no-op.
+    pub(super) fn admit_dispatch(
+        &self,
+        state_key: &str,
+        provider_name_for_err: &str,
+    ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
+        self.admit(
+            state_key,
+            provider_name_for_err,
+            AdmissionKind::ClientDispatch,
+        )
+    }
+
+    /// Admit a BACKGROUND PROBE, which defers a half-open-ready lane instead of
+    /// taking its recovery attempt.
+    ///
+    /// The deferral happens inside `ProviderState`'s critical section, before
+    /// the half-open claim and before the RPM debit, so a declined probe leaves
+    /// the recovery attempt available to the next real request and spends none
+    /// of the operator's rate budget. Deciding it here rather than in the
+    /// caller is what makes that true: a caller that admitted and then declined
+    /// would already have spent the token, which no later path refunds.
+    ///
+    /// The returned guard is always inert -- a probe never claims -- but it is
+    /// returned rather than elided so the worker's release path stays a single
+    /// `Drop` on every exit.
+    pub(super) fn admit_probe_dispatch(
+        &self,
+        state_key: &str,
+        provider_name_for_err: &str,
+    ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
+        self.admit(
+            state_key,
+            provider_name_for_err,
+            AdmissionKind::BackgroundProbe,
+        )
+    }
+
+    fn admit(
+        &self,
+        state_key: &str,
+        provider_name_for_err: &str,
+        kind: AdmissionKind,
+    ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
+        let Some(state) = self.state.get(state_key).cloned() else {
+            return (None, ProbeSlotGuard::new(None));
+        };
+        let now = Instant::now();
+        let admission = match kind {
+            AdmissionKind::ClientDispatch => state.lock().try_dispatch_admitting(now),
+            AdmissionKind::BackgroundProbe => state.lock().try_dispatch_probe(now),
+        };
+        let guard = if admission.claimed_half_open {
+            ProbeSlotGuard::new(Some(state))
+        } else {
+            ProbeSlotGuard::new(None)
+        };
+        let refusal = match admission.decision {
             GateDecision::Allow => None,
             GateDecision::RateLimited => Some((
                 "rate_limit",
@@ -70,7 +161,8 @@ impl Router {
                 "circuit_breaker",
                 Error::upstream(provider_name_for_err, 0, "circuit breaker open"),
             )),
-        }
+        };
+        (refusal, guard)
     }
 
     pub(super) fn record_success(&self, state_key: &str) {
