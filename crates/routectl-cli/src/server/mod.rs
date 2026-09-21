@@ -23,6 +23,7 @@ pub mod file_watch;
 pub mod k_rebuild;
 pub mod ledger_reader;
 mod metrics_driver;
+mod paid_probe_ledger;
 mod probe_driver;
 pub mod purge_settlement;
 mod reload;
