@@ -40,6 +40,7 @@ mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
 mod overlays;
+mod paid_probe_ledger;
 mod prefix_rewrite;
 mod probe_failure_class;
 mod probe_lifecycle;
@@ -65,6 +66,7 @@ pub use field_verdict_observability::{
 };
 use overlays::{apply_layered_overlays, operator_betas};
 pub use overlays::{merge_header_extras, merge_payload_extras};
+pub use paid_probe_ledger::{PaidProbeLedger, PaidProbeReservation};
 use routectl_core::capability::FailurePhase;
 #[cfg(test)]
 use routectl_core::capability::SignalTier;
@@ -338,6 +340,22 @@ pub struct Router {
     /// incarnation describes router state that no longer serves. Shared
     /// with the scheduler on carry-over for the same reason.
     paid_probe_candidates: Arc<Mutex<Vec<probe_lifecycle::PaidProbeCandidate>>>,
+    /// Crash-safe paid-probe budget seam -- see
+    /// [`paid_probe_ledger`]. `None` on every Router `Router::new` builds, and
+    /// installed only by a boot path that has a durable accounting actor to
+    /// install. Absent means every reservation refuses, so a paid call is
+    /// impossible without an explicit installation rather than merely
+    /// improbable.
+    ///
+    /// Shared across Router generations by `carry_over_learned_from`, which
+    /// attaches this same `Arc` to the replacement. Sharing is what lets both
+    /// a config reload and a credentials rebuild preserve the seam without the
+    /// reload site holding an accounting handle of its own -- and it is
+    /// load-bearing beyond convenience: two generations reserving against
+    /// different installations would be two budgets for one provider-day, and
+    /// since a committed unit is never refunded, the overspend would be
+    /// permanent.
+    paid_probe_ledger: Option<Arc<dyn paid_probe_ledger::PaidProbeLedger>>,
     /// Edge-trigger latch for the queue-full probe diagnostic, following
     /// the same bounded warn-once pattern as `volatile_prefix_warned`: a
     /// saturated queue refuses every later request, so one line per
@@ -1916,6 +1934,7 @@ impl Router {
             probe_incarnation: AtomicU64::new(1),
             probe_incarnation_ticket: Arc::new(AtomicU64::new(1)),
             paid_probe_candidates: Arc::default(),
+            paid_probe_ledger: None,
             probe_queue_full_warned: Mutex::new(false),
             probe_payload_refused_warned: Mutex::new(false),
             override_registry,
@@ -2509,9 +2528,10 @@ impl Router {
     /// alongside the other carry-over calls.
     ///
     /// Carries MORE than the learned registry, despite the name: the replay
-    /// facade, the field-verdict facade, and the PROBE SCHEDULER (with its
-    /// candidate list and incarnation ticket) are attached here too, all under
-    /// the same attach-not-copy discipline. They ride along because they are
+    /// facade, the field-verdict facade, the PROBE SCHEDULER (with its
+    /// candidate list and incarnation ticket), and the paid-probe ledger
+    /// installation are attached here too, all under the same attach-not-copy
+    /// discipline. They ride along because they are
     /// all keyed on the shared registry and must span the swap together -- a
     /// caller that carried the registry but not the scheduler would leave an
     /// outstanding probe settling into a table the published Router never
@@ -2554,6 +2574,14 @@ impl Router {
         // of superseded work is the scheduler's own generation check, not a
         // fresh table -- see `carry_over_probe_scheduler_from`.
         self.carry_over_probe_scheduler_from(previous);
+        // The paid-budget seam rides along under the same discipline, and for
+        // a reason specific to it: the replacement must reserve against the
+        // SAME accounting actor, because a committed unit is never refunded, so
+        // two installations would be two day budgets whose overspend cannot be
+        // undone. Attaching here also means neither the config-reload nor the
+        // credentials-rebuild site needs an accounting handle in scope to
+        // preserve it.
+        self.paid_probe_ledger = previous.paid_probe_ledger().cloned();
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
 

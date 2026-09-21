@@ -2330,7 +2330,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   registry `Arc` rather than copying entries -- one store spans generations, so a
   request still in flight on the pre-swap Router writes where the published
   Router reads; also rebuilds the learned-replay facade on that same Arc
-  carrying its in-flight admissions, and adopts the shared generation. Retuning
+  carrying its in-flight admissions, adopts the shared generation, and attaches
+  the paid-probe ledger installation by `Arc` identity so both a config reload
+  and a credentials rebuild preserve the budget seam with no accounting handle
+  in scope -- see `src/router/paid_probe_ledger.rs`. Retuning
   the shared registry from the reloaded `[capability]` knobs -- the only path by
   which changed tuning can take effect, since the registry outlives the Router
   that built it -- happens HERE only for a config-only reload, where the reload
@@ -3083,6 +3086,33 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   FAILS CLOSED -- transient classes retry, bad-request / auth / context /
   content-policy and the `#[non_exhaustive]` catch-all refuse, so a class added
   upstream cannot walk a lane to the paid class by existing
+- `src/router/paid_probe_ledger.rs` -- the CRATE-BOUNDARY contract for the
+  crash-safe paid-probe budget: the `PaidProbeLedger` trait
+  (`reserve_paid_probe_unit(provider, daily_cap)`, the only method -- there is
+  no release, refund, or timeout, because a committed unit is spent) and the
+  closed `PaidProbeReservation` outcome set, of which only `Committed { used,
+  cap }` authorizes a dial. The trait and enum are crate-root `pub` because an
+  out-of-crate implementor returns the enum; the `permits_paid_call` predicate
+  and the `as_str` log tokens are `pub(crate)`, so the authorization decision
+  and the token vocabulary stay this crate's and never become semver surface.
+  NO DAY KEY crosses the boundary: the implementation owns `(provider, day)`
+  entirely -- resolution and rollover are accounting concerns, and a day string
+  here would be state the router carries and logs without owning. Every variant
+  is MECHANISM-NEUTRAL (`Overloaded`, not a channel or queue), so an adapter
+  maps its own saturation and transaction diagnostics inward and keeps the
+  detail on its side; the implementation lives in the usage-writer-owning crate,
+  so this crate names no database, channel, or schema and takes no
+  `routectl-usage` dependency. `Router::with_paid_probe_ledger` is a CONSUMING
+  builder (boot-time installation, not a post-publication setter) over an
+  `Option` that `Router::new` leaves absent, so a Router nobody installed one on
+  answers `Unavailable` and can make no paid call at all. Carried across a
+  reload by `carry_over_learned_from`, by `Arc` identity: two installations
+  would be two never-refundable day budgets for one provider-day. Pinned by
+  `src/router/paid_probe_ledger_tests.rs` (counting double: absent refuses at
+  every cap, installed answers once with the identity and cap unchanged, every
+  refusal passes through permitting nothing, saturation authorizes nothing,
+  carry-over shares the instance) plus a source guard that the Router half
+  constructs no commit
 - `src/router/probe_test_support.rs` -- shared fixtures for the probe sidecars:
   one `build_router` behind the per-shape wrappers (base URL, breaker
   threshold, RPM limit, lane count, model beta floor, paid cap),
