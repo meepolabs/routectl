@@ -159,6 +159,7 @@ fn closed_writer_reports_unavailable_rather_than_committed() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::new(UsageCounters::default()),
+        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     // Act
@@ -180,7 +181,7 @@ fn full_channel_reports_channel_full() {
     // slot directly (rather than with an unacknowledged batch) keeps this test
     // independent of the wait behavior it is not about.
     let (tx, _rx) = tokio::sync::mpsc::channel::<crate::writer::WriterMessage>(1);
-    tx.try_send(crate::writer::WriterMessage::CapabilityEvent(
+    tx.try_send(crate::writer::WriterMessage::capability_event(
         CapabilityEvent::tombstone(900, 8, 1),
         crate::writer::EventStamp {
             generation: 1,
@@ -192,6 +193,7 @@ fn full_channel_reports_channel_full() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::new(UsageCounters::default()),
+        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     // Act: no free slot, so admission itself must fail -- and it must fail
@@ -372,6 +374,7 @@ async fn admission_reports_refusal_without_a_receipt() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::new(UsageCounters::default()),
+        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     let refused = handle

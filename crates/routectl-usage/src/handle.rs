@@ -46,6 +46,17 @@ pub struct UsageCounters {
     capability_events_superseded: AtomicU64,
     capability_events_dropped_full: AtomicU64,
     capability_events_persisted: AtomicU64,
+    /// Paid-probe units that COMMITTED but whose caller was never authorized,
+    /// because shutdown began between the transaction and the answer.
+    ///
+    /// Budget consumed for no call. Expected to be zero on a daemon that is not
+    /// being torn down, and at most a handful per shutdown; anything larger means
+    /// reservations are routinely straddling teardown. Deliberately its own
+    /// counter rather than a degraded/healthy transition: it is neither a storage
+    /// fault (the write landed) nor a healthy write (nothing was authorized), and
+    /// folding it into either would hide a real divergence between what was spent
+    /// and what was used.
+    paid_probe_consumed_unauthorized: AtomicU64,
 }
 
 impl UsageCounters {
@@ -118,6 +129,13 @@ impl UsageCounters {
         self.capability_events_persisted.load(Ordering::Relaxed)
     }
 
+    /// Paid-probe units committed whose caller was not authorized, because
+    /// shutdown began first. See the field's own note on how to read it.
+    pub fn paid_probe_consumed_unauthorized(&self) -> u64 {
+        self.paid_probe_consumed_unauthorized
+            .load(Ordering::Relaxed)
+    }
+
     pub(crate) fn incr_enqueued(&self) {
         self.enqueued.fetch_add(1, Ordering::Relaxed);
     }
@@ -174,6 +192,11 @@ impl UsageCounters {
         self.capability_events_persisted
             .fetch_add(1, Ordering::Relaxed);
     }
+
+    pub(crate) fn incr_paid_probe_consumed_unauthorized(&self) {
+        self.paid_probe_consumed_unauthorized
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// WARN about overflow drops at most this often (every Nth drop). The
@@ -191,6 +214,12 @@ pub struct UsageHandle {
     sender: Sender<WriterMessage>,
     enabled: Arc<AtomicBool>,
     counters: Arc<UsageCounters>,
+    /// Marked terminal once the writer subsystem begins shutting down. Read ONLY
+    /// by the acknowledged paid-probe admission, which must not hand out an
+    /// authorization the subsystem will not outlive; best-effort writes do not
+    /// consult it, because a dropped telemetry row at shutdown is the accepted
+    /// contract and a closed channel already covers it.
+    lifecycle: crate::paid_probe_lifecycle::LifecycleGate,
 }
 
 impl UsageHandle {
@@ -198,12 +227,24 @@ impl UsageHandle {
         sender: Sender<WriterMessage>,
         enabled: Arc<AtomicBool>,
         counters: Arc<UsageCounters>,
+        lifecycle: crate::paid_probe_lifecycle::LifecycleGate,
     ) -> Self {
         Self {
             sender,
             enabled,
             counters,
+            lifecycle,
         }
+    }
+
+    /// Whether the writer subsystem has begun shutting down.
+    ///
+    /// Crate-internal: the only legitimate consumer is the paid-probe
+    /// admission, and publishing it would invite a caller to ask the question
+    /// and then act on a stale answer -- the check that matters is the one the
+    /// writer itself performs around the transaction.
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.lifecycle.is_terminal()
     }
 
     /// Hand a record to the writer without ever blocking, awaiting, or
@@ -222,7 +263,7 @@ impl UsageHandle {
         }
         match self
             .sender
-            .try_send(WriterMessage::Request(Box::new(record)))
+            .try_send(WriterMessage::request(Box::new(record)))
         {
             Ok(()) => self.counters.incr_enqueued(),
             Err(_) => self.note_overflow_drop(),
@@ -246,7 +287,7 @@ impl UsageHandle {
             self.counters.incr_dropped_disabled();
             return;
         }
-        match self.sender.try_send(WriterMessage::LearnEvent(event)) {
+        match self.sender.try_send(WriterMessage::learn_event(event)) {
             Ok(()) => self.counters.incr_learn_events_enqueued(),
             Err(_) => self.note_learn_event_overflow_drop(),
         }
@@ -293,7 +334,7 @@ impl UsageHandle {
             self.counters.incr_dropped_disabled();
             return;
         }
-        match self.sender.try_send(WriterMessage::CapabilityEvent(
+        match self.sender.try_send(WriterMessage::capability_event(
             event,
             crate::writer::EventStamp {
                 generation,

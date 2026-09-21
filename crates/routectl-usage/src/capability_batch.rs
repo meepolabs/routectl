@@ -168,7 +168,7 @@ impl UsageHandle {
         };
         match self
             .sender()
-            .try_send(crate::writer::WriterMessage::CapabilityBatch(batch))
+            .try_send(crate::writer::WriterMessage::capability_batch(batch))
         {
             Ok(()) => Ok(BatchReceipt { ack: ack_rx }),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(BatchCommit::ChannelFull),
@@ -239,6 +239,7 @@ pub fn handle_over_channel(
         sender,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         std::sync::Arc::new(crate::handle::UsageCounters::default()),
+        crate::paid_probe_lifecycle::LifecycleGate::running(),
     )
 }
 
@@ -250,6 +251,7 @@ pub fn handle_with_closed_channel() -> UsageHandle {
         tx,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         std::sync::Arc::new(crate::handle::UsageCounters::default()),
+        crate::paid_probe_lifecycle::LifecycleGate::running(),
     )
 }
 
