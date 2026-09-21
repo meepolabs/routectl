@@ -59,6 +59,33 @@ pub(super) struct ProbeSeat {
     pub(super) effective_row: crate::catalog::EffectiveRow,
 }
 
+/// Hand-written rather than derived because the provider handle is a
+/// `dyn Provider` trait object, which carries no `Debug` bound -- and adding one
+/// to the trait for a diagnostic would impose it on every implementation.
+///
+/// The provider is named by its own closed-set `id()` instead. That is strictly
+/// more useful than an opaque pointer for the one thing this print is for (a
+/// paid-authorization diagnostic on a money-spending path), and every other
+/// field is an operator config key or a catalog fact -- no caller text and no
+/// credential material reaches here.
+impl std::fmt::Debug for ProbeSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeSeat")
+            .field("provider_name", &self.provider_name)
+            .field("state_key", &self.state_key)
+            .field("upstream", &self.upstream)
+            .field("provider_id", &self.provider.id())
+            .field("provider_kind", &self.provider_kind)
+            .field(
+                "supports_adaptive_thinking",
+                &self.supports_adaptive_thinking,
+            )
+            .field("configured_output_ceiling", &self.configured_output_ceiling)
+            .field("effective_row", &self.effective_row)
+            .finish()
+    }
+}
+
 impl Router {
     /// Whether a rejection from `provider_name`'s CURRENT entry would be
     /// attributable to a routectl-owned seat.

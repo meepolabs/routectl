@@ -109,6 +109,11 @@ pub(super) async fn run_probe_driver(
 /// run will not run, and draining would hold the shutdown path for as long
 /// as the upstream takes.
 fn cancel_probe_work_at_shutdown(router_swap: &Arc<ArcSwap<Router>>) {
+    // SYNCHRONOUS, and it never waits on an in-flight paid probe. `shutdown_probe_work`
+    // advances the shared publication generation to a terminal value no router is
+    // stamped with BEFORE clearing, so an in-flight authorization abandons itself
+    // at its next generation check and an in-flight refusal cannot requeue --
+    // rather than this path waiting for a reservation that may never answer.
     let cancelled = router_swap.load().shutdown_probe_work();
     if cancelled > 0 {
         tracing::debug!(

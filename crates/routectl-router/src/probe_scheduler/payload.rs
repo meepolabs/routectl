@@ -110,8 +110,18 @@ fn bounded_source(raw: &[String]) -> Option<Vec<String>> {
 ///
 /// One payload therefore holds at most `longest modeled display value +
 /// PROBE_BETA_MAX_TOTAL_BYTES` bytes, and the beta half is the only part a
-/// caller influences at all. With the queue depth bounding the tracked-job
-/// count, total retained payload bytes are bounded by depth times that sum.
+/// caller influences at all.
+///
+/// TWO HOLDERS SHARE ONE CEILING, and counting only the first understates the
+/// bound by half. A payload is retained by a tracked JOB in the scheduler, and
+/// again by a paid CANDIDATE on the Router once that job's free plan is spent --
+/// the candidate keeps the payload so a paid body asks the question the admitted
+/// request posed. Both lists are bounded by `PROBE_QUEUE_DEPTH`
+/// independently, so total retained payload bytes are bounded by TWICE the depth
+/// times the per-payload sum, not once. The two are disjoint in practice (a job
+/// leaves the table in the same settlement that records the candidate), so the
+/// doubled figure is a ceiling rather than a typical figure -- but it is the
+/// ceiling, and a requeue writes to the candidate half under the same bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbePayload {
     /// The closed-table dotted path under test. A `&'static str` from the

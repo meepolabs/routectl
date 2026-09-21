@@ -716,3 +716,8 @@ async fn an_unknown_display_value_refuses_the_payload_and_tombstones_nothing() {
         "and must reach the upstream"
     );
 }
+
+// The candidate-retention group lives in a sibling file to keep every file under
+// the size ceiling. It compiles into THIS module via `include!`, so the imports
+// above stay in scope and no test's module path changes.
+include!("probe_candidate_payload_tests.rs");

@@ -3036,7 +3036,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   incarnation rather than skipped silently. A `PaidProbeCandidate` is recorded
   only when the scheduler reports the plan spent its last free step AND
   `paid_probe_permitted` agrees; a candidate refused for list capacity is
-  COUNTED (`paid_candidate_capacity_refusals_total`). Both counters are
+  COUNTED (`paid_candidate_capacity_refusals_total`). It RETAINS the exhausting
+  job's own `ProbePayload` (cloned before the settle consumes the lease, and
+  already bounded by every ceiling `ProbePayload::new` enforced), so the paid
+  stage asks about the exact field, value, and beta context the admitted request
+  was about to send rather than rebuilding one from config. Both counters are
   SNAPSHOT TELEMETRY -- nothing renders them to an operator today. Nothing
   here dials a paid endpoint, and the candidate list is input for the paid
   stage rather than permission to spend. `probe_scheduler_snapshot()` is PURE and `pub`
@@ -3110,8 +3114,156 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   FAILS CLOSED -- transient classes retry, bad-request / auth / context /
   content-policy and the `#[non_exhaustive]` catch-all refuse, so a class added
   upstream cannot walk a lane to the paid class by existing
-- `src/router/paid_probe_ledger.rs` -- the CRATE-BOUNDARY contract for the
-  crash-safe paid-probe budget: the `PaidProbeLedger` trait
+- (router) the PAID-PROBE PUBLICATION GENERATION PROTOCOL, in
+  `src/router/probe_publication.rs`. The shared monotonic `probe_incarnation_ticket`
+  is the authority: a publication draws from it and stamps the drawn value on
+  itself, so `Router::is_current_publication` (crate-internal, `Acquire` on both
+  loads) is the equality of this router's stamp with the ticket. `shutdown_probe_work`
+  advances the ticket to a terminal generation NO router is stamped with BEFORE
+  clearing, which supersedes every live router at once and cannot be undone -- a
+  shutdown that advanced to a value some router then stamped would be an ABA that
+  reopened the resurrection window. Equality rather than `>=` or a per-router flag:
+  a flag needs a writer on routers the publication never touched, and `>=` cannot
+  express a generation current for nobody. Publication and shutdown are
+  SYNCHRONOUS and never wait on a paid probe, so a slow, saturated, or wedged
+  accounting layer cannot hold a reload or a shutdown open -- the AUTHORIZATION
+  abandons itself instead (see `paid_probe_authorize.rs`). Additive
+  `publish_probe_incarnation_into(&Arc<Self>, impl FnOnce(Arc<Self>))` stamps and
+  then invokes the store callback BEFORE returning, so the stamp-before-store
+  ordering is a property of the protocol rather than a convention two call sites
+  remember; a closure rather than a publication token because this crate must not
+  depend on the caller's swap primitive and a token's correct USE is again a
+  convention. The plain sync `publish_probe_incarnation` / `shutdown_probe_work`
+  stay public and unchanged for compatibility
+- `src/router/probe_publication.rs` -- `publish_probe_incarnation`,
+  `publish_probe_incarnation_into`, `shutdown_probe_work`, and
+  `is_current_publication`: the short SERIALIZED transitions that move the probe
+  lifecycle forward. Each takes the shared lifecycle transition for its whole
+  ticket/stamp-retire-clear/store sequence, because the ticket alone orders the
+  GENERATION but says nothing about whether the rest of a transition has run --
+  two could otherwise interleave their steps, most damagingly a publication whose
+  STORE lands after a shutdown already cleared. Shutdown marks terminal and
+  advances the ticket BEFORE clearing, so a publication that has not started reads
+  terminal and does nothing; a later plain publish is a no-op and the CALLBACK form
+  does not invoke its callback at all, so no store reaches a daemon that has
+  stopped. The clear goes through `ProbeScheduler::cancel_all_and_retire_to`, which
+  sweeps AND raises the retirement floor to the terminal generation in ONE critical
+  section: a shutdown restamps no router, so admitted traffic racing it still
+  carries the OLD generation, and clearing without moving the floor would admit
+  that activation into a table just swept. Two separate calls could not close the
+  window from outside. The public callback contract is documented on
+  `publish_probe_incarnation_into`: one non-blocking, non-panicking store, no
+  lifecycle re-entry. Both clears take the candidate lock only AFTER the ticket has moved,
+  which is what lets `requeue_paid_probe_candidate` linearize against them. Split
+  from `probe_lifecycle.rs` for file size: that module owns per-incarnation WORK,
+  this one owns the generation that work is valid under
+- `src/router/probe_lifecycle_state.rs` -- `ProbeLifecycleState`, one short
+  `parking_lot::Mutex` plus a terminal-shutdown bit, shared across replacement
+  routers by carry-over (the publishing and shutting-down routers are different
+  objects, so a per-router state would serialize nothing). NEVER held across an
+  await, and a paid authorization never takes it -- which is what distinguishes it
+  from the withdrawn blocking exclusion: the longest step under it is a bounded
+  in-memory sweep, so publication and shutdown still wait on nothing that can be
+  slow. LIVENESS IS STRUCTURAL: `begin_publication` checks the terminal bit INSIDE
+  its own acquisition and returns `Option<LiveLifecycleTransition>`, the opaque
+  field-less token `publish_within` is typed on -- so "checked terminal" and
+  "published" cannot be two acquisitions, because the only producer of the token is
+  the checking call. No accessor hands the bit out without it, which is what a
+  split check-and-reacquire would need. `begin_shutdown` is separate because
+  shutdown alone must proceed when ALREADY terminal (it is idempotent). RE-ENTRY IS
+  REFUSED BEFORE THE MUTEX: a thread-local marker, checked ahead of any
+  acquisition and cleared on the token's `Drop`, turns a store callback that calls
+  back in into an immediate no-op instead of a deadlock on a non-reentrant lock
+- `src/router/paid_probe_authorize.rs` -- `Router::authorize_paid_probe()`:
+  claiming one paid-probe candidate and turning it into permission for exactly
+  one paid call. Order IS the contract -- claim atomically, recheck every
+  precondition, take the shared slot, reserve once. The claim pops from the
+  shared candidate list inside the list's own critical section with NOTHING
+  awaited in between, so two concurrent claimers get different candidates or one
+  gets none; a claim spanning the reservation await would commit two
+  never-refundable units for one exhausted lane. Preconditions are RE-DERIVED,
+  never inherited from the record: live incarnation, the exact seat (the same
+  resolver, so an AMBIGUOUS key refuses), attributability through the predicate
+  both free stages call, the LIVE non-zero cap, and a committed
+  `PaidProbeProfile`. Each of those refuses with ZERO ledger calls -- nothing the
+  accounting layer could say makes a stale, seatless, unattributable, uncapped,
+  or unpriced lane dialable. `Committed` yields a `PaidProbeAuthorization` owning
+  the claimed payload, the resolved seat and provider `Arc`, the profile, the
+  incarnation, the ledger's own used/cap commit proof, and the paid concurrency
+  slot; it is NOT `Clone` (a clone would be two dials on one committed unit, and
+  no refund method exists) and a commit is FINAL -- a later reload or lowered cap
+  does not invalidate it, while shutdown or cancellation may drop it and never
+  refunds. Its `Debug` is HAND-WRITTEN and prints only the accounting shape
+  (committed used/cap, incarnation, sized allowance), naming the identity, seat,
+  payload, and slot as elided: a derive would print the captured payload's
+  client-supplied field value and beta tokens plus the provider identity, on
+  exactly the path a diagnostic reaches for. `PaidProbeRefusal::requeues()` is the one axis a caller acts on:
+  whether the condition can change WITHOUT a new generation. REQUEUED: the
+  concurrency refusal plus the four RECOVERABLE accounting outcomes
+  (`CapExhausted` at UTC rollover, `Overloaded`, `WriteFailed`, `MalformedState`
+  by external repair), enumerated per variant rather than as `Accounting(_)` so a
+  new reservation outcome cannot inherit a retry by default. DISCARDED: stale /
+  no-seat / unattributable / cap-zero / no-profile, since their correction
+  publishes a new generation (which clears the list) or arrives as new traffic --
+  plus BOTH ABSENCE CASES, which are terminal for the PROCESS. `NoLedger` is
+  checked before the trait call (the installation is a consuming boot-time
+  builder, so a Router without one never gains one) and an installed ledger's
+  `Unavailable` is terminal too: no accounting is reachable, and neither a missing
+  installation nor a shutdown reverses, so a requeue could only be re-refused for
+  the daemon's life while holding a bounded slot. Contrast `Overloaded`, which is
+  LOAD and passes. TWO FURTHER TERMINAL refusals come from the publication
+  protocol rather than from the accounting layer: `Superseded`, raised at either
+  generation check (before the ledger call, so nothing was spent -- or on its
+  acknowledgement, in which case the unit MAY be committed and stays consumed as
+  deliberate underuse, since no release method exists and dialing for retired
+  router state is the worse outcome), and `ReservationTimeout` at
+  `PAID_PROBE_RESERVATION_TIMEOUT`, a code constant bounding the one await so a
+  wedged accounting layer cannot strand a claimed candidate and a held slot.
+  Expiry is terminal UNKNOWN, not retryable: the actor may commit after the
+  future is dropped, so a retry could pair a second unit with the first and no
+  call may follow. Dropping the whole authorize future behaves the same way --
+  nothing requeued, slot released. Claim/requeue are FIFO over a `VecDeque` (`pop_front` /
+  `push_back`): with a LIFO pair the candidate just refused is re-claimed on the
+  very next pass, so one lane whose accounting keeps refusing starves every
+  healthy lane behind it. The requeue obeys the list's own depth bound and
+  identity check, counting a refusal on
+  `paid_candidate_capacity_refusals_total`. `record_paid_probe_candidate` (the
+  WORKER-settlement side, in `probe_lifecycle.rs`) takes the same lock order and
+  the same liveness reads, so a settlement committing against a superseded or
+  terminal generation records nothing. IT TAKES THE QUEUE LOCK FIRST, before
+  either liveness read, and holds it through dedupe/capacity/push: checking
+  liveness first leaves a window in which a publication or shutdown advances the
+  ticket AND clears, after which this call pushes a retained payload onto a list
+  that was just emptied and nothing removes it. Because both clears advance the
+  ticket before taking this same lock, the two orders linearize -- either the
+  requeue completes and the following clear removes it, or the clear goes first and
+  the requeue's under-lock read observes the supersession and drops. The liveness
+  reads happen UNDER that lock for the same reason: publication and shutdown each
+  advance the TICKET BEFORE acquiring it, so the read cannot observe a pre-clear
+  generation after the clear has run. No outbound call, body build, CLI
+  adapter, usage-DB write, or status render lives here. Pinned by
+  `src/router/paid_probe_authorize_tests.rs` (a counting ledger double, so every
+  "no ledger call" has a POSITIVE control differing in exactly that one fact and
+  reaching the ledger; two and sixteen concurrent claimers against a SLOW double
+  so they provably overlap; cap zero paired with a live free validator still
+  dialing; every missing-profile class by name; each accounting refusal requeuing
+  once without duplication; and a source guard on the absent `Clone` derive).
+  Split into `include!`d fragments to stay under the size ceiling --
+  `paid_probe_authorize_claim_tests.rs` (concurrent claiming and the pre-ledger
+  preconditions), `paid_probe_authorize_requeue_tests.rs` (requeue rules, slot,
+  finality, surface guards), `paid_probe_generation_tests.rs` (the
+  publication/shutdown races, the wedged-ledger timeout, the callback ordering,
+  and the restored legacy surface), and `paid_probe_fairness_tests.rs` (rotation
+  fairness and the Debug redaction) -- all compiling into the host module, so
+  every test keeps its name. The race tests drive a ledger that PARKS inside its
+  reservation and signals that it has, so each interleaving is deterministic
+  rather than timed, and the timeout tests bound their OWN wait so a missing
+  production bound fails by name instead of stalling the suite. Named mutation
+  checks: removing either generation check, removing the requeue's shared read,
+  removing the shutdown ticket advance, unbounding the ledger await, reordering the
+  publication callback, and removing the stale, attributability, cap-zero, or
+  profile check -- each reds its own case
+- `src/router/paid_probe_ledger.rs` -- the CRATE-BOUNDARY contract for the  crash-safe paid-probe budget: the `PaidProbeLedger` trait
   (`reserve_paid_probe_unit(provider, daily_cap)`, the only method -- there is
   no release, refund, or timeout, because a committed unit is spent) and the
   closed `PaidProbeReservation` outcome set, of which only `Committed { used,
@@ -3193,6 +3345,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   composition with its unstripped positive control
 - `src/router/probe_worker_tests.rs` -- what the worker executes, settles, and
   refuses to spend, including the counted paid-candidate capacity refusal
+  - `src/router/probe_candidate_payload_tests.rs` -- an `include!`d fragment of
+    it: what a recorded candidate RETAINS, driven through the real worker. The
+    retained payload is compared against the body the probe ACTUALLY sent (a
+    hand-written expectation could agree with a default-constructed payload and
+    hold whether retention worked or not), both beta sources non-empty and
+    asserted as a premise, and a publication clears the list payloads included
 - `src/router/probe_payload_seat_tests.rs` -- the probe body, the pre-dial
   recheck, and the real-normalizer thinking/beta weld
 - `src/router/probe_payload_bound_tests.rs` -- the modeled display-value
@@ -3863,7 +4021,51 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/probe_scheduler/mod.rs` -- `ProbeScheduler` over one
   `Mutex<Vec<Job>>`, plus `Job`/`JobPhase`/`SchedulerInner` and every state
   transition: activate, lease, settle/release, reschedule, defer, tombstone,
-  retire, cancel.
+  retire, cancel. `in_flight()` is ONE reading over free leases PLUS held paid
+  slots, and `lease_due`, `try_acquire_paid_slot`, and the snapshot all read it,
+  so `PROBE_MAX_CONCURRENCY` bounds real simultaneous background work rather
+  than one of its two kinds. `retire_before` KEEPS a retired IN-FLIGHT row while
+  dropping queued and backing-off ones: a live upstream operation must keep
+  occupying its slot across a reload, or the replacement router's next lease or
+  paid acquisition admits work on top of it and real load exceeds the ceiling
+  with no counter showing it. The retained row is non-leasable (the raised
+  `retired_below` floor already refuses it) and is swept by `release` when its
+  lease settles or drops, reported STALE so it cannot reschedule, tombstone into a
+  retired incarnation, or report a spent free step. `cancel_all` clears in-flight
+  rows too, and the asymmetry is deliberate: after a shutdown there is no later
+  admission for an under-count to mislead, and the caller must not wait on an
+  upstream. `release` and `release_paid_slot` are MODULE-PRIVATE (descendants
+  `lease` and `paid_slot` reach them; a sibling forging either would free a slot
+  whose operation is still running -- measured: at `pub(super)` a planted sibling
+  call compiles, module-private makes it `E0624`).
+- `src/probe_scheduler/lease.rs` -- the RAII `ProbeLease` guard a worker holds
+  while a free operation runs, and `ReleaseOutcome` (`Stale` vs
+  `Committed { free_spent }`, the settling critical section's own answer to "did
+  advancing the cursor run the plan out"). `ProbeLease::new` is `pub(super)` with
+  private fields, so only the scheduler's leasing critical section can mint one.
+  Split out of `mod.rs` for file size; names and surface are unchanged.
+- `src/probe_scheduler/paid_slot.rs` -- `PaidProbeSlot`, the RAII guard a paid
+  probe holds from before its reservation await until its call completes. Counted
+  by the SAME ceiling free leases refuse at (a separate paid counter would let
+  real load reach the sum of two bounds while each read inside its own). Owns an
+  `Arc<ProbeScheduler>` rather than a borrow because it outlives the function
+  that took it -- it travels inside the authorization -- and its `Drop` is the
+  only release path, so a completed dial, a cancelled future, and a shutdown all
+  return the slot. Releasing is NEVER a refund: the slot bounds load, the ledger
+  bounds spend. Deliberately not `Clone`, and its `Debug` is HAND-WRITTEN to a
+  field-less `PaidProbeSlot(held)`: a derive would recurse into
+  `Arc<ProbeScheduler>` and render the WHOLE job table -- every other lane's
+  identity and captured beta context -- from a guard held on a money-spending
+  path. It also does not read the count through the scheduler, which would take
+  that lock from inside a formatter.
+- `src/probe_scheduler/schedule.rs` -- the `SchedulerInner` methods that move one
+  job's schedule: `defer_without_charging_attempt` (bounded by
+  `PROBE_MAX_DEFERRALS`, evicting without a tombstone), `reschedule_or_abandon`
+  (the single place a retry is scheduled, so no path can schedule an unbounded
+  one), and `tombstone` (bounded, idempotent, raising an incarnation-level
+  SATURATION marker rather than failing open when capacity is exhausted). Split
+  from `mod.rs` for file size; still `SchedulerInner` methods under the scheduler's
+  one lock, so no locking or surface changed.
 - `src/probe_scheduler/bounds.rs` -- the queue, concurrency, timeout, backoff,
   attempt, deferral, and tombstone-capacity limits as code constants.
 - `src/probe_scheduler/vocab.rs` -- the closed validator / outcome /
@@ -3887,13 +4089,30 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   scheduler has no business holding a session id across a queueing delay). The
   count bound is read off `len()` BEFORE any per-token work and dedupe runs
   through a `BTreeSet`, so a pathological input costs one length read rather
-  than an O(n^2) scan. `is_retainable_beta` REFUSES (never sanitizes) a token
+  than an O(n^2) scan. TWO HOLDERS share the retention ceiling and counting only
+  one understates it by half: a payload is retained by a tracked JOB here and
+  again by a paid CANDIDATE on the Router, each list bounded by
+  `PROBE_QUEUE_DEPTH` independently, so total retained payload bytes are bounded
+  by TWICE the depth times the per-payload sum. `is_retainable_beta` REFUSES (never sanitizes) a token
   carrying a comma, CR, LF, or any control char: the egress joins betas into one
   comma-separated header, and a rewritten token is a different flag.
 - `src/probe_scheduler/test_support.rs` -- shared fixtures for
   `probe_scheduler/queue_tests.rs` (queue mechanics),
   `probe_scheduler/plan_tests.rs` (free plan and paid boundary), and
   `probe_scheduler/concurrency_tests.rs` (parallelism, deferral occupancy).
+  - `src/probe_scheduler/retirement_tests.rs` -- an `include!`d fragment of
+    `concurrency_tests.rs`: a retired in-flight row stays counted and blocks paid
+    admission until its lease settles, a DROPPED lease on one returns its slot
+    too, and shutdown clears in-flight rows where retirement keeps them. Named
+    mutation check: removing the in-flight retention reds the first two.
+  - `src/probe_scheduler/paid_slot_tests.rs` -- an `include!`d fragment of
+    `concurrency_tests.rs`: the paid slot displacing a free lease and vice versa,
+    release on drop and on a CANCELLED FUTURE (not `catch_unwind` -- the gated
+    release profile is `panic = "abort"`, so an unwinding variant would be
+    inert), and both kinds contending at 64 threads against an EXTERNAL live
+    counter rather than the snapshot the mutation would have skewed. Named
+    mutation check: dropping paid slots from the shared reading reds all four,
+    peaking at 3 against a bound of 2.
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait
@@ -4959,9 +5178,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
   later stamp the published router still carries the outgoing incarnation, so a
   request landing in that window queues work the stamp immediately retires,
-  leaving the lane un-probed with nothing recording why. One helper rather than
-  three copies, and a source guard asserts `reload.rs` performs no store of its
-  own
+  leaving the lane un-probed with nothing recording why. SYNCHRONOUS, and it
+  delegates the ordering to the router rather than sequencing a stamp and a store
+  itself: it passes the store to `publish_probe_incarnation_into`, which stamps and
+  then invokes the callback before returning, all under the short lifecycle
+  transition. So a shutdown cannot interleave between the stamp and the store, and
+  a post-shutdown publication does not store at all. It waits on nothing that can
+  be slow -- an in-flight paid authorization orders ITSELF against the publication
+  generation rather than this path waiting for it. One helper rather than three
+  copies, and a source guard asserts `reload.rs` performs no store of its own and
+  that this helper routes through the router's callback protocol
 - `src/server/metrics_driver.rs` -- the periodic router-metrics snapshot driver
   and its `ROUTER_METRICS_SNAPSHOT_INTERVAL`; flushes once more at shutdown so a
   session shorter than one interval still surfaces its totals

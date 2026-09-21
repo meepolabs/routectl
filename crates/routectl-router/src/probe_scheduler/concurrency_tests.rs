@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::test_support::{key, payload};
 use super::{
     PROBE_BACKOFF_CEILING, PROBE_MAX_CONCURRENCY, PROBE_MAX_DEFERRALS, PROBE_QUEUE_DEPTH,
-    ProbeActivation, ProbeScheduler, ProbeSettlement, ProbeValidator,
+    ProbeActivation, ProbeScheduler, ProbeSettlement, ProbeValidator, ReleaseOutcome,
 };
 
 #[test]
@@ -311,3 +311,9 @@ fn deferrals_below_the_ceiling_keep_the_job_queued() {
     assert_eq!(snap.deferrals_total, u64::from(PROBE_MAX_DEFERRALS) - 1);
     assert_eq!(snap.abandoned_total, 0, "and no attempt was ever charged");
 }
+
+// The paid-slot group lives in a sibling file to keep every file under the size
+// ceiling. It compiles into THIS module via `include!`, so the imports above
+// stay in scope and no test's module path changes.
+include!("paid_slot_tests.rs");
+include!("retirement_tests.rs");

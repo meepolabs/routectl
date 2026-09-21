@@ -4392,8 +4392,10 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::probe_scheduler_snapshot(&self) -> routectl_router::ProbeSchedulerSnapshot
-pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
 pub async fn routectl_router::router::Router::run_due_probes(&self) -> usize
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
+pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
@@ -12690,6 +12692,7 @@ pub routectl_router::ProbeSchedulerSnapshot::deferrals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::free_exhausted_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::in_flight: usize
 pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_capacity_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_slot_refusals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::payload_refusals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::queue_full_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::queued: usize
@@ -13342,8 +13345,10 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::probe_scheduler_snapshot(&self) -> routectl_router::ProbeSchedulerSnapshot
-pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
 pub async fn routectl_router::router::Router::run_due_probes(&self) -> usize
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
+pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>

@@ -2086,11 +2086,19 @@ async fn probe_driver_follows_router_publication_and_retires_old_work() {
     let _ = router_swap.load().complete(probe_grounding_request()).await;
     assert_eq!(router_swap.load().probe_scheduler_snapshot().queued, 1);
 
-    // Publish a replacement, exactly as the reload coordinator does.
+    // Publish a replacement through the PRODUCTION helper rather than a raw store
+    // plus a hand-made stamp: the helper is what owns the ordering, so a test that
+    // reconstructed the sequence itself could keep passing while the real path
+    // regressed.
     let (mut next, _next_calls) = probe_router_with_counting_provider();
     next.carry_over_learned_from(&router_swap.load_full());
-    router_swap.store(Arc::new(next));
-    let retired = router_swap.load().publish_probe_incarnation();
+    let before = router_swap.load().probe_scheduler_snapshot().queued;
+    assert_eq!(
+        before, 1,
+        "premise: the outgoing incarnation holds queued work"
+    );
+    publish_router(&router_swap, Arc::new(next));
+    let retired = before - router_swap.load().probe_scheduler_snapshot().queued;
 
     assert_eq!(retired, 1, "publication retires the outgoing work");
     assert_eq!(
@@ -2299,12 +2307,14 @@ async fn a_replacement_router_is_stamped_before_it_is_published() {
     let _ = previous.complete(probe_grounding_request()).await;
     assert_eq!(previous.probe_scheduler_snapshot().queued, 1);
 
-    // Production ordering: stamp + retire, THEN store.
+    // Production ordering, through the production helper: it stamps, retires, and
+    // stores -- in that order -- inside one call.
     let (mut next, _l) = stalling_probe_router();
     next.carry_over_learned_from(&previous);
-    let retired = next.publish_probe_incarnation();
     let next = Arc::new(next);
-    router_swap.store(Arc::clone(&next));
+    let queued_before = previous.probe_scheduler_snapshot().queued;
+    publish_router(&router_swap, Arc::clone(&next));
+    let retired = queued_before - next.probe_scheduler_snapshot().queued;
 
     assert_eq!(retired, 1, "the outgoing incarnation's work is retired");
     assert_eq!(
@@ -2364,20 +2374,22 @@ fn every_reload_path_publishes_through_the_stamping_helper() {
         "expected the three publication sites to call the helper, found {calls}"
     );
 
-    // And the helper itself stamps before it stores.
-    let helper_at = PUBLISH_SRC
-        .find("pub(super) fn publish_router(")
-        .expect("the publication helper must exist");
-    let helper = &PUBLISH_SRC[helper_at..];
-    let stamp_at = helper
-        .find("publish_probe_incarnation()")
-        .expect("the helper must stamp the incarnation");
-    let store_at = helper
-        .find("router_swap.store(")
-        .expect("the helper must store the router");
+    // The helper delegates the ORDERING to the router, rather than sequencing a
+    // stamp and a store itself.
+    //
+    // That is the whole reason the previous source-text guards on this helper are
+    // gone: they asserted a local ordering (stamp line before store line) and a
+    // local binding lifetime, both of which only mattered while the helper owned
+    // the sequence. `publish_probe_incarnation_into` now stamps and invokes the
+    // store callback before returning, so the property is enforced by the router
+    // and PINNED BEHAVIOURALLY over there -- see
+    // `the_publication_callback_stores_before_returning`. What is left to check
+    // here is only that this helper routes through that protocol at all, which no
+    // behavioural test on the cli side can observe.
     assert!(
-        stamp_at < store_at,
-        "the publication helper stores before stamping the incarnation"
+        PUBLISH_SRC.contains("publish_probe_incarnation_into"),
+        "the helper must publish through the router's callback protocol, which is \
+         what owns the stamp-before-store ordering"
     );
 }
 

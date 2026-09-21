@@ -290,7 +290,13 @@ pub enum ProbeSettlement {
 pub struct ProbeSchedulerSnapshot {
     /// Jobs waiting to be leased right now.
     pub queued: usize,
-    /// Jobs currently leased.
+    /// Background probe work occupying a concurrency slot right now: leased
+    /// free jobs PLUS held paid-probe slots.
+    ///
+    /// ONE number over both kinds, because `PROBE_MAX_CONCURRENCY` is
+    /// one ceiling over both: a paid slot displaces a free lease, so reporting
+    /// the two separately would let an operator read each inside its bound
+    /// while the real simultaneous load sat at their sum.
     pub in_flight: usize,
     /// Jobs waiting out a backoff.
     pub backing_off: usize,
@@ -351,6 +357,16 @@ pub struct ProbeSchedulerSnapshot {
     /// condition is per-identity and bounded by the same queue depth: a WARN
     /// would repeat per settlement with nothing new to say.
     pub paid_candidate_capacity_refusals_total: u64,
+    /// Times a paid-probe slot could not be taken because background
+    /// concurrency was already at `PROBE_MAX_CONCURRENCY`.
+    ///
+    /// The refusal is the shared ceiling working: free leases and paid slots
+    /// draw on one pool, so a busy free worker legitimately delays a paid call.
+    /// Counted rather than warned because the condition is transient load and
+    /// per-attempt -- a WARN would repeat with nothing new to say -- and
+    /// counted at all because otherwise a paid stage that never runs looks
+    /// identical to one that was never reached.
+    pub paid_slot_refusals_total: u64,
     /// Times a lane could not be activated because its beta context breached a
     /// payload retention bound or validity rule.
     ///

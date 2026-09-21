@@ -40,12 +40,16 @@ mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
 mod overlays;
+mod paid_probe_authorize;
+
 mod paid_probe_ledger;
 mod paid_probe_profile;
 mod prefix_rewrite;
 mod probe_failure_class;
 mod probe_lifecycle;
+mod probe_lifecycle_state;
 mod probe_payload_capture;
+mod probe_publication;
 mod probe_seat;
 mod repair_budget;
 mod replay_repair;
@@ -340,7 +344,23 @@ pub struct Router {
     /// publication and shutdown, since a candidate from a retired
     /// incarnation describes router state that no longer serves. Shared
     /// with the scheduler on carry-over for the same reason.
-    paid_probe_candidates: Arc<Mutex<Vec<probe_lifecycle::PaidProbeCandidate>>>,
+    /// Serializes the short publication and shutdown transitions against each
+    /// other, and carries the terminal-shutdown bit -- see
+    /// [`probe_lifecycle_state`].
+    ///
+    /// Shared across Router generations by `carry_over_learned_from`, for the
+    /// same reason the ticket is: the publishing router and the shutting-down
+    /// router are different objects, so a per-router state would serialize
+    /// nothing between them. NEVER held across an await; a paid authorization
+    /// does not take it at all.
+    probe_lifecycle_state: Arc<probe_lifecycle_state::ProbeLifecycleState>,
+    /// A `VecDeque` so the claim/requeue pair is FIFO: a refused candidate goes
+    /// behind every other waiting one. With a `Vec` the natural pair is pop/push
+    /// at the same end, which re-claims the candidate just refused on the very
+    /// next pass -- one lane whose accounting keeps refusing would starve every
+    /// healthy lane behind it for as long as the condition lasted.
+    paid_probe_candidates:
+        Arc<Mutex<std::collections::VecDeque<probe_lifecycle::PaidProbeCandidate>>>,
     /// Crash-safe paid-probe budget seam -- see
     /// [`paid_probe_ledger`]. `None` on every Router `Router::new` builds, and
     /// installed only by a boot path that has a durable accounting actor to
@@ -1934,6 +1954,7 @@ impl Router {
             probe_scheduler: Arc::new(crate::probe_scheduler::ProbeScheduler::new()),
             probe_incarnation: AtomicU64::new(1),
             probe_incarnation_ticket: Arc::new(AtomicU64::new(1)),
+            probe_lifecycle_state: Arc::default(),
             paid_probe_candidates: Arc::default(),
             paid_probe_ledger: None,
             probe_queue_full_warned: Mutex::new(false),

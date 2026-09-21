@@ -47,6 +47,14 @@ pub(super) const PROBE_ACTIVATION_REFUSED_EVENT: &str = "probe_activation_refuse
 /// conditions `paid_probe_permitted` requires;
 /// the reservation that would actually authorize a call is not part of
 /// this stage, and nothing here dials a paid endpoint.
+///
+/// It RETAINS the payload the exhausting job carried rather than leaving the
+/// paid stage to rebuild one. Two reasons, and the second is the load-bearing
+/// one: the payload is already bounded by every ceiling
+/// `ProbePayload::new` enforces, so carrying it adds no unbounded state; and
+/// the whole point of a probe is to ask about the exact field, value, and beta
+/// context the admitted request was about to send, which a payload
+/// reconstructed later from config could not reproduce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaidProbeCandidate {
     /// The identity whose free plan is exhausted.
@@ -58,6 +66,9 @@ pub struct PaidProbeCandidate {
     /// Always the `PaidCompletion` class: the only class a
     /// candidate can name.
     pub validator: ProbeValidator,
+    /// The already-bounded payload the exhausting free job carried, so the
+    /// paid body asks the question the admitted request posed.
+    pub payload: crate::probe_scheduler::ProbePayload,
 }
 
 impl Router {
@@ -65,46 +76,6 @@ impl Router {
     pub(crate) fn probe_incarnation(&self) -> u64 {
         self.probe_incarnation
             .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Advance the scheduler incarnation and retire every job from the
-    /// previous one, returning how many were cancelled.
-    ///
-    /// Called at the PUBLICATION COMMIT POINT -- immediately BEFORE the
-    /// `ArcSwap` store, once every failure and abandonment path has already
-    /// returned. Ordering matters in both directions: doing it at carry-over
-    /// time would strand a previous router that an abandoned reload leaves
-    /// live, while doing it AFTER the store leaves a window in which the
-    /// published router still carries the outgoing incarnation, so a request
-    /// landing there queues work this call immediately retires.
-    ///
-    /// Also clears terminal tombstones and any tombstone saturation: a new
-    /// incarnation must be free to ask questions the previous one settled.
-    pub fn publish_probe_incarnation(&self) -> usize {
-        // Draw from the SHARED ticket so the value is strictly greater than
-        // every previously published one, then stamp it on THIS Router
-        // only -- the outgoing Router keeps its own, so its activations and
-        // settlements are refused as stale from this moment on.
-        let next = self
-            .probe_incarnation_ticket
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-        self.probe_incarnation
-            .store(next, std::sync::atomic::Ordering::Release);
-        // Retire everything below the new incarnation. Outstanding leases
-        // settle as stale: they release nothing they no longer hold and
-        // schedule no follow-up work.
-        let cancelled = self.probe_scheduler.retire_before(next);
-        self.paid_probe_candidates.lock().clear();
-        cancelled
-    }
-
-    /// Cancel every queued probe job for shutdown, returning how many were
-    /// cancelled. Outstanding leases settle as stale and schedule nothing.
-    pub fn shutdown_probe_work(&self) -> usize {
-        let cancelled = self.probe_scheduler.cancel_all();
-        self.paid_probe_candidates.lock().clear();
-        cancelled
     }
 
     /// Ask for a probe of `key` on behalf of an admitted real request.
@@ -326,6 +297,11 @@ impl Router {
         );
         let key = lease.key().clone();
         let incarnation = lease.generation();
+        // Cloned BEFORE the settle consumes the lease, because the payload is
+        // what a paid body would be built from and the lease is the only thing
+        // that carries it. Cloning is bounded by the same ceilings
+        // `ProbePayload::new` enforced at capture.
+        let payload = lease.payload().clone();
         let release = lease.settle(settlement, Instant::now());
         // Order is load-bearing: a candidate is published only after a
         // settlement that actually COMMITTED, only when that settlement spent
@@ -337,7 +313,7 @@ impl Router {
                 self.paid_probe_daily_cap(&key),
             )
         {
-            self.record_paid_probe_candidate(&key, incarnation);
+            self.record_paid_probe_candidate(&key, incarnation, payload);
         }
     }
 
@@ -544,8 +520,35 @@ impl Router {
     /// outside the tests. `free_exhausted_total` on the scheduler snapshot is
     /// the operator-readable counter for the same event, so the two are not
     /// redundant -- one identifies WHICH lanes, the other counts HOW MANY.
-    fn record_paid_probe_candidate(&self, key: &FieldVerdictKey, incarnation: u64) {
+    fn record_paid_probe_candidate(
+        &self,
+        key: &FieldVerdictKey,
+        incarnation: u64,
+        payload: crate::probe_scheduler::ProbePayload,
+    ) {
+        // THE QUEUE LOCK FIRST, then liveness -- the same order, and for the same
+        // reason, as `Router::requeue_paid_probe_candidate`. A worker settling a
+        // probe can reach this concurrently with a publication or shutdown; both of
+        // those advance the ticket BEFORE taking this lock to clear, so either this
+        // recording completes and the clear removes it, or the clear goes first and
+        // the read below observes the supersession and drops. Reading liveness
+        // before the lock would leave the window where a record lands on a list
+        // that was just emptied and nothing removes it.
         let mut candidates = self.paid_probe_candidates.lock();
+        // TEST PARK POINT, at the first in-lock position -- the only place that
+        // discriminates the two lock orders. See the requeue path's hook for the
+        // full reasoning; inert outside tests and in tests that install no hook.
+        #[cfg(test)]
+        Self::record_park_hook();
+        // A settlement that commits against a superseded generation records
+        // nothing. The incarnation comparison catches work from a generation this
+        // router no longer publishes under; the shared-ticket read catches this
+        // ROUTER being superseded or a shutdown having advanced the ticket to its
+        // terminal generation -- neither of which rewrites this router's own stamp,
+        // so a post-shutdown worker settlement would otherwise still record.
+        if incarnation != self.probe_incarnation() || !self.is_current_publication() {
+            return;
+        }
         if candidates
             .iter()
             .any(|c: &PaidProbeCandidate| &c.key == key && c.incarnation == incarnation)
@@ -561,11 +564,42 @@ impl Router {
             self.probe_scheduler.note_paid_candidate_capacity_refusal();
             return;
         }
-        candidates.push(PaidProbeCandidate {
+        candidates.push_back(PaidProbeCandidate {
             key: key.clone(),
             incarnation,
             validator: ProbeValidator::PaidCompletion,
+            payload,
         });
+    }
+
+    /// The park hook the recording lock-order test installs, called once inside
+    /// `record_paid_probe_candidate`.
+    ///
+    /// Thread-local for the same reason the requeue's is: the racing clear runs on
+    /// another thread and must NOT be parked, or the test would arrange a deadlock
+    /// rather than a race.
+    #[cfg(test)]
+    fn record_park_hook() {
+        RECORD_PARK.with(|hook| {
+            if let Some(park) = hook.borrow().as_ref() {
+                park();
+            }
+        });
+    }
+
+    /// `record_paid_probe_candidate`, for the lock-order and post-shutdown tests.
+    ///
+    /// The production path is reached only from a worker settling a probe, which a
+    /// test cannot park mid-settlement; this drives the same function directly so a
+    /// mutation to its lock order or liveness reads is observable.
+    #[cfg(test)]
+    pub(crate) fn record_paid_probe_candidate_for_tests(
+        &self,
+        key: &FieldVerdictKey,
+        incarnation: u64,
+        payload: crate::probe_scheduler::ProbePayload,
+    ) {
+        self.record_paid_probe_candidate(key, incarnation, payload);
     }
 
     /// Every RECORDED candidate, live incarnation or not.
@@ -578,7 +612,7 @@ impl Router {
     /// makes "recorded only after a committed settlement" falsifiable.
     #[cfg(test)]
     pub(crate) fn all_recorded_paid_candidates_for_tests(&self) -> Vec<PaidProbeCandidate> {
-        self.paid_probe_candidates.lock().clone()
+        self.paid_probe_candidates.lock().iter().cloned().collect()
     }
 
     /// The paid-probe candidates free validation has exhausted, for the
@@ -644,8 +678,31 @@ impl Router {
         // value, so a request that lands mid-swap activates onto live work
         // rather than being refused by an unpublished incarnation.
         self.probe_incarnation_ticket = std::sync::Arc::clone(&previous.probe_incarnation_ticket);
+        // Same sharing rationale as the ticket: the publishing router and the
+        // shutting-down router are different objects, so a per-router lifecycle
+        // state would serialize nothing between them.
+        self.probe_lifecycle_state = std::sync::Arc::clone(&previous.probe_lifecycle_state);
         self.probe_incarnation = std::sync::atomic::AtomicU64::new(previous.probe_incarnation());
     }
+}
+
+// Per-thread park hook for the recording lock-order test. Test-only, and
+// thread-local by design: the racing clear runs on another thread and must not be
+// parked. A line comment rather than a doc comment because rustdoc generates
+// nothing for a macro invocation and rejects one attached to it.
+#[cfg(test)]
+thread_local! {
+    static RECORD_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install `park` as this thread's recording hook for the duration of `body`.
+#[cfg(test)]
+pub(super) fn with_record_park<R>(park: impl Fn() + 'static, body: impl FnOnce() -> R) -> R {
+    RECORD_PARK.with(|hook| *hook.borrow_mut() = Some(Box::new(park)));
+    let out = body();
+    RECORD_PARK.with(|hook| *hook.borrow_mut() = None);
+    out
 }
 
 /// The single short user turn a count-token probe carries.
