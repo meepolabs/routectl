@@ -4274,6 +4274,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   that fold reasoning into output, so reasoning is never double-counted);
   `Rates` is a usage-owned mirror of the router `PricingConfig` so the crate
   stays a leaf
+- `src/paid_probe.rs` -- pure durable codec for paid-probe budget
+  reservations, crate-internal (nothing re-exported):
+  `utc_day_from_epoch_ms` (floored `epoch_ms / 86_400_000`, so the crate stays
+  chrono-free and pre-epoch stamps land on one day), `reservation_key(utc_day,
+  provider)` rendering `paid_probe_reservation:v1:<utc_day>:<provider hex>`
+  with every provider UTF-8 byte as two lowercase hex digits (a name carrying
+  the `:` separator or non-ASCII bytes can neither collide with another
+  provider nor inject key structure), and the unit-count pair `format_units`
+  (canonical unsigned decimal) / `parse_units` refusing empty, signed,
+  whitespace-padded, leading-zero, fractional, non-digit and overflowing
+  values as a named `MalformedUnits` class rather than defaulting malformed
+  accounting state to zero; tests in `src/paid_probe_tests.rs`
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never
   blocks/awaits/panics -- safe from `Drop`), `try_send_learn_event` (the same
   best-effort discipline for a `CapabilityLearnEvent`, dropping on a
