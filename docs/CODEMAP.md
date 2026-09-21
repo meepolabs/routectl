@@ -4373,8 +4373,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   that fold reasoning into output, so reasoning is never double-counted);
   `Rates` is a usage-owned mirror of the router `PricingConfig` so the crate
   stays a leaf
-- `src/paid_probe.rs` -- pure durable codec for paid-probe budget
-  reservations, crate-internal (nothing re-exported):
+- `src/paid_probe.rs` -- durable codec for paid-probe budget reservations plus
+  the atomic reservation over it, crate-internal (nothing re-exported):
   `utc_day_from_epoch_ms` (floored `epoch_ms / 86_400_000`, so the crate stays
   chrono-free and pre-epoch stamps land on one day), `reservation_key(utc_day,
   provider)` rendering `paid_probe_reservation:v1:<utc_day>:<provider hex>`
@@ -4384,7 +4384,30 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (canonical unsigned decimal) / `parse_units` refusing empty, signed,
   whitespace-padded, leading-zero, fractional, non-digit and overflowing
   values as a named `MalformedUnits` class rather than defaulting malformed
-  accounting state to zero; tests in `src/paid_probe_tests.rs`
+  accounting state to zero. `reserve_one_unit(&mut Connection, provider, cap,
+  now_epoch_ms) -> StoredReservation` is the one write: a single
+  `TransactionBehavior::Immediate` transaction that takes the write lock
+  BEFORE reading the `meta` row (a deferred one lets two connections read the
+  same count and either double-spend a unit or lose a write), compares the
+  count it read against the caller's cap, and stores exactly that count plus
+  one -- never an unconditional increment. A missing row means zero; cap zero
+  or `used >= cap` is `CapExhausted` with nothing written; a non-canonical
+  stored value is `MalformedState` with the bytes left identical; every
+  rusqlite failure is `WriteFailed`. `Committed { utc_day, used, cap }` is the
+  only outcome a paid call may follow. THERE IS NO release / refund /
+  decrement entry point, by design -- a committed unit is spent, because
+  releasing a unit whose call may already have reached the upstream is how a
+  crash loop spends a day's cap several times over. The caller samples
+  `now_epoch_ms`, so the day cannot drift between the cap gate and the commit.
+  Tests in `src/paid_probe_tests.rs` plus the `include!`d fragment
+  `src/paid_probe_reserve_tests.rs` (real file-backed databases and separate
+  connections throughout: cross-connection visibility, cap walk to
+  exhaustion, zero cap creating no row, a cap lowered below the committed
+  count, every malformed class byte-identical, the `u32::MAX` ceiling,
+  provider/day isolation, missing control table / read-only / write-locked
+  paths, a deterministic two-connection probe at the read/write boundary that
+  distinguishes Immediate from Deferred, and the no-refund pair -- a lexical
+  absence guard plus a monotonic stored-count pin)
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never
   blocks/awaits/panics -- safe from `Drop`), `try_send_learn_event` (the same
   best-effort discipline for a `CapabilityLearnEvent`, dropping on a

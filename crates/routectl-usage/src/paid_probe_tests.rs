@@ -286,3 +286,5 @@ fn no_refusal_class_reads_as_a_committed_count() {
         );
     }
 }
+
+include!("paid_probe_reserve_tests.rs");
