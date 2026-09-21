@@ -17,6 +17,8 @@ mod handle;
 mod learn_event;
 mod migrate;
 mod paid_probe;
+mod paid_probe_command;
+mod paid_probe_lifecycle;
 mod query;
 mod record;
 mod retention;
@@ -38,6 +40,7 @@ pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, op
 pub use handle::{UsageCounters, UsageHandle};
 pub use learn_event::CapabilityLearnEvent;
 pub use migrate::MigrateError;
+pub use paid_probe_command::{PaidProbeAdmission, PaidProbeCommit, PaidProbeReceipt};
 pub use query::{
     AggRow, BucketSpec, CacheDecisionSummary, CalibrationSampleRow, CapabilityEventRow, CostStatus,
     DeadlineGuard, GroupDim, GroupKey, KCalibration, NearLosslessAttributionSummary, QueryError,

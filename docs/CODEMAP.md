@@ -4550,8 +4550,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   tombstone-verdict literal mirrors the read side's copy in
   `query/capability.rs` (agreement pinned by the round-trip test)
 - `src/capability_batch.rs` -- the ACKNOWLEDGED atomic capability-event batch,
-  the only non-best-effort write in the crate. `BatchCommit`
-  (`Committed{rows}` / `Unavailable` / `ChannelFull` / `Timeout` /
+  one of the crate's two non-best-effort writes (the other is the paid-probe
+  reservation below). `BatchCommit`
+  (`Committed{rows}` / `Unavailable` / `ChannelFull` /
   `WriteFailed` -- every non-commit is a NAMED outcome so a caller can hold
   its old state rather than proceed on an unpersisted boundary),
   `CapabilityBatch` (rows + the one-shot ack sender, carried as a single
@@ -4593,7 +4594,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Rates` is a usage-owned mirror of the router `PricingConfig` so the crate
   stays a leaf
 - `src/paid_probe.rs` -- durable codec for paid-probe budget reservations plus
-  the atomic reservation over it, crate-internal (nothing re-exported):
+  the atomic reservation over it, reached only through
+  `src/paid_probe_command.rs` (nothing here is re-exported):
   `utc_day_from_epoch_ms` (floored `epoch_ms / 86_400_000`, so the crate stays
   chrono-free and pre-epoch stamps land on one day), `reservation_key(utc_day,
   provider)` rendering `paid_probe_reservation:v1:<utc_day>:<provider hex>`
@@ -4627,6 +4629,80 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   paths, a deterministic two-connection probe at the read/write boundary that
   distinguishes Immediate from Deferred, and the no-refund pair -- a lexical
   absence guard plus a monotonic stored-count pin)
+- `src/paid_probe_command.rs` -- the ACKNOWLEDGED paid-probe reservation: the
+  writer command, its bounded admission, and the outcome vocabulary a spender
+  acts on. `UsageHandle::admit_paid_probe_reservation(provider, cap) ->
+  PaidProbeAdmission` (`Admitted(PaidProbeReceipt)` / `Saturated` /
+  `Unavailable`) is non-blocking by construction -- a bounded `try_send`, so a
+  wedged writer can never stall a request path, and a refusal authorizes
+  nothing -- and `PaidProbeReceipt::await_outcome` (async, NO time limit)
+  yields the closed `PaidProbeCommit` set (`Committed { used, cap }` /
+  `CapExhausted` / `MalformedState` / `WriteFailed` / `Unavailable`), of which
+  only `Committed` permits a paid call. `Committed` is `#[non_exhaustive]`, so no
+  other crate can CONSTRUCT the authorizing value and route around the
+  reservation (matching and field reads still work; a downstream struct
+  expression is E0639). DELIBERATELY bypasses the `usage.enabled`
+  gate: that gate is a telemetry preference and must not disable a spend
+  ceiling. SHUTDOWN IS A THIRD REFUSAL PATH, checked in three places because the
+  channel cannot express it (it stays open while any handle holds a sender
+  clone): at admission, in the writer before the transaction (so a unit nobody
+  can use is never SPENT), and in the writer after it returns but before the ack
+  (the commit-raced-shutdown case, where the unit stays consumed and the caller
+  gets `Unavailable`). THERE IS NO timed-out, unknown, release, refund, or
+  decrement answer -- a committed unit is spent, so an unsettled answer would
+  leave the caller with no safe move; dropping the receipt loses only the ANSWER,
+  never the unit, and leaves the writer healthy. NO DAY OR STORAGE KEY crosses
+  the boundary (a spender would carry and log state it does not own), so the
+  writer-side `reserve` / `commit_for` pair keeps `StoredReservation`'s
+  `utc_day` on this side and maps every storage outcome exhaustively. The
+  `PaidProbeCommand` payload is crate-private and unexported: it holds the ack
+  sender, so anything able to build one could answer somebody else's reservation.
+  Tests in `src/paid_probe_command_tests.rs` plus the `include!`d fragments
+  `src/paid_probe_command_storage_tests.rs`,
+  `src/paid_probe_command_surface_tests.rs`,
+  `src/paid_probe_command_lifecycle_tests.rs` and
+  `src/paid_probe_command_refund_guard_tests.rs` (real writers over real
+  file-backed databases: ack-after-commit visibility from a second
+  connection, the writer's own day asserted through the raw control key,
+  commit while capture is disabled with an ordinary record still dropped on
+  the same handle, a never-drained full channel and a closed channel, a
+  concurrent storm holding exactly the cap, two writers on one database
+  bounded by the stored count, restart continuity, provider isolation, an
+  abandoned receipt keeping its unit, every malformed class byte-identical
+  with a canonical control, missing control table / read-only / write-locked
+  / no-connection paths, a reservation queued behind a lock-blocked writer that
+  cannot yield `Committed` once shutdown begins, the commit-raced-shutdown case
+  consuming its unit without authorizing plus its authorizing control, a broken
+  `requests` table proving a working reservation does NOT clear the writer's
+  degraded state plus the control that a working ROW does, and lexical guards
+  that no published type names a day or key, no outcome names a timeout,
+  admission neither blocks nor reads the enabled gate and refuses after
+  shutdown, the reservation path never calls the shared recovery edge, and --
+  ACROSS BOTH FIRST-PARTY CRATES -- a filesystem walk of `routectl-usage/src`
+  AND `routectl-cli/src` (which holds the published writable `open_rw`
+  connection), reconciled against a declared inventory so a new unclassified
+  module goes RED, with nonempty and SQL-visible premises: no module outside
+  the reservation implementation names the durable key or deletes from the
+  control table. Arbitrary external consumers of the published connection are
+  beyond mechanical reach from this repo and are carried by that connection's
+  own docs instead). Gate-level pins live in
+  `src/paid_probe_command_gate_tests.rs`: the send proved to happen while the lock
+  is held (a barrier parks inside the section, `try_lock` observes the lock
+  directly, and a concurrent shutdown is proved unable to finish), a structural
+  backstop refusing any move of the answer out of the section, the poisoned-gate
+  refusal with its control (layered deliberately: the fail-closed DECISION is
+  pinned purely through `forbids_authorization`, holding in every profile
+  including one where panics do not unwind and no mutex can be poisoned, while
+  the real poisoned-mutex path is `cfg(panic = "unwind")` -- both test profiles
+  here unwind, measured, since `panic = "abort"` governs the shipped binary and
+  not cargo's harnesses, and both were enumerated in each profile to confirm no
+  silent drop; the poisoning seam mutates no process-global panic hook, which
+  would race sibling tests), the suppressed-non-commit counter case, and two
+  PRECEDENCE pins whose violations are otherwise only visible as rare races --
+  shutdown marking terminal before it drops the sender or drains, and the
+  test-only terminal signal being emitted after the state change while the guard
+  is held (both measured to survive behavioural testing alone, which is why they
+  are pinned where the ordering is written)
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never
   blocks/awaits/panics -- safe from `Drop`), `try_send_learn_event` (the same
   best-effort discipline for a `CapabilityLearnEvent`, dropping on a
@@ -4791,7 +4867,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a
   no-op drain loop on open failure), drains the bounded channel on a dedicated
   thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`. The
-  channel carries a `WriterMessage` enum (`Request(Box<UsageRecord>)` -> the
+  channel carries a `WriterMessage`, an OPAQUE envelope over a crate-private
+  `WriterCommand` vocabulary -- nameable out-of-crate (test channel declarations
+  spell the item type) but neither constructible nor inspectable there, because a
+  crate able to build a variant could forge any write the actor performs,
+  including the reservation that authorizes money. The commands are
+  (`Request(Box<UsageRecord>)` -> the
   `requests` table, `LearnEvent(CapabilityLearnEvent)` -> the
   `capability_learn_events` table, `CapabilityEvent(CapabilityEvent)` -> the
   unified `capability_events` ledger (carrying the producing registry
@@ -4800,12 +4881,53 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   otherwise restore evicted state on the next boot; transient in-memory
   sequencing, never a column), `CapabilityBatch(..)` -> the same ledger as ONE
   acknowledged transaction via `commit_capability_batch`, which raises the
-  writer's `boundary_generation` only on a COMMITTED batch; the record is
+  writer's `boundary_generation` only on a COMMITTED batch,
+  `PaidProbeReservation(..)` -> one acknowledged budget reservation, DELEGATED
+  whole to `paid_probe_lifecycle::reserve_and_answer` (this file keeps only the
+  match arm, the `ReservationHost` impl handing over the connection and the
+  failure accounting, and the `begin_shutdown` call -- the reservation's
+  sequencing is not the actor's business); the record is
   boxed so the variants stay close in size), so one actor + one connection
-  serves every row kind with the message variant selecting the destination
-  table. The one-shot startup prune
+  serves every row kind with the command selecting the destination
+  table. The one-shot startup
+  prune
   runs over both `requests` (`retention::prune`) and `capability_events`
   (`retention::prune_capability_events`, tombstone-exempt)
+- `src/paid_probe_lifecycle.rs` -- the reservation's LIFECYCLE, split out of the
+  writer so the actor keeps only its loop. `LifecycleGate` is a short shared
+  `Mutex<Lifecycle>` (Running / Terminal, one-way, poisoned reads as Terminal)
+  held by the writer and every handle. A LOCK rather than a flag because the
+  property is an ORDERING, not a value: an atomic can only be sampled, leaving a
+  window between the final check and the send in which shutdown can begin --
+  precisely the case where a caller ends up holding `Committed` for a writer that
+  is already draining. Shutdown marks terminal BEFORE draining or dropping the
+  sender; `reserve_and_answer` performs its terminal check AND its
+  `oneshot` send inside ONE critical section, so for every reservation either the
+  answer was sent before shutdown began (and thus happens-before the drain) or it
+  is suppressed to `Unavailable`. The gate is NEVER held across the SQLite
+  transaction -- that would make shutdown wait on a wedged database, turning a
+  liveness property into a hang -- so it is taken twice, briefly, with the
+  transaction unlocked between them. The answer is sent through a `GatedSection`
+  that OWNS the guard and only ever lends it: `answer` takes `&self`, so the guard
+  cannot be moved, destructured, or dropped inside the send path at all, and the
+  named section binding at the call site is the single release point -- structural
+  rather than a convention (a bare `let _guard` plus a direct answer reads
+  identically and is silently breakable by one inserted `drop`; by-value `self`
+  would still allow `let Self { _guard } = self; drop(_guard);` before the send).
+  A poisoned gate reads as `GateReading::Unknown` and
+  `forbids_authorization` refuses it: an unknown lifecycle is as untrustworthy as a
+  teardown, and the mistakes cost differently -- refusing wastes at most one unit,
+  authorizing hands out a spend nobody can honor. The pre-transaction check is not redundant
+  with the post-commit one: terminal there means the unit is never SPENT, while
+  terminal after means the unit stays CONSUMED and only the authorization is
+  withheld (no refund, ever), counted as
+  `UsageCounters::paid_probe_consumed_unauthorized` rather than folded into the
+  writer's degraded/healthy state -- it is neither a storage fault nor a healthy
+  write, and an accounting-health surface has to be able to see budget spent for
+  no call. `note_outcome` keeps the health asymmetry (failures generalize to the
+  writer's degraded edge, successes do NOT clear it: a control row landing is no
+  evidence the request-row path recovered). `ReservationHost` is the narrow seam
+  back to the actor (connection + failure accounting, nothing else)
 - `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign
   keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id`
   (idempotency), schema-presence assertions.
@@ -4818,7 +4940,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   without `CREATE`, so a missing file is still `NoData` and a mismatched
   schema still errors -- the connection may `INSERT` but never creates or
   migrates, letting the one-shot CLI capability probe attach to the daemon's
-  existing WAL database instead of forking a second unmigrated one
+  existing WAL database instead of forking a second unmigrated one. Both
+  `UsageDb` and `open_rw` carry the CONTROL-TABLE caution in their docs: one
+  family of `meta` rows is the paid-probe spend ledger (one row per provider per
+  UTC day), append-and-increment only, because deleting or lowering one refunds
+  spend that may already have reached an upstream -- a crate-wide test guard
+  enforces it and the doc is what a future meta-writing author reads first
 - `src/schema.rs` -- `requests` table DDL (the capture columns + `request_id
   UNIQUE` idempotency key + `outcome` CHECK), `meta` table, `SCHEMA_VERSION`;
   v2 added the nullable `strategy TEXT` column (the per-request auto-cache

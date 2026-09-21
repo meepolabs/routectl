@@ -23,14 +23,11 @@
 //!   as zero: malformed accounting state must block a paid call, and a
 //!   silent zero would license one.
 //!
-//! Nothing outside the tests reads this module yet: the codec and the
-//! reservation it feeds are fixed before the writer path that submits one,
-//! so the durable encoding and the accounting rule are settled
-//! independently of any caller. Hence the crate-local dead-code allowance
-//! below, which the first production caller removes. The entry points and
-//! the outcome enums are `pub(super)` (visible to the sibling modules that
-//! will submit and report a reservation, no wider) so the crate's published
-//! surface does not grow for an internal encoding. Everything they are
+//! The reservation and its codec are reached only through the acknowledged
+//! writer command in `paid_probe_command`, which is what samples the clock and
+//! owns the outcome vocabulary a spender reads. The entry points and the outcome
+//! enums are `pub(super)` (visible to that sibling and no wider) so the crate's
+//! published surface does not grow for an internal encoding. Everything they are
 //! built from stays private to this module.
 //!
 //! THERE IS NO RELEASE, REFUND, OR DECREMENT, and the absence is the
@@ -38,7 +35,6 @@
 //! already have reached the upstream is how a crash loop spends a day's cap
 //! several times over, so the only operation is the reservation itself.
 
-#![cfg_attr(not(test), allow(dead_code))]
 #![expect(
     clippy::redundant_pub_crate,
     reason = "this module is private, so a crate-wide visibility reads as \

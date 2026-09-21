@@ -17,6 +17,18 @@ use crate::schema::SCHEMA_VERSION;
 
 /// Owns an open usage-DB connection. The later writer task takes
 /// ownership of this wrapper.
+///
+/// # The control table carries spend state
+///
+/// Any code writing the `meta` table through a writable connection must know
+/// that one family of its rows is an accounting LEDGER, not metadata: the
+/// paid-probe reservation counts, one row per provider per UTC day. A committed
+/// unit is money already authorized to be spent, so those rows are
+/// append-and-increment only. Deleting one, or lowering its value, silently
+/// refunds spend that may already have reached an upstream -- which is how a
+/// crash loop spends a day's cap several times over. Only the reservation
+/// implementation may write them; a crate-wide test guard enforces that, and it
+/// is a backstop rather than a licence.
 pub struct UsageDb {
     conn: Connection,
     path: PathBuf,
@@ -292,6 +304,10 @@ pub fn open_readonly_fastfail(path: impl AsRef<Path>) -> Result<UsageDb, OpenErr
 /// daemon created and owns, never forking its own schema. A missing or
 /// older-schema DB is a clear error here, never a silent migrate -- the
 /// out-of-band-migration incident class.
+///
+/// A WRITABLE connection, so the control-table caution on [`UsageDb`] applies:
+/// the paid-probe reservation rows in `meta` are spend state, and nothing outside
+/// the reservation implementation may delete or lower one.
 ///
 /// The open sequence is a thin sibling of `open_readonly_with_timeout`,
 /// reusing `verify_readable_version` and `ensure_requests_table`: reject
