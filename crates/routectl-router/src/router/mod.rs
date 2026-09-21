@@ -41,6 +41,7 @@ mod field_repair;
 mod field_verdict_observability;
 mod overlays;
 mod paid_probe_ledger;
+mod paid_probe_profile;
 mod prefix_rewrite;
 mod probe_failure_class;
 mod probe_lifecycle;
