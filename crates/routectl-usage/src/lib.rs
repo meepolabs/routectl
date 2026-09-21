@@ -16,6 +16,7 @@ mod db;
 mod handle;
 mod learn_event;
 mod migrate;
+mod paid_probe;
 mod query;
 mod record;
 mod retention;
