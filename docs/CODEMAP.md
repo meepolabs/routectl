@@ -3015,13 +3015,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   runs it with `join_all`, wraps each operation in `tokio::time::timeout` so
   expiry DROPS the future, and settles the outcome; it executes only the
   count-token free validator (the expected-rejection class is in no plan).
-  `build_probe_count_request` builds the body from the leased payload: the
+  `build_probe_request` is the SHARED body builder for BOTH probe classes (the
+  free count-token validator here and the paid completion in
+  `paid_probe_dial.rs`), so the two ask the same question of the same lane rather
+  than drifting into different envelopes: the
   seat's UPSTREAM wire id, one minimal constant turn, the closed-table field
   applied through the GROUNDED table's own carrier (`grounded_table_row`, so a
   test-only row is neither produceable nor consumable by a probe) plus the
   minimal canonical reasoning state the normalizer needs, each captured beta
   source reapplied to ITS OWN carrier, and the originating Claude-Code
-  classification so the egress makes the same `is_non_cc` call. Classification
+  classification so the egress makes the same `is_non_cc` call. `max_tokens` is
+  its one parameter -- the single axis the two classes differ on -- set BEFORE
+  `apply_probe_payload`, which fills the free default only where the field is
+  absent, so a caller-supplied allowance survives it.
+  Classification
   is welded ACROSS crates: the header literal and the presence predicate live
   once in `routectl_core::identity::anthropic`
   (`CLAUDE_CODE_SESSION_HEADER` / `has_claude_code_session`), and both the
@@ -3047,23 +3054,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (the reload boundary tests read it across the crate boundary);
   `carry_over_probe_scheduler_from` ATTACHES the scheduler, candidate list,
   and incarnation TICKET
-- (providers) `anthropic_api::counts_toward_lane_statistics` -- the one
-  eligibility predicate every translation-metrics call on this lane gates on:
-  `false` for a background probe. Every rate here divides one population, and
-  that population is CLIENT traffic, so excluding a probe from some counters but
-  not others would skew the rates against each other. Gates all EIGHT recorder
-  sites: the `lane_seen` denominator and the fingerprint-strip numerator
-  (`request.rs`), the two classification arms (`client.rs`), and the four cloak
-  losses (`cloak.rs`, one early return for all four).
-  A PREDICATE rather than wrapper recorders, and the reason is mechanical: the
-  translation-drop census resolves each `record_translation_*` call's lane and
-  class to constants in the call's OWN file and FAILS a call it cannot resolve
-  rather than skipping it, so a wrapper taking the lane as a parameter takes
-  every call out of the census (measured -- it broke four census tests). Pinned
-  by `only_client_traffic_counts_toward_this_lanes_statistics` (the decision) and
-  `every_recorder_call_on_this_lane_is_probe_gated` (a source guard counting
-  calls AND gates per file, so an ungated call cannot hide behind a sibling's
-  gate). Other lanes call the raw recorders and are unaffected
+- (providers) `anthropic_api::is_client_traffic` -- excludes background probes
+  from this lane's translation metrics, the unified-quota shared claim/log state,
+  and thinking-cache writes; response-local metadata unaffected. Rationale in module docs
 - `src/router/probe_payload_capture.rs` -- what an admitted request contributes
   to a probe, and the ONLY path into the queue.
   `on_admitted_request` is the dispatch-facing wrapper all THREE walks call
@@ -3109,11 +3102,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   configured entry's `kind_str` -- all read off the MODEL or the operator's own
   entry rather than re-derived at dial time, so no stage can size a body against
   a shape, a cap, a cell, or a lane the egress does not use
-- `src/router/probe_failure_class.rs` -- `classify_probe_failure` /
-  `probe_outcome_for_class`: what a failure class means for the free plan.
-  FAILS CLOSED -- transient classes retry, bad-request / auth / context /
-  content-policy and the `#[non_exhaustive]` catch-all refuse, so a class added
-  upstream cannot walk a lane to the paid class by existing
+- `src/router/probe_failure_class.rs` -- two closed mappings off the SHARED
+  `routectl_core` classifier: what a failure means for free validation, and for
+  paid settlement (one arm per variant). Both fail closed; reasoning in module docs
 - (router) the PAID-PROBE PUBLICATION GENERATION PROTOCOL, in
   `src/router/probe_publication.rs`. The shared monotonic `probe_incarnation_ticket`
   is the authority: a publication draws from it and stamps the drawn value on
@@ -3263,6 +3254,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   removing the shutdown ticket advance, unbounding the ledger await, reordering the
   publication callback, and removing the stale, attributability, cap-zero, or
   profile check -- each reds its own case
+- `src/router/paid_probe_dial.rs` -- `Router::run_paid_probe()`: authorize then
+  dial, spending one committed unit on one direct `seat.provider.complete`.
+  No driver pass, usage write, verdict mint, or status render; contracts in module docs
 - `src/router/paid_probe_ledger.rs` -- the CRATE-BOUNDARY contract for the  crash-safe paid-probe budget: the `PaidProbeLedger` trait
   (`reserve_paid_probe_unit(provider, daily_cap)`, the only method -- there is
   no release, refund, or timeout, because a committed unit is spent) and the

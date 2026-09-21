@@ -127,7 +127,7 @@ impl ClientFingerprintStripTally {
     /// Takes the request so a background probe records nothing -- see
     /// `super::probe_aware_metrics`.
     fn flush(&self, req: &ChatRequest) {
-        if self.stripped && super::counts_toward_lane_statistics(req) {
+        if self.stripped && super::is_client_traffic(req) {
             crate::translation_drop_metrics::record_translation_policy_action(
                 super::LANE,
                 "client_fingerprint_stripped",
@@ -934,7 +934,7 @@ pub(crate) fn normalize(
     // request leaves this lane's statistics entirely -- it still translates and
     // still ships, since the probe's whole purpose is to reproduce the wire
     // shape under test.
-    if super::counts_toward_lane_statistics(req) {
+    if super::is_client_traffic(req) {
         crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
     }
     let mut fingerprint = ClientFingerprintStripTally::default();

@@ -41,7 +41,7 @@ mod field_repair;
 mod field_verdict_observability;
 mod overlays;
 mod paid_probe_authorize;
-
+mod paid_probe_dial;
 mod paid_probe_ledger;
 mod paid_probe_profile;
 mod prefix_rewrite;
