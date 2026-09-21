@@ -1110,7 +1110,7 @@ impl AnthropicApiProvider {
         // would shift the genuine-CC / non-CC split by an amount proportional
         // to probe scheduling, which is precisely the signal this census is
         // read to rule out.
-        if super::counts_toward_lane_statistics(req) {
+        if super::is_client_traffic(req) {
             if is_non_cc {
                 crate::translation_drop_metrics::record_translation_policy_action(
                     super::LANE,
@@ -1142,12 +1142,27 @@ impl AnthropicApiProvider {
     /// is absent (api-key path, or any non-subscription response).
     /// Shared by the complete() and stream() paths so the flip log and
     /// the carrier attach identically on both.
+    ///
+    /// The PARSE and the carrier are unconditional; only the CLAIM-STATE
+    /// mutation is gated on `is_client_traffic`. A background
+    /// probe's response still carries its quota upward -- the carrier is
+    /// per-response data, so withholding it would change wire-visible
+    /// behavior -- but it must not write `last_representative_claim` or emit a
+    /// flip log. That state is a per-instance record of what CLIENT traffic
+    /// last saw, and the flip log is once-per-transition: a probe landing
+    /// between two client requests would either forge a transition the client
+    /// stream never underwent or swallow the real one, and an operator reading
+    /// the billing-attribution line would see a flip caused by routectl's own
+    /// scheduling.
     pub(super) fn observe_unified_quota(
         &self,
+        req: &routectl_core::ChatRequest,
         headers: &reqwest::header::HeaderMap,
     ) -> Option<routectl_core::UpstreamMeta> {
         let quota = ratelimit_unified::parse_unified_quota(headers)?;
-        self.log_overage_flip(&quota);
+        if super::is_client_traffic(req) {
+            self.log_overage_flip(&quota);
+        }
         Some(routectl_core::UpstreamMeta::from_anthropic_unified(quota))
     }
 

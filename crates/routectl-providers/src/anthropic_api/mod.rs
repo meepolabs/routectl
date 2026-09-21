@@ -39,14 +39,24 @@ pub mod sse;
 pub mod sse_opaque;
 pub mod sse_unknown;
 
-/// Whether `req` may contribute to this lane's translation statistics.
+/// Whether `req` is CLIENT traffic rather than routectl's own background probe.
 ///
-/// `false` for a BACKGROUND PROBE -- routectl's own traffic, scheduled on its own
-/// cadence. Every counter on this lane divides one population, and that
-/// population is CLIENT traffic: `lane_seen` is the denominator and each policy
-/// action is a numerator over it. Counting a probe anywhere would move a rate by
-/// an amount set by probe scheduling; counting it in only SOME counters would
-/// skew the rates against each other.
+/// A NEUTRAL question, deliberately, because three different boundaries turn on
+/// it and only one of them is about statistics:
+///
+/// - the translation-drop census, whose every counter divides one population and
+///   that population is client traffic (`lane_seen` is the denominator and each
+///   policy action a numerator over it) -- counting a probe anywhere would move a
+///   rate by an amount set by probe scheduling, and counting it in only SOME
+///   counters would skew the rates against each other;
+/// - the unified-quota claim record and its once-per-transition overage-flip log,
+///   which describe what client requests last observed about billing attribution;
+/// - the context-management thinking cache, read by the NEXT client turn out of a
+///   capacity-bounded LRU.
+///
+/// Naming it after the statistics alone would have made the two state boundaries
+/// read as if they were counting something. Each caller states its own reason; the
+/// predicate states only the fact.
 ///
 /// A PREDICATE rather than a wrapper around the recorders, deliberately. The
 /// translation-drop census resolves every `record_translation_*` call's lane and
@@ -57,7 +67,7 @@ pub mod sse_unknown;
 /// single-sources the decision.
 ///
 /// Other lanes do not consult this and are unaffected.
-const fn counts_toward_lane_statistics(req: &routectl_core::ChatRequest) -> bool {
+const fn is_client_traffic(req: &routectl_core::ChatRequest) -> bool {
     !req.routectl_internal.background_probe
 }
 mod system;
@@ -297,7 +307,7 @@ impl Provider for AnthropicApiProvider {
         // Parse the anthropic-ratelimit-unified-* quota family from the
         // same headers (BEFORE the body consume) and run the overage-flip
         // log. Returns None on the api-key path (family absent).
-        let upstream_meta = self.observe_unified_quota(resp.headers());
+        let upstream_meta = self.observe_unified_quota(&req, resp.headers());
         let content_length = resp.content_length();
         let (body_bytes, hit_cap) =
             crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
@@ -317,7 +327,11 @@ impl Provider for AnthropicApiProvider {
         // Clone the raw body before normalize consumes it. Only pay the
         // allocation cost on the context_management emulation path; the
         // default false path skips the clone entirely.
-        let raw_for_cache = if self.cfg.context_management {
+        //
+        // A BACKGROUND PROBE skips it too, because the only consumer of the
+        // clone is the cache write below, which a probe must not perform -- so
+        // the probe also pays no allocation for a body nothing will read.
+        let raw_for_cache = if self.cfg.context_management && is_client_traffic(&req) {
             Some(raw_body.clone())
         } else {
             None
@@ -338,6 +352,14 @@ impl Provider for AnthropicApiProvider {
         // shared thinking cache for re-injection on the next turn. The write
         // lock is acquired synchronously here -- no .await after this point --
         // so it is never held across an async yield.
+        //
+        // A BACKGROUND PROBE never reaches here: `raw_for_cache` is `None` for
+        // it above. The cache is keyed by `(provider_id, tool_use_id)` and is
+        // read by the NEXT CLIENT turn, so a probe-seeded entry would inject
+        // thinking a client's conversation never produced -- and, since the LRU
+        // is capacity-bounded, would evict an entry a real conversation is
+        // still going to need. Gated where the clone is decided rather than
+        // here, so the guard also covers the allocation.
         if let Some(raw) = raw_for_cache {
             let blocks: Vec<types::ContentBlock> = raw
                 .pointer("/content")
@@ -479,7 +501,7 @@ impl Provider for AnthropicApiProvider {
         // attached to the FIRST canonical chunk yielded by the stream;
         // consumers must not assume it on later chunks. None on the
         // api-key path (family absent).
-        let mut pending_upstream_meta = self.observe_unified_quota(resp.headers());
+        let mut pending_upstream_meta = self.observe_unified_quota(&req, resp.headers());
 
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
@@ -488,7 +510,13 @@ impl Provider for AnthropicApiProvider {
         // the thinking cache so the post-stream write tail can drain
         // pending_cache_writes synchronously without holding the lock
         // across any await point.
-        let context_management_enabled = self.cfg.context_management;
+        //
+        // A BACKGROUND PROBE clears the flag here, which is what keeps it out
+        // of the post-stream drain below. Same reasoning as the complete()
+        // path: the cache is read by the next CLIENT turn, so a probe-seeded
+        // entry injects thinking no client conversation produced and evicts one
+        // that a real conversation still needs.
+        let context_management_enabled = self.cfg.context_management && is_client_traffic(&req);
         let max_thinking_entry_bytes = self.cfg.max_thinking_entry_bytes;
         let thinking_cache_for_stream = Arc::clone(&self.thinking_cache);
         // Per-request tool-name reverse map (renamed upstream name ->
@@ -1076,3 +1104,9 @@ mod envelope_unwrap_tests;
 #[cfg(test)]
 #[path = "request_drop_counter_tests.rs"]
 mod request_drop_counter_tests;
+
+// Background probe traffic must not mutate client-facing shared state: the
+// unified-quota claim record and the context-management thinking cache.
+#[cfg(test)]
+#[path = "mod_background_isolation_tests.rs"]
+mod background_isolation_tests;

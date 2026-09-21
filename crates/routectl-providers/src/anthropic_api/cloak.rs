@@ -248,9 +248,9 @@ impl CloakPolicyTally {
     /// `super::probe_aware_metrics`.
     fn flush(&self, req: &ChatRequest) {
         // A background probe contributes to no numerator on this lane -- see
-        // `super::counts_toward_lane_statistics`. Checked once for all four
+        // `super::is_client_traffic`. Checked once for all four
         // classes: they are one flush of one request.
-        if !super::counts_toward_lane_statistics(req) {
+        if !super::is_client_traffic(req) {
             return;
         }
         // One call site per class rather than a loop over a table: the census

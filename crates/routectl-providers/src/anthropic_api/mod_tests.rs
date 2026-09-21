@@ -4511,25 +4511,26 @@ fn cloak_split_count(class: &str) -> u64 {
         .map_or(0, |e| e.action_count)
 }
 
-/// The eligibility predicate: client traffic counts, a background probe does not.
+/// The traffic predicate: a client request IS client traffic, a background probe
+/// is not.
 ///
-/// A UNIT pin on the one decision every recorder call on this lane gates on.
-/// Kept separate from the delta tests below because it needs no registry at all
-/// -- so it cannot flake on a process-global counter, and it fails for exactly
-/// one reason.
+/// A UNIT pin on the one decision every recorder call AND both client-facing
+/// state boundaries on this lane gate on. Kept separate from the delta tests below
+/// because it needs no registry at all -- so it cannot flake on a process-global
+/// counter, and it fails for exactly one reason.
 #[test]
 fn only_client_traffic_counts_toward_this_lanes_statistics() {
     let client = req_with_claude_code_headers(Vec::new());
     assert!(
-        super::counts_toward_lane_statistics(&client),
-        "ordinary client traffic must count"
+        super::is_client_traffic(&client),
+        "an ordinary client request must read as client traffic"
     );
 
     let mut probe = req_with_claude_code_headers(Vec::new());
     probe.routectl_internal.background_probe = true;
     assert!(
-        !super::counts_toward_lane_statistics(&probe),
-        "a background probe must not count"
+        !super::is_client_traffic(&probe),
+        "a background probe must not read as client traffic"
     );
 }
 
@@ -4556,9 +4557,17 @@ fn every_recorder_call_on_this_lane_is_probe_gated() {
     //
     // `cloak.rs` gates all four of its calls with ONE early return, which is why
     // its expected gate count is 1 rather than 4.
+    //
+    // `client.rs` carries ONE MORE gate than it has recorder calls, and that
+    // asymmetry is deliberate rather than slack: the same predicate also guards
+    // the unified-quota CLAIM-STATE mutation, which is not a recorder call but is
+    // the same question -- may routectl's own background traffic move state that
+    // describes what clients saw. Counting it here is what keeps a later removal
+    // of THAT gate visible to this guard too; the sibling behavioral tests pin
+    // its effect.
     for (name, src, expected_calls, expected_gates) in [
         ("request.rs", REQUEST, 2usize, 2usize),
-        ("client.rs", CLIENT, 2, 1),
+        ("client.rs", CLIENT, 2, 2),
         ("cloak.rs", CLOAK, 4, 1),
     ] {
         let calls = src.matches("record_translation_lane_seen(").count()
@@ -4566,9 +4575,9 @@ fn every_recorder_call_on_this_lane_is_probe_gated() {
         assert_eq!(
             calls, expected_calls,
             "{name} has {calls} recorder call(s), expected {expected_calls}; a new \
-             call must be gated on `counts_toward_lane_statistics` and counted here"
+             call must be gated on `is_client_traffic` and counted here"
         );
-        let gates = src.matches("counts_toward_lane_statistics(req)").count();
+        let gates = src.matches("is_client_traffic(req)").count();
         assert_eq!(
             gates, expected_gates,
             "{name} has {gates} eligibility gate(s), expected {expected_gates}; an \

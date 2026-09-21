@@ -430,7 +430,7 @@ impl Router {
         // dropped early, so the release path is the guard's `Drop` on every
         // exit -- including a cancelled future, since this whole call runs
         // inside a `tokio::time::timeout`.
-        let req = self.build_probe_count_request(&seat, payload);
+        let req = build_probe_request(&seat, payload, None);
         let outcome = match seat.provider.count_tokens(req).await {
             // A count came back for a body carrying the field under test.
             // This stage draws no verdict from it -- minting is the reactive
@@ -450,65 +450,6 @@ impl Router {
         // failing probe.
         drop(probe_guard);
         outcome
-    }
-
-    /// Build the count-token probe body: the seat's UPSTREAM wire model, one
-    /// minimal user message, the closed-table field under test, and the
-    /// captured beta context.
-    ///
-    /// The field is what makes this a probe rather than a token count. A body
-    /// without it is accepted by any healthy lane regardless of the
-    /// capability, so its absence would make the validator answer `Settled`
-    /// for a question it never asked. The wire id rather than the nickname
-    /// because this request goes straight to the provider, past the
-    /// alias/model resolution that would otherwise translate it.
-    ///
-    /// The betas are REAPPLIED to both carriers the egress reads, so the
-    /// probe travels under the same effective `anthropic-beta` header the
-    /// admitted request was about to send. Without them a beta-gated field
-    /// would be rejected for the missing flag, and that rejection would be
-    /// read as evidence about the field.
-    fn build_probe_count_request(
-        &self,
-        seat: &super::probe_seat::ProbeSeat,
-        payload: &crate::probe_scheduler::ProbePayload,
-    ) -> routectl_core::ChatRequest {
-        let mut req = routectl_core::ChatRequest {
-            model: seat.upstream.clone(),
-            messages: vec![routectl_core::Message {
-                role: routectl_core::Role::User,
-                content: routectl_core::MessageContent::Text(PROBE_MESSAGE_TEXT.to_string()),
-                refusal: None,
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }]
-            .into(),
-            anthropic_beta: payload.client_betas().to_vec(),
-            ..Default::default()
-        };
-        // Each source back onto ITS OWN carrier. The egress filters
-        // `anthropic_beta` through `allowed_betas` and exempts
-        // `operator_betas`, so crossing them over would either smuggle a
-        // filtered client flag past the allowlist or subject an operator-pinned
-        // flag to it -- either way the probe's header would differ from the one
-        // under test.
-        req.routectl_internal.operator_betas = payload.operator_betas().to_vec();
-        // The originating Claude-Code classification, so the egress makes the
-        // same `is_non_cc` call (and so applies or suppresses the CC beta floor
-        // identically) for a body that carries no session capture of its own.
-        req.routectl_internal.originating_claude_code_session =
-            Some(payload.originating_claude_code_session());
-        // Marks this as routectl's own background traffic. It changes nothing
-        // about the bytes sent -- the classification above still drives the
-        // beta floor and the cloak transform -- and excludes the probe from
-        // the egress's CLIENT-traffic classification census, which exists to
-        // report what clients send.
-        req.routectl_internal.background_probe = true;
-        super::field_repair::apply_probe_payload(&mut req, payload);
-        req
     }
 
     /// Record that `key`'s free validation is exhausted, making the paid
@@ -712,3 +653,78 @@ pub(super) fn with_record_park<R>(park: impl Fn() + 'static, body: impl FnOnce()
 /// the smallest body that makes the call well-formed. A constant so no probe
 /// can carry caller text.
 const PROBE_MESSAGE_TEXT: &str = "ping";
+
+/// Build a probe body: the seat's UPSTREAM wire model, one minimal user
+/// message, the closed-table field under test, and the captured beta context.
+///
+/// THE one builder for both probe classes -- the free count-token validator and
+/// the paid completion -- because the two must ask the SAME question of the same
+/// lane. Two builders would let one class drift into a different envelope, and
+/// the paid class's whole value is that its rejection is comparable to the free
+/// class's.
+///
+/// The field is what makes this a probe rather than a token count. A body
+/// without it is accepted by any healthy lane regardless of the capability, so
+/// its absence would make a validator answer `Settled` for a question it never
+/// asked. The wire id rather than the nickname because this request goes
+/// straight to the provider, past the alias/model resolution that would
+/// otherwise translate it.
+///
+/// The betas are REAPPLIED to both carriers the egress reads, so the probe
+/// travels under the same effective `anthropic-beta` header the admitted
+/// request was about to send. Without them a beta-gated field would be rejected
+/// for the missing flag, and that rejection would be read as evidence about the
+/// field.
+///
+/// `max_tokens` is the one axis the two classes differ on, so it is a
+/// PARAMETER rather than a second function. `Some(n)` is the paid class's
+/// catalog-derived allowance, and it is set BEFORE `apply_probe_payload`
+/// deliberately: that call fills a free-path default wherever `max_tokens` is
+/// absent, so a derived allowance applied afterwards would be overwritten and
+/// the whole derivation would be inert. `None` is the free class, which has no
+/// derivation and takes that default.
+pub(super) fn build_probe_request(
+    seat: &super::probe_seat::ProbeSeat,
+    payload: &crate::probe_scheduler::ProbePayload,
+    max_tokens: Option<u32>,
+) -> routectl_core::ChatRequest {
+    let mut req = routectl_core::ChatRequest {
+        model: seat.upstream.clone(),
+        messages: vec![routectl_core::Message {
+            role: routectl_core::Role::User,
+            content: routectl_core::MessageContent::Text(PROBE_MESSAGE_TEXT.to_string()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }]
+        .into(),
+        anthropic_beta: payload.client_betas().to_vec(),
+        max_tokens,
+        ..Default::default()
+    };
+    // Each source back onto ITS OWN carrier. The egress filters
+    // `anthropic_beta` through `allowed_betas` and exempts `operator_betas`, so
+    // crossing them over would either smuggle a filtered client flag past the
+    // allowlist or subject an operator-pinned flag to it -- either way the
+    // probe's header would differ from the one under test.
+    req.routectl_internal.operator_betas = payload.operator_betas().to_vec();
+    // The originating Claude-Code classification, so the egress makes the same
+    // `is_non_cc` call (and so applies or suppresses the CC beta floor
+    // identically) for a body that carries no session capture of its own.
+    req.routectl_internal.originating_claude_code_session =
+        Some(payload.originating_claude_code_session());
+    // Marks this as routectl's own background traffic. It changes nothing about
+    // the bytes sent -- the classification above still drives the beta floor and
+    // the cloak transform -- and excludes the probe from the egress's
+    // CLIENT-traffic classification census, which exists to report what clients
+    // send.
+    req.routectl_internal.background_probe = true;
+    // LAST, and after `max_tokens` is already set: this fills the free path's
+    // default only where the field is absent, so a caller-supplied allowance
+    // survives it.
+    super::field_repair::apply_probe_payload(&mut req, payload);
+    req
+}
