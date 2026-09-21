@@ -460,7 +460,29 @@ pub(super) fn remote_router_with_lanes_and_paid_cap(
 /// recorded, which is the fail-closed default rather than a defect --
 /// `a_zero_cap_router_records_no_candidate` pins that direction.
 pub(super) fn remote_router_with_paid_cap(provider: Arc<dyn Provider>, cap: u32) -> Router {
-    let mut router = router_on_base("https://api.anthropic.com", provider);
+    with_paid_cap(router_on_base("https://api.anthropic.com", provider), cap)
+}
+
+/// `remote_router_with_model_beta` plus a non-zero paid-probe daily cap.
+///
+/// Both halves are needed by the candidate-retention test: the beta floor gives
+/// the captured payload a non-default OPERATOR source to retain (an all-empty
+/// payload would compare equal to a freshly built one whether retention worked
+/// or not), and the cap is what lets an exhausted plan record a candidate at
+/// all.
+pub(super) fn remote_router_with_model_beta_and_paid_cap(
+    provider: Arc<dyn Provider>,
+    beta: &str,
+    cap: u32,
+) -> Router {
+    with_paid_cap(remote_router_with_model_beta(provider, beta), cap)
+}
+
+/// Install `cap` as `p1`'s paid-probe daily cap on an already-built router.
+///
+/// One writer for the fidelity knob, so the three fixtures above cannot drift
+/// on which provider key the cap lands under.
+fn with_paid_cap(mut router: Router, cap: u32) -> Router {
     let mut config = (*router.config).clone();
     config
         .fidelity

@@ -22,16 +22,32 @@ use routectl_router::Router;
 /// first means every request that can reach the new router already sees the new
 /// incarnation.
 ///
+/// The ordering is enforced by the ROUTER, not by this function: the store is
+/// passed to `publish_probe_incarnation_into` as a callback, which stamps and
+/// then invokes it before returning. So a future edit here cannot reorder the two
+/// or drop the store -- the protocol owns that, rather than this call site
+/// remembering it. The callback shape is also what keeps the router crate free of
+/// any dependency on the swap primitive used here.
+///
+/// SYNCHRONOUS, and deliberately: nothing in publication waits on a paid probe.
+/// An in-flight paid authorization orders itself against this by re-reading the
+/// shared publication generation immediately before its ledger call and again on
+/// the acknowledgement, so it abandons itself rather than this path waiting for
+/// it. A blocking design would let a slow, saturated, or wedged accounting layer
+/// hold a reload open.
+///
 /// Safe to stamp before the swap because a caller only reaches here at its
 /// COMMIT POINT: every failure and abandonment path has already returned, so
 /// the previous router is not staying live.
 pub(super) fn publish_router(router_swap: &Arc<ArcSwap<Router>>, router: Arc<Router>) {
-    let retired_probes = router.publish_probe_incarnation();
+    let router_swap = Arc::clone(router_swap);
+    let retired_probes = router.publish_probe_incarnation_into(move |published| {
+        router_swap.store(published);
+    });
     if retired_probes > 0 {
         tracing::debug!(
             retired_probe_jobs = retired_probes,
             "probe scheduler incarnation advanced before router publication",
         );
     }
-    router_swap.store(router);
 }

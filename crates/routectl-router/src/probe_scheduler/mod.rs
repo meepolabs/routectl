@@ -80,6 +80,7 @@
 //! the code in this module, so both are named here rather than left to be
 //! discovered.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -87,11 +88,17 @@ use parking_lot::Mutex;
 use crate::field_verdict::FieldVerdictKey;
 
 mod bounds;
+mod lease;
+mod paid_slot;
 mod payload;
+mod schedule;
 mod vocab;
 
 // The module's flat surface: every consumer names `probe_scheduler::X`, so the
-// three-file split inside is an organizing choice rather than a new API shape.
+// file split inside is an organizing choice rather than a new API shape.
+pub use lease::{ProbeLease, ReleaseOutcome};
+pub use paid_slot::PaidProbeSlot;
+
 pub use bounds::{
     PROBE_MAX_ATTEMPTS, PROBE_MAX_CONCURRENCY, PROBE_MAX_DEFERRALS, PROBE_OPERATION_TIMEOUT,
     PROBE_PAYLOAD_REFUSED_EVENT, PROBE_QUEUE_DEPTH, PROBE_TOMBSTONE_CAPACITY,
@@ -198,6 +205,14 @@ struct SchedulerInner {
     /// tracked, activated, or retried.
     retired_below: u64,
     next_lease_seq: u64,
+    /// Paid-probe slots held right now, counted in the SAME `in_flight`
+    /// reading the free-lease ceiling and the snapshot read.
+    ///
+    /// A `usize` under the one scheduler lock rather than an atomic, so
+    /// "check the ceiling and take the slot" is one critical section -- two
+    /// concurrent acquisitions reading an atomic ceiling could both see room
+    /// and both take the last slot.
+    paid_slots_held: usize,
     counters: ProbeSchedulerSnapshot,
 }
 
@@ -210,118 +225,16 @@ impl SchedulerInner {
         self.jobs.iter().filter(|job| matcher(job.phase)).count()
     }
 
+    /// Everything occupying a concurrency slot right now: leased free jobs
+    /// PLUS held paid slots.
+    ///
+    /// ONE reading, deliberately. The free-lease ceiling, the snapshot's
+    /// `in_flight`, and the paid acquisition all read this, so a paid slot
+    /// displaces a free lease and vice versa -- which is what makes
+    /// [`PROBE_MAX_CONCURRENCY`] a bound on real simultaneous background work
+    /// rather than on one of its two kinds.
     fn in_flight(&self) -> usize {
-        self.count_phase(|phase| matches!(phase, JobPhase::InFlight))
-    }
-
-    /// Back the job off WITHOUT charging an attempt.
-    ///
-    /// For an outcome where no question was asked: the gate deferred before any
-    /// dial. Charging an attempt would make a lane that is merely unavailable
-    /// right now indistinguishable from one that is failing, and with
-    /// [`PROBE_MAX_ATTEMPTS`] at three, three deferrals would ABANDON and
-    /// TOMBSTONE the identity -- permanently, for the incarnation -- over a
-    /// breaker that had simply not finished recovering. The attempt budget
-    /// exists to bound repeated ANSWERS, not repeated non-answers.
-    ///
-    /// Still bounded on every other axis: the job holds one queue slot it
-    /// already held, releases its concurrency slot, and cannot re-lease until
-    /// the backoff elapses. The backoff is computed from the attempt count as
-    /// usual, so a job deferred at attempt zero waits the base interval rather
-    /// than spinning. Retirement and shutdown remain authoritative -- both drop
-    /// the job outright regardless of phase.
-    ///
-    /// OCCUPANCY is bounded separately: at [`PROBE_MAX_DEFERRALS`] the job is
-    /// EVICTED and its queue slot released, so no single activation can hold a
-    /// slot for a whole incarnation. Eviction does NOT tombstone -- the
-    /// identity was never answered,
-    /// so later real traffic on a recovered lane is free to activate it again.
-    /// Returning capacity is not the same as granting priority: continuous
-    /// reactivation of an unprobeable lane can keep re-acquiring a slot.
-    ///
-    /// The eviction is observable through `deferral_evictions_total` rather
-    /// than returned: no caller varies its behavior on it.
-    fn defer_without_charging_attempt(&mut self, index: usize, now: Instant) {
-        let job = &mut self.jobs[index];
-        job.deferrals = job.deferrals.saturating_add(1);
-        if job.deferrals >= PROBE_MAX_DEFERRALS {
-            self.jobs.swap_remove(index);
-            self.counters.deferral_evictions_total += 1;
-            return;
-        }
-        job.phase = JobPhase::BackingOff {
-            due_at: now + backoff_for_attempt(job.attempts.saturating_add(1)),
-        };
-    }
-
-    /// Bump `attempts` and either back the job off or abandon it at the
-    /// attempt cap. The single place a retry is scheduled, so no path can
-    /// schedule an unbounded one.
-    fn reschedule_or_abandon(&mut self, index: usize, now: Instant) {
-        let job = &mut self.jobs[index];
-        job.attempts = job.attempts.saturating_add(1);
-        if job.attempts >= PROBE_MAX_ATTEMPTS {
-            let key = job.key.clone();
-            let generation = job.generation;
-            self.jobs.swap_remove(index);
-            self.counters.abandoned_total += 1;
-            // Terminal for this incarnation: an identity that spent its
-            // whole attempt budget must not be re-queued by the next
-            // admitted request, or a failing lane re-enters the queue on
-            // every burst of traffic.
-            self.tombstone(key, generation);
-            return;
-        }
-        job.phase = JobPhase::BackingOff {
-            due_at: now + backoff_for_attempt(job.attempts),
-        };
-    }
-
-    /// Record a terminal marker for `key` at `generation`.
-    ///
-    /// Bounded by [`PROBE_TOMBSTONE_CAPACITY`] and idempotent. When capacity
-    /// is exhausted the marker cannot
-    /// be stored, and DROPPING it would fail OPEN: the identity would be
-    /// re-activatable on the next admitted request, which is exactly the
-    /// re-ask loop tombstones exist to stop. So an overflow raises an
-    /// incarnation-level SATURATION marker instead, and while that is set no
-    /// identity may activate until retirement clears it. Refusing work is
-    /// the safe direction; re-probing a settled question on every burst of
-    /// traffic is not.
-    fn tombstone(&mut self, key: FieldVerdictKey, generation: u64) {
-        if let Some(existing) = self.tombstones.iter_mut().find(|(k, _)| *k == key) {
-            existing.1 = existing.1.max(generation);
-            return;
-        }
-        if self.tombstones.len() >= PROBE_TOMBSTONE_CAPACITY {
-            // ONE line per saturation EPISODE: once saturated, every later
-            // terminal settlement overflows too, so a line each would flood
-            // exactly when the daemon is busiest. The counter carries the
-            // volume; the line is the existence proof.
-            //
-            // Keyed on the marker being ABSENT rather than on the incarnation
-            // differing. The two are currently equivalent -- activation
-            // refuses every generation at or below a set marker, so no new job
-            // queues and every queued job carries the saturating generation,
-            // while a publication always draws a greater one and clears the
-            // marker -- but absence states the intent directly and cannot
-            // diverge if those surrounding invariants change.
-            let first_of_episode = self.tombstone_saturated_at.is_none();
-            self.tombstone_saturated_at = Some(
-                self.tombstone_saturated_at
-                    .map_or(generation, |existing: u64| existing.max(generation)),
-            );
-            self.counters.tombstone_saturations_total += 1;
-            if first_of_episode {
-                tracing::warn!(
-                    capacity = PROBE_TOMBSTONE_CAPACITY,
-                    tombstone_saturations_total = self.counters.tombstone_saturations_total,
-                    "{PROBE_TOMBSTONE_SATURATED_EVENT}",
-                );
-            }
-            return;
-        }
-        self.tombstones.push((key, generation));
+        self.count_phase(|phase| matches!(phase, JobPhase::InFlight)) + self.paid_slots_held
     }
 }
 
@@ -450,15 +363,14 @@ impl ProbeScheduler {
         let validator = job.validator().expect("checked in the predicate above");
         job.phase = JobPhase::InFlight;
         job.lease_seq = lease_seq;
-        Some(ProbeLease {
-            scheduler: self,
-            key: job.key.clone(),
-            payload: job.payload.clone(),
-            generation: job.generation,
+        Some(ProbeLease::new(
+            self,
+            job.key.clone(),
+            job.payload.clone(),
+            job.generation,
             validator,
             lease_seq,
-            settled: false,
-        })
+        ))
     }
 
     /// Retire every generation below `generation`: drop each job from a
@@ -505,7 +417,27 @@ impl ProbeScheduler {
             inner.tombstone_saturated_at = None;
         }
         let before = inner.jobs.len();
-        inner.jobs.retain(|job| job.generation >= generation);
+        // RETIRE THE IDLE ROWS, KEEP THE IN-FLIGHT ONES.
+        //
+        // A queued or backing-off row holds nothing: dropping it frees its queue
+        // slot and cancels work that had not started. An IN-FLIGHT row is
+        // different -- a real upstream operation is running right now, and its
+        // `ProbeLease` is what will end it. Dropping the row here would make
+        // `in_flight()` stop counting an operation that is still consuming
+        // upstream concurrency, so the very next `lease_due` or
+        // `try_acquire_paid_slot` would admit work on top of it and the real
+        // simultaneous load would exceed `PROBE_MAX_CONCURRENCY` with no counter
+        // showing it. A reload is exactly when that happens, because retirement
+        // and live probe work coincide.
+        //
+        // The retained row is NOT leasable: `lease_due`'s predicate already
+        // refuses any job below `retired_below`, and this raised that floor
+        // above it. So the row's only remaining function is to hold its slot
+        // until its lease settles or drops, at which point `release` finds it
+        // retired and sweeps it (see the stale arm there).
+        inner
+            .jobs
+            .retain(|job| job.generation >= generation || matches!(job.phase, JobPhase::InFlight));
         let cancelled = before - inner.jobs.len();
         inner.counters.retired_total += cancelled as u64;
         cancelled
@@ -513,18 +445,103 @@ impl ProbeScheduler {
 
     /// Cancel every tracked job, for shutdown. Returns how many were
     /// cancelled. Outstanding operations settle as stale.
+    ///
+    /// Clears IN-FLIGHT rows too, unlike [`Self::retire_before`], and the
+    /// asymmetry is deliberate: a retirement is followed by a replacement router
+    /// that keeps admitting work, so an uncounted live operation would let that
+    /// router over-subscribe. At shutdown nothing will be admitted again, so
+    /// there is no later admission for an under-count to mislead -- and the
+    /// caller is on the way out and must not wait on an upstream.
+    /// TEST-ONLY since the shutdown path began raising the floor atomically:
+    /// production takes [`Self::cancel_all_and_retire_to`], and the tests that
+    /// drive cancellation MECHANICS (an outstanding lease settling as stale, the
+    /// in-flight-row asymmetry against retirement) want the sweep without a
+    /// lifecycle generation around it. Gated rather than blanket-allowed, so a
+    /// future production caller has to ungate it deliberately -- and would then
+    /// have to justify sweeping without moving the floor.
+    #[cfg(test)]
     pub fn cancel_all(&self) -> usize {
+        self.cancel_all_and_retire_to(0)
+    }
+
+    /// Cancel every tracked job AND raise the retirement floor to `generation`,
+    /// in ONE critical section.
+    ///
+    /// THE shutdown entry point, and the atomicity is the whole reason it exists
+    /// as one call. Clearing alone leaves the floor where it was, so an activation
+    /// racing the shutdown -- admitted traffic on a router still carrying the OLD
+    /// generation, which no shutdown restamps -- would be accepted by a scheduler
+    /// that had just been swept, re-arming work nothing will ever run. Raising the
+    /// floor to the terminal generation inside the same lock refuses every such
+    /// activation instead, because no router is or ever will be stamped with it.
+    ///
+    /// Two separate calls could not close that window from outside: between them
+    /// an activation would observe a cleared table and an unraised floor, which is
+    /// precisely the admitting state.
+    ///
+    /// `generation` of `0` leaves the floor untouched, which is what the
+    /// test-only `cancel_all` passes -- the tests that drive cancellation
+    /// mechanics without a lifecycle around them want the sweep and nothing more.
+    /// A plain code span rather than an intra-doc link because that item is
+    /// `cfg(test)` and so does not exist in a docs build.
+    pub fn cancel_all_and_retire_to(&self, generation: u64) -> usize {
         let mut inner = self.inner.lock();
         let cancelled = inner.jobs.len();
         inner.jobs.clear();
         inner.tombstones.clear();
         inner.tombstone_saturated_at = None;
+        if generation > inner.retired_below {
+            inner.retired_below = generation;
+        }
         inner.counters.retired_total += cancelled as u64;
         cancelled
     }
 
-    /// Raise the retirement floor WITHOUT sweeping the table.
+    /// Take one PAID concurrency slot, or `None` at the ceiling.
     ///
+    /// Checked against the SAME [`PROBE_MAX_CONCURRENCY`] reading
+    /// [`Self::lease_due`] refuses at, inside one critical section, so a paid
+    /// slot and a free lease compete for one pool of background concurrency.
+    /// See `paid_slot` for why that is the bound rather than a paid counter of
+    /// its own.
+    ///
+    /// Acquired BEFORE the reservation await, not after: a slot taken after the
+    /// commit would leave the awaiting window uncounted, and the ceiling would
+    /// bound only the part of a paid call that is cheapest to bound.
+    ///
+    /// Takes `&Arc<Self>` because the returned guard OUTLIVES this call -- it
+    /// travels inside the authorization -- so it owns a refcount rather than
+    /// borrowing the scheduler the way a free lease does.
+    pub fn try_acquire_paid_slot(self: &Arc<Self>) -> Option<PaidProbeSlot> {
+        let mut inner = self.inner.lock();
+        if inner.in_flight() >= PROBE_MAX_CONCURRENCY {
+            inner.counters.paid_slot_refusals_total += 1;
+            return None;
+        }
+        inner.paid_slots_held += 1;
+        drop(inner);
+        Some(PaidProbeSlot::new(Arc::clone(self)))
+    }
+
+    /// Give one paid slot back. Called ONLY by [`PaidProbeSlot`]'s `Drop`, so
+    /// no path can release a slot it does not hold.
+    ///
+    /// Saturating rather than a bare decrement: an underflow here would wrap to
+    /// `usize::MAX` and permanently refuse every later lease and acquisition,
+    /// which is a worse failure than the impossible double release it would be
+    /// reporting.
+    ///
+    /// MODULE-PRIVATE, which is the narrowest visibility that compiles: a
+    /// private item is visible to its module's DESCENDANTS, and the only caller
+    /// is `paid_slot`'s `Drop`. Anything wider would let a sibling module forge
+    /// a release for a slot it never took, which reads as free capacity while
+    /// the real work is still running.
+    fn release_paid_slot(&self) {
+        let mut inner = self.inner.lock();
+        inner.paid_slots_held = inner.paid_slots_held.saturating_sub(1);
+    }
+
+    /// Raise the retirement floor WITHOUT sweeping the table.    ///
     /// TEST-ONLY. Reproduces the window between raising the floor and
     /// sweeping, which is the state the per-lease generation check exists
     /// for: `retire_before` does both, so nothing else can construct a
@@ -580,6 +597,11 @@ impl ProbeScheduler {
     /// cancelled at shutdown, or already settled and re-leased -- is
     /// STALE: it is counted, releases nothing, and schedules nothing, so
     /// no work is ever queued against retired state.
+    ///
+    /// MODULE-PRIVATE, like `release_paid_slot`: the only callers are `lease`'s
+    /// `settle` and its `Drop`, both descendants of this module, so a private
+    /// item already reaches them. Wider visibility would let a sibling settle a
+    /// lease it does not hold, freeing a slot whose operation is still running.
     fn release(
         &self,
         key: &FieldVerdictKey,
@@ -599,6 +621,27 @@ impl ProbeScheduler {
             }
         };
         if stale {
+            inner.counters.stale_settlements_total += 1;
+            return ReleaseOutcome::Stale;
+        }
+        // A RETIRED ROW REACHING ITS SETTLEMENT: swept here, and this is the only
+        // place that can sweep it. `retire_before` deliberately KEEPS an
+        // in-flight row so its live upstream operation keeps occupying a
+        // concurrency slot across a reload; that row's remaining function ends
+        // exactly now, when the lease it was holding the slot for settles or
+        // drops.
+        //
+        // Reported STALE rather than settled, which is the same answer a caller
+        // would have got had the row been dropped at retirement: the settlement
+        // must not reschedule a retired job, must not tombstone into a retired
+        // incarnation, and must not report a spent free step that could publish a
+        // paid candidate describing router state that no longer serves.
+        let retired_below = inner.retired_below;
+        if let Some(index) = inner.position(key)
+            && inner.jobs[index].generation < retired_below
+        {
+            inner.jobs.swap_remove(index);
+            inner.counters.retired_total += 1;
             inner.counters.stale_settlements_total += 1;
             return ReleaseOutcome::Stale;
         }
@@ -652,131 +695,6 @@ impl ProbeScheduler {
             }
         }
         ReleaseOutcome::Committed { free_spent: false }
-    }
-}
-
-/// What one [`ProbeScheduler::release`] did.
-///
-/// `free_spent` is reported by the scheduler rather than decided by the
-/// caller because only the settling critical section can know it: it is the
-/// answer to "did advancing the cursor run the plan out", and the cursor is
-/// shared state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReleaseOutcome {
-    /// The settlement did not apply: a retired or cancelled job, or one
-    /// already settled and re-leased. Nothing was mutated or scheduled.
-    Stale,
-    /// The settlement applied.
-    Committed {
-        /// `true` when this settlement spent the LAST free step, so the paid
-        /// class is now a candidate for this identity. Only a
-        /// [`ProbeSettlement::SpentFreeStep`] that ran the plan out sets it.
-        free_spent: bool,
-    },
-}
-
-impl ReleaseOutcome {
-    /// Whether the settlement applied against current state.
-    ///
-    /// Test-only: the production worker keys on
-    /// [`Self::exhausted_free_plan`], which already implies commitment, so a
-    /// separate commitment read has no production caller. The tests need it
-    /// to tell "did not commit" from "committed but spent no step" -- two
-    /// outcomes the stronger predicate cannot distinguish.
-    #[cfg(test)]
-    #[must_use]
-    pub const fn committed(self) -> bool {
-        matches!(self, Self::Committed { .. })
-    }
-
-    /// Whether this settlement spent the last free step in the plan.
-    #[must_use]
-    pub const fn exhausted_free_plan(self) -> bool {
-        matches!(self, Self::Committed { free_spent: true })
-    }
-}
-
-/// RAII lease over one in-flight probe slot.
-///
-/// [`settle`](Self::settle) is the only way to record an outcome. Dropping
-/// the guard unsettled -- an early return, a `?`, a cancelled future, a
-/// shutdown -- releases the slot on the same terms, so there is no call
-/// site that can forget to.
-#[derive(Debug)]
-pub struct ProbeLease<'a> {
-    scheduler: &'a ProbeScheduler,
-    key: FieldVerdictKey,
-    payload: ProbePayload,
-    generation: u64,
-    validator: ProbeValidator,
-    lease_seq: u64,
-    settled: bool,
-}
-
-impl ProbeLease<'_> {
-    /// The identity this lease runs a probe for.
-    #[must_use]
-    pub const fn key(&self) -> &FieldVerdictKey {
-        &self.key
-    }
-
-    /// The router generation the leased job was activated at. Carried so
-    /// every observation a probe produces is stamped with the generation
-    /// that selected it, never a freshly sampled one.
-    #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// The validator class this lease runs.
-    #[must_use]
-    pub const fn validator(&self) -> ProbeValidator {
-        self.validator
-    }
-
-    /// The bounded capability payload this job was activated with.
-    #[must_use]
-    pub const fn payload(&self) -> &ProbePayload {
-        &self.payload
-    }
-
-    /// Settle the lease at `now`, releasing the slot.
-    ///
-    /// The returned [`ReleaseOutcome`] carries both facts a caller needs and
-    /// neither can derive itself: whether the settlement COMMITTED against
-    /// current state, and whether it spent the plan's last free step. A
-    /// caller may only publish a consequence of the settlement (a paid
-    /// candidate, say) after it commits, or a lease settling into a scheduler
-    /// that no longer tracks it would leave a candidate describing retired
-    /// router state.
-    #[must_use]
-    pub fn settle(mut self, settlement: ProbeSettlement, now: Instant) -> ReleaseOutcome {
-        self.settled = true;
-        self.scheduler.release(
-            &self.key,
-            self.generation,
-            self.lease_seq,
-            Some(settlement),
-            now,
-        )
-    }
-}
-
-impl Drop for ProbeLease<'_> {
-    fn drop(&mut self) {
-        if !self.settled {
-            // No clock is available on a drop path, so the backoff is
-            // measured from now. A drop is a cancellation, not a result:
-            // the only thing that matters is that the slot comes back and
-            // the job cannot immediately re-lease.
-            let _outcome = self.scheduler.release(
-                &self.key,
-                self.generation,
-                self.lease_seq,
-                None,
-                Instant::now(),
-            );
-        }
     }
 }
 
