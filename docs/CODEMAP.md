@@ -5294,6 +5294,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   drops the run future and every in-flight validator future with it; awaiting
   would hold the graceful drain for a whole per-operation timeout. Both selects
   are `biased` with the shutdown arm first, pinned by a source guard.
+- `src/server/paid_probe_ledger.rs` -- bridges the router's paid-probe budget
+  seam to the usage writer, plus `install_paid_probe_ledger` (boot-time).
+  Tests: `paid_probe_ledger_tests.rs` + its lifetime / wiring `include!` sidecars
 - `src/server/router_publish.rs` -- `publish_router`, the publication step every
   reload path shares. STAMPS the replacement's probe incarnation and retires the
   outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
@@ -5312,10 +5315,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/metrics_driver.rs` -- the periodic router-metrics snapshot driver
   and its `ROUTER_METRICS_SNAPSHOT_INTERVAL`; flushes once more at shutdown so a
   session shorter than one interval still surfaces its totals
-- `src/server/reload_shutdown.rs` -- `await_reload_tasks` and the bounded
-  per-task `RELOAD_TASK_SHUTDOWN_DEADLINE`: awaiting (not merely dropping) each
-  reload-side handle is what releases the coordinator's `UsageHandle` clone
-  before the usage drain begins
+- `src/server/reload_shutdown.rs` -- `await_reload_tasks` and
+  `RELOAD_TASK_SHUTDOWN_DEADLINE`: the ownership barrier that aborts and awaits
+  an overrunning reload task. Tests in `reload_shutdown_tests.rs`
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
   splits into `parse_config_only` (version + legacy-mitm preflight + typed
@@ -7388,6 +7390,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +
   credentials.json and polls for the live `Router` swap
+- `tests/serve_shutdown.rs` -- real-binary graceful-shutdown integration test;
+  signals and reaps a hermetic child process
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the

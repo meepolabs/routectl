@@ -412,6 +412,18 @@ pub async fn serve_on_listener_with_secrets(
     );
 
     let max_body_bytes = compute_max_body_bytes(&config);
+    // The paid-budget seam, installed on the OWNED Router: after the writer
+    // exists (the adapter carries a producer handle, so there has to be a writer
+    // to carry one of) and before publication (the installation is a consuming
+    // builder, which is what keeps it at boot rather than behind a shared Arc).
+    //
+    // Installed HERE and nowhere else. Neither reload path installs its own:
+    // `Router::carry_over_learned_from` attaches this one to every replacement,
+    // because a committed unit is never refunded and two installations would be
+    // two day budgets whose overspend cannot be undone. Every Router built
+    // outside this boot -- a library embedder's, a test's -- carries none and is
+    // fail closed by construction.
+    let router = super::paid_probe_ledger::install_paid_probe_ledger(router, &usage_handle);
     let router_swap = Arc::new(ArcSwap::from_pointee(router));
 
     // Compute the initial activation inventory and SEED its ArcSwap before
@@ -540,17 +552,41 @@ pub async fn serve_on_listener_with_secrets(
     // Graceful-shutdown ordering matters for a clean usage drain. The
     // writer thread exits only when its mpsc channel closes, i.e. when
     // EVERY `UsageHandle` clone (each holding a sender) is dropped and
-    // the writer's own sender is closed. Two clones outlive the server
-    // loop: the one inside `AppState` (already gone -- `app` consumed it
-    // above) and the one the reload coordinator task carries. So:
+    // the writer's own sender is closed. Three clones outlive the server
+    // loop: the one inside `AppState` (gone with `app`, which the serve
+    // future consumed, once every connection task holding a clone of it has
+    // ended), the one the reload coordinator task carries, and the one the
+    // Router's paid-probe accounting adapter holds. So:
     //   1. server stopped accepting (above),
     //   2. signal the reload-side tasks to stop,
-    //   3. AWAIT them so the coordinator's `UsageHandle` clone is dropped,
-    //   4. THEN drain -- at which point the only remaining sender is the
-    //      one inside `usage_writer`, so closing it lets the thread
-    //      drain-and-exit well within its bounded deadline.
+    //   3. AWAIT them -- a barrier, not a wait: `await_reload_tasks` cancels
+    //      and awaits the cancellation of any task that overruns its deadline,
+    //      so past this line no reload-side task holds a `UsageHandle` clone or
+    //      reads the published Router,
+    //   4. release the published Router, which drops the accounting adapter,
+    //   5. THEN drain.
+    //
+    // ON THE CLEAN PATH step 4 releases the LAST producer clone, so the drain
+    // closes the channel and the writer exits promptly. It is not the only
+    // path: when the bounded drain above abandoned in-flight requests at its
+    // deadline, the connection tasks still running hold `AppState` clones this
+    // sequence cannot reach, and the same is true of any other bounded
+    // degradation that leaves work detached. Those shutdowns fall back to the
+    // writer's own abandon deadline -- at-most-once durability, as documented
+    // on `UsageWriter::shutdown` -- which is the reason that deadline exists
+    // and the reason this ordering is a latency property rather than a
+    // correctness one.
     let _ = shutdown_tx.send(());
     await_reload_tasks(reload_handles).await;
+
+    // The published Router goes HERE: after the barrier above (which is what
+    // makes this the last reachable holder) and before the drain. The
+    // accounting adapter it carries holds a producer clone of the writer's
+    // channel, so a drain that ran first would wait out its whole abandon
+    // deadline on a handle nothing is going to use again -- turning every
+    // shutdown into a multi-second stall. Dropped rather than left to scope end
+    // for exactly that reason, which is why the ordering carries a test.
+    drop(router_swap);
 
     // Purge settlements are awaited HERE: after the server stopped accepting (so
     // no new ones start) and BEFORE the writer drains (because each in-flight
