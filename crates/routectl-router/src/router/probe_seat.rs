@@ -20,6 +20,43 @@ pub(super) struct ProbeSeat {
     /// The seat's wire model id.
     pub(super) upstream: String,
     pub(super) provider: std::sync::Arc<dyn routectl_core::Provider>,
+    /// The CONFIGURED kind of this seat's `[providers]` entry, or `None` when no
+    /// entry exists.
+    ///
+    /// A `&'static str` from the entry's own discriminant rather than operator
+    /// text, and read from the operator's entry rather than a dispatch target --
+    /// the probe stages have none. Needed because a serializer-specific decision
+    /// (which wire shape's minimum output allowance applies) is only meaningful
+    /// for the lane whose serializer it describes.
+    pub(super) provider_kind: Option<&'static str>,
+    /// Whether the resolved model this seat belongs to serializes the ADAPTIVE
+    /// thinking wire shape, copied from the resolved model rather than read
+    /// from config at dial time.
+    ///
+    /// The two wire shapes need different minimum output allowances, so a
+    /// paid-probe body sized against the wrong one is either refused by the
+    /// serializer or larger than the question requires. Copied because the
+    /// resolved table is what the egress itself reads: a config re-read here
+    /// could disagree with the flag the request is actually serialized under.
+    pub(super) supports_adaptive_thinking: bool,
+    /// The resolved model's operator-declared `max_output_tokens` ceiling, `0`
+    /// meaning no override (the production sentinel).
+    ///
+    /// Carried because it binds the same request a paid body would be sized as,
+    /// so a viability decision reading only the catalog's ceiling could admit an
+    /// allowance the operator capped below. Copied off the resolved model for
+    /// the same reason as the flag above: the resolved table is what the egress
+    /// itself reads.
+    pub(super) configured_output_ceiling: u32,
+    /// The resolved model's two-layer catalog merge, as stamped at chain-build
+    /// time.
+    ///
+    /// The ROW rather than any digest of it, because the row is what states
+    /// whether this cell is priced at all -- and that question, not a
+    /// provider-name table, is what decides whether a paid body may be sized.
+    /// Cloned once per seat resolution, which happens once per probe decision
+    /// rather than per request.
+    pub(super) effective_row: crate::catalog::EffectiveRow,
 }
 
 impl Router {
@@ -87,40 +124,127 @@ impl Router {
     ///
     /// The pooled key is resolved by RE-COMPOSING each candidate through
     /// `SeatTarget::state_key_for` and comparing, rather than by splitting the
-    /// key on `#`. Splitting requires knowing which `#` is the separator, and
-    /// neither choice is sound: `split_once` mis-parses a nickname containing
-    /// `#`, `rsplit_once` mis-parses a label containing one, and nothing in the
-    /// config grammar forbids either (see `seat_pool::seat_state_key`'s own
-    /// collision note). Comparing against the composer's output is correct for
-    /// every key the composer can produce, whatever it contains, and needs no
-    /// new validation.
+    /// key on the separator. Splitting requires knowing which separator
+    /// occurrence divides the two halves, and neither choice is sound:
+    /// `split_once` mis-parses a nickname containing one, `rsplit_once`
+    /// mis-parses a label containing one, and nothing in the config grammar
+    /// forbids either (see `seat_pool::seat_state_key`'s own collision note).
+    ///
+    /// RECOMPOSITION IS NOT INJECTIVE, so comparing is only sound together with
+    /// a UNIQUENESS requirement -- and the candidates it must be unique across
+    /// are of TWO kinds, not one:
+    ///
+    /// - a DIRECT hit, where the key is a `[models]` nickname outright;
+    /// - a POOLED match, where some (model, member) pair recomposes to the key.
+    ///
+    /// Two pooled pairs can collide with each other (model `a` with member `b#c`
+    /// and model `a#b` with member `c` both compose `a#b#c`), and a direct
+    /// nickname can collide with a pooled pair (a `[models]` entry literally
+    /// named `a#b` alongside model `a`'s member `b`) -- exactly the adversarial
+    /// shape `seat_pool::seat_state_key`'s own collision note describes. Each
+    /// candidate names a DIFFERENT account, so this counts candidates across
+    /// both kinds and answers `None` unless the COMBINED count is exactly one.
+    /// The direct hit deliberately does NOT short-circuit: returning it early
+    /// would silently prefer one account over an equally-valid pooled one
+    /// whenever both exist, which is the same defect as taking the first pooled
+    /// match by map order.
+    ///
+    /// WHICH CONSTRUCTION PATH THIS PROTECTS. Normal factory construction
+    /// already rejects a `#` in a model NICKNAME (`factory::build_resolved_models`
+    /// drops such a model with a stated reason, precisely to keep a nickname from
+    /// colliding with a labeled seat's state key), so a config-built table cannot
+    /// present the nickname half of either collision. But
+    /// `Router::install_resolved_models` is PUBLIC and installs whatever map it
+    /// is handed, performing no such check -- a manually composed table may carry
+    /// nicknames containing the separator. Member names are not filtered for it
+    /// on either path. So the combined exact-one guard is fail-closed protection
+    /// for that construction path rather than a restatement of a factory
+    /// invariant, and it is what keeps a probe decision from depending on which
+    /// path built the table.
+    ///
+    /// SCOPE. This uniqueness holds for THIS resolver's answer only. It does not
+    /// make the wider runtime state-slot namespace collision-free -- a colliding
+    /// pair still shares one breaker and RPM bucket, and nothing here changes
+    /// that or validates it elsewhere. What it guarantees is narrower and is the
+    /// part this stage owns: no probe decision is made against a seat the key
+    /// does not uniquely name. Rejecting the separator globally is not the fix
+    /// either; it is legal in both halves, and a global ban would refuse
+    /// configurations the composer handles correctly.
     pub(super) fn probe_seat_for(&self, key: &FieldVerdictKey) -> Option<ProbeSeat> {
         let state_key = key.probe_state_key();
+        // Both candidate kinds are collected before anything is returned, so the
+        // combined count is what decides. Bounded by the configured model and
+        // seat counts, both small and operator-authored; this runs once per probe
+        // decision, not per request.
+        let mut matched: Option<ProbeSeat> = None;
+        let mut candidates: usize = 0;
+
+        // The DIRECT candidate: the key is a `[models]` nickname. A map key is
+        // unique within the map, so this contributes at most one candidate --
+        // but not necessarily the ONLY one.
         if let Some(model) = self.resolved_models.get(state_key) {
-            // Non-pooled: the state key IS the nickname.
-            return Some(ProbeSeat {
+            candidates += 1;
+            matched = Some(ProbeSeat {
                 provider_name: model.provider_name.clone(),
                 state_key: state_key.to_string(),
                 upstream: model.upstream.clone(),
                 provider: std::sync::Arc::clone(&model.provider),
+                provider_kind: self.probe_provider_kind(&model.provider_name),
+                supports_adaptive_thinking: model.supports_adaptive_thinking,
+                configured_output_ceiling: model.max_output_tokens,
+                effective_row: model.effective_row.clone(),
             });
         }
-        // Pooled. Bounded by the configured model and seat counts, both small
-        // and operator-authored; this runs once per probe dial, not per
-        // request.
-        self.resolved_models.iter().find_map(|(nickname, model)| {
-            let seat = model
-                .seats
-                .as_ref()?
-                .iter()
-                .find(|s| s.state_key_for(nickname) == state_key)?;
-            Some(ProbeSeat {
-                provider_name: seat.provider_name.clone(),
-                state_key: seat.state_key_for(nickname),
-                upstream: model.upstream.clone(),
-                provider: std::sync::Arc::clone(&seat.provider),
-            })
-        })
+
+        // The POOLED candidates: every (model, member) pair whose composed key
+        // equals this one.
+        for (nickname, model) in &self.resolved_models {
+            let Some(seats) = model.seats.as_ref() else {
+                continue;
+            };
+            for seat in seats.iter() {
+                if seat.state_key_for(nickname) != state_key {
+                    continue;
+                }
+                candidates += 1;
+                if candidates > 1 {
+                    // A second candidate of either kind means the key names no
+                    // single account. Refuse rather than choose: the whole point
+                    // of this resolution is that the seat a probe reaches is the
+                    // seat its identity names.
+                    return None;
+                }
+                matched = Some(ProbeSeat {
+                    provider_name: seat.provider_name.clone(),
+                    state_key: seat.state_key_for(nickname),
+                    upstream: model.upstream.clone(),
+                    provider: std::sync::Arc::clone(&seat.provider),
+                    provider_kind: self.probe_provider_kind(&seat.provider_name),
+                    // These two facts belong to the MODEL, not to the seat: a
+                    // pool's members share one wire model id, so they share its
+                    // thinking shape and its catalog cell. Reading them off the
+                    // seat would require per-seat copies of one model's facts.
+                    supports_adaptive_thinking: model.supports_adaptive_thinking,
+                    configured_output_ceiling: model.max_output_tokens,
+                    effective_row: model.effective_row.clone(),
+                });
+            }
+        }
+        matched
+    }
+
+    /// The configured provider KIND behind `provider_name`, or `None` when no
+    /// entry exists.
+    ///
+    /// Read off the operator's own `[providers]` entry, the same source
+    /// `probe_entry_is_attributable` reads, so the kind a stage gates on and the
+    /// entry a dial would use cannot describe two different providers. A
+    /// `&'static str` from the entry's own discriminant, never operator text.
+    fn probe_provider_kind(&self, provider_name: &str) -> Option<&'static str> {
+        self.config
+            .providers
+            .get(provider_name)
+            .map(super::super::config::ProviderEntry::kind_str)
     }
 
     /// The configured paid-probe daily cap for the provider behind `key`,

@@ -3080,7 +3080,31 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `probe_entry_is_attributable`, `paid_probe_daily_cap`: which seat an identity
   names and whether a rejection from it is attributable. A pooled identity is
   resolved by RECOMPOSING each candidate member's canonical state key and
-  comparing -- never by splitting on the separator, never seat zero
+  comparing -- never by splitting on the separator, never seat zero. Because
+  recomposition is NOT injective, the resolver counts candidates of BOTH kinds --
+  a DIRECT `[models]` nickname hit and every POOLED (model, member) pair that
+  recomposes to the key -- and returns a seat only when the COMBINED count is
+  exactly one. Two pooled pairs can collide (model `a` + member `b#c` and model
+  `a#b` + member `c` both compose `a#b#c`), and a direct nickname can collide
+  with a pooled pair (a `[models]` entry literally named `p#s` beside model `p`'s
+  member `s`); each names a different credential, so the direct hit deliberately
+  does not early-return. WHICH PATH THIS PROTECTS: normal factory construction
+  already rejects a `#` in a model NICKNAME (`factory::build_resolved_models`
+  drops such a model with a stated reason), so a config-built table cannot present
+  the nickname half of either collision -- but `Router::install_resolved_models` is
+  PUBLIC and installs whatever map it is handed with no such check, so a manually
+  composed table may carry them (member names are filtered on neither path). The
+  guard is therefore fail-closed protection for that construction path, not a
+  restatement of a factory invariant. SCOPE: this is uniqueness of THIS resolver's
+  answer only. It does not make the wider runtime state-slot namespace
+  collision-free -- a colliding pair still shares one breaker and RPM bucket --
+  and nothing here changes or validates that elsewhere. `ProbeSeat` also carries
+  the resolved
+  model's `supports_adaptive_thinking`, its operator `max_output_tokens`, its
+  `effective_row` (the catalog merge stamped at chain-build time), and the
+  configured entry's `kind_str` -- all read off the MODEL or the operator's own
+  entry rather than re-derived at dial time, so no stage can size a body against
+  a shape, a cap, a cell, or a lane the egress does not use
 - `src/router/probe_failure_class.rs` -- `classify_probe_failure` /
   `probe_outcome_for_class`: what a failure class means for the free plan.
   FAILS CLOSED -- transient classes retry, bad-request / auth / context /
@@ -3113,6 +3137,51 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   refusal passes through permitting nothing, saturation authorizes nothing,
   carry-over shares the instance) plus a source guard that the Router half
   constructs no commit
+- `src/router/paid_probe_profile.rs` -- `Router::paid_probe_profile(key) ->
+  Option<PaidProbeProfile>`: whether this build may size a paid-probe body for an
+  identity, and what the smallest viable output allowance is. Read off the
+  RESOLVED MODEL'S OWN `effective_row` through the existing exact
+  seat lookup -- never a provider-name table, never a per-provider spend profile
+  -- so this stage cannot admit a cell the economics view calls unpriced. A
+  profile exists only when the row is Present AND confirms a finite positive
+  input rate, a finite positive output rate, a positive output ceiling, and an
+  effective ceiling at or above the shape's floor; missing, disabled,
+  half-priced, zero, negative, non-finite, absent-ceiling, or below-floor all
+  yield `None`, and an identity naming no resolved model, no live pool member, or
+  a key more than one direct/pooled candidate answers to does too. The EFFECTIVE
+  ceiling is
+  `min(catalog ceiling, configured ceiling)` with the resolved model's
+  `max_output_tokens` sentinel `0` meaning unset: a configured cap LOWERS the
+  ceiling (it binds the same request) but never RAISES it past the catalog's
+  vendor fact. The ceiling is a VIABILITY constraint, not a clamp target: a cell
+  below the floor cannot carry the field at all, so clamping under it would ship
+  an allowance whose serialized body omits the very field the probe asks about.
+  The provider-KIND gate sits at the point the floor is chosen, because both
+  floors describe ONE egress's wire shapes -- another lane's serializer, or an
+  entry a reload removed, gets no profile.
+  `LEGACY_MIN_VIABLE_MAX_TOKENS` (1025) and `ADAPTIVE_MIN_VIABLE_MAX_TOKENS` (1)
+  are properties of the request serializer, welded to it by real
+  `normalize_request` cases rather than duplicated from its private constant.
+  `PaidProbeProfile` is a `Copy` pair (`max_tokens`, `output_ceiling_tokens`)
+  constructible only here, carrying no provider identity and no dollar figure.
+  Pinned by `src/router/paid_probe_profile_tests.rs` (a named case per missing or
+  degenerate fact against a fully-priced control differing in exactly that fact,
+  catalog and configured ceilings at and one below each floor in both
+  precedence directions, NaN / infinity, two executed key collisions -- pooled
+  pair versus pooled pair, and direct nickname versus pooled composed key -- each
+  with single-kind controls in the same fixture router, a non-Anthropic lane with
+  a real Anthropic control, and the real-serializer pair: field present at 1025,
+  whole thinking object absent at 1024, adaptive shape intact at 1). That sidecar
+  is the HOST of two `include!`d fragments, which keeps every file under the size
+  ceiling while leaving each test's fully qualified name unchanged (a second
+  `#[path] mod` would rename them all); the host owns the imports and the fixture
+  builders, and neither fragment carries a top-level `use`:
+  - `src/router/paid_probe_profile_pooled_tests.rs` -- pooled seat resolution:
+    a member's own composed key resolves, both collision shapes refuse, and each
+    single-kind control profiles
+  - `src/router/paid_probe_profile_wire_tests.rs` -- the operator-ceiling
+    precedence cases, the serializer-specific lane gate, and the real
+    `normalize_request` assertions
 - `src/router/probe_test_support.rs` -- shared fixtures for the probe sidecars:
   one `build_router` behind the per-shape wrappers (base URL, breaker
   threshold, RPM limit, lane count, model beta floor, paid cap),
