@@ -426,3 +426,60 @@ fn apply_layered_overlays_preserves_anthropic_thinking_display() {
         );
     }
 }
+
+/// The same per-attempt overlay-rebuild hazard, for the two ORIGIN facts a
+/// background probe carries.
+///
+/// `apply_layered_overlays` rebuilds `routectl_internal` from
+/// `Default::default()` on every dispatch attempt, so a field it does not
+/// explicitly carry resets. Both of these decide behavior that must not change
+/// mid-chain:
+///
+/// - `originating_claude_code_session` drives the Claude-Code beta floor and the
+///   cloak transform. Losing it re-classifies the request on the second attempt,
+///   handing a probe for genuine-CC traffic the floor that traffic suppressed;
+/// - `background_probe` keeps routectl's own traffic out of this lane's
+///   client-traffic statistics. Losing it starts counting the probe as a client
+///   request.
+///
+/// Both failures appear only on a RE-DISPATCH, which is exactly the shape a
+/// single-attempt test cannot see -- hence a direct test on the rebuild.
+#[test]
+fn apply_layered_overlays_preserves_the_probe_origin_facts() {
+    let config = Config::default();
+    let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+        "nick",
+        "test-prov",
+        Arc::new(StubProvider),
+        "claude-x",
+    ));
+    let target = into_one_dispatch_target(model);
+
+    let mut req = req_with_betas(vec![]);
+    req.routectl_internal.originating_claude_code_session = Some(true);
+    req.routectl_internal.background_probe = true;
+    apply_layered_overlays(&config, &target, &mut req);
+
+    assert_eq!(
+        req.routectl_internal.originating_claude_code_session,
+        Some(true),
+        "the originating Claude-Code classification must survive the rebuild",
+    );
+    assert!(
+        req.routectl_internal.background_probe,
+        "the background-probe marker must survive the rebuild",
+    );
+
+    // And the NEGATIVE direction: the rebuild must not invent either fact for
+    // ordinary client traffic, or every request would read as a probe.
+    let mut client = req_with_betas(vec![]);
+    apply_layered_overlays(&config, &target, &mut client);
+    assert_eq!(
+        client.routectl_internal.originating_claude_code_session, None,
+        "client traffic must stay unclassified by this carrier",
+    );
+    assert!(
+        !client.routectl_internal.background_probe,
+        "client traffic must not be marked as a background probe",
+    );
+}

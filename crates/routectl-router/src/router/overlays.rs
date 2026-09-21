@@ -103,7 +103,25 @@ pub(super) fn apply_layered_overlays(
     // it does model.
     let captured_anthropic_thinking_display =
         req.routectl_internal.anthropic_thinking_display.take();
+    // Preserve the ORIGIN facts, for the same reason as the captures above: both
+    // are properties of where the request came from, not per-model knobs, so the
+    // per-attempt rebuild from `Default::default()` must carry them or they
+    // reset.
+    //
+    // `originating_claude_code_session` decides the beta floor and the cloak
+    // transform, so losing it would re-classify a request mid-chain: a probe for
+    // genuine-CC traffic would be handed the floor that traffic suppressed, on
+    // the second chain attempt only. `background_probe` decides whether the
+    // request enters this lane's client-traffic statistics, so losing it would
+    // silently start counting routectl's own traffic as a client's -- again only
+    // on a re-dispatch, which is exactly the shape that escapes a single-attempt
+    // test.
+    let captured_originating_claude_code_session =
+        req.routectl_internal.originating_claude_code_session;
+    let captured_background_probe = req.routectl_internal.background_probe;
     let mut internal = RoutectlInternal::default();
+    internal.originating_claude_code_session = captured_originating_claude_code_session;
+    internal.background_probe = captured_background_probe;
     internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);
     internal.history_reasoning = target.history_reasoning.map(std::convert::Into::into);
     internal.claude_code_headers = captured_claude_code_headers;

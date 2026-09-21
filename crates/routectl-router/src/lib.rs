@@ -60,6 +60,7 @@ pub(crate) mod log_hash;
 pub(crate) mod override_registry;
 pub mod pool_build;
 pub mod pricing;
+pub(crate) mod probe_scheduler;
 pub(crate) mod quota;
 pub(crate) mod resolved;
 pub mod router;
@@ -185,6 +186,7 @@ pub use override_registry::{
 };
 pub use pool_build::{PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolReport};
 pub use pricing::{PricingSource, effective_pricing};
+pub use probe_scheduler::ProbeSchedulerSnapshot;
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CatalogIndependentSurvivor, DispatchMeta,

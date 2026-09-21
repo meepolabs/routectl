@@ -515,11 +515,18 @@ const _: () = assert!(
 /// per-model one) and caps the number of paid probe calls issued against
 /// that provider per UTC day. A provider absent from this map, or listed
 /// with the default `0`, permits no paid probe calls; only free
-/// validators may still run for it. It has no RUNTIME consumer in this build --
-/// no probe engine reads it yet, so it constrains no dispatch -- but its KEYS are
-/// validated at config load against the configured providers (a `:`-scoped key,
-/// or one naming an unknown provider, fails the load), so a typo'd entry is
-/// rejected now rather than when the probe engine lands.
+/// validators may still run for it.
+///
+/// It IS consumed at runtime, for PAID-CANDIDATE ELIGIBILITY only: when a
+/// lane's free validation runs out of steps, the probe worker reads this cap
+/// through the shared `paid_probe_permitted` predicate and records a candidate
+/// only when it is non-zero -- so at the default zero, every exhausted lane
+/// declines and nothing is recorded. No paid CALL exists in this build, so the
+/// cap constrains no upstream spend yet; it gates whether a lane is even
+/// nominated for one. Its KEYS are additionally validated at config load
+/// against the configured providers (a `:`-scoped key, or one naming an unknown
+/// provider, fails the load), so a typo'd entry is rejected at load rather than
+/// discovered later.
 ///
 /// The re-verification cadence and confirmation quorum are code constants
 /// ([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are

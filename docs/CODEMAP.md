@@ -1432,8 +1432,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   changes nothing -- but the two fields differ in what reads them.
   `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight planner
   refuses a prefix-impacting transform for any target it does not name, so an
-  entry can change what goes upstream. `paid_probe_daily_caps` has no runtime
-  probe consumer yet, though its KEYS are validated at config load against the
+  entry can change what goes upstream. `paid_probe_daily_caps` is consumed for
+  PAID-CANDIDATE ELIGIBILITY -- the probe worker reads it through
+  `paid_probe_permitted` when a free plan is exhausted and records a candidate
+  only at a non-zero cap, so the default zero declines every lane -- while no
+  paid CALL exists, so it constrains no upstream spend. Its KEYS are
+  additionally validated at config load against the
   configured providers (`factory::validate`, which rejects a `:`-scoped key and
   an unknown provider name), so a typo fails the load today. The re-verification
   cadence and the confirmation quorums are the code constants
@@ -2729,7 +2733,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   A masked decision suppresses the ACTION
   and never the state: the verdict stays resident, acting, and confirmed.
   The gate chain is split across three helpers rather than one long function --
-  `preflight_lane_admits` (kill switch, lane, forwarded credential),
+  `preflight_lane_admits` (kill switch and lane only -- the forwarded-credential
+  refusal is NOT repeated here; it belongs to the shared attributability
+  decision below and reports `unattributable_target`),
   `preflight_identity` (attribution plus the `FieldVerdictKey`), and
   `preflight_authorization_for` (mask, eligibility, quorum, opt-in) -- each
   returning the closed-set token its refusal reports, and `unchanged_record` is a
@@ -2991,6 +2997,138 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   consumed by `routectl-cli`'s `handlers::status::field_verdict_log` -- this
   module owns the "which learned rows count as acting" predicate so the
   cli-crate log and any future consumer cannot restate it differently
+- `src/router/probe_lifecycle.rs` -- the scheduler incarnation and the bounded
+  probe WORKER over the shared `Arc<ProbeScheduler>` on `Router`. Owns WHEN
+  queued work runs and how it settles; the admitted-request activation seam
+  belongs to `probe_payload_capture.rs`, and `activate_probe_plan` is the narrow
+  seam between them. Nothing reachable from `Router::new`, config parsing, or
+  `carry_over_learned_from` reaches either module, which is what
+  makes "a lane activates only after its first admitted real request" a
+  structural property rather than a convention.
+  `publish_probe_incarnation` / `shutdown_probe_work` own
+  retirement and cancellation. `run_due_probes` leases up to the CONCURRENCY
+  BOUND first (not necessarily every due job -- one not taken waits for the next
+  pass) and
+  runs it with `join_all`, wraps each operation in `tokio::time::timeout` so
+  expiry DROPS the future, and settles the outcome; it executes only the
+  count-token free validator (the expected-rejection class is in no plan).
+  `build_probe_count_request` builds the body from the leased payload: the
+  seat's UPSTREAM wire id, one minimal constant turn, the closed-table field
+  applied through the GROUNDED table's own carrier (`grounded_table_row`, so a
+  test-only row is neither produceable nor consumable by a probe) plus the
+  minimal canonical reasoning state the normalizer needs, each captured beta
+  source reapplied to ITS OWN carrier, and the originating Claude-Code
+  classification so the egress makes the same `is_non_cc` call. Classification
+  is welded ACROSS crates: the header literal and the presence predicate live
+  once in `routectl_core::identity::anthropic`
+  (`CLAUDE_CODE_SESSION_HEADER` / `has_claude_code_session`), and both the
+  router's capture and the egress's `is_non_cc` call it. The probe also sets
+  `routectl_internal.background_probe`, which changes NO bytes and excludes it
+  from the egress's client-traffic classification census -- a probe counted
+  there would move the genuine-CC / non-CC ratio by an amount proportional to
+  probe scheduling. Welded by a real wiremock header capture
+  (`tests/probe_beta_wire.rs`) and by classification + census tests in the
+  providers crate. A payload refused for any
+  retention bound is COUNTED (`payload_refusals_total`) and diagnosed once per
+  incarnation rather than skipped silently. A `PaidProbeCandidate` is recorded
+  only when the scheduler reports the plan spent its last free step AND
+  `paid_probe_permitted` agrees; a candidate refused for list capacity is
+  COUNTED (`paid_candidate_capacity_refusals_total`). Both counters are
+  SNAPSHOT TELEMETRY -- nothing renders them to an operator today. Nothing
+  here dials a paid endpoint, and the candidate list is input for the paid
+  stage rather than permission to spend. `probe_scheduler_snapshot()` is PURE and `pub`
+  (the reload boundary tests read it across the crate boundary);
+  `carry_over_probe_scheduler_from` ATTACHES the scheduler, candidate list,
+  and incarnation TICKET
+- (providers) `anthropic_api::counts_toward_lane_statistics` -- the one
+  eligibility predicate every translation-metrics call on this lane gates on:
+  `false` for a background probe. Every rate here divides one population, and
+  that population is CLIENT traffic, so excluding a probe from some counters but
+  not others would skew the rates against each other. Gates all EIGHT recorder
+  sites: the `lane_seen` denominator and the fingerprint-strip numerator
+  (`request.rs`), the two classification arms (`client.rs`), and the four cloak
+  losses (`cloak.rs`, one early return for all four).
+  A PREDICATE rather than wrapper recorders, and the reason is mechanical: the
+  translation-drop census resolves each `record_translation_*` call's lane and
+  class to constants in the call's OWN file and FAILS a call it cannot resolve
+  rather than skipping it, so a wrapper taking the lane as a parameter takes
+  every call out of the census (measured -- it broke four census tests). Pinned
+  by `only_client_traffic_counts_toward_this_lanes_statistics` (the decision) and
+  `every_recorder_call_on_this_lane_is_probe_gated` (a source guard counting
+  calls AND gates per file, so an ungated call cannot hide behind a sibling's
+  gate). Other lanes call the raw recorders and are unaffected
+- `src/router/probe_payload_capture.rs` -- what an admitted request contributes
+  to a probe, and the ONLY path into the queue.
+  `on_admitted_request` is the dispatch-facing wrapper all THREE walks call
+  immediately before their outbound call -- the ADMITTED boundary, past the gate
+  and about to dial, deliberately NOT the success arm. Each passes the per-target
+  `attempt_req` (post-overlay, post-strip, post-pre-flight), so a row an acting
+  pre-flight already stripped activates nothing; pinned by a source guard on the
+  call sites AND by an end-to-end dispatch test that a pre-preflight clone (which
+  survives the source guard) turns red.
+  `activate_probe_lanes_for_admitted_request` mirrors `plan_field_carry`'s
+  refusals through the SHARED
+  `field_repair::attributable_anthropic_base_url` rather than a second base-url
+  read, captures the bounded payload (field value, both beta sources, the
+  Claude-Code classification), and emits the once-per-incarnation beta-retention
+  refusal warning. All `&self` bookkeeping: dials nothing, awaits nothing, never
+  delays the admitted request
+- `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
+  `probe_entry_is_attributable`, `paid_probe_daily_cap`: which seat an identity
+  names and whether a rejection from it is attributable. A pooled identity is
+  resolved by RECOMPOSING each candidate member's canonical state key and
+  comparing -- never by splitting on the separator, never seat zero
+- `src/router/probe_failure_class.rs` -- `classify_probe_failure` /
+  `probe_outcome_for_class`: what a failure class means for the free plan.
+  FAILS CLOSED -- transient classes retry, bad-request / auth / context /
+  content-policy and the `#[non_exhaustive]` catch-all refuse, so a class added
+  upstream cannot walk a lane to the paid class by existing
+- `src/router/probe_test_support.rs` -- shared fixtures for the probe sidecars:
+  one `build_router` behind the per-shape wrappers (base URL, breaker
+  threshold, RPM limit, lane count, model beta floor, paid cap),
+  `plant_eligible_verdict`, and the provider doubles
+- `src/router/probe_scheduling_tests.rs` -- activation and lifecycle from the
+  scheduler side, plus the pre-flight/activation composition
+- `src/router/probe_activation_boundary_tests.rs` -- the admitted boundary,
+  every mirrored refusal, and the end-to-end pre-flight-strips-then-activates
+  composition with its unstripped positive control
+- `src/router/probe_worker_tests.rs` -- what the worker executes, settles, and
+  refuses to spend, including the counted paid-candidate capacity refusal
+- `src/router/probe_payload_seat_tests.rs` -- the probe body, the pre-dial
+  recheck, and the real-normalizer thinking/beta weld
+- `src/router/probe_payload_bound_tests.rs` -- the modeled display-value
+  whitelist (the whole of the value rule -- there is no separate byte ceiling),
+  the per-source beta count / per-token bounds and the combined total, the
+  CR/LF/comma refusal, pre-bound count refusal, per-source dedupe, and total
+  retained bytes under the LARGEST ACCEPTABLE payload. Also pins that a
+  test-only closed-table row can be neither captured nor applied by a probe
+- `src/router/probe_attribution_parity_tests.rs` -- all FOUR field stages
+  (reactive carry, pre-flight planner, probe activation, pre-dial recheck) must
+  reach the SAME attributability verdict. A behavioral parity TABLE, one row per
+  provider shape (the production Anthropic default and a remote mirror admitting;
+  loopback, forwarded credential, a reload-removed entry, and -- under `bedrock`
+  -- a Mantle sub-lane refusing), each row driven through every stage on its own
+  fresh router. Catches a stage narrowing or widening its verdict on a fact the
+  table VARIES: base URL, credential source, entry presence, Mantle sub-lane. The
+  Mantle row is the one a raw base-url read gets WRONG rather than merely narrow,
+  since its configured base IS that default; its fixture clears `api_key_ref` and
+  runs the production `validate_provider_bedrock_mantle` so the entry is one an
+  operator could write, then pins the base as non-loopback so the row cannot
+  collapse into the loopback row. Scope limits, stated in the module doc: a
+  decision keyed on another entry fact needs a new discriminating row, and a local
+  check merely RESTATING part of the shared set changes no verdict
+- `tests/probe_beta_wire.rs` -- the OUTGOING `anthropic-beta` header a probe
+  sends must equal the admitted request's, captured off a real wiremock request
+  under a NON-EMPTY `allowed_betas`. Two stages, because the router refuses to
+  activate for a loopback base URL: the real router yields the two canonical
+  requests, then a real `AnthropicApiProvider` emits headers from them
+- `src/router/probe_terminal_state_tests.rs` -- tombstones, their own capacity
+  bound, stale settlement, and the lane's last-outcome stamp
+- `src/router/probe_breaker_tests.rs` -- breaker non-interference: a probe
+  never credits or debits the lane's client-traffic breaker
+- `src/router/probe_half_open_tests.rs` -- carried half-open ownership
+  (including at `Router::admit`, where a probe's drop must not free a client's
+  claim) plus the deferral and what a declined probe does not consume
 - `src/router/capability_learn.rs` -- learned-capability observation, expiry,
   and snapshot: `CapabilityLearnEvent` (the ledger event),
   `observe_for_learning` (the 400/422 capture gate: kill switch + status +
@@ -3623,6 +3761,40 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   their saturation, and the incarnation scoping that keeps a superseded claim
   from releasing a live one. Several tests are written as named mutation checks,
   each documenting the edit that turns it red
+- `src/probe_scheduler/mod.rs` -- `ProbeScheduler` over one
+  `Mutex<Vec<Job>>`, plus `Job`/`JobPhase`/`SchedulerInner` and every state
+  transition: activate, lease, settle/release, reschedule, defer, tombstone,
+  retire, cancel.
+- `src/probe_scheduler/bounds.rs` -- the queue, concurrency, timeout, backoff,
+  attempt, deferral, and tombstone-capacity limits as code constants.
+- `src/probe_scheduler/vocab.rs` -- the closed validator / outcome /
+  settlement / activation tokens, `ProbeSchedulerSnapshot`, `validator_plan`,
+  and `paid_probe_permitted`.
+- `src/probe_scheduler/payload.rs` -- `ProbePayload` and every capture-time
+  refusal. `PROBE_MODELED_DISPLAY_VALUES` restricts the probed value to the
+  vocabulary the egress models (`summarized` / `omitted` / `updates`); the rule
+  is a denial-of-probing guard rather than a memory one, since a settlement is
+  terminal for the incarnation and an unmodeled value would let one client's junk
+  tombstone the lane for every other client. It also SUBSUMES the byte ceiling
+  that used to sit beside it: every accepted value is one of three fixed
+  literals, so a length check on the field was unreachable and is gone. Ceilings
+  on the beta half:
+  `PROBE_BETA_MAX_COUNT_PER_SOURCE` / `PROBE_BETA_MAX_TOKEN_BYTES` (per source)
+  and `PROBE_BETA_MAX_TOTAL_BYTES` (combined across both). Stores the client and
+  operator beta sets SEPARATELY -- the egress filters one through
+  `allowed_betas` and exempts the other, so a union reapplied to either carrier
+  would send a header the admitted request did not -- plus the originating
+  Claude-Code classification as a BIT (presence is all `is_non_cc` reads, and a
+  scheduler has no business holding a session id across a queueing delay). The
+  count bound is read off `len()` BEFORE any per-token work and dedupe runs
+  through a `BTreeSet`, so a pathological input costs one length read rather
+  than an O(n^2) scan. `is_retainable_beta` REFUSES (never sanitizes) a token
+  carrying a comma, CR, LF, or any control char: the egress joins betas into one
+  comma-separated header, and a rewritten token is a different flag.
+- `src/probe_scheduler/test_support.rs` -- shared fixtures for
+  `probe_scheduler/queue_tests.rs` (queue mechanics),
+  `probe_scheduler/plan_tests.rs` (free plan and paid boundary), and
+  `probe_scheduler/concurrency_tests.rs` (parallelism, deferral occupancy).
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait
@@ -4617,7 +4789,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   message text through a local macro so every arm is byte-identical)
   or `handle_credentials_reload` -> `rebuild_router_for_seat_change`
   (seat-set-gated rebuild off the unchanged config + the coordinator's current
-  overlay, which the replacement Router both merges and retains). `apply_activation` (+ `gather_probes` /
+  overlay, which the replacement Router both merges and retains). Two bounded
+  interval drivers ride the same pipeline and the same `shutdown_rx`, both
+  reading the live router PER TICK so a publication switches them onto the
+  replacement cleanly: `run_router_metrics_snapshot_driver` (in
+  `metrics_driver.rs`) and `run_probe_driver` (in `probe_driver.rs`). All three
+  publication sites go through `router_publish::publish_router`, never a direct
+  store. `apply_activation` (+ `gather_probes` /
   `emit_activation_delta`, `ActivationTrigger`) recomputes the auto-activation
   inventory at startup and after each reload; `await_reload_tasks` bounds
   graceful-shutdown joins. Unit tests live in the `#[path]`-included sibling
@@ -4627,6 +4805,36 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
   per-session prefix-epoch baselines -- a one-site-only carry silently empties
   that store on the missed path, and an empty store reads exactly as health)
+- `src/server/probe_driver.rs` -- the daemon's bounded probe driver. It is
+  the production scheduling driver for the router's bounded free-validator
+  worker: it starts IDLE and stays idle -- a tick with an empty queue is a lock,
+  a length check, and a return, so startup, config parsing, reload, and a status
+  read all issue ZERO network work, and nothing is dialed until an admitted real
+  request has activated a lane. `PROBE_DRIVER_INTERVAL` is a code constant never
+  read from the environment. It reads the live router per tick through
+  `load_full` rather than an `ArcSwap` Guard: a Guard is documented for a stack
+  local, not a long-held borrow, and this one spans the whole probe batch, up to
+  the per-operation timeout. Its shutdown arm is the SINGLE owner of probe
+  cancellation, and it is CANCELLATION-SAFE -- each tick's run is selected
+  AGAINST the shutdown signal rather than awaited first, so losing the race
+  drops the run future and every in-flight validator future with it; awaiting
+  would hold the graceful drain for a whole per-operation timeout. Both selects
+  are `biased` with the shutdown arm first, pinned by a source guard.
+- `src/server/router_publish.rs` -- `publish_router`, the publication step every
+  reload path shares. STAMPS the replacement's probe incarnation and retires the
+  outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
+  later stamp the published router still carries the outgoing incarnation, so a
+  request landing in that window queues work the stamp immediately retires,
+  leaving the lane un-probed with nothing recording why. One helper rather than
+  three copies, and a source guard asserts `reload.rs` performs no store of its
+  own
+- `src/server/metrics_driver.rs` -- the periodic router-metrics snapshot driver
+  and its `ROUTER_METRICS_SNAPSHOT_INTERVAL`; flushes once more at shutdown so a
+  session shorter than one interval still surfaces its totals
+- `src/server/reload_shutdown.rs` -- `await_reload_tasks` and the bounded
+  per-task `RELOAD_TASK_SHUTDOWN_DEADLINE`: awaiting (not merely dropping) each
+  reload-side handle is what releases the coordinator's `UsageHandle` clone
+  before the usage drain begins
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
   splits into `parse_config_only` (version + legacy-mitm preflight + typed

@@ -38,6 +38,28 @@ pub mod response;
 pub mod sse;
 pub mod sse_opaque;
 pub mod sse_unknown;
+
+/// Whether `req` may contribute to this lane's translation statistics.
+///
+/// `false` for a BACKGROUND PROBE -- routectl's own traffic, scheduled on its own
+/// cadence. Every counter on this lane divides one population, and that
+/// population is CLIENT traffic: `lane_seen` is the denominator and each policy
+/// action is a numerator over it. Counting a probe anywhere would move a rate by
+/// an amount set by probe scheduling; counting it in only SOME counters would
+/// skew the rates against each other.
+///
+/// A PREDICATE rather than a wrapper around the recorders, deliberately. The
+/// translation-drop census resolves every `record_translation_*` call's lane and
+/// class to constants in the call's own file, and it FAILS a call it cannot
+/// resolve rather than skipping it. A wrapper taking the lane as a parameter
+/// therefore takes each call out of the census -- measured: it broke four census
+/// tests. Gating at each call site keeps every call resolvable and still
+/// single-sources the decision.
+///
+/// Other lanes do not consult this and are unaffected.
+const fn counts_toward_lane_statistics(req: &routectl_core::ChatRequest) -> bool {
+    !req.routectl_internal.background_probe
+}
 mod system;
 mod tools;
 pub(crate) mod types;

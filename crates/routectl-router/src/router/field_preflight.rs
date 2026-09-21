@@ -98,15 +98,25 @@ use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, FieldP
 /// there is nothing for a pre-flight rewrite to act on.
 pub(super) const FIELD_PREFLIGHT_NO_GROUNDED_FIELD: &str = "no_grounded_field";
 
-/// Reason token: the capability learning kill switch is off, the target is
-/// not on the one lane this stage acts on, or the target authenticates with
-/// a forwarded client credential -- the same exclusions the reactive
-/// admission applies, checked here before any verdict is read.
+/// Reason token: the capability learning kill switch is off, or the target is
+/// not on the one lane this stage acts on. Checked before any verdict is read.
+///
+/// Does NOT cover the forwarded-credential refusal. That one reports
+/// [`FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET`], because it is decided inside the
+/// shared attributability decision rather than by a lane check here -- keeping
+/// the two apart is what stops a second copy of the refusal from drifting from
+/// the first.
 pub(super) const FIELD_PREFLIGHT_UNSUPPORTED_LANE: &str = "unsupported_lane";
 
-/// Reason token: the target carries no attributable Anthropic API base URL,
-/// or the URL it carries names a local hop. A Bedrock Mantle entry reports
-/// no such URL and is refused here.
+/// Reason token: this stage could not attribute a rejection from the target to
+/// a routectl-owned seat. Three causes, all decided by the one shared
+/// decision (`field_repair::attributable_anthropic_base_url`):
+///
+/// - the target authenticates with a FORWARDED client credential, so one
+///   client's rejection must not mint a verdict steering every other client;
+/// - the target carries no attributable Anthropic API base URL (a Bedrock
+///   Mantle entry reports none and is refused here);
+/// - the URL it carries names a local hop.
 pub(super) const FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET: &str = "unattributable_target";
 
 /// Reason token: an operator `force_supported` override masks this field's
@@ -584,14 +594,29 @@ impl Router {
     }
 
     /// The LANE gates, shared with the reactive admission's exclusions: the
-    /// capability kill switch, the one provider kind this stage acts on, and the
-    /// forwarded-credential refusal. `Some(provider_kind)` when the lane admits.
+    /// capability kill switch and the one provider kind this stage acts on.
+    /// `Some(provider_kind)` when the lane admits.
+    ///
+    /// The forwarded-credential refusal is deliberately NOT repeated here. It
+    /// lives in the shared attributability decision
+    /// (`field_repair::attributable_anthropic_base_url`), which
+    /// `preflight_identity` calls with this target's own flag, so every stage
+    /// draws its verdict from one refusal set rather than from a local copy.
+    ///
+    /// What is CHECKED is the verdict, not the absence of a copy: a parity test
+    /// drives every stage over the provider shapes it varies -- base URL,
+    /// credential source, entry presence, and the Mantle sub-lane -- and reds
+    /// when a stage narrows or widens its verdict on one of those. A decision
+    /// keyed on some OTHER entry fact needs a new discriminating row before any
+    /// test can see it, and a local check that merely restates part of the
+    /// shared set changes no verdict at all. Calling through is a maintenance
+    /// convention here, not an enforced one.
     fn preflight_lane_admits(&self, target: &DispatchTarget) -> Option<&'static str> {
         if !self.config.capability.enabled {
             return None;
         }
         let provider_kind = target.provider_kind?;
-        if provider_kind != ANTHROPIC_API_KIND || target.use_forwarded_credential {
+        if provider_kind != ANTHROPIC_API_KIND {
             return None;
         }
         Some(provider_kind)
@@ -613,15 +638,14 @@ impl Router {
         path: &'static str,
         provider_kind: &'static str,
     ) -> Result<FieldVerdictKey, &'static str> {
-        let base_url = self
-            .config
-            .providers
-            .get(&target.provider_name)
-            .and_then(crate::config::ProviderEntry::anthropic_api_base_url)
-            .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
-        if crate::field_verdict::loopback_target_suppresses_minting(base_url) {
-            return Err(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
-        }
+        // THE shared attributability read, so this stage cannot refuse a
+        // target the reactive arm would act on, or act on one it would refuse.
+        crate::router::field_repair::attributable_anthropic_base_url(
+            &self.config,
+            &target.provider_name,
+            target.use_forwarded_credential,
+        )
+        .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
         FieldVerdictKey::new(&target.state_key, path, provider_kind)
             .ok_or(FIELD_PREFLIGHT_NO_IDENTITY)
     }

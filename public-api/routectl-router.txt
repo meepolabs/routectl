@@ -4329,6 +4329,11 @@ pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, rout
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::probe_scheduler_snapshot(&self) -> routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
+pub async fn routectl_router::router::Router::run_due_probes(&self) -> usize
+pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
+impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
 impl !core::marker::Freeze for routectl_router::router::Router
@@ -12546,6 +12551,86 @@ impl<T> typenum::type_operators::Same for routectl_router::PricingConfig
 pub type routectl_router::PricingConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PricingConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::PricingConfig::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::ProbeSchedulerSnapshot
+pub routectl_router::ProbeSchedulerSnapshot::abandoned_probe_requests_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::abandoned_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::activations_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::backing_off: usize
+pub routectl_router::ProbeSchedulerSnapshot::deduped_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::deferral_evictions_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::deferrals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::free_exhausted_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::in_flight: usize
+pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_capacity_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::payload_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::queue_full_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::queued: usize
+pub routectl_router::ProbeSchedulerSnapshot::resolved_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::retired_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::stale_settlements_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::timeouts_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::tombstone_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::tombstone_saturated: bool
+pub routectl_router::ProbeSchedulerSnapshot::tombstone_saturations_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::tombstoned: usize
+impl core::clone::Clone for routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::ProbeSchedulerSnapshot::clone(&self) -> routectl_router::ProbeSchedulerSnapshot
+impl core::cmp::Eq for routectl_router::ProbeSchedulerSnapshot
+impl core::cmp::PartialEq for routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::ProbeSchedulerSnapshot::eq(&self, &routectl_router::ProbeSchedulerSnapshot) -> bool
+impl core::default::Default for routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::ProbeSchedulerSnapshot::default() -> routectl_router::ProbeSchedulerSnapshot
+impl core::fmt::Debug for routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::ProbeSchedulerSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::ProbeSchedulerSnapshot
+impl core::marker::StructuralPartialEq for routectl_router::ProbeSchedulerSnapshot
+impl core::marker::Freeze for routectl_router::ProbeSchedulerSnapshot
+impl core::marker::Send for routectl_router::ProbeSchedulerSnapshot
+impl core::marker::Sync for routectl_router::ProbeSchedulerSnapshot
+impl core::marker::Unpin for routectl_router::ProbeSchedulerSnapshot
+impl core::marker::UnsafeUnpin for routectl_router::ProbeSchedulerSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ProbeSchedulerSnapshot
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ProbeSchedulerSnapshot
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::ProbeSchedulerSnapshot where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::ProbeSchedulerSnapshot::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::ProbeSchedulerSnapshot where U: core::convert::From<T>
+pub fn routectl_router::ProbeSchedulerSnapshot::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ProbeSchedulerSnapshot where U: core::convert::Into<T>
+pub type routectl_router::ProbeSchedulerSnapshot::Error = core::convert::Infallible
+pub fn routectl_router::ProbeSchedulerSnapshot::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ProbeSchedulerSnapshot where U: core::convert::TryFrom<T>
+pub type routectl_router::ProbeSchedulerSnapshot::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ProbeSchedulerSnapshot::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ProbeSchedulerSnapshot where T: core::clone::Clone
+pub type routectl_router::ProbeSchedulerSnapshot::Owned = T
+pub fn routectl_router::ProbeSchedulerSnapshot::clone_into(&self, &mut T)
+pub fn routectl_router::ProbeSchedulerSnapshot::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ProbeSchedulerSnapshot where T: core::clone::Clone
+pub fn routectl_router::ProbeSchedulerSnapshot::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ProbeSchedulerSnapshot where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ProbeSchedulerSnapshot::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ProbeSchedulerSnapshot where T: ?core::marker::Sized
+pub fn routectl_router::ProbeSchedulerSnapshot::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ProbeSchedulerSnapshot where T: ?core::marker::Sized
+pub fn routectl_router::ProbeSchedulerSnapshot::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ProbeSchedulerSnapshot where T: core::clone::Clone
+pub unsafe fn routectl_router::ProbeSchedulerSnapshot::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::ProbeSchedulerSnapshot::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ProbeSchedulerSnapshot where T: core::clone::Clone
+pub fn routectl_router::ProbeSchedulerSnapshot::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ProbeSchedulerSnapshot
+impl<T> outref::AsOut<T> for routectl_router::ProbeSchedulerSnapshot where T: core::marker::Copy
+pub fn routectl_router::ProbeSchedulerSnapshot::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ProbeSchedulerSnapshot where T: ?core::marker::Sized
+pub fn routectl_router::ProbeSchedulerSnapshot::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ProbeSchedulerSnapshot::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ProbeSchedulerSnapshot
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ProbeSchedulerSnapshot
+impl<T> typenum::type_operators::Same for routectl_router::ProbeSchedulerSnapshot
+pub type routectl_router::ProbeSchedulerSnapshot::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ProbeSchedulerSnapshot where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ProbeSchedulerSnapshot::into_shared(self) -> Shared
 pub struct routectl_router::ProviderCell
 pub routectl_router::ProviderCell::auth_token: core::option::Option<alloc::string::String>
 pub routectl_router::ProviderCell::credential_ref_scheme: core::option::Option<alloc::string::String>
@@ -13127,6 +13212,11 @@ pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core:
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::probe_scheduler_snapshot(&self) -> routectl_router::ProbeSchedulerSnapshot
+pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
+pub async fn routectl_router::router::Router::run_due_probes(&self) -> usize
+pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>

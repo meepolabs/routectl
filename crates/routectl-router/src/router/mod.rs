@@ -41,6 +41,10 @@ mod field_repair;
 mod field_verdict_observability;
 mod overlays;
 mod prefix_rewrite;
+mod probe_failure_class;
+mod probe_lifecycle;
+mod probe_payload_capture;
+mod probe_seat;
 mod repair_budget;
 mod replay_repair;
 mod runtime_gate;
@@ -291,6 +295,61 @@ pub struct Router {
     /// APIs using the generation this Router was published at
     /// (`registry_generation`), never a freshly sampled one.
     field_verdicts: Arc<crate::field_verdict::FieldVerdictRegistry>,
+    /// Bounded lazy probe scheduler -- see
+    /// [`crate::probe_scheduler::ProbeScheduler`]. Constructed empty and
+    /// never populated by construction, config parsing, or a reload: a
+    /// lane enters it only when an admitted real request activates it.
+    ///
+    /// Shared across Router generations by the same `Arc` as
+    /// `field_verdicts`, for the same reason: a probe outstanding at swap
+    /// time must release the slot the replacement leases from, and a job
+    /// queued through the outgoing Router must not be silently lost. The
+    /// scheduler's own generation stamping (`retire_before`) is what
+    /// discards work belonging to retired state, rather than a fresh
+    /// table hiding it.
+    probe_scheduler: Arc<crate::probe_scheduler::ProbeScheduler>,
+    /// The scheduler incarnation THIS Router publishes probe work under,
+    /// set by `publish_probe_incarnation` from the shared ticket below.
+    ///
+    /// Distinct from `registry_generation`, which only moves at a
+    /// catalog/overlay boundary and therefore cannot express "this Router
+    /// was republished": two successive config-only reloads share one
+    /// generation, so work queued by the first would read as live under
+    /// the third.
+    ///
+    /// PER-ROUTER, not shared: the outgoing Router must keep the value it
+    /// published under so its own activations are refused once the
+    /// replacement publishes. A single shared cell would move the old
+    /// Router's incarnation forward with the new one's, making every
+    /// still-in-flight request on the retired Router read as live -- which
+    /// is exactly the staleness the incarnation exists to detect.
+    probe_incarnation: AtomicU64,
+    /// Monotonic source of incarnation values, shared across Router
+    /// generations so each publication draws a value strictly greater than
+    /// every previous one. Shared (unlike `probe_incarnation`) because a
+    /// per-Router ticket would restart at zero and make every reload's
+    /// "new" incarnation equal to the first one's.
+    probe_incarnation_ticket: Arc<AtomicU64>,
+    /// Identities whose FREE probe validation ran out of steps. A
+    /// candidate records that free validation is spent -- one of the two
+    /// conditions a paid call needs -- and is never itself permission to
+    /// spend. Bounded by the scheduler's queue depth; cleared on
+    /// publication and shutdown, since a candidate from a retired
+    /// incarnation describes router state that no longer serves. Shared
+    /// with the scheduler on carry-over for the same reason.
+    paid_probe_candidates: Arc<Mutex<Vec<probe_lifecycle::PaidProbeCandidate>>>,
+    /// Edge-trigger latch for the queue-full probe diagnostic, following
+    /// the same bounded warn-once pattern as `volatile_prefix_warned`: a
+    /// saturated queue refuses every later request, so one line per
+    /// refusal would emit a WARN per request exactly when the daemon is
+    /// busiest. `queue_full_total` carries the suppressed volume.
+    probe_queue_full_warned: Mutex<bool>,
+    /// Edge-trigger latch for the beta-retention refusal diagnostic, bounded
+    /// like `probe_queue_full_warned`: the condition is a property of a
+    /// client's beta set, so a client repeating one refused set would put a
+    /// WARN on every one of its requests. `payload_refusals_total` carries the
+    /// volume.
+    probe_payload_refused_warned: Mutex<bool>,
     /// Operator capability-override read-model, flattened from config at
     /// construction. Pure projection of `config.capability.overrides` plus
     /// the legacy provider / model `unsupported_features` lists -- no
@@ -1853,6 +1912,12 @@ impl Router {
             learned_capabilities,
             learned_replay,
             field_verdicts,
+            probe_scheduler: Arc::new(crate::probe_scheduler::ProbeScheduler::new()),
+            probe_incarnation: AtomicU64::new(1),
+            probe_incarnation_ticket: Arc::new(AtomicU64::new(1)),
+            paid_probe_candidates: Arc::default(),
+            probe_queue_full_warned: Mutex::new(false),
+            probe_payload_refused_warned: Mutex::new(false),
             override_registry,
             pool_reports: Vec::new(),
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
@@ -2442,6 +2507,16 @@ impl Router {
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in,
     /// alongside the other carry-over calls.
+    ///
+    /// Carries MORE than the learned registry, despite the name: the replay
+    /// facade, the field-verdict facade, and the PROBE SCHEDULER (with its
+    /// candidate list and incarnation ticket) are attached here too, all under
+    /// the same attach-not-copy discipline. They ride along because they are
+    /// all keyed on the shared registry and must span the swap together -- a
+    /// caller that carried the registry but not the scheduler would leave an
+    /// outstanding probe settling into a table the published Router never
+    /// reads. Named here rather than split into a second public call, which
+    /// would widen the surface for a sequence no caller may vary.
     pub fn carry_over_learned_from(&mut self, previous: &Self) {
         let catalog_changed = self.catalog_version != previous.catalog_version;
         let overlay_changed = self.overlay_revision != previous.overlay_revision;
@@ -2474,6 +2549,11 @@ impl Router {
                 .field_verdicts
                 .rebuilt_on(Arc::clone(&self.learned_capabilities)),
         );
+        // Same discipline again: a probe leased through the outgoing Router
+        // settles against the table the replacement leases from. Retirement
+        // of superseded work is the scheduler's own generation check, not a
+        // fresh table -- see `carry_over_probe_scheduler_from`.
+        self.carry_over_probe_scheduler_from(previous);
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
 
@@ -2763,6 +2843,45 @@ use std::time::Instant;
 #[cfg(test)]
 #[path = "probe_guard_generation_tests.rs"]
 mod probe_guard_generation_tests;
+
+#[cfg(test)]
+#[path = "probe_scheduling_tests.rs"]
+mod probe_scheduling_tests;
+
+#[cfg(test)]
+#[path = "probe_test_support.rs"]
+mod probe_test_support;
+
+#[cfg(test)]
+#[path = "probe_activation_boundary_tests.rs"]
+mod probe_activation_boundary_tests;
+
+#[cfg(test)]
+#[path = "probe_worker_tests.rs"]
+mod probe_worker_tests;
+
+#[cfg(test)]
+#[path = "probe_payload_seat_tests.rs"]
+mod probe_payload_seat_tests;
+
+#[cfg(test)]
+#[path = "probe_terminal_state_tests.rs"]
+mod probe_terminal_state_tests;
+
+#[cfg(test)]
+#[path = "probe_breaker_tests.rs"]
+mod probe_breaker_tests;
+#[cfg(test)]
+#[path = "probe_half_open_tests.rs"]
+mod probe_half_open_tests;
+
+#[cfg(test)]
+#[path = "probe_payload_bound_tests.rs"]
+mod probe_payload_bound_tests;
+
+#[cfg(test)]
+#[path = "probe_attribution_parity_tests.rs"]
+mod probe_attribution_parity_tests;
 
 #[cfg(test)]
 #[path = "generation_barrier_tests.rs"]

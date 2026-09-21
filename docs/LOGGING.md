@@ -393,8 +393,8 @@ the whole information content of a fail-open:
 |---|---|
 | `field_preflight_drop` | ACTED: the mapped field was dropped from the per-target request before dispatch |
 | `no_grounded_field` | The request carries no closed-table field at all |
-| `unsupported_lane` | The capability kill switch is off, the target is not on the one lane this stage acts on, or it authenticates with a forwarded client credential |
-| `unattributable_target` | The target carries no attributable Anthropic API base URL (a Bedrock Mantle entry reports none), or the URL names a local hop |
+| `unsupported_lane` | The capability kill switch is off, or the target is not on the one lane this stage acts on |
+| `unattributable_target` | A rejection from this target could not be attributed to a routectl-owned seat: it authenticates with a forwarded client credential, carries no attributable Anthropic API base URL (a Bedrock Mantle entry reports none), or names a local hop |
 | `masked_by_override` | An operator `force_supported` override masks this field's capability cell for this target. The operator has said to send the field; the learned verdict is NOT deleted |
 | `no_identity` | No identity could be minted for the field on this target |
 | `not_eligible` | No settled, acknowledged, acting verdict -- covers absent, lapsed, canary-suspended, zero acknowledged confirmations, and a verdict whose state moved under the eligibility read |
@@ -1047,6 +1047,47 @@ Summary (grep the `event` field to isolate a kind):
 | `suppression` | WARN | `routectl_router::router` | `force_supported override contradicted: masked capability still rejected upstream` |
 | `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key is rewritten by normalization; ...` |
 | `legacy_deprecation` | WARN | `routectl_cli::server` | `deprecated capability-list keys are set; ...` |
+
+## Bounded probe-scheduler diagnostics
+
+The background probe scheduler emits THREE edge-triggered warnings and carries
+the rest of its state as counters. Each condition repeats -- per request, or per
+settlement -- and would otherwise flood exactly when the daemon is busiest, so
+every line is latched and its counter carries the suppressed volume. The line is
+the existence proof; the counter is the rate.
+
+The latch SCOPES differ, because the conditions do:
+
+- `probe_activation_refused` and `probe_payload_retention_refused` latch once
+  per ROUTER INCARNATION. Both latches are fields on `Router`, so a reload
+  publishes a new one with the latch clear: saturation or a refused beta shape
+  under a NEW configuration is new information.
+- `probe_tombstone_capacity_saturated` latches once per SATURATION EPISODE. It
+  stays suppressed until retirement clears the marker -- which can outlast a
+  single incarnation -- because the condition is a property of the marker set
+  rather than of the router that observed it.
+
+| Message | Level | Module target | Meaning |
+|---|---|---|---|
+| `probe_activation_refused` | WARN | `routectl_router::router` | The probe queue is at its depth bound, so a lane could not be activated. Carries `queued` / `in_flight` / `backing_off` / `queue_full_total`. |
+| `probe_payload_retention_refused` | WARN | `routectl_router::router` | A lane's beta context breached a payload retention bound or validity rule, so no probe was activated for it. Carries `payload_refusals_total` only -- deliberately no token, value, or identity, since the refusal is precisely that the shape was unacceptable. |
+| `probe_tombstone_capacity_saturated` | WARN | `routectl_router::probe_scheduler` | Terminal-marker capacity is exhausted for this incarnation, so the scheduler fails closed and refuses further activations until a republication. |
+
+### Probe counters (`ProbeSchedulerSnapshot`)
+
+These are TELEMETRY on the router's snapshot accessor, not an
+operator-rendered surface: nothing in `status` or `doctor` prints them today,
+and a consumer reads them through `Router::probe_scheduler_snapshot()`. Two are
+worth naming because they are the only signal their condition produces:
+
+- `payload_refusals_total` -- lanes not probed because their beta context was
+  refused. A lane counted here produces no job, no settlement, and no
+  tombstone, so without this counter it is indistinguishable from a lane that
+  was never admitted.
+- `paid_candidate_capacity_refusals_total` -- exhausted lanes whose paid-probe
+  CANDIDATE could not be recorded because the candidate list was full. Costs no
+  upstream call (a candidate is not permission to spend), but a non-zero value
+  means the candidate list is truncated rather than complete.
 
 ### `learn` (WARN)
 

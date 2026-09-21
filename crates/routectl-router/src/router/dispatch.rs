@@ -577,6 +577,22 @@ impl Router {
                     &attempt_req,
                     &mut reasoning_drop_warned,
                 );
+                // Lazy probe activation at the ADMITTED boundary: the gate
+                // has cleared and this attempt is about to go upstream, so the
+                // lane is provably in use -- while a gate-refused or
+                // breaker-parked request, which never reaches here, is not.
+                // Deliberately NOT the success arm: a lane whose upstream is
+                // erroring is exactly the one a probe should investigate, so
+                // requiring a 2xx would keep the scheduler dark on the traffic
+                // that most needs it. Reads `attempt_req`, the post-overlay /
+                // post-strip / post-pre-flight per-target body actually being
+                // sent, so the probed identity describes the bytes the upstream
+                // will see -- a row a pre-flight rewrite already dropped is
+                // absent here and activates nothing. Pure bookkeeping: it
+                // enqueues at most one bounded job per lane and capability and
+                // returns without dialing or awaiting, so this request is not
+                // delayed and its outcome does not depend on it.
+                self.on_admitted_request(target, &attempt_req);
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -1514,6 +1530,13 @@ impl Router {
                     &attempt_req,
                     &mut reasoning_drop_warned,
                 );
+                // Lazy probe activation at the same ADMITTED boundary as the
+                // complete walk (see there for why it is not the success arm),
+                // reading the same post-overlay / post-strip / post-pre-flight
+                // `attempt_req`. Deduped against the other walks by the shared
+                // lane/capability identity, so a session mixing surfaces still
+                // queues one job.
+                self.on_admitted_request(target, &attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,

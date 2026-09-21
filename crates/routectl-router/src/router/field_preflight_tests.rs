@@ -697,9 +697,15 @@ fn a_forwarded_credential_target_falls_open() {
 
     assert!(
         !decision.acted,
-        "a target authenticating with a client credential is out of this stage's lane",
+        "a target authenticating with a client credential is one whose rejections \
+         this stage cannot attribute to a routectl-owned seat",
     );
-    assert_eq!(decision.reason, FIELD_PREFLIGHT_UNSUPPORTED_LANE);
+    // Reported as UNATTRIBUTABLE rather than off-lane: the forwarded refusal
+    // lives in the shared attributability decision, which every field stage
+    // consults, rather than in a per-stage lane check that could drift from it.
+    // The refusal itself is unchanged -- the planner still falls open and the
+    // field still reaches the upstream.
+    assert_eq!(decision.reason, FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
     assert!(carries_field(&planned));
 }
 

@@ -62,6 +62,9 @@ use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, Dispatch
 /// whose keys would be rewritten must never mint one. The verdict key
 /// refuses such a lane independently ([`FieldVerdictKey::new`]) -- two
 /// independent refusals for one irreversible mistake.
+/// Visible to the sibling pre-flight and probe-lifecycle modules so every arm
+/// gates on the SAME lane token this one does, rather than each carrying a
+/// copy that could drift from it.
 pub(super) const ANTHROPIC_API_KIND: &str = "anthropic-api";
 
 /// Action token for the field-repair WARN: the L0 repair dropped the mapped
@@ -196,6 +199,77 @@ impl FieldSurface {
             // leaves this surface readable.
             #[cfg(test)]
             Self::ClaimsRemovalForTests => true,
+        }
+    }
+
+    /// The VALUE `req` carries for this surface, for the probe payload.
+    ///
+    /// Read through the surface itself rather than by a caller reaching into
+    /// the request, so the probe asks about the same carrier the repair
+    /// would drop. Bounded: the carrier is a short display token, and the
+    /// derived boolean renders as its canonical spelling.
+    fn value_in(&self, req: &ChatRequest) -> Option<String> {
+        match self {
+            Self::AnthropicThinkingDisplay => req
+                .routectl_internal
+                .anthropic_thinking_display
+                .clone()
+                .or_else(|| {
+                    req.reasoning
+                        .as_ref()
+                        .and_then(|r| r.exclude)
+                        .map(|exclude| if exclude { "omitted" } else { "summarized" }.to_string())
+                }),
+            #[cfg(all(test, not(debug_assertions)))]
+            Self::DivergentForTests => None,
+            // No probe payload: the test-only surfaces are never rows of
+            // `FIELD_REPAIRS`, the only table a probe payload is built from,
+            // so no probe is ever built from one.
+            #[cfg(test)]
+            Self::PartialDropForTests
+            | Self::PrefixImpactingSystemForTests
+            | Self::ClaimsRemovalForTests => None,
+        }
+    }
+
+    /// Set this surface's carrier on `req` to `value`, for the probe body.
+    ///
+    /// The inverse of [`Self::drop_from`] over the same carrier, so a probe
+    /// asks about exactly the field a repair would remove.
+    fn set_in(&self, req: &mut ChatRequest, value: &str) {
+        match self {
+            Self::AnthropicThinkingDisplay => {
+                req.routectl_internal.anthropic_thinking_display = Some(value.to_string());
+                // The carrier alone does NOT reach the wire. The Anthropic
+                // normalizer's `build_thinking` returns early when
+                // `req.reasoning` is absent, and again when the caller asked
+                // for no thinking, so a body carrying only the carrier
+                // serializes with no `thinking` object at all -- the probe
+                // would ask a plain token count and read its success as
+                // evidence about a field it never sent.
+                //
+                // So the minimal canonical state the normalizer requires is
+                // set alongside: reasoning present, thinking explicitly
+                // active, and a `max_tokens` for the budget window the legacy
+                // shape clamps into. Only filled where absent, so a caller
+                // that already expressed a reasoning state keeps it.
+                let reasoning = req.reasoning.get_or_insert_with(Default::default);
+                if reasoning.enabled.is_none()
+                    && reasoning.effort.is_none()
+                    && reasoning.max_tokens.is_none()
+                {
+                    reasoning.enabled = Some(true);
+                }
+                if req.max_tokens.is_none() {
+                    req.max_tokens = Some(PROBE_THINKING_MAX_TOKENS);
+                }
+            }
+            #[cfg(all(test, not(debug_assertions)))]
+            Self::DivergentForTests => {}
+            #[cfg(test)]
+            Self::PartialDropForTests
+            | Self::PrefixImpactingSystemForTests
+            | Self::ClaimsRemovalForTests => {}
         }
     }
 
@@ -394,6 +468,107 @@ pub(super) fn closed_table() -> &'static [FieldRepairRow] {
             .collect()
     });
     &ROWS
+}
+
+/// `max_tokens` a probe body carries so the legacy Anthropic thinking shape
+/// has a budget window to clamp into.
+///
+/// Small on purpose: `count_tokens` bills nothing and never generates, so
+/// this only has to clear Anthropic's `[1024, max_tokens-1]` budget window.
+const PROBE_THINKING_MAX_TOKENS: u32 = 2048;
+
+/// Apply a probe payload's closed-table field and value onto `req`.
+///
+/// Routed through the GROUNDED table -- the same `FIELD_REPAIRS` that
+/// [`grounded_closed_table_payloads`] captures from -- so the lookup that
+/// applies a payload accepts exactly the paths the lookup that produces one
+/// can emit. Resolving against the test-inclusive `closed_table()` instead
+/// would let a test-only row be applied here while no production path could
+/// ever have captured it, which is the asymmetry that hides a real
+/// mis-wiring. A payload naming a path outside the grounded table sets
+/// nothing, so no probe can assemble an arbitrary envelope field.
+pub(super) fn apply_probe_payload(
+    req: &mut ChatRequest,
+    payload: &crate::probe_scheduler::ProbePayload,
+) {
+    let Some(row) = grounded_table_row(payload.field_path()) else {
+        return;
+    };
+    row.surface.set_in(req, payload.field_value());
+}
+
+/// The GROUNDED table's row for `path`, or `None`.
+///
+/// Named and separate from [`closed_table_row`] because the two answer
+/// different questions and the difference is load-bearing: `closed_table_row`
+/// resolves against the TEST-INCLUSIVE table (a test build appends
+/// `TEST_FIELD_REPAIRS`), while this one resolves against `FIELD_REPAIRS`
+/// alone. The probe path uses this one on BOTH sides -- capture through
+/// [`grounded_closed_table_payloads`] and application through
+/// [`apply_probe_payload`] -- so a test-only row can be neither produced nor
+/// consumed by a probe, in any build.
+fn grounded_table_row(path: &str) -> Option<&'static FieldRepairRow> {
+    FIELD_REPAIRS.iter().find(|row| row.path == path)
+}
+
+/// The grounded closed-table rows `req` carries, each with the VALUE it
+/// carries for that row -- the bounded payload a probe is built from.
+///
+/// One accessor rather than a path list plus a separate value lookup: the
+/// two must describe the same carrier, and splitting them is how a probe
+/// comes to name one field while sending another's value.
+pub(super) fn grounded_closed_table_payloads(
+    req: &ChatRequest,
+) -> impl Iterator<Item = (&'static str, String)> + use<'_> {
+    FIELD_REPAIRS
+        .iter()
+        .filter_map(|row| row.surface.value_in(req).map(|value| (row.path, value)))
+}
+
+/// THE single attributability decision every field stage makes: the reactive
+/// `plan_field_carry`, the pre-flight planner, probe activation, and the
+/// probe's pre-dial recheck.
+///
+/// Answers `Some(base_url)` only when ALL of:
+///
+/// - the caller's own forwarded-credential fact is false. A target
+///   authenticating with the CLIENT's bearer must not have its rejections
+///   attributed to a routectl-owned seat: one client's rejection would mint a
+///   permanent verdict steering every other client;
+/// - the operator's OWN `[providers]` entry for `provider_name` exists;
+/// - that entry yields an attributable Anthropic base URL. The Bedrock Mantle
+///   shape is excluded here, by the accessor itself: its entry reads
+///   `anthropic-api` while egressing through Mantle, and the accessor answers
+///   `None`;
+/// - the base URL does not name a LOOPBACK destination.
+///
+/// The forwarded fact is a PARAMETER rather than a per-site check because its
+/// two sources differ -- the dispatch arms read a target's own
+/// `use_forwarded_credential`, the probe stages have no target and read the
+/// entry's `forwarded_base_url()` -- while the DECISION they feed must be one
+/// decision. Passing the fact in is what lets the refusal set live here
+/// whole: a stage that is narrower than another is exactly the asymmetry that
+/// mints a verdict from evidence the acting arm had already rejected.
+///
+/// Read from the operator's entry rather than from a dispatch target because
+/// the suppression predicate keys on the configured base URL, which no target
+/// carries.
+pub(super) fn attributable_anthropic_base_url<'a>(
+    config: &'a crate::config::Config,
+    provider_name: &str,
+    use_forwarded_credential: bool,
+) -> Option<&'a str> {
+    if use_forwarded_credential {
+        return None;
+    }
+    let base_url = config
+        .providers
+        .get(provider_name)
+        .and_then(crate::config::ProviderEntry::anthropic_api_base_url)?;
+    if crate::field_verdict::loopback_target_suppresses_minting(base_url) {
+        return None;
+    }
+    Some(base_url)
 }
 
 /// The closed table's row for `path` -- the table's OWN path literal plus its
@@ -898,23 +1073,24 @@ impl Router {
         // base URL, and the target carries none. The accessor answers only
         // for the lane this stage acts on, so every other kind fails closed
         // here as well as at the kind check above.
-        let base_url = self
-            .config
-            .providers
-            .get(&target.provider_name)
-            .and_then(crate::config::ProviderEntry::anthropic_api_base_url)?;
-        // Loopback suppression is checked HERE, above the settlement-mode
-        // branch, so it applies to EVERY walk. The guard's own admission also
-        // refuses a local target, but only a settling walk reaches that
-        // admission -- leaving the check there alone let a result-only walk
-        // mutate the body, spend the shared allowance, and re-dispatch a
-        // target whose rejection this stage has decided it cannot attribute at
-        // all. A suppressed target is one routectl must not act on, not merely
-        // one it must not learn from, so the refusal belongs to the plan rather
+        //
+        // Loopback suppression is folded into the SAME shared read, so it
+        // applies to EVERY walk. The guard's own admission also refuses a
+        // local target, but only a settling walk reaches that admission --
+        // leaving the check there alone let a result-only walk mutate the
+        // body, spend the shared allowance, and re-dispatch a target whose
+        // rejection this stage has decided it cannot attribute at all. A
+        // suppressed target is one routectl must not act on, not merely one
+        // it must not learn from, so the refusal belongs to the plan rather
         // than to the settlement.
-        if crate::field_verdict::loopback_target_suppresses_minting(base_url) {
-            return None;
-        }
+        // The forwarded fact comes from the TARGET here -- the chain derived it
+        // for this dispatch -- and the rest of the refusal set lives in the
+        // shared decision.
+        let base_url = attributable_anthropic_base_url(
+            &self.config,
+            &target.provider_name,
+            target.use_forwarded_credential,
+        )?;
         // The identities come from the CLOSED TABLE plus the request, never
         // from upstream text: every row whose surface this attempt actually
         // carries, in table source order.
