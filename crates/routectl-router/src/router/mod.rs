@@ -48,6 +48,7 @@ mod prefix_rewrite;
 mod probe_failure_class;
 mod probe_lifecycle;
 mod probe_lifecycle_state;
+mod probe_pass;
 mod probe_payload_capture;
 mod probe_publication;
 mod probe_seat;
@@ -72,6 +73,7 @@ pub use field_verdict_observability::{
 use overlays::{apply_layered_overlays, operator_betas};
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use paid_probe_ledger::{PaidProbeLedger, PaidProbeReservation};
+pub use probe_pass::ProbePassSummary;
 use routectl_core::capability::FailurePhase;
 #[cfg(test)]
 use routectl_core::capability::SignalTier;
@@ -2984,3 +2986,7 @@ mod field_verdict_observability_tests;
 #[cfg(test)]
 #[path = "field_canary_settlement_tests.rs"]
 mod field_canary_settlement_tests;
+
+#[cfg(test)]
+#[path = "probe_pass_tests.rs"]
+mod probe_pass_tests;

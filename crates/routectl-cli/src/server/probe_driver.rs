@@ -11,7 +11,8 @@ use arc_swap::ArcSwap;
 use routectl_router::Router;
 use tokio::sync::watch;
 
-/// How often the probe driver looks for due free-validator work.
+/// How often the probe driver looks for due free-validator work and attempts
+/// a paid probe.
 ///
 /// A code CONSTANT, not an operator knob and never read from the
 /// environment: it is one of the bounds that keeps background validation
@@ -20,8 +21,9 @@ use tokio::sync::watch;
 /// a best-effort side channel, and a lane's answer is not time-critical.
 pub(super) const PROBE_DRIVER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Drive the live `Router`'s bounded probe worker until `shutdown` fires,
-/// then cancel whatever is still queued.
+/// Drive the live `Router`'s probe pass -- the due free batch, then at most
+/// one paid probe -- until `shutdown` fires, then cancel whatever is still
+/// queued.
 ///
 /// Starts IDLE and stays idle: each tick asks the currently published
 /// router for its due work, and with nothing queued that is a lock, a
@@ -29,13 +31,17 @@ pub(super) const PROBE_DRIVER_INTERVAL: std::time::Duration = std::time::Duratio
 /// request has activated a lane. Startup, config parsing, reload, and a
 /// status read all leave the queue empty, so none of them can cause a call.
 ///
+/// One `run_probe_pass` call per tick, never a second task or interval: the
+/// free-before-paid ordering and the at-most-one-paid-candidate bound both
+/// live inside that single call, so this driver only needs to schedule it.
+///
 /// Reads `router_swap` per tick rather than capturing one `Arc`, matching
 /// the metrics driver above: a publication switches the driver onto the
 /// replacement cleanly, and because the scheduler is shared across the swap
 /// an outstanding lease still settles against the table the published
 /// router reads.
 ///
-/// Never blocks a request: this is its own task, and the worker it calls
+/// Never blocks a request: this is its own task, and the pass it calls
 /// bounds itself by the scheduler's queue depth, concurrency ceiling, and
 /// per-operation timeout.
 pub(super) async fn run_probe_driver(
@@ -76,7 +82,7 @@ pub(super) async fn run_probe_driver(
                 // front is both the documented shape and one predictable
                 // refcount bump per tick.
                 let live = router_swap.load_full();
-                let run = live.run_due_probes();
+                let run = live.run_probe_pass();
                 tokio::select! {
                     // Biased the other way ROUND, shutdown still first: the
                     // run is already in flight here, so checking shutdown
@@ -89,10 +95,11 @@ pub(super) async fn run_probe_driver(
                         return;
                     }
                     ran = run => {
-                        if ran > 0 {
+                        if ran.free_validators_run > 0 || ran.paid_probe_attempted {
                             tracing::debug!(
-                                probe_validators_run = ran,
-                                "probe driver executed due free validators",
+                                probe_validators_run = ran.free_validators_run,
+                                paid_probe_attempted = ran.paid_probe_attempted,
+                                "probe driver ran its due free batch and paid attempt",
                             );
                         }
                     }

@@ -377,4 +377,70 @@ pub struct ProbeSchedulerSnapshot {
     /// read. An operator seeing this non-zero alongside a lane that never
     /// produces evidence has the explanation.
     pub payload_refusals_total: u64,
+    /// Lifetime paid-probe candidates CLAIMED off the list. Recorded at the
+    /// claim itself, so a pass cancelled at any later point still reports
+    /// that it took a candidate.
+    ///
+    /// An empty list claims nothing and counts nothing.
+    pub paid_candidate_attempts_total: u64,
+    /// Lifetime paid-probe reservations committed, recorded on the ledger's
+    /// COMMITTED ACKNOWLEDGEMENT rather than on whatever the pass went on to
+    /// do.
+    ///
+    /// That is the only honest boundary: the unit is spent the moment the
+    /// ledger acknowledges it and there is no refund, so this counts a
+    /// commit whose pass was then superseded, gate-deferred, cancelled, or
+    /// dropped. Reading spend off a pass's final outcome would undercount
+    /// exactly the irreversible cases.
+    pub paid_reservations_committed_total: u64,
+    /// Lifetime paid-probe calls DISPATCHED to a provider, recorded
+    /// immediately before the call rather than after it answers -- so a
+    /// cancelled or timed-out call still reports that the upstream may have
+    /// received it.
+    ///
+    /// Excludes a gate deferral, which spends the reservation without
+    /// dispatching a call.
+    pub paid_provider_calls_started_total: u64,
+    /// Lifetime paid-probe calls that answered.
+    pub paid_completed_total: u64,
+    /// Lifetime paid-probe calls the upstream refused or failed.
+    pub paid_provider_failed_total: u64,
+    /// Lifetime paid-probe calls that did not answer inside the operation
+    /// timeout.
+    pub paid_timeouts_total: u64,
+    /// Lifetime paid-probe reservations the per-attempt gate declined before
+    /// any call was dispatched.
+    pub paid_gate_deferrals_total: u64,
+    /// Lifetime paid-probe passes refused after claiming a candidate: every
+    /// authorization refusal except the empty-list case, which claimed
+    /// nothing to be refused.
+    pub paid_authorization_refusals_total: u64,
+}
+
+/// How one paid-probe pass SETTLED, for the scheduler's terminal counters. A
+/// closed set local to this crate: the pass's own outcome and refusal
+/// vocabularies live on `router`, in modules this one cannot name, so `router`
+/// translates its outcome into this vocabulary before handing it to
+/// `ProbeScheduler::record_paid_settlement`.
+///
+/// TERMINAL OUTCOMES ONLY. The irreversible milestones a pass passes through --
+/// claiming a candidate, committing a reservation, dispatching a call -- are
+/// each recorded where they happen, because a pass cancelled after one of them
+/// never reaches a settlement to report it. There is likewise no
+/// "nothing was claimed" variant: an empty candidate list settles nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaidPassSettlement {
+    /// A claimed candidate was refused by authorization, for any reason other
+    /// than an empty list. May or may not have committed a reservation first --
+    /// a post-commit supersession lands here too, which is exactly why spend is
+    /// counted at the commit rather than inferred from this value.
+    Refused,
+    /// The per-attempt gate declined the call after the reservation committed.
+    GateDeferred,
+    /// A call was dispatched and the upstream answered.
+    Completed,
+    /// A call was dispatched and the upstream refused or failed.
+    ProviderFailed,
+    /// A call was dispatched and did not answer inside the operation timeout.
+    TimedOut,
 }

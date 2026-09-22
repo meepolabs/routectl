@@ -139,15 +139,8 @@ impl PaidProbeDialOutcome {
 pub enum PaidProbePass {
     /// A unit was committed and exactly one call was made, or the gate declined
     /// it. Either way the unit is spent.
-    ///
-    /// Allowance rationale as for [`Router::run_paid_probe`]: the driver pass
-    /// that reads the outcome is a separate change, so nothing outside the tests
-    /// inspects the payload yet. `cfg_attr` rather than a blanket allow, so the
-    /// allowance disappears the moment that caller lands.
-    #[cfg_attr(not(test), allow(dead_code))]
     Dialed(PaidProbeDialOutcome),
     /// No authorization was granted, for this reason. Nothing was dialed.
-    #[cfg_attr(not(test), allow(dead_code))]
     Refused(PaidProbeRefusal),
 }
 
@@ -159,12 +152,8 @@ impl Router {
     /// that could reorder. Moving the dial ahead of the authorization would put an
     /// outbound paid call in front of the reservation that pays for it.
     ///
-    /// NO PRODUCTION CALLER YET, for the same reason `authorize_paid_probe` had
-    /// none before this landed: the driver pass that ticks it is a separate
-    /// change, and pinning the call's shape before any driver exists is what
-    /// keeps that change from having to invent it. `cfg_attr` rather than a
-    /// blanket allow, so the allowance disappears the moment that caller lands.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Called at most once per driver tick, after the free due batch has run to
+    /// completion, by `Router::run_probe_pass`.
     pub(super) async fn run_paid_probe(&self) -> PaidProbePass {
         match self.authorize_paid_probe().await {
             PaidProbeOutcome::Refused(refusal) => PaidProbePass::Refused(refusal),
@@ -221,6 +210,13 @@ impl Router {
         // validator in, so a paid call cannot outlive a free one by carrying its
         // own bound. Expiry DROPS the call future rather than merely giving up on
         // it, which is why it is terminal unknown rather than retryable.
+        //
+        // COUNTED AS STARTED IMMEDIATELY BEFORE the call, never after it
+        // answers: from here the upstream may have received the request, so a
+        // timeout or a cancelled future has still dispatched one. Recording it
+        // on the answer would report zero calls for exactly the cases where
+        // routectl cannot tell whether the upstream was reached.
+        self.probe_scheduler.note_paid_provider_call_started();
         let answered = tokio::time::timeout(
             crate::probe_scheduler::PROBE_OPERATION_TIMEOUT,
             authorization.seat().provider.complete(request),
