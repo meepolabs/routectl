@@ -129,3 +129,15 @@ pub(super) fn install_paid_probe_ledger(router: Router, usage: &UsageHandle) -> 
 #[cfg(test)]
 #[path = "paid_probe_ledger_tests.rs"]
 mod paid_probe_ledger_tests;
+
+/// The composed end-to-end proof: the real writer, this module's own adapter,
+/// and the daemon's probe pass in ONE path down to a single wire call.
+///
+/// Its own module rather than an `include!` fragment of the sidecar above: it
+/// carries a full rig of its own and the two together would put one compiled
+/// module well past the repo's size ceiling. Nothing in it needs the host's
+/// fixtures directly -- the live writer and the control-row reads it shares with
+/// that sidecar live in `server::test_support`.
+#[cfg(test)]
+#[path = "paid_probe_end_to_end_tests.rs"]
+mod paid_probe_end_to_end_tests;

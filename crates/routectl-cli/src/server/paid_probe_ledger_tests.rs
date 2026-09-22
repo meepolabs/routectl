@@ -9,30 +9,16 @@
 
 use super::*;
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 use tempfile::TempDir;
 
-use crate::server::test_support::begin_writer_drain;
-
-/// A live writer over a fresh database, plus the tempdir guard and the path a
-/// second connection reads through.
-///
-/// The file is brought to the current schema HERE, before the writer starts, so
-/// a second connection can read it from the first instant. The writer performs
-/// its own migrating open on its thread, which a reader racing it sees as an
-/// absent or older-schema file rather than as an empty one -- so a fixture that
-/// skipped this would fail on the read rather than on the behavior.
-fn live_writer() -> (TempDir, PathBuf, UsageHandle, UsageWriter) {
-    let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().join("usage.db");
-    drop(routectl_usage::open(&path).expect("migrating open"));
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
-    (dir, path, handle, writer)
-}
+use crate::server::test_support::{
+    added_control_rows as added_rows, begin_writer_drain, live_usage_writer as live_writer,
+    usage_control_rows as control_rows,
+};
 
 /// One reservation through the adapter, as the Router would ask for it.
 async fn reserve(
@@ -41,41 +27,6 @@ async fn reserve(
     daily_cap: u32,
 ) -> PaidProbeReservation {
     ledger.reserve_paid_probe_unit(provider, daily_cap).await
-}
-
-/// Every control row the database holds, read through a connection the writer
-/// does not own.
-///
-/// Returns the whole table rather than one key on purpose: the storage key the
-/// reservation lands under is the usage crate's own encoding and deliberately
-/// never crosses the boundary, so these tests DERIVE the key from what a
-/// committed reservation adds instead of restating it. A hardcoded key here
-/// would be a second copy of a private encoding, and would keep passing if the
-/// reservation started writing somewhere else entirely.
-fn control_rows(path: &Path) -> BTreeMap<String, String> {
-    let db = routectl_usage::open_readonly(path).expect("read-only open");
-    let mut stmt = db
-        .conn()
-        .prepare("SELECT key, value FROM meta")
-        .expect("prepare");
-    stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })
-    .expect("query")
-    .collect::<Result<BTreeMap<_, _>, _>>()
-    .expect("control rows")
-}
-
-/// The rows present in `after` and absent from `before`.
-fn added_rows(
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    after
-        .iter()
-        .filter(|(key, _)| !before.contains_key(*key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }
 
 /// Release the producer side, then stop the writer.
