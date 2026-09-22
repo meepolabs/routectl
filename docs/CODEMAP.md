@@ -5285,7 +5285,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
 - `src/server/paid_probe_ledger.rs` -- bridges the router's paid-probe budget
   seam to the usage writer, plus `install_paid_probe_ledger` (boot-time).
-  Tests: `paid_probe_ledger_tests.rs` + its lifetime / wiring `include!` sidecars
+  Tests: `paid_probe_ledger_tests.rs` + its lifetime / wiring `include!`
+  sidecars, plus `paid_probe_end_to_end_tests.rs` as its own `#[path]` module
+  (composes the real writer, this adapter, and the daemon's probe pass into one
+  wire call; shares the live-writer / control-row fixtures via
+  `src/server/test_support.rs`)
 - `src/server/router_publish.rs` -- `publish_router`, the publication step every
   reload path shares. STAMPS the replacement's probe incarnation and retires the
   outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
