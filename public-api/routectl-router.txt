@@ -4173,6 +4173,65 @@ impl<T> typenum::type_operators::Same for routectl_router::FieldRepairCounters
 pub type routectl_router::FieldRepairCounters::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldRepairCounters where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::FieldRepairCounters::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::ProbePassSummary
+pub routectl_router::router::ProbePassSummary::free_validators_run: usize
+pub routectl_router::router::ProbePassSummary::paid_probe_attempted: bool
+impl core::clone::Clone for routectl_router::router::ProbePassSummary
+pub fn routectl_router::router::ProbePassSummary::clone(&self) -> routectl_router::router::ProbePassSummary
+impl core::cmp::Eq for routectl_router::router::ProbePassSummary
+impl core::cmp::PartialEq for routectl_router::router::ProbePassSummary
+pub fn routectl_router::router::ProbePassSummary::eq(&self, &routectl_router::router::ProbePassSummary) -> bool
+impl core::fmt::Debug for routectl_router::router::ProbePassSummary
+pub fn routectl_router::router::ProbePassSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::router::ProbePassSummary
+impl core::marker::StructuralPartialEq for routectl_router::router::ProbePassSummary
+impl core::marker::Freeze for routectl_router::router::ProbePassSummary
+impl core::marker::Send for routectl_router::router::ProbePassSummary
+impl core::marker::Sync for routectl_router::router::ProbePassSummary
+impl core::marker::Unpin for routectl_router::router::ProbePassSummary
+impl core::marker::UnsafeUnpin for routectl_router::router::ProbePassSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::ProbePassSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::ProbePassSummary
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::router::ProbePassSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::router::ProbePassSummary::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::router::ProbePassSummary where U: core::convert::From<T>
+pub fn routectl_router::router::ProbePassSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::ProbePassSummary where U: core::convert::Into<T>
+pub type routectl_router::router::ProbePassSummary::Error = core::convert::Infallible
+pub fn routectl_router::router::ProbePassSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::ProbePassSummary where U: core::convert::TryFrom<T>
+pub type routectl_router::router::ProbePassSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::ProbePassSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::ProbePassSummary where T: core::clone::Clone
+pub type routectl_router::router::ProbePassSummary::Owned = T
+pub fn routectl_router::router::ProbePassSummary::clone_into(&self, &mut T)
+pub fn routectl_router::router::ProbePassSummary::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::ProbePassSummary where T: core::clone::Clone
+pub fn routectl_router::router::ProbePassSummary::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::ProbePassSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::ProbePassSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::ProbePassSummary where T: ?core::marker::Sized
+pub fn routectl_router::router::ProbePassSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::ProbePassSummary where T: ?core::marker::Sized
+pub fn routectl_router::router::ProbePassSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::ProbePassSummary where T: core::clone::Clone
+pub unsafe fn routectl_router::router::ProbePassSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::ProbePassSummary
+pub fn routectl_router::router::ProbePassSummary::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::ProbePassSummary where T: core::clone::Clone
+pub fn routectl_router::router::ProbePassSummary::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::ProbePassSummary
+impl<T> outref::AsOut<T> for routectl_router::router::ProbePassSummary where T: core::marker::Copy
+pub fn routectl_router::router::ProbePassSummary::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::ProbePassSummary where T: ?core::marker::Sized
+pub fn routectl_router::router::ProbePassSummary::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::ProbePassSummary::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::ProbePassSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::ProbePassSummary
+impl<T> typenum::type_operators::Same for routectl_router::router::ProbePassSummary
+pub type routectl_router::router::ProbePassSummary::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ProbePassSummary where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::ProbePassSummary::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::ReplayDegradation
 pub routectl_router::router::ReplayDegradation::action: &'static str
 pub routectl_router::router::ReplayDegradation::artifact_count: usize
@@ -4397,6 +4456,8 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
 pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
+impl routectl_router::router::Router
+pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_router::router::ProbePassSummary
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
@@ -12691,8 +12752,16 @@ pub routectl_router::ProbeSchedulerSnapshot::deferral_evictions_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::deferrals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::free_exhausted_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::in_flight: usize
+pub routectl_router::ProbeSchedulerSnapshot::paid_authorization_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_attempts_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_capacity_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_completed_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_gate_deferrals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_provider_calls_started_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_provider_failed_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_reservations_committed_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::paid_slot_refusals_total: u64
+pub routectl_router::ProbeSchedulerSnapshot::paid_timeouts_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::payload_refusals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::queue_full_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::queued: usize
@@ -13350,6 +13419,8 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
 pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
+impl routectl_router::router::Router
+pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_router::router::ProbePassSummary
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>

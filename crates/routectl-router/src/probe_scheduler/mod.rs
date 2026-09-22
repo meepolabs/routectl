@@ -116,6 +116,7 @@ pub use payload::{
     PROBE_BETA_MAX_COUNT_PER_SOURCE, PROBE_BETA_MAX_TOKEN_BYTES, PROBE_BETA_MAX_TOTAL_BYTES,
     PROBE_MODELED_DISPLAY_VALUES,
 };
+pub use vocab::PaidPassSettlement;
 pub use vocab::{
     FreeValidatorOutcome, ProbeActivation, ProbeSchedulerSnapshot, ProbeSettlement, ProbeValidator,
     paid_probe_permitted, validator_plan,
@@ -574,6 +575,53 @@ impl ProbeScheduler {
     /// admitted.
     pub fn note_payload_refusal(&self) {
         self.inner.lock().counters.payload_refusals_total += 1;
+    }
+
+    /// Record that a paid-probe pass CLAIMED a candidate off the list.
+    ///
+    /// Called at the claim, not at a settlement. A claim is irreversible --
+    /// the candidate is off the list whatever happens next -- so a pass
+    /// cancelled at any later point must still report that it took one.
+    pub fn note_paid_candidate_claimed(&self) {
+        self.inner.lock().counters.paid_candidate_attempts_total += 1;
+    }
+
+    /// Record that the ledger ACKNOWLEDGED a committed reservation.
+    ///
+    /// Called on the acknowledgement itself rather than on whatever the pass
+    /// goes on to do, because that is where the unit becomes spent and there is
+    /// no refund: a supersession, gate deferral, timeout, or cancellation after
+    /// this point changes nothing about the spend. Inferring it from a pass's
+    /// final outcome would undercount exactly the irreversible cases.
+    pub fn note_paid_reservation_committed(&self) {
+        self.inner.lock().counters.paid_reservations_committed_total += 1;
+    }
+
+    /// Record that a paid-probe call was DISPATCHED to a provider.
+    ///
+    /// Called immediately before the call rather than after it answers: once
+    /// the request is handed to the provider the upstream may have received it,
+    /// so a cancelled or timed-out call has still started.
+    pub fn note_paid_provider_call_started(&self) {
+        self.inner.lock().counters.paid_provider_calls_started_total += 1;
+    }
+
+    /// Record how one paid-probe pass SETTLED.
+    ///
+    /// Terminal counters only. The irreversible milestones have their own
+    /// recorders above, called where they occur, so this adds nothing a
+    /// cancellation could skip -- and one exhaustive match still forces a build
+    /// that adds a settlement shape to decide what it counts.
+    pub fn record_paid_settlement(&self, settlement: PaidPassSettlement) {
+        let mut inner = self.inner.lock();
+        let counters = &mut inner.counters;
+        match settlement {
+            PaidPassSettlement::Refused => counters.paid_authorization_refusals_total += 1,
+            PaidPassSettlement::GateDeferred => counters.paid_gate_deferrals_total += 1,
+            PaidPassSettlement::Completed => counters.paid_completed_total += 1,
+            PaidPassSettlement::ProviderFailed => counters.paid_provider_failed_total += 1,
+            PaidPassSettlement::TimedOut => counters.paid_timeouts_total += 1,
+        }
     }
 
     /// Current queue state plus the lifetime counters.

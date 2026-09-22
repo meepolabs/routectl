@@ -3257,6 +3257,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/paid_probe_dial.rs` -- `Router::run_paid_probe()`: authorize then
   dial, spending one committed unit on one direct `seat.provider.complete`.
   No driver pass, usage write, verdict mint, or status render; contracts in module docs
+- `src/router/probe_pass.rs` -- `Router::run_probe_pass()` and
+  `ProbePassSummary`: the driver-facing entry point for one probe pass.
 - `src/router/paid_probe_ledger.rs` -- the CRATE-BOUNDARY contract for the  crash-safe paid-probe budget: the `PaidProbeLedger` trait
   (`reserve_paid_probe_unit(provider, daily_cap)`, the only method -- there is
   no release, refund, or timeout, because a committed unit is spent) and the
@@ -4063,8 +4065,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/probe_scheduler/bounds.rs` -- the queue, concurrency, timeout, backoff,
   attempt, deferral, and tombstone-capacity limits as code constants.
 - `src/probe_scheduler/vocab.rs` -- the closed validator / outcome /
-  settlement / activation tokens, `ProbeSchedulerSnapshot`, `validator_plan`,
-  and `paid_probe_permitted`.
+  settlement / activation tokens, `ProbeSchedulerSnapshot`,
+  `PaidPassSettlement`, `validator_plan`, and `paid_probe_permitted`.
 - `src/probe_scheduler/payload.rs` -- `ProbePayload` and every capture-time
   refusal. `PROBE_MODELED_DISPLAY_VALUES` restricts the probed value to the
   vocabulary the egress models (`summarized` / `omitted` / `updates`); the rule
@@ -5279,21 +5281,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
   per-session prefix-epoch baselines -- a one-site-only carry silently empties
   that store on the missed path, and an empty store reads exactly as health)
-- `src/server/probe_driver.rs` -- the daemon's bounded probe driver. It is
-  the production scheduling driver for the router's bounded free-validator
-  worker: it starts IDLE and stays idle -- a tick with an empty queue is a lock,
-  a length check, and a return, so startup, config parsing, reload, and a status
-  read all issue ZERO network work, and nothing is dialed until an admitted real
-  request has activated a lane. `PROBE_DRIVER_INTERVAL` is a code constant never
-  read from the environment. It reads the live router per tick through
-  `load_full` rather than an `ArcSwap` Guard: a Guard is documented for a stack
-  local, not a long-held borrow, and this one spans the whole probe batch, up to
-  the per-operation timeout. Its shutdown arm is the SINGLE owner of probe
-  cancellation, and it is CANCELLATION-SAFE -- each tick's run is selected
-  AGAINST the shutdown signal rather than awaited first, so losing the race
-  drops the run future and every in-flight validator future with it; awaiting
-  would hold the graceful drain for a whole per-operation timeout. Both selects
-  are `biased` with the shutdown arm first, pinned by a source guard.
+- `src/server/probe_driver.rs` -- `run_probe_driver` and
+  `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
 - `src/server/paid_probe_ledger.rs` -- bridges the router's paid-probe budget
   seam to the usage writer, plus `install_paid_probe_ledger` (boot-time).
   Tests: `paid_probe_ledger_tests.rs` + its lifetime / wiring `include!` sidecars

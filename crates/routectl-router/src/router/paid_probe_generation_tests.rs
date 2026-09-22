@@ -235,6 +235,14 @@ async fn a_publication_during_the_await_supersedes_the_consumed_reservation() {
         "the reservation was submitted once, and stays consumed -- there is no \
          release method, and underuse is the cheap side of this trade",
     );
+    assert_eq!(
+        router
+            .probe_scheduler_snapshot()
+            .paid_reservations_committed_total,
+        1,
+        "and the spend is COUNTED, because the commit -- not the pass's final \
+         refusal -- is where the unit became irreversible",
+    );
     assert!(
         router.all_recorded_paid_candidates_for_tests().is_empty(),
         "a superseded attempt must not requeue onto a list the publication cleared",

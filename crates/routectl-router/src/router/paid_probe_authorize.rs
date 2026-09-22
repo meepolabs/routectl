@@ -407,12 +407,6 @@ pub enum PaidProbeOutcome {
     /// refusal (it owns a seat, a payload, and a slot), and this value is
     /// returned by every pass including the overwhelmingly common refusing one.
     /// An unboxed variant would make each of those pay the authorized size.
-    ///
-    /// Allowance rationale as for [`Router::authorize_paid_probe`]: the arm that
-    /// dials on the authorization is a separate change, so nothing outside the
-    /// tests reads the payload yet. `cfg_attr` rather than a blanket allow, so
-    /// the allowance disappears the moment that caller lands.
-    #[cfg_attr(not(test), allow(dead_code))]
     Authorized(Box<PaidProbeAuthorization>),
     /// No paid call may be made, for this reason.
     Refused(PaidProbeRefusal),
@@ -447,8 +441,17 @@ impl Router {
     /// next pass, so one lane whose accounting keeps refusing (a cap exhausted
     /// until the UTC rollover, an overloaded layer) starves every healthy lane
     /// behind it for as long as the condition lasts.
+    ///
+    /// COUNTED HERE, where the claim happens, rather than by a caller reading
+    /// the eventual outcome: the candidate is off the list from this point on,
+    /// so a pass cancelled anywhere downstream must still report that it took
+    /// one. An empty list counts nothing, having claimed nothing.
     fn claim_paid_probe_candidate(&self) -> Option<PaidProbeCandidate> {
-        self.paid_probe_candidates.lock().pop_front()
+        let candidate = self.paid_probe_candidates.lock().pop_front();
+        if candidate.is_some() {
+            self.probe_scheduler.note_paid_candidate_claimed();
+        }
+        candidate
     }
 
     /// Put a claimed candidate back at the END of the queue, subject to the same
@@ -600,11 +603,8 @@ impl Router {
     /// candidate only when the condition can change without a publication (see
     /// [`PaidProbeRefusal::requeues`]).
     ///
-    /// NO PRODUCTION CALLER YET, for the same reason
-    /// `Router::reserve_paid_probe_unit` has none: the arm that dials on the
-    /// authorization is a separate change, and pinning the refusals before any
-    /// spender exists is what keeps that change from having to invent them.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Called by `Router::run_paid_probe`, which dials on the authorization this
+    /// returns.
     pub(super) async fn authorize_paid_probe(&self) -> PaidProbeOutcome {
         let Some(candidate) = self.claim_paid_probe_candidate() else {
             return PaidProbeOutcome::Refused(PaidProbeRefusal::NoCandidate);
@@ -712,6 +712,15 @@ impl Router {
             // given back.
             return PaidProbeOutcome::Refused(PaidProbeRefusal::Accounting(reservation));
         };
+        // THE SPEND IS RECORDED HERE, on the acknowledgement, before any later
+        // check can decide the attempt is over. The unit is spent from this
+        // point and the ledger has no release method, so the supersession
+        // refusal below -- and a cancellation, a gate deferral, or a timeout
+        // further on -- must not be able to skip it. Recording it at a pass's
+        // final outcome instead would undercount exactly the irreversible cases,
+        // and would make a post-commit supersession indistinguishable from a
+        // refusal that cost nothing.
+        self.probe_scheduler.note_paid_reservation_committed();
         // CURRENT PUBLICATION AGAIN, on the acknowledgement and BEFORE any
         // authorization exists. A publication or shutdown that landed inside the
         // await means the committed unit belongs to router state that no longer
