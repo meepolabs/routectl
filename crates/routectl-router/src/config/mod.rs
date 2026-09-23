@@ -213,14 +213,12 @@ pub struct Config {
     ///   list does not name, so adding an entry can change what goes
     ///   upstream (for a target whose verdict also clears the confirmed-
     ///   repair quorum).
-    /// - `paid_probe_daily_caps` is consumed for PAID-CANDIDATE ELIGIBILITY:
-    ///   the probe worker reads a lane's cap when its free validation runs out
-    ///   of steps and records a paid candidate only when the cap is non-zero,
-    ///   so at the default zero every exhausted lane declines. No paid CALL
-    ///   exists in this build, so it constrains no upstream spend. Its keys are
-    ///   additionally validated at config load -- a key carrying a `:` or
-    ///   naming a provider that is not configured fails the load -- so a
-    ///   typo'd entry is rejected at load time.
+    /// - `paid_probe_daily_caps` gates both PAID-CANDIDATE ELIGIBILITY and
+    ///   the durable reservation that must commit before a live paid probe
+    ///   call. A non-zero entry authorizes real upstream spend up to that
+    ///   provider's UTC-day cap; the default zero declines every paid call.
+    ///   Keys are validated at config load -- a key carrying a `:` or naming
+    ///   an unconfigured provider fails the load -- so a typo is rejected.
     ///
     /// See `FidelityConfig` for the fixed cadence/quorum constants this
     /// block deliberately does not expose.

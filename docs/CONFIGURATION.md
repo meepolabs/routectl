@@ -3482,12 +3482,12 @@ prefix_impact_opt_in = []
   it suppresses the action without deleting the learned verdict.
   Envelope-class repair needs neither gate -- it acts on one confirmed
   cycle and no opt-in.
-- **`paid_probe_daily_caps` gates paid-probe CANDIDACY, not spend.** When a
-  lane's free validation runs out of steps, routectl records it as a
-  paid-probe candidate only if the provider's cap here is non-zero -- so at
-  the default `0` every exhausted lane declines and nothing is recorded. No
-  paid probe call exists in this build, so raising the cap authorizes no
-  upstream spend today; it only lets a lane be nominated for one.
+- **`paid_probe_daily_caps` authorizes and bounds paid probes.** When a
+  lane's free validation runs out of steps, routectl records a paid-probe
+  candidate only if the provider's cap is non-zero. Before a live paid probe
+  call, one unit must commit durably against that provider's UTC-day cap. A
+  non-zero entry therefore authorizes real upstream spend up to the cap; the
+  default `0` declines every paid call.
 
 ## Context reduction (`[reduction]`)
 
