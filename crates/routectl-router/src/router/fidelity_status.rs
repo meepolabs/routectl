@@ -23,7 +23,8 @@
 //! real request needs. The registries expose non-mutating snapshot reads for
 //! exactly this, and nothing here calls anything else -- no cadence tick, no
 //! canary claim, no modified-request accounting, no lane activation, no
-//! scheduling. A source guard in the test sidecar refuses the mutating names.
+//! scheduling. Behavioral tests compare the canary, learned-registry, and
+//! scheduler state before and after repeated status reads.
 //!
 //! # What is deliberately NOT here
 //!

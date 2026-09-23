@@ -1432,12 +1432,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   changes nothing -- but the two fields differ in what reads them.
   `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight planner
   refuses a prefix-impacting transform for any target it does not name, so an
-  entry can change what goes upstream. `paid_probe_daily_caps` is consumed for
-  PAID-CANDIDATE ELIGIBILITY -- the probe worker reads it through
-  `paid_probe_permitted` when a free plan is exhausted and records a candidate
-  only at a non-zero cap, so the default zero declines every lane -- while no
-  paid CALL exists, so it constrains no upstream spend. Its KEYS are
-  additionally validated at config load against the
+  entry can change what goes upstream. `paid_probe_daily_caps` gates
+  PAID-CANDIDATE ELIGIBILITY and the durable reservation that must commit before
+  a live paid probe call. A non-zero entry authorizes real upstream spend up to
+  that provider's UTC-day cap; the default zero declines every paid call. Its
+  KEYS are validated at config load against the
   configured providers (`factory::validate`, which rejects a `:`-scoped key and
   an unknown provider name), so a typo fails the load today. The re-verification
   cadence and the confirmation quorums are the code constants
