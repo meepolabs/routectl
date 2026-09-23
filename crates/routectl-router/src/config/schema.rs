@@ -517,16 +517,25 @@ const _: () = assert!(
 /// with the default `0`, permits no paid probe calls; only free
 /// validators may still run for it.
 ///
-/// It IS consumed at runtime, for PAID-CANDIDATE ELIGIBILITY only: when a
-/// lane's free validation runs out of steps, the probe worker reads this cap
-/// through the shared `paid_probe_permitted` predicate and records a candidate
-/// only when it is non-zero -- so at the default zero, every exhausted lane
-/// declines and nothing is recorded. No paid CALL exists in this build, so the
-/// cap constrains no upstream spend yet; it gates whether a lane is even
-/// nominated for one. Its KEYS are additionally validated at config load
-/// against the configured providers (a `:`-scoped key, or one naming an unknown
-/// provider, fails the load), so a typo'd entry is rejected at load rather than
-/// discovered later.
+/// It IS consumed at runtime, and it gates REAL UPSTREAM SPEND. A non-zero
+/// entry is read at two distinct points, and both are live:
+///
+/// - PAID-CANDIDATE ELIGIBILITY: when a lane's free validation runs out of
+///   steps, the probe worker reads this cap through the shared
+///   `paid_probe_permitted` predicate and records a candidate only when it is
+///   non-zero, so at the default zero every exhausted lane declines and nothing
+///   is recorded.
+/// - PAID AUTHORIZATION: the paid pass re-reads the LIVE cap for the claimed
+///   candidate's provider and refuses outright at zero, then passes that same
+///   number to the durable reservation. A committed reservation authorizes
+///   exactly one outbound completion call against that provider, which is
+///   billable upstream spend, and the unit is never refunded.
+///
+/// So a non-zero entry is the operator's authorization to spend money: raising
+/// it from zero permits up to that many billable calls per provider per UTC day.
+/// Its KEYS are additionally validated at config load against the configured
+/// providers (a `:`-scoped key, or one naming an unknown provider, fails the
+/// load), so a typo'd entry is rejected at load rather than discovered later.
 ///
 /// The re-verification cadence and confirmation quorum are code constants
 /// ([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are
@@ -545,7 +554,9 @@ pub struct FidelityConfig {
     #[serde(default)]
     pub prefix_impact_opt_in: Vec<String>,
     /// Per-provider paid-probe daily call cap, keyed by provider name. A
-    /// provider absent from this map defaults to `0` (no paid probes).
+    /// provider absent from this map defaults to `0` (no paid probes). A
+    /// non-zero value authorizes up to that many BILLABLE upstream completion
+    /// calls per UTC day for that provider; a committed unit is never refunded.
     #[serde(default)]
     pub paid_probe_daily_caps: BTreeMap<String, u32>,
 }
