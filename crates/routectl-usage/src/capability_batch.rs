@@ -171,8 +171,21 @@ impl UsageHandle {
             .try_send(crate::writer::WriterMessage::capability_batch(batch))
         {
             Ok(()) => Ok(BatchReceipt { ack: ack_rx }),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(BatchCommit::ChannelFull),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(BatchCommit::Unavailable),
+            // COUNTED, on the shared classifier, before the outcome is returned.
+            //
+            // A refused batch previously incremented nothing at all, and that was the
+            // hole: this is the path a purge, a canary's durable clear, and a boot
+            // tombstone all take, so a refusal here is precisely the event
+            // capability-persistence health exists to notice -- and it was invisible
+            // to it. The caller learning `ChannelFull` is not a substitute: health is
+            // read later, by a different component, from the counters.
+            Err(refusal) => {
+                self.note_capability_refusal(&refusal);
+                Err(match refusal {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => BatchCommit::ChannelFull,
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => BatchCommit::Unavailable,
+                })
+            }
         }
     }
 
@@ -235,10 +248,27 @@ impl UsageHandle {
 pub fn handle_over_channel(
     sender: tokio::sync::mpsc::Sender<crate::writer::WriterMessage>,
 ) -> UsageHandle {
+    handle_over_channel_with(
+        sender,
+        std::sync::Arc::new(crate::handle::UsageCounters::default()),
+    )
+}
+
+/// [`handle_over_channel`] over CALLER-SUPPLIED counters.
+///
+/// Test seam for a caller that has to read the counters a refusal moves. The
+/// default constructor above builds its own, which nobody outside the handle can
+/// then observe -- and a refusal nobody can read is a refusal a test cannot
+/// distinguish from an acceptance.
+#[doc(hidden)]
+pub fn handle_over_channel_with(
+    sender: tokio::sync::mpsc::Sender<crate::writer::WriterMessage>,
+    counters: std::sync::Arc<crate::handle::UsageCounters>,
+) -> UsageHandle {
     UsageHandle::new(
         sender,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        std::sync::Arc::new(crate::handle::UsageCounters::default()),
+        counters,
         crate::paid_probe_lifecycle::LifecycleGate::running(),
     )
 }

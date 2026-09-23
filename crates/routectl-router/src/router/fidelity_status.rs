@@ -108,6 +108,22 @@ pub enum PreflightBlockedReason {
     /// verdict known to be WRONG whose clear may be failing, while the rest of
     /// that arm is a verdict not yet known to be right.
     CanarySuspended,
+    /// Durable capability-event persistence cannot currently be guaranteed, so
+    /// learned pre-flight is suspended for EVERY verdict.
+    ///
+    /// Reported distinctly from every verdict-level reason, and the distinction is
+    /// the operator's whole action: this says nothing about whether the verdict is
+    /// right. Every escape hatch a pre-flight rewrite depends on is a
+    /// capability-event write -- the durable clear a disproving canary performs,
+    /// the operator purge, the confirmation acknowledgment -- so while those
+    /// cannot be guaranteed a wrong verdict could not be durably retracted. An
+    /// operator seeing `not_eligible` or `below_quorum` here would go looking for
+    /// missing evidence; what is actually needed is a healthy writer.
+    ///
+    /// Reactive forward-and-repair is UNAFFECTED, so a lane reporting this is
+    /// still fully served -- it forwards and repairs on rejection rather than
+    /// rewriting ahead of one.
+    CapabilityWriterUnhealthy,
 }
 
 impl PreflightBlockedReason {
@@ -127,6 +143,7 @@ impl PreflightBlockedReason {
             Self::CapabilityDisabled => "capability_disabled",
             Self::UnsupportedLane => "unsupported_lane",
             Self::MaskedByOverride => "masked_by_override",
+            Self::CapabilityWriterUnhealthy => "capability_writer_unhealthy",
         }
     }
 }
@@ -438,6 +455,14 @@ impl Router {
         if self.override_masks_capability(key) {
             return Some(PreflightBlockedReason::MaskedByOverride);
         }
+        // PERSISTENCE, in the planner's own order: after the operator mask (which
+        // is the operative reason at any writer health -- a healthy writer would
+        // not change a masked row's fate) and ahead of every evidence gate (it is
+        // not a verdict gate, so reporting a confirmation shortfall here would send
+        // an operator looking for evidence that would never help).
+        if !self.capability_writes_durable() {
+            return Some(PreflightBlockedReason::CapabilityWriterUnhealthy);
+        }
         if snapshot.is_some_and(|s| s.preflight_suspended) {
             return Some(PreflightBlockedReason::CanarySuspended);
         }
@@ -609,6 +634,12 @@ impl Router {
 
 /// The canary posture a snapshot describes.
 ///
+/// THE single derivation, shared by the status row above and by the pre-flight
+/// authorization (`FieldVerdictRegistry::preflight_authorization`), which carries
+/// the posture of the ONE snapshot that permitted an action. A second spelling
+/// would let the posture an operator reads on a status row and the posture a
+/// decision record reports for the same identity disagree.
+///
 /// A claim outranks a due flag, and the ORDER of the two arms is not load-bearing
 /// today: `claim_canary` clears the due flag in the same critical section that
 /// takes the claim, so the two are never both set and either order reports the
@@ -617,7 +648,14 @@ impl Router {
 /// stopped clearing the flag, reporting "due" for an identity whose canary is
 /// already in flight would tell an operator to expect a claim that has already
 /// happened, and this order degrades to the safe answer instead.
-const fn canary_posture(snapshot: Option<CanaryStateSnapshot>) -> CanaryPosture {
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this module is private, so pub(crate) reads as redundant -- but \
+              `field_verdict::preflight_authorization` calls this so the posture a \
+              decision record reports and the posture a status row reports cannot \
+              disagree, which makes the visibility load-bearing"
+)]
+pub(crate) const fn canary_posture(snapshot: Option<CanaryStateSnapshot>) -> CanaryPosture {
     match snapshot {
         Some(s) if s.canary_claimed => CanaryPosture::InFlight,
         Some(s) if s.due => CanaryPosture::Due,
@@ -698,8 +736,8 @@ pub struct FidelitySnapshot {
 mod test_support;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::{
-    FieldVerdictStatusSpec, make_field_canary_due_for_tests, plant_acting_field_verdict_for_tests,
-    seed_distinct_fidelity_counters_for_tests,
+    FieldVerdictStatusSpec, field_verdict_event_stamps_for_tests, make_field_canary_due_for_tests,
+    plant_acting_field_verdict_for_tests, seed_distinct_fidelity_counters_for_tests,
 };
 
 #[cfg(test)]

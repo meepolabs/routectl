@@ -16,9 +16,11 @@ use routectl_usage::UsageHandle;
 pub mod auth;
 pub mod calibration_rebuild;
 pub mod capability_boundary;
+mod capability_health;
 pub mod capability_rebuild;
 pub mod cc_pin_drift;
 mod config_load;
+pub mod confirmation_advance;
 pub mod file_watch;
 pub mod k_rebuild;
 pub mod ledger_reader;
@@ -101,6 +103,19 @@ pub struct AppState {
     /// because an in-flight settlement is waiting on a commit that needs the
     /// writer alive.
     pub purge_settlements: Arc<purge_settlement::SettlementTracker>,
+    /// Tracks in-flight field-verdict confirmation advancements.
+    ///
+    /// A SIBLING of `purge_settlements`, and for the same structural reason: the
+    /// advancement must outlive the handler that admitted its row, or a cancelled
+    /// client abandons a committed row and the verdict stays dormant until a restart.
+    /// Shutdown closes and awaits this alongside the purge settlements, before the
+    /// writer drains, because an in-flight advancement is waiting on a commit.
+    ///
+    /// Its shutdown contract is LOOSER than the purge tracker's: abandoning one loses
+    /// only an in-memory count the next boot's ledger replay restores, so a timeout is
+    /// logged rather than treated as ambiguous routing state. See
+    /// `confirmation_advance`.
+    pub confirmation_advances: Arc<confirmation_advance::ConfirmationTracker>,
 }
 
 impl AppState {
@@ -123,6 +138,7 @@ impl AppState {
             mitm_seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
             cc_pin_drift: cc_pin_drift::CcPinDriftGuard::new(),
             purge_settlements: Arc::new(purge_settlement::SettlementTracker::new().0),
+            confirmation_advances: Arc::new(confirmation_advance::ConfirmationTracker::new()),
         });
         (state, dir)
     }

@@ -2264,3 +2264,243 @@ fn an_owning_disproof_still_suspends_charges_and_clears() {
         "and a clear that actually removed a row drops the canary state with it",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The durable-acknowledgment entry point
+// ---------------------------------------------------------------------------
+//
+// These pin the two refusals the entry point owns -- the acting-in-generation read
+// and the incarnation match -- at THIS layer, and that placement is the point. Both
+// are also observable end to end (a refused acknowledgment leaves the next request
+// unrewritten), but the end-to-end fixture cannot ATTRIBUTE a refusal: several
+// independent conditions produce the same unrewritten request, so removing either
+// check leaves that test green while this one reds. A check whose removal no test
+// notices is not a check.
+
+/// The resident entry's own incarnation for `k`, the value an acknowledgment must
+/// present.
+fn resident_incarnation(learned: &LearnedCapabilityRegistry, k: &FieldVerdictKey) -> u64 {
+    learned.resident_incarnation_for_tests(k.state_key(), k.capability_key(), k.provider_kind())
+}
+
+#[test]
+fn a_matching_acknowledgment_advances_the_count_and_makes_the_verdict_eligible() {
+    // THE happy path, and it is asserted on ELIGIBILITY rather than on the count
+    // alone: the count is only interesting because it gates traffic, and a test
+    // reading it back would pass on a build that raised it somewhere the
+    // eligibility read never looks.
+    let learned = Arc::new(LearnedCapabilityRegistry::new(
+        DECAY,
+        WINDOW,
+        DEFAULT_MAX_ENTRIES,
+    ));
+    let reg = FieldVerdictRegistry::new(Arc::clone(&learned));
+    let now = Instant::now();
+    let k = key("t");
+    plant_acting_negative(&learned, &k, now);
+    let generation = learned.generation();
+    let incarnation = resident_incarnation(&learned, &k);
+    assert!(
+        !reg.preflight_eligible(&k, generation, now),
+        "premise: a resident acting verdict with NO acknowledged confirmation is not \
+         pre-flight eligible -- which is the whole gap this acknowledgment closes",
+    );
+
+    let acknowledged = reg.acknowledge_durable_confirmation(&k, generation, incarnation, 1, now);
+
+    assert!(acknowledged, "a matching acknowledgment is admitted");
+    assert!(
+        reg.preflight_eligible(&k, generation, now),
+        "and the verdict is now pre-flight eligible IN THIS PROCESS -- no restart, \
+         which is exactly what the design requires",
+    );
+}
+
+#[test]
+fn an_acknowledgment_for_a_mismatched_incarnation_advances_nothing() {
+    // THE INCARNATION REFUSAL, attributable here and nowhere else. A delayed
+    // acknowledgment from a superseded lifecycle must not credit the lifecycle that
+    // replaced it, and one from an unseen future incarnation must not reseed the
+    // canary state -- dropping a live cadence and claim on the strength of a
+    // mutation this registry never saw.
+    //
+    // Driven in BOTH directions, because the code is one comparison and a
+    // one-sided test would pass on `<` or `>` in place of `!=`.
+    //
+    // Mutation check: delete the incarnation comparison from
+    // `acknowledge_durable_confirmation` -> red here in both directions.
+    let learned = Arc::new(LearnedCapabilityRegistry::new(
+        DECAY,
+        WINDOW,
+        DEFAULT_MAX_ENTRIES,
+    ));
+    let reg = FieldVerdictRegistry::new(Arc::clone(&learned));
+    let now = Instant::now();
+    let k = key("t");
+    plant_acting_negative(&learned, &k, now);
+    let generation = learned.generation();
+    let resident = resident_incarnation(&learned, &k);
+
+    for wrong in [resident + 1, resident + 7] {
+        assert!(
+            !reg.acknowledge_durable_confirmation(&k, generation, wrong, 1, now),
+            "an acknowledgment naming incarnation {wrong} must be refused: the \
+             resident lifecycle is {resident}",
+        );
+        assert!(
+            !reg.preflight_eligible(&k, generation, now),
+            "and nothing may have advanced -- a refused acknowledgment that still \
+             raised the count would make the verdict eligible on evidence for \
+             another lifecycle",
+        );
+    }
+
+    // THE POSITIVE CONTROL on the same fixture: the resident incarnation IS
+    // admitted, so the refusals above are the comparison rather than a registry
+    // that refuses everything.
+    assert!(
+        reg.acknowledge_durable_confirmation(&k, generation, resident, 1, now),
+        "control: the resident incarnation is admitted",
+    );
+    assert!(reg.preflight_eligible(&k, generation, now));
+}
+
+#[test]
+fn an_acknowledgment_for_a_key_with_no_acting_verdict_advances_nothing() {
+    // THE ACTING-IN-GENERATION REFUSAL, attributable here. Three shapes, each a way
+    // the identity can have moved on between the write and its acknowledgment:
+    // absent entirely, resident but LAPSED, and under a generation this event may
+    // not write against.
+    //
+    // Mutation check: replace the `field_acting_facts_in_generation` read with a
+    // fabricated `Some(..)` -> red here on all three.
+    let learned = Arc::new(LearnedCapabilityRegistry::new(
+        DECAY,
+        WINDOW,
+        DEFAULT_MAX_ENTRIES,
+    ));
+    let reg = FieldVerdictRegistry::new(Arc::clone(&learned));
+    let now = Instant::now();
+    let generation = learned.generation();
+
+    // ABSENT: nothing was ever planted for this identity.
+    let absent = key("never-planted");
+    assert!(
+        !reg.acknowledge_durable_confirmation(&absent, generation, 0, 1, now),
+        "an acknowledgment for an identity with no resident entry advances nothing",
+    );
+    assert!(!reg.preflight_eligible(&absent, generation, now));
+
+    // LAPSED: resident, but its decay window has passed, so it is not acting.
+    let lapsed = key("lapsed");
+    plant_acting_negative(&learned, &lapsed, now);
+    let lapsed_incarnation = resident_incarnation(&learned, &lapsed);
+    let after_decay = now + DECAY + Duration::from_secs(1);
+    assert!(
+        !reg.acknowledge_durable_confirmation(
+            &lapsed,
+            generation,
+            lapsed_incarnation,
+            1,
+            after_decay,
+        ),
+        "a LAPSED verdict is not acting, so an acknowledgment for it advances \
+         nothing -- the verdict it describes is due for re-verification, not for \
+         being handed pre-flight authority",
+    );
+    assert!(!reg.preflight_eligible(&lapsed, generation, after_decay));
+
+    // The POSITIVE CONTROL for the lapsed case: the SAME identity at an instant
+    // inside its window is admitted, so the refusal is the decay rather than the
+    // planting.
+    assert!(
+        reg.acknowledge_durable_confirmation(&lapsed, generation, lapsed_incarnation, 1, now),
+        "control: the same identity inside its decay window is admitted",
+    );
+}
+
+#[test]
+fn an_acknowledgment_the_canary_layer_refuses_reports_false_rather_than_a_success() {
+    // THE TWO-LAYER GAP, and the one case neither existing test covers.
+    //
+    // `acknowledge_durable_confirmation` validates the event's incarnation against the
+    // LEARNED row, then delegates to the canary registry, which validates it again
+    // against the resident CANARY state. Those two are not the same number: the canary
+    // state is reseeded by a cold-rebuild seed, by a clear, and by a confirmation
+    // carry, none of which moves the learned incarnation. So an event can be CURRENT
+    // by the learned row and SUPERSEDED by the canary state -- and that is the path
+    // this test drives.
+    //
+    // Previously the function returned `true` and logged "acknowledged" on it: a FALSE
+    // SUCCESS for a call that wrote nothing. The count could not have caught it either
+    // -- a refusal reports the count that stands, so a refusal at three and an
+    // acceptance at three are the same `u32`.
+    //
+    // Mutation check: make the propagation unconditional (`let _ = ack; ... true`) ->
+    // red here, while every other acknowledgement test stays green, because this is
+    // the only fixture where the two layers disagree.
+    let learned = Arc::new(LearnedCapabilityRegistry::new(
+        DECAY,
+        WINDOW,
+        DEFAULT_MAX_ENTRIES,
+    ));
+    let reg = FieldVerdictRegistry::new(Arc::clone(&learned));
+    let now = Instant::now();
+    let k = key("t");
+    plant_acting_negative(&learned, &k, now);
+    let generation = learned.generation();
+    let learned_incarnation = resident_incarnation(&learned, &k);
+
+    // The CANARY state is carried FORWARD of the learned row, through the registry's
+    // own production seam (the cold-rebuild seed, which is what a boot that replayed a
+    // since-confirmed verdict produces). The learned row stays where it was, so an
+    // event stamped with the learned incarnation is current by that check and stale by
+    // the canary one.
+    reg.canaries()
+        .seed_from_rebuild(&k, learned_incarnation + 1, 2, false);
+    assert_eq!(
+        reg.canaries().snapshot(&k).expect("seeded").incarnation,
+        learned_incarnation + 1,
+        "premise: the canary state names a NEWER lifecycle than the learned row",
+    );
+
+    let acknowledged =
+        reg.acknowledge_durable_confirmation(&k, generation, learned_incarnation, 9, now);
+
+    assert!(
+        !acknowledged,
+        "an acknowledgement the canary layer refused must report FALSE: it wrote \
+         nothing, so reporting success would tell the caller a count backs \
+         eligibility when it does not",
+    );
+    assert_eq!(
+        reg.canaries().snapshot(&k).expect("resident").confirmations,
+        2,
+        "and the standing count is untouched -- the stale event's 9 was not written",
+    );
+
+    // THE POSITIVE CONTROL, and it has to be built rather than restated: the refusal
+    // above must be attributable to the CANARY layer specifically, so the control
+    // brings the two layers back into agreement and shows the same call then succeeds.
+    //
+    // Reseeding the canary state back to the LEARNED incarnation is the one move that
+    // changes only the disagreement -- same registry, same key, same generation, same
+    // event stamps.
+    reg.canaries()
+        .seed_from_rebuild(&k, learned_incarnation, 2, false);
+
+    let acknowledged =
+        reg.acknowledge_durable_confirmation(&k, generation, learned_incarnation, 9, now);
+
+    assert!(
+        acknowledged,
+        "control: with the two layers in agreement the IDENTICAL call is accepted, so \
+         the refusal above is the canary layer's disagreement rather than a registry \
+         that refuses everything",
+    );
+    assert_eq!(
+        reg.canaries().snapshot(&k).expect("resident").confirmations,
+        9,
+        "and an accepted acknowledgement does write its own count",
+    );
+}

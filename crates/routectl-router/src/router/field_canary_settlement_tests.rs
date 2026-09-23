@@ -139,7 +139,15 @@ fn install(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Obs
         );
     }
     router.install_resolved_models(models);
-    (router, observed)
+    // DURABLE PERSISTENCE IS ASSUMED, stated rather than defaulted: learned
+    // pre-flight suspends unless a capability-persistence health read reports
+    // durable writes, and `Router::new` installs none. Without this every canary
+    // assertion in this file would run against a suspended planner -- no
+    // restoration, no cadence, no settlement -- and pass for the wrong reason.
+    (
+        router.with_capability_writes_assumed_durable_for_tests(),
+        observed,
+    )
 }
 
 fn single_seat(answer: Answer) -> (Router, Arc<Observed>) {

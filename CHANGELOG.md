@@ -51,6 +51,83 @@ list with more narrative.
   real traffic needs. One line per request, so the combined `/status`
   endpoint does not double-report.
 
+- **A newly confirmed wire-shape repair now takes effect without a
+  restart** -- a learned envelope-field verdict becomes eligible to rewrite
+  requests ahead of a rejection only once the ledger row describing its
+  confirmation is durably written, and that acknowledgment now happens in
+  the running process. Previously the only thing that could raise a
+  verdict's acknowledged confirmation count was a boot replaying the
+  ledger, so a repair confirmed at noon started saving round trips at the
+  next restart. Now the next request on that lane is already rewritten.
+
+  The advancement is the daemon's own work rather than the request's, which
+  matters in two ways a caller can feel. A client that hangs up mid-write no
+  longer loses it -- previously the wait lived in the request, so cancelling
+  the request cancelled the advancement while the row still landed, leaving a
+  verdict dormant until a restart for exactly the requests whose clients went
+  away. And no response waits on the database for it: the request hands the
+  work off and returns. At shutdown the daemon waits briefly for any in-flight
+  advancement and then lets it go, which is safe because the row is already
+  written and the next start reads it back.
+
+  The condition is unchanged, which is the point: eligibility advances on
+  the acknowledgment and on nothing else. A write that failed, was refused
+  by a saturated writer, was dropped because capture is disabled, or
+  described a verdict version an operator purge has since superseded
+  advances nothing at all -- the verdict stays resident and the lane keeps
+  being served by repair-after-rejection, which costs one extra round trip
+  and is always correct. What that rules out is a verdict rewriting traffic
+  today on evidence no later boot can find.
+
+- **Pre-flight rewrites stand down while the capability ledger cannot be
+  trusted** -- every way a wrong wire-shape verdict is taken back out of
+  service is itself a ledger write: the clear a failed re-verification
+  performs, an operator purge, a later confirmation. So when durable
+  capability writes cannot be guaranteed, rewriting requests ahead of a
+  rejection is a bet that cannot be called off -- the in-memory retraction
+  lasts until the process restarts, and the next boot restores exactly the
+  verdict that was proven wrong. The router now suspends those rewrites
+  instead, and says so with its own status reason rather than reporting a
+  shortfall of evidence an operator would go looking for in vain.
+
+  Repair-after-rejection is untouched and keeps serving every request: it
+  acts on a rejection it has in hand, so it needs no durable record to be
+  correct. The cost is one extra round trip on an affected lane, against an
+  unbounded one avoided. The suspension is deliberately sticky for the life
+  of the process -- a daemon that dropped one capability write serves the
+  rest of its life on repair-after-rejection, and recovery is a restart.
+
+  A failure counts no matter when it happened, boot included. The check is
+  an absolute one rather than a comparison against whatever had already
+  failed by the time the daemon finished starting, because the replay
+  boundary the daemon writes at startup is itself one of these writes: a
+  boundary that never landed leaves the ledger disagreeing with the
+  registry about which history is current, which is the strongest reason of
+  all to keep verdicts off the rewrite path. Every way a capability write
+  can be lost now counts toward this -- a storage failure, a write the
+  writer was too far behind to accept, and a write submitted after the
+  writer was gone -- and the last two are reported apart, since a saturated
+  daemon and a shutting-down one need different responses. Ordinary
+  accounting rows falling behind are deliberately not counted: that says
+  nothing about whether a capability write would land.
+
+- **Every pre-flight decision now reports the evidence that authorized
+  it** -- the diagnostic for a request routectl rewrote before dispatch
+  carries the detection phase and evidence source of the verdict it acted
+  on, how many acknowledged confirmations back it, and where that verdict's
+  re-verification stood at the moment the rewrite was authorized. The
+  values are taken from the exact snapshot that permitted the action rather
+  than re-read afterwards, so a line can never describe a state the rewrite
+  was not actually authorized under.
+
+  A decision that rewrote nothing reports no evidence, explicitly, because
+  it had none -- the one exception is a re-verification, which did hold
+  authorization and spent it on testing the verdict rather than acting on
+  it. Both the per-decision detail and the one-per-request summary carry
+  the same fields, so reading a summary and then scanning the detail for
+  the target it named lands on matching values. Nothing added is a request
+  value, a response body, or upstream text.
+
 - **Paid-probe budgets report their accounting health, including budget
   spent for no call** -- each provider with a configured daily cap now
   reports that cap beside what the ledger recorded for the current UTC

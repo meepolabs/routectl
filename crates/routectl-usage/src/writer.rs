@@ -83,6 +83,20 @@ enum WriterCommand {
     /// would restore on the next boot exactly the state the boundary evicted.
     /// Nothing about it is persisted.
     CapabilityEvent(CapabilityEvent, EventStamp),
+    /// ONE capability event whose outcome is reported back to the sender.
+    ///
+    /// Same destination and same admission checks as
+    /// [`Self::CapabilityEvent`]; the difference is only that the caller LEARNS
+    /// whether the row landed. That exists for one consumer: a field verdict's
+    /// pre-flight eligibility may advance only once its event write is durable,
+    /// so the router needs the acknowledgment rather than a best-effort send.
+    ///
+    /// NOT the batch variant below, and the distinction is load-bearing: this
+    /// carries one ordinary event, so it must pass the boundary-generation check
+    /// and the per-key purge floor exactly as a best-effort event does. The batch
+    /// ESTABLISHES a boundary and raises floors, which an ordinary event has no
+    /// business doing.
+    AcknowledgedCapabilityEvent(crate::capability_ack::AcknowledgedCapabilityEvent),
     /// An ACKNOWLEDGED batch of capability events, committed in one
     /// transaction and reported back to the sender.
     ///
@@ -116,6 +130,13 @@ impl WriterMessage {
     /// A unified-ledger capability event, stamped with its producing generation.
     pub(crate) const fn capability_event(event: CapabilityEvent, stamp: EventStamp) -> Self {
         Self::new(WriterCommand::CapabilityEvent(event, stamp))
+    }
+
+    /// One capability event whose outcome is reported back to the sender.
+    pub(crate) const fn acknowledged_capability_event(
+        command: crate::capability_ack::AcknowledgedCapabilityEvent,
+    ) -> Self {
+        Self::new(WriterCommand::AcknowledgedCapabilityEvent(command))
     }
 
     /// An acknowledged atomic capability-event batch.
@@ -164,6 +185,60 @@ pub struct UsageWriter {
 }
 
 impl UsageWriter {
+    /// Start a writer that consumes an ALREADY-CREATED channel, returning the writer
+    /// and the counters it shares with the handle the caller built over the sender.
+    ///
+    /// # Why this seam exists
+    ///
+    /// A deterministic test of "the row has not committed yet" needs the writer's
+    /// scheduling under the test's control, and the only honest way to get that is to
+    /// hold the receiving end until the test is ready. `start` creates the channel
+    /// itself, so it cannot be parked from outside; this takes the receiver instead.
+    ///
+    /// Everything downstream is the PRODUCTION path -- the same `run_writer`, the same
+    /// boundary-generation check, the same purge floors, the same inserts -- so a test
+    /// over it is a test of real durability rather than of a stand-in. Only when the
+    /// thread begins consuming is the caller's.
+    ///
+    /// `cfg(any(test, feature = "test-utils"))`: a release build cannot reach it, so no
+    /// deployment can start a writer over a channel it does not own.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn start_over_channel(
+        db_path: PathBuf,
+        retention_days: u32,
+        rx: mpsc::Receiver<WriterMessage>,
+        counters: Arc<UsageCounters>,
+    ) -> Self {
+        let lifecycle = LifecycleGate::running();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let thread_counters = Arc::clone(&counters);
+        let thread_lifecycle = lifecycle.clone();
+        let join = std::thread::Builder::new()
+            .name("routectl-usage-writer".to_string())
+            .spawn(move || {
+                run_writer(
+                    db_path,
+                    retention_days,
+                    rx,
+                    thread_counters,
+                    thread_lifecycle,
+                );
+                let _ = done_tx.send(());
+            })
+            .expect("a test fixture must be able to spawn the writer thread");
+        Self {
+            // No sender: the caller owns the producing end, so this writer cannot
+            // close the channel from its side and `shutdown` waits on the drain
+            // signal alone.
+            sender: None,
+            done: Some(done_rx),
+            join: Some(join),
+            counters,
+            lifecycle,
+        }
+    }
+
     /// Start the writer subsystem.
     ///
     /// Opens the DB at `db_path` (degrading to a no-DB drain loop if the
@@ -373,7 +448,18 @@ fn run_writer(
             WriterCommand::Request(record) => state.persist(&record, &counters),
             WriterCommand::LearnEvent(event) => state.persist_learn_event(&event, &counters),
             WriterCommand::CapabilityEvent(event, stamp) => {
-                state.persist_capability_event(&event, stamp, &counters)
+                // Best effort: the outcome is discarded, because nothing waits on
+                // it. The ACKNOWLEDGED variant below is the one whose caller acts
+                // on the answer.
+                let _ = state.persist_capability_event(&event, stamp, &counters);
+            }
+            WriterCommand::AcknowledgedCapabilityEvent(command) => {
+                let outcome =
+                    state.persist_capability_event(&command.event, command.stamp, &counters);
+                // A dropped receiver (the caller left) makes this fail silently,
+                // which is correct: the writer must never block on a caller that
+                // is gone, and the row it wrote stays written either way.
+                let _ = command.ack.send(outcome);
             }
             WriterCommand::CapabilityBatch(batch) => {
                 state.commit_capability_batch(batch, &counters)
@@ -412,6 +498,64 @@ pub struct EventStamp {
     pub generation: u64,
     /// The incarnation of the key's state the event describes.
     pub incarnation: u64,
+}
+
+/// What one capability-event write attempt ESTABLISHED.
+///
+/// Closed set, and only [`Self::Committed`] means a row is on disk. Every other
+/// variant means NOTHING was appended by that attempt, and each names its own
+/// cause because they are operationally different: a superseded event is the
+/// barrier working as designed, while a write failure is storage an operator needs
+/// to know is broken.
+///
+/// There is deliberately NO "unknown" or "timed out" variant, for the same reason
+/// [`crate::capability_batch::BatchCommit`] has none: an ambiguous answer would
+/// leave a consumer unable to choose -- treating an unlanded row as durable is the
+/// failure the acknowledgment exists to prevent, and treating a landed one as lost
+/// is merely conservative. Admission is bounded instead, so an outcome is only
+/// produced for an event whose fate is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityEventWrite {
+    /// The row is durably appended.
+    Committed,
+    /// The event predates the newest committed replay boundary, so appending it
+    /// would restore state that boundary evicted. Nothing was written, and
+    /// nothing should be: the event describes a catalog revision the daemon left.
+    SupersededByBoundary,
+    /// An operator purge of the same key has already superseded this event's
+    /// incarnation. Nothing was written, and nothing should be: the operator was
+    /// told that verdict was removed.
+    SupersededByPurge,
+    /// The durable write was attempted and did not land, or could not be
+    /// submitted at all (no connection, a saturated channel, capture disabled).
+    ///
+    /// The four collapse into one variant because a consumer's action is identical
+    /// for each -- the row is not known to be durable -- and each remains
+    /// separately visible on its own health counter.
+    WriteFailed,
+}
+
+impl CapabilityEventWrite {
+    /// Whether a row is durably on disk.
+    ///
+    /// THE one predicate every consumer of an acknowledgment asks, so "the write
+    /// landed" cannot be restated as a different condition at a second site.
+    #[must_use]
+    pub const fn is_durable(self) -> bool {
+        matches!(self, Self::Committed)
+    }
+
+    /// Closed-set log token for this outcome. Carries no key, count, or path --
+    /// a caller logs those from its own fields.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::SupersededByBoundary => "superseded_by_boundary",
+            Self::SupersededByPurge => "superseded_by_purge",
+            Self::WriteFailed => "write_failed",
+        }
+    }
 }
 
 /// The `cleared` verdict token, as this crate writes it.
@@ -603,12 +747,19 @@ impl WriterState {
     /// the capability-event persisted counter. A missing connection or an
     /// insert error drops the event and routes through the shared DB-health
     /// failure path (write-error counter + degraded-transition log).
+    ///
+    /// Returns what the attempt ESTABLISHED, which the best-effort caller
+    /// discards and the acknowledged caller reports back. Both go through this
+    /// one body deliberately: the boundary-generation check, the per-key purge
+    /// floor, and the health transition must be identical on both paths, and a
+    /// second copy for the acknowledged one is how an acknowledgment comes to
+    /// claim a row a floor would have dropped.
     fn persist_capability_event(
         &mut self,
         event: &CapabilityEvent,
         stamp: EventStamp,
         counters: &Arc<UsageCounters>,
-    ) {
+    ) -> CapabilityEventWrite {
         // Reject an event that predates the newest committed boundary. It was
         // produced against a superseded registry generation, so appending it
         // after that boundary's tombstone would make the next boot replay state
@@ -621,7 +772,7 @@ impl WriterState {
                 boundary_generation = self.boundary_generation,
                 "dropped a capability event older than the committed replay boundary"
             );
-            return;
+            return CapabilityEventWrite::SupersededByBoundary;
         }
         // The PER-KEY floor, which the boundary check above cannot substitute
         // for: a purge and a later relearn of one key both happen inside a single
@@ -643,18 +794,22 @@ impl WriterState {
                 purge_floor = floor,
                 "dropped a capability event superseded by an operator purge of the same key"
             );
-            return;
+            return CapabilityEventWrite::SupersededByPurge;
         }
         let Some(conn) = self.conn.as_ref() else {
             self.record_failure(None, counters);
-            return;
+            return CapabilityEventWrite::WriteFailed;
         };
         match insert_capability_event(conn, event) {
             Ok(_) => {
                 counters.incr_capability_events_persisted();
                 self.mark_healthy();
+                CapabilityEventWrite::Committed
             }
-            Err(err) => self.record_failure(Some(err), counters),
+            Err(err) => {
+                self.record_failure(Some(err), counters);
+                CapabilityEventWrite::WriteFailed
+            }
         }
     }
 

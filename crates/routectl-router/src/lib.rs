@@ -171,6 +171,7 @@ pub use factory::{
     validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use field_canary::CanaryOutcome;
+pub use field_capability::capability_key_is_field_verdict;
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{
     Confidence, EstimateSource, K_SESSION_CAPACITY, KEstimate, KEstimator, KQuery, KSessionKey,
@@ -190,13 +191,14 @@ pub use pricing::{PricingSource, effective_pricing};
 pub use probe_scheduler::ProbeSchedulerSnapshot;
 pub use resolved::ResolvedModel;
 pub use router::{
-    ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CatalogIndependentSurvivor,
-    DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldRepairCounters,
-    FieldVerdictStatus, PaidProbeLedger, PaidProbeReservation, PreflightBlockedReason, Router,
-    RouterOptions, acting_field_verdicts, class_debits,
+    ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
+    CatalogIndependentSurvivor, DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot,
+    FieldPreflight, FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
+    PaidProbeLedger, PaidProbeReservation, PreflightBlockedReason, Router, RouterOptions,
+    acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{
-    FieldVerdictStatusSpec, make_field_canary_due_for_tests, plant_acting_field_verdict_for_tests,
-    seed_distinct_fidelity_counters_for_tests,
+    FieldVerdictStatusSpec, field_verdict_event_stamps_for_tests, make_field_canary_due_for_tests,
+    plant_acting_field_verdict_for_tests, seed_distinct_fidelity_counters_for_tests,
 };

@@ -496,6 +496,33 @@ impl UsageCapture {
     ) {
         drain_capability_events(&self.usage, meta, catalog_version, overlay_revision);
     }
+
+    /// Admit this walk's FIELD-VERDICT events through the acknowledged path and hand
+    /// each admitted row to the daemon's confirmation tracker.
+    ///
+    /// Separate from [`Self::drain_capability_events`] because the two have different
+    /// durability contracts, not because one awaits: NEITHER awaits. This one admits
+    /// through the acknowledged path and transfers ownership of the outcome to a
+    /// daemon-owned task, so a cancelled request cannot abandon a committed row and no
+    /// response waits on SQLite. See `capability_ack_drain` for why that transfer is
+    /// required rather than merely tidy.
+    pub(crate) fn acknowledge_field_confirmations(
+        &self,
+        router: &std::sync::Arc<routectl_router::Router>,
+        tracker: &crate::server::confirmation_advance::ConfirmationTracker,
+        meta: &DispatchMeta,
+        catalog_version: u32,
+        overlay_revision: u64,
+    ) {
+        crate::handlers::capability_ack_drain::acknowledge_field_confirmations(
+            router,
+            &self.usage,
+            tracker,
+            meta,
+            catalog_version,
+            overlay_revision,
+        );
+    }
 }
 
 /// The drain itself, as a free function over a `UsageHandle`.
@@ -564,6 +591,15 @@ pub(crate) fn drain_capability_events(
         return;
     }
     for ev in &meta.learned_capabilities {
+        // FIELD-VERDICT rows are excluded here and written by
+        // `capability_ack_drain` instead, through the ACKNOWLEDGED path: their
+        // pre-flight eligibility may advance only once the row is durable, so the
+        // caller has to learn whether it landed. Excluded rather than written
+        // twice, because two rows for one fact would double the observation count
+        // a warm rebuild reads back.
+        if crate::handlers::capability_ack_drain::is_field_verdict_event(ev) {
+            continue;
+        }
         usage.try_send_capability_event_at(
             CapabilityEvent {
                 ts,

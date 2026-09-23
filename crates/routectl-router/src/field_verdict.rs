@@ -236,6 +236,14 @@ pub(crate) const MINIMUM_CONFIRMATIONS: u32 = 1;
 /// through two calls, because a transform class's quorum is a threshold on the
 /// same count eligibility was decided from: a caller re-reading it could gate
 /// one row against a state the eligibility decision never saw.
+///
+/// The PROVENANCE and the CANARY POSTURE ride along for the same reason, one
+/// step further: a decision record that reports which evidence authorized a
+/// rewrite, and where that identity's re-verification stood when it did, must
+/// report the snapshot that ACTUALLY permitted the action. A caller re-reading
+/// either afterwards would report a state that may have moved between the
+/// authorization and the record -- which is the one way a diagnostic on this
+/// surface can make a false claim about a rewrite that already went upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreflightAuthorization {
     /// The verdict incarnation the authorization rests on. A canary claim and
@@ -244,6 +252,18 @@ pub struct PreflightAuthorization {
     /// The acknowledged confirmation count resident for that incarnation, at
     /// least [`MINIMUM_CONFIRMATIONS`].
     pub confirmations: u32,
+    /// The detection phase that attributed the acting verdict, from the SAME
+    /// guarded read the incarnation came from.
+    pub phase: FailurePhase,
+    /// Whether the acting verdict's evidence came from live traffic or an
+    /// out-of-band probe, from that same guarded read.
+    pub source: EvidenceSource,
+    /// Where this identity's canary stood in the ONE canary snapshot that
+    /// backed the eligibility decision -- counting, due, or in flight.
+    pub canary: crate::router::CanaryPosture,
+    /// The last settled canary outcome in that same snapshot, or `None` when
+    /// none has settled for this incarnation.
+    pub canary_last_outcome: Option<crate::field_canary::CanaryOutcome>,
 }
 
 /// Two-phase, single-flight lifecycle over the learned-capability registry for
@@ -407,8 +427,8 @@ impl FieldVerdictRegistry {
         generation: u64,
         now: Instant,
     ) -> Option<PreflightAuthorization> {
-        let acting_incarnation = |()| {
-            self.learned.field_acting_incarnation_in_generation(
+        let acting_facts = |()| {
+            self.learned.field_acting_facts_in_generation(
                 generation,
                 &key.state_key,
                 &key.capability_key,
@@ -416,7 +436,7 @@ impl FieldVerdictRegistry {
                 now,
             )
         };
-        let before = acting_incarnation(())?;
+        let before = acting_facts(())?;
         // SUSPENSION, read before the confirmation: a canary that accepted the
         // unrepaired field proved this verdict wrong, and the durable clear
         // that removes it can be REFUSED (a purge lease, a stale generation).
@@ -442,15 +462,28 @@ impl FieldVerdictRegistry {
         if snapshot.preflight_suspended {
             return None;
         }
-        if snapshot.incarnation != before || snapshot.confirmations < MINIMUM_CONFIRMATIONS {
+        if snapshot.incarnation != before.incarnation
+            || snapshot.confirmations < MINIMUM_CONFIRMATIONS
+        {
             return None;
         }
         between_eligibility_reads();
         // Re-read under the same generation: the confirmation above is only
-        // authorization if the verdict it backs is STILL the acting one.
-        (acting_incarnation(()) == Some(before)).then_some(PreflightAuthorization {
-            incarnation: before,
+        // authorization if the verdict it backs is STILL the acting one. Compared
+        // on the whole facts value, not the incarnation alone: phase and source
+        // are carried into the decision record, so a lifecycle that moved under
+        // the read must refuse rather than report the pre-read provenance.
+        (acting_facts(()) == Some(before)).then_some(PreflightAuthorization {
+            incarnation: before.incarnation,
             confirmations: snapshot.confirmations,
+            phase: before.phase,
+            source: before.source,
+            // Derived through the status surface's OWN posture function, from the
+            // same snapshot the two eligibility checks above read. One
+            // derivation, so the posture a decision record reports and the
+            // posture a status row reports for one identity cannot disagree.
+            canary: crate::router::fidelity_status::canary_posture(Some(snapshot)),
+            canary_last_outcome: snapshot.last_outcome,
         })
     }
 
@@ -700,6 +733,138 @@ impl FieldVerdictRegistry {
             capability_key: key.capability_key.clone(),
             provider_kind: key.provider_kind.clone(),
         })
+    }
+
+    /// Reconcile the acknowledged confirmation count for `key` from a capability
+    /// event whose ledger write has DURABLY LANDED.
+    ///
+    /// THE production writer of the confirmation half of pre-flight eligibility,
+    /// and the one that closes the live-acknowledgment gap: a reactive repair
+    /// that mints a verdict emits a [`CapabilityLearnEvent`] carrying the
+    /// observation count the guarded mutation produced, and once the durable
+    /// writer acknowledges THAT event's row, the count it names is acknowledged
+    /// evidence rather than an in-memory tally. So the verdict becomes pre-flight
+    /// eligible during the same process, without a restart.
+    ///
+    /// # Why the acknowledgment cannot be inferred from the mutation
+    ///
+    /// The in-memory admission ([`FieldRepairGuard::commit`],
+    /// [`Self::record_canary_confirmation`]) reports
+    /// `GenerationOutcome::Applied`, which means the shared registry accepted the
+    /// mutation through the generation barrier -- it says nothing about whether
+    /// the event row describing it was written. Advancing the count on `Applied`
+    /// would make a verdict pre-flight eligible whose event the writer then
+    /// dropped (a full channel, a degraded database, a purge that superseded it),
+    /// and the next boot's replay would find no evidence for the very verdict that
+    /// had been rewriting traffic. So the count moves on the ACKNOWLEDGMENT and
+    /// nowhere else.
+    ///
+    /// # What a caller must present, and why each half is checked
+    ///
+    /// `generation` and `incarnation` are the event's OWN stamps, from the guarded
+    /// mutation that produced it, and BOTH are validated against live state before
+    /// anything moves:
+    ///
+    /// - the GENERATION, because an event stamped before a boundary describes a
+    ///   catalog revision the daemon has left. Acknowledging it would raise a
+    ///   count against a lifecycle the boundary evicted.
+    /// - the INCARNATION, because a purge and a later relearn of one key both
+    ///   happen inside one generation. A delayed pre-purge acknowledgment carries
+    ///   the superseded incarnation, and raising the post-purge lifecycle's count
+    ///   from it would credit the new verdict with the old one's evidence. The
+    ///   monotonic admission inside
+    ///   [`FieldCanaryRegistry::acknowledge_confirmation`] refuses a superseded
+    ///   one; the ACTING check here additionally refuses an acknowledgment for an
+    ///   identity whose row is no longer resident or no longer acting at all.
+    ///
+    /// `false` for every refusal, and nothing is written on any of them: an
+    /// unacknowledged, failed, timed-out, or stale write must not advance
+    /// eligibility, because each leaves the durable record the count claims to
+    /// describe absent.
+    ///
+    /// `now` is the instant the acting check reads decay against, passed in rather
+    /// than sampled here so the caller's own consistency window governs.
+    pub fn acknowledge_durable_confirmation(
+        &self,
+        key: &FieldVerdictKey,
+        generation: u64,
+        incarnation: u64,
+        observations: u32,
+        now: Instant,
+    ) -> bool {
+        // The ACTING facts under the event's own generation. A `None` here covers
+        // every way the identity can have moved on: absent, lapsed, no longer
+        // acting, or a generation this event may not write against.
+        let Some(facts) = self.learned.field_acting_facts_in_generation(
+            generation,
+            &key.state_key,
+            &key.capability_key,
+            &key.provider_kind,
+            now,
+        ) else {
+            tracing::debug!(
+                event = "field_confirmation_ack_refused",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                reason = "not_acting_in_generation",
+                "durable confirmation acknowledgment refused: no acting verdict \
+                 for this identity under the event's own generation"
+            );
+            return false;
+        };
+        // THE INCARNATION MATCH. A delayed acknowledgment from a superseded
+        // lifecycle must not credit the lifecycle that replaced it, and one from a
+        // FUTURE incarnation must not be admitted either -- it would reseed the
+        // canary state (dropping a live cadence and claim) on the strength of an
+        // event whose own mutation this registry has not seen.
+        if facts.incarnation != incarnation {
+            tracing::debug!(
+                event = "field_confirmation_ack_refused",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                reason = "incarnation_superseded",
+                "durable confirmation acknowledgment refused: the identity's \
+                 lifecycle moved while this event was in flight"
+            );
+            return false;
+        }
+        // THE CANARY LAYER'S OWN VERDICT, propagated rather than assumed.
+        //
+        // The check above validates against the LEARNED row; this validates against
+        // the resident CANARY state, and a straggler can be current by one and
+        // superseded by the other -- the canary state is reseeded by a rebuild, a
+        // clear, and a confirmation carry, none of which the learned incarnation
+        // tracks. So this call can refuse an acknowledgement the check above admitted.
+        //
+        // Reporting `true` regardless (the previous shape) was a FALSE SUCCESS: it
+        // logged "acknowledged" and told the caller the count now backs eligibility
+        // for a call that wrote nothing. The count alone could not have caught it
+        // either -- a refusal reports the standing count, so a refusal at three and an
+        // acceptance at three are the same number.
+        let ack = self
+            .canaries
+            .acknowledge_confirmation(key, incarnation, observations);
+        if !ack.accepted {
+            tracing::debug!(
+                event = "field_confirmation_ack_refused",
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                capability_key = %key.capability_key,
+                reason = "canary_state_superseded",
+                standing_observations = ack.confirmations,
+                "durable confirmation acknowledgment refused: the identity's canary \
+                 state names a newer lifecycle, so nothing was written"
+            );
+            return false;
+        }
+        tracing::debug!(
+            event = "field_confirmation_acknowledged",
+            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            capability_key = %key.capability_key,
+            observations = ack.confirmations,
+            "durable confirmation acknowledged: this verdict's acknowledged count \
+             now backs pre-flight eligibility"
+        );
+        true
     }
 
     /// Claim the single-flight repair slot for `key` on a target reached at

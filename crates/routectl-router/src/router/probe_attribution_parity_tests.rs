@@ -39,6 +39,7 @@ use super::field_preflight::{
     FIELD_PREFLIGHT_NO_GROUNDED_FIELD, FIELD_PREFLIGHT_NO_IDENTITY,
     FIELD_PREFLIGHT_NO_TARGET_OPT_IN, FIELD_PREFLIGHT_NOT_ELIGIBLE,
     FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET, FIELD_PREFLIGHT_UNSUPPORTED_LANE,
+    FIELD_PREFLIGHT_WRITER_UNHEALTHY,
 };
 use super::field_repair::FieldSettlementMode;
 use super::probe_test_support::{OkProvider, grounding_request};
@@ -330,6 +331,11 @@ fn preflight_admits(shape: &Shape, req: &ChatRequest) -> bool {
         | FIELD_PREFLIGHT_NO_TARGET_OPT_IN
         | FIELD_PREFLIGHT_AMBIGUOUS_MUTATION
         | FIELD_PREFLIGHT_CANARY_RESTORED
+        // AFTER the attribution gate: the persistence refusal is reached only once
+        // a lane has been admitted and an identity minted, so seeing it means
+        // attribution said yes. It is also why this fixture needs no durability
+        // opt-in -- reaching this token is itself the admission this table reads.
+        | FIELD_PREFLIGHT_WRITER_UNHEALTHY
         | FIELD_PREFLIGHT_ACTION_DROP => true,
         other => panic!(
             "unclassified pre-flight reason {other:?}: a new refusal must be placed \

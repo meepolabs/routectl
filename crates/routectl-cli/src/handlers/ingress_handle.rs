@@ -35,6 +35,7 @@ use crate::ingress::{
     token_estimate::estimate_input_tokens,
 };
 use crate::server::AppState;
+use crate::server::confirmation_advance::ConfirmationTracker;
 use crate::server::request_id::RequestId;
 
 const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
@@ -174,8 +175,22 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     let draft = build_usage_draft(adapter.id(), &req, request_id);
 
     let streaming = req.stream == Some(true);
+    // The confirmation tracker rides alongside the usage handle, by the same route
+    // and for the same reason: both are daemon-owned sinks a request writes to, and
+    // neither belongs to the request. Cloned Arcs, so the handler holds no borrow of
+    // `state` across the dispatch await.
+    let confirmations = Arc::clone(&state.confirmation_advances);
     if streaming {
-        stream_response(router, req, opts, adapter, state.usage.clone(), draft).await
+        stream_response(
+            router,
+            req,
+            opts,
+            adapter,
+            state.usage.clone(),
+            confirmations,
+            draft,
+        )
+        .await
     } else {
         complete_response(
             router,
@@ -184,6 +199,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
             adapter,
             envelope,
             state.usage.clone(),
+            confirmations,
             draft,
         )
         .await
@@ -455,6 +471,13 @@ fn ok_json_response(body: Bytes) -> Response {
         .into_response()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct owned input or sink this walk needs for its \
+              whole life -- the adapter, the envelope shape, and the two daemon-owned \
+              sinks (usage, confirmations) are read at unrelated points, so bundling \
+              them would make one struct nobody reads as a unit"
+)]
 async fn complete_response<A: IngressAdapter>(
     router: Arc<routectl_router::Router>,
     req: routectl_core::ChatRequest,
@@ -462,6 +485,7 @@ async fn complete_response<A: IngressAdapter>(
     adapter: A,
     envelope: ErrorEnvelopeShape,
     usage: UsageHandle,
+    confirmations: Arc<ConfirmationTracker>,
     draft: UsageRecord,
 ) -> Response {
     let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
@@ -472,6 +496,24 @@ async fn complete_response<A: IngressAdapter>(
     let session_key = req.routectl_internal.inbound_session_key.clone();
     let dispatched = router.complete_with_options(req, opts).await;
     capture.observe_meta(
+        &dispatched.meta,
+        router.catalog_version(),
+        router.overlay_revision(),
+    );
+    // FIELD-VERDICT rows ride the ACKNOWLEDGED path, and the acknowledgment is what
+    // advances pre-flight eligibility -- so a verdict this walk just minted becomes
+    // eligible for the NEXT request in this same process, with no restart. A no-op
+    // unless this walk minted one, which is the rare tail rather than the common path.
+    //
+    // SYNCHRONOUS on purpose: it admits the row and hands the receipt to a daemon-owned
+    // task, so a cancelled client cannot abandon a committed row and this response does
+    // not wait on SQLite. THE canonical explanation for all three walks -- see
+    // `handlers::capability_ack_drain` and `server::confirmation_advance` for the
+    // reasoning; the other two call sites cross-reference this one rather than repeat
+    // it.
+    capture.acknowledge_field_confirmations(
+        &router,
+        &confirmations,
         &dispatched.meta,
         router.catalog_version(),
         router.overlay_revision(),
@@ -537,6 +579,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
     opts: RouterOptions,
     adapter: A,
     usage: UsageHandle,
+    confirmations: Arc<ConfirmationTracker>,
     draft: UsageRecord,
 ) -> Response {
     let capture = UsageCapture::new(draft, usage, adapter.id().to_string());
@@ -561,7 +604,16 @@ async fn stream_response<A: IngressAdapter + 'static>(
     let router_for_dispatch = Arc::clone(&router);
     let fut: DispatchFut =
         Box::pin(async move { router_for_dispatch.stream_with_options(req, opts).await });
-    stream_dispatch_gated(fut, adapter, capture, router, session_key, stream_ctx).await
+    stream_dispatch_gated(
+        fut,
+        adapter,
+        capture,
+        router,
+        confirmations,
+        session_key,
+        stream_ctx,
+    )
+    .await
 }
 
 /// Grace-gated commit (option (b')): hold the dispatch future for a bounded
@@ -585,6 +637,7 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
     adapter: A,
     mut capture: UsageCapture,
     router: Arc<routectl_router::Router>,
+    confirmations: Arc<ConfirmationTracker>,
     session_key: Option<String>,
     stream_ctx: StreamRequestContext,
 ) -> Response {
@@ -615,6 +668,16 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
     match fast {
         Some(dispatched) => {
             capture.observe_meta(
+                &dispatched.meta,
+                router.catalog_version(),
+                router.overlay_revision(),
+            );
+            // The acknowledged field-verdict drain, as on the non-streaming walk (see
+            // there for the rationale). Called BEFORE `capture` moves into the render
+            // task, which is the only point on this path where it is still owned here.
+            capture.acknowledge_field_confirmations(
+                &router,
+                &confirmations,
                 &dispatched.meta,
                 router.catalog_version(),
                 router.overlay_revision(),
@@ -653,8 +716,17 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
             // response now; the warm task owns the still-pending future and
             // flushes the early frame before awaiting it.
             tokio::spawn(
-                warm_render_task(fut, adapter, capture, tx, router, session_key, stream_ctx)
-                    .instrument(parent_span),
+                warm_render_task(
+                    fut,
+                    adapter,
+                    capture,
+                    tx,
+                    router,
+                    confirmations,
+                    session_key,
+                    stream_ctx,
+                )
+                .instrument(parent_span),
             );
             build_sse_response(rx, &egress_id)
         }
@@ -706,12 +778,19 @@ fn build_sse_response(rx: tokio::sync::mpsc::Receiver<SseEvent>, egress_id: &str
 /// while awaiting the still-pending dispatch (the pre-content window the
 /// content-commit boundary keeps open). Both drop the guard un-finalized
 /// so Drop stamps `client_disconnect`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct owned sink or seed this task must hold for \
+              its whole life; bundling them would make one struct whose fields are \
+              read at four unrelated points"
+)]
 async fn warm_render_task<A: IngressAdapter>(
     mut fut: DispatchFut,
     adapter: A,
     mut capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
     router: Arc<routectl_router::Router>,
+    confirmations: Arc<ConfirmationTracker>,
     session_key: Option<String>,
     stream_ctx: StreamRequestContext,
 ) {
@@ -757,6 +836,15 @@ async fn warm_render_task<A: IngressAdapter>(
         dispatched = &mut fut => dispatched,
     };
     capture.observe_meta(
+        &dispatched.meta,
+        router.catalog_version(),
+        router.overlay_revision(),
+    );
+    // The acknowledged field-verdict drain, as on the non-streaming walk above (see
+    // there for why it is synchronous and daemon-owned).
+    capture.acknowledge_field_confirmations(
+        &router,
+        &confirmations,
         &dispatched.meta,
         router.catalog_version(),
         router.overlay_revision(),

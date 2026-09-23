@@ -43,7 +43,12 @@ async fn an_acting_preflight_strips_before_activation_on_a_real_dispatch_walk() 
     let provider = Arc::new(OkProvider {
         count_calls: AtomicUsize::new(0),
     });
-    let router = remote_router(provider);
+    // Durable persistence is ASSUMED here, and only here among this file's
+    // fixtures: learned pre-flight suspends unless a capability-persistence health
+    // read reports durable writes, and this is the one test whose premise requires
+    // the planner to ACT. Opting in at the site rather than in the shared fixture
+    // keeps every other test in this file on the production default.
+    let router = remote_router(provider).with_capability_writes_assumed_durable_for_tests();
     plant_eligible_verdict(&router, "m1");
 
     let dispatched = router

@@ -2839,6 +2839,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class`) though
   not within one target, since the closed table holds one row per class. The
   aggregate counts still describe every decision, so naming one hides nothing.
+  BOTH tiers additionally carry the AUTHORIZATION PROVENANCE
+  (`FieldPreflightAuthorizationRecord`: `phase` / `source` / `confirmations` /
+  `canary` / `canary_last_outcome`, all closed tokens or counts), rendered
+  through `RenderedAuthorization` so the three emit sites cannot spell the absent
+  case two ways. `authorization_record` and `RenderedAuthorization` live in
+  `src/router/field_preflight_provenance.rs`, an `include!`d fragment kept
+  under this file's size ceiling; the types and imports they render stay
+  in `field_preflight.rs`. The record is populated from the EXACT `PreflightAuthorization`
+  that permitted the action and never re-read: the identity's state can move
+  between the gates clearing and the line being emitted, so a re-read would report
+  a provenance the rewrite was never authorized under. Present on an acting
+  decision and on a `canary_restored` one (the authorization permitted an action;
+  the planner spent it on a re-verification), and `None` on every REFUSAL -- a
+  refusal held no authorization, so reporting one would attribute permission to a
+  decision that had none. The WARN carries the HEADLINE decision's own provenance
+  rather than an aggregate, since the four values describe ONE identity's evidence.
   Field-by-field reference in `docs/LOGGING.md` "Envelope-field pre-flight
   decision DEBUG + WARN". `action = field_preflight_drop` is
   attached only to a record that ACTED -- labelling a fail-open with it would
@@ -2851,8 +2867,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rather than one this attempt is establishing. It takes NO repair budget at
   all: a threaded-but-unread parameter would falsely signal that some invariant
   here consults the reactive ceiling.
+  THE PERSISTENCE GATE (`capability_writer_unhealthy`) sits between the operator
+  mask and every evidence gate, and that placement is the contract: after the mask
+  because a masked row's fate does not change when the writer recovers, and ahead
+  of eligibility and quorum because it refuses the MECHANISM rather than this
+  verdict's evidence -- reporting a confirmation shortfall would send an operator
+  hunting confirmations that could never help. Read through
+  `Router::capability_writes_durable` (see `src/router/capability_health.rs`).
   Behavior lives in `src/router/field_preflight_tests.rs` (the planning
-  decision, the two content gates, and the reactive arm's row attribution) and
+  decision, the two content gates, and the reactive arm's row attribution), its
+  `include!`d fragments `field_preflight_action_tests.rs` (the adopted-row action
+  counter and the one-WARN-per-request contract),
+  `field_preflight_provenance_tests.rs` (the authorization record on each decision
+  class, both tiers rendering it, and its log hygiene) and
+  `field_preflight_persistence_tests.rs` (the persistence gate's refusal, its
+  order against the mask and the evidence gates, reactive repair staying available,
+  and the end-to-end dispatched bytes), and
   `src/router/field_canary_settlement_tests.rs` (the cadence, the
   three settlements, and the accounting)
 - `src/router/field_canary_settlement_tests.rs` -- behavioral coverage of the
@@ -3019,7 +3049,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   there would silently change what every operator dashboard matches on. What keeps
   the two from meaning different things is that each variant is produced by
   consulting the planner's own predicate, not by paraphrasing its conditions.
-  Carries a `test-utils`-gated `plant_acting_field_verdict_for_tests` so
+  Carries `test-utils`-gated `plant_acting_field_verdict_for_tests` and
+  `field_verdict_event_stamps_for_tests` (the latter READ-ONLY: it hands back the
+  live generation and resident incarnation a cross-crate test must stamp an
+  acknowledgment with, because a hardcoded pair would produce a refusal
+  indistinguishable from a broken acknowledgment's) so
   cross-crate status tests can establish real registry state through the same
   `import_entries` plus canary-seed path a cold boot uses -- without it their only
   option was asserting over an empty row set, which a projection rendering nothing
@@ -3040,7 +3074,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reason about it would be actionable. `MaskedByOverride` follows them, since it is
   about a specific capability on a lane the stage WOULD act on: an operator cell
   forcing the capability supported outranks any evidence, and its remedy is a config
-  edit rather than more confirmations. `CanarySuspended` is the one reason this
+  edit rather than more confirmations. `CapabilityWriterUnhealthy` follows the mask
+  and precedes every EVIDENCE gate: durable capability persistence cannot be
+  guaranteed, so learned pre-flight is suspended for every verdict at once -- but it
+  is not a verdict gate, since every escape hatch a rewrite depends on (the durable
+  clear, the purge, the confirmation) is itself a capability-event write, so a wrong
+  verdict could not be durably retracted. Behind the mask because a masked row's
+  fate does not change when the writer recovers; ahead of the evidence gates because
+  reporting a confirmation shortfall would send an operator hunting evidence that
+  could never help. Reactive forward-and-repair is unaffected, so a lane reporting it
+  is still fully served. `CanarySuspended` is the one reason this
   surface distinguishes that the planner does not, because the planner folds a
   suspension into not-eligible while the operator action differs. A verdict whose
   transform class THIS build's table does not carry (a ledger row from a wider build)
@@ -3465,6 +3508,43 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_preflight_action_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: the pre-flight adopted-row action counter and
   the one-WARN-per-request contract
+- `src/router/field_preflight_provenance_tests.rs` -- `include!`d fragment of
+  `field_preflight_tests.rs`: the authorization-provenance record. Plants a
+  verdict whose provenance is DISTINGUISHABLE on every axis the record reports
+  (F2 rather than F1, `Probe` rather than `Live`, a confirmation count above both
+  quorums) so a swapped or constant-wired field is visible -- at the fixture
+  defaults two fields read `live` and the count reads one, and every permutation
+  would pass. Covers the record on an acting decision, its ABSENCE on three
+  refusals at different gate depths (including a masked cell, whose facts ARE
+  readable -- the arm that discriminates a record filled from a later read), its
+  presence on a `canary_restored` decision, the settled last-outcome and the
+  non-default `in_flight` posture, both tiers rendering all five fields, and a
+  log-hygiene sweep with a positive control
+- `src/router/field_preflight_persistence_tests.rs` -- `include!`d fragment of
+  `field_preflight_tests.rs`: the capability-persistence gate on the planner.
+  Its fixtures deliberately OMIT the host's durability opt-in and construct the
+  Router the way production does, so what they exercise is the shipped fail-safe
+  default rather than an installed `false`. Covers the refusal of a fully eligible
+  verdict with a paired positive control on the same planting, the gate's order
+  against the operator mask and against the evidence gates (each with a control
+  showing what a healthy writer reports instead), reactive forward-and-repair
+  staying available on the same suspended router (planted LAPSED, since the
+  reactive arm refuses an ACTING verdict by its own documented rule), and the
+  end-to-end dispatched bytes through a real walk
+- `src/router/paid_probe_hostile_claim_tests.rs` -- `include!`d fragment of
+  `paid_probe_authorize_tests.rs`: the hostile paid-claim proof. 512
+  contenders gathered at an async barrier and released together against ONE
+  candidate, over eight rounds, with a deliberately SLOW committing ledger so the
+  winner is still inside its reservation window while the losers claim. Asserts
+  exactly one authorization, exactly one reservation (the money assertion -- a
+  committed unit is never refunded), and that every loser refused with
+  `NoCandidate` rather than a precondition; a sibling case pins that the claimed
+  candidate is OFF the list afterwards and no concurrency slot is stranded, which
+  the reservation count alone cannot see. 512 rather than the sibling claim test's
+  sixteen because this class of race is thread-count sensitive in a measured way.
+  The read-then-remove claim mutation reds these in 5 of 8 runs at
+  `--test-threads=512` -- partial detection is the honest result for a real race
+  and is recorded in the file, so a single green run is not read as proof
 - `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
   `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
 - `src/probe_scheduler/queue_status_tests.rs` -- `include!`d fragment of
@@ -3498,6 +3578,29 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/probe_half_open_tests.rs` -- carried half-open ownership
   (including at `Router::admit`, where a probe's drop must not free a client's
   claim) plus the deferral and what a declined probe does not consume
+- `src/router/capability_health.rs` -- the CRATE-BOUNDARY contract for the
+  capability-persistence gate: the `CapabilityPersistenceHealth` trait (one
+  synchronous `capability_writes_durable()`, consulted per considered row on the
+  dispatch path, so an implementation reads already-maintained state rather than
+  probing storage) and the optional installation the Router holds. WHY IT GATES
+  LEARNED PRE-FLIGHT: every escape hatch a pre-flight rewrite depends on -- the
+  durable clear a disproving canary performs, the operator purge, the
+  confirmation acknowledgment -- is a capability-event WRITE, so while those
+  cannot be guaranteed a verdict that turns out wrong cannot be durably
+  retracted (the in-memory suspension lasts only until restart, and the next
+  boot's replay restores it). REACTIVE FORWARD-AND-REPAIR IS UNAFFECTED, which
+  is the whole asymmetry: it acts only after an upstream rejection, so its
+  evidence is in hand on the request it serves and needs no durable record.
+  `Router::with_capability_persistence_health` is a CONSUMING builder over an
+  `Option` `Router::new` leaves absent, and absent reads as NOT GUARANTEED --
+  so a build path that forgot the wiring suspends pre-flight rather than
+  permitting it. `Router::capability_writes_durable()` (crate-internal) is THE
+  one predicate both the planner and the status surface ask. Carried across a
+  reload by `carry_over_learned_from`, because both generations submit to the ONE
+  writer whose health is one fact. `with_capability_writes_assumed_durable_for_tests`
+  is a NAMED `cfg`-gated opt-in rather than a `cfg(test)` flip of the default, so
+  the production and library-test defaults are one value and no test exercises
+  the gate's absence by accident
 - `src/router/capability_learn.rs` -- learned-capability observation, expiry,
   and snapshot: `CapabilityLearnEvent` (the ledger event),
   `observe_for_learning` (the 400/422 capture gate: kill switch + status +
@@ -3932,9 +4035,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the generation barrier, not a durable writer acknowledgment, so reconciling
   a confirmation count off it alone would let a later eligibility check treat
   a verdict as confirmed before its event write ever landed. That
-  reconciliation is `FieldCanaryRegistry::acknowledge_confirmation` (see
-  `src/field_canary.rs`), an explicit state-only API for a caller holding the
-  durable ack; no such caller exists yet in this build.
+  reconciliation is `FieldVerdictRegistry::acknowledge_durable_confirmation(key,
+  generation, incarnation, observations, now) -> bool`, THE production writer of
+  the confirmation half, closing the live-acknowledgment gap: it validates the
+  event's own generation (via `field_acting_facts_in_generation`) and its
+  incarnation against the live acting row BEFORE delegating to
+  `FieldCanaryRegistry::acknowledge_confirmation`, so an event describing a
+  catalog revision the daemon left, or a lifecycle a purge-and-relearn
+  superseded, advances nothing and returns `false`. Reached from
+  `Router::acknowledge_durable_field_confirmation`, which the daemon's
+  `handlers/capability_ack_drain` calls on a COMMITTED capability-event row --
+  which is what makes a newly confirmed reactive repair pre-flight eligible
+  within the same process, with no restart.
   `preflight_authorization(key, generation, now) ->
   Option<PreflightAuthorization>` is the READ-ONLY
   predicate the
@@ -3947,11 +4059,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   exact value is pinned by
   `the_three_quorum_values_are_exactly_one_one_and_two`) acknowledged
   confirmations whose incarnation equals the ACTING entry's OWN
-  incarnation (via `LearnedCapabilityRegistry::field_acting_incarnation_in_generation`
+  incarnation (via `LearnedCapabilityRegistry::field_acting_facts_in_generation`
   and `FieldCanaryRegistry::snapshot`), so a count left over from a
   since-relearned incarnation can never back the current verdict. It RETURNS
-  that incarnation AND the confirmation count it was decided from (the
-  `cfg(test)` `preflight_eligible` discards both): a canary
+  that incarnation, the confirmation count it was decided from, AND the
+  PROVENANCE and CANARY POSTURE of that same pair -- `phase` and `source` out of
+  the one guarded read, `canary` and `canary_last_outcome` out of the one
+  snapshot, the posture derived through `fidelity_status::canary_posture` so a
+  decision record and a status row cannot disagree. All five travel together
+  because the pre-flight decision record reports which evidence permitted a
+  rewrite, and a caller re-reading any would report a state that moved after the
+  authorization (the `cfg(test)` `preflight_eligible` discards them all): a canary
   claim and its later settlement must carry the same incarnation the
   authorization was validated against, so reading one separately afterwards
   could name a lifecycle the decision never checked -- and a transform class's
@@ -4056,9 +4174,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   incarnation, observations)` is the sole write path for the confirmation
   count, and it exists for a caller holding a DURABLE writer acknowledgment
   for `observations` -- not the in-memory `Applied` outcome
-  `FieldRepairGuard::commit` (see `src/field_verdict.rs`) reads; no caller
-  holds that ack yet, so on live traffic the cold-rebuild seed below is the
-  only writer that can raise the count. `snapshot(key) ->
+  `FieldRepairGuard::commit` (see `src/field_verdict.rs`) reads. Its production
+  caller is `FieldVerdictRegistry::acknowledge_durable_confirmation`, which
+  validates the event's generation and incarnation against the live acting row
+  first; the MONOTONIC incarnation admission here is NOT redundant with that
+  check, since the caller validates against the LEARNED row while this validates
+  against the resident CANARY state, and a straggler can be current by one and
+  superseded by the other. The cold-rebuild seed below remains the other writer,
+  for a boot that replays an already-acting verdict.
+  `snapshot(key) ->
   Option<CanaryStateSnapshot>` is the read side, consumed by
   `FieldVerdictRegistry::preflight_authorization`.
   `CanaryOutcome` is three-valued -- `Confirmed` (same rejection plus a
@@ -4661,6 +4785,34 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   verdicts the batch was preserving); the private
   tombstone-verdict literal mirrors the read side's copy in
   `query/capability.rs` (agreement pinned by the round-trip test)
+- `src/capability_ack.rs` -- the ACKNOWLEDGED SINGLE capability-event write: one
+  ordinary event whose outcome the caller awaits. `CapabilityEventWrite`
+  (`Committed` / `SupersededByBoundary` / `SupersededByPurge` / `WriteFailed`,
+  with `is_durable()` the ONE predicate every consumer asks and `as_str()` the
+  closed log token; no timed-out variant, for the same reason `BatchCommit` has
+  none), `AcknowledgedCapabilityEvent` (the row + its `EventStamp` + the one-shot
+  ack sender), `CapabilityEventReceipt::await_outcome`, and
+  `UsageHandle::admit_acknowledged_capability_event(event, generation,
+  incarnation) -> Result<CapabilityEventReceipt, CapabilityEventWrite>`
+  (non-blocking admission, so a saturated channel is reported rather than
+  awaited). ONE consumer: a learned envelope-field verdict may rewrite client
+  requests before any rejection only once its event write is DURABLE, because
+  every way that verdict can be retracted (a disproving canary's clear, an
+  operator purge, a later confirmation) is itself a capability-event write -- so
+  the router advances pre-flight eligibility on the acknowledgment and nowhere
+  else. NOT the boundary batch beside it: this establishes nothing, so it passes
+  the SAME boundary-generation check and per-key purge floor a best-effort event
+  passes, through the writer's one shared `persist_capability_event` body rather
+  than a copy of it. It DOES honour the `usage.enabled` gate (the batch
+  deliberately bypasses it): an operator who turned capture off wrote no row, so
+  no verdict may become eligible on the strength of one, and the refusal is
+  REPORTED rather than silent. A refused admission is CLASSIFIED by the channel's
+  own reason through `UsageHandle::note_capability_refusal` -- the ONE shared
+  classifier every capability-write class uses -- so a full channel lands on
+  `capability_events_dropped_full` and a closed one on
+  `capability_writer_unavailable`. Both resolve to one OUTCOME here (a caller's
+  action is identical: the row is not durable) while the counters keep the
+  distinction capability-persistence health reads and an operator needs
 - `src/capability_batch.rs` -- the ACKNOWLEDGED atomic capability-event batch,
   one of the crate's two non-best-effort writes (the other is the paid-probe
   reservation below). `BatchCommit`
@@ -4676,7 +4828,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `commit_capability_events_blocking(events, generation)` for callers off the
   runtime. All DELIBERATELY bypass the `usage.enabled` gate (a telemetry
   preference must not destroy routing state). Admission is bounded (a full
-  channel is refused without queueing) but an ADMITTED batch is never
+  channel is refused without queueing) and a refusal is now COUNTED through the
+  shared `note_capability_refusal` classifier -- previously it incremented nothing,
+  which was the hole: this is the path a purge, a canary's durable clear, and the
+  boot tombstone all take, so a refusal here is exactly what capability-persistence
+  health exists to notice and it was invisible to it. An ADMITTED batch is never
   abandoned by timeout: there is no timed-out variant, because answering while
   the queued transaction can still commit would let the boundary move behind a
   caller that kept its old state. Dropping the receipt abandons the wait (the
@@ -5464,6 +5620,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   that store on the missed path, and an empty store reads exactly as health)
 - `src/server/probe_driver.rs` -- `run_probe_driver` and
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
+- `src/server/capability_health.rs` -- bridges the router's
+  capability-persistence gate to the usage writer whose health answers it, the
+  read-direction sibling of `paid_probe_ledger.rs` below and installed at the
+  same boot point for the same two reasons (after the writer exists, before
+  publication). `UsagePaidProbeLedger`'s counterpart `UsageCapabilityHealth`
+  holds the writer's OWN shared counters plus the baseline it observed at install
+  time, and reports durable only while BOTH `write_errors` and
+  `capability_events_dropped_full` are unmoved -- neither subsumes the other (a
+  write error is a store fault, a dropped event is back-pressure, and for the
+  router's question both mean the row is not on disk). An EDGE against the
+  install-time baseline rather than a level, because the counters are monotonic:
+  a single failure therefore suspends learned pre-flight for the rest of the
+  process rather than flapping with load. THAT STICKINESS IS A REAL COST, stated
+  rather than glossed -- a daemon that dropped one event serves the rest of its
+  life with reactive forward-and-repair only, which is a bounded loss against the
+  unbounded one (a verdict rewriting traffic no boot can explain), and the
+  recovery is a restart. `install_capability_health(router, usage)` is consuming
+  and called once from `serve.rs`; a reload needs none, since
+  `carry_over_learned_from` attaches the outgoing installation
 - `src/server/paid_probe_ledger.rs` -- bridges the router's paid-probe budget
   seam to the usage writer, plus `install_paid_probe_ledger` (boot-time).
   Tests: `paid_probe_ledger_tests.rs` + its lifetime / wiring `include!`
@@ -5646,6 +5821,59 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Anthropic's real `/v1/models` list via `crate::proxy::forward` and returns
   it verbatim; every other case, including any proxy failure, fails soft to
   the local list above
+- `src/server/confirmation_advance.rs` -- DAEMON-OWNED advancement of acknowledged
+  field-verdict confirmations, the read-side sibling of `purge_settlement.rs` against
+  the same bug class. `ConfirmationTracker` (`claim` before admission / `advance`
+  spending the claim on a spawned task / `close_and_wait`), `ConfirmationClaim` (a
+  `#[must_use]` slot whose `Drop` releases an unspent one), `ConfirmationIdentity` (the
+  event's stamps carried VERBATIM, never re-derived on the task), and
+  `CONFIRMATION_DEADLINE`. WHY THE AWAIT CANNOT LIVE IN THE REQUEST: a handler's future
+  is cancelled when the client goes away, and awaiting the write's outcome is a
+  cancellation point -- cancelling there drops the receipt mid-commit, so the row lands
+  and the count is never applied, leaving the verdict dormant until a restart, silently
+  and only for the requests whose clients hung up. Second reason, independent: no client
+  response should wait on SQLite for work the client did not ask for. `advance` returns
+  NOTHING (unlike the purge settlement's result receiver) precisely so no caller can
+  await it and reintroduce the cancellation point. ITS SHUTDOWN CONTRACT IS LOOSER THAN
+  THE PURGE TRACKER'S, deliberately: this task holds no lease and owes the registry
+  nothing, and its row is already durable, so an abandoned advancement loses only an
+  in-memory count the next boot's cold-rebuild seed restores -- the documented recovery,
+  and the only path that existed before. So a timeout logs at INFO and shutdown
+  continues, where a purge settlement's timeout is ambiguous routing state. Awaited from
+  `serve.rs` after the purge settlements and before the writer drains (an in-flight
+  advancement needs the writer alive); a refused claim at shutdown is safe for the same
+  reason abandonment is. Behavior in
+  `src/server/confirmation_advance_tests.rs`, whose `ParkedWriter` holds the writer
+  channel's receiving end so "the row has not committed yet" is a state the test
+  ESTABLISHES rather than races -- it releases by starting the REAL writer over that
+  channel through `UsageWriter::start_over_channel`, so the commit and its durability
+  are production's. The hostile-concurrency sweep against `close_and_wait` (hundreds
+  of contenders racing one close, repeated across rounds) lives in the `include!`d
+  fragment `confirmation_advance_hostile_tests.rs`, kept separate to hold the host
+  under the size ceiling
+- `src/handlers/capability_ack_drain.rs` -- the ACKNOWLEDGED drain for
+  ENVELOPE-FIELD verdict events, and the eligibility advance it authorizes.
+  `is_field_verdict_event` routes one class off the best-effort drain (read
+  through `routectl_router::capability_key_is_field_verdict`, the namespace's own
+  published predicate -- never a prefix spelled here), and
+  `acknowledge_field_confirmations(router, usage, meta, catalog_version,
+  overlay_revision)` writes each such row through
+  `UsageHandle::admit_acknowledged_capability_event`, awaits the outcome, and
+  calls `Router::acknowledge_durable_field_confirmation` only for a row that
+  landed. SYNCHRONOUS: it admits, hands the receipt to
+  `server::confirmation_advance`'s tracker, and returns -- nothing here awaits, so a
+  cancelled request cannot interrupt it and no response waits on SQLite. The tracker
+  CLAIM is taken before the admission, so a committed row always has a task accounting
+  for it. THAT is what makes a newly confirmed reactive repair pre-flight
+  eligible within the SAME process, with no restart: the count advances on the
+  acknowledgment and nowhere else, so an unacknowledged, failed, superseded, or
+  timed-out write advances nothing and the lane stays on reactive
+  forward-and-repair. Called from all three ingress walks (`ingress_handle`'s
+  complete, fast-stream, and warm-hold paths, via
+  `UsageCapture::acknowledge_field_confirmations`) and from
+  `messages_count_tokens`; `usage_capture`'s best-effort drain EXCLUDES this
+  class, so one fact writes one row -- two would double the observation count a
+  warm rebuild reads back
 - `src/handlers/chat_completions.rs` -- `POST /v1/chat/completions` thin
   wrapper around `ingress_handle` with `OpenAiIngress`
 - `src/handlers/messages.rs` -- `POST /v1/messages` thin wrapper around
@@ -7708,7 +7936,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   than as a confusing connection error, and teardown aborts AND awaits, accepting only
   a cancellation. The observer is per-call, not a process global -- measured: a global
   one-shot is claimed by whichever daemon boots first and failed all six concurrent
-  cases
+  cases. Shared fixtures stay in this host file; the scenario bodies above are split
+  across three `include!`d fragments kept under the size ceiling:
+  `preflight_daemon_rewrite_tests.rs` (feature rewrite/forward and the canary),
+  `preflight_daemon_observability_tests.rs` (status/doctor INFO snapshots, the
+  cap-zero free-validation lane, and per-endpoint event emission), and
+  `preflight_daemon_health_tests.rs` (the LIVE acknowledgment path and its
+  incarnation/confirmation guards)
 - `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
   pre-flight observability floor: a real `serve_on_listener` daemon on an
   OS-assigned loopback port, a per-test tempdir usage ledger, and a provider

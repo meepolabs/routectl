@@ -139,7 +139,7 @@ fn pooled_router(config: Config) -> Router {
         "claude-sonnet-4-5",
     )
     .with_seats(seats.into());
-    let mut router = Router::new(Arc::new(config));
+    let mut router = router_assuming_durable_writes(config);
     let mut models: std::collections::BTreeMap<String, std::sync::Arc<ResolvedModel>> =
         std::collections::BTreeMap::new();
     models.insert(POOLED_NICK.to_string(), std::sync::Arc::new(resolved));
@@ -534,7 +534,7 @@ fn fallback_config() -> Config {
 /// lane it admits -- so this row reads as a supported lane only if the suffix won.
 #[test]
 fn a_suffix_naming_a_provider_entry_resolves_that_entry_rather_than_the_base_model() {
-    let router = Router::new(Arc::new(fallback_config()));
+    let router = router_assuming_durable_writes(fallback_config());
     let state_key = crate::seat_pool::seat_state_key(POOLED_NICK, Some(MEMBER));
     plant_verdict_on(&router, &state_key, grounded_key());
 
@@ -557,7 +557,7 @@ fn a_suffix_naming_a_provider_entry_resolves_that_entry_rather_than_the_base_mod
 /// which is the correct answer for that entry and the opposite of the row above.
 #[test]
 fn a_suffix_naming_no_provider_entry_falls_back_to_the_base_models_provider() {
-    let router = Router::new(Arc::new(fallback_config()));
+    let router = router_assuming_durable_writes(fallback_config());
     let state_key = crate::seat_pool::seat_state_key(POOLED_NICK, Some("no-such-entry"));
     plant_verdict_on(&router, &state_key, grounded_key());
 
@@ -594,7 +594,7 @@ fn config_only_pooled_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlocked
     config.fidelity.prefix_impact_opt_in = opt_in.iter().map(|s| (*s).to_string()).collect();
     assert_pool_config_is_valid(&config);
     // No `install_resolved_models`: THE branch under test.
-    let router = Router::new(Arc::new(config));
+    let router = router_assuming_durable_writes(config);
     let state_key = pooled_key();
     let capability_key = prefix_key();
     plant_verdict_on(&router, &state_key, capability_key.clone());

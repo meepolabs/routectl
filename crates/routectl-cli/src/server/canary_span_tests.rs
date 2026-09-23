@@ -247,6 +247,13 @@ fn spanning_config() -> (Arc<Config>, tempfile::TempDir) {
 }
 
 /// A Router over `config` with `seat` installed as the resolved model.
+///
+/// DURABLE PERSISTENCE IS ASSUMED, stated rather than defaulted: learned pre-flight
+/// suspends unless a capability-persistence health read reports durable writes, and
+/// `Router::new` installs none. Without this every cadence and settlement assertion
+/// in this file would run against a suspended planner -- no rewrite, no canary -- and
+/// pass for the wrong reason. The restart oracle below deliberately does NOT opt in:
+/// it only reads a persisted snapshot and plans nothing.
 fn router_with(config: &Arc<Config>, seat: Arc<Seat>) -> Router {
     let mut router = Router::new(Arc::clone(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
@@ -260,7 +267,7 @@ fn router_with(config: &Arc<Config>, seat: Arc<Seat>) -> Router {
         )),
     );
     router.install_resolved_models(models);
-    router
+    router.with_capability_writes_assumed_durable_for_tests()
 }
 
 /// A request carrying the grounded field through BOTH canonical carriers, plus an

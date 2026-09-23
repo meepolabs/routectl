@@ -239,6 +239,23 @@ pub(crate) struct DaemonTestSeams {
     /// Receives the live router swap the running daemon serves from.
     pub(crate) router_observer:
         Option<tokio::sync::oneshot::Sender<Arc<ArcSwap<routectl_router::Router>>>>,
+    /// Receives the live usage handle the running daemon's own writer is behind.
+    ///
+    /// A separate seam from the router observer rather than a tuple on it, because
+    /// the two answer different questions and a test usually wants one: the router
+    /// swap is what the handlers route through, and this is what they PERSIST
+    /// through. A test driving the production acknowledgment path needs the daemon's
+    /// OWN handle -- one built beside it would write to a different writer, and the
+    /// acknowledgment would then be about a ledger the daemon does not read.
+    pub(crate) usage_observer: Option<tokio::sync::oneshot::Sender<routectl_usage::UsageHandle>>,
+    /// Receives the live confirmation tracker the running daemon's handlers hand
+    /// advancements to.
+    ///
+    /// The DAEMON's own, for the same reason the usage observer exists: an advancement
+    /// on a tracker the daemon does not own would not be awaited by its shutdown, so a
+    /// test over it would exercise a different lifecycle than production's.
+    pub(crate) confirmation_observer:
+        Option<tokio::sync::oneshot::Sender<Arc<super::confirmation_advance::ConfirmationTracker>>>,
     /// Observation and failure-injection hooks for this daemon's status surface.
     pub(crate) status_hooks: crate::handlers::status::test_hooks::StatusTestHooks,
 }
@@ -361,6 +378,8 @@ async fn serve_inner(
     let DaemonTestSeams {
         injected_router,
         router_observer,
+        usage_observer,
+        confirmation_observer,
         status_hooks,
     } = seams;
     #[cfg(test)]
@@ -579,6 +598,18 @@ async fn serve_inner(
     // outside this boot -- a library embedder's, a test's -- carries none and is
     // fail closed by construction.
     let router = super::paid_probe_ledger::install_paid_probe_ledger(router, &usage_handle);
+    // The capability-persistence health read, installed on the same OWNED Router
+    // and for the same two reasons: after the writer exists (its counters are what
+    // answer the question) and before publication (the installation is a consuming
+    // builder).
+    //
+    // Installed HERE and nowhere else. Neither reload path installs its own:
+    // `Router::carry_over_learned_from` attaches this one to every replacement,
+    // because both generations submit capability events to the one writer and its
+    // health is one fact. Every Router built outside this boot -- a library
+    // embedder's, a test's -- carries none, which suspends learned pre-flight and
+    // is fail safe by construction.
+    let router = super::capability_health::install_capability_health(router, &usage_handle);
     let router_swap = Arc::new(ArcSwap::from_pointee(router));
     // Publish the LIVE swap to this call's observer, if it was given one.
     //
@@ -592,10 +623,31 @@ async fn serve_inner(
     // claimed by whichever daemon boots first and every other test then waits on a
     // sender that was already consumed. Measured -- the global shape failed all six
     // cases with a receive error.
+    // The confirmation tracker, built HERE rather than beside the purge tracker
+    // further down, because the test observer below is handed it: a tracker created
+    // after its publication point could not be published at all. Its own type rather
+    // than a second use of the purge tracker -- the two have different shutdown
+    // contracts (an abandoned purge settlement is ambiguous routing state and triggers
+    // terminal shutdown; an abandoned confirmation advance is a dormant verdict the
+    // next boot's replay restores), and sharing one would force the looser obligation
+    // onto the stricter one.
+    let confirmation_advances = Arc::new(super::confirmation_advance::ConfirmationTracker::new());
+
     #[cfg(test)]
     if let Some(observer) = router_observer {
         // A dropped receiver is fine: the test finished before publication.
         let _ = observer.send(Arc::clone(&router_swap));
+    }
+    // The daemon's own usage handle, published for the same reason and on the same
+    // terms. A test that built its own would be writing to a different writer.
+    #[cfg(test)]
+    if let Some(observer) = usage_observer {
+        let _ = observer.send(usage_handle.clone());
+    }
+    // The daemon's own confirmation tracker, published on the same terms.
+    #[cfg(test)]
+    if let Some(observer) = confirmation_observer {
+        let _ = observer.send(Arc::clone(&confirmation_advances));
     }
 
     // Compute the initial activation inventory and SEED its ArcSwap before
@@ -639,6 +691,7 @@ async fn serve_inner(
         mitm_seam_nonce: mitm_seam_nonce.clone(),
         cc_pin_drift: crate::server::cc_pin_drift::CcPinDriftGuard::new(),
         purge_settlements: Arc::clone(&purge_settlements),
+        confirmation_advances: Arc::clone(&confirmation_advances),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is
@@ -769,6 +822,16 @@ async fn serve_inner(
     // disagreeing for that key until the next boot.
     purge_settlements
         .close_and_wait(PURGE_SETTLEMENT_DEADLINE)
+        .await;
+
+    // Confirmation advancements are awaited in the SAME window and for the same
+    // structural reason -- each is waiting on a commit that needs the writer alive --
+    // but with a looser obligation: abandoning one loses only an in-memory count the
+    // next boot's ledger replay restores, so its deadline is short and a timeout is
+    // logged rather than treated as ambiguous state. After the purge settlements
+    // because those hold leases and a stalled one must not eat this budget too.
+    confirmation_advances
+        .close_and_wait(super::confirmation_advance::CONFIRMATION_DEADLINE)
         .await;
 
     // Drain queued usage rows after the server stops accepting and every

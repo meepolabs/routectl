@@ -1,3 +1,4 @@
+pub mod capability_ack_drain;
 pub mod chat_completions;
 pub mod control;
 pub mod health;

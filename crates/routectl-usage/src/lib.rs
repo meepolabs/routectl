@@ -9,6 +9,7 @@
 //! call `try_send`, which never blocks; a dedicated OS thread owns the
 //! blocking connection and performs the INSERTs.
 
+mod capability_ack;
 mod capability_batch;
 mod capability_event;
 mod cost;
@@ -32,8 +33,16 @@ mod retention;
 mod schema;
 mod writer;
 
+// The acknowledged single capability-event write. `CapabilityEventReceipt` is
+// public because `admit_acknowledged_capability_event` RETURNS it and the caller
+// awaits it; `AcknowledgedCapabilityEvent` is deliberately NOT re-exported -- it is
+// the writer message's payload, constructed only inside the admission, and
+// publishing it would invite a downstream producer to build one and bypass the
+// admission's enabled gate and accounting.
+pub use capability_ack::CapabilityEventReceipt;
 pub use capability_batch::{
-    BatchCommit, BatchReceipt, CapabilityBatch, handle_over_channel, handle_with_closed_channel,
+    BatchCommit, BatchReceipt, CapabilityBatch, handle_over_channel, handle_over_channel_with,
+    handle_with_closed_channel,
 };
 // The writer's message type, for the test seams above only: a caller supplying
 // its own channel to `handle_over_channel` has to name what flows over it.
@@ -69,6 +78,7 @@ pub use record::{
     UsageRecord,
 };
 pub use schema::SCHEMA_VERSION;
+pub use writer::CapabilityEventWrite;
 #[doc(hidden)]
 pub use writer::WriterMessage;
 pub use writer::{CHANNEL_CAPACITY, UsageWriter};

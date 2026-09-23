@@ -189,7 +189,7 @@ fn convergence_router(base_url: &str, kind: &str) -> Router {
         CONVERGENCE_ALIAS.to_string(),
         AliasValue::Single(STATE_KEY.to_string()),
     );
-    let mut router = Router::new(Arc::new(config));
+    let mut router = router_assuming_durable_writes(config);
     let provider: std::sync::Arc<dyn routectl_core::Provider> = std::sync::Arc::new(InertProvider);
     let mut models: std::collections::BTreeMap<String, std::sync::Arc<ResolvedModel>> =
         std::collections::BTreeMap::new();
@@ -440,7 +440,65 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
         });
     }
 
+    // DURABLE PERSISTENCE UNAVAILABLE: the persistence gate. The fixture is the
+    // otherwise-unblocked one with NO capability-persistence health read
+    // installed, which is `Router::new`'s own fail-safe default -- so this row is
+    // also the pin that the default suspends rather than permits. Both surfaces
+    // must name the writer, not a confirmation shortfall: an operator sent after
+    // missing evidence would never find any.
+    let unhealthy = convergence_router_without_health_read();
+    plant_convergence_verdict(&unhealthy, envelope, ENVELOPE_QUORUM);
+    cases.push(ConvergenceCase {
+        name: "durable capability writes not guaranteed",
+        router: unhealthy,
+        req: convergence_envelope_req(),
+        path: envelope,
+        expect: Some(PreflightBlockedReason::CapabilityWriterUnhealthy),
+        planner_reason_override: None,
+    });
+
     cases
+}
+
+/// The otherwise-unblocked convergence fixture with NO capability-persistence
+/// health read installed.
+///
+/// Built by omitting [`router_assuming_durable_writes`]'s opt-in rather than by
+/// installing a read that answers `false`, and the difference is the point: what
+/// this exercises is `Router::new`'s own default, so the row doubles as the pin
+/// that a build path which forgot the wiring suspends learned pre-flight rather
+/// than permitting it. An installed-but-false read would prove the gate reads its
+/// input and say nothing about the default.
+fn convergence_router_without_health_read() -> Router {
+    use crate::config::{AliasValue, ModelEntry};
+    use crate::resolved::ResolvedModel;
+
+    let toml_text = "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n\
+         base_url = \"https://api.anthropic.com\"\n";
+    let mut config: Config = toml::from_str(toml_text).expect("valid convergence toml");
+    config
+        .models
+        .insert(STATE_KEY.to_string(), ModelEntry::new("p0", "wire-model"));
+    config.aliases.insert(
+        CONVERGENCE_ALIAS.to_string(),
+        AliasValue::Single(STATE_KEY.to_string()),
+    );
+    // Router::new and NOTHING else: no health read, which is production's default.
+    let mut router = Router::new(Arc::new(config));
+    let provider: std::sync::Arc<dyn routectl_core::Provider> = std::sync::Arc::new(InertProvider);
+    let mut models: std::collections::BTreeMap<String, std::sync::Arc<ResolvedModel>> =
+        std::collections::BTreeMap::new();
+    models.insert(
+        STATE_KEY.to_string(),
+        std::sync::Arc::new(ResolvedModel::new(
+            STATE_KEY,
+            "p0",
+            provider,
+            "wire-model".to_string(),
+        )),
+    );
+    router.install_resolved_models(models);
+    router
 }
 
 /// Rebuild a convergence router over `config`, carrying the resolved table across.
@@ -479,7 +537,7 @@ fn rebuild_convergence_router_with_kind(
 fn rebuild_convergence_router_inner(previous: &Router, config: Config) -> Router {
     use crate::resolved::ResolvedModel;
 
-    let mut router = Router::new(Arc::new(config));
+    let mut router = router_assuming_durable_writes(config);
     let provider: std::sync::Arc<dyn routectl_core::Provider> = std::sync::Arc::new(InertProvider);
     let upstream = previous
         .resolved_models
@@ -578,6 +636,7 @@ fn every_blocked_reason_is_exercised_or_excused_by_the_convergence_matrix() {
         PreflightBlockedReason::NotEligible,
         PreflightBlockedReason::BelowQuorum,
         PreflightBlockedReason::NoTargetOptIn,
+        PreflightBlockedReason::CapabilityWriterUnhealthy,
     ] {
         let token = reason.as_str();
         assert!(

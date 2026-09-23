@@ -60,6 +60,9 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
         purge_settlements: std::sync::Arc::new(
             routectl_cli::server::purge_settlement::SettlementTracker::new().0,
         ),
+        confirmation_advances: std::sync::Arc::new(
+            routectl_cli::server::confirmation_advance::ConfirmationTracker::new(),
+        ),
     });
     (state, dir)
 }

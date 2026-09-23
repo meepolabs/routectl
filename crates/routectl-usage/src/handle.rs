@@ -44,7 +44,26 @@ pub struct UsageCounters {
     /// straddle purges, which is a throughput signal rather than a correctness
     /// one -- the drop itself is the protection working.
     capability_events_superseded: AtomicU64,
+    /// Capability writes the channel refused because it was FULL: the writer is
+    /// alive but behind, so the row never reached it.
+    ///
+    /// Distinct from the unavailable counter below, and the distinction is not
+    /// cosmetic: full is LOAD and closed is TEARDOWN, so an operator reading a
+    /// nonzero value needs to know which. Both mean the same thing for
+    /// capability-persistence health -- the row is not on disk -- so both are read
+    /// by it, but labelling a closed channel as full would misreport a shutting-down
+    /// daemon as a saturated one.
     capability_events_dropped_full: AtomicU64,
+    /// Capability writes the channel refused because it was CLOSED: the writer is
+    /// gone (shutting down, or never started).
+    ///
+    /// Its own counter rather than a second meaning for the full one, for the reason
+    /// above. Counted for every capability-write class alike -- best-effort events,
+    /// acknowledged single events, and acknowledged batches (a purge, a canary clear,
+    /// a boot tombstone) -- because capability-persistence health asks one question
+    /// of all of them and a class whose refusal went uncounted would be invisible
+    /// to it.
+    capability_writer_unavailable: AtomicU64,
     capability_events_persisted: AtomicU64,
     /// Paid-probe units that COMMITTED but whose caller was never authorized,
     /// because shutdown began between the transaction and the answer.
@@ -129,6 +148,12 @@ impl UsageCounters {
         self.capability_events_persisted.load(Ordering::Relaxed)
     }
 
+    /// Capability writes refused because the writer channel was CLOSED. See the
+    /// field's own note for why this is not the full counter.
+    pub fn capability_writer_unavailable(&self) -> u64 {
+        self.capability_writer_unavailable.load(Ordering::Relaxed)
+    }
+
     /// Paid-probe units committed whose caller was not authorized, because
     /// shutdown began first. See the field's own note on how to read it.
     pub fn paid_probe_consumed_unauthorized(&self) -> u64 {
@@ -191,6 +216,11 @@ impl UsageCounters {
     pub(crate) fn incr_capability_events_persisted(&self) {
         self.capability_events_persisted
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn incr_capability_writer_unavailable(&self) -> u64 {
+        self.capability_writer_unavailable
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     pub(crate) fn incr_paid_probe_consumed_unauthorized(&self) {
@@ -342,7 +372,10 @@ impl UsageHandle {
             },
         )) {
             Ok(()) => self.counters.incr_capability_events_enqueued(),
-            Err(_) => self.note_capability_event_overflow_drop(),
+            // FULL and CLOSED are counted SEPARATELY, on the one shared classifier
+            // below: the two are load versus teardown, and capability-persistence
+            // health reads both while an operator needs to tell them apart.
+            Err(refusal) => self.note_capability_refusal(&refusal),
         }
     }
 
@@ -392,6 +425,51 @@ impl UsageHandle {
         }
     }
 
+    /// Classify and count ONE refused capability write, by the channel's own
+    /// reason, and (bounded) warn about it.
+    ///
+    /// THE single classifier for every capability-write class -- best-effort events,
+    /// acknowledged single events, and acknowledged batches -- and that is the whole
+    /// point of it being one function: capability-persistence health reads these
+    /// counters, so a class whose refusal went uncounted, or landed on the wrong
+    /// counter, would be invisible to the gate. A second copy per call site is
+    /// exactly how one of three classes comes to be missed.
+    ///
+    /// `Full` means the writer is alive but behind; `Closed` means it is gone. Both
+    /// mean the row is not on disk, which is what health asks -- but they are
+    /// different operator situations, so they are counted apart.
+    ///
+    /// Generic over the refused message type because the three call sites send three
+    /// different payloads and none of them is inspected here; only the variant is.
+    pub(crate) fn note_capability_refusal<T>(
+        &self,
+        refusal: &tokio::sync::mpsc::error::TrySendError<T>,
+    ) {
+        match refusal {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                self.note_capability_event_overflow_drop();
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                self.note_capability_writer_unavailable();
+            }
+        }
+    }
+
+    /// Count and (bounded) warn about a capability write refused by a CLOSED
+    /// channel: the writer is shutting down or was never started.
+    fn note_capability_writer_unavailable(&self) {
+        let prior = self.counters.incr_capability_writer_unavailable();
+        if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {
+            tracing::warn!(
+                target: "routectl_usage::handle",
+                unavailable_total = prior + 1,
+                "usage writer channel closed -- dropping capability write (no durable \
+                 capability persistence)"
+            );
+        }
+    }
+
+    /// Count and (bounded) warn about a capability write refused by a FULL channel.
     fn note_capability_event_overflow_drop(&self) {
         let prior = self.counters.incr_capability_events_dropped_full();
         if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {

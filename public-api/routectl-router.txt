@@ -3542,6 +3542,7 @@ pub fn routectl_router::PaidProbeReservation::into_shared(self) -> Shared
 pub routectl_router::router::PreflightBlockedReason::BelowQuorum
 pub routectl_router::router::PreflightBlockedReason::CanarySuspended
 pub routectl_router::router::PreflightBlockedReason::CapabilityDisabled
+pub routectl_router::router::PreflightBlockedReason::CapabilityWriterUnhealthy
 pub routectl_router::router::PreflightBlockedReason::MaskedByOverride
 pub routectl_router::router::PreflightBlockedReason::NoTargetOptIn
 pub routectl_router::router::PreflightBlockedReason::NotEligible
@@ -4185,6 +4186,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::FidelitySnapshot::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FieldPreflight
 pub routectl_router::router::FieldPreflight::acted: bool
+pub routectl_router::router::FieldPreflight::authorization: core::option::Option<routectl_router::router::FieldPreflightAuthorizationRecord>
 pub routectl_router::router::FieldPreflight::field_path: core::option::Option<&'static str>
 pub routectl_router::router::FieldPreflight::reason: &'static str
 pub routectl_router::router::FieldPreflight::state_key: alloc::string::String
@@ -4236,6 +4238,68 @@ impl<T> typenum::type_operators::Same for routectl_router::router::FieldPrefligh
 pub type routectl_router::router::FieldPreflight::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldPreflight where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::FieldPreflight::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::FieldPreflightAuthorizationRecord
+pub routectl_router::router::FieldPreflightAuthorizationRecord::canary: &'static str
+pub routectl_router::router::FieldPreflightAuthorizationRecord::canary_last_outcome: &'static str
+pub routectl_router::router::FieldPreflightAuthorizationRecord::confirmations: u32
+pub routectl_router::router::FieldPreflightAuthorizationRecord::phase: &'static str
+pub routectl_router::router::FieldPreflightAuthorizationRecord::source: &'static str
+impl core::clone::Clone for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::clone(&self) -> routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::cmp::Eq for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::cmp::PartialEq for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::eq(&self, &routectl_router::router::FieldPreflightAuthorizationRecord) -> bool
+impl core::fmt::Debug for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::StructuralPartialEq for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Freeze for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Send for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Sync for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Unpin for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::UnsafeUnpin for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::router::FieldPreflightAuthorizationRecord where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::router::FieldPreflightAuthorizationRecord where U: core::convert::From<T>
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::FieldPreflightAuthorizationRecord where U: core::convert::Into<T>
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Error = core::convert::Infallible
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::FieldPreflightAuthorizationRecord where U: core::convert::TryFrom<T>
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Owned = T
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::clone_into(&self, &mut T)
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::FieldPreflightAuthorizationRecord where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub unsafe fn routectl_router::router::FieldPreflightAuthorizationRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<T> outref::AsOut<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::marker::Copy
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::FieldPreflightAuthorizationRecord where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<T> typenum::type_operators::Same for routectl_router::router::FieldPreflightAuthorizationRecord
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldPreflightAuthorizationRecord where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FieldRepair
 pub routectl_router::router::FieldRepair::action: &'static str
 pub routectl_router::router::FieldRepair::field_path: &'static str
@@ -4649,6 +4713,15 @@ pub fn routectl_router::router::Router::audit_absent_purge(&self, &str, &str)
 pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
 pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &str, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
+pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
+pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
+pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
+pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
+pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
+pub fn routectl_router::router::Router::observe_verified_capability(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
+pub fn routectl_router::router::Router::provider_kind_for_state_key(&self, &str) -> &str
+impl routectl_router::router::Router
 pub fn routectl_router::router::Router::apply_capability_tuning(&self)
 pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
@@ -4682,14 +4755,6 @@ pub fn routectl_router::router::Router::register(&mut self, impl core::convert::
 pub fn routectl_router::router::Router::registry_generation(&self) -> u64
 pub fn routectl_router::router::Router::set_pending_registry_generation(&self, u64)
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
-pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
-pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
-pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
-pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
-pub fn routectl_router::router::Router::observe_verified_capability(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
-pub fn routectl_router::router::Router::provider_kind_for_state_key(&self, &str) -> &str
-impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::complete(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub async fn routectl_router::router::Router::complete_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::Dispatched
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
@@ -4717,6 +4782,8 @@ pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::with_capability_persistence_health(self, alloc::sync::Arc<dyn routectl_router::CapabilityPersistenceHealth>) -> Self
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::with_paid_probe_ledger(self, alloc::sync::Arc<dyn routectl_router::PaidProbeLedger>) -> Self
 impl !core::marker::Freeze for routectl_router::router::Router
@@ -4806,6 +4873,8 @@ pub type routectl_router::router::RouterOptions::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::RouterOptions where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::RouterOptions::into_shared(self) -> Shared
 pub const routectl_router::router::ALIAS_MAX_RECURSION_DEPTH: usize
+pub trait routectl_router::router::CapabilityPersistenceHealth: core::marker::Send + core::marker::Sync
+pub fn routectl_router::router::CapabilityPersistenceHealth::capability_writes_durable(&self) -> bool
 pub trait routectl_router::router::PaidProbeLedger: core::marker::Send + core::marker::Sync
 pub fn routectl_router::router::PaidProbeLedger::reserve_paid_probe_unit<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str, u32) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_router::PaidProbeReservation> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn routectl_router::router::acting_field_verdicts(&[routectl_router::LearnedRegistryEntry]) -> alloc::vec::Vec<routectl_router::ActingFieldVerdict>
@@ -7723,6 +7792,7 @@ pub fn routectl_router::pool_build::PoolOutcome::into_shared(self) -> Shared
 pub routectl_router::PreflightBlockedReason::BelowQuorum
 pub routectl_router::PreflightBlockedReason::CanarySuspended
 pub routectl_router::PreflightBlockedReason::CapabilityDisabled
+pub routectl_router::PreflightBlockedReason::CapabilityWriterUnhealthy
 pub routectl_router::PreflightBlockedReason::MaskedByOverride
 pub routectl_router::PreflightBlockedReason::NoTargetOptIn
 pub routectl_router::PreflightBlockedReason::NotEligible
@@ -11250,6 +11320,122 @@ impl<T> typenum::type_operators::Same for routectl_router::FidelitySnapshot
 pub type routectl_router::FidelitySnapshot::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FidelitySnapshot where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::FidelitySnapshot::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::FieldPreflight
+pub routectl_router::FieldPreflight::acted: bool
+pub routectl_router::FieldPreflight::authorization: core::option::Option<routectl_router::router::FieldPreflightAuthorizationRecord>
+pub routectl_router::FieldPreflight::field_path: core::option::Option<&'static str>
+pub routectl_router::FieldPreflight::reason: &'static str
+pub routectl_router::FieldPreflight::state_key: alloc::string::String
+pub routectl_router::FieldPreflight::transform_class: core::option::Option<&'static str>
+impl core::clone::Clone for routectl_router::router::FieldPreflight
+pub fn routectl_router::router::FieldPreflight::clone(&self) -> routectl_router::router::FieldPreflight
+impl core::fmt::Debug for routectl_router::router::FieldPreflight
+pub fn routectl_router::router::FieldPreflight::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::router::FieldPreflight
+impl core::marker::Send for routectl_router::router::FieldPreflight
+impl core::marker::Sync for routectl_router::router::FieldPreflight
+impl core::marker::Unpin for routectl_router::router::FieldPreflight
+impl core::marker::UnsafeUnpin for routectl_router::router::FieldPreflight
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::FieldPreflight
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::FieldPreflight
+impl<T, U> core::convert::Into<U> for routectl_router::router::FieldPreflight where U: core::convert::From<T>
+pub fn routectl_router::router::FieldPreflight::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::FieldPreflight where U: core::convert::Into<T>
+pub type routectl_router::router::FieldPreflight::Error = core::convert::Infallible
+pub fn routectl_router::router::FieldPreflight::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::FieldPreflight where U: core::convert::TryFrom<T>
+pub type routectl_router::router::FieldPreflight::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::FieldPreflight::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub type routectl_router::router::FieldPreflight::Owned = T
+pub fn routectl_router::router::FieldPreflight::clone_into(&self, &mut T)
+pub fn routectl_router::router::FieldPreflight::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflight::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::FieldPreflight where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::FieldPreflight where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::FieldPreflight where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub unsafe fn routectl_router::router::FieldPreflight::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::FieldPreflight
+pub fn routectl_router::router::FieldPreflight::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::FieldPreflight where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflight::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::FieldPreflight
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::FieldPreflight where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflight::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::FieldPreflight::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::FieldPreflight
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::FieldPreflight
+impl<T> typenum::type_operators::Same for routectl_router::router::FieldPreflight
+pub type routectl_router::router::FieldPreflight::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldPreflight where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::FieldPreflight::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::FieldPreflightAuthorizationRecord
+pub routectl_router::FieldPreflightAuthorizationRecord::canary: &'static str
+pub routectl_router::FieldPreflightAuthorizationRecord::canary_last_outcome: &'static str
+pub routectl_router::FieldPreflightAuthorizationRecord::confirmations: u32
+pub routectl_router::FieldPreflightAuthorizationRecord::phase: &'static str
+pub routectl_router::FieldPreflightAuthorizationRecord::source: &'static str
+impl core::clone::Clone for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::clone(&self) -> routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::cmp::Eq for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::cmp::PartialEq for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::eq(&self, &routectl_router::router::FieldPreflightAuthorizationRecord) -> bool
+impl core::fmt::Debug for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::StructuralPartialEq for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Freeze for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Send for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Sync for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::Unpin for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::marker::UnsafeUnpin for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::FieldPreflightAuthorizationRecord
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::router::FieldPreflightAuthorizationRecord where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::router::FieldPreflightAuthorizationRecord where U: core::convert::From<T>
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::FieldPreflightAuthorizationRecord where U: core::convert::Into<T>
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Error = core::convert::Infallible
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::FieldPreflightAuthorizationRecord where U: core::convert::TryFrom<T>
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Owned = T
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::clone_into(&self, &mut T)
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::FieldPreflightAuthorizationRecord where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub unsafe fn routectl_router::router::FieldPreflightAuthorizationRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::FieldPreflightAuthorizationRecord
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::clone::Clone
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<T> outref::AsOut<T> for routectl_router::router::FieldPreflightAuthorizationRecord where T: core::marker::Copy
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::FieldPreflightAuthorizationRecord where T: ?core::marker::Sized
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::FieldPreflightAuthorizationRecord
+impl<T> typenum::type_operators::Same for routectl_router::router::FieldPreflightAuthorizationRecord
+pub type routectl_router::router::FieldPreflightAuthorizationRecord::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::FieldPreflightAuthorizationRecord where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::FieldPreflightAuthorizationRecord::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::FieldRepairCounters
 pub routectl_router::FieldRepairCounters::disproved_requests: u64
 pub routectl_router::FieldRepairCounters::outstanding_unconfirmed: u64
@@ -13930,6 +14116,15 @@ pub fn routectl_router::router::Router::audit_absent_purge(&self, &str, &str)
 pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
 pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &str, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
+pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
+pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
+pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
+pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
+pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
+pub fn routectl_router::router::Router::observe_verified_capability(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
+pub fn routectl_router::router::Router::provider_kind_for_state_key(&self, &str) -> &str
+impl routectl_router::router::Router
 pub fn routectl_router::router::Router::apply_capability_tuning(&self)
 pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
@@ -13963,14 +14158,6 @@ pub fn routectl_router::router::Router::register(&mut self, impl core::convert::
 pub fn routectl_router::router::Router::registry_generation(&self) -> u64
 pub fn routectl_router::router::Router::set_pending_registry_generation(&self, u64)
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
-pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
-pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
-pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
-pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
-pub fn routectl_router::router::Router::observe_verified_capability(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
-pub fn routectl_router::router::Router::provider_kind_for_state_key(&self, &str) -> &str
-impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::complete(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub async fn routectl_router::router::Router::complete_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::Dispatched
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
@@ -13998,6 +14185,8 @@ pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
 pub fn routectl_router::router::Router::status_targets(&self, std::time::Instant) -> alloc::vec::Vec<routectl_router::router::RouteTargetStatus>
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::with_capability_persistence_health(self, alloc::sync::Arc<dyn routectl_router::CapabilityPersistenceHealth>) -> Self
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::with_paid_probe_ledger(self, alloc::sync::Arc<dyn routectl_router::PaidProbeLedger>) -> Self
 impl !core::marker::Freeze for routectl_router::router::Router
@@ -15316,6 +15505,8 @@ pub fn routectl_router::CalibrationLedgerReader::read_calibration_samples(&self,
 pub trait routectl_router::CapabilityLedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::CapabilityLedgerReader::read_events(&self) -> alloc::vec::Vec<routectl_router::CapabilityEventRow>
 pub fn routectl_router::CapabilityLedgerReader::tombstone(&self) -> core::option::Option<routectl_router::ReplayTombstone>
+pub trait routectl_router::CapabilityPersistenceHealth: core::marker::Send + core::marker::Sync
+pub fn routectl_router::CapabilityPersistenceHealth::capability_writes_durable(&self) -> bool
 pub trait routectl_router::KEstimator: core::marker::Send + core::marker::Sync
 pub fn routectl_router::KEstimator::estimate(&self, &routectl_router::KQuery<'_>) -> routectl_router::KEstimate
 impl routectl_router::KEstimator for routectl_router::LedgerBackedK
@@ -15340,6 +15531,7 @@ pub async fn routectl_router::build_provider_with_options(&str, &routectl_router
 pub async fn routectl_router::build_resolved_models(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>)>
 pub async fn routectl_router::build_resolved_models_reported(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<routectl_router::ResolvedModelBuild>
 pub fn routectl_router::candidate_shrink_counts(&routectl_router::ImportCandidate) -> routectl_router::ShrinkCounts
+pub fn routectl_router::capability_key_is_field_verdict(&str) -> bool
 pub fn routectl_router::catalog_import_state_default_path() -> std::path::PathBuf
 pub fn routectl_router::catalog_state_default_path() -> std::path::PathBuf
 pub fn routectl_router::catalog_state_selector_key(&str, &str) -> alloc::string::String

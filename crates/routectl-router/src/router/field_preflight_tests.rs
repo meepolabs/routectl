@@ -147,8 +147,16 @@ fn chain_config(alias: &str, seats: usize, kind: &str) -> Config {
     config
 }
 
-/// Install `seats` mocks answering `answer` onto `config`'s resolved models.
-fn install(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Observed>>) {
+/// Install `seats` mocks answering `answer` onto `config`'s resolved models, with
+/// NOTHING assumed about capability persistence.
+///
+/// THE raw body, shared with `install` below and with
+/// `install_without_durable_writes` in the persistence fragment. Private and
+/// underscore-named because it is not a fixture anybody should reach for directly:
+/// the two wrappers differ by exactly one call, and which one a test uses decides
+/// whether it exercises the acting planner or the suspended one -- so the choice is
+/// made by NAME at the call site rather than by a boolean nobody reads.
+fn install_raw(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Observed>>) {
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     let mut observed: Vec<Arc<Observed>> = Vec::with_capacity(seats);
@@ -168,6 +176,23 @@ fn install(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Obs
     }
     router.install_resolved_models(models);
     (router, observed)
+}
+
+/// [`install_raw`] with DURABLE PERSISTENCE ASSUMED -- the fixture almost every test
+/// in this file wants.
+///
+/// Stated rather than defaulted: learned pre-flight suspends unless a
+/// capability-persistence health read reports durable writes, and `Router::new`
+/// installs none -- so a fixture that said nothing would exercise the SUSPENDED path
+/// in every test here, and every eligibility, quorum, opt-in, and cadence assertion
+/// would pass for the wrong reason. The suspension itself is asserted on
+/// `install_without_durable_writes`, which deliberately omits this call.
+fn install(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Observed>>) {
+    let (router, observed) = install_raw(config, seats, answer);
+    (
+        router.with_capability_writes_assumed_durable_for_tests(),
+        observed,
+    )
 }
 
 /// A one-seat anthropic-api chain whose provider entry carries `base_url`,
@@ -3946,6 +3971,10 @@ fn the_warn_headline_takes_the_worst_and_breaks_ties_on_planning_order() {
             // longer produces.
             transform_class: Some(class.as_str()),
             reason: FIELD_PREFLIGHT_ACTION_DROP,
+            // The headline SELECTOR keys on impact rank and planning order only,
+            // so this fixture carries no authorization: threading one in would
+            // suggest the tie rule consults it.
+            authorization: None,
         }
     }
 
@@ -4076,3 +4105,5 @@ fn the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class() {
 }
 
 include!("field_preflight_action_tests.rs");
+include!("field_preflight_provenance_tests.rs");
+include!("field_preflight_persistence_tests.rs");

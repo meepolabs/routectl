@@ -28,6 +28,7 @@ use crate::runtime_state::ProviderState;
 
 mod cache_plan;
 mod capability_cleared;
+mod capability_health;
 mod capability_learn;
 mod capability_observe;
 mod capability_purge;
@@ -36,7 +37,7 @@ mod class_observe;
 mod count_tokens;
 mod dispatch;
 mod feature_filter;
-mod fidelity_status;
+pub(crate) mod fidelity_status;
 mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
@@ -60,6 +61,7 @@ mod status;
 mod sticky;
 mod window_gate;
 pub use capability_cleared::CapabilityClearedEvent;
+pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::{CapabilityLearnEvent, CatalogIndependentSurvivor};
 pub use capability_observe::CapabilityObserveEvent;
 pub use capability_purge::{PurgeOutcome, ReservedPurge};
@@ -73,8 +75,8 @@ pub use fidelity_status::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use fidelity_status::{
-    FieldVerdictStatusSpec, make_field_canary_due_for_tests, plant_acting_field_verdict_for_tests,
-    seed_distinct_fidelity_counters_for_tests,
+    FieldVerdictStatusSpec, field_verdict_event_stamps_for_tests, make_field_canary_due_for_tests,
+    plant_acting_field_verdict_for_tests, seed_distinct_fidelity_counters_for_tests,
 };
 pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
@@ -388,6 +390,18 @@ pub struct Router {
     /// since a committed unit is never refunded, the overspend would be
     /// permanent.
     paid_probe_ledger: Option<Arc<dyn paid_probe_ledger::PaidProbeLedger>>,
+    /// Capability-persistence health seam -- see [`capability_health`]. `None` on
+    /// every Router `Router::new` builds, and absent reads as NOT GUARANTEED, so
+    /// learned pre-flight suspends on a build path that never installed one.
+    ///
+    /// Shared across Router generations by `carry_over_learned_from`, which
+    /// attaches this same `Arc` to the replacement. Sharing is load-bearing
+    /// rather than convenient: the health of the ONE writer both generations
+    /// submit to is one fact, so a replacement that lost the read would suspend
+    /// pre-flight across every reload until the boot path reinstalled it, and one
+    /// that acquired a SECOND read could report a different writer's health than
+    /// the one its events go to.
+    capability_health: Option<Arc<dyn capability_health::CapabilityPersistenceHealth>>,
     /// Edge-trigger latch for the queue-full probe diagnostic, following
     /// the same bounded warn-once pattern as `volatile_prefix_warned`: a
     /// saturated queue refuses every later request, so one line per
@@ -1552,6 +1566,53 @@ pub struct FieldPreflight {
     pub transform_class: Option<&'static str>,
     /// Closed-set token naming why the planner acted or fell open.
     pub reason: &'static str,
+    /// The AUTHORIZATION facts the action rested on, present only on a decision
+    /// whose authorization actually permitted something -- an acting rewrite or
+    /// the canary that one authorized.
+    ///
+    /// `None` on every refusal, and that is the contract rather than a gap: a
+    /// refusal has no authorization to report, so filling this in from a later
+    /// read would attribute permission to a decision that had none. Populated
+    /// from the EXACT snapshot the gates were decided against, never re-read.
+    pub authorization: Option<FieldPreflightAuthorizationRecord>,
+}
+
+/// The closed-set authorization provenance one pre-flight action rested on.
+///
+/// Every field is a closed-set token or a count, copied VERBATIM out of the one
+/// `PreflightAuthorization` that permitted the action. Nothing here is re-read:
+/// a record assembled from a later snapshot could report a confirmation count,
+/// a provenance, or a canary posture the action was never authorized under,
+/// which is the one way this surface can make a false claim about a rewrite
+/// that has already gone upstream.
+///
+/// Deliberately NO request value, response body, credential, session key, or
+/// upstream text -- a provenance record is metadata about a decision, never
+/// about a payload.
+///
+/// `#[non_exhaustive]` so a later authorization fact stays additive.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldPreflightAuthorizationRecord {
+    /// Closed-set detection-phase token of the acting verdict (`f1` / `f2` /
+    /// `f3`).
+    pub phase: &'static str,
+    /// Closed-set evidence-source token of the acting verdict (`live` /
+    /// `probe`).
+    pub source: &'static str,
+    /// Acknowledged confirmation cycles backing the verdict at authorization
+    /// time. A confirmation count is only ever advanced by a caller holding a
+    /// durable writer acknowledgment, so this number is acknowledged evidence
+    /// rather than an in-memory tally.
+    pub confirmations: u32,
+    /// Closed-set canary posture token at authorization time (`counting` /
+    /// `due` / `in_flight`).
+    pub canary: &'static str,
+    /// Closed-set last-settled-canary-outcome token, or the explicit `none`
+    /// token when no canary has settled for this incarnation. Rendered rather
+    /// than absent for the same reason the status surface renders it: an absent
+    /// field on a diagnostic reads as an unavailable one.
+    pub canary_last_outcome: &'static str,
 }
 
 /// Closed-set facts about a reactive L0 envelope-field repair that fired
@@ -2018,6 +2079,7 @@ impl Router {
             probe_lifecycle_state: Arc::default(),
             paid_probe_candidates: Arc::default(),
             paid_probe_ledger: None,
+            capability_health: None,
             probe_queue_full_warned: Mutex::new(false),
             probe_payload_refused_warned: Mutex::new(false),
             override_registry,
@@ -2665,6 +2727,13 @@ impl Router {
         // credentials-rebuild site needs an accounting handle in scope to
         // preserve it.
         self.paid_probe_ledger = previous.paid_probe_ledger().cloned();
+        // The persistence-health read rides along under the same discipline, and
+        // for a reason of its own: both generations submit capability events to
+        // the SAME writer, so its health is one fact. A replacement that lost the
+        // read would suspend learned pre-flight on every reload until a boot path
+        // reinstalled it, and one that acquired a second read could report a
+        // different writer's health than the one its own events go to.
+        self.capability_health = previous.capability_persistence_health().cloned();
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
 

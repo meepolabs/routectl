@@ -580,6 +580,57 @@ impl Router {
         &self.field_verdicts
     }
 
+    /// Acknowledge that the capability event describing a field verdict's
+    /// observation has DURABLY LANDED, so its count may back pre-flight
+    /// eligibility.
+    ///
+    /// THE production entry point for the live acknowledgment, and the reason the
+    /// feature does not need a restart: a reactive repair mints a verdict and rides
+    /// a [`CapabilityLearnEvent`] out, the daemon commits that row through the
+    /// ACKNOWLEDGED batch path, and on the commit it calls this -- so the next
+    /// request on that lane plans pre-flight against evidence that is actually on
+    /// disk.
+    ///
+    /// `state_key`, `capability_key`, `provider_kind`, `generation`, and
+    /// `incarnation` are the event's OWN fields, carried verbatim from the guarded
+    /// mutation that produced it. Nothing is re-derived: a caller that re-read the
+    /// live incarnation would be acknowledging whatever lifecycle is resident now
+    /// rather than the one whose row committed, which is exactly the
+    /// stale-acknowledgment case the generation and incarnation checks exist to
+    /// refuse.
+    ///
+    /// `false` when the acknowledgment was refused and nothing moved: the identity
+    /// is no longer acting under that generation, or its lifecycle was superseded
+    /// while the write was in flight. A caller has nothing to do about either --
+    /// the verdict it describes is gone -- so the boolean is for diagnostics and
+    /// for tests, not for control flow.
+    ///
+    /// Takes only a normalized capability key, not a raw field path: the key is
+    /// read off the event the registry itself produced, so re-minting it from a
+    /// path here could only ever disagree with the check that admitted it.
+    pub fn acknowledge_durable_field_confirmation(
+        &self,
+        state_key: &str,
+        capability_key: &str,
+        provider_kind: &str,
+        generation: u64,
+        incarnation: u64,
+        observations: u32,
+    ) -> bool {
+        let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+            state_key.to_string(),
+            capability_key.to_string(),
+            provider_kind.to_string(),
+        );
+        self.field_verdicts.acknowledge_durable_confirmation(
+            &key,
+            generation,
+            incarnation,
+            observations,
+            Instant::now(),
+        )
+    }
+
     /// Learn-path capture, called from both dispatch error arms beside
     /// [`Router::emit_class_observability`]. On an eligible, deduped
     /// capability rejection it records a learned negative in the registry,
