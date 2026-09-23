@@ -16,6 +16,60 @@ list with more narrative.
 
 ### Added
 
+- **The envelope-field pre-flight surface is now readable at INFO** -- a
+  status or doctor poll emits one structured line carrying what an
+  operator needs to explain, audit, or distrust every resident wire-shape
+  verdict: the capability key and target it applies to, its transform
+  class and whether that class rewrites a cache prefix, where the evidence
+  came from, how many confirmations back it against how many its class
+  requires, what is currently blocking it, and where its re-verification
+  cadence stands. Two new process counters ride the same line: requests a
+  pre-flight rewrite modified before dispatch, and upstream rejections
+  whose envelope no field path could be read from -- the second is the
+  am-I-flying-blind figure, and what carries its signal is its ratio
+  against the first.
+
+  The line also carries the probe scheduler's own state -- lanes activated,
+  queue depth, work in flight or backing off, the most recent settled
+  outcome, and how long until the next retry -- because "why is this
+  verdict not moving" is usually answered there rather than by the verdict
+  itself.
+
+  Rows are reported for every resident verdict rather than only the acting
+  ones, because the question an operator actually asks is why a repair is
+  NOT firing, and a surface listing only what acts answers that with
+  silence. Every row is drawn from one coherent read, so two counts on the
+  line can differ only by a documented filter and never by timing. Rows are
+  sanitized and capped at a fixed ceiling, with the real total and the
+  omitted count both reported -- a truncated line says how much it is not
+  showing rather than presenting a subset as complete.
+
+  Nothing on the line is a request value, a response body, a credential, or
+  upstream text. Reading it mutates nothing: no lane activates, no cadence
+  advances, no re-verification slot is claimed, so polling a dashboard
+  cannot re-verify verdicts on its refresh interval or consume the slots
+  real traffic needs. One line per request, so the combined `/status`
+  endpoint does not double-report.
+
+- **Paid-probe budgets report their accounting health, including budget
+  spent for no call** -- each provider with a configured daily cap now
+  reports that cap beside what the ledger recorded for the current UTC
+  day, whether that record could be read at all, and whether the usage
+  writer can still promise a durable unit. The count read is the durable
+  one rather than a process tally, so a daemon restarted after spending
+  its day's budget reports the spend rather than zero.
+
+  Separately reported, and the reason the surface exists: units that were
+  committed while shutdown had begun, whose caller was never authorized.
+  Budget consumed for no call is invisible everywhere else -- the unit is
+  spent and its ledger row looks like any other, and it is not a writer
+  fault because the write landed -- so a surface reporting only the day's
+  usage and the writer's state under-reports the real budget. It is a
+  process-wide total rather than a per-provider one, since the condition it
+  counts has no provider dimension, and it resets on restart: reconciling a
+  day's budget across a restart means reading it from the logs of the
+  process that emitted it.
+
 - **`catalog set --create` publishes a narrow cell for an uncovered
   upstream** -- correcting a catalog fact (a context window, a rate, a
   capability prior) for a model the baked table and the overlay both miss

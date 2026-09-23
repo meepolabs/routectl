@@ -17,7 +17,7 @@ fn a_fresh_scheduler_holds_no_work_and_has_activated_nothing() {
     let scheduler = ProbeScheduler::new();
 
     // Assert
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, 0, "construction must enqueue no probe");
     assert_eq!(snap.in_flight, 0);
     assert_eq!(
@@ -36,7 +36,7 @@ fn the_first_activation_for_an_identity_queues_exactly_one_job() {
 
     // Assert
     assert_eq!(outcome, ProbeActivation::Queued);
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, 1);
     assert_eq!(snap.activations_total, 1);
 }
@@ -62,7 +62,7 @@ fn a_repeat_activation_for_the_same_lane_and_capability_dedupes() {
     // Assert: dedupe is per lane AND capability, so neither adds a job.
     assert_eq!(second, ProbeActivation::Deduped);
     assert_eq!(third, ProbeActivation::Deduped);
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, 1, "one job per lane/capability, never more");
     assert_eq!(snap.deduped_total, 2);
 }
@@ -87,7 +87,7 @@ fn distinct_capabilities_on_one_lane_are_separate_jobs() {
     );
 
     // Assert: dedupe keys on the identity, so two capabilities coexist.
-    assert_eq!(scheduler.snapshot().queued, 2);
+    assert_eq!(scheduler.snapshot(Instant::now()).queued, 2);
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn an_in_flight_identity_dedupes_rather_than_queueing_a_second_job() {
 
     // Assert: a leased identity still occupies its single-job slot.
     assert_eq!(repeat, ProbeActivation::Deduped);
-    assert_eq!(scheduler.snapshot().queued, 0);
+    assert_eq!(scheduler.snapshot(Instant::now()).queued, 0);
     drop(lease);
 }
 
@@ -129,7 +129,7 @@ fn the_queue_refuses_past_its_fixed_depth_and_counts_the_refusal() {
 
     // Assert
     assert_eq!(overflow, ProbeActivation::QueueFull);
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, PROBE_QUEUE_DEPTH, "the bound is not exceeded");
     assert_eq!(snap.queue_full_total, 1, "the refusal is diagnosable");
 }
@@ -156,7 +156,10 @@ fn no_more_than_the_concurrency_bound_of_leases_are_handed_out_at_once() {
 
     // Assert
     assert_eq!(held.len(), PROBE_MAX_CONCURRENCY);
-    assert_eq!(scheduler.snapshot().in_flight, PROBE_MAX_CONCURRENCY);
+    assert_eq!(
+        scheduler.snapshot(Instant::now()).in_flight,
+        PROBE_MAX_CONCURRENCY
+    );
 }
 
 #[test]
@@ -204,7 +207,7 @@ fn a_dropped_unsettled_lease_frees_its_slot() {
         next.is_some(),
         "an unsettled drop must free the slot exactly as a settlement does"
     );
-    assert_eq!(scheduler.snapshot().in_flight, 1);
+    assert_eq!(scheduler.snapshot(Instant::now()).in_flight, 1);
     drop(next);
 }
 
@@ -220,7 +223,7 @@ fn a_timed_out_settlement_releases_the_slot_and_counts_the_timeout() {
     let _committed = lease.settle(ProbeSettlement::TimedOut, start);
 
     // Assert
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.in_flight, 0, "the slot must come back");
     assert_eq!(snap.timeouts_total, 1, "the timeout is counted");
     assert_eq!(
@@ -244,7 +247,7 @@ fn a_timed_out_job_is_abandoned_at_the_attempt_cap_like_any_retry() {
     }
 
     assert!(scheduler.lease_due(now).is_none());
-    assert_eq!(scheduler.snapshot().abandoned_total, 1);
+    assert_eq!(scheduler.snapshot(Instant::now()).abandoned_total, 1);
 }
 
 #[test]
@@ -263,7 +266,7 @@ fn a_retryable_settlement_backs_the_job_off_before_it_is_due_again() {
         scheduler.lease_due(start).is_none(),
         "a retryable settlement must not re-lease in the same instant"
     );
-    assert_eq!(scheduler.snapshot().backing_off, 1);
+    assert_eq!(scheduler.snapshot(Instant::now()).backing_off, 1);
     assert!(
         scheduler
             .lease_due(start + PROBE_BACKOFF_BASE + Duration::from_secs(1))
@@ -309,7 +312,7 @@ fn a_job_is_abandoned_once_it_exhausts_the_attempt_cap() {
         scheduler.lease_due(now).is_none(),
         "a job past the attempt cap must never lease again"
     );
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, 0);
     assert_eq!(snap.backing_off, 0);
     assert_eq!(snap.abandoned_total, 1);
@@ -328,7 +331,7 @@ fn retirement_cancels_queued_work_from_a_superseded_generation() {
 
     // Assert
     assert_eq!(cancelled, 1);
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, 1, "only live-generation work survives");
     assert_eq!(snap.retired_total, 1);
     let lease = scheduler.lease_due(now).expect("the live job is still due");
@@ -350,7 +353,7 @@ fn activation_against_a_retired_generation_schedules_no_work() {
 
     // Assert
     assert_eq!(outcome, ProbeActivation::Retired);
-    assert_eq!(scheduler.snapshot().queued, 0);
+    assert_eq!(scheduler.snapshot(Instant::now()).queued, 0);
 }
 
 #[test]
@@ -364,7 +367,11 @@ fn a_job_whose_incarnation_was_retired_cannot_be_leased_before_the_sweep_removes
     let now = Instant::now();
     scheduler.activate(&key(0), 1, vec![ProbeValidator::CountTokens], payload());
     scheduler.retire_before(5);
-    assert_eq!(scheduler.snapshot().queued, 0, "the sweep removed it");
+    assert_eq!(
+        scheduler.snapshot(Instant::now()).queued,
+        0,
+        "the sweep removed it"
+    );
 
     // A request still holding generation 1 cannot queue (activation
     // refuses), so drive the window directly: generation 4 is below the
@@ -392,7 +399,7 @@ fn a_stale_settlement_releases_its_slot_and_schedules_no_retry() {
     let _committed = lease.settle(ProbeSettlement::Retryable, now);
 
     // Assert: slot freed, nothing rescheduled on retired state.
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.in_flight, 0, "a stale settlement releases its slot");
     assert_eq!(snap.queued, 0);
     assert_eq!(
@@ -416,10 +423,12 @@ fn shutdown_cancels_every_queued_job() {
 
     // Assert
     assert_eq!(cancelled, 3);
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.queued, 0);
     assert!(
         scheduler.lease_due(now).is_none(),
         "no work may be leased after shutdown cancellation"
     );
 }
+
+include!("queue_status_tests.rs");

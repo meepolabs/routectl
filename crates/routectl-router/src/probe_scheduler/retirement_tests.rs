@@ -25,12 +25,12 @@ fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
     }
     let lease = scheduler.lease_due(now).expect("a queued job is due");
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         1,
         "premise: one operation must be in flight before retirement"
     );
     assert_eq!(
-        scheduler.snapshot().queued,
+        scheduler.snapshot(Instant::now()).queued,
         1,
         "premise: one row still idle"
     );
@@ -45,12 +45,12 @@ fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
          operation and cannot be cancelled by bookkeeping alone"
     );
     assert_eq!(
-        scheduler.snapshot().queued,
+        scheduler.snapshot(Instant::now()).queued,
         0,
         "the queued row from the retired incarnation is gone immediately"
     );
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         1,
         "the retired in-flight row must STILL be counted: its upstream call is \
          running, and an uncounted live call lets the replacement router \
@@ -72,7 +72,7 @@ fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
         "the retained retired row must never be handed to a worker again"
     );
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         PROBE_MAX_CONCURRENCY,
         "the retained row plus the fresh lease fill the SHARED ceiling"
     );
@@ -94,7 +94,7 @@ fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
          tombstone into a retired incarnation, or report a spent free step"
     );
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         0,
         "and the slot comes back only now"
     );
@@ -119,7 +119,7 @@ fn a_dropped_lease_on_a_retired_row_also_returns_its_slot() {
     let lease = scheduler.lease_due(now).expect("the queued job is due");
     scheduler.retire_before(2);
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         1,
         "premise: the retired in-flight row is still counted"
     );
@@ -127,12 +127,12 @@ fn a_dropped_lease_on_a_retired_row_also_returns_its_slot() {
     drop(lease);
 
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         0,
         "a dropped lease must release the retained row's slot"
     );
     assert_eq!(
-        scheduler.snapshot().queued,
+        scheduler.snapshot(Instant::now()).queued,
         0,
         "and must leave nothing rescheduled on retired state"
     );
@@ -153,13 +153,13 @@ fn shutdown_clears_in_flight_rows_unlike_retirement() {
         ProbeActivation::Queued
     );
     let lease = scheduler.lease_due(now).expect("the queued job is due");
-    assert_eq!(scheduler.snapshot().in_flight, 1, "premise");
+    assert_eq!(scheduler.snapshot(Instant::now()).in_flight, 1, "premise");
 
     let cancelled = scheduler.cancel_all();
 
     assert_eq!(cancelled, 1, "shutdown cancels the in-flight row too");
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         0,
         "and stops counting it: no later admission can be misled by the \
          under-count, because there is no later admission"

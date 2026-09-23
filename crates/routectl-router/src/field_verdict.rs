@@ -151,6 +151,20 @@ impl FieldVerdictKey {
         &self.state_key
     }
 
+    /// The routing state key this identity is keyed on, for the read-only
+    /// status/doctor projection's target-spec resolution.
+    ///
+    /// Its own accessor rather than ungating the test-only `state_key` below, for
+    /// the same reason [`Self::probe_state_key`] is: each production reader is
+    /// explicit about why it needs the half. This one resolves the state key to a
+    /// `(provider, nickname)` pair to answer whether the operator opted the target
+    /// into prefix-impacting pre-flight -- a pure read, on a surface that must
+    /// mutate nothing.
+    #[must_use]
+    pub(crate) fn status_state_key(&self) -> &str {
+        &self.state_key
+    }
+
     /// The routing state key this identity is keyed on.
     ///
     /// Test-only, like its two siblings below: the dispatch path passes the

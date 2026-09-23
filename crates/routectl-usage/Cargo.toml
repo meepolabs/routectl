@@ -8,6 +8,20 @@ repository.workspace = true
 publish.workspace = true
 description = "Usage-accounting persistence types for routectl."
 
+[features]
+# Exposes the cross-crate paid-probe test seams under
+# `routectl_usage::paid_probe_test_support` plus the `_for_tests` counter
+# mutators on `UsageCounters`. Enabled as a dev-dependency feature by
+# routectl-cli so its integration tests can build fixtures this crate's own
+# `cfg(test)` cannot reach, and NEVER compiled into a release build.
+#
+# The gate is a SECURITY boundary, not a tidiness one. One of those seams writes
+# a raw paid-probe accounting value, which means it can lower a committed count --
+# and a committed unit is never given back. Shipping it in a release library
+# would put a cap-bypass path on the published surface of the crate that owns
+# the spend ceiling.
+"test-utils" = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

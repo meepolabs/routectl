@@ -4074,3 +4074,5 @@ fn the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class() {
     assert_eq!(field_of(warns[0], "decisions_acted"), Some("2"));
     assert_eq!(field_of(warns[0], "decisions_planned"), Some("2"));
 }
+
+include!("field_preflight_action_tests.rs");

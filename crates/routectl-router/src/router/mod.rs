@@ -36,6 +36,7 @@ mod class_observe;
 mod count_tokens;
 mod dispatch;
 mod feature_filter;
+mod fidelity_status;
 mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
@@ -67,6 +68,14 @@ use dispatch::k_query_key;
 #[cfg(test)]
 use feature_filter::FilterSource;
 use feature_filter::{StripDecision, catalog_capabilities};
+pub use fidelity_status::{
+    CanaryPosture, FidelitySnapshot, FieldVerdictStatus, PreflightBlockedReason,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub use fidelity_status::{
+    FieldVerdictStatusSpec, make_field_canary_due_for_tests, plant_acting_field_verdict_for_tests,
+    seed_distinct_fidelity_counters_for_tests,
+};
 pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
 };
@@ -654,6 +663,34 @@ struct RouterMetrics {
     /// suppressed (loopback) target repairs nothing at all, so it cannot
     /// contribute a success either.
     field_verdicts_learned_total: AtomicU64,
+    /// Requests a PRE-FLIGHT rewrite modified before dispatch: one per acting
+    /// pre-flight decision, counted where the rewrite is adopted.
+    ///
+    /// The count an operator reads to answer "is pre-flight acting at all",
+    /// independent of log level. Distinct from
+    /// [`field_repair_attempted_total`](Self::field_repair_attempted_total),
+    /// which counts the REACTIVE arm: a reactive repair follows a rejection the
+    /// client already paid for, while a pre-flight rewrite means the upstream
+    /// never saw the field -- so one rising while the other is flat is the
+    /// feature working, not a discrepancy.
+    field_preflight_actions_total: AtomicU64,
+    /// Upstream rejections eligible to name a field whose envelope the parser
+    /// localized NO field path from.
+    ///
+    /// The am-I-flying-blind metric, modeled on
+    /// [`bedrock_validation_unmatched_total`](Self::bedrock_validation_unmatched_total):
+    /// a rejection that COULD have carried a field name and did not resolve to
+    /// one is either a shape the parser does not know or a rejection about
+    /// something else entirely, and without a count the two are
+    /// indistinguishable from "no such rejection arrived". Bumped once per
+    /// request per target by the learn path, so a same-request retry cannot
+    /// inflate it.
+    ///
+    /// Expected NON-ZERO on a daemon serving real traffic even when everything
+    /// is healthy: most caller-shaped 4xxs are not field rejections. It is the
+    /// RATIO against the localized counts that carries the signal, which is why
+    /// it is reported beside them rather than alone.
+    parser_unlocalized_total: AtomicU64,
 }
 
 /// Running quota-placement totals, partitioned by the partition's arms.
@@ -847,6 +884,28 @@ impl RouterMetrics {
     /// Read the cumulative persisted-field-verdict count.
     fn field_verdicts_learned_total(&self) -> u64 {
         self.field_verdicts_learned_total.load(Ordering::Relaxed)
+    }
+
+    /// Count one request a pre-flight rewrite modified before dispatch.
+    fn incr_field_preflight_action(&self) {
+        self.field_preflight_actions_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the cumulative pre-flight-action count.
+    fn field_preflight_actions_total(&self) -> u64 {
+        self.field_preflight_actions_total.load(Ordering::Relaxed)
+    }
+
+    /// Count one field-eligible rejection the parser localized no path from.
+    fn incr_parser_unlocalized(&self) {
+        self.parser_unlocalized_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the cumulative parser-unlocalized count.
+    fn parser_unlocalized_total(&self) -> u64 {
+        self.parser_unlocalized_total.load(Ordering::Relaxed)
     }
 
     /// Bump the window-gate skip count, returning the new running total so

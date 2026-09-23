@@ -585,6 +585,15 @@ pub(super) fn closed_table_row(path: &str) -> Option<(&'static str, FieldSurface
         .find_map(|row| (row.path == path).then_some((row.path, row.surface)))
 }
 
+/// The transform class of the closed-table row a `field:`-namespaced capability
+/// key names, or `None` for a key this build's table carries no row for.
+pub(super) fn transform_class_of_capability_key(key: &str) -> Option<TransformClass> {
+    closed_table().iter().find_map(|row| {
+        (crate::field_capability::field_capability_key(row.path).as_deref() == Some(key))
+            .then_some(row.class)
+    })
+}
+
 /// EVERY closed-table row whose surface `req` carries, in table order.
 ///
 /// The scan shared by the pre-flight planner (which considers every present
@@ -1168,6 +1177,20 @@ impl Router {
             return false;
         };
         closed_table_row(named).is_some_and(|(_, row_surface)| row_surface == surface)
+    }
+
+    /// Whether a rejection eligible to name a field localized NO field path from
+    /// its envelope.
+    ///
+    /// The am-I-flying-blind predicate, read through the SAME resolver the repair's
+    /// own candidate selection uses.
+    pub(super) fn rejection_localizes_no_field(
+        native_class: &FailureClass,
+        err: &Error,
+        provider_kind: &str,
+    ) -> bool {
+        class_can_name_a_field(native_class)
+            && rejected_field_path(native_class, err, provider_kind).is_none()
     }
 
     /// Record that the field repair fired for this request, for the single

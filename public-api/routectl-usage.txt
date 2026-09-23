@@ -388,6 +388,52 @@ impl<T> core::convert::From<T> for routectl_usage::PaidProbeCommit
 pub fn routectl_usage::PaidProbeCommit::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::PaidProbeCommit
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::PaidProbeCommit
+#[non_exhaustive] pub enum routectl_usage::PaidProbeUsage
+pub routectl_usage::PaidProbeUsage::Committed(u32)
+pub routectl_usage::PaidProbeUsage::Malformed
+pub routectl_usage::PaidProbeUsage::Unreadable
+impl core::clone::Clone for routectl_usage::PaidProbeUsage
+pub fn routectl_usage::PaidProbeUsage::clone(&self) -> routectl_usage::PaidProbeUsage
+impl core::cmp::Eq for routectl_usage::PaidProbeUsage
+impl core::cmp::PartialEq for routectl_usage::PaidProbeUsage
+pub fn routectl_usage::PaidProbeUsage::eq(&self, &routectl_usage::PaidProbeUsage) -> bool
+impl core::fmt::Debug for routectl_usage::PaidProbeUsage
+pub fn routectl_usage::PaidProbeUsage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::PaidProbeUsage
+impl core::marker::StructuralPartialEq for routectl_usage::PaidProbeUsage
+impl core::marker::Freeze for routectl_usage::PaidProbeUsage
+impl core::marker::Send for routectl_usage::PaidProbeUsage
+impl core::marker::Sync for routectl_usage::PaidProbeUsage
+impl core::marker::Unpin for routectl_usage::PaidProbeUsage
+impl core::marker::UnsafeUnpin for routectl_usage::PaidProbeUsage
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::PaidProbeUsage
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::PaidProbeUsage
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::PaidProbeUsage where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::PaidProbeUsage::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::PaidProbeUsage where U: core::convert::From<T>
+pub fn routectl_usage::PaidProbeUsage::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::PaidProbeUsage where U: core::convert::Into<T>
+pub type routectl_usage::PaidProbeUsage::Error = core::convert::Infallible
+pub fn routectl_usage::PaidProbeUsage::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::PaidProbeUsage where U: core::convert::TryFrom<T>
+pub type routectl_usage::PaidProbeUsage::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::PaidProbeUsage::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::PaidProbeUsage where T: core::clone::Clone
+pub type routectl_usage::PaidProbeUsage::Owned = T
+pub fn routectl_usage::PaidProbeUsage::clone_into(&self, &mut T)
+pub fn routectl_usage::PaidProbeUsage::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::PaidProbeUsage where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::PaidProbeUsage::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::PaidProbeUsage where T: ?core::marker::Sized
+pub fn routectl_usage::PaidProbeUsage::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::PaidProbeUsage where T: ?core::marker::Sized
+pub fn routectl_usage::PaidProbeUsage::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::PaidProbeUsage where T: core::clone::Clone
+pub unsafe fn routectl_usage::PaidProbeUsage::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::PaidProbeUsage
+pub fn routectl_usage::PaidProbeUsage::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::PaidProbeUsage
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::PaidProbeUsage
 pub enum routectl_usage::QueryError
 pub routectl_usage::QueryError::Interrupted
 pub routectl_usage::QueryError::InvalidBucket
@@ -2093,6 +2139,7 @@ pub const routectl_usage::SCHEMA_VERSION: i64
 pub const routectl_usage::SUPPRESSED_SESSION_CAP: usize
 pub fn routectl_usage::aggregate(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<routectl_usage::AggRow>, routectl_usage::QueryError>
 pub fn routectl_usage::cache_decision_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::CacheDecisionSummary, routectl_usage::QueryError>
+pub fn routectl_usage::committed_units(&rusqlite::Connection, &str, i64) -> routectl_usage::PaidProbeUsage
 pub fn routectl_usage::earliest_ts_start(&routectl_usage::UsageDb, i64) -> core::result::Result<core::option::Option<i64>, routectl_usage::QueryError>
 pub fn routectl_usage::errors_by_class(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, alloc::string::String, i64)>, routectl_usage::QueryError>
 pub fn routectl_usage::estimate_cost_tokens(i64, i64, i64, i64, i64, i64, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>

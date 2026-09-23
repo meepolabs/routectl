@@ -2010,3 +2010,5 @@ mod grounded_field_feature_keys_tests {
         );
     }
 }
+
+include!("field_repair_parser_tests.rs");

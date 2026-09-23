@@ -594,7 +594,11 @@ impl Router {
     /// unconditionally and `run_due_probes` returns zero when nothing is due,
     /// so there is no snapshot-then-act window for the queue to change inside.
     pub fn probe_scheduler_snapshot(&self) -> ProbeSchedulerSnapshot {
-        self.probe_scheduler.snapshot()
+        // The clock is read HERE and passed in, so the snapshot's queue counts and
+        // its next-retry duration describe one moment under one lock acquisition.
+        // Reading a second clock inside would let the two disagree by however long
+        // the lock wait took.
+        self.probe_scheduler.snapshot(Instant::now())
     }
 
     /// Attach this Router to the outgoing Router's probe scheduler and

@@ -19,6 +19,13 @@ mod migrate;
 mod paid_probe;
 mod paid_probe_command;
 mod paid_probe_lifecycle;
+mod paid_probe_read;
+/// Cross-crate paid-probe test fixtures. Compiled only under `cfg(test)` or the
+/// `test-utils` feature, so the seams never ship in a release build -- one of
+/// them can lower a committed paid-probe count, and a committed unit is never
+/// given back.
+#[cfg(any(test, feature = "test-utils"))]
+mod paid_probe_test_support;
 mod query;
 mod record;
 mod retention;
@@ -41,6 +48,11 @@ pub use handle::{UsageCounters, UsageHandle};
 pub use learn_event::CapabilityLearnEvent;
 pub use migrate::MigrateError;
 pub use paid_probe_command::{PaidProbeAdmission, PaidProbeCommit, PaidProbeReceipt};
+pub use paid_probe_read::{PaidProbeUsage, committed_units};
+#[cfg(any(test, feature = "test-utils"))]
+pub use paid_probe_test_support::{
+    plant_paid_probe_units_for_tests, reserve_paid_probe_unit_for_tests,
+};
 pub use query::{
     AggRow, BucketSpec, CacheDecisionSummary, CalibrationSampleRow, CapabilityEventRow, CostStatus,
     DeadlineGuard, GroupDim, GroupKey, KCalibration, NearLosslessAttributionSummary, QueryError,

@@ -274,6 +274,26 @@ pub enum ProbeSettlement {
     Abandoned,
 }
 
+impl ProbeSettlement {
+    /// Stable, closed-set token for the operator-facing status line.
+    ///
+    /// Owned here rather than derived, so a new settlement variant is a compile
+    /// error on this surface instead of a silent change to what a status reader
+    /// sees -- the same discipline the status health panel applies to the breaker
+    /// phases.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Retryable => "retryable",
+            Self::Deferred => "deferred",
+            Self::SpentFreeStep => "spent_free_step",
+            Self::TimedOut => "timed_out",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
 /// Operator-facing scheduler diagnostics. Counters only -- no identity,
 /// no upstream text.
 ///
@@ -415,6 +435,36 @@ pub struct ProbeSchedulerSnapshot {
     /// authorization refusal except the empty-list case, which claimed
     /// nothing to be refused.
     pub paid_authorization_refusals_total: u64,
+    /// The most recently settled FREE probe outcome, process-wide, or `None`
+    /// before any free probe has settled.
+    ///
+    /// AGGREGATE, not per-lane, and the distinction is the design rather than a
+    /// simplification. A per-lane outcome history would be a store: it grows with
+    /// the number of identities a deployment has probed, needs its own bound and
+    /// eviction rule, and has to be carried across reload alongside the job
+    /// table. What an operator needs from a status line is narrower -- "is
+    /// anything answering, and what did the last answer say" -- and one aggregate
+    /// value answers it from state the scheduler already holds.
+    ///
+    /// Read the limitation with it: on a multi-lane deployment this names the last
+    /// settlement of whichever lane settled last, so it is an existence-and-kind
+    /// signal rather than an attribution. The per-kind lifetime counters above are
+    /// what carry the distribution.
+    pub last_settlement: Option<ProbeSettlement>,
+    /// Time until the EARLIEST backing-off job may be leased again, or `None`
+    /// when nothing is backing off.
+    ///
+    /// Derived from the existing per-job backoff deadlines -- no new state, no
+    /// timer, no scheduled work. A DURATION rather than an instant, because the
+    /// caller renders it into a log line and a monotonic `Instant` has no
+    /// meaningful rendering; and the EARLIEST rather than a per-job list for the
+    /// same reason the settlement above is aggregate.
+    ///
+    /// Bounded by construction: every deadline comes from `backoff_for_attempt`,
+    /// which is itself capped, so this can never report an unbounded wait. Zero
+    /// means a job's backoff has already elapsed and it is leasable on the next
+    /// tick -- distinct from `None`, which means there is nothing to wait for.
+    pub next_retry_in: Option<std::time::Duration>,
 }
 
 /// How one paid-probe pass SETTLED, for the scheduler's terminal counters. A

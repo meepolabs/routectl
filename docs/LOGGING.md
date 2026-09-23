@@ -300,6 +300,10 @@ Three counters ride the router metrics snapshot (DEBUG, target
 `routectl_router::router::metrics`) so the arm is answerable without a
 log level: `rc_field_repair_attempted_total`,
 `rc_field_repair_succeeded_total`, and `rc_field_verdicts_learned_total`.
+All three, plus the pre-flight and parser-blindness counters, also ride
+the INFO snapshot below -- the DEBUG snapshot is not readable at a live
+log level, so an observability floor satisfied only there would be a
+floor no operator can read.
 Read them as a pair -- a rising attempted count with a flat succeeded
 count means the dropped field was not what the upstream objected to.
 
@@ -412,10 +416,37 @@ enum token: the line names the path and the class, never the content.
 
 ### Field-verdict snapshot INFO (status / doctor)
 
-Every `/status` health-panel build and every `/status/doctor` build emits
-one aggregated INFO line, `"envelope field verdict snapshot"`, so the
-repair counters above and every currently ACTING field verdict stay
-visible without polling metrics or reading the response body:
+One aggregated INFO line, `"envelope field verdict snapshot"`, carries the whole
+observability floor -- so the repair counters above, every resident field verdict,
+the probe scheduler's state, and the paid-cap accounting stay visible without
+polling metrics or reading the response body.
+
+ONE LINE PER REQUEST, not per panel build. A standalone `/status/health` or
+`/status/doctor` request emits exactly one; the `/status` aggregate builds BOTH
+panels and still emits one, because two identical snapshots per poll would make a
+reader counting lines read double the poll rate while the two lines carried
+different timestamps for one moment.
+
+The arbitration is a request-scoped CLAIM rather than a pre-assigned emitter, and
+the difference is operationally visible: each panel is built through a guard that
+degrades a failing data source to an unavailable panel, and an unavailable build
+never reaches its logger. With a pre-assigned emitter, a failing health panel took
+the whole line down for that request. With a claim, whichever builder reaches the
+logger first wins it -- so health failing still lets doctor emit. Suppression is
+about the log only; both panels' data is built in full.
+
+A daemon serving with NO on-disk config path emits the line from the doctor branch
+too, with unavailable budget data. There is no report to build there, but the
+observability floor is about the router, not the report: the counters, the verdict
+rows, the probe state, and the writer health all come from state that branch has in
+full, and only the per-provider caps (which come from config) are missing. Staying
+silent would mean a config-less daemon satisfied the floor only through
+`/status/health`.
+
+Reading it is PURE: no lane activates, no cadence advances, no re-verification slot
+is claimed, and no work is scheduled. A status poll runs every few seconds, so a
+read that mutated would re-verify verdicts on the dashboard's refresh interval and
+consume the slots real traffic needs.
 
 | Field | Meaning |
 |---|---|
@@ -424,12 +455,65 @@ visible without polling metrics or reading the response body:
 | `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above |
 | `rc_field_outstanding_unconfirmed_total` | CURRENT: requests riding on a verdict no canary has re-confirmed yet, summed over every resident identity. Rises and falls -- exposure that MIGHT later be disproved |
 | `rc_field_disproved_requests_total` | LIFETIME: requests that applied a repair a canary later DISPROVED. Monotonic, never falls (including across a clear or reload), and counts requests AFFECTED rather than canary attempts -- one disproof of a verdict that repaired forty requests charges forty |
+| `rc_field_preflight_actions_total` | ADOPTED ROW REWRITES: one per closed-table row whose transform was applied before dispatch, NOT one per request. A request carrying rows of two classes rewrites two surfaces and exposes two identities, so it counts two. Read alongside the per-REQUEST WARN below, whose unit is deliberately the other one -- this counter measures exposure, that line reports an event. The count that answers "is pre-flight acting at all", which no log level can. Rising here while `rc_field_repair_attempted_total` stays flat is the feature working: the upstream no longer sees the field, so the reactive arm has nothing to repair |
+| `rc_parser_unlocalized_total` | Upstream rejections eligible to name a field whose envelope the parser localized NO field path from -- the am-I-flying-blind metric, modeled on `rc_bedrock_validation_unmatched_total`. Expected NON-ZERO on real traffic even when everything is healthy, since most caller-shaped 4xxs are not field rejections; the signal is its RATIO against the learned and repaired counts, which is why it is reported beside them. Deduped once per request per target |
 | `rc_acting_field_verdicts_total` | Count of learned rows currently steering dispatch (field-scoped, not cleared, not catalog-scoped) |
 | `rc_acting_field_verdicts` | One entry per acting row: `state_key`, `feature_key`, `phase`, `source` |
+| `rc_field_verdict_rows_total` | Count of resident field verdicts the surface HAS, before the render ceiling. Rows are produced for every resident verdict, ACTING OR NOT: an operator debugging why pre-flight is not firing needs the row whose `blocked_reason` explains it |
+| `rc_field_verdict_rows_omitted` | Rows the render ceiling dropped. Zero in the ordinary case; non-zero says the rows field is a SUBSET, so a truncated line is self-describing rather than silently partial |
+| `rc_field_verdict_rows` | The rows that fit -- the per-verdict floor, detailed below. Capped at a fixed code constant (32), because the count grows with what a deployment has learned while this line is emitted every poll |
+| `rc_acting_field_verdicts_omitted` | Same ceiling, same reading, for the acting list |
+| `rc_paid_probe_budgets_total` | Count of providers named in `[fidelity] paid_probe_daily_caps`. Zero on a deployment that configured no cap, which is the default |
+| `rc_paid_probe_budgets_omitted` | Same ceiling, same reading, for the budget rows |
+| `rc_paid_probe_budgets` | The budget rows that fit -- the paid-cap accounting, detailed below |
+| `rc_usage_writer_degraded` | PROCESS-GLOBAL: whether the usage writer can persist rows at all. The OTHER reason every provider's paid probes are refused, independent of any cap. Emitted ONCE and never copied onto a provider row -- the writer is one actor, and a per-row copy would make a summed or attributed column wrong in both readings. A LATCHING reading: it over-reports a resolved problem rather than under-reporting a live one |
+| `rc_paid_probe_consumed_unauthorized_total` | PROCESS-GLOBAL: paid-probe units that COMMITTED but whose caller was never authorized, because shutdown began between the transaction and the answer -- budget consumed for no call. **The only place an operator can see that divergence.** A provider's `committed_today` cannot show it (the unit IS spent, there is no refund, and its ledger row looks like any other) and `rc_usage_writer_degraded` cannot either (the write landed, so it is neither a storage fault nor a healthy write). Emitted once because the counter has NO provider dimension -- the reservation records only that a unit committed unauthorized. **RESETS ON RESTART:** nothing persists it, so reconciling a day's budget across a restart means reading this from the logs of the process that emitted it |
+| `rc_probe_activations_total` | Lifetime probe lanes activated. A lane activates on its first admitted real request, never at startup, install, config parse, or reload |
+| `rc_probe_queued` / `rc_probe_in_flight` / `rc_probe_backing_off` | The bounded scheduler's own queue state, read from the scheduler rather than re-derived -- so these are the numbers it enforces its bounds against |
+| `rc_probe_last_settlement` | The most recently settled free-probe outcome (`resolved` / `retryable` / `deferred` / `spent_free_step` / `timed_out` / `abandoned`), or `none` before any has settled. AGGREGATE, not per-lane: on a multi-lane deployment this names whichever lane settled last, so it is an existence-and-kind signal rather than an attribution -- the per-kind lifetime counters carry the distribution. A per-lane history would be a store with its own bound, eviction rule, and reload carry |
+| `rc_probe_next_retry_ms` | Milliseconds until the EARLIEST backing-off job may be leased again, or `-1` when nothing is backing off. A negative sentinel rather than an absent field because ZERO is a real answer here (a backoff that already elapsed, leasable next tick). Derived from the deadlines jobs already carry -- no new state, no timer -- and bounded by the same ceiling the backoff itself is |
 
 The two alarm halves are reported TOGETHER deliberately: one is exposure
 that might yet be disproved, the other is exposure that was, and either
 number read alone reads as the other.
+
+#### Per-verdict rows (`rc_field_verdict_rows`)
+
+One entry per resident field verdict. Every value is a closed-set token, a
+count, a boolean, or a sanitized identifier.
+
+| Field | Meaning |
+|---|---|
+| `state_key` | Sanitized `[providers]` state key of the target the verdict applies to |
+| `capability_key` | The normalized `field:`-namespaced capability key, read off the resident row |
+| `transform_class` | `envelope` / `prefix_impacting`, or `unknown` for a resident verdict whose path THIS build's closed table does not carry (what a verdict persisted by a build with a wider table looks like) |
+| `prefix_impacting` | Whether this class's transform rewrites content the upstream hashes into its cache prefix. `false` for an unknown class -- it claims no prefix cost it cannot substantiate |
+| `source` | `live` / `probe` |
+| `phase` | `f1` / `f2` / `f3` |
+| `confirmations` | Acknowledged confirmation cycles backing the verdict |
+| `required_quorum` | Cycles this verdict's CLASS requires before a pre-flight rewrite may run, or `unknown` with no class. Reported beside the actual count deliberately: the required value is a per-class code constant, so a bare count of one is either sufficient or half-sufficient depending on a fact the row would otherwise not carry |
+| `blocked_reason` | `capability_disabled` / `unsupported_lane` / `masked_by_override` / `canary_suspended` / `not_eligible` / `below_quorum` / `no_target_opt_in`, or `none` when nothing is blocking. Reported in the planner's own precedence, so the token names the FIRST gate that holds: the two CONFIG-LEVEL gates come first because they refuse the LANE rather than the verdict -- a verdict on a refused lane is real but can never fire, so no per-key reason about it would be actionable -- and the operator mask follows, since it is about a specific capability on a lane the stage would otherwise act on. These are STATUS-SURFACE tokens with their own stable table, deliberately not read from the planner's internal constants: those are a debug vocabulary its own module may retune, and a rename there would silently change what every operator dashboard and alert matches on. What keeps the two from meaning different things is that each value is produced by consulting the planner's own predicates (the kill switch, the lane predicates, the override registry, eligibility, the class quorum, the target-spec membership) rather than by paraphrasing its conditions. Four need reading carefully: **`capability_disabled`** is the global kill switch (`[capability] enabled = false`), so it reports for EVERY verdict at once and its remedy is flipping one setting rather than anything per-target. **`unsupported_lane`** means the target's lane is not one this stage acts on at all -- not an Anthropic-API provider, or no attributable base URL (a forwarded credential, a local hop, or a Bedrock Mantle entry) -- so the verdict is real and permanently inert; note that a status read carries no per-request forwarded-credential fact, so a lane whose REQUESTS are forwarded may instead read `not_eligible`, the correct conservative answer rather than a false claim about the lane. **`masked_by_override`** is the only reason whose remedy is a CONFIG edit rather than more evidence -- an operator `[capability.overrides]` cell forces the capability supported, so no learned verdict acts on it however well confirmed, and reading `not_eligible` there would send someone hunting confirmations that could never help. **`not_eligible`** additionally covers a verdict whose transform class THIS build's closed table does not carry (a ledger row from a wider build): it is unactionable rather than short of evidence, and the absent `transform_class` beside it is what says which case it is. `canary_suspended` is the one reason this surface distinguishes that the planner does not: the planner folds it into not-eligible because its decision is the same either way, but a suspension is a verdict a canary proved WRONG whose durable clear may be failing |
+| `canary` | `counting` / `due` / `in_flight` |
+| `canary_remaining_requests` | Eligible non-streaming completion requests before the next canary is due. A REQUEST count, never a timestamp: the cadence is driven by traffic, so any instant derived from it is a projection an operator would read as a schedule |
+| `canary_last_outcome` | `confirmed` / `regressed` / `inconclusive`, or `none` when none has settled for this incarnation. The `none` case is distinct from `inconclusive` on purpose -- a re-verification that never ran must not read as one that ran and proved nothing |
+| `requests_in_flight` | Requests currently applying this verdict's repair |
+| `unconfirmed_requests` | Requests modified since this verdict's last confirmation -- the exposure a later disproof would charge to the lifetime alarm |
+
+#### Paid-cap accounting health (`rc_paid_probe_budgets`)
+
+One entry per provider named in `[fidelity] paid_probe_daily_caps`.
+
+| Field | Meaning |
+|---|---|
+| `provider` | The configured provider name the cap is keyed on, SANITIZED. Config load validates that the key names a configured provider, not its shape or length, so the value is operator-supplied and unbounded -- and a control byte in a log field is how a forged second line is injected |
+| `daily_cap` | The operator's configured UTC-day cap. Zero -- the default -- means no paid call is ever made for this provider, which is a different state from an exhausted budget |
+| `committed_today` | Units the LEDGER records as committed for the current UTC day, or `unknown` when the accounting could not be read as a count. Read from durable state rather than a process counter because the budget survives restart: a process-local tally reports zero on a daemon that came up after spending its day's cap. `unknown` rather than zero on a failed read, because zero is a claim that nothing was spent |
+| `accounting` | `healthy` / `malformed` / `unreadable`. `malformed` is corrupt accounting to repair -- the reservation REFUSES on unparseable state, so every paid call for the provider is already failing closed. `unreadable` is a query that did not land, whose stored state may be fine |
+
+A budget row carries ONLY these four per-provider facts. The writer's health and
+the unauthorized-spend total are process-global and are emitted once at the top
+level (above) rather than copied onto every row -- see those two fields for why
+the scope is expressed in the shape.
 
 The line never touches a panel's response body -- it is log-only
 provenance for an operator watching INFO, not a wire contract. Like the

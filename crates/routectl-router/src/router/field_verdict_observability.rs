@@ -3,7 +3,7 @@
 //! field repair or a durably purged verdict stays observable at INFO without
 //! any response-body change.
 
-use routectl_core::{EvidenceSource, FailurePhase, Verdict};
+use routectl_core::{EvidenceSource, FailurePhase, Verdict, sanitize_for_log};
 
 use crate::field_capability::capability_key_is_catalog_scoped;
 use crate::learned_capability::LearnedRegistryEntry;
@@ -46,6 +46,22 @@ pub struct FieldRepairCounters {
     /// canary attempts: one disproof of a verdict that had repaired forty
     /// requests charges forty.
     pub disproved_requests: u64,
+    /// Cumulative requests a PRE-FLIGHT rewrite modified before dispatch.
+    ///
+    /// The count that answers "is pre-flight acting at all", and the one whose
+    /// zero an operator must be able to distinguish from an absent field. Read
+    /// beside `repair_attempted` rather than instead of it: that one counts the
+    /// REACTIVE arm, so a rising pre-flight count against a flat reactive one
+    /// means the upstream is no longer seeing the field -- the feature working.
+    pub preflight_actions: u64,
+    /// Cumulative field-eligible upstream rejections the parser localized no
+    /// field path from -- the am-I-flying-blind metric.
+    ///
+    /// Expected NON-ZERO on real traffic even when everything is healthy: most
+    /// caller-shaped 4xxs are not field rejections. What carries the signal is
+    /// its ratio against the learned and repaired counts above, which is why it
+    /// is reported beside them.
+    pub parser_unlocalized: u64,
 }
 
 impl Router {
@@ -60,17 +76,34 @@ impl Router {
             verdicts_learned: self.metrics.field_verdicts_learned_total(),
             outstanding_unconfirmed: canaries.outstanding_unconfirmed_total(),
             disproved_requests: canaries.disproved_requests_total(),
+            preflight_actions: self.metrics.field_preflight_actions_total(),
+            parser_unlocalized: self.metrics.parser_unlocalized_total(),
         }
     }
 }
 
 /// One acting envelope-field verdict: the provenance status/doctor need to
 /// explain why a field is currently being soft-tailed for a target.
+///
+/// Both string fields are `sanitize_for_log`-SANITIZED at construction, and that
+/// is a property of this type rather than of its consumers: the value goes
+/// straight onto an operator-facing log line, and a control byte there is how a
+/// forged second line is injected while an unbounded one prints a whole registry
+/// key into a journal. Sanitizing here means no consumer can forget -- and there
+/// is more than one consumer.
+///
+/// SANITIZING IS NOT REDACTING. The filter bounds length and strips
+/// non-printables; it does not hide a value. Nothing here needs it to: a state
+/// key comes from the operator's own `[providers]` table and a capability key is
+/// a normalized token minted from a closed-table path, so neither carries request
+/// or response content in the first place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActingFieldVerdict {
-    /// The routing state key (provider + model) this verdict applies to.
+    /// The routing state key (provider + model) this verdict applies to,
+    /// sanitized.
     pub state_key: String,
-    /// The `field:`-namespaced capability key this verdict was minted for.
+    /// The `field:`-namespaced capability key this verdict was minted for,
+    /// sanitized.
     pub feature_key: String,
     /// The detection phase that attributed this verdict.
     pub phase: FailurePhase,
@@ -100,8 +133,11 @@ pub fn acting_field_verdicts(entries: &[LearnedRegistryEntry]) -> Vec<ActingFiel
                 None
             }
             Verdict::LearnedBroken(phase) => Some(ActingFieldVerdict {
-                state_key: entry.state_key.clone(),
-                feature_key: entry.feature_key.clone(),
+                // Sanitized HERE rather than at each log site: this value's only
+                // destination is an operator-facing line, and a second consumer
+                // that forgot would reintroduce the hole silently.
+                state_key: sanitize_for_log(&entry.state_key),
+                feature_key: sanitize_for_log(&entry.feature_key),
                 phase,
                 source: entry.source,
             }),

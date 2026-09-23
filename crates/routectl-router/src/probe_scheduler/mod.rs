@@ -215,6 +215,13 @@ struct SchedulerInner {
     /// and both take the last slot.
     paid_slots_held: usize,
     counters: ProbeSchedulerSnapshot,
+    /// The most recently settled free-probe outcome, process-wide.
+    ///
+    /// One slot rather than a per-lane map, for the reason spelled on
+    /// `ProbeSchedulerSnapshot::last_settlement`: a per-lane history is a store
+    /// with its own bound, eviction rule, and reload carry, and the status
+    /// question it would answer is narrower than that.
+    last_settlement: Option<ProbeSettlement>,
 }
 
 impl SchedulerInner {
@@ -236,6 +243,23 @@ impl SchedulerInner {
     /// rather than on one of its two kinds.
     fn in_flight(&self) -> usize {
         self.count_phase(|phase| matches!(phase, JobPhase::InFlight)) + self.paid_slots_held
+    }
+
+    /// Time until the EARLIEST backing-off job becomes leasable, or `None` when
+    /// nothing is backing off.
+    ///
+    /// Derived from the deadlines the jobs already carry -- this adds no state and
+    /// arms no timer. `saturating_duration_since` is what makes an ALREADY-elapsed
+    /// backoff report zero rather than underflowing: zero means leasable on the
+    /// next tick, which is a different answer from `None` (nothing to wait for).
+    fn next_retry_in(&self, now: Instant) -> Option<std::time::Duration> {
+        self.jobs
+            .iter()
+            .filter_map(|job| match job.phase {
+                JobPhase::BackingOff { due_at } => Some(due_at.saturating_duration_since(now)),
+                JobPhase::Queued | JobPhase::InFlight => None,
+            })
+            .min()
     }
 }
 
@@ -626,7 +650,7 @@ impl ProbeScheduler {
 
     /// Current queue state plus the lifetime counters.
     #[must_use]
-    pub fn snapshot(&self) -> ProbeSchedulerSnapshot {
+    pub fn snapshot(&self, now: Instant) -> ProbeSchedulerSnapshot {
         let inner = self.inner.lock();
         ProbeSchedulerSnapshot {
             queued: inner.count_phase(|phase| matches!(phase, JobPhase::Queued)),
@@ -634,6 +658,11 @@ impl ProbeScheduler {
             backing_off: inner.count_phase(|phase| matches!(phase, JobPhase::BackingOff { .. })),
             tombstoned: inner.tombstones.len(),
             tombstone_saturated: inner.tombstone_saturated_at.is_some(),
+            last_settlement: inner.last_settlement,
+            // Sampled against the SAME clock reading the caller passes, under the
+            // one lock this snapshot already holds, so the queue counts above and
+            // this deadline describe one consistent moment.
+            next_retry_in: inner.next_retry_in(now),
             ..inner.counters
         }
     }
@@ -695,6 +724,16 @@ impl ProbeScheduler {
         }
         let index = inner.position(key).expect("checked above");
         let owner = inner.jobs[index].generation;
+        // Recorded BEFORE the per-outcome arms, so every settled outcome is
+        // reported whatever that arm goes on to do -- several of them return
+        // early. A dropped lease (`None`) records nothing: it settled no outcome,
+        // and overwriting the last real answer with "a future was dropped" would
+        // erase the signal an operator reads. Recorded here rather than in the
+        // arms because one site cannot disagree with itself about which outcomes
+        // count.
+        if let Some(settled) = settlement {
+            inner.last_settlement = Some(settled);
+        }
         match settlement {
             Some(ProbeSettlement::Resolved) => {
                 inner.jobs.swap_remove(index);

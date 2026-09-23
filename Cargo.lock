@@ -2971,6 +2971,7 @@ dependencies = [
  "routectl-auth",
  "routectl-core",
  "routectl-providers",
+ "routectl-router",
  "routectl-testkit",
  "schemars",
  "serde",

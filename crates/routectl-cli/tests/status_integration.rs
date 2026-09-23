@@ -115,7 +115,7 @@ async fn upstream_hits(server: &MockServer) -> usize {
         .len()
 }
 
-/// Scenario #2 (#3 in the spec): the HTTP-level analog of the router-unit
+/// The HTTP-level analog of the router-unit
 /// non-perturbation guard. Drive a target to half-open, then hammer
 /// `/status/health` -- no read dials upstream or claims the probe slot -- and
 /// prove the FIRST real proxy request afterward still consumes the probe.
@@ -223,7 +223,7 @@ async fn status_storm_does_not_perturb_breaker_probe() {
     );
 }
 
-/// Scenario #3 (usage DB unavailable, HTTP level): a daemon pointed at a
+/// USAGE DB UNAVAILABLE at the HTTP level: a daemon pointed at a
 /// schema-mismatched usage DB serves `GET /status/usage` as HTTP 200 with a
 /// code-only `unavailable` panel and `as_of: null` -- never stale data, never
 /// a 500.

@@ -1,6 +1,8 @@
 //! The free plan and the paid boundary: validator ordering, what spends a
 //! free step, and the two conditions a paid call would need.
 
+use std::time::Instant;
+
 use super::test_support::{key, payload};
 use super::{
     FreeValidatorOutcome, PROBE_QUEUE_DEPTH, ProbeActivation, ProbeScheduler, ProbeValidator,
@@ -55,7 +57,7 @@ fn a_plan_with_no_executable_free_step_queues_nothing() {
     let outcome = scheduler.activate(&key(0), 1, validator_plan(false), payload());
 
     assert_eq!(outcome, ProbeActivation::NoFreeValidator);
-    assert_eq!(scheduler.snapshot().queued, 0);
+    assert_eq!(scheduler.snapshot(Instant::now()).queued, 0);
 }
 
 #[test]
@@ -115,7 +117,7 @@ fn free_validators_stay_bounded_by_the_scheduler_despite_having_no_spend_cap() {
 
     // Assert: the queue bound governs free work as strictly as paid work.
     assert_eq!(queued, PROBE_QUEUE_DEPTH);
-    assert_eq!(scheduler.snapshot().queued, PROBE_QUEUE_DEPTH);
+    assert_eq!(scheduler.snapshot(Instant::now()).queued, PROBE_QUEUE_DEPTH);
 }
 
 #[test]

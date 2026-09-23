@@ -3414,6 +3414,68 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::pricing::PricingSource::into_shared(self) -> Shared
 pub fn routectl_router::pricing::effective_pricing(&routectl_router::config::Config, &routectl_router::CatalogOverlay, &str, &str, &str) -> core::option::Option<(routectl_router::PricingConfig, routectl_router::pricing::PricingSource)>
 pub mod routectl_router::router
+pub enum routectl_router::router::CanaryPosture
+pub routectl_router::router::CanaryPosture::Counting
+pub routectl_router::router::CanaryPosture::Due
+pub routectl_router::router::CanaryPosture::InFlight
+impl routectl_router::CanaryPosture
+pub const fn routectl_router::CanaryPosture::as_str(self) -> &'static str
+impl core::clone::Clone for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::clone(&self) -> routectl_router::CanaryPosture
+impl core::cmp::Eq for routectl_router::CanaryPosture
+impl core::cmp::PartialEq for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::eq(&self, &routectl_router::CanaryPosture) -> bool
+impl core::fmt::Debug for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::CanaryPosture
+impl core::marker::StructuralPartialEq for routectl_router::CanaryPosture
+impl core::marker::Freeze for routectl_router::CanaryPosture
+impl core::marker::Send for routectl_router::CanaryPosture
+impl core::marker::Sync for routectl_router::CanaryPosture
+impl core::marker::Unpin for routectl_router::CanaryPosture
+impl core::marker::UnsafeUnpin for routectl_router::CanaryPosture
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CanaryPosture
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CanaryPosture
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CanaryPosture where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CanaryPosture where U: core::convert::From<T>
+pub fn routectl_router::CanaryPosture::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CanaryPosture where U: core::convert::Into<T>
+pub type routectl_router::CanaryPosture::Error = core::convert::Infallible
+pub fn routectl_router::CanaryPosture::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CanaryPosture where U: core::convert::TryFrom<T>
+pub type routectl_router::CanaryPosture::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CanaryPosture::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CanaryPosture where T: core::clone::Clone
+pub type routectl_router::CanaryPosture::Owned = T
+pub fn routectl_router::CanaryPosture::clone_into(&self, &mut T)
+pub fn routectl_router::CanaryPosture::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CanaryPosture where T: core::clone::Clone
+pub fn routectl_router::CanaryPosture::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CanaryPosture where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CanaryPosture where T: ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CanaryPosture where T: ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CanaryPosture where T: core::clone::Clone
+pub unsafe fn routectl_router::CanaryPosture::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CanaryPosture where T: core::clone::Clone
+pub fn routectl_router::CanaryPosture::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CanaryPosture
+impl<T> outref::AsOut<T> for routectl_router::CanaryPosture where T: core::marker::Copy
+pub fn routectl_router::CanaryPosture::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CanaryPosture where T: ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CanaryPosture::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CanaryPosture
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CanaryPosture
+impl<T> typenum::type_operators::Same for routectl_router::CanaryPosture
+pub type routectl_router::CanaryPosture::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CanaryPosture where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CanaryPosture::into_shared(self) -> Shared
 pub enum routectl_router::router::PaidProbeReservation
 pub routectl_router::router::PaidProbeReservation::CapExhausted
 pub routectl_router::router::PaidProbeReservation::Committed
@@ -3476,6 +3538,72 @@ impl<T> typenum::type_operators::Same for routectl_router::PaidProbeReservation
 pub type routectl_router::PaidProbeReservation::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PaidProbeReservation where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::PaidProbeReservation::into_shared(self) -> Shared
+#[non_exhaustive] pub enum routectl_router::router::PreflightBlockedReason
+pub routectl_router::router::PreflightBlockedReason::BelowQuorum
+pub routectl_router::router::PreflightBlockedReason::CanarySuspended
+pub routectl_router::router::PreflightBlockedReason::CapabilityDisabled
+pub routectl_router::router::PreflightBlockedReason::MaskedByOverride
+pub routectl_router::router::PreflightBlockedReason::NoTargetOptIn
+pub routectl_router::router::PreflightBlockedReason::NotEligible
+pub routectl_router::router::PreflightBlockedReason::UnsupportedLane
+impl routectl_router::PreflightBlockedReason
+pub const fn routectl_router::PreflightBlockedReason::as_str(self) -> &'static str
+impl core::clone::Clone for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::clone(&self) -> routectl_router::PreflightBlockedReason
+impl core::cmp::Eq for routectl_router::PreflightBlockedReason
+impl core::cmp::PartialEq for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::eq(&self, &routectl_router::PreflightBlockedReason) -> bool
+impl core::fmt::Debug for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::PreflightBlockedReason
+impl core::marker::StructuralPartialEq for routectl_router::PreflightBlockedReason
+impl core::marker::Freeze for routectl_router::PreflightBlockedReason
+impl core::marker::Send for routectl_router::PreflightBlockedReason
+impl core::marker::Sync for routectl_router::PreflightBlockedReason
+impl core::marker::Unpin for routectl_router::PreflightBlockedReason
+impl core::marker::UnsafeUnpin for routectl_router::PreflightBlockedReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::PreflightBlockedReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::PreflightBlockedReason
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::PreflightBlockedReason where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::PreflightBlockedReason where U: core::convert::From<T>
+pub fn routectl_router::PreflightBlockedReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::PreflightBlockedReason where U: core::convert::Into<T>
+pub type routectl_router::PreflightBlockedReason::Error = core::convert::Infallible
+pub fn routectl_router::PreflightBlockedReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::PreflightBlockedReason where U: core::convert::TryFrom<T>
+pub type routectl_router::PreflightBlockedReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::PreflightBlockedReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub type routectl_router::PreflightBlockedReason::Owned = T
+pub fn routectl_router::PreflightBlockedReason::clone_into(&self, &mut T)
+pub fn routectl_router::PreflightBlockedReason::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub fn routectl_router::PreflightBlockedReason::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::PreflightBlockedReason where T: 'static + ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::PreflightBlockedReason where T: ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::PreflightBlockedReason where T: ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub unsafe fn routectl_router::PreflightBlockedReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub fn routectl_router::PreflightBlockedReason::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::PreflightBlockedReason
+impl<T> outref::AsOut<T> for routectl_router::PreflightBlockedReason where T: core::marker::Copy
+pub fn routectl_router::PreflightBlockedReason::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::PreflightBlockedReason where T: ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::PreflightBlockedReason::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::PreflightBlockedReason
+impl<T> tracing::instrument::WithSubscriber for routectl_router::PreflightBlockedReason
+impl<T> typenum::type_operators::Same for routectl_router::PreflightBlockedReason
+pub type routectl_router::PreflightBlockedReason::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PreflightBlockedReason where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::PreflightBlockedReason::into_shared(self) -> Shared
 pub enum routectl_router::router::PurgeOutcome
 pub routectl_router::router::PurgeOutcome::Absent
 pub routectl_router::router::PurgeOutcome::Busy
@@ -4003,6 +4131,58 @@ impl<T> typenum::type_operators::Same for routectl_router::router::DispatchedStr
 pub type routectl_router::router::DispatchedStream::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::DispatchedStream where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::DispatchedStream::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::FidelitySnapshot
+pub routectl_router::router::FidelitySnapshot::acting: alloc::vec::Vec<routectl_router::ActingFieldVerdict>
+pub routectl_router::router::FidelitySnapshot::counters: routectl_router::FieldRepairCounters
+pub routectl_router::router::FidelitySnapshot::probes: routectl_router::ProbeSchedulerSnapshot
+pub routectl_router::router::FidelitySnapshot::verdicts: alloc::vec::Vec<routectl_router::FieldVerdictStatus>
+impl core::clone::Clone for routectl_router::FidelitySnapshot
+pub fn routectl_router::FidelitySnapshot::clone(&self) -> routectl_router::FidelitySnapshot
+impl core::fmt::Debug for routectl_router::FidelitySnapshot
+pub fn routectl_router::FidelitySnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::FidelitySnapshot
+impl core::marker::Send for routectl_router::FidelitySnapshot
+impl core::marker::Sync for routectl_router::FidelitySnapshot
+impl core::marker::Unpin for routectl_router::FidelitySnapshot
+impl core::marker::UnsafeUnpin for routectl_router::FidelitySnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FidelitySnapshot
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FidelitySnapshot
+impl<T, U> core::convert::Into<U> for routectl_router::FidelitySnapshot where U: core::convert::From<T>
+pub fn routectl_router::FidelitySnapshot::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FidelitySnapshot where U: core::convert::Into<T>
+pub type routectl_router::FidelitySnapshot::Error = core::convert::Infallible
+pub fn routectl_router::FidelitySnapshot::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FidelitySnapshot where U: core::convert::TryFrom<T>
+pub type routectl_router::FidelitySnapshot::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FidelitySnapshot::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub type routectl_router::FidelitySnapshot::Owned = T
+pub fn routectl_router::FidelitySnapshot::clone_into(&self, &mut T)
+pub fn routectl_router::FidelitySnapshot::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub fn routectl_router::FidelitySnapshot::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FidelitySnapshot where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FidelitySnapshot where T: ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FidelitySnapshot where T: ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub unsafe fn routectl_router::FidelitySnapshot::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FidelitySnapshot
+pub fn routectl_router::FidelitySnapshot::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub fn routectl_router::FidelitySnapshot::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FidelitySnapshot
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FidelitySnapshot where T: ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FidelitySnapshot::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FidelitySnapshot
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FidelitySnapshot
+impl<T> typenum::type_operators::Same for routectl_router::FidelitySnapshot
+pub type routectl_router::FidelitySnapshot::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FidelitySnapshot where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FidelitySnapshot::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FieldPreflight
 pub routectl_router::router::FieldPreflight::acted: bool
 pub routectl_router::router::FieldPreflight::field_path: core::option::Option<&'static str>
@@ -4114,6 +4294,8 @@ pub fn routectl_router::router::FieldRepair::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FieldRepairCounters
 pub routectl_router::router::FieldRepairCounters::disproved_requests: u64
 pub routectl_router::router::FieldRepairCounters::outstanding_unconfirmed: u64
+pub routectl_router::router::FieldRepairCounters::parser_unlocalized: u64
+pub routectl_router::router::FieldRepairCounters::preflight_actions: u64
 pub routectl_router::router::FieldRepairCounters::repair_attempted: u64
 pub routectl_router::router::FieldRepairCounters::repair_succeeded: u64
 pub routectl_router::router::FieldRepairCounters::verdicts_learned: u64
@@ -4173,6 +4355,77 @@ impl<T> typenum::type_operators::Same for routectl_router::FieldRepairCounters
 pub type routectl_router::FieldRepairCounters::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldRepairCounters where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::FieldRepairCounters::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::FieldVerdictStatus
+pub routectl_router::router::FieldVerdictStatus::blocked_reason: core::option::Option<routectl_router::PreflightBlockedReason>
+pub routectl_router::router::FieldVerdictStatus::canary: routectl_router::CanaryPosture
+pub routectl_router::router::FieldVerdictStatus::canary_last_outcome: core::option::Option<routectl_router::CanaryOutcome>
+pub routectl_router::router::FieldVerdictStatus::canary_remaining_requests: u32
+pub routectl_router::router::FieldVerdictStatus::capability_key: alloc::string::String
+pub routectl_router::router::FieldVerdictStatus::confirmations: u32
+pub routectl_router::router::FieldVerdictStatus::phase: routectl_core::capability::FailurePhase
+pub routectl_router::router::FieldVerdictStatus::prefix_impacting: bool
+pub routectl_router::router::FieldVerdictStatus::requests_in_flight: u64
+pub routectl_router::router::FieldVerdictStatus::required_quorum: core::option::Option<u32>
+pub routectl_router::router::FieldVerdictStatus::source: routectl_core::capability::EvidenceSource
+pub routectl_router::router::FieldVerdictStatus::state_key: alloc::string::String
+pub routectl_router::router::FieldVerdictStatus::transform_class: core::option::Option<&'static str>
+pub routectl_router::router::FieldVerdictStatus::unconfirmed_requests: u64
+impl routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::blocked_reason_token(&self) -> &'static str
+pub fn routectl_router::FieldVerdictStatus::canary_outcome_token(&self) -> &'static str
+impl core::clone::Clone for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::clone(&self) -> routectl_router::FieldVerdictStatus
+impl core::cmp::Eq for routectl_router::FieldVerdictStatus
+impl core::cmp::PartialEq for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::eq(&self, &routectl_router::FieldVerdictStatus) -> bool
+impl core::fmt::Debug for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::FieldVerdictStatus
+impl core::marker::Freeze for routectl_router::FieldVerdictStatus
+impl core::marker::Send for routectl_router::FieldVerdictStatus
+impl core::marker::Sync for routectl_router::FieldVerdictStatus
+impl core::marker::Unpin for routectl_router::FieldVerdictStatus
+impl core::marker::UnsafeUnpin for routectl_router::FieldVerdictStatus
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FieldVerdictStatus
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FieldVerdictStatus
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::FieldVerdictStatus where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::FieldVerdictStatus where U: core::convert::From<T>
+pub fn routectl_router::FieldVerdictStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FieldVerdictStatus where U: core::convert::Into<T>
+pub type routectl_router::FieldVerdictStatus::Error = core::convert::Infallible
+pub fn routectl_router::FieldVerdictStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FieldVerdictStatus where U: core::convert::TryFrom<T>
+pub type routectl_router::FieldVerdictStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FieldVerdictStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub type routectl_router::FieldVerdictStatus::Owned = T
+pub fn routectl_router::FieldVerdictStatus::clone_into(&self, &mut T)
+pub fn routectl_router::FieldVerdictStatus::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub fn routectl_router::FieldVerdictStatus::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FieldVerdictStatus where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FieldVerdictStatus where T: ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FieldVerdictStatus where T: ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub unsafe fn routectl_router::FieldVerdictStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub fn routectl_router::FieldVerdictStatus::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FieldVerdictStatus
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FieldVerdictStatus where T: ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FieldVerdictStatus::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FieldVerdictStatus
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FieldVerdictStatus
+impl<T> typenum::type_operators::Same for routectl_router::FieldVerdictStatus
+pub type routectl_router::FieldVerdictStatus::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldVerdictStatus where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FieldVerdictStatus::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::ProbePassSummary
 pub routectl_router::router::ProbePassSummary::free_validators_run: usize
 pub routectl_router::router::ProbePassSummary::paid_probe_attempted: bool
@@ -4447,6 +4700,9 @@ pub fn routectl_router::router::Router::first_target_oauth_id(&self, &str) -> co
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::fidelity_snapshot(&self) -> routectl_router::FidelitySnapshot
+pub fn routectl_router::router::Router::field_verdict_status(&self) -> alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
@@ -5580,6 +5836,128 @@ impl<T> typenum::type_operators::Same for routectl_router::BoundarySettlement
 pub type routectl_router::BoundarySettlement::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BoundarySettlement where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::BoundarySettlement::into_shared(self) -> Shared
+pub enum routectl_router::CanaryOutcome
+pub routectl_router::CanaryOutcome::Confirmed
+pub routectl_router::CanaryOutcome::Inconclusive
+pub routectl_router::CanaryOutcome::Regressed
+impl core::clone::Clone for routectl_router::CanaryOutcome
+pub fn routectl_router::CanaryOutcome::clone(&self) -> routectl_router::CanaryOutcome
+impl core::cmp::Eq for routectl_router::CanaryOutcome
+impl core::cmp::PartialEq for routectl_router::CanaryOutcome
+pub fn routectl_router::CanaryOutcome::eq(&self, &routectl_router::CanaryOutcome) -> bool
+impl core::fmt::Debug for routectl_router::CanaryOutcome
+pub fn routectl_router::CanaryOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::CanaryOutcome
+impl core::marker::StructuralPartialEq for routectl_router::CanaryOutcome
+impl core::marker::Freeze for routectl_router::CanaryOutcome
+impl core::marker::Send for routectl_router::CanaryOutcome
+impl core::marker::Sync for routectl_router::CanaryOutcome
+impl core::marker::Unpin for routectl_router::CanaryOutcome
+impl core::marker::UnsafeUnpin for routectl_router::CanaryOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CanaryOutcome
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CanaryOutcome
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CanaryOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CanaryOutcome::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CanaryOutcome where U: core::convert::From<T>
+pub fn routectl_router::CanaryOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CanaryOutcome where U: core::convert::Into<T>
+pub type routectl_router::CanaryOutcome::Error = core::convert::Infallible
+pub fn routectl_router::CanaryOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CanaryOutcome where U: core::convert::TryFrom<T>
+pub type routectl_router::CanaryOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CanaryOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CanaryOutcome where T: core::clone::Clone
+pub type routectl_router::CanaryOutcome::Owned = T
+pub fn routectl_router::CanaryOutcome::clone_into(&self, &mut T)
+pub fn routectl_router::CanaryOutcome::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CanaryOutcome where T: core::clone::Clone
+pub fn routectl_router::CanaryOutcome::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CanaryOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CanaryOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CanaryOutcome where T: ?core::marker::Sized
+pub fn routectl_router::CanaryOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CanaryOutcome where T: ?core::marker::Sized
+pub fn routectl_router::CanaryOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CanaryOutcome where T: core::clone::Clone
+pub unsafe fn routectl_router::CanaryOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CanaryOutcome
+pub fn routectl_router::CanaryOutcome::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CanaryOutcome where T: core::clone::Clone
+pub fn routectl_router::CanaryOutcome::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CanaryOutcome
+impl<T> outref::AsOut<T> for routectl_router::CanaryOutcome where T: core::marker::Copy
+pub fn routectl_router::CanaryOutcome::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CanaryOutcome where T: ?core::marker::Sized
+pub fn routectl_router::CanaryOutcome::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CanaryOutcome::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CanaryOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CanaryOutcome
+impl<T> typenum::type_operators::Same for routectl_router::CanaryOutcome
+pub type routectl_router::CanaryOutcome::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CanaryOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CanaryOutcome::into_shared(self) -> Shared
+pub enum routectl_router::CanaryPosture
+pub routectl_router::CanaryPosture::Counting
+pub routectl_router::CanaryPosture::Due
+pub routectl_router::CanaryPosture::InFlight
+impl routectl_router::CanaryPosture
+pub const fn routectl_router::CanaryPosture::as_str(self) -> &'static str
+impl core::clone::Clone for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::clone(&self) -> routectl_router::CanaryPosture
+impl core::cmp::Eq for routectl_router::CanaryPosture
+impl core::cmp::PartialEq for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::eq(&self, &routectl_router::CanaryPosture) -> bool
+impl core::fmt::Debug for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::CanaryPosture
+impl core::marker::StructuralPartialEq for routectl_router::CanaryPosture
+impl core::marker::Freeze for routectl_router::CanaryPosture
+impl core::marker::Send for routectl_router::CanaryPosture
+impl core::marker::Sync for routectl_router::CanaryPosture
+impl core::marker::Unpin for routectl_router::CanaryPosture
+impl core::marker::UnsafeUnpin for routectl_router::CanaryPosture
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CanaryPosture
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CanaryPosture
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CanaryPosture where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CanaryPosture where U: core::convert::From<T>
+pub fn routectl_router::CanaryPosture::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CanaryPosture where U: core::convert::Into<T>
+pub type routectl_router::CanaryPosture::Error = core::convert::Infallible
+pub fn routectl_router::CanaryPosture::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CanaryPosture where U: core::convert::TryFrom<T>
+pub type routectl_router::CanaryPosture::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CanaryPosture::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CanaryPosture where T: core::clone::Clone
+pub type routectl_router::CanaryPosture::Owned = T
+pub fn routectl_router::CanaryPosture::clone_into(&self, &mut T)
+pub fn routectl_router::CanaryPosture::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CanaryPosture where T: core::clone::Clone
+pub fn routectl_router::CanaryPosture::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CanaryPosture where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CanaryPosture where T: ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CanaryPosture where T: ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CanaryPosture where T: core::clone::Clone
+pub unsafe fn routectl_router::CanaryPosture::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CanaryPosture
+pub fn routectl_router::CanaryPosture::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CanaryPosture where T: core::clone::Clone
+pub fn routectl_router::CanaryPosture::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CanaryPosture
+impl<T> outref::AsOut<T> for routectl_router::CanaryPosture where T: core::marker::Copy
+pub fn routectl_router::CanaryPosture::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CanaryPosture where T: ?core::marker::Sized
+pub fn routectl_router::CanaryPosture::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CanaryPosture::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CanaryPosture
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CanaryPosture
+impl<T> typenum::type_operators::Same for routectl_router::CanaryPosture
+pub type routectl_router::CanaryPosture::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CanaryPosture where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CanaryPosture::into_shared(self) -> Shared
 #[non_exhaustive] pub enum routectl_router::CandidateOrigin
 pub routectl_router::CandidateOrigin::DocRefresh
 impl core::clone::Clone for routectl_router::CandidateOrigin
@@ -7341,6 +7719,72 @@ impl<T> typenum::type_operators::Same for routectl_router::pool_build::PoolOutco
 pub type routectl_router::pool_build::PoolOutcome::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::pool_build::PoolOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::pool_build::PoolOutcome::into_shared(self) -> Shared
+#[non_exhaustive] pub enum routectl_router::PreflightBlockedReason
+pub routectl_router::PreflightBlockedReason::BelowQuorum
+pub routectl_router::PreflightBlockedReason::CanarySuspended
+pub routectl_router::PreflightBlockedReason::CapabilityDisabled
+pub routectl_router::PreflightBlockedReason::MaskedByOverride
+pub routectl_router::PreflightBlockedReason::NoTargetOptIn
+pub routectl_router::PreflightBlockedReason::NotEligible
+pub routectl_router::PreflightBlockedReason::UnsupportedLane
+impl routectl_router::PreflightBlockedReason
+pub const fn routectl_router::PreflightBlockedReason::as_str(self) -> &'static str
+impl core::clone::Clone for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::clone(&self) -> routectl_router::PreflightBlockedReason
+impl core::cmp::Eq for routectl_router::PreflightBlockedReason
+impl core::cmp::PartialEq for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::eq(&self, &routectl_router::PreflightBlockedReason) -> bool
+impl core::fmt::Debug for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::PreflightBlockedReason
+impl core::marker::StructuralPartialEq for routectl_router::PreflightBlockedReason
+impl core::marker::Freeze for routectl_router::PreflightBlockedReason
+impl core::marker::Send for routectl_router::PreflightBlockedReason
+impl core::marker::Sync for routectl_router::PreflightBlockedReason
+impl core::marker::Unpin for routectl_router::PreflightBlockedReason
+impl core::marker::UnsafeUnpin for routectl_router::PreflightBlockedReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::PreflightBlockedReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::PreflightBlockedReason
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::PreflightBlockedReason where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::PreflightBlockedReason where U: core::convert::From<T>
+pub fn routectl_router::PreflightBlockedReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::PreflightBlockedReason where U: core::convert::Into<T>
+pub type routectl_router::PreflightBlockedReason::Error = core::convert::Infallible
+pub fn routectl_router::PreflightBlockedReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::PreflightBlockedReason where U: core::convert::TryFrom<T>
+pub type routectl_router::PreflightBlockedReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::PreflightBlockedReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub type routectl_router::PreflightBlockedReason::Owned = T
+pub fn routectl_router::PreflightBlockedReason::clone_into(&self, &mut T)
+pub fn routectl_router::PreflightBlockedReason::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub fn routectl_router::PreflightBlockedReason::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::PreflightBlockedReason where T: 'static + ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::PreflightBlockedReason where T: ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::PreflightBlockedReason where T: ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub unsafe fn routectl_router::PreflightBlockedReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::PreflightBlockedReason
+pub fn routectl_router::PreflightBlockedReason::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::PreflightBlockedReason where T: core::clone::Clone
+pub fn routectl_router::PreflightBlockedReason::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::PreflightBlockedReason
+impl<T> outref::AsOut<T> for routectl_router::PreflightBlockedReason where T: core::marker::Copy
+pub fn routectl_router::PreflightBlockedReason::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::PreflightBlockedReason where T: ?core::marker::Sized
+pub fn routectl_router::PreflightBlockedReason::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::PreflightBlockedReason::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::PreflightBlockedReason
+impl<T> tracing::instrument::WithSubscriber for routectl_router::PreflightBlockedReason
+impl<T> typenum::type_operators::Same for routectl_router::PreflightBlockedReason
+pub type routectl_router::PreflightBlockedReason::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PreflightBlockedReason where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::PreflightBlockedReason::into_shared(self) -> Shared
 pub enum routectl_router::PricingSource
 pub routectl_router::PricingSource::Catalog
 pub routectl_router::PricingSource::Registry
@@ -10754,9 +11198,63 @@ impl<T> typenum::type_operators::Same for routectl_router::ElisionMark
 pub type routectl_router::ElisionMark::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ElisionMark where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ElisionMark::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::FidelitySnapshot
+pub routectl_router::FidelitySnapshot::acting: alloc::vec::Vec<routectl_router::ActingFieldVerdict>
+pub routectl_router::FidelitySnapshot::counters: routectl_router::FieldRepairCounters
+pub routectl_router::FidelitySnapshot::probes: routectl_router::ProbeSchedulerSnapshot
+pub routectl_router::FidelitySnapshot::verdicts: alloc::vec::Vec<routectl_router::FieldVerdictStatus>
+impl core::clone::Clone for routectl_router::FidelitySnapshot
+pub fn routectl_router::FidelitySnapshot::clone(&self) -> routectl_router::FidelitySnapshot
+impl core::fmt::Debug for routectl_router::FidelitySnapshot
+pub fn routectl_router::FidelitySnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::FidelitySnapshot
+impl core::marker::Send for routectl_router::FidelitySnapshot
+impl core::marker::Sync for routectl_router::FidelitySnapshot
+impl core::marker::Unpin for routectl_router::FidelitySnapshot
+impl core::marker::UnsafeUnpin for routectl_router::FidelitySnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FidelitySnapshot
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FidelitySnapshot
+impl<T, U> core::convert::Into<U> for routectl_router::FidelitySnapshot where U: core::convert::From<T>
+pub fn routectl_router::FidelitySnapshot::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FidelitySnapshot where U: core::convert::Into<T>
+pub type routectl_router::FidelitySnapshot::Error = core::convert::Infallible
+pub fn routectl_router::FidelitySnapshot::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FidelitySnapshot where U: core::convert::TryFrom<T>
+pub type routectl_router::FidelitySnapshot::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FidelitySnapshot::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub type routectl_router::FidelitySnapshot::Owned = T
+pub fn routectl_router::FidelitySnapshot::clone_into(&self, &mut T)
+pub fn routectl_router::FidelitySnapshot::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub fn routectl_router::FidelitySnapshot::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FidelitySnapshot where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FidelitySnapshot where T: ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FidelitySnapshot where T: ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub unsafe fn routectl_router::FidelitySnapshot::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FidelitySnapshot
+pub fn routectl_router::FidelitySnapshot::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FidelitySnapshot where T: core::clone::Clone
+pub fn routectl_router::FidelitySnapshot::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FidelitySnapshot
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FidelitySnapshot where T: ?core::marker::Sized
+pub fn routectl_router::FidelitySnapshot::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FidelitySnapshot::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FidelitySnapshot
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FidelitySnapshot
+impl<T> typenum::type_operators::Same for routectl_router::FidelitySnapshot
+pub type routectl_router::FidelitySnapshot::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FidelitySnapshot where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FidelitySnapshot::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::FieldRepairCounters
 pub routectl_router::FieldRepairCounters::disproved_requests: u64
 pub routectl_router::FieldRepairCounters::outstanding_unconfirmed: u64
+pub routectl_router::FieldRepairCounters::parser_unlocalized: u64
+pub routectl_router::FieldRepairCounters::preflight_actions: u64
 pub routectl_router::FieldRepairCounters::repair_attempted: u64
 pub routectl_router::FieldRepairCounters::repair_succeeded: u64
 pub routectl_router::FieldRepairCounters::verdicts_learned: u64
@@ -10816,6 +11314,77 @@ impl<T> typenum::type_operators::Same for routectl_router::FieldRepairCounters
 pub type routectl_router::FieldRepairCounters::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldRepairCounters where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::FieldRepairCounters::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::FieldVerdictStatus
+pub routectl_router::FieldVerdictStatus::blocked_reason: core::option::Option<routectl_router::PreflightBlockedReason>
+pub routectl_router::FieldVerdictStatus::canary: routectl_router::CanaryPosture
+pub routectl_router::FieldVerdictStatus::canary_last_outcome: core::option::Option<routectl_router::CanaryOutcome>
+pub routectl_router::FieldVerdictStatus::canary_remaining_requests: u32
+pub routectl_router::FieldVerdictStatus::capability_key: alloc::string::String
+pub routectl_router::FieldVerdictStatus::confirmations: u32
+pub routectl_router::FieldVerdictStatus::phase: routectl_core::capability::FailurePhase
+pub routectl_router::FieldVerdictStatus::prefix_impacting: bool
+pub routectl_router::FieldVerdictStatus::requests_in_flight: u64
+pub routectl_router::FieldVerdictStatus::required_quorum: core::option::Option<u32>
+pub routectl_router::FieldVerdictStatus::source: routectl_core::capability::EvidenceSource
+pub routectl_router::FieldVerdictStatus::state_key: alloc::string::String
+pub routectl_router::FieldVerdictStatus::transform_class: core::option::Option<&'static str>
+pub routectl_router::FieldVerdictStatus::unconfirmed_requests: u64
+impl routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::blocked_reason_token(&self) -> &'static str
+pub fn routectl_router::FieldVerdictStatus::canary_outcome_token(&self) -> &'static str
+impl core::clone::Clone for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::clone(&self) -> routectl_router::FieldVerdictStatus
+impl core::cmp::Eq for routectl_router::FieldVerdictStatus
+impl core::cmp::PartialEq for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::eq(&self, &routectl_router::FieldVerdictStatus) -> bool
+impl core::fmt::Debug for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::FieldVerdictStatus
+impl core::marker::Freeze for routectl_router::FieldVerdictStatus
+impl core::marker::Send for routectl_router::FieldVerdictStatus
+impl core::marker::Sync for routectl_router::FieldVerdictStatus
+impl core::marker::Unpin for routectl_router::FieldVerdictStatus
+impl core::marker::UnsafeUnpin for routectl_router::FieldVerdictStatus
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FieldVerdictStatus
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FieldVerdictStatus
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::FieldVerdictStatus where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::FieldVerdictStatus where U: core::convert::From<T>
+pub fn routectl_router::FieldVerdictStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FieldVerdictStatus where U: core::convert::Into<T>
+pub type routectl_router::FieldVerdictStatus::Error = core::convert::Infallible
+pub fn routectl_router::FieldVerdictStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FieldVerdictStatus where U: core::convert::TryFrom<T>
+pub type routectl_router::FieldVerdictStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FieldVerdictStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub type routectl_router::FieldVerdictStatus::Owned = T
+pub fn routectl_router::FieldVerdictStatus::clone_into(&self, &mut T)
+pub fn routectl_router::FieldVerdictStatus::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub fn routectl_router::FieldVerdictStatus::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FieldVerdictStatus where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FieldVerdictStatus where T: ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FieldVerdictStatus where T: ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub unsafe fn routectl_router::FieldVerdictStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FieldVerdictStatus
+pub fn routectl_router::FieldVerdictStatus::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FieldVerdictStatus where T: core::clone::Clone
+pub fn routectl_router::FieldVerdictStatus::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FieldVerdictStatus
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FieldVerdictStatus where T: ?core::marker::Sized
+pub fn routectl_router::FieldVerdictStatus::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FieldVerdictStatus::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FieldVerdictStatus
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FieldVerdictStatus
+impl<T> typenum::type_operators::Same for routectl_router::FieldVerdictStatus
+pub type routectl_router::FieldVerdictStatus::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldVerdictStatus where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FieldVerdictStatus::into_shared(self) -> Shared
 pub struct routectl_router::Finding
 pub routectl_router::Finding::detail: alloc::string::String
 pub routectl_router::Finding::name: alloc::string::String
@@ -12752,6 +13321,8 @@ pub routectl_router::ProbeSchedulerSnapshot::deferral_evictions_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::deferrals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::free_exhausted_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::in_flight: usize
+pub routectl_router::ProbeSchedulerSnapshot::last_settlement: core::option::Option<routectl_router::probe_scheduler::vocab::ProbeSettlement>
+pub routectl_router::ProbeSchedulerSnapshot::next_retry_in: core::option::Option<core::time::Duration>
 pub routectl_router::ProbeSchedulerSnapshot::paid_authorization_refusals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_attempts_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_capacity_refusals_total: u64
@@ -13410,6 +13981,9 @@ pub fn routectl_router::router::Router::first_target_oauth_id(&self, &str) -> co
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::fidelity_snapshot(&self) -> routectl_router::FidelitySnapshot
+pub fn routectl_router::router::Router::field_verdict_status(&self) -> alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router

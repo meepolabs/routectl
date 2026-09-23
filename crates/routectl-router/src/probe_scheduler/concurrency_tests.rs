@@ -45,7 +45,7 @@ fn concurrent_activation_of_one_identity_queues_exactly_one_job() {
         1,
         "exactly one racing activation may queue the job"
     );
-    assert_eq!(scheduler.snapshot().queued, 1);
+    assert_eq!(scheduler.snapshot(Instant::now()).queued, 1);
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn concurrent_leasing_never_exceeds_the_concurrency_bound() {
         "peak concurrent leases {} exceeded the bound {PROBE_MAX_CONCURRENCY}",
         peak.load(Ordering::SeqCst)
     );
-    assert_eq!(scheduler.snapshot().in_flight, 0);
+    assert_eq!(scheduler.snapshot(Instant::now()).in_flight, 0);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn spending_a_step_with_another_free_step_left_advances_rather_than_exhausting()
         "a plan with a free step left must not report itself spent, or a lane \
          reaches the paid class having never run step two"
     );
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.free_exhausted_total, 0);
     assert_eq!(
         snap.backing_off, 1,
@@ -158,7 +158,7 @@ fn spending_a_step_with_another_free_step_left_advances_rather_than_exhausting()
         release.exhausted_free_plan(),
         "spending the last free step is what makes the paid class a candidate"
     );
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.free_exhausted_total, 1);
     assert_eq!(snap.queued, 0);
     assert_eq!(snap.backing_off, 0);
@@ -213,7 +213,7 @@ fn a_queue_of_deferred_jobs_frees_capacity_for_a_healthy_lane() {
         now += PROBE_BACKOFF_CEILING + Duration::from_secs(1);
     }
 
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(
         snap.deferral_evictions_total, PROBE_QUEUE_DEPTH as u64,
         "every deferred job must have been evicted at the ceiling"
@@ -257,7 +257,11 @@ fn an_evicted_identity_may_be_reactivated_and_settle() {
         assert!(release.committed(), "a deferral on live state must commit");
         now += PROBE_BACKOFF_CEILING + Duration::from_secs(1);
     }
-    assert_eq!(scheduler.snapshot().deferral_evictions_total, 1, "premise");
+    assert_eq!(
+        scheduler.snapshot(Instant::now()).deferral_evictions_total,
+        1,
+        "premise"
+    );
     assert!(
         scheduler.lease_due(now).is_none(),
         "premise: the evicted job is gone from the queue"
@@ -277,7 +281,7 @@ fn an_evicted_identity_may_be_reactivated_and_settle() {
         .expect("the reactivated job must be leasable");
     let release = lease.settle(ProbeSettlement::Resolved, now);
     assert!(release.committed());
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.resolved_total, 1, "the reactivated job answered");
     assert_eq!(snap.queued, 0);
     assert_eq!(snap.in_flight, 0);
@@ -302,7 +306,7 @@ fn deferrals_below_the_ceiling_keep_the_job_queued() {
         now += PROBE_BACKOFF_CEILING + Duration::from_secs(1);
     }
 
-    let snap = scheduler.snapshot();
+    let snap = scheduler.snapshot(Instant::now());
     assert_eq!(
         snap.deferral_evictions_total, 0,
         "below the ceiling nothing is evicted"

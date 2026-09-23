@@ -799,6 +799,7 @@ async fn declared_auth_gated_routes_challenge_unauthenticated_requests() {
         None,
         bound,
         crate::handlers::status::DaemonMeta::for_test(),
+        crate::handlers::status::test_hooks::StatusTestHooks::default(),
     );
 
     // Act + Assert: no credential -> 401 on every auth-gated path.
@@ -866,6 +867,7 @@ async fn token_less_loopback_serves_auth_gated_routes_without_credentials() {
         None,
         bound,
         crate::handlers::status::DaemonMeta::for_test(),
+        crate::handlers::status::test_hooks::StatusTestHooks::default(),
     );
 
     // Act

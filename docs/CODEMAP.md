@@ -2993,13 +2993,105 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`repair_attempted`/`repair_succeeded`/`verdicts_learned`) without the
   metrics-snapshot DEBUG line, plus the two wrong-repair alarm halves off the
   shared canary registry (`outstanding_unconfirmed` /`disproved_requests`, see
-  `src/field_canary.rs`). Both halves are reported together deliberately: the
-  outstanding count is exposure that MIGHT later be disproved and the lifetime
-  total is exposure that WAS, so either number alone reads as the other. Both are
+  `src/field_canary.rs`), plus `preflight_actions` (requests a pre-flight
+  rewrite modified, counted per adopted row at the one adoption site in
+  `field_preflight::adopt_row`) and `parser_unlocalized` (the
+  am-I-flying-blind count, bumped once per request per target by
+  `capability_learn::observe_field_parser_blindness` through the shared
+  `Router::rejection_localizes_no_field` predicate). Both alarm halves are
+  reported together deliberately: the outstanding count is exposure that MIGHT
+  later be disproved and the lifetime total is exposure that WAS, so either
+  number alone reads as the other. Both are
   re-exported crate-root `pub` and
   consumed by `routectl-cli`'s `handlers::status::field_verdict_log` -- this
   module owns the "which learned rows count as acting" predicate so the
   cli-crate log and any future consumer cannot restate it differently
+- `src/router/fidelity_status.rs` -- the router-owned fidelity read.
+  `Router::fidelity_snapshot() -> FidelitySnapshot` is the coherent entry point:
+  ONE learned-registry read feeds BOTH the acting-verdict derivation and the
+  detailed rows, plus the repair counters and the existing
+  `ProbeSchedulerSnapshot`. That coherence is the reason the type exists -- four
+  separate reads meant four moments, so an acting count could describe one
+  registry state while the rows described another and a reader reconciling them
+  could not tell a documented filter from a race. Its `PreflightBlockedReason`
+  owns its OWN stable token table rather than reading the planner's internal
+  constants: those are a debug vocabulary the planner may retune, and a rename
+  there would silently change what every operator dashboard matches on. What keeps
+  the two from meaning different things is that each variant is produced by
+  consulting the planner's own predicate, not by paraphrasing its conditions.
+  Carries a `test-utils`-gated `plant_acting_field_verdict_for_tests` so
+  cross-crate status tests can establish real registry state through the same
+  `import_entries` plus canary-seed path a cold boot uses -- without it their only
+  option was asserting over an empty row set, which a projection rendering nothing
+  would pass. `Router::field_verdict_status()` remains as the standalone
+  per-verdict read: ONE ROW PER RESIDENT FIELD VERDICT, acting or not -- an operator
+  debugging why pre-flight is NOT firing needs the row whose blocked reason
+  explains it, and a surface listing only acting rows would answer that question
+  with silence. Each row carries the capability key and sanitized target, the transform
+  class and its prefix-impact flag, provenance and phase, the confirmation count
+  beside its class's `required_quorum`, a `PreflightBlockedReason`, the
+  `CanaryPosture` with remaining eligible requests and last outcome, and the two
+  exposure counts, reported in the PLANNER'S OWN precedence so the token names the
+  first gate that holds. The two CONFIG-LEVEL gates come FIRST, because they refuse
+  the LANE rather than the verdict: `CapabilityDisabled` is the global kill switch
+  (`[capability] enabled = false`), so it holds for every verdict at once, and
+  `UnsupportedLane` means the target is not an Anthropic-API provider or has no
+  attributable base URL -- such a verdict is real but can never fire, so no per-key
+  reason about it would be actionable. `MaskedByOverride` follows them, since it is
+  about a specific capability on a lane the stage WOULD act on: an operator cell
+  forcing the capability supported outranks any evidence, and its remedy is a config
+  edit rather than more confirmations. `CanarySuspended` is the one reason this
+  surface distinguishes that the planner does not, because the planner folds a
+  suspension into not-eligible while the operator action differs. A verdict whose
+  transform class THIS build's table does not carry (a ledger row from a wider build)
+  reports `not_eligible`: it is unactionable, not unblocked -- reporting it unblocked
+  was the single most misleading value the field could carry. Both string fields are
+  `sanitize_for_log`-SANITIZED: the registry is fed from a ledger this build did
+  not necessarily write, so the read side must not assume a key's shape, and an
+  uncapped or control-byte-bearing value on a log line is how a forged second line
+  is injected. Every read is non-mutating, pinned by ONE WIDE behavioral
+  observation: the per-identity canary state, the learned registry's own snapshot, the
+  scheduler snapshot, and the registry's snapshot-read COUNT are captured before and
+  after fifty reads and compared together, so any mutating entry point on any of the
+  three is visible. That replaced a source-text guard over a fixed list of mutator
+  names, brittle both ways -- it fired on prose explaining why a write would be wrong,
+  and could not see a mutation reached through a name its list did not carry. The gated
+  fixture, seeding, and instrumentation seams live in
+  `src/router/fidelity_status_test_support.rs`, which keeps the production module
+  focused and under the size ceiling: `test-utils`-gated, and absent from every
+  release build because a production caller could otherwise mint a routing-affecting
+  verdict, force a re-verification off-schedule, or hand a status reader a fabricated
+  row. Pooled-seat identity is resolved MEMBER-FIRST: a `nick#member` state key's
+  suffix is the provider entry a live `DispatchTarget` for that seat carries, so the
+  kind, the override mask, and the prefix-impact opt-in all resolve against it while
+  the base names the model tier. That order is load-bearing because a pool-backed
+  model's own `provider_name` is the POOL, which is not a `[providers]` entry at all
+  -- resolving through it yields a name no provider lookup answers, and every
+  decision keyed on the pair then falls through to a default (measured: the kind
+  resolved to the empty token, and the row reported `not_eligible` for a verdict
+  pre-flight was rewriting traffic with). The fallback stays: a `#` suffix naming no
+  provider entry resolves the base model's own provider. The same resolution serves a
+  CONFIG-ONLY router (no resolved table installed -- a cold boot before install, or a
+  Router whose provider build failed), which matters because an identity resolved only
+  through the resolved table returns an empty nickname there, and an empty nickname can
+  never match a model-scoped override or opt-in tier: the operator's own
+  `provider:model` entry would read as absent on exactly the boot that restored the
+  verdict. The class lookup goes through
+  `field_repair::transform_class_of_capability_key`, which mints each table row's
+  key via the namespace constructor rather than stripping a prefix
+- `src/probe_scheduler/vocab.rs` -- the scheduler's closed vocabularies and its
+  operator-facing `ProbeSchedulerSnapshot`. Beyond the lifetime counters it carries
+  two AGGREGATE status fields derived from state the scheduler already holds:
+  `last_settlement` (the most recent settled free-probe outcome, recorded at the one
+  release site so every outcome is reported whatever its arm goes on to do -- a
+  DROPPED lease records nothing, since overwriting the last real answer with "a
+  future was dropped" erases the signal) and `next_retry_in` (time until the
+  EARLIEST backing-off job is leasable, `None` when nothing is, `ZERO` when a
+  deadline already elapsed -- the two are distinct answers). Both are aggregate
+  rather than per-lane deliberately: a per-lane history would be a store with its
+  own bound, eviction rule, and reload carry, and the status question is narrower.
+  `snapshot(now)` takes the clock so the queue counts and the deadline describe one
+  moment under one lock acquisition
 - `src/router/probe_lifecycle.rs` -- the scheduler incarnation and the bounded
   probe WORKER over the shared `Arc<ProbeScheduler>` on `Router`. Owns WHEN
   queued work runs and how it settles; the admitted-request activation seam
@@ -3370,6 +3462,30 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   collapse into the loopback row. Scope limits, stated in the module doc: a
   decision keyed on another entry fact needs a new discriminating row, and a local
   check merely RESTATING part of the shared set changes no verdict
+- `src/router/field_preflight_action_tests.rs` -- `include!`d fragment of
+  `field_preflight_tests.rs`: the pre-flight adopted-row action counter and
+  the one-WARN-per-request contract
+- `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
+  `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
+- `src/probe_scheduler/queue_status_tests.rs` -- `include!`d fragment of
+  `queue_tests.rs`: the aggregate last-settlement and next-retry-in fields
+- `tests/preflight_behavior.rs` -- REAL-DISPATCH proofs that the pre-flight
+  pipeline does what it claims, asserted on the BYTES a provider received rather
+  than on a decision record (a planner that recorded an acting decision and
+  dispatched the original body passes every record-level assertion). Covers an
+  acknowledged eligible verdict actually rewriting the request, the two
+  feature-ABSENT controls that make that non-vacuous (no resident verdict, and a
+  resident-but-unacknowledged one, both of which must forward the client's field
+  verbatim -- without them an unconditional strip would pass), the counter and the
+  single request WARN moving on a real rewrite, and the cap-zero lane still
+  activating and running FREE validation while committing no reservation and
+  dispatching no paid call. Lives in this crate rather than the daemon e2e suite
+  for a structural reason the file states: pre-flight and probe activation both
+  refuse a target whose base URL names a local hop, and every in-process HTTP mock
+  binds loopback -- so a wiremock-backed daemon test would assert over a lane where
+  the feature is CORRECTLY inert and would pass with the pipeline deleted. Same
+  constraint, same workaround as `tests/probe_beta_wire.rs`: the real router on a
+  remote-looking base URL behind a provider that answers in-process
 - `tests/probe_beta_wire.rs` -- the OUTGOING `anthropic-beta` header a probe
   sends must equal the admitted request's, captured off a real wiremock request
   under a NON-EMPTY `allowed_betas`. Two stages, because the router refuses to
@@ -4924,6 +5040,36 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   writer's degraded edge, successes do NOT clear it: a control row landing is no
   evidence the request-row path recovered). `ReservationHost` is the narrow seam
   back to the actor (connection + failure accounting, nothing else)
+- `src/paid_probe_read.rs` -- the READ side of the budget, deliberately apart from
+  the reservation: `committed_units(conn, provider, now_ms) -> PaidProbeUsage`
+  answers one provider-day's committed count and authorizes nothing (no cap
+  argument, no refusal, no commit). Three answers rather than an `Option<u32>`,
+  because "nothing spent" and "the stored accounting is unreadable" are opposite
+  operational facts: `Committed(n)` (zero for a day with no row -- a real reading),
+  `Malformed` (a value the codec would not have written, which the reservation
+  REFUSES on, so reporting zero would show a clean budget for a provider whose
+  paid calls are all failing closed), and `Unreadable` (the query itself did not
+  land). Goes through the reservation's OWN key encoding and value parser rather
+  than restating either -- a second copy would drift and then read a day the writer
+  never wrote to. The day is sampled by the CALLER, so a read cannot land on the
+  other side of a rollover from the cap gate it is being reconciled against
+- `src/paid_probe_test_support.rs` -- cross-crate test seams the CLI-side
+  accounting-health surface cannot build for itself:
+  `reserve_paid_probe_unit_for_tests` (a real commit, returning only a boolean so
+  the reservation's outcome vocabulary stays internal) and
+  `plant_paid_probe_units_for_tests` (a RAW value the writer would never produce,
+  which is the one fixture nothing else can create). Its own file with the repo's
+  test-support suffix on purpose: the planting seam can lower a committed count,
+  and the no-refund scan over this crate's PRODUCTION corpus is right to refuse
+  that -- naming the file out of that corpus is the honest classification (it is
+  test scaffolding) rather than an exemption that would widen the scan's hole for
+  every future module beside it. The file is ALSO gated behind the crate's
+  non-default `test-utils` feature, which is the security half: a release library
+  exposing a function that can lower a committed count would put a cap-bypass path
+  on the published surface of the crate that owns the spend ceiling. The no-refund
+  guard VERIFIES that classification rather than trusting it -- it reads the `mod`
+  declaration in `lib.rs` and fails if the gate is missing, so removing the gate to
+  ship the file is red twice over
 - `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign
   keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id`
   (idempotency), schema-presence assertions.
@@ -5106,6 +5252,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per-concern: the `#[path]`-included hub sidecar `tests.rs` keeps only the
   bind-safety tests, each submodule owns its own `<name>_tests.rs` sidecar,
   and the shared `#[cfg(test)]` fixture helpers live in `test_support.rs`
+- `src/server/serve.rs` -- also carries the two `test-utils`-GATED daemon seams the
+  assembled-daemon suite needs: `serve_on_listener_with_injected_router` (a prebuilt
+  Router replaces the config-derived build, with every downstream stage -- warms,
+  writer, layer stack, listener, reload wiring -- unchanged) plus its per-call
+  router-swap observer. Both are absent from every release build, and each would be a
+  hole if it shipped: an injected Router could pair a config and a provider that
+  disagree, which is the state the attributability rules exist to keep out of a
+  deployment, and an observer of the live swap reaches dispatch and raw config from
+  outside the handler stack that the status facade exists to prevent. Proven absent
+  from the release API and binary symbols. The observer is PER-CALL rather than a
+  process-global slot: a test binary runs cases concurrently, so a global one-shot is
+  claimed by whichever daemon boots first
 - `src/server/serve.rs` -- listener bind + serve loop: `serve` (bind then
   serve) / `serve_on_listener` / `serve_on_listener_with_overlay` boot path,
   `build_axum_router` route wiring (every registered path is classified by
@@ -5165,6 +5323,29 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   EMPTY, never partial -- a factor reduced from a half-read slice is one the
   full evidence never supported -- and the tally is logged in one info line
   with a `warn` when the row cap truncated the read
+- `src/server/canary_span_tests.rs` -- THE spanning canary proof, declared from
+  `capability_boundary.rs` because it extends that module's drain-plus-restart
+  seam. Walks the whole path in one test: a durably seeded verdict, ninety-nine
+  repaired completions, a hundredth carrying the field UNREPAIRED, its upstream
+  success settling the disproof and charging the ninety-nine to the lifetime alarm,
+  the production `drain_capability_events` call, the writer's drain, a restart
+  replaying the ledger, and request 101 forwarding unchanged. It exists because the
+  pieces are each pinned elsewhere and neither pin spans the seam between them:
+  `field_canary_settlement_tests` drives real dispatch but stops at the dispatch
+  metadata (so a build that produced the clear and never persisted it passes), and
+  the boundary tests above drive the real drain with a HAND-BUILT event (so a build
+  whose canary never produced one passes). Between them sits a verdict cleared only
+  in memory, which a warm rebuild resurrects. The durable SEED is load-bearing and
+  was added after measurement: without a real `broken` row in the ledger, skipping
+  the drain entirely left the test green. Also carries the contention case (a
+  concurrent burst at the boundary sends exactly ONE unrepaired request -- and the
+  mechanism at this level is `claim_canary` clearing the sticky due flag, not the
+  `canary_claimed` flag, which mutation testing established), the stream/count
+  cadence controls, and the feature-absent control. A direct Router integration
+  rather than a spawned daemon because pre-flight and probe activation both refuse
+  loopback base URLs and every in-process HTTP mock binds loopback -- a
+  daemon-plus-wiremock harness would assert over a lane where the feature is
+  correctly inert
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
@@ -5647,6 +5828,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   same logic inline (crossing the crate boundary for four lines would mean a
   public-API change plus a baseline regeneration). Its `#[should_panic]` test is
   the durable proof the ambiguity check fires
+- `src/handlers/status/test_hooks.rs` -- DAEMON-scoped observation and
+  failure-injection seams for the `/status` family, carried on `StatusState` and
+  handed in at spawn. Two properties of the fidelity surface are invisible from a
+  response and from the router's state alike -- WHICH builder emitted the shared
+  INFO line and HOW MANY the request produced -- and a per-call argument cannot
+  reach them, because the daemon's own handlers construct their `FidelityEmission`
+  values. `FidelityObserver` is UNBOUNDED and multi-event for exactly that count:
+  a one-shot silently drops a second send, so a daemon emitting twice per request
+  would read as one. `fail_health_builder` panics the health builder BEFORE the
+  emitter, which is the shape `guard_panel` really degrades, and is what lets the
+  aggregate's health-failure fallback be exercised over a real request.
+  Per-daemon rather than process-global -- a test binary runs its cases
+  concurrently, so a global slot is claimed by whichever daemon boots first
+  (measured on the sibling router-swap seam: the global shape failed every case at
+  once). `cfg(test)` only, so no deployment can tap its own status events or force
+  a panel to degrade; absence from the release binary is checked by symbol scan
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
@@ -5695,10 +5892,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
-  which exposes ONLY four read methods -- `route_targets(now)`,
+  which exposes ONLY six read methods -- `route_targets(now)`,
   `learned_capabilities()`, `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
-  see `field_verdict_log.rs`), and `effective_view()` (runs
+  see `field_verdict_log.rs`), `field_verdict_status()` (the per-verdict
+  fidelity rows, a PURE router-side read -- see
+  `routectl-router/src/router/fidelity_status.rs`),
+  `paid_probe_daily_caps()` (the RUNNING daemon's configured caps, read through
+  the facade rather than from a re-loaded file so a budget row cannot report a
+  cap no reservation is checked against), and `effective_view()` (runs
   `derive_effective_view` against the live config AND the overlay retained on
   the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
   derivation can never pair mismatched config / overlay generations), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
@@ -5764,21 +5966,106 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   sentinel); `last_outcome` renders the derived `circuit_open` when the phase
   is open, else the stored outcome token; `feature_key` is renamed to the
   contract token `capability_key`. No dial, no mutation. Also calls the
-  shared `field_verdict_log::log_field_verdict_snapshot` once per build with
-  the same fetched `learned_capabilities()` snapshot
-- `src/handlers/status/field_verdict_log.rs` -- shared live-visibility log
-  line for acting field verdicts, called from both `health.rs` and
-  `doctor.rs` so a field repair or a durably purged verdict stays observable
-  at INFO without a response-body change. `log_field_verdict_snapshot(view,
-  learned)` reads `view.field_repair_counters()` plus
-  `acting_field_verdicts(learned)` (the router's own acting-row derivation)
-  and emits one aggregated INFO, `"envelope field verdict snapshot"`, with
-  all five repair counters -- the three metrics totals plus BOTH halves of the
-  wrong-repair alarm (`rc_field_outstanding_unconfirmed_total`, current, and
-  `rc_field_disproved_requests_total`, lifetime-monotonic) --
-  `rc_acting_field_verdicts_total`, and the acting
-  rows themselves under `rc_acting_field_verdicts` for provenance. Pure
-  function of its two read-only inputs -- no state, no mutation, log-only
+  `log_field_verdict_snapshot` once per build -- the response data and the INFO
+  snapshot are separate reads from one pinned Router/config generation, not an
+  atomic live-state snapshot: each may observe a different canary or counter
+  instant while both sit on the same config generation. What they share is the
+  pinned view's Router arc, so neither can cross a config-reload boundary
+- `src/handlers/status/field_verdict_log.rs` -- the single EMITTER of the
+  fidelity INFO line, called from both `health.rs` and `doctor.rs` so a field
+  repair, a pre-flight rewrite, a durably purged verdict, or a paid-probe budget
+  stays observable at INFO without a response-body change (a routectl key in the
+  flattened extras would itself be a fidelity leak, so the floor is satisfied
+  operator-side -- and at INFO rather than the 60s DEBUG metrics snapshot, which
+  is not readable at a live log level). `log_field_verdict_snapshot(view,
+  learned, budgets)` reads `view.field_repair_counters()`,
+  `view.fidelity_snapshot()` -- ONE coherent router read -- then emits one
+  aggregated INFO,
+  `"envelope field verdict snapshot"`, carrying: all SEVEN counters -- the three
+  metrics totals, BOTH halves of the wrong-repair alarm
+  (`rc_field_outstanding_unconfirmed_total`, current, and
+  `rc_field_disproved_requests_total`, lifetime-monotonic),
+  `rc_field_preflight_actions_total` and `rc_parser_unlocalized_total` --
+  `rc_acting_field_verdicts{,_total}`, the per-verdict
+  `rc_field_verdict_rows{,_total}`, and the accounting-health
+  `rc_paid_probe_budgets{,_total}`. ONE line because the facts are only
+  interpretable together (a confirmation count without its required quorum
+  cannot be read as sufficient or short; a used budget without its cap says
+  nothing). `budgets` is passed IN rather than read here, because the accounting
+  read needs the ledger path and the counters facade and the caller already holds
+  both. ONE LINE PER REQUEST, not per panel build: the `/status` aggregate builds
+  both fidelity-carrying panels and shares ONE request-scoped CLAIM between them --
+  each attempts it, the first to reach the logger wins. A claim rather than a
+  pre-assigned emitter because each panel builds through `guard_panel`, which degrades
+  a failing source to an unavailable panel that never reaches its logger: with an
+  assigned emitter, a failing health panel took the whole line down for that request.
+  The no-config doctor branch emits too, with unavailable budget data -- the floor is
+  about the router, and only the caps come from config. Suppression is log-only, so
+  every panel's data is built in full. The process-global writer health and unauthorized-spend total are emitted
+  HERE, once, never copied onto a provider row. A source guard in its own sidecar
+  pins each counter field to the counter it is NAMED for and refuses either global
+  being read off a row -- a swap emits a well-formed line that reports one fact as
+  another, which no assertion on the emitted VALUES can see. Pure function of its
+  read-only inputs -- no state, no mutation, log-only. The observer event is built
+  ONLY inside a `cfg(test)` helper (`emit_observer_event`), and the gate is about COST
+  rather than tidiness: the event owns a cloned `FidelitySnapshot`, whose verdict and
+  acting vectors grow with the (target, field) identities a deployment has learned --
+  traffic-driven and unbounded -- so constructing it in the emitter body made every
+  status poll of every daemon deep-copy that structure for a consumer no release build
+  has, on a surface polled every few seconds. Two observers read it, and neither can
+  answer the other's question: a per-call `EventObserver` installed on the
+  `FidelityEmission` (unit tests read the exact event without a process-global
+  subscriber) and a DAEMON-scoped multi-event observer carried on `StatusState`
+  (`handlers::status::test_hooks`), which is what lets an assembled-daemon test COUNT
+  the events a real endpoint request emitted -- the per-call slot cannot, because the
+  daemon's own handlers construct their own emissions. A source guard in the sidecar
+  pins the allocation to the gated region, with a positive control proving it is
+  locating a real construction rather than matching nothing
+- `src/handlers/status/fidelity_log.rs` -- the RENDERING under that emitter:
+  `rendered_verdicts` / `rendered_budgets` flatten each DTO to tokens, counts,
+  and booleans. Split from the emitter because the judgement lives here -- several
+  DTO fields are `Option`s whose absent case is a real operator-facing state
+  rather than missing data, and each gets its own literal: `unknown` for a
+  transform class this build's table does not carry (and for the quorum only a
+  class can have), `none` for an unblocked verdict and for a canary that has NEVER
+  settled (distinct from `inconclusive`), and `unknown` for a budget whose count
+  could not be read (never zero, which would claim nothing was spent). A test pins
+  that no real token collides with any of those literals. Both row kinds are also
+  BOUNDED here, under one shared `MAX_RENDERED_ROWS` code constant: the row count
+  grows with what a deployment has learned while the line is emitted every poll, so
+  `Bounded { rows, total, omitted }` carries the real total and the dropped count
+  alongside the rows -- a truncated line says how much it hides rather than
+  presenting a subset as complete
+- `src/handlers/status/paid_probe_budget.rs` -- the paid-cap accounting-health
+  rows: `paid_probe_budgets(caps, db_path, usage, now_ms)` yields one
+  `PaidProbeBudget` per provider named in `[fidelity] paid_probe_daily_caps`,
+  folding the operator's cap, the LEDGER's committed count for the current UTC day
+  (read through `routectl_usage::committed_units` -- durable, because the budget
+  survives restart and a process-local tally would report zero on a daemon that
+  came up after spending its cap), and an `AccountingHealth` token -- and NOTHING
+  ELSE. The writer's health and the
+  unauthorized-spend total are process-global facts and live on a separate
+  `AccountingGlobals` read (`accounting_globals`), emitted once: the writer is one
+  actor and the unauthorized counter has no provider dimension at all, so a per-row
+  copy reads as a multiple of the truth to anyone summing the column and as this
+  provider's spend to anyone who does not -- both wrong, neither detectable from
+  the line. That unauthorized total is the reason the surface exists: units that
+  committed while shutdown had begun bought no call, and the divergence is
+  invisible in `committed_today` (the unit IS spent, its ledger row looks ordinary,
+  and there is no refund) and deliberately not folded into `writer_degraded`
+  (neither a storage fault nor a healthy write). It is PROCESS-LIFETIME and resets
+  on restart, which the field documents. Reads through
+  `UsageHealthView`, a counters-only facade over the shared `Arc<UsageCounters>`:
+  `StatusState`'s contract is that it carries no writer producer handle (which
+  could enqueue rows), and a lexical guard in `mod.rs` refuses that type's name in
+  every status source. The ledger is opened ONCE per build rather than per row (so
+  the rows share one read instant) with `open_readonly_fastfail`, and the OPEN runs
+  INSIDE the panel's `spawn_blocking` closure: SQLite work on an async worker blocks
+  that worker, and the ordinary read-only open waits out a busy timeout -- so a
+  busy or checkpointing ledger would hold one of the few status permits for that
+  whole wait on every poll, and a handful of concurrent polls could wedge the
+  subtree. Failing fast degrades ONE field to `unreadable`, which the row already
+  has a token for
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
   provenance-annotated EFFECTIVE (live, in-effect) config view: snapshots the
   router through the read-only facade and folds its config together with the
@@ -7385,6 +7672,58 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   credentials.json and polls for the live `Router` swap
 - `tests/serve_shutdown.rs` -- real-binary graceful-shutdown integration test;
   signals and reaps a hermetic child process
+- `src/server/preflight_daemon_tests.rs` -- ASSEMBLED-DAEMON verification (a
+  `cfg(test)` sidecar declared from `serve.rs`; see item 4 relocation): a real
+  `serve_on_listener` daemon, real HTTP inference traffic over loopback, and the
+  status/doctor surfaces that daemon serves. Everything goes through the daemon's own
+  wiring -- listener, layer stack, ingress handler, usage capture, request boundary --
+  which the router-level proofs are structurally blind to: a pipeline wired into a
+  handler the request never reaches passes all of them. Covers feature-present rewrite
+  and feature-absent forward over HTTP, a canary disproof whose clear is visible in the
+  daemon's LIVE router and whose next HTTP request forwards unchanged, a populated
+  verdict row on the health panel plus a configured doctor envelope, and a cap-zero lane
+  activating on a real request and running FREE validation with zero reservations and
+  zero paid calls (the probe pass is driven on the daemon's exact live Router, which the
+  daemon publishes through a per-call observer). Also covers the fidelity INFO line at
+  the REAL endpoints, observed through the daemon-scoped event observer
+  (`handlers::status::test_hooks`): `/status/health`, the configured
+  `/status/doctor`, the no-config `/status/doctor` branch, and the `/status`
+  aggregate each emit EXACTLY ONE populated event per request. The count is the whole
+  point and only an observer can see it -- the line is log-only by design, so no
+  response body distinguishes one emission from two, and the aggregate builds BOTH
+  fidelity-carrying panels in one request. The health-failure fallback is exercised
+  by INJECTING a health-builder failure through the same hooks (a panic, the shape
+  `guard_panel` really degrades, landing before the emitter): the response marks
+  health unavailable and doctor still emits the one event, which is the regression
+  the shared CLAIM replaced a pre-assigned emitter to prevent -- a designated
+  emitter that degraded took the whole observability floor down with it. Paired with
+  a no-injection control, so the degradation is attributable to the injection.
+  Needs the `test-utils`-gated
+  `serve_on_listener_with_injected_router` seam, and the reason is a safety rule rather
+  than convenience: pre-flight and probe activation both refuse a target whose base URL
+  names a local hop, every in-process mock binds loopback, so a daemon aimed at a mock
+  is a lane where the feature is CORRECTLY inert. The daemon is handed a Router whose
+  CONFIG is remote-looking (what the gates read) while its provider answers in process.
+  Every daemon task is SUPERVISED: an early exit fails with a named diagnosis rather
+  than as a confusing connection error, and teardown aborts AND awaits, accepting only
+  a cancellation. The observer is per-call, not a process global -- measured: a global
+  one-shot is claimed by whichever daemon boots first and failed all six concurrent
+  cases
+- `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
+  pre-flight observability floor: a real `serve_on_listener` daemon on an
+  OS-assigned loopback port, a per-test tempdir usage ledger, and a provider
+  pointed at a DEAD local port (so nothing dials out and no background dial can
+  change state under a purity assertion). Covers the two surfaces the floor names
+  (health and doctor are asserted separately -- doctor builds through a blocking
+  gather behind a runtime handle, so a read wired into only one of them would pass
+  a health-only test), the runtime purity contract (twenty polls leave the learned
+  set and every target's gate state byte-identical, each poll's availability
+  asserted so a run of shed polls cannot satisfy it vacuously), and the cap-zero
+  lane -- PAIRED against a nonzero cap, without which a daemon refusing to start
+  on any `[fidelity]` cap would satisfy the cap-zero case by failing the same way
+  for a different reason. The unknown-provider cap refusal carries its own paired
+  positive for the same reason. Never touches the live daemon's port or the real
+  `~/.config` ledger
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the
