@@ -384,3 +384,4 @@ include!("paid_probe_authorize_requeue_tests.rs");
 include!("paid_probe_generation_tests.rs");
 include!("paid_probe_fairness_tests.rs");
 include!("paid_probe_lifecycle_tests.rs");
+include!("paid_probe_hostile_claim_tests.rs");
