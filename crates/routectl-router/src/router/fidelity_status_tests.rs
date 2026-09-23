@@ -34,10 +34,26 @@ const STATE_KEY: &str = "sonnet";
 /// Long enough that nothing in a test lapses by wall-clock.
 const NOT_LAPSED: Duration = Duration::from_hours(1);
 
+/// Build a Router from `config` with durable capability persistence ASSUMED.
+///
+/// THE shared constructor for every fixture in this file and its `include!`d
+/// fragments, so the durability assumption is stated once rather than at each
+/// site. Learned pre-flight suspends unless a capability-persistence health read
+/// reports durable writes, and `Router::new` installs none -- so a fixture
+/// constructing a Router directly would make every blocked-reason assertion read
+/// `capability_writer_unhealthy` regardless of the gate it was written to
+/// exercise. The unhealthy row is asserted on its own fixture, which deliberately
+/// calls `Router::new` instead.
+fn router_assuming_durable_writes(config: Config) -> Router {
+    Router::new(Arc::new(config)).with_capability_writes_assumed_durable_for_tests()
+}
+
 /// A Router whose lane admits pre-flight: one anthropic-api provider with a
 /// remote-looking base URL, one model, one alias. Remote-looking because the
 /// planner refuses a local hop, and the default base URL is what the production
 /// `anthropic_api()` constructor writes -- which is the real `api.anthropic.com`.
+///
+/// Built through [`router_assuming_durable_writes`]; see it for why.
 fn bare_router() -> Router {
     use crate::config::{AliasValue, ModelEntry, ProviderEntry};
     let mut providers = std::collections::BTreeMap::new();
@@ -55,12 +71,12 @@ fn bare_router() -> Router {
         "default".to_string(),
         AliasValue::Single(STATE_KEY.to_string()),
     );
-    Router::new(Arc::new(Config {
+    router_assuming_durable_writes(Config {
         providers,
         aliases,
         models,
         ..Config::default()
-    }))
+    })
 }
 
 /// The capability key the grounded path mints, through the namespace's sole

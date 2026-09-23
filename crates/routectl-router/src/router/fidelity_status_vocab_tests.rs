@@ -219,7 +219,7 @@ fn a_disabled_capability_kill_switch_reports_capability_disabled() {
         "default".to_string(),
         AliasValue::Single(STATE_KEY.to_string()),
     );
-    let router = Router::new(Arc::new(config));
+    let router = router_assuming_durable_writes(config);
     plant_verdict(&router, grounded_key());
     seed_confirmations(&router, ENVELOPE_QUORUM);
 
@@ -247,7 +247,7 @@ fn a_non_anthropic_lane_reports_unsupported_lane() {
         "default".to_string(),
         AliasValue::Single(STATE_KEY.to_string()),
     );
-    let router = Router::new(Arc::new(config));
+    let router = router_assuming_durable_writes(config);
     // Plant with the grounded key -- the verdict exists, the lane refuses it.
     plant_verdict(&router, grounded_key());
 
@@ -279,7 +279,7 @@ fn a_loopback_anthropic_lane_reports_unsupported_lane() {
         "default".to_string(),
         AliasValue::Single(STATE_KEY.to_string()),
     );
-    let router = Router::new(Arc::new(config));
+    let router = router_assuming_durable_writes(config);
     plant_verdict(&router, grounded_key());
 
     let rows = router.field_verdict_status();
@@ -328,7 +328,7 @@ fn a_pooled_seat_resolves_member_for_provider_and_base_for_model() {
             force_supported: vec![grounded_key()],
         },
     );
-    let router = Router::new(Arc::new(config));
+    let router = router_assuming_durable_writes(config);
     // Plant the verdict on the POOLED state key: `nick#member`.
     let pooled_key = format!("{}#seat-a", STATE_KEY);
     let cap_key = grounded_key();

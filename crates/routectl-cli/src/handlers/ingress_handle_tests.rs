@@ -2061,6 +2061,7 @@ async fn a_render_failure_leaves_no_live_calibration_evidence() {
         },
         ErrorEnvelopeShape::OpenAi,
         rig.handle.clone().expect("rig handle present"),
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         draft,
     )
     .await;
@@ -2116,6 +2117,7 @@ async fn a_render_failure_leaves_no_live_k_sample() {
         },
         ErrorEnvelopeShape::OpenAi,
         rig.handle.clone().expect("rig handle present"),
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         draft,
     )
     .await;
@@ -2155,6 +2157,7 @@ async fn a_clean_completion_records_a_live_k_sample() {
         OpenAiIngress,
         ErrorEnvelopeShape::OpenAi,
         rig.handle.clone().expect("rig handle present"),
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         draft,
     )
     .await;
@@ -2186,6 +2189,7 @@ async fn a_clean_completion_records_live_calibration_evidence() {
         OpenAiIngress,
         ErrorEnvelopeShape::OpenAi,
         rig.handle.clone().expect("rig handle present"),
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         draft,
     )
     .await;
@@ -2684,6 +2688,7 @@ async fn sub_trigger_keyed_dispatch_still_lands_a_k_sample() {
         OpenAiIngress,
         ErrorEnvelopeShape::OpenAi,
         rig.handle.clone().expect("rig handle present"),
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         draft,
     )
     .await;
@@ -2989,8 +2994,16 @@ async fn stream_gate_fast_ok_renders_message_start_with_estimate_no_early_frame(
     };
 
     // Act
-    let resp =
-        stream_dispatch_gated(fut, AnthropicIngress, capture, router, None, stream_ctx).await;
+    let resp = stream_dispatch_gated(
+        fut,
+        AnthropicIngress,
+        capture,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
 
     // Assert: a 200 SSE response whose FIRST event is message_start.
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3042,6 +3055,7 @@ async fn stream_gate_fast_err_returns_http_status_not_in_stream_frame() {
         AnthropicIngress,
         capture,
         router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         None,
         StreamRequestContext::default(),
     )
@@ -3103,7 +3117,17 @@ async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
 
     // Act: drive the warm render task; it flushes the early frame before
     // awaiting the (here-immediate) dispatch, then renders content.
-    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    warm_render_task(
+        fut,
+        AnthropicIngress,
+        capture,
+        tx,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: the FIRST event is the early message_start with the estimate.
@@ -3156,7 +3180,17 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    warm_render_task(
+        fut,
+        AnthropicIngress,
+        capture,
+        tx,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: the early frame, then exactly ONE terminal error event.
@@ -3281,6 +3315,7 @@ async fn warm_render_cancels_pending_dispatch_on_client_disconnect_before_conten
             capture,
             tx,
             router,
+            std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
             None,
             stream_ctx,
         ));
@@ -3340,8 +3375,16 @@ async fn stream_gate_grace_expiry_commits_sse_response() {
     // Act: with paused time + a pending dispatch, the runtime auto-advances to
     // the grace deadline; the grace arm fires and commits the SSE Response
     // (flush-and-continue), it does NOT abort the request.
-    let resp =
-        stream_dispatch_gated(fut, AnthropicIngress, capture, router, None, stream_ctx).await;
+    let resp = stream_dispatch_gated(
+        fut,
+        AnthropicIngress,
+        capture,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
 
     // Assert: a committed 200 SSE stream.
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3382,7 +3425,17 @@ async fn warm_render_ok_then_mid_stream_error_marks_mid_stream_stage() {
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    warm_render_task(
+        fut,
+        AnthropicIngress,
+        capture,
+        tx,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: the early frame, the rendered chunk, then EXACTLY ONE terminal
@@ -3458,7 +3511,17 @@ async fn warm_render_post_content_anthropic_error_is_terminal_with_preserved_typ
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    warm_render_task(
+        fut,
+        AnthropicIngress,
+        capture,
+        tx,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: exactly one terminal error, last, carrying overloaded_error.
@@ -3534,7 +3597,17 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     // Act: the early-frame send fails immediately (no receiver); the task
     // returns without ever finalizing, leaving the Drop fallback to stamp
     // the row.
-    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    warm_render_task(
+        fut,
+        AnthropicIngress,
+        capture,
+        tx,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
 
     // Assert: exactly one row, client_disconnect, no stage marker -- a
     // genuine cancellation, not an upstream failure.
@@ -3585,7 +3658,16 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
     };
 
     // Act
-    let resp = stream_dispatch_gated(fut, OpenAiIngress, capture, router, None, stream_ctx).await;
+    let resp = stream_dispatch_gated(
+        fut,
+        OpenAiIngress,
+        capture,
+        router,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+        None,
+        stream_ctx,
+    )
+    .await;
 
     // Assert: the SSE response still commits (OpenAI has no early frame to
     // flush, but the warm-hold path must still commit the response head).
@@ -3618,6 +3700,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
         capture2,
         tx,
         router2,
+        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
         None,
         StreamRequestContext {
             input_tokens_estimate: 5,

@@ -304,6 +304,30 @@ pub struct LearnedRegistryEntry {
     pub source: EvidenceSource,
 }
 
+/// The incarnation and PROVENANCE of one currently-acting field-namespace
+/// entry, read out of a single guarded acquisition. See
+/// [`LearnedCapabilityRegistry::field_acting_facts_in_generation`].
+///
+/// The three fields travel together because they describe one lifecycle: an
+/// incarnation number paired with another lifecycle's phase or source would
+/// attribute a rewrite to evidence that never authorized it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this module is private, so pub(crate) reads as redundant -- but \
+              `field_verdict` names this type in its own guarded-read call, so the \
+              visibility is load-bearing rather than cosmetic; `pub` would publish a \
+              registry-internal shape as semver surface"
+)]
+pub(crate) struct FieldActingFacts {
+    /// The acting entry's own incarnation.
+    pub incarnation: u64,
+    /// The detection phase that attributed this verdict.
+    pub phase: FailurePhase,
+    /// Whether the evidence came from live traffic or an out-of-band probe.
+    pub source: EvidenceSource,
+}
+
 /// The identity and incarnation-scoped facts a cold-rebuild canary seed
 /// needs for one resident field-namespace entry. See
 /// [`LearnedCapabilityRegistry::field_seed_snapshot`].
@@ -2627,23 +2651,31 @@ impl LearnedCapabilityRegistry {
             .collect()
     }
 
-    /// The resident entry's own incarnation when it is currently ACTING
-    /// under `generation`, or `None` when it is absent, lapsed, or the
-    /// generation may not read the key.
+    /// The resident entry's own incarnation AND its provenance when it is
+    /// currently ACTING under `generation`, or `None` when it is absent, lapsed,
+    /// or the generation may not read the key.
     ///
-    /// Distinct from the barrier-generation `u64` [`Self::negative_state_in_generation`]
-    /// returns: this is the entry's OWN incarnation, the value a canary-quorum
-    /// snapshot is seeded and compared against, so a stale canary state left
-    /// over from a since-relearned incarnation can never be read as backing
-    /// the current verdict.
-    pub(crate) fn field_acting_incarnation_in_generation(
+    /// The incarnation is distinct from the barrier-generation `u64`
+    /// [`Self::negative_state_in_generation`] returns: this is the entry's OWN
+    /// incarnation, the value a canary-quorum snapshot is seeded and compared
+    /// against, so a stale canary state left over from a since-relearned
+    /// incarnation can never be read as backing the current verdict.
+    ///
+    /// The PROVENANCE rides along out of the same guarded acquisition rather
+    /// than through a second read, and that is load-bearing rather than tidy: a
+    /// caller reporting which evidence authorized a rewrite must report the
+    /// evidence of the incarnation it acted on. A separate snapshot could
+    /// straddle a clear-and-relearn and pair this incarnation's number with the
+    /// next lifecycle's phase and source, which is precisely the
+    /// misattribution an operator would act on.
+    pub(crate) fn field_acting_facts_in_generation(
         &self,
         generation: u64,
         state_key: &str,
         feature_key_raw: &str,
         provider_kind: &str,
         now: Instant,
-    ) -> Option<u64> {
+    ) -> Option<FieldActingFacts> {
         match self.guarded_read(
             generation,
             state_key,
@@ -2652,13 +2684,20 @@ impl LearnedCapabilityRegistry {
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
                 let state = Self::negative_state_in(entries, &key, now);
-                (state, entries.get(&key).map(|e| e.incarnation))
+                (
+                    state,
+                    entries.get(&key).map(|e| FieldActingFacts {
+                        incarnation: e.incarnation,
+                        phase: e.phase,
+                        source: e.source,
+                    }),
+                )
             },
         ) {
             GenerationOutcome::Applied {
-                value: (NegativeState::Acting, Some(incarnation)),
+                value: (NegativeState::Acting, Some(facts)),
                 ..
-            } => Some(incarnation),
+            } => Some(facts),
             _ => None,
         }
     }

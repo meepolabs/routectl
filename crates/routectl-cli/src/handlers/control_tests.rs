@@ -94,6 +94,9 @@ impl Fixture {
             purge_settlements: std::sync::Arc::new(
                 crate::server::purge_settlement::SettlementTracker::new().0,
             ),
+            confirmation_advances: std::sync::Arc::new(
+                crate::server::confirmation_advance::ConfirmationTracker::new(),
+            ),
         });
         let app = axum::Router::new()
             .route(PURGE_PATH, post(purge_capability))

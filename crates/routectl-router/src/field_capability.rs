@@ -116,6 +116,27 @@ pub fn capability_key_is_catalog_scoped(key: &str) -> bool {
     field_capability_path(key).is_none()
 }
 
+/// True when `key` names an envelope-field wire-shape fact.
+///
+/// The exact complement of `capability_key_is_catalog_scoped`, published under
+/// its own name because the two answer different questions and a caller inverting
+/// the other one would be stating the wrong one. That predicate asks "must a
+/// catalog-revision change discard this?"; this one asks "is this a field verdict?"
+/// -- which is what the daemon's event-drain needs in order to route a field
+/// verdict's row through the ACKNOWLEDGED write path (its pre-flight eligibility
+/// depends on the row being durable) while every other capability row stays best
+/// effort.
+///
+/// Both read the same private prefix through the same private accessor, so the
+/// namespace still has exactly one spelling.
+///
+/// Like its sibling, this is a NAMESPACE test rather than a validity test: it
+/// answers only whether the key sits inside the field namespace, and never
+/// re-checks the grammar of a key already persisted.
+pub fn capability_key_is_field_verdict(key: &str) -> bool {
+    field_capability_path(key).is_some()
+}
+
 #[cfg(test)]
 #[path = "field_capability_tests.rs"]
 mod tests;

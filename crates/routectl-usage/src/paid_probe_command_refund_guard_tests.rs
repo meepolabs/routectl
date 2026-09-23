@@ -26,6 +26,7 @@
 /// `paid_probe.rs` appears here AND in the exempt list below: it is production
 /// code that the undo-scan deliberately skips.
 const USAGE_PRODUCTION_FILES: &[&str] = &[
+    "capability_ack.rs",
     "capability_batch.rs",
     "capability_event.rs",
     "cost.rs",

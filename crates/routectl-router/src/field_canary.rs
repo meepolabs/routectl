@@ -59,6 +59,28 @@ pub enum CanaryOutcome {
     Inconclusive,
 }
 
+/// What one durable-confirmation acknowledgement ESTABLISHED.
+///
+/// Two fields rather than the bare count, because the count alone cannot distinguish
+/// the two outcomes: a stale acknowledgement reports the count that stands, so an
+/// acknowledgement refused at a resident count of three and one ACCEPTED at three are
+/// the same `u32`. A caller that logs or returns success on the strength of that
+/// number reports a false success for the refused case -- which is exactly the shape a
+/// diagnostic on this surface must not have, since the whole point of the refusal is
+/// that a superseded lifecycle's evidence was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfirmationAck {
+    /// Whether the registry ACCEPTED the caller's incarnation and wrote its count.
+    ///
+    /// `false` on the stale path only: the caller named a superseded lifecycle, so
+    /// nothing was written and `confirmations` describes the lifecycle that stands
+    /// rather than anything this call established.
+    pub accepted: bool,
+    /// The confirmation count resident for the identity after this call -- the
+    /// caller's own on an acceptance, the standing one on a refusal.
+    pub confirmations: u32,
+}
+
 /// Resident per-identity canary/quorum state.
 #[derive(Debug, Clone, Copy)]
 struct CanaryState {
@@ -257,28 +279,48 @@ impl FieldCanaryRegistry {
     /// `GenerationOutcome::Applied` admission through the in-memory
     /// generation barrier. `Applied` only means the shared registry
     /// accepted the mutation in memory; it says nothing about whether the
-    /// event describing it has been durably written. No caller in this
-    /// build holds that acknowledgment yet, so this is state-only surface
-    /// for the durable-writer-ack caller that lands in a follow-up change --
-    /// wiring it to `Applied` alone would let a later eligibility check
-    /// observe a verdict as confirmed before its event write actually
-    /// landed.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// event describing it has been durably written, so wiring this to
+    /// `Applied` alone would let a later eligibility check observe a verdict
+    /// as confirmed before its event write actually landed.
+    ///
+    /// ITS PRODUCTION CALLER IS
+    /// [`FieldVerdictRegistry::acknowledge_durable_confirmation`], which
+    /// validates the event's generation and incarnation against live state
+    /// before reaching here. That call is reached from the daemon's
+    /// capability-event acknowledgment path, so a newly confirmed reactive
+    /// repair becomes pre-flight eligible within the same process once -- and
+    /// only once -- its event write is acknowledged.
+    ///
+    /// The MONOTONIC incarnation admission is this function's own half of that
+    /// discipline and is not redundant with the caller's check: the caller
+    /// validates against the LEARNED row while this validates against the
+    /// resident CANARY state, and a straggler can be current by one and
+    /// superseded by the other.
     pub fn acknowledge_confirmation(
         &self,
         key: &FieldVerdictKey,
         incarnation: u64,
         observations: u32,
-    ) -> u32 {
+    ) -> ConfirmationAck {
         let mut states = self.states.lock();
         let entry = states
             .entry(key.clone())
             .or_insert_with(|| CanaryState::fresh(incarnation, observations));
         if Self::admit_incarnation(entry, incarnation, observations) == IncarnationOrder::Stale {
-            return entry.confirmations;
+            // REFUSED, and reported as such: the standing count rides along for a
+            // diagnostic, but `accepted: false` is what stops a caller reading that
+            // number as its own. Returning the bare count here is how a caller comes
+            // to log a success for an acknowledgement that wrote nothing.
+            return ConfirmationAck {
+                accepted: false,
+                confirmations: entry.confirmations,
+            };
         }
         entry.confirmations = observations;
-        entry.confirmations
+        ConfirmationAck {
+            accepted: true,
+            confirmations: entry.confirmations,
+        }
     }
 
     /// Drop all resident state for `key`, e.g. because its verdict was

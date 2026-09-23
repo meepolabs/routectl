@@ -48,12 +48,18 @@ fn fixture_router() -> Router {
         "default".to_string(),
         AliasValue::Single(STATE_KEY.to_string()),
     );
+    // DURABLE PERSISTENCE IS ASSUMED, stated rather than defaulted: every verdict row
+    // reports `capability_writer_unhealthy` while capability writes cannot be
+    // guaranteed, and `Router::new` installs no health read. A fixture that said
+    // nothing would make every blocked-reason assertion in this file read that one
+    // token regardless of the state it was written to describe.
     Router::new(Arc::new(Config {
         providers,
         models,
         aliases,
         ..Config::default()
     }))
+    .with_capability_writes_assumed_durable_for_tests()
 }
 
 /// A facade view over `router`, which is what the panels hold.

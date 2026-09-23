@@ -93,6 +93,17 @@ pub async fn count_tokens(
         router.catalog_version(),
         router.overlay_revision(),
     );
+    // FIELD-VERDICT rows take the acknowledged path instead, and their
+    // acknowledgment is what advances pre-flight eligibility -- see
+    // `capability_ack_drain`. A no-op unless this walk actually minted one.
+    crate::handlers::capability_ack_drain::acknowledge_field_confirmations(
+        &router,
+        &state.usage,
+        &state.confirmation_advances,
+        &counted.meta,
+        router.catalog_version(),
+        router.overlay_revision(),
+    );
     match counted.result {
         Ok(tc) => {
             // Anthropic's wire shape is `{"input_tokens": N, ...}`.

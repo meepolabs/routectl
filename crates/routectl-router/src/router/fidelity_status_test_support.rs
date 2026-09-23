@@ -208,6 +208,51 @@ pub fn make_field_canary_due_for_tests(router: &Router, state_key: &str, field_p
     );
 }
 
+/// The resident learned entry's own incarnation for one field identity, so a
+/// cross-crate test can build the `CapabilityLearnEvent` stamps the production
+/// acknowledgment path validates against.
+///
+/// # Why a seam rather than a literal
+///
+/// The acknowledgment refuses an event whose generation or incarnation does not
+/// match the live acting row, which is the whole point of it. A test that
+/// hardcoded either would therefore be asserting against a value the registry may
+/// not hold -- and the refusal it got would look exactly like the refusal a broken
+/// acknowledgment produces. Reading the real values is what makes the durable path
+/// distinguishable from the refusal paths.
+///
+/// Returns `(generation, incarnation)`: the generation a producer must stamp is
+/// this Router's live registry generation, and the incarnation is the resident
+/// row's own.
+///
+/// GATED to test builds. It only READS -- nothing here can mint or advance a
+/// verdict -- but it is gated with its siblings so no release build carries a
+/// reach into registry internals at all.
+///
+/// # Panics
+///
+/// If `field_path` is not a well-formed qualified field path, or if no entry is
+/// resident for it: a test stamping an event against an absent identity would be
+/// asserting about a refusal it arranged by accident.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[must_use]
+pub fn field_verdict_event_stamps_for_tests(
+    router: &Router,
+    state_key: &str,
+    field_path: &str,
+) -> (u64, u64) {
+    let capability_key = crate::field_capability::field_capability_key(field_path)
+        .expect("the fixture's field path must be a well-formed qualified path");
+    let provider_kind = router.provider_kind_for_state_key(state_key).to_string();
+    let incarnation = router.learned_registry().resident_incarnation_for_tests(
+        state_key,
+        &capability_key,
+        &provider_kind,
+    );
+    (router.registry_generation(), incarnation)
+}
+
 /// Plant one resident ACTING envelope-field verdict and acknowledge
 /// `confirmations` cycles for it, so a cross-crate test can drive the REAL status
 /// surface against real registry state.

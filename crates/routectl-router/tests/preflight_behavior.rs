@@ -181,6 +181,13 @@ fn config() -> Config {
 }
 
 /// A router over `config()` with `seat` installed as the resolved model.
+///
+/// DURABLE PERSISTENCE IS ASSUMED, stated rather than defaulted: learned pre-flight
+/// suspends unless a capability-persistence health read reports durable writes, and
+/// `Router::new` installs none. Without this every rewrite assertion in this file
+/// would run against a suspended planner and pass for the wrong reason. The
+/// suspension itself is asserted against a fixture that omits the opt-in, in the
+/// crate's own `field_preflight_persistence_tests`.
 fn router_with(seat: Arc<Seat>) -> Router {
     let mut router = Router::new(Arc::new(config()));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
@@ -194,7 +201,7 @@ fn router_with(seat: Arc<Seat>) -> Router {
         )),
     );
     router.install_resolved_models(models);
-    router
+    router.with_capability_writes_assumed_durable_for_tests()
 }
 
 /// A request CARRYING the closed-table field on its canonical carrier.

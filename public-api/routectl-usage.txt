@@ -47,6 +47,56 @@ impl<T> core::convert::From<T> for routectl_usage::BatchCommit
 pub fn routectl_usage::BatchCommit::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::BatchCommit
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::BatchCommit
+pub enum routectl_usage::CapabilityEventWrite
+pub routectl_usage::CapabilityEventWrite::Committed
+pub routectl_usage::CapabilityEventWrite::SupersededByBoundary
+pub routectl_usage::CapabilityEventWrite::SupersededByPurge
+pub routectl_usage::CapabilityEventWrite::WriteFailed
+impl routectl_usage::CapabilityEventWrite
+pub const fn routectl_usage::CapabilityEventWrite::as_str(self) -> &'static str
+pub const fn routectl_usage::CapabilityEventWrite::is_durable(self) -> bool
+impl core::clone::Clone for routectl_usage::CapabilityEventWrite
+pub fn routectl_usage::CapabilityEventWrite::clone(&self) -> routectl_usage::CapabilityEventWrite
+impl core::cmp::Eq for routectl_usage::CapabilityEventWrite
+impl core::cmp::PartialEq for routectl_usage::CapabilityEventWrite
+pub fn routectl_usage::CapabilityEventWrite::eq(&self, &routectl_usage::CapabilityEventWrite) -> bool
+impl core::fmt::Debug for routectl_usage::CapabilityEventWrite
+pub fn routectl_usage::CapabilityEventWrite::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::CapabilityEventWrite
+impl core::marker::StructuralPartialEq for routectl_usage::CapabilityEventWrite
+impl core::marker::Freeze for routectl_usage::CapabilityEventWrite
+impl core::marker::Send for routectl_usage::CapabilityEventWrite
+impl core::marker::Sync for routectl_usage::CapabilityEventWrite
+impl core::marker::Unpin for routectl_usage::CapabilityEventWrite
+impl core::marker::UnsafeUnpin for routectl_usage::CapabilityEventWrite
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::CapabilityEventWrite
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::CapabilityEventWrite
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::CapabilityEventWrite where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventWrite::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::CapabilityEventWrite where U: core::convert::From<T>
+pub fn routectl_usage::CapabilityEventWrite::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::CapabilityEventWrite where U: core::convert::Into<T>
+pub type routectl_usage::CapabilityEventWrite::Error = core::convert::Infallible
+pub fn routectl_usage::CapabilityEventWrite::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::CapabilityEventWrite where U: core::convert::TryFrom<T>
+pub type routectl_usage::CapabilityEventWrite::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::CapabilityEventWrite::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::CapabilityEventWrite where T: core::clone::Clone
+pub type routectl_usage::CapabilityEventWrite::Owned = T
+pub fn routectl_usage::CapabilityEventWrite::clone_into(&self, &mut T)
+pub fn routectl_usage::CapabilityEventWrite::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::CapabilityEventWrite where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventWrite::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::CapabilityEventWrite where T: ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventWrite::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::CapabilityEventWrite where T: ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventWrite::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::CapabilityEventWrite where T: core::clone::Clone
+pub unsafe fn routectl_usage::CapabilityEventWrite::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::CapabilityEventWrite
+pub fn routectl_usage::CapabilityEventWrite::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::CapabilityEventWrite
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::CapabilityEventWrite
 pub enum routectl_usage::CostStatus
 pub routectl_usage::CostStatus::Partial
 pub routectl_usage::CostStatus::Priced
@@ -830,6 +880,34 @@ impl<T> core::convert::From<T> for routectl_usage::CapabilityEvent
 pub fn routectl_usage::CapabilityEvent::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::CapabilityEvent
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::CapabilityEvent
+pub struct routectl_usage::CapabilityEventReceipt
+impl routectl_usage::CapabilityEventReceipt
+pub async fn routectl_usage::CapabilityEventReceipt::await_outcome(self) -> routectl_usage::CapabilityEventWrite
+impl core::marker::Freeze for routectl_usage::CapabilityEventReceipt
+impl core::marker::Send for routectl_usage::CapabilityEventReceipt
+impl core::marker::Sync for routectl_usage::CapabilityEventReceipt
+impl core::marker::Unpin for routectl_usage::CapabilityEventReceipt
+impl core::marker::UnsafeUnpin for routectl_usage::CapabilityEventReceipt
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::CapabilityEventReceipt
+impl !core::panic::unwind_safe::UnwindSafe for routectl_usage::CapabilityEventReceipt
+impl<T, U> core::convert::Into<U> for routectl_usage::CapabilityEventReceipt where U: core::convert::From<T>
+pub fn routectl_usage::CapabilityEventReceipt::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::CapabilityEventReceipt where U: core::convert::Into<T>
+pub type routectl_usage::CapabilityEventReceipt::Error = core::convert::Infallible
+pub fn routectl_usage::CapabilityEventReceipt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::CapabilityEventReceipt where U: core::convert::TryFrom<T>
+pub type routectl_usage::CapabilityEventReceipt::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::CapabilityEventReceipt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_usage::CapabilityEventReceipt where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventReceipt::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::CapabilityEventReceipt where T: ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventReceipt::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::CapabilityEventReceipt where T: ?core::marker::Sized
+pub fn routectl_usage::CapabilityEventReceipt::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::CapabilityEventReceipt
+pub fn routectl_usage::CapabilityEventReceipt::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::CapabilityEventReceipt
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::CapabilityEventReceipt
 pub struct routectl_usage::CapabilityEventRow
 pub routectl_usage::CapabilityEventRow::capability: core::option::Option<alloc::string::String>
 pub routectl_usage::CapabilityEventRow::catalog_version: core::option::Option<i64>
@@ -1900,6 +1978,8 @@ pub fn routectl_usage::UsageDb::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::UsageDb
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageDb
 pub struct routectl_usage::UsageHandle
+impl routectl_usage::UsageHandle
+pub fn routectl_usage::UsageHandle::admit_acknowledged_capability_event(&self, routectl_usage::CapabilityEvent, u64, u64) -> core::result::Result<routectl_usage::CapabilityEventReceipt, routectl_usage::CapabilityEventWrite>
 impl routectl_usage::UsageHandle
 pub fn routectl_usage::UsageHandle::admit_capability_batch(&self, alloc::vec::Vec<routectl_usage::CapabilityEvent>, u64) -> core::result::Result<routectl_usage::BatchReceipt, routectl_usage::BatchCommit>
 pub fn routectl_usage::UsageHandle::admit_capability_batch_at(&self, alloc::vec::Vec<routectl_usage::CapabilityEvent>, u64, u64) -> core::result::Result<routectl_usage::BatchReceipt, routectl_usage::BatchCommit>

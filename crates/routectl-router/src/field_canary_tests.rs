@@ -32,8 +32,22 @@ fn acknowledge_confirmation_reconciles_to_the_acknowledged_count() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    assert_eq!(registry.acknowledge_confirmation(&k, 1, 1), 1);
-    assert_eq!(registry.acknowledge_confirmation(&k, 1, 2), 2);
+    // Both halves asserted, not just the count: an ACCEPTED acknowledgement is the
+    // only one that wrote anything, and the count alone cannot say which happened.
+    assert_eq!(
+        registry.acknowledge_confirmation(&k, 1, 1),
+        ConfirmationAck {
+            accepted: true,
+            confirmations: 1
+        },
+    );
+    assert_eq!(
+        registry.acknowledge_confirmation(&k, 1, 2),
+        ConfirmationAck {
+            accepted: true,
+            confirmations: 2
+        },
+    );
 
     let snap = registry.snapshot(&k).expect("resident after a commit");
     assert_eq!(snap.confirmations, 2);
@@ -65,7 +79,14 @@ fn a_new_incarnation_discards_the_prior_confirmation_count() {
     // identity (cleared and re-learned); its confirmation count starts
     // fresh rather than continuing from incarnation 1's tally.
     let reconciled = registry.acknowledge_confirmation(&k, 2, 1);
-    assert_eq!(reconciled, 1);
+    assert_eq!(
+        reconciled,
+        ConfirmationAck {
+            accepted: true,
+            confirmations: 1
+        },
+        "a NEWER incarnation is accepted, and reseeds to its own count",
+    );
     let snap = registry.snapshot(&k).expect("resident");
     assert_eq!(snap.incarnation, 2);
 }
@@ -1110,8 +1131,14 @@ fn an_older_acknowledgement_cannot_overwrite_a_newer_count() {
     let reported = registry.acknowledge_confirmation(&k, 4, 99);
 
     assert_eq!(
-        reported, 3,
-        "the stale acknowledgement reports the count that stands, not its own",
+        reported,
+        ConfirmationAck {
+            accepted: false,
+            confirmations: 3
+        },
+        "the stale acknowledgement reports REFUSED plus the count that stands -- the \
+         count alone cannot distinguish this from an acceptance at three, which is \
+         how a caller comes to log a false success",
     );
     let snap = registry.snapshot(&k).expect("resident");
     assert_eq!(snap.confirmations, 3, "and writes nothing");

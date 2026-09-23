@@ -92,11 +92,30 @@ use super::class_observe::DispatchSurface;
 use super::field_repair::{
     ANTHROPIC_API_KIND, FieldRepairRow, FieldSurface, TransformClass, present_rows,
 };
-use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, FieldPreflight, Router};
+use super::{
+    CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, FieldPreflight,
+    FieldPreflightAuthorizationRecord, Router,
+};
 
 /// Reason token: no closed-table field is present in the request at all, so
 /// there is nothing for a pre-flight rewrite to act on.
 pub(super) const FIELD_PREFLIGHT_NO_GROUNDED_FIELD: &str = "no_grounded_field";
+
+/// Reason token: durable capability-event persistence cannot be guaranteed right
+/// now, so learned pre-flight is suspended.
+///
+/// Every escape hatch a pre-flight rewrite depends on is a capability-event
+/// WRITE -- the durable clear a disproving canary performs, the operator purge,
+/// and the confirmation acknowledgment that made the verdict eligible. While
+/// those cannot be guaranteed, a verdict that turns out to be wrong cannot be
+/// taken out of service durably: the in-memory suspension lasts only until the
+/// process restarts, and the next boot's replay restores it. Reactive
+/// forward-and-repair is unaffected and still serves every request.
+///
+/// Checked BEFORE any verdict is read, alongside the lane gates, because it
+/// refuses the whole learned-pre-flight mechanism rather than one verdict's
+/// evidence.
+pub(super) const FIELD_PREFLIGHT_WRITER_UNHEALTHY: &str = "capability_writer_unhealthy";
 
 /// Reason token: the capability learning kill switch is off, or the target is
 /// not on the one lane this stage acts on. Checked before any verdict is read.
@@ -479,7 +498,7 @@ impl Router {
             // which is what leaves every OTHER row's adopted rewrite standing
             // on the accumulated body. A canary re-verifies one identity, so
             // unrelated eligible repairs remain applied.
-            Err(canary) => return restored_decision(target, row, canary),
+            Err(canary) => return restored_decision(target, row, canary, authorization),
             Ok(key) => key,
         };
         match self.adopt_row(planned, target, row, &key, authorization) {
@@ -543,6 +562,12 @@ impl Router {
                 field_path: Some(row.path),
                 transform_class: Some(row.class.as_str()),
                 reason: FIELD_PREFLIGHT_ACTION_DROP,
+                // The EXACT authorization this rewrite rested on, carried rather
+                // than re-read: the identity's state can move after the gates
+                // clear, and a record assembled from a later read would report a
+                // provenance or a canary posture this rewrite was never
+                // authorized under.
+                authorization: Some(authorization_record(authorization)),
             },
             canary: None,
             accounting: Some(accounting),
@@ -685,6 +710,31 @@ impl Router {
         if self.override_forces_supported(target, key.capability_key(), provider_kind) {
             return Err(FIELD_PREFLIGHT_MASKED_BY_OVERRIDE);
         }
+        // PERSISTENCE, after the operator mask and before every EVIDENCE gate.
+        //
+        // After the mask because the mask is the operative reason at any writer
+        // health: the operator has said to send this field, so a healthy writer
+        // would not change this row's fate and reporting the writer would send
+        // them to fix the wrong thing.
+        //
+        // Before eligibility and quorum because it is not a verdict gate at all.
+        // Every escape hatch a pre-flight rewrite depends on is a capability-event
+        // WRITE -- the durable clear a disproving canary performs, the operator
+        // purge, the confirmation acknowledgment -- so while those cannot be
+        // guaranteed, a verdict that turns out to be wrong could not be taken out
+        // of service durably: the in-memory suspension lasts only until the
+        // process restarts, and the next boot's replay restores it. Reporting a
+        // confirmation shortfall here would make an unhealthy writer look like
+        // missing evidence, and an operator would go looking for confirmations
+        // that would never help.
+        //
+        // Reactive forward-and-repair is untouched by this and still serves every
+        // request: it acts only after an upstream rejection, so its evidence is in
+        // hand on the request it serves and it needs no durable record to be
+        // correct.
+        if !self.capability_writes_durable() {
+            return Err(FIELD_PREFLIGHT_WRITER_UNHEALTHY);
+        }
         // ONE authorization read backs both gates below: the incarnation a
         // canary claim and its settlement must carry, plus the acknowledged
         // confirmation count this class's quorum is a threshold on. Reading
@@ -819,18 +869,28 @@ struct GateInputs<'g> {
 }
 
 /// The decision for a row this request RESTORED as its canary.
+///
+/// Carries the authorization record even though `acted` is false, and the
+/// distinction is exactly the point: a canary is not a refusal. The
+/// authorization DID permit an action here -- the planner spent it on a
+/// re-verification instead of a rewrite -- so the provenance that permitted it
+/// is reportable, and an operator reading a restored row needs to know which
+/// evidence the identity under test rests on.
 fn restored_decision<'a>(
     target: &DispatchTarget,
     row: FieldRepairRow,
     canary: Box<CanaryPlan<'a>>,
+    authorization: PreflightAuthorization,
 ) -> RowDecision<'a> {
+    let mut record = unchanged_record(
+        target,
+        Some(row.path),
+        Some(row.class),
+        FIELD_PREFLIGHT_CANARY_RESTORED,
+    );
+    record.authorization = Some(authorization_record(authorization));
     RowDecision {
-        record: unchanged_record(
-            target,
-            Some(row.path),
-            Some(row.class),
-            FIELD_PREFLIGHT_CANARY_RESTORED,
-        ),
+        record,
         canary: Some(canary),
         accounting: None,
     }
@@ -841,6 +901,10 @@ fn restored_decision<'a>(
 /// A free function rather than a method: it reads nothing from the router, so a
 /// `&self` receiver would suggest the record depends on router state when the
 /// only inputs are the target's sanitized key and the row's own facts.
+///
+/// Carries NO authorization record, and that is the contract: a refusal never
+/// held one, so filling the field would attribute permission to a decision that
+/// had none.
 fn unchanged_record(
     target: &DispatchTarget,
     field_path: Option<&'static str>,
@@ -853,8 +917,14 @@ fn unchanged_record(
         field_path,
         transform_class: class.map(TransformClass::as_str),
         reason,
+        authorization: None,
     }
 }
+
+// The authorization-provenance rendering used above and by `emit_field_preflight`
+// below lives in a sibling file to keep this one under the size ceiling. It
+// compiles into THIS module via `include!`, so no call site's path changes.
+include!("field_preflight_provenance.rs");
 
 /// Apply `surface` to a SCRATCH clone of `original_req` and adopt it only on a
 /// reported success whose post-condition holds.
@@ -909,6 +979,10 @@ pub(super) fn plan_transform_for_tests(
                 field_path: Some(path),
                 transform_class: class,
                 reason: FIELD_PREFLIGHT_ACTION_DROP,
+                // This driver starts AFTER every admission check, so it holds no
+                // authorization to report -- it exercises the transform, not the
+                // gates that authorize one.
+                authorization: None,
             },
         ),
         None => (
@@ -919,6 +993,7 @@ pub(super) fn plan_transform_for_tests(
                 field_path: Some(path),
                 transform_class: class,
                 reason: FIELD_PREFLIGHT_AMBIGUOUS_MUTATION,
+                authorization: None,
             },
         ),
     }
@@ -966,8 +1041,26 @@ const FIELD_PREFLIGHT_EVENT: &str = "envelope_field_preflight";
 /// `sanitize_for_log`-sanitized state key, or a boolean/count. Deliberately NO
 /// request values, no response body, no credential, no session key, and no
 /// upstream text at any verbosity.
+///
+/// # The authorization provenance, on both tiers
+///
+/// A decision whose authorization permitted something carries the provenance
+/// that permitted it (see [`super::FieldPreflightAuthorizationRecord`]), and
+/// both tiers render it: the DEBUG line for the decision it belongs to, and the
+/// WARN for the headline decision the line names. That pairing is what makes the
+/// two correlate -- an operator reading a WARN and scanning the DEBUG lines for
+/// the `state_key` it named finds the same phase, source, confirmation count,
+/// and canary posture on the decision the WARN stood for.
+///
+/// A refusal has no authorization, so its DEBUG line renders the absent tokens
+/// explicitly rather than omitting the fields: a line whose field set varies by
+/// outcome is one an operator cannot query uniformly, and an absent field reads
+/// as an unavailable one rather than as an inapplicable one.
 pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
     for record in &meta.field_preflight {
+        // Rendered ONCE per record, before the severity split, so the acting and
+        // non-acting tiers cannot render the same provenance two ways.
+        let provenance = RenderedAuthorization::of(record.authorization);
         if record.acted {
             tracing::debug!(
                 event = FIELD_PREFLIGHT_EVENT,
@@ -977,6 +1070,11 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
                 transform_class = record.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
                 reason = record.reason,
+                provenance_phase = provenance.phase,
+                provenance_source = provenance.source,
+                confirmations = provenance.confirmations,
+                canary = provenance.canary,
+                canary_last_outcome = provenance.canary_last_outcome,
                 "envelope-field pre-flight decision",
             );
         } else {
@@ -988,6 +1086,11 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
                 transform_class = record.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
                 reason = record.reason,
+                provenance_phase = provenance.phase,
+                provenance_source = provenance.source,
+                confirmations = provenance.confirmations,
+                canary = provenance.canary,
+                canary_last_outcome = provenance.canary_last_outcome,
                 "envelope-field pre-flight decision",
             );
         }
@@ -1009,12 +1112,23 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
     // below still describe every decision, so nothing is hidden by the choice of
     // which one to name.
     let headline = warn_headline(&acted).expect("the non-empty check above guarantees one");
+    // The HEADLINE's own provenance, carried through from the authorization that
+    // permitted the rewrite this line names. Read off the selected headline
+    // rather than aggregated across the acting set: the four values describe ONE
+    // identity's evidence, and an aggregate of two identities' phases or canary
+    // postures would be a fact about neither.
+    let provenance = RenderedAuthorization::of(headline.authorization);
     tracing::warn!(
         event = FIELD_PREFLIGHT_EVENT,
         action = FIELD_PREFLIGHT_ACTION_DROP,
         state_key = %sanitize_for_log(&headline.state_key),
         field_path = headline.field_path.unwrap_or(FIELD_PATH_NONE),
         transform_class = headline.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
+        provenance_phase = provenance.phase,
+        provenance_source = provenance.source,
+        confirmations = provenance.confirmations,
+        canary = provenance.canary,
+        canary_last_outcome = provenance.canary_last_outcome,
         decisions_acted = acted.len(),
         decisions_planned = meta.field_preflight.len(),
         "{FIELD_PREFLIGHT_WARN_MESSAGE}",
