@@ -57,7 +57,7 @@ fn a_paid_slot_counts_toward_the_same_ceiling_free_leases_refuse_at() {
 
     // Assert: the ceiling is now full FROM THE FREE SIDE TOO.
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         PROBE_MAX_CONCURRENCY,
         "the held paid slot must be counted in the one in_flight reading"
     );
@@ -71,7 +71,7 @@ fn a_paid_slot_counts_toward_the_same_ceiling_free_leases_refuse_at() {
         "and it must refuse a second paid acquisition"
     );
     assert_eq!(
-        scheduler.snapshot().paid_slot_refusals_total,
+        scheduler.snapshot(Instant::now()).paid_slot_refusals_total,
         1,
         "the refused acquisition must be counted"
     );
@@ -114,7 +114,7 @@ fn dropping_a_paid_slot_returns_capacity_to_the_free_side() {
     drop(held);
 
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         0,
         "every dropped paid slot must be released"
     );
@@ -145,7 +145,7 @@ async fn a_paid_slot_held_by_a_cancelled_future_still_releases() {
             .try_acquire_paid_slot()
             .expect("a slot is available");
         assert_eq!(
-            scheduler.snapshot().in_flight,
+            scheduler.snapshot(Instant::now()).in_flight,
             1,
             "premise: the slot must be held inside the cancelled future"
         );
@@ -160,7 +160,7 @@ async fn a_paid_slot_held_by_a_cancelled_future_still_releases() {
         "premise: the future must have been cancelled"
     );
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         0,
         "a cancelled future must still release the slot it held"
     );
@@ -219,7 +219,7 @@ fn concurrent_paid_acquisition_never_exceeds_the_shared_ceiling() {
         peak.load(Ordering::SeqCst)
     );
     assert_eq!(
-        scheduler.snapshot().in_flight,
+        scheduler.snapshot(Instant::now()).in_flight,
         0,
         "every slot and lease must have been released"
     );

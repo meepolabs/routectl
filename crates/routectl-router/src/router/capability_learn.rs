@@ -94,6 +94,11 @@ pub(super) enum LearnDedupeKey {
         /// Breaker state key of the rejecting target.
         state_key: String,
     },
+    /// One field-parser blindness signal per target per request.
+    FieldParserUnlocalized {
+        /// Breaker state key of the rejecting target.
+        state_key: String,
+    },
     /// Marks that an F1 negative for this capability was minted earlier in
     /// this attempt chain. Keys on `feature_key` ALONE (cross-lane): a later
     /// F2 candidate for the same capability -- on any lane -- is suppressed
@@ -229,18 +234,52 @@ impl Router {
 
     /// Map a learned-registry `state_key` to the `(provider_name, nickname)`
     /// pair the override registry resolves against. A per-model target keys
-    /// by nickname; a pooled seat keys by `nickname#label` (recover the base
-    /// model); a legacy / direct-construction target keys by the provider
+    /// by nickname; a pooled seat keys by `nickname#label`, whose LABEL is the
+    /// member `[providers]` entry the seat dispatches and whose base is the
+    /// model; a legacy / direct-construction target keys by the provider
     /// name itself (no model scope). Enables comparing a learned entry's
     /// effective override verdict across a reload.
+    ///
+    /// The member label outranks the base model's `provider_name` for a pooled
+    /// seat, and the ORDER is load-bearing: a pool-backed model's
+    /// `provider_name` is the POOL, which is not a `[providers]` entry at all
+    /// (`validate_pools` refuses a pool name that collides with one), so
+    /// resolving through it yields a name no provider lookup can answer -- and
+    /// every decision keyed on the pair then falls through to a default. A live
+    /// `DispatchTarget` for the seat carries the MEMBER as its `provider_name`
+    /// (see `chain::dispatch_target_for_seat`), so the member is what keeps this
+    /// resolution and the dispatch path naming one identity.
+    ///
+    /// The CONFIGURED-model arm behind the resolved one is not a nicety: it is what
+    /// a cold boot resolves in, before the resolved table is installed, and what a
+    /// Router whose provider build failed leaves behind permanently. The learn path
+    /// keys entries on such a target either way, so an identity that resolved only
+    /// through the resolved table would return an empty nickname for every one of
+    /// them -- and an empty nickname can never match a model-scoped override or
+    /// opt-in tier, so the operator's own `provider:model` entry would read as
+    /// absent on exactly the boot that restored the verdict.
     pub(super) fn override_identity_for(&self, state_key: &str) -> (String, String) {
         if let Some(model) = self.resolved_models.get(state_key) {
             return (model.provider_name.clone(), state_key.to_string());
         }
-        if let Some((base, _label)) = state_key.split_once('#')
-            && let Some(model) = self.resolved_models.get(base)
-        {
-            return (model.provider_name.clone(), base.to_string());
+        if let Some((base, label)) = state_key.split_once('#') {
+            // The member entry when the label names one, the base model's own
+            // provider otherwise -- a `#`-suffixed key whose label resolves nothing
+            // still has a base that does. Resolved table first, then the config, so
+            // a reload that repointed a nickname is honoured over the static tables.
+            let base_provider = self
+                .resolved_models
+                .get(base)
+                .map(|model| model.provider_name.clone())
+                .or_else(|| self.config.models.get(base).map(|m| m.provider.clone()));
+            if let Some(base_provider) = base_provider {
+                let provider_name = if self.config.providers.contains_key(label) {
+                    label.to_string()
+                } else {
+                    base_provider
+                };
+                return (provider_name, base.to_string());
+            }
         }
         (state_key.to_string(), String::new())
     }
@@ -275,13 +314,26 @@ impl Router {
         // entries on such a target, so its kind must still resolve: falling
         // through to the provider-name lookup below would yield the empty kind,
         // which silently changes the registry key on any provider whose
-        // normalization is not the identity (only `bedrock` today). Both the
-        // exact nickname and a pooled seat's base are tried, in that order.
-        if let Some(kind) = self.configured_model_kind(state_key).or_else(|| {
-            state_key
-                .split_once('#')
-                .and_then(|(base, _label)| self.configured_model_kind(base))
-        }) {
+        // normalization is not the identity (only `bedrock` today).
+        //
+        // A `#`-suffixed key tries its MEMBER label before its base, matching
+        // `override_identity_for`'s order above: the two are read together for
+        // one key (the pair names the target, the kind normalizes its capability
+        // token), so a kind drawn from the base while the name came from the
+        // member would describe two different provider entries as one identity.
+        if let Some(kind) = self
+            .configured_model_kind(state_key)
+            .or_else(|| {
+                state_key
+                    .split_once('#')
+                    .and_then(|(_base, label)| self.kind_of_provider(label))
+            })
+            .or_else(|| {
+                state_key
+                    .split_once('#')
+                    .and_then(|(base, _label)| self.configured_model_kind(base))
+            })
+        {
             return kind;
         }
         // A provider-scoped key (legacy or direct construction, no model scope).
@@ -583,6 +635,15 @@ impl Router {
         let Some(provider_kind) = target.provider_kind else {
             return;
         };
+        // BEFORE the capability resolver, and deliberately independent of it:
+        // the two questions are orthogonal. A rejection can resolve to a catalog
+        // capability and still name no field of the envelope, so hanging this on
+        // the resolver's `None` branch (where the two matcher-drift observers
+        // sit) would under-count exactly the traffic where the parser is blind
+        // while the matcher is not. Every gate above has already excluded a
+        // remapped class, a forwarded credential, and a status no request fault
+        // can carry.
+        self.observe_field_parser_blindness(provider_kind, cf, err, target, dedupe);
         let Some(resolved) = resolve_requested_capability(provider_kind, err, cf) else {
             self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
             self.observe_feature_naming_drift(provider_kind, cf, target, req, dedupe);
@@ -967,6 +1028,50 @@ impl Router {
             provider_kind,
             "deterministic feature-carrying rejection matched no feature-naming template",
         );
+    }
+
+    /// Blindness observability for the envelope-field rejection parser. When a
+    /// rejection's CLASS could have named a field of the request envelope and
+    /// the parser localized no path from it, this build could not attribute a
+    /// wire-shape fact it may well have been told: count it, so "the parser
+    /// knows no shape for this" is distinguishable from "no such rejection
+    /// arrived".
+    ///
+    /// Modeled on the two matcher-drift observers above, and deduped the same
+    /// way -- once per request per target, so a same-request retry or a
+    /// per-target re-entry cannot inflate the rate.
+    ///
+    /// COUNTED BUT NOT WARNED, unlike its two siblings. Those fire only when a
+    /// rejection shape a table was built for went unmatched, which is rare and
+    /// actionable per occurrence. This one is the ORDINARY case on real traffic
+    /// -- most caller-shaped 4xxs are not field rejections at all -- so a WARN
+    /// per occurrence would be noise an operator learns to ignore, and the
+    /// signal is the ratio against the localized counts rather than any single
+    /// line. The status/doctor surface reports that ratio.
+    ///
+    /// Only the count leaves this function: no state key, no provider, no
+    /// upstream text, so nothing about a rejection's content can reach a log
+    /// through it.
+    fn observe_field_parser_blindness(
+        &self,
+        provider_kind: &str,
+        cf: &ClassifiedFailure,
+        err: &Error,
+        target: &DispatchTarget,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+    ) {
+        // The NATIVE class is not available here, so the remap is refused
+        // explicitly by the caller before this is reached -- see
+        // `observe_for_learning`. What arrives is an unremapped class.
+        if !Self::rejection_localizes_no_field(&cf.class, err, provider_kind) {
+            return;
+        }
+        if !dedupe.insert(LearnDedupeKey::FieldParserUnlocalized {
+            state_key: target.state_key.clone(),
+        }) {
+            return;
+        }
+        self.metrics.incr_parser_unlocalized();
     }
 }
 

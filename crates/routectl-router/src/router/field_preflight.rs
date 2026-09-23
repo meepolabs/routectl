@@ -529,6 +529,13 @@ impl Router {
             .begin_modified_request(key, authorization.incarnation)
             .ok_or(FIELD_PREFLIGHT_NOT_ELIGIBLE)?;
         *planned = adopted;
+        // Counted HERE, at the one site that swaps the rewritten body in, so the
+        // count cannot outrun what actually went upstream: a decision refused by
+        // any gate above never reaches this line, and the routine fail-open is
+        // most decisions on most requests. Per ADOPTED ROW rather than per
+        // request, because a request carrying two classes rewrites two surfaces
+        // and exposes two identities.
+        self.metrics.incr_field_preflight_action();
         Ok(RowDecision {
             record: FieldPreflight {
                 acted: true,

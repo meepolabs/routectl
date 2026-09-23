@@ -202,6 +202,140 @@ pub async fn serve_on_listener_with_secrets(
     config_path: Option<PathBuf>,
     secrets: Option<Arc<dyn SecretStore>>,
 ) -> Result<()> {
+    serve_on_listener_with_injected_router(
+        config,
+        catalog_overlay,
+        listener,
+        config_path,
+        secrets,
+        Default::default(),
+    )
+    .await
+}
+
+/// The test-only seams one spawned daemon carries, as ONE value.
+///
+/// Bundled rather than threaded as three parameters, and that shape is what the
+/// previous arity drift argues for: the plumbing from the spawn call to
+/// `StatusState` crosses four functions, each with a `cfg(test)` and a
+/// `cfg(not(test))` arm, and an earlier version of one arm took one parameter fewer
+/// -- every test build passed, and only `cargo build --release` caught it. A struct
+/// makes a new seam a field rather than eight signature edits.
+///
+/// `cfg(test)` ONLY, like each seam it carries: a release build cannot construct it,
+/// so no deployment can inject a Router, tap its own status events, or force a panel
+/// to degrade.
+#[cfg(test)]
+#[derive(Default)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the module is private, but this is a \
+    test-only seam named from a sibling module tree, so the crate visibility is \
+    load-bearing rather than cosmetic -- `pub` would widen it past the crate"
+)]
+pub(crate) struct DaemonTestSeams {
+    /// Replaces the ROUTER BUILD only; everything downstream runs as in production.
+    pub(crate) injected_router: Option<routectl_router::Router>,
+    /// Receives the live router swap the running daemon serves from.
+    pub(crate) router_observer:
+        Option<tokio::sync::oneshot::Sender<Arc<ArcSwap<routectl_router::Router>>>>,
+    /// Observation and failure-injection hooks for this daemon's status surface.
+    pub(crate) status_hooks: crate::handlers::status::test_hooks::StatusTestHooks,
+}
+
+/// `serve_on_listener_with_secrets` with the built ROUTER injectable.
+///
+/// # Why this seam exists, and why it is test-only
+///
+/// Two of routectl's own safety rules make some behaviors unreachable through a
+/// spawned daemon, and the reason is deliberate in both cases: pre-flight refuses a
+/// target whose base URL names a LOCAL HOP (a rejection from one is not attributable
+/// to an upstream, so a verdict must neither be learned from it nor acted on for it),
+/// and probe activation refuses the same targets. Every in-process HTTP mock binds
+/// loopback. So a daemon pointed at a mock is a lane where those features are
+/// CORRECTLY inert -- and a test asserting over it would pass with the whole pipeline
+/// deleted.
+///
+/// The way out is not to weaken either rule. It is to let a test hand the daemon a
+/// Router whose CONFIG carries a remote-looking base URL -- which is what the gates
+/// read -- while its resolved provider handle answers in-process. The daemon's own
+/// wiring, its listener, its layer stack, its status surface, and the request
+/// boundary are then all real; only the transport under the provider is not, and that
+/// is the one part these behaviors do not turn on.
+///
+/// `pub(crate)` under `cfg(test)` ONLY -- not behind a feature, and not `pub`. A
+/// caller able to inject a Router could inject one whose config and whose provider
+/// disagree, which is precisely the state the attributability rules exist to keep out
+/// of a deployment. Behind a feature it would still be reachable by any consumer that
+/// enabled it; under `cfg(test)` it exists in no build anyone else can link. That is
+/// why the test driving it lives in this crate rather than in `tests/`.
+///
+/// A default `DaemonTestSeams` is the ordinary path and builds from `config` exactly
+/// as before.
+#[cfg(test)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the module is private, but the test \
+    sidecar is a sibling module that needs to name this, so the visibility is \
+    load-bearing rather than cosmetic"
+)]
+pub(crate) async fn serve_on_listener_with_injected_router(
+    config: Arc<Config>,
+    catalog_overlay: Arc<CatalogOverlay>,
+    listener: TcpListener,
+    config_path: Option<PathBuf>,
+    secrets: Option<Arc<dyn SecretStore>>,
+    seams: DaemonTestSeams,
+) -> Result<()> {
+    serve_inner(
+        config,
+        catalog_overlay,
+        listener,
+        config_path,
+        secrets,
+        seams,
+    )
+    .await
+}
+
+/// The production path. The test-only parameter is present but typed `Option<()>`,
+/// so a release build cannot construct it -- while the ONE caller below stays
+/// identical in both builds.
+///
+/// The arity matching the gated arm is what a RELEASE compile checks: an earlier
+/// version of this arm took one parameter fewer, every test build passed, and only
+/// `cargo build --release` caught the drift.
+#[cfg(not(test))]
+async fn serve_on_listener_with_injected_router(
+    config: Arc<Config>,
+    catalog_overlay: Arc<CatalogOverlay>,
+    listener: TcpListener,
+    config_path: Option<PathBuf>,
+    secrets: Option<Arc<dyn SecretStore>>,
+    _seams: Option<()>,
+) -> Result<()> {
+    serve_inner(
+        config,
+        catalog_overlay,
+        listener,
+        config_path,
+        secrets,
+        None,
+    )
+    .await
+}
+
+/// The whole serve body. One implementation, so the injected and ordinary paths
+/// cannot drift.
+async fn serve_inner(
+    config: Arc<Config>,
+    catalog_overlay: Arc<CatalogOverlay>,
+    listener: TcpListener,
+    config_path: Option<PathBuf>,
+    secrets: Option<Arc<dyn SecretStore>>,
+    #[cfg(test)] seams: DaemonTestSeams,
+    #[cfg(not(test))] _seams: Option<()>,
+) -> Result<()> {
     // Composite resolver: oauth:// refs flow through OAuthStore (the
     // routectl-managed credentials.json), everything else through
     // MemoryStore. Built ONCE up here so the same `Arc<dyn
@@ -219,9 +353,30 @@ pub async fn serve_on_listener_with_secrets(
         }
     };
 
-    let router =
+    // An injected Router replaces the BUILD only. Everything downstream -- the
+    // warms, the writer, the layer stack, the listener, the reload wiring -- runs
+    // exactly as it does in production, which is what makes a test over it a test of
+    // the assembled daemon rather than of a harness.
+    #[cfg(test)]
+    let DaemonTestSeams {
+        injected_router,
+        router_observer,
+        status_hooks,
+    } = seams;
+    #[cfg(test)]
+    let router = match injected_router {
+        Some(injected) => injected,
+        None => {
+            build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())
+                .await?
+        }
+    };
+    #[cfg(not(test))]
+    let router = {
+        let _ = _seams;
         build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())
-            .await?;
+            .await?
+    };
 
     // Cross-version catalog drift observability: AFTER the router
     // build, so the in-use selectors below are the same set
@@ -425,6 +580,23 @@ pub async fn serve_on_listener_with_secrets(
     // fail closed by construction.
     let router = super::paid_probe_ledger::install_paid_probe_ledger(router, &usage_handle);
     let router_swap = Arc::new(ArcSwap::from_pointee(router));
+    // Publish the LIVE swap to this call's observer, if it was given one.
+    //
+    // This is what lets an assembled-daemon test drive the router the running daemon
+    // is actually serving from -- a probe pass on any other Router would prove
+    // nothing about this one. It hands out the same `Arc<ArcSwap<Router>>` the
+    // handlers hold, so a reload the daemon performs is visible to the observer too.
+    //
+    // PER-CALL rather than a process-global slot, and that is not a style choice: a
+    // test binary runs its cases concurrently in one process, so a global one-shot is
+    // claimed by whichever daemon boots first and every other test then waits on a
+    // sender that was already consumed. Measured -- the global shape failed all six
+    // cases with a receive error.
+    #[cfg(test)]
+    if let Some(observer) = router_observer {
+        // A dropped receiver is fine: the test finished before publication.
+        let _ = observer.send(Arc::clone(&router_swap));
+    }
 
     // Compute the initial activation inventory and SEED its ArcSwap before
     // the reload coordinator spawns, so the first reload-triggered recompute
@@ -525,6 +697,8 @@ pub async fn serve_on_listener_with_secrets(
         config_path.clone(),
         bound,
         daemon_meta,
+        #[cfg(test)]
+        status_hooks,
     );
 
     // An UNACCOUNTED settlement is terminal: after its batch was admitted, the
@@ -1032,6 +1206,7 @@ fn build_axum_router(
     config_path: Option<PathBuf>,
     bound: std::net::SocketAddr,
     daemon_meta: Arc<crate::handlers::status::DaemonMeta>,
+    #[cfg(test)] status_hooks: crate::handlers::status::test_hooks::StatusTestHooks,
 ) -> AxumRouter {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
@@ -1111,6 +1286,8 @@ fn build_axum_router(
     // the operator's incident window (the shell) still loads.
     let status_state =
         crate::handlers::status::StatusState::from_app(&state, config_path, daemon_meta);
+    #[cfg(test)]
+    let status_state = status_state.with_test_hooks(status_hooks);
     let status_allowlist = status_gate::StatusHostAllowlist::new(bound);
     let status_json = status_gate::apply_overload_layers(
         crate::handlers::status::status_router().with_state(Arc::new(status_state)),
@@ -1136,3 +1313,13 @@ fn build_axum_router(
 #[cfg(test)]
 #[path = "serve_tests.rs"]
 mod serve_tests;
+
+/// ASSEMBLED-DAEMON verification of the pre-flight pipeline.
+///
+/// Declared here rather than in `tests/` because it drives the `pub(crate)`
+/// `cfg(test)` injection seam above: as an integration test it would have required
+/// that seam to be `pub` behind a feature, which any consumer enabling the feature
+/// could then call.
+#[cfg(test)]
+#[path = "preflight_daemon_tests.rs"]
+mod preflight_daemon_tests;

@@ -127,6 +127,14 @@ dhat = ["dep:dhat"]
 # A dev-dependency with extra features unifies the `test-utils` feature in
 # only for test/bench builds, never for the release binary.
 routectl-core = { workspace = true, features = ["test-utils"] }
+# Same pattern, same reason, for the two crates whose mutation seams must not
+# exist in a release build: routectl-usage's paid-probe fixtures (one of which
+# can lower a committed spend count) and routectl-router's status-row fixture
+# constructor. Declared as dev-dependency features so feature unification turns
+# them on for test/bench builds ONLY -- the release binary links the same crates
+# without them.
+routectl-usage = { path = "../routectl-usage", features = ["test-utils"] }
+routectl-router = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
 futures = { workspace = true }
 # `io-util` adds `AsyncReadExt`/`AsyncWriteExt` (`read_exact`/`write_all`),

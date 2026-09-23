@@ -28,7 +28,10 @@ use routectl_core::failure_class::LastOutcome;
 use routectl_router::DoctorReport;
 use routectl_router::router::RouteTargetStatus;
 
-use super::field_verdict_log::log_field_verdict_snapshot;
+use super::field_verdict_log::{FidelityEmission, log_field_verdict_snapshot};
+use super::paid_probe_budget::{
+    AccountingGlobals, PaidProbeBudget, accounting_globals, paid_probe_budgets,
+};
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -82,9 +85,14 @@ fn map_reachability(target: RouteTargetStatus) -> TargetReachability {
 /// the panel data, emitting the shared field-verdict snapshot log along the
 /// way. Split out from [`build_from_path`] so the wiring is directly
 /// testable without going through the `spawn_blocking` builder.
-fn build_panel_data(report: DoctorReport, view: &StatusRouterView) -> DoctorPanel {
-    let learned = view.learned_capabilities();
-    log_field_verdict_snapshot(view, &learned);
+fn build_panel_data(
+    report: DoctorReport,
+    view: &StatusRouterView,
+    budgets: &[PaidProbeBudget],
+    globals: AccountingGlobals,
+    emission: FidelityEmission,
+) -> DoctorPanel {
+    log_field_verdict_snapshot(view, budgets, globals, emission);
     let reachability = view
         .route_targets(Instant::now())
         .into_iter()
@@ -100,11 +108,27 @@ fn build_panel_data(report: DoctorReport, view: &StatusRouterView) -> DoctorPane
 /// `spawn_blocking` builder (via a runtime handle) so its disk I/O never blocks
 /// an async worker; reachability is read from the SAME live router snapshot
 /// pinned before the blocking work.
-async fn build_from_path(state: &StatusState, config_path: PathBuf) -> Panel<DoctorPanel> {
+async fn build_from_path(
+    state: &StatusState,
+    config_path: PathBuf,
+    emission: FidelityEmission,
+) -> Panel<DoctorPanel> {
     let view = state.router.view();
+    // Captured here; the ledger OPEN runs inside the blocking closure below, beside
+    // the gather's own disk I/O -- SQLite work on an async worker blocks that
+    // worker, and `guard_panel` is what puts it on a blocking thread under a
+    // cancellation-survivable permit.
+    let caps = view.paid_probe_daily_caps();
+    let db_path = state.usage_db_path.clone();
+    // Counter reads, not I/O, so these stay out here beside the router snapshot.
+    let globals = accounting_globals(&state.usage_health);
     let handle = tokio::runtime::Handle::current();
     // The snapshot is pinned now, so request time IS the read time.
     let as_of = now_utc_rfc3339();
+    // The daemon's own fidelity observer, when a test installed one -- attached at
+    // the builder rather than by the caller, for the reason `health` states.
+    #[cfg(test)]
+    let emission = emission.with_daemon_observer(state);
     guard_panel(
         &state.builder_capacity,
         DOCTOR_SCHEMA_VERSION,
@@ -113,7 +137,9 @@ async fn build_from_path(state: &StatusState, config_path: PathBuf) -> Panel<Doc
             let ctx = handle.block_on(gather_context_no_network(&config_path));
             let report = build_report_no_network(&ctx);
             let schema_version = report.schema_version;
-            let data = build_panel_data(report, &view);
+            let budgets =
+                paid_probe_budgets(&caps, &db_path, chrono::Utc::now().timestamp_millis());
+            let data = build_panel_data(report, &view, &budgets, globals, emission);
             Panel::available(schema_version, as_of, data)
         },
     )
@@ -121,9 +147,41 @@ async fn build_from_path(state: &StatusState, config_path: PathBuf) -> Panel<Doc
 }
 
 pub(super) async fn build(state: &StatusState) -> Panel<DoctorPanel> {
+    build_with_emission(state, FidelityEmission::always()).await
+}
+
+/// The panel build, with the caller stating whether THIS build emits the shared
+/// fidelity line. See `health::build_with_emission` for why the choice is the
+/// caller's.
+pub(super) async fn build_with_emission(
+    state: &StatusState,
+    emission: FidelityEmission,
+) -> Panel<DoctorPanel> {
     let panel = match state.config_path.clone() {
-        Some(config_path) => build_from_path(state, config_path).await,
-        None => Panel::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH),
+        Some(config_path) => build_from_path(state, config_path, emission).await,
+        None => {
+            // A daemon serving without an on-disk config path has no doctor REPORT
+            // to build, but it still has a live router -- and the observability
+            // floor is about the router, not the report. So the fidelity line is
+            // emitted here too, with UNAVAILABLE budget data: the caps come from
+            // config and there is none to read, while every other field on the line
+            // (the counters, the verdict rows, the probe state, the writer health)
+            // comes from state this branch has in full.
+            //
+            // The alternative -- staying silent -- would mean a config-less daemon
+            // satisfied the floor only through `/status/health`, which is a narrower
+            // contract than the one this surface documents.
+            log_field_verdict_snapshot(
+                &state.router.view(),
+                &[],
+                accounting_globals(&state.usage_health),
+                #[cfg(test)]
+                emission.with_daemon_observer(state),
+                #[cfg(not(test))]
+                emission,
+            );
+            Panel::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH)
+        }
     };
     state.observability.doctor.record(&panel);
     panel
@@ -135,6 +193,57 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 
 #[cfg(test)]
 mod tests {
+    /// The NO-CONFIG doctor branch still emits the fidelity line.
+    ///
+    /// A daemon serving without an on-disk config path has no doctor report to
+    /// build, but it has a live router -- and the observability floor is about the
+    /// router. Staying silent here would mean a config-less daemon satisfied the
+    /// floor only through `/status/health`, a narrower contract than this surface
+    /// documents.
+    ///
+    /// The budget rows are legitimately empty (the caps come from config and there
+    /// is none), which is why the line is emitted with unavailable budget data
+    /// rather than withheld: every OTHER field on it comes from state this branch
+    /// has in full.
+    ///
+    /// Mutation check: drop the `log_field_verdict_snapshot` call from the `None`
+    /// arm -> red here.
+    #[test]
+    fn the_no_config_branch_still_emits_the_fidelity_snapshot() {
+        let router = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
+            Config::default(),
+        ))));
+        let (app, _dir) = AppState::for_test(router);
+        // No config path: the branch under test.
+        let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
+
+        // `capture_events` takes a synchronous closure, so the build is driven on a
+        // current-thread runtime inside it. A bare futures executor is not a
+        // substitute: the builder arms tokio machinery.
+        let mut panel = None;
+        let events = routectl_testkit::capture_events(|| {
+            panel = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a current-thread runtime")
+                    .block_on(build(&state)),
+            );
+        });
+        let panel = panel.expect("the build ran");
+
+        assert!(
+            panel.unavailable.is_some(),
+            "premise: this IS the no-config branch, so the panel is unavailable",
+        );
+        assert!(
+            events.iter().any(|e| e.message
+                == crate::handlers::status::field_verdict_log::FIDELITY_SNAPSHOT_MESSAGE),
+            "and the fidelity line is still emitted: the floor is about the router, \
+             which this branch has in full",
+        );
+    }
+
     use super::*;
     use crate::handlers::status::DaemonMeta;
     use crate::server::AppState;
@@ -243,7 +352,16 @@ mod tests {
         let report = build_report_no_network(&ctx);
 
         let events = routectl_testkit::capture_events(|| {
-            build_panel_data(report, &view);
+            build_panel_data(
+                report,
+                &view,
+                &[],
+                AccountingGlobals {
+                    writer_degraded: false,
+                    consumed_unauthorized_total: 0,
+                },
+                FidelityEmission::always(),
+            );
         });
 
         assert!(
@@ -334,7 +452,7 @@ mod tests {
         // derived, never a dial.
         assert!(json["data"]["reachability"].is_array());
 
-        // Test #7 (redaction): the raw loader error is already redacted inside
+        // REDACTION: the raw loader error is already redacted inside
         // the gather, so no path / scheme value / secret reaches the payload.
         let text = serde_json::to_string(&json).unwrap();
         for forbidden in ["LEAKED", "literal:", "env://", "file://", "config.toml"] {

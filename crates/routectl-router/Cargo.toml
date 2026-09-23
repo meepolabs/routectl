@@ -24,6 +24,14 @@ bedrock = ["routectl-providers/bedrock"]
 # drift-guard test). Off by default so the runtime binary does not carry
 # the multi-megabyte snapshot text.
 gen-catalog = []
+# Exposes the fidelity-status fixture constructor
+# (`FieldVerdictStatusSpec` + `FieldVerdictStatus::from_spec_for_tests`) for the
+# cross-crate renderer tests in routectl-cli, and nothing else. Enabled as a
+# dev-dependency feature there so the constructor is available to test builds and
+# NEVER compiled into a release build: a hand-built status row in production
+# would be a fabricated status report, and the type is `#[non_exhaustive]`
+# precisely so no foreign crate can assemble one.
+"test-utils" = []
 # Bench-only: swaps the perf bench global allocator to dhat's heap
 # profiler (see benches/dispatch_clone.rs). Never a default feature;
 # enabled via `--features routectl-router/dhat` by
@@ -65,6 +73,14 @@ fd-lock = "4"
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
+# This crate depends on ITSELF as a dev-dependency to turn on its own
+# `test-utils` feature for test targets. An integration test in `tests/` is a
+# SEPARATE crate, so it does not inherit this crate's `cfg(test)` -- without this
+# it cannot see the gated fixture seams at all, and gating them on `cfg(test)`
+# alone would put them out of reach of exactly the tests that need them. Feature
+# unification then enables the feature for test/bench builds only; the release
+# library is built without it.
+routectl-router = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 serial_test = "3"
 wiremock.workspace = true

@@ -47,7 +47,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 /// Milliseconds in one UTC day. Leap seconds are not represented in
 /// epoch-millisecond time, so every day is exactly this long.
-const MS_PER_UTC_DAY: i64 = 86_400_000;
+pub(super) const MS_PER_UTC_DAY: i64 = 86_400_000;
 /// Fixed prefix of every reservation key, carrying the codec version.
 const RESERVATION_KEY_PREFIX: &str = "paid_probe_reservation:v1";
 

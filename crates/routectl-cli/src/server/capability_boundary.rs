@@ -332,3 +332,15 @@ impl AdmittedBoundary {
 #[cfg(test)]
 #[path = "capability_boundary_tests.rs"]
 mod tests;
+
+/// The SPANNING canary proof: real Router dispatch at full cadence, the canary's
+/// own settlement, the production drain to a real writer, and the restart that
+/// proves the clear was durable.
+///
+/// Its own sidecar rather than part of the boundary tests above, and declared here
+/// because this is the module whose drain-plus-restart seam it extends. Those tests
+/// drive the real drain with a HAND-BUILT cleared event; the whole point of this one
+/// is that the event comes from a real canary, so the two cannot share a fixture.
+#[cfg(test)]
+#[path = "canary_span_tests.rs"]
+mod canary_span_tests;

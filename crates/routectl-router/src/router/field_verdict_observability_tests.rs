@@ -280,3 +280,58 @@ fn field_repair_counters_reports_both_nonzero_alarm_halves() {
          modified -- requests affected, not canary attempts",
     );
 }
+
+/// The pre-flight ACTION count and the parser-unlocalized count are reported
+/// beside the repair halves, and start at zero on a fresh router.
+///
+/// Their presence at zero is the contract: an absent field on the status
+/// surface reads as an unavailable panel rather than as "nothing happened", and
+/// a pre-flight gate an operator cannot see acting is one they cannot audit.
+#[test]
+fn field_repair_counters_starts_the_preflight_and_parser_halves_at_zero() {
+    let router = bare_router();
+
+    let counters = router.field_repair_counters();
+
+    assert_eq!(
+        counters.preflight_actions, 0,
+        "a router that dispatched nothing has applied no pre-flight rewrite",
+    );
+    assert_eq!(
+        counters.parser_unlocalized, 0,
+        "and has seen no rejection its parser could not localize",
+    );
+}
+
+/// Each of the two new halves reads its OWN counter.
+///
+/// Driven to DIFFERENT non-zero values deliberately: equal values would let a
+/// snapshot that wired both fields to one source pass, and the two mean
+/// unrelated things -- one counts requests routectl rewrote before dispatch,
+/// the other counts rejections it could not attribute to a field at all.
+///
+/// Mutation checks: hardcode `preflight_actions: 0` -> red on the first
+/// assertion; hardcode `parser_unlocalized: 0` -> red on the second; SWAP the
+/// two right-hand sources -> red on both.
+#[test]
+fn field_repair_counters_reports_the_preflight_and_parser_halves_separately() {
+    let router = bare_router();
+
+    for _ in 0..4 {
+        router.metrics.incr_field_preflight_action();
+    }
+    for _ in 0..7 {
+        router.metrics.incr_parser_unlocalized();
+    }
+
+    let counters = router.field_repair_counters();
+
+    assert_eq!(
+        counters.preflight_actions, 4,
+        "the pre-flight half counts requests a pre-flight rewrite modified",
+    );
+    assert_eq!(
+        counters.parser_unlocalized, 7,
+        "and the parser half counts rejections no field path was localized from",
+    );
+}

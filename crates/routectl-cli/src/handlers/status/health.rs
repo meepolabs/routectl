@@ -21,7 +21,10 @@ use routectl_router::LearnedRegistryEntry;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 
-use super::field_verdict_log::log_field_verdict_snapshot;
+use super::field_verdict_log::{FidelityEmission, log_field_verdict_snapshot};
+use super::paid_probe_budget::{
+    AccountingGlobals, PaidProbeBudget, accounting_globals, paid_probe_budgets,
+};
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -179,7 +182,16 @@ fn map_learned(entry: LearnedRegistryEntry, now: Instant, now_ms: i64) -> Learne
 /// Build the panel from ONE router snapshot. The single `view` drives both
 /// reads, so the target health and the learned negatives are internally
 /// consistent (no interleaved hot-swap).
-fn build_from_view(view: &StatusRouterView) -> HealthPanel {
+///
+/// `budgets` is computed by the caller, which is the one that holds the ledger
+/// path and the counters facade -- keeping this function a projection over the
+/// pinned snapshot rather than a second place that opens a database.
+fn build_from_view(
+    view: &StatusRouterView,
+    budgets: &[PaidProbeBudget],
+    globals: AccountingGlobals,
+    emission: FidelityEmission,
+) -> HealthPanel {
     // Pin a single monotonic read time and its epoch-ms anchor together, so
     // every target's elapsed-age conversion shares one clock reading.
     let now = Instant::now();
@@ -190,7 +202,7 @@ fn build_from_view(view: &StatusRouterView) -> HealthPanel {
         .map(|target| map_target(target, now_ms))
         .collect();
     let entries = view.learned_capabilities();
-    log_field_verdict_snapshot(view, &entries);
+    log_field_verdict_snapshot(view, budgets, globals, emission);
     let learned_negatives = entries
         .into_iter()
         .map(|entry| map_learned(entry, now, now_ms))
@@ -202,15 +214,56 @@ fn build_from_view(view: &StatusRouterView) -> HealthPanel {
 }
 
 pub(super) async fn build(state: &StatusState) -> Panel<HealthPanel> {
+    build_with_emission(state, FidelityEmission::always()).await
+}
+
+/// The panel build, with the caller stating whether THIS build emits the shared
+/// fidelity line.
+///
+/// Split so the `/status` aggregate -- which builds this panel AND the doctor panel
+/// in one request, both of which carry the surface -- can emit once. An explicit
+/// argument rather than a flag derived here, because only the caller knows what its
+/// sibling builders did.
+pub(super) async fn build_with_emission(
+    state: &StatusState,
+    emission: FidelityEmission,
+) -> Panel<HealthPanel> {
     let view = state.router.view();
+    // The inputs the accounting read needs are captured here; the READ ITSELF runs
+    // inside the blocking closure below. That placement is the point: the read
+    // opens SQLite, and SQLite work on an async worker blocks that worker for the
+    // duration. `guard_panel` exists to run exactly this kind of work on a blocking
+    // thread while holding a cancellation-survivable permit, so the open belongs
+    // inside it rather than awaited in front of it.
+    let caps = view.paid_probe_daily_caps();
+    let db_path = state.usage_db_path.clone();
+    // The process-global accounting facts are counter reads, not I/O, so they stay
+    // out here beside the router snapshot -- one read time for the whole build.
+    let globals = accounting_globals(&state.usage_health);
     // The snapshot is pinned at `view()`, so request time IS the read time.
     let as_of = now_utc_rfc3339();
+    // The daemon's own fidelity observer, when a test installed one. Attached here
+    // rather than passed in by the caller: the aggregate shares ONE emission across
+    // both builders, so a caller-side attach would have to be repeated at every call
+    // site and a missed one would silently stop observing that path.
+    #[cfg(test)]
+    let emission = emission.with_daemon_observer(state);
+    // Fail BEFORE the fidelity emitter, which is what makes this the real degraded
+    // shape: the aggregate's contract is that health leaving the shared claim
+    // untouched lets doctor still satisfy the observability floor. A failure injected
+    // after the emit would prove the opposite of what it looks like.
+    #[cfg(test)]
+    let fail = state.test_hooks.fail_health_builder;
     let panel = guard_panel(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
         move || {
-            let dto = build_from_view(&view);
+            #[cfg(test)]
+            assert!(!fail, "injected health-builder failure");
+            let budgets =
+                paid_probe_budgets(&caps, &db_path, chrono::Utc::now().timestamp_millis());
+            let dto = build_from_view(&view, &budgets, globals, emission);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },
     )
@@ -226,6 +279,15 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 #[cfg(test)]
 mod tests {
     use super::super::vocabulary;
+
+    /// Healthy process-global accounting, for the panel tests whose subject is the
+    /// panel rather than the accounting.
+    fn healthy_globals() -> AccountingGlobals {
+        AccountingGlobals {
+            writer_degraded: false,
+            consumed_unauthorized_total: 0,
+        }
+    }
     use super::*;
     use crate::handlers::status::DaemonMeta;
     use crate::server::AppState;
@@ -626,7 +688,7 @@ mod tests {
         let view = state.router.view();
 
         let events = routectl_testkit::capture_events(|| {
-            build_from_view(&view);
+            build_from_view(&view, &[], healthy_globals(), FidelityEmission::always());
         });
 
         assert!(
@@ -643,7 +705,7 @@ mod tests {
         // the point is that ONE view drives both reads and the DTO builds.
         let state = test_state();
         let view = state.router.view();
-        let panel = build_from_view(&view);
+        let panel = build_from_view(&view, &[], healthy_globals(), FidelityEmission::always());
         assert!(panel.targets.is_empty());
         assert!(panel.learned_negatives.is_empty());
     }

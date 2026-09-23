@@ -37,6 +37,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "paid_probe.rs",
     "paid_probe_command.rs",
     "paid_probe_lifecycle.rs",
+    "paid_probe_read.rs",
     "query/aggregate.rs",
     "query/cache_decision.rs",
     "query/calibration.rs",
@@ -96,6 +97,53 @@ fn is_production_source(path: &std::path::Path) -> bool {
         && !name.ends_with("_test_support.rs")
         && name != "tests.rs"
         && !name.contains("test_support")
+}
+
+/// Source files that are RELEASE-ABSENT: declared behind `cfg(test)` or the
+/// non-default `test-utils` feature, so no release build compiles them.
+///
+/// Distinguished from the exempt list below, and the difference is the whole
+/// point. An EXEMPT file ships and is trusted for a stated reason. A file here
+/// does not ship at all, so a refund path in it cannot exist in any artifact a
+/// deployment runs -- the classification is enforced by the build, not by this
+/// guard's trust.
+///
+/// The classification is VERIFIED rather than declared: `assert_release_absent`
+/// below reads each file's declaration site in `lib.rs` and fails if the gate is
+/// missing. So removing the `cfg` to ship one of these turns it into an
+/// UNDECLARED production module (red on the completeness check) AND fails the
+/// gate assertion -- it cannot quietly become a shipped refund path.
+const USAGE_RELEASE_ABSENT_FILES: &[&str] = &["paid_probe_test_support.rs"];
+
+/// Assert every release-absent file really is gated at its declaration.
+///
+/// Reads `lib.rs` rather than the file itself: a `cfg` INSIDE a module does not
+/// stop the module from being compiled, and the gate that matters is the one on
+/// the `mod` item. Comment-stripped, so prose about the gate cannot satisfy it.
+fn assert_release_absent(src: &std::path::Path) {
+    let lib = std::fs::read_to_string(src.join("lib.rs")).expect("lib.rs must read");
+    let code: String = lib
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for file in USAGE_RELEASE_ABSENT_FILES {
+        let module = file.trim_end_matches(".rs");
+        let decl = format!("mod {module};");
+        let at = code.find(&decl).unwrap_or_else(|| {
+            panic!("{file} is classified release-absent but `{decl}` is not in lib.rs")
+        });
+        let gate = r#"#[cfg(any(test, feature = "test-utils"))]"#;
+        let above = &code[..at];
+        assert!(
+            above
+                .rfind(gate)
+                .is_some_and(|gate_at| !above[gate_at..].contains("\n\n")),
+            "{file} is classified release-absent, so its `mod` declaration in lib.rs must \
+             carry `{gate}` immediately above it -- without that gate the file SHIPS, and \
+             it holds a path that can lower a committed paid-probe count",
+        );
+    }
 }
 
 /// Every production source under `dir`, as `(path relative to dir, text)`.
@@ -248,6 +296,26 @@ fn the_scanned_corpus_covers_every_production_module() {
             "exempt file {file} no longer exists -- remove or update the exemption",
         );
     }
+
+    // And every RELEASE-ABSENT classification is verified against the build, not
+    // trusted: the file must exist on disk (a stale entry would mask a real gap
+    // after a rename, exactly as for an exemption) and its `mod` declaration must
+    // carry the feature gate. A file whose gate is removed SHIPS, and this one
+    // holds a path that can lower a committed spend count.
+    for file in USAGE_RELEASE_ABSENT_FILES {
+        let path = src.join(file);
+        assert!(
+            path.exists(),
+            "release-absent file {file} no longer exists -- remove or update the entry",
+        );
+        assert!(
+            !discovered.contains(*file),
+            "{file} is classified release-absent yet the production walk FOUND it -- the \
+             two classifications are disjoint by construction, so this means the \
+             suffix-based production filter changed",
+        );
+    }
+    assert_release_absent(&src);
 }
 
 /// No production module in the owning crate, outside the reservation

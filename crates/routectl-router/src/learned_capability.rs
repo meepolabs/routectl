@@ -466,6 +466,18 @@ pub struct LearnedCapabilityRegistry {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     acquire_hook: Mutex<Option<Box<dyn Fn(&'static str) + Send + Sync>>>,
+    /// How many [`Self::snapshot`] calls this registry has served.
+    ///
+    /// The one-read contract's executable half -- see [`Self::note_snapshot_read`].
+    /// A relaxed-free `SeqCst` counter costs one increment per snapshot, which is a
+    /// read a status poll makes a handful of times.
+    ///
+    /// GATED to test/`test-utils` builds rather than carried unread in release: the
+    /// counter's only reader is the one-read contract's own assertion, so a release
+    /// build would pay an atomic increment per snapshot for a value nothing can
+    /// observe -- and `-D warnings` is right to flag it.
+    #[cfg(any(test, feature = "test-utils"))]
+    snapshot_reads: std::sync::atomic::AtomicUsize,
     /// Test-only hook fired by `observe_in_generation_with_observations`
     /// itself, AFTER its own `guarded_for` call has returned (every lock it
     /// took already released) and BEFORE the outcome goes back to the
@@ -881,6 +893,8 @@ impl LearnedCapabilityRegistry {
             probe_hook: Mutex::new(None),
             #[cfg(test)]
             acquire_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-utils"))]
+            snapshot_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             post_observe_hook: Mutex::new(None),
         }
@@ -1246,6 +1260,7 @@ impl LearnedCapabilityRegistry {
 
     /// Snapshot every resident entry in the fixed contract shape.
     pub fn snapshot(&self) -> Vec<LearnedRegistryEntry> {
+        self.note_snapshot_read();
         self.entries
             .read()
             .iter()
@@ -1705,7 +1720,10 @@ impl LearnedCapabilityRegistry {
     /// The resident entry's incarnation, or zero when the key holds nothing.
     /// Test-only direct query; production reads the incarnation off the
     /// `GenerationOutcome` [`Self::guarded_keyed`] returns.
-    #[cfg(test)]
+    ///
+    /// Gate widened alongside its one caller `resident_incarnation_for_tests`; see
+    /// that method for why. Absent from every release build either way.
+    #[cfg(any(test, feature = "test-utils"))]
     fn resident_incarnation(&self, key: &RegistryKey) -> u64 {
         self.entries.read().get(key).map_or(0, |e| e.incarnation)
     }
@@ -1752,6 +1770,60 @@ impl LearnedCapabilityRegistry {
     #[inline]
     #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
     const fn note_acquired(&self, _lock: &'static str) {}
+
+    /// Count one [`Self::snapshot`] call and, while instrumented, PERTURB what the
+    /// next one returns.
+    ///
+    /// Two effects from one hook deliberately. The count makes "one read" assertable
+    /// directly. The perturbation is what makes it assertable for the right reason:
+    /// a test that only counted would still pass if a second read happened to
+    /// return the same entries, which it usually would -- so under instrumentation
+    /// each successive read is made to answer DIFFERENTLY, and a consumer that read
+    /// twice then assembles two lists that cannot be reconciled. That turns a
+    /// coherence claim from "the source looks like it reads once" into a behavior.
+    ///
+    /// Gated to test/`test-utils` builds and inert unless a test installs the
+    /// instrument, so production takes one atomic increment and nothing else.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn note_snapshot_read(&self) {
+        self.snapshot_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// No-op when not testing.
+    #[cfg(not(any(test, feature = "test-utils")))]
+    #[inline]
+    #[allow(clippy::unused_self)]
+    const fn note_snapshot_read(&self) {}
+
+    /// How many times [`Self::snapshot`] has been called.
+    ///
+    /// The executable half of the one-read contract: a consumer claiming to derive
+    /// two lists from one snapshot is checked against this, not against its source
+    /// text.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn snapshot_reads(&self) -> usize {
+        self.snapshot_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Make the NEXT snapshot read answer differently from this one, by planting an
+    /// extra resident entry per read.
+    ///
+    /// The perturbation a count alone cannot provide. Installed by a test, then any
+    /// consumer that reads twice sees two different registries and its own
+    /// consistency assertions fail -- which is the behavior, rather than an
+    /// inference from how the code is written.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn perturb_each_snapshot_read_for_tests(&self, entry: ExportedEntry) {
+        let reads = self.snapshot_reads();
+        let mut planted = entry;
+        // A key unique per read, so read N and read N+1 differ.
+        planted.feature_key = format!("{}#perturbed{reads}", planted.feature_key);
+        self.import_entries(vec![planted]);
+    }
 
     /// Install a test hook fired from inside the guarded operation with the
     /// generation active at that moment. Test-only; see [`Self::guarded`].
@@ -2046,7 +2118,12 @@ impl LearnedCapabilityRegistry {
     }
 
     /// A resident entry's stamped incarnation. Test-only.
-    #[cfg(test)]
+    ///
+    /// Widened from `cfg(test)` to include the `test-utils` feature so the
+    /// crate's own gated planting seam (`plant_acting_field_verdict_for_tests`)
+    /// can seed a canary state at the incarnation the import just stamped. Still
+    /// absent from every release build, and still crate-internal.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn resident_incarnation_for_tests(
         &self,
         state_key: &str,
@@ -2483,6 +2560,71 @@ impl LearnedCapabilityRegistry {
             | GenerationOutcome::Reserved
             | GenerationOutcome::Exhausted => None,
         }
+    }
+
+    /// Every resident FIELD-namespace entry's acting incarnation, under ONE
+    /// acquisition of the guards.
+    ///
+    /// # Why a bulk projection exists at all
+    ///
+    /// [`Self::field_acting_incarnation_in_generation`] is the per-key read, and it
+    /// goes through `guarded_read`, which takes `entries.write()` -- an EXCLUSIVE
+    /// lock, because the guarded primitive is shared with the mutating paths that
+    /// need lease-awareness in the same critical section. That is right for a
+    /// dispatch asking about one key. It is wrong for a STATUS read that asks about
+    /// every key: a deployment with a thousand resident verdicts would take a
+    /// thousand exclusive locks per poll, on the same lock every dispatch needs,
+    /// every few seconds.
+    ///
+    /// So this answers the same question for all of them at once. One acquisition,
+    /// one consistent instant, and the projection is READ-ONLY: it mints no
+    /// incarnation, takes no lease, and mutates no entry -- which is what makes a
+    /// single shared acquisition sound here where the per-key primitive needs an
+    /// exclusive one.
+    pub(crate) fn field_acting_incarnations(&self, now: Instant) -> HashMap<(String, String), u64> {
+        // A field key is catalog-INDEPENDENT, so the generation gate admits it
+        // unconditionally -- which is why no generation reading is compared here. The
+        // two COHERENCE guards are still TAKEN, and only those two: `entries` holds
+        // the rows and `purge_leases` decides which of them a purge has captured, so a
+        // row admitted here while its lease was taken would be one this projection
+        // reports acting and a dispatch refuses. Taken in the documented order
+        // (`entries` before `purge_leases`), which is what makes a concurrent
+        // `prepare_purge` -- taking the same two in the same order -- unable to
+        // interleave with a boundary that is landing.
+        //
+        // The generation locks are NOT taken. An earlier version acquired and
+        // immediately dropped them, claiming ordering; that was false twice over --
+        // a lock released before the read orders nothing, and a field key is
+        // catalog-generation independent so there was no admission to order anyway.
+        let entries = self.entries.read();
+        let leases = self.purge_leases.read();
+        entries
+            .iter()
+            .filter(|(key, _)| {
+                !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+            })
+            // A key a purge has captured is refused, exactly as the per-key
+            // primitive refuses it: acting on one would act on state the purge
+            // already owns.
+            .filter(|(key, _)| !leases.contains(*key))
+            // The SAME acting predicate the per-key read applies, over the same
+            // map -- not a second spelling of it. A copy here could disagree
+            // about a lapsed or non-negative entry, and the status surface would
+            // then report a verdict acting that no dispatch would act on.
+            .filter_map(|(key, entry)| {
+                matches!(
+                    Self::negative_state_in(&entries, key, now),
+                    NegativeState::Acting
+                )
+                .then_some((
+                    // The registry's own key type is private, so the projection
+                    // hands back its two normalized halves -- which is what a
+                    // caller outside this module keys on anyway.
+                    (key.state_key.clone(), key.feature_key.clone()),
+                    entry.incarnation,
+                ))
+            })
+            .collect()
     }
 
     /// The resident entry's own incarnation when it is currently ACTING

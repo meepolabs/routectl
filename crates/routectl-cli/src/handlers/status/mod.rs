@@ -20,13 +20,17 @@ pub(crate) mod builder_probe;
 mod config;
 mod daemon_meta;
 mod doctor;
+mod fidelity_log;
 mod field_verdict_log;
 mod health;
 mod page;
+mod paid_probe_budget;
 #[cfg(test)]
 mod production_source;
 mod query;
 mod router_view;
+#[cfg(test)]
+pub(crate) mod test_hooks;
 mod types;
 mod usage;
 
@@ -45,6 +49,11 @@ use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError as TryAcquire};
 
 pub use types::{Panel, now_utc_rfc3339, utc_rfc3339, vocabulary};
+
+/// Re-exported for the assembled-daemon sidecar in `crate::server`, which drains
+/// these off a daemon-scoped observer. `cfg(test)` like the observer itself.
+#[cfg(test)]
+pub(crate) use field_verdict_log::FidelityEvent;
 
 pub use daemon_meta::DaemonMeta;
 
@@ -147,6 +156,20 @@ pub struct StatusState {
     /// it is released by the blocking work ending -- not by a cancelled
     /// request's future dropping. See [`BuilderCapacity`].
     pub builder_capacity: BuilderCapacity,
+    /// Read-only view of the usage writer's shared health counters, for the
+    /// paid-probe accounting-health rows.
+    ///
+    /// A COUNTERS facade, never the writer's producer handle: that handle can
+    /// enqueue rows, so a status handler holding one would be structurally capable
+    /// of writing -- and a lexical guard in this module's tests refuses its type
+    /// name in every status source for exactly that reason. This carries the same
+    /// shared `Arc` the writer holds and exposes only reads, which is what lets the
+    /// accounting surface exist without weakening the contract above.
+    pub usage_health: paid_probe_budget::UsageHealthView,
+    /// Test-only observation and failure-injection seams for THIS daemon's status
+    /// surface. Absent from every release build -- see [`test_hooks`].
+    #[cfg(test)]
+    pub(crate) test_hooks: test_hooks::StatusTestHooks,
 }
 
 impl StatusState {
@@ -158,6 +181,8 @@ impl StatusState {
         daemon_meta: Arc<DaemonMeta>,
     ) -> Self {
         let usage_db_path = app.router.load().config.usage.db_path.clone();
+        let usage_health =
+            paid_probe_budget::UsageHealthView::new(std::sync::Arc::clone(app.usage.counters()));
         Self {
             router: StatusRouterHandle::new(app.router.clone()),
             activation: app.activation.clone(),
@@ -166,7 +191,23 @@ impl StatusState {
             daemon_meta: DaemonMetaHandle::new(daemon_meta),
             observability: PanelObservability::default(),
             builder_capacity: BuilderCapacity::default(),
+            usage_health,
+            #[cfg(test)]
+            test_hooks: test_hooks::StatusTestHooks::default(),
         }
+    }
+
+    /// Install this daemon's test-only status seams.
+    ///
+    /// A post-construction setter rather than a `from_app` parameter, so the
+    /// production constructor's signature is identical in both builds -- every
+    /// other caller of `from_app` (the panel unit tests, the route-inventory
+    /// guards) stays untouched, and a release build has no way to reach this.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_test_hooks(mut self, hooks: test_hooks::StatusTestHooks) -> Self {
+        self.test_hooks = hooks;
+        self
     }
 }
 
@@ -422,9 +463,21 @@ async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusA
     // are the SAME builders the per-panel endpoints call -- no divergent second
     // mapping.
     let usage = usage::build(&state).await;
-    let health = health::build(&state).await;
+    // The health and doctor panels BOTH carry the fidelity surface, so exactly one
+    // of them emits its INFO line for this request: two identical snapshots per poll
+    // would make a reader counting lines read double the poll rate, and the two
+    // lines would carry different timestamps while describing one moment.
+    //
+    // ONE request-scoped CLAIM rather than a pre-assigned emitter. Each builder
+    // attempts it and the first to reach the logger wins, so a builder whose panel
+    // degraded to unavailable never reaches it and its sibling still satisfies the
+    // observability floor for this request. A pre-assigned emitter could not: if IT
+    // failed, the request emitted nothing at all. Suppression is about the LOG ONLY
+    // -- both panels' data is built in full either way.
+    let emission = field_verdict_log::FidelityEmission::shared();
+    let health = health::build_with_emission(&state, emission.clone()).await;
     let config = config::build(&state).await;
-    let doctor = doctor::build(&state).await;
+    let doctor = doctor::build_with_emission(&state, emission).await;
     Json(StatusAggregate {
         panels: AggregatePanels {
             usage,
@@ -567,6 +620,21 @@ mod tests {
             ("config.rs", include_str!("config.rs"), &panel_forbidden),
             ("doctor.rs", include_str!("doctor.rs"), &panel_forbidden),
             (
+                "fidelity_log.rs",
+                include_str!("fidelity_log.rs"),
+                &panel_forbidden,
+            ),
+            (
+                "field_verdict_log.rs",
+                include_str!("field_verdict_log.rs"),
+                &panel_forbidden,
+            ),
+            (
+                "paid_probe_budget.rs",
+                include_str!("paid_probe_budget.rs"),
+                &panel_forbidden,
+            ),
+            (
                 "daemon_meta.rs",
                 include_str!("daemon_meta.rs"),
                 &panel_forbidden,
@@ -708,7 +776,7 @@ mod tests {
         assert!(ok.unavailable.is_none());
     }
 
-    /// Test #6 (panic isolation): the aggregate composes four guarded builders
+    /// PANIC ISOLATION: the aggregate composes four guarded builders
     /// with sequential awaits. A panic in ONE builder degrades only that panel
     /// to unavailable; the builders after it still run and build normally, the
     /// one before it keeps its value, and no panic escapes. Exercises the exact
@@ -744,7 +812,7 @@ mod tests {
         assert!(a.unavailable.is_none());
     }
 
-    /// Test #5 (partial failure) + the no-outer-version contract. The usage
+    /// PARTIAL FAILURE, plus the no-outer-version contract. The usage
     /// source is unavailable (absent ledger) while health/config/doctor
     /// succeed: `GET /status` is HTTP 200, the usage panel is unavailable, the
     /// other three are available, each panel carries its OWN `schema_version`,
