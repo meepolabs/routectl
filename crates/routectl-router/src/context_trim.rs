@@ -332,8 +332,36 @@ fn substitute_placeholder(part: &mut ContentPart, replacement: Option<&str>) {
 }
 
 /// Rough token estimate for the whole request: serialized byte length / 4.
+///
+/// The FLOOR division is load-bearing: this value keys the window gate, the
+/// trim trigger, calibration evidence and the persisted `calib_estimated_tokens`
+/// / `would_trim_*` columns, whose meaning must stay comparable across
+/// deploys. A client-facing display reads [`estimate_meter_tokens`] instead.
 pub fn estimate_total_tokens(req: &ChatRequest) -> u64 {
     serialized_len(req) / BYTES_PER_TOKEN_ESTIMATE
+}
+
+/// Client-facing context-meter estimate for the whole request: the same
+/// serialized byte length as `estimate_total_tokens`, with the one
+/// display rule that a request serializing to any bytes never shows zero.
+///
+/// Display only: never feed this into a persisted column or a gating
+/// decision -- those stay on the floor value.
+#[must_use]
+pub fn estimate_meter_tokens(req: &ChatRequest) -> u64 {
+    meter_tokens_from_bytes(serialized_len(req))
+}
+
+/// Minimum-nonzero bytes/4: zero bytes show zero, any nonzero byte count
+/// shows at least one token, otherwise the floor quotient.
+const fn meter_tokens_from_bytes(bytes: u64) -> u64 {
+    if bytes == 0 {
+        0
+    } else if bytes < BYTES_PER_TOKEN_ESTIMATE {
+        1
+    } else {
+        bytes / BYTES_PER_TOKEN_ESTIMATE
+    }
 }
 
 /// Rough token estimate for a message-index range: summed serialized byte
@@ -2030,3 +2058,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "context_trim_estimate_tests.rs"]
+mod estimate_tests;

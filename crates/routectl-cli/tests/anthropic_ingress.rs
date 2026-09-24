@@ -3531,3 +3531,105 @@ async fn upstream_400_message_survives_verbatim_without_leaking_the_body() {
         "the raw upstream body was echoed to the client; got: {raw}"
     );
 }
+
+/// The synthesized first `message_start` on a streaming Anthropic request
+/// carries the display meter estimate of the inbound canonical request --
+/// the same serialized-bytes basis the router persists -- rather than the
+/// upstream's own opening count, which is withheld until the terminal
+/// `message_delta`.
+#[tokio::test]
+async fn stream_first_message_start_carries_meter_estimate_of_inbound_request() {
+    use axum::http::HeaderMap;
+    use routectl_cli::ingress::IngressAdapter;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: an upstream whose own opening count (5) differs from any
+    // estimate of the request below.
+    let sse_body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_meter\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 256,
+        "stream": true,
+        "system": "be brief",
+        "messages": [{"role": "user", "content": "caf\u{e9} \u{1f600} how long is this prompt?"}]
+    });
+    let canonical = AnthropicIngress
+        .parse_request(&HeaderMap::new(), &serde_json::to_vec(&body).unwrap())
+        .expect("fixture parses");
+    let expected = routectl_router::estimate_meter_tokens(&canonical);
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let downstream = resp.text().await.unwrap();
+
+    // Assert: exactly one message_start, first in the stream, carrying the
+    // meter estimate. Field order inside a frame is not part of the SSE
+    // contract, so frames are split on blank lines and read by field.
+    let frames: Vec<(Option<&str>, Option<&str>)> = downstream
+        .split("\n\n")
+        .filter(|frame| !frame.trim().is_empty())
+        .map(|frame| {
+            let event = frame.lines().find_map(|l| l.strip_prefix("event: "));
+            let data = frame.lines().find_map(|l| l.strip_prefix("data: "));
+            (event, data)
+        })
+        .collect();
+    assert_eq!(
+        frames.first().and_then(|(event, _)| *event),
+        Some("message_start"),
+        "message_start must be the first frame; got: {downstream}"
+    );
+    let starts: Vec<Value> = frames
+        .iter()
+        .filter(|(event, _)| *event == Some("message_start"))
+        .map(|(_, data)| {
+            serde_json::from_str(data.expect("message_start frame carries data"))
+                .expect("message_start data is JSON")
+        })
+        .collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "exactly one message_start; got: {downstream}"
+    );
+    assert!(
+        expected > 5,
+        "fixture must separate estimate from upstream count"
+    );
+    assert_eq!(
+        starts[0]["message"]["usage"]["input_tokens"].as_u64(),
+        Some(expected),
+        "first message_start must carry the meter estimate; got: {downstream}"
+    );
+}

@@ -15554,6 +15554,7 @@ pub fn routectl_router::edit_config_toml<E, F>(&std::path::Path, &[u8], F) -> co
 pub fn routectl_router::effective_pricing(&routectl_router::config::Config, &routectl_router::CatalogOverlay, &str, &str, &str) -> core::option::Option<(routectl_router::PricingConfig, routectl_router::pricing::PricingSource)>
 pub fn routectl_router::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_router::ImpactClass) -> routectl_router::ImpactClass
+pub fn routectl_router::estimate_meter_tokens(&routectl_core::schema::ChatRequest) -> u64
 pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
 pub fn routectl_router::is_cataloged_provider_kind(&str) -> bool
 pub fn routectl_router::is_config_provider_kind(&str) -> bool

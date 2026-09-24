@@ -32,7 +32,6 @@ use crate::handlers::usage_capture::{
 };
 use crate::ingress::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamRequestContext,
-    token_estimate::estimate_input_tokens,
 };
 use crate::server::AppState;
 use crate::server::confirmation_advance::ConfirmationTracker;
@@ -588,11 +587,11 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // K-sample recording at natural end-of-stream.
     let session_key = req.routectl_internal.inbound_session_key.clone();
     // Build the stream-state seed from `req` BEFORE dispatch moves it:
-    // the local input-token estimate (for a non-zero early
+    // the display input-token estimate (for a non-zero early
     // `message_start.usage.input_tokens`) and the resolved model (for the
     // early-frame model id). Adapters that need neither ignore it.
     let stream_ctx = StreamRequestContext {
-        input_tokens_estimate: estimate_input_tokens(&req),
+        input_tokens_estimate: routectl_router::estimate_meter_tokens(&req),
         model: req.model.clone(),
     };
     // Hold the dispatch UN-AWAITED. `stream_with_options` borrows `&self`

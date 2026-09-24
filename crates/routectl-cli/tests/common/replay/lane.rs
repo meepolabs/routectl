@@ -284,7 +284,7 @@ pub enum LaneClass {
 /// The ingress tokens that own a client-facing dialect, as
 /// `IngressAdapter::id()` emits them
 /// (`crates/routectl-cli/src/ingress/`). Shared helpers in that directory
-/// (`mod.rs`, `session_key.rs`, `token_estimate.rs`) own no dialect and are
+/// (`mod.rs`, `session_key.rs`) own no dialect and are
 /// absent by construction.
 pub const INGRESS_IDS: &[&str] = &["anthropic", "openai", "openai-responses"];
 

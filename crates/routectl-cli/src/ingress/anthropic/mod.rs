@@ -110,10 +110,11 @@ pub struct AnthropicStreamState {
     /// via `IngressAdapter::new_stream_state`; `None` on the `Default`
     /// path (tests, library consumers with no request context).
     pub(super) req_model: Option<String>,
-    /// Local input-token estimate for the originating request (see
-    /// `ingress::token_estimate`). Emitted as `usage.input_tokens` on the
-    /// synthesized `message_start` so the pre-inversion fast path reports
-    /// a live context meter instead of zero. The terminal
+    /// Display input-token estimate for the originating request (see
+    /// `routectl_router::estimate_meter_tokens`). Emitted as
+    /// `usage.input_tokens` on the synthesized `message_start` so the
+    /// pre-inversion fast path reports a live context meter instead of
+    /// zero. The terminal
     /// `message_delta` carries the authoritative upstream count and
     /// overwrites this within seconds. Defaults to 0 on the `Default`
     /// path.

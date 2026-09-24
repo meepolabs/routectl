@@ -2080,6 +2080,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   wm=1.25/rm=0.1, ~1.11 at wm=2.0), and `None` means NEVER SUPPRESS
   (`row.auto_cacher`, `wm <= 1.0`, or a degenerate `rm >= 1.0`). Imports ONLY
   the pricing row + std -- no Config/Router/provider/async
+- `src/context_trim.rs` -- advisory steady-state trimmer
+  (`propose_steady_state_trim`, near-lossless marks) plus the whole-request
+  token estimates: `estimate_total_tokens` (persisted floor) and
+  `estimate_meter_tokens` (client display wrapper over the same bytes)
 - `src/calibration/mod.rs` -- learned per-lane correction of the router's token
   estimate; re-exports `Factor` + `CalibrationStore` / `LaneKey` / `cohort_of`
   and the warm-rebuild seam (`CalibrationLedgerReader` /
@@ -6639,18 +6643,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/ingress/mod.rs` -- `IngressAdapter` trait (incl. `early_frame`:
   warm-hold first-body-byte SSE events, default no-op; Anthropic emits the
   synthesized `message_start`, OpenAI / Responses emit nothing), `SseEvent`,
-  `StreamRequestContext` (request-derived seed for `new_stream_state`: local
-  input-token estimate + resolved model), `read_alias_header`
+  `StreamRequestContext` (request-derived seed for `new_stream_state`:
+  display input-token estimate + resolved model), `read_alias_header`
   (`x-routectl-alias` override); `MITM_PROXIED_HEADER`
   (`x-routectl-mitm-proxied`) -- the seam header the MITM front-proxy stamps
   on the re-injected `api.anthropic.com` inference leg, shared between the
   proxy set site and the `handlers::ingress_handle` forwarded-mode
   capture/admission read sites so the two cannot drift on the literal
-- `src/ingress/token_estimate.rs` -- `estimate_input_tokens(&ChatRequest) ->
-  u64`: pure/total zero-dependency char/token heuristic (`CHARS_PER_TOKEN`
-  divisor) over system + message text; seeds the synthesized
-  `message_start.usage.input_tokens` so the pre-inversion fast path shows a
-  live context meter until the terminal `message_delta` overwrites it
 - `src/ingress/session_key.rs` -- shared inbound per-conversation
   session-key resolution: `OPENAI_SESSION_HEADERS` (the ordered, grounded
   allowlist of session headers the OpenAI-shaped ingresses accept, and the
