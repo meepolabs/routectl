@@ -112,19 +112,14 @@ impl PaidProbeReservation {
     /// Whether a paid upstream call may proceed on the strength of this
     /// outcome.
     ///
-    /// THE one predicate every paid dispatch site asks, so that "reserve
-    /// before dispatch" cannot be restated as a different condition at a
-    /// second site.
-    ///
     /// `pub(crate)` deliberately, though the enum is public: the enum must be
     /// public because trait implementors outside this crate RETURN it, but the
     /// authorization decision is the router's alone. Publishing it would invite
-    /// an out-of-crate caller to ask the question and act on the answer, which
-    /// is exactly the second reservation site the seam exists to prevent -- and
-    /// would pin it as semver surface before a single spender exists.
+    /// an out-of-crate caller to ask the question and act on the answer.
     ///
-    /// Allowance rationale as for [`Router::reserve_paid_probe_unit`]: the
-    /// paid dispatch arm that asks is a separate change.
+    /// Production authorization matches `Committed` directly because it also
+    /// needs the committed counts; this predicate pins the same classification
+    /// in tests, so it remains test-only in normal builds.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn permits_paid_call(&self) -> bool {
         matches!(self, Self::Committed { .. })
@@ -187,13 +182,9 @@ impl Router {
     /// without inventing a permission -- the fail-closed default this whole
     /// module exists to make unavoidable.
     ///
-    /// NO PRODUCTION CALLER YET, and allowed rather than deleted for the same
-    /// reason `crate::probe_scheduler::ProbeValidator::ExpectedRejection` is:
-    /// the paid dispatch arm that draws on it is a separate change, and a seam
-    /// whose fail-closed answer is pinned before any spender exists is what
-    /// keeps that change from having to invent one. `cfg_attr` rather than a
-    /// blanket allow, so the allowance disappears the moment a caller lands.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Called by paid-probe authorization before the outbound dial. A committed
+    /// answer is the permission the dial consumes; every other answer prevents the
+    /// call. With no ledger installed the path therefore remains fail closed.
     pub(crate) async fn reserve_paid_probe_unit(
         &self,
         provider: &str,
