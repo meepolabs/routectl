@@ -92,9 +92,7 @@ impl PaidProbeProfile {
     /// The `max_tokens` a paid probe body would carry: the smallest allowance
     /// this identity's wire shape can keep the field under test on.
     ///
-    /// Allowance rationale as for [`Router::paid_probe_profile`]: the paid
-    /// dispatch arm that reads it is a separate change.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Read by the paid dial when it builds the one authorized request.
     pub(super) const fn max_tokens(&self) -> u32 {
         self.max_tokens
     }
@@ -124,13 +122,8 @@ impl Router {
     /// parses soundly, and never under an AMBIGUOUS key, which that lookup
     /// refuses outright.
     ///
-    /// NO PRODUCTION CALLER YET, for the same reason
-    /// `Router::reserve_paid_probe_unit` has none: the paid dispatch arm that
-    /// draws on both is a separate change, and pinning the fail-closed answer
-    /// before any spender exists is what keeps that change from having to invent
-    /// one. `cfg_attr` rather than a blanket allow, so the allowance disappears
-    /// the moment a caller lands.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Called by paid-probe authorization before reservation and dispatch. A
+    /// missing or ambiguous profile returns `None`, so no paid call is authorized.
     pub(super) fn paid_probe_profile(&self, key: &FieldVerdictKey) -> Option<PaidProbeProfile> {
         let seat = self.probe_seat_for(key)?;
         // The ceiling read goes through the shared accessor, which already
