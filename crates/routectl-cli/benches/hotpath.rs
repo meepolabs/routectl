@@ -10,8 +10,8 @@
 //! `ingress_parse` measures the full ingress translation the server does
 //! per request: raw wire bytes -> `serde_json::Value` -> canonical
 //! `ChatRequest` via the dialect adapter. `token_estimate` measures the
-//! local pre-usage estimate over a canonical request (dialect-agnostic, so
-//! `na`). `response_render` measures rendering a canonical `ChatResponse`
+//! display meter estimate (`routectl_router::estimate_meter_tokens`) over a
+//! canonical request (dialect-agnostic, so `na`). `response_render` measures rendering a canonical `ChatResponse`
 //! back to dialect wire JSON. The adapter consumes the response by value,
 //! so each case is a batched one: the per-iteration clone is the untimed
 //! setup and only the render is measured.
@@ -31,7 +31,6 @@ use serde_json::{Value, json};
 use routectl_cli::ingress::IngressAdapter;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::openai::OpenAiIngress;
-use routectl_cli::ingress::token_estimate::estimate_input_tokens;
 
 // The perf benches run under one of two mutually exclusive global
 // allocators, selected at compile time: by default the CountingAllocator
@@ -179,7 +178,7 @@ fn main() {
         cases.push(BenchCase::new(
             format!("token_estimate__{}__na", profile.snake_name()),
             move || {
-                black_box(estimate_input_tokens(req));
+                black_box(routectl_router::estimate_meter_tokens(req));
             },
         ));
     }

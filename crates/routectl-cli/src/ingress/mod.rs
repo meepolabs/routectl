@@ -28,7 +28,6 @@ pub mod anthropic;
 pub mod openai;
 pub mod openai_responses;
 pub mod session_key;
-pub mod token_estimate;
 
 /// Header used by harnesses that can override the canonical `model`
 /// field directly to pin routing to a specific configured alias.
@@ -524,9 +523,10 @@ pub enum ErrorEnvelopeShape {
 /// into the router.
 ///
 /// Today it carries:
-/// - `input_tokens_estimate`: a local heuristic count (see
-///   `token_estimate`) so the synthesized early `message_start` frame
-///   can report a non-zero `usage.input_tokens` on the pre-inversion
+/// - `input_tokens_estimate`: the display estimate from
+///   `routectl_router::estimate_meter_tokens` (serialized bytes / 4, never
+///   zero for a nonempty request) so the synthesized early `message_start`
+///   frame can report a non-zero `usage.input_tokens` on the pre-inversion
 ///   fast path instead of a stuck-at-zero context meter.
 /// - `model`: the resolved request model, used as the early-frame model
 ///   id when the upstream stream's first chunk carries no model string.
