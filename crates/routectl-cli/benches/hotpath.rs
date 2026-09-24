@@ -1,9 +1,9 @@
 //! Ingress hot-path micro-benches: request parse, local token estimate,
-//! and response render.
+//! context-anchor measurement, and response render.
 //!
 //! Bench names follow the pinned `<stage>__<profile>__<dialect>`
 //! convention (stages `ingress_parse`, `token_estimate`,
-//! `response_render`; dialects `anthropic`, `openai`, `na`). Fixtures are
+//! `anchor_identity`, `response_render`; dialects `anthropic`, `openai`, `na`). Fixtures are
 //! generated ONCE outside every timed closure per the
 //! [`bench_fixtures`](routectl_testkit::bench_fixtures) contract.
 //!
@@ -11,17 +11,29 @@
 //! per request: raw wire bytes -> `serde_json::Value` -> canonical
 //! `ChatRequest` via the dialect adapter. `token_estimate` measures the
 //! display meter estimate (`routectl_router::estimate_meter_tokens`) over a
-//! canonical request (dialect-agnostic, so `na`). `response_render` measures rendering a canonical `ChatResponse`
-//! back to dialect wire JSON. The adapter consumes the response by value,
-//! so each case is a batched one: the per-iteration clone is the untimed
-//! setup and only the render is measured.
+//! canonical request (dialect-agnostic, so `na`); its bench-local
+//! `json_heavy_150k` case measures the persisted floor estimate over the
+//! anchor fixture for scale. `anchor_identity` measures the Anthropic
+//! context anchor's per-request work (the streaming prefix digest and its
+//! normalized byte count, in one pass) on that pinned 154k-token request.
+//! `response_render` measures rendering a canonical `ChatResponse` back to
+//! dialect wire JSON. The adapter consumes the response by value, so each
+//! case is a batched one: the per-iteration clone is the untimed setup and
+//! only the render is measured.
+//!
+//! Every fixture except `json_heavy_150k` is a `SpectrumProfile`; that one
+//! is bench-local and pinned in size by `assert_anchor_fixture`, and
+//! `scripts/bench.sh` records it on its separate local-fixtures line.
 
 use std::hint::black_box;
 use std::time::Duration;
 
 use axum::http::HeaderMap;
 use criterion::{BatchSize, Criterion};
-use routectl_core::{ChatResponse, Choice, Message, MessageContent, Role, Usage};
+use routectl_core::{
+    ChatRequest, ChatResponse, Choice, ContentPart, KnownContentPart, Message, MessageContent,
+    Role, Usage,
+};
 #[cfg(not(feature = "dhat"))]
 use routectl_testkit::bench_alloc::CountingAllocator;
 use routectl_testkit::bench_alloc::{self, BenchCase};
@@ -30,6 +42,7 @@ use serde_json::{Value, json};
 
 use routectl_cli::ingress::IngressAdapter;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
+use routectl_cli::ingress::anthropic::context_anchor::RequestIdentity;
 use routectl_cli::ingress::openai::OpenAiIngress;
 
 // The perf benches run under one of two mutually exclusive global
@@ -76,6 +89,97 @@ const fn assistant_message(content: MessageContent, tool_calls: Option<Vec<Value
         tool_call_id: None,
         tool_calls,
         refusal: None,
+    }
+}
+
+/// Profile token of the large-prompt anchor fixture. Bench-local, like the
+/// router bench's `max_body` fixture: it is not a [`SpectrumProfile`], whose
+/// variants drive every other bench's fan-out. `scripts/bench.sh` lists it
+/// under its local fixtures.
+const ANCHOR_PROFILE: &str = "json_heavy_150k";
+
+/// Tool-call rounds in the anchor fixture. Each round is one tool-use turn
+/// and one pretty-printed JSON tool result.
+const ANCHOR_ROUNDS: usize = 114;
+
+/// Exact serialized size of the anchor fixture: 154,042 tokens at the
+/// bytes/4 estimate. Pinned so a fixture drift cannot silently change what
+/// the series prices.
+const ANCHOR_FIXTURE_BYTES: usize = 616_171;
+
+/// A deterministic long tool-using session of [`ANCHOR_ROUNDS`] rounds plus
+/// a final user message. Returns the request and the message count before
+/// that final message -- the prefix a prior anchor would claim.
+fn anchor_fixture() -> (ChatRequest, usize) {
+    let mut messages = vec![user_message("Audit every manifest in the repository.")];
+    for round in 0..ANCHOR_ROUNDS {
+        let id = format!("toolu_{round:04}");
+        let rows: Vec<Value> = (0..40)
+            .map(|j| json!({"crate": format!("c{round}-{j}"), "version": "1.0.0", "features": ["std", "derive"]}))
+            .collect();
+        let payload = serde_json::to_string_pretty(&rows).expect("bench fixture serializes");
+        messages.push(tool_part_message(
+            Role::Assistant,
+            KnownContentPart::ToolUse {
+                id: id.clone(),
+                name: "read_file".into(),
+                input: json!({"path": format!("m{round}.json")}),
+                cache_control: None,
+            },
+        ));
+        messages.push(tool_part_message(
+            Role::User,
+            KnownContentPart::ToolResult {
+                tool_use_id: id,
+                content: Value::String(payload),
+                is_error: None,
+                cache_control: None,
+            },
+        ));
+    }
+    let prior = messages.len();
+    messages.push(user_message("Check the lockfile next."));
+    (anchor_request(&messages), prior)
+}
+
+/// Pin the anchor fixture's size and shape before sampling, so a drifted
+/// fixture fails loudly instead of pricing a different request.
+fn assert_anchor_fixture(req: &ChatRequest, prior: usize) {
+    let bytes = serde_json::to_string(req).map_or(0, |s| s.len());
+    assert_eq!(
+        bytes, ANCHOR_FIXTURE_BYTES,
+        "anchor fixture {ANCHOR_PROFILE} drifted in size"
+    );
+    assert_eq!(prior, 1 + 2 * ANCHOR_ROUNDS);
+    assert_eq!(req.messages.len(), prior + 1);
+    assert!(
+        RequestIdentity::measure(req, Some(prior))
+            .digest()
+            .is_some(),
+        "anchor fixture {ANCHOR_PROFILE} must be fingerprintable"
+    );
+}
+
+fn anchor_request(messages: &[Message]) -> ChatRequest {
+    ChatRequest {
+        model: "claude-opus-4-7".into(),
+        messages: messages.to_vec().into(),
+        max_tokens: Some(4096),
+        ..Default::default()
+    }
+}
+
+fn user_message(text: &str) -> Message {
+    Message {
+        role: Role::User,
+        ..assistant_message(MessageContent::Text(text.into()), None)
+    }
+}
+
+fn tool_part_message(role: Role, part: KnownContentPart) -> Message {
+    Message {
+        role,
+        ..assistant_message(MessageContent::Parts(vec![ContentPart::Known(part)]), None)
     }
 }
 
@@ -147,6 +251,8 @@ fn main() {
         .map(|p| (*p, build_response(*p)))
         .collect();
 
+    let anchor_fixture = anchor_fixture();
+
     let mut cases: Vec<BenchCase> = Vec::new();
 
     for (profile, fx) in &parse_fixtures {
@@ -182,6 +288,24 @@ fn main() {
             },
         ));
     }
+
+    // The anchor's normalized digest pass, with the persisted estimate over
+    // the same request beside it for scale.
+    let anchor_req = &anchor_fixture.0;
+    let anchor_prior = anchor_fixture.1;
+    assert_anchor_fixture(anchor_req, anchor_prior);
+    cases.push(BenchCase::new(
+        format!("token_estimate__{ANCHOR_PROFILE}__na"),
+        move || {
+            black_box(routectl_router::estimate_total_tokens(anchor_req));
+        },
+    ));
+    cases.push(BenchCase::new(
+        format!("anchor_identity__{ANCHOR_PROFILE}__na"),
+        move || {
+            black_box(RequestIdentity::measure(anchor_req, Some(anchor_prior)));
+        },
+    ));
 
     for (profile, resp) in &render_fixtures {
         cases.push(BenchCase::new_batched(

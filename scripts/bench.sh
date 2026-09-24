@@ -23,7 +23,8 @@
 #
 # Output record (OUTPUT_DIR/baseline-<shortsha>[-dirty].txt):
 #   - metadata header: commit sha + dirty flag, toolchain (rustc --version),
-#     build flags/profile, the fixture-profile catalog, loadavg before/after,
+#     build flags/profile, the fixture-profile catalog, the bench-local
+#     fixtures, loadavg before/after,
 #     CPU count + load threshold.
 #   - a summary table: bench | median run1 ns/op | median run2 ns/op |
 #     allocs/op | bytes/op | status (stable/UNSTABLE).
@@ -81,6 +82,13 @@ BENCH_TARGETS=(hotpath dispatch_clone egress)
 # The fixture-profile catalog (SpectrumProfile snake names), pinned. Recorded
 # in the metadata header so a baseline documents the spectrum it covered.
 FIXTURE_PROFILES="tool_heavy large_image plain_round_trip no_marker cache_less long_session"
+
+# Fixtures a single bench target builds for itself (outside the shared
+# catalog above), as `<crate>/<target>:<profile token>`. Recorded on their own
+# header line so a baseline's shared-spectrum line keeps its meaning. Kept by
+# hand: update it in the same change that adds or removes a bench-local
+# fixture.
+LOCAL_FIXTURE_PROFILES="routectl-cli/hotpath:json_heavy_150k routectl-router/dispatch_clone:max_body routectl-router/dispatch_clone:applied_body"
 
 # Per-bench noise tolerance, percent (medians agree within this -> stable).
 TOLERANCE_PCT=5
@@ -369,6 +377,7 @@ write_record() {
         echo "build flags:   RUSTFLAGS='${RUSTFLAGS:-}' (default); per-crate default features"
         echo "bench targets: routectl-cli/hotpath routectl-router/dispatch_clone routectl-providers/egress"
         echo "profiles:      $FIXTURE_PROFILES"
+        echo "local fixtures: $LOCAL_FIXTURE_PROFILES"
         echo "cpu count:     $ncpu"
         echo "load threshold:$threshold (ncpu/2)"
         echo "loadavg 1-min: before=$load_before after=$load_after [$load_tag]"

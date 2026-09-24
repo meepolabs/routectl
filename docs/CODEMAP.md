@@ -6687,6 +6687,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the shared `redacted_thinking.data` encoder used by both flatten sites
   (wraps a Responses-family blob in the `reasoning_envelope`; everything
   else, Anthropic-sourced above all, byte-verbatim)
+- `src/ingress/anthropic/context_anchor/mod.rs` -- Anthropic session anchor:
+  `RequestIdentity::measure` (prefix digest + normalized bytes/4), `evaluate`
+  (`AnchorVerdict` / `MissReason`), `AnchorLane`, saturating `anchored_input`
+- `src/ingress/anthropic/context_anchor/digest.rs` -- one-pass streaming
+  SHA-256 and byte count over the normalized prompt-affecting request stream
+- `src/ingress/anthropic/context_anchor/store.rs` -- `ContextAnchorStore`:
+  bounded LRU of immutable `AnchorRecord`s; `reserve_turn(key)` ->
+  `TurnTicket::measure` -> consuming `PendingAnchor::settle`; newest turn wins
 - `src/ingress/anthropic/parse.rs` -- Anthropic body -> canonical
   `ChatRequest`; forward-compat sweep into `provider_extras`. Captures the
   inbound per-conversation key into

@@ -65,6 +65,12 @@ arc-swap = { workspace = true }
 # (handlers::status::PanelCounters): a poisoned std mutex would silently
 # drop the last-available stamp. Already a dependency of routectl-router.
 parking_lot = "0.12"
+# Anthropic ingress session anchor (ingress::anthropic::context_anchor): a
+# streaming SHA-256 prefix digest and a bounded LRU of per-session records.
+# Both are already in the graph (routectl-auth, routectl-router); direct deps
+# here because the daemon-owned store lives in this crate.
+sha2.workspace = true
+lru.workspace = true
 # The `/status/usage` panel classifies a SQLite busy/lock into the distinct
 # `db_busy` shed code (vs `db_unavailable`) by reading the underlying
 # `rusqlite` error code. Already in the graph via routectl-usage; a direct
