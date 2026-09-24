@@ -847,7 +847,7 @@ impl Usage {
 }
 
 /// Per-TTL breakdown of cache writes for one request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheCreation {
     /// Tokens written to the 5-minute-TTL cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -908,11 +908,13 @@ pub struct ChatChunk {
     #[serde(skip)]
     pub opaque_events: Vec<crate::schema_opaque::OpaqueSseEvent>,
     /// Transport-internal carrier for non-canonical upstream metadata
-    /// (today: Anthropic's `anthropic-ratelimit-unified-*` quota/overage
-    /// family). On a stream this is set ONLY on the FIRST canonical chunk
-    /// yielded (the response head is where the headers are available);
-    /// consumers must NOT assume it on later chunks. Skip-serialized so
-    /// the wire shape is unchanged. See `crate::upstream_meta`.
+    /// (provider quota families from the response head, plus the
+    /// first-event opening usage on Anthropic-shape streams). On a stream
+    /// this is set ONLY on the FIRST canonical chunk yielded; consumers
+    /// must NOT assume it on later chunks, and must not assume a carrier
+    /// holds a quota family (an opening-usage-only carrier is valid).
+    /// Skip-serialized so the wire shape is unchanged. See
+    /// `crate::upstream_meta`.
     #[serde(skip)]
     pub upstream_meta: Option<crate::upstream_meta::UpstreamMeta>,
 }

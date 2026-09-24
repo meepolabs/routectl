@@ -85,7 +85,9 @@ pub use schema_opaque::OpaqueSseEvent;
 pub use system_content::{SystemBlock, SystemContent};
 pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};
-pub use upstream_meta::{AnthropicUnifiedQuota, CodexQuota, UpstreamMeta};
+pub use upstream_meta::{
+    AnthropicUnifiedQuota, CodexQuota, OpeningUsage, OpeningUsageOrigin, UpstreamMeta,
+};
 pub use volatile::{
     CallerPrefixAdvisory, CallerPrefixFinding, PrefixComponent, VolatileConfidence, VolatileKind,
     VolatileReport, scan_caller_prefix_advisory, scan_volatile,

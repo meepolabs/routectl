@@ -21,9 +21,12 @@
 //! [`feed_response`] runs at the terminal success arm, which returns
 //! immediately after, so it fires once per non-streaming response.
 //! `feed_first_chunk` is armed with the seat key and DISARMS itself on the
-//! first chunk carrying metadata, so a stream feeds at most once however many
-//! chunks follow -- and a stream that never carries metadata feeds nothing
-//! rather than feeding an empty reading.
+//! first chunk carrying a quota family, so a stream feeds at most once however
+//! many chunks follow -- and a stream that never carries one feeds nothing
+//! rather than feeding an empty reading. A carrier holding only non-quota
+//! metadata (the opening usage on an Anthropic-shape stream's role chunk) is
+//! passed over WITHOUT disarming, so a quota family arriving on a later chunk
+//! is still taken.
 //!
 //! # Which seat is fed
 //!
@@ -75,11 +78,15 @@ impl FirstChunkFeed {
         Self { store, seat }
     }
 
-    /// Offer one chunk. Feeds and disarms on the first chunk carrying quota
-    /// metadata; every other chunk, and every chunk after the first fed one, is
+    /// Offer one chunk. Feeds and disarms on the first chunk carrying a quota
+    /// family; every other chunk, and every chunk after the first fed one, is
     /// a no-op.
     pub fn offer(&mut self, chunk: &ChatChunk) {
-        let Some(meta) = chunk.upstream_meta.as_ref() else {
+        let Some(meta) = chunk
+            .upstream_meta
+            .as_ref()
+            .filter(|meta| meta.has_quota_family())
+        else {
             return;
         };
         let Some(seat) = self.seat.take() else {

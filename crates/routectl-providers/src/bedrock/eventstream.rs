@@ -31,7 +31,7 @@ use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
 use serde_json::Value;
 
-use routectl_core::{ChatChunk, Error, Result};
+use routectl_core::{ChatChunk, Error, OpeningUsageOrigin, Result};
 
 use super::frame::{self, FrameHandler, FrameLabel};
 use crate::anthropic_api::sse::SseState;
@@ -64,7 +64,7 @@ where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
     let handler = InvokeFrameHandler {
-        sse_state: SseState::default(),
+        sse_state: SseState::default().with_opening_origin(OpeningUsageOrigin::BedrockInvoke),
     };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Invoke)
 }
@@ -709,3 +709,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "eventstream_opening_usage_tests.rs"]
+mod eventstream_opening_usage_tests;

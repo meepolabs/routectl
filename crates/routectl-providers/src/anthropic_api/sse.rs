@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result, Role, sanitize_for_log,
+    ChatChunk, Error, OpaqueSseEvent, OpeningUsage, OpeningUsageOrigin, ReasoningDetail, Result,
+    Role, UpstreamMeta, sanitize_for_log,
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -175,6 +176,10 @@ pub struct SseState {
     /// re-emits the stored name and so inherits the reversal. Empty map =
     /// no-op.
     pub tool_reverse: std::collections::HashMap<String, String>,
+    /// Wire label stamped on the opening usage carrier. `None` reads as
+    /// the Anthropic Messages wire; a wrapping transport that feeds this
+    /// parser nested events sets its own via `with_opening_origin`.
+    opening_origin: Option<OpeningUsageOrigin>,
 }
 
 /// Input-side usage captured once from `message_start`, carried forward
@@ -216,6 +221,14 @@ impl SseState {
             "anthropic SSE state opened: opaque-capture caps active",
         );
         Self::default()
+    }
+
+    /// Label the opening usage carrier with the transport that delivered
+    /// the nested Anthropic events, rather than the Anthropic Messages wire.
+    #[must_use]
+    pub const fn with_opening_origin(mut self, origin: OpeningUsageOrigin) -> Self {
+        self.opening_origin = Some(origin);
+        self
     }
 
     /// Parse one raw SSE data line (the JSON string after "data: ").
@@ -678,7 +691,9 @@ impl SseState {
 
     /// Opening chunk carrying only `delta.role="assistant"`. Non-final,
     /// so `usage` and `finish_reason` stay absent (both skip-serialize
-    /// when None), matching the peer lanes' opening chunk shape.
+    /// when None), matching the peer lanes' opening chunk shape. The
+    /// `message_start` input usage, when the upstream sent one, rides the
+    /// skip-serialized `upstream_meta` instead of `usage`.
     fn role_chunk(&self) -> ChatChunk {
         ChatChunk {
             id: self.id.clone(),
@@ -694,8 +709,24 @@ impl SseState {
             }],
             usage: None,
             opaque_events: Vec::new(),
-            upstream_meta: None,
+            upstream_meta: self.opening_carrier(),
         }
+    }
+
+    /// The captured `message_start` input usage as a transport-internal
+    /// carrier, field for field. `None` when the event carried no usage.
+    fn opening_carrier(&self) -> Option<UpstreamMeta> {
+        let captured = self.captured_input_usage.as_ref()?;
+        let mut opening = OpeningUsage::new(
+            self.opening_origin
+                .unwrap_or(OpeningUsageOrigin::AnthropicMessages),
+            std::time::Instant::now(),
+            captured.input_tokens,
+        );
+        opening.cache_creation_input_tokens = captured.cache_creation_input_tokens;
+        opening.cache_read_input_tokens = captured.cache_read_input_tokens;
+        opening.cache_creation = captured.cache_creation.clone();
+        Some(UpstreamMeta::from_opening_usage(opening))
     }
 
     fn make_text_chunk(&self, text: String) -> ChatChunk {
@@ -849,3 +880,8 @@ mod sse_context_management_tests;
 #[cfg(test)]
 #[path = "sse_thinking_display_tests.rs"]
 mod sse_thinking_display_tests;
+
+// Opening-usage carrier on the `message_start` role chunk.
+#[cfg(test)]
+#[path = "sse_opening_usage_tests.rs"]
+mod sse_opening_usage_tests;
