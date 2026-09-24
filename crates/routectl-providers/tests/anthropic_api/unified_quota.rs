@@ -174,18 +174,90 @@ async fn stream_upstream_meta_is_none_without_unified_headers() {
     // Act
     use futures::StreamExt;
     let mut stream = provider.stream(req).await.unwrap();
-    let mut any_meta = false;
+    let mut chunks = Vec::new();
     while let Some(result) = stream.next().await {
-        if result.unwrap().upstream_meta.is_some() {
-            any_meta = true;
-        }
+        chunks.push(result.unwrap());
+    }
+
+    // Assert: no unified family means no chunk carries a quota family.
+    // The opener still carries the body's opening usage, which is the
+    // positive control that the carrier is inspected at all.
+    assert!(
+        chunks
+            .iter()
+            .filter_map(|c| c.upstream_meta.as_ref())
+            .all(|m| !m.has_quota_family()),
+        "no unified family means no chunk carries a quota family"
+    );
+    let opening = chunks[0]
+        .upstream_meta
+        .as_ref()
+        .and_then(|m| m.opening_usage.as_ref())
+        .expect("the opener carries the message_start usage");
+    assert_eq!(opening.input_tokens, 5);
+}
+
+#[tokio::test]
+async fn stream_opener_carries_both_unified_quota_and_opening_usage() {
+    // Arrange: the response head carries the unified family and the
+    // message_start carries an input + cache breakdown. Both describe
+    // the same response and must survive on the one opening chunk.
+    let mock_server = MockServer::start().await;
+    let sse_body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_um04\",\"model\":\"claude-3-opus\",\"usage\":{\"input_tokens\":17,\"output_tokens\":1,\"cache_creation_input_tokens\":29,\"cache_read_input_tokens\":4099}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi!\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(with_unified_headers(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .append_header("content-type", "text/event-stream"),
+        ))
+        .mount(&mock_server)
+        .await;
+    let provider = make_provider(&mock_server.uri());
+    let mut req = base_req("claude-3-opus", vec![user_msg("stream test")]);
+    req.stream = Some(true);
+
+    // Act
+    use futures::StreamExt;
+    let mut stream = provider.stream(req).await.unwrap();
+    let mut chunks = Vec::new();
+    while let Some(result) = stream.next().await {
+        chunks.push(result.unwrap());
     }
 
     // Assert
+    let meta = chunks[0]
+        .upstream_meta
+        .as_ref()
+        .expect("the opener carries upstream_meta");
+    let quota = meta
+        .anthropic_unified
+        .as_ref()
+        .expect("the unified family survives the merge");
+    assert_eq!(quota.representative_claim.as_deref(), Some("five_hour"));
+    let opening = meta
+        .opening_usage
+        .as_ref()
+        .expect("the opening usage survives the merge");
+    assert_eq!(opening.input_tokens, 17);
+    assert_eq!(opening.cache_creation_input_tokens, Some(29));
+    assert_eq!(opening.cache_read_input_tokens, Some(4099));
     assert!(
-        !any_meta,
-        "no unified family means no chunk carries upstream_meta"
+        chunks[0].usage.is_none(),
+        "no canonical usage on the opener"
     );
+    for (i, c) in chunks.iter().enumerate().skip(1) {
+        assert!(c.upstream_meta.is_none(), "chunk {i} carries no meta");
+    }
 }
 
 #[tokio::test]

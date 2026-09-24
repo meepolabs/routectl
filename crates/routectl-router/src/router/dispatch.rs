@@ -3676,3 +3676,7 @@ mod replay_degradation_observability_tests;
 #[cfg(test)]
 #[path = "reasoning_drop_warn_tests.rs"]
 mod reasoning_drop_warn_tests;
+
+#[cfg(test)]
+#[path = "opening_usage_fallback_tests.rs"]
+mod opening_usage_fallback_tests;

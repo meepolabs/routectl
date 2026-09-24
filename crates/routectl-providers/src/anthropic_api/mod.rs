@@ -498,9 +498,10 @@ impl Provider for AnthropicApiProvider {
         // Parse the anthropic-ratelimit-unified-* quota family from the
         // response head (BEFORE `resp` is moved into the byte stream) and
         // run the overage-flip log once here. The parsed carrier is
-        // attached to the FIRST canonical chunk yielded by the stream;
-        // consumers must not assume it on later chunks. None on the
-        // api-key path (family absent).
+        // merged into the FIRST canonical chunk yielded by the stream,
+        // beside any opening usage the parser put there; consumers must
+        // not assume it on later chunks. None on the api-key path (family
+        // absent).
         let mut pending_upstream_meta = self.observe_unified_quota(&req, resp.headers());
 
         let provider_id = self.cfg.id.clone();
@@ -586,11 +587,14 @@ impl Provider for AnthropicApiProvider {
                                 return;
                             }
                             Ok(Some(mut chunk)) => {
-                                // Attach the unified-quota carrier to the
+                                // Merge the unified-quota carrier into the
                                 // FIRST canonical chunk only; `take()`
                                 // leaves None for every subsequent chunk.
-                                if pending_upstream_meta.is_some() {
-                                    chunk.upstream_meta = pending_upstream_meta.take();
+                                if let Some(head) = pending_upstream_meta.take() {
+                                    chunk.upstream_meta = Some(match chunk.upstream_meta.take() {
+                                        Some(body) => head.merge(body),
+                                        None => head,
+                                    });
                                 }
                                 yield Ok(chunk);
                             }

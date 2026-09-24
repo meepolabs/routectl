@@ -47,7 +47,12 @@ license.
   metadata; today the provider-namespaced `AnthropicUnifiedQuota` (the
   `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras`
   forward-compat + `is_overage()`) and `CodexQuota` (the `x-codex-*` family:
-  `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`)
+  `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`), plus
+  `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
+  cache fields, exact, with `OpeningUsageOrigin` wire label and `observed_at`;
+  never rides canonical `ChatChunk.usage`). `merge` combines a response-head
+  quota carrier with a stream-body opening carrier; `has_quota_family` is the
+  quota consumers' test (opening usage alone is not a quota reading)
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
@@ -720,7 +725,12 @@ license.
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical
   `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
 - `src/anthropic_api/sse.rs` -- Anthropic SSE event state machine
-  (`message_start`, `content_block_*`, `message_delta`, `message_stop`)
+  (`message_start`, `content_block_*`, `message_delta`, `message_stop`); the
+  content-free `message_start` role chunk carries the captured input usage as
+  `UpstreamMeta::opening_usage` (none when the event had no usage), and
+  `with_opening_origin` relabels it for a wrapping transport. `stream()` in
+  `mod.rs` MERGES the unified-quota head carrier into that first chunk rather
+  than replacing it
 - `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per
   unknown content block (per-block caps: 256 KB / 10000 deltas; per-stream
   ceiling: 4 MB / 40000 events), each degrading to sink-drain on overflow with
@@ -1081,8 +1091,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (exception member name -> HTTP status), shared so the two lanes classify
   upstream failures identically
 - `src/bedrock/eventstream.rs` -- InvokeModel-stream frame handler / payload
-  interpreter (base64-unwrap of Anthropic SSE per frame); delegates the
-  framing byte loop and DoS cap to `frame.rs`
+  interpreter (base64-unwrap of Anthropic SSE per frame, parsed by the shared
+  `anthropic_api::sse::SseState` labelled `OpeningUsageOrigin::BedrockInvoke`,
+  so the opener carries the same opening usage); delegates the framing byte
+  loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- InvokeModel adapter: reuses
   `anthropic_api::request::normalize_deferring_format_key_warn` (selecting
   reasoning-envelope passthrough EXPLICITLY -- this lane is never the genuine
@@ -2264,7 +2276,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `feed_response` reads `ChatResponse::upstream_meta` at the terminal
   non-streaming success arm; `FirstChunkFeed` is armed with the served seat's key
   at the stream hand-back and lifts `ChatChunk::upstream_meta` off the FIRST
-  chunk carrying it (the only chunk that does), inside
+  chunk carrying a quota family (an opening-usage-only carrier is passed over
+  WITHOUT disarming, so a later quota family is still taken), inside
   `wrap_with_breaker_accounting` -- before the caller renders it, never per
   chunk, and never at end-of-stream where the reading is already gone. Wiring
   only the non-streaming path would leave a streaming client's every seat reading

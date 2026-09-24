@@ -388,6 +388,22 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   in `crates/routectl-providers/src/anthropic_api/parts.rs`; Converse mirror
   in `crates/routectl-providers/src/bedrock/converse/messages.rs`.
 
+- **`message_start` input usage rides a transport-internal carrier,
+  not canonical `usage`.** Anthropic reports the input side of usage
+  (`input_tokens` plus the disjoint `cache_creation_input_tokens` /
+  `cache_read_input_tokens` / per-TTL `cache_creation`) once, in
+  `message_start`. The egress copies it verbatim onto the content-free
+  opening role chunk as the skip-serialized `upstream_meta.opening_usage`
+  (`anthropic_api/sse.rs`); Bedrock InvokeModel inherits it through the
+  shared parser. It must NOT be set on `ChatChunk.usage`: OpenAI-shape
+  ingresses serialize that field onto the client's first frame, and usage
+  accounting reads it as cumulative counters, so a truncated stream would
+  ledger input-only numbers. The opening value can legitimately differ from
+  the terminal `message_delta` usage (server-side tools add input
+  mid-response). The router's pre-content buffer replays it only for the
+  attempt that reaches first content; a failed attempt's opener is dropped
+  with its buffer.
+
 ## Bedrock surface
 
 - **Bedrock rejects unsupported `anthropic_beta` values + unknown

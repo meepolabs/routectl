@@ -10,7 +10,9 @@ use super::*;
 
 use std::time::{Duration, Instant, SystemTime};
 
-use routectl_core::upstream_meta::{AnthropicUnifiedQuota, UpstreamMeta};
+use routectl_core::upstream_meta::{
+    AnthropicUnifiedQuota, OpeningUsage, OpeningUsageOrigin, UpstreamMeta,
+};
 
 use crate::quota::key::seat_key_for_secret_ref;
 use crate::quota::window::QuotaWindow;
@@ -159,6 +161,47 @@ fn a_stream_feeds_exactly_once_however_many_chunks_carry_metadata() {
         Some(0.10),
         "the reading comes off the FIRST chunk; later chunks must not re-feed"
     );
+}
+
+fn opening_only() -> UpstreamMeta {
+    UpstreamMeta::from_opening_usage(OpeningUsage::new(
+        OpeningUsageOrigin::AnthropicMessages,
+        Instant::now(),
+        1_234,
+    ))
+}
+
+/// An Anthropic-shape stream opens with a role chunk carrying only the
+/// first-event opening usage. That is not a quota reading: taking it as the
+/// one-shot observation would disarm the feed and silently drop the quota
+/// family a later chunk carries.
+#[test]
+fn an_opening_usage_only_carrier_does_not_disarm_the_feed() {
+    let store = store();
+    let mut feed = FirstChunkFeed::armed(store.clone(), Some(seat()));
+
+    feed.offer(&chunk_with(Some(opening_only())));
+    assert!(store.is_empty(), "opening usage alone stores nothing");
+    feed.offer(&chunk_with(Some(meta("0.44"))));
+
+    assert_eq!(
+        stored_fraction(&store),
+        Some(0.44),
+        "the later quota family must still be taken"
+    );
+}
+
+/// A carrier holding BOTH the quota family and the opening usage is a quota
+/// reading and feeds exactly once.
+#[test]
+fn a_merged_opening_and_quota_carrier_feeds_once() {
+    let store = store();
+    let mut feed = FirstChunkFeed::armed(store.clone(), Some(seat()));
+
+    feed.offer(&chunk_with(Some(opening_only().merge(meta("0.12")))));
+    feed.offer(&chunk_with(Some(meta("0.97"))));
+
+    assert_eq!(stored_fraction(&store), Some(0.12));
 }
 
 #[test]

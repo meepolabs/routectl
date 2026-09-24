@@ -694,3 +694,7 @@ pub trait IngressAdapter: Send + Sync {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+#[path = "opening_usage_render_tests.rs"]
+mod opening_usage_render_tests;

@@ -2393,3 +2393,45 @@ async fn a_stamped_capability_ride_along_drains() {
         "a stamped ride-along persists its row",
     );
 }
+
+/// The opening role chunk of an Anthropic-shape stream carries the
+/// first-event input usage on `upstream_meta`. It is not canonical usage and
+/// not a quota family, so a stream truncated right after the opener must
+/// leave every token and quota column empty rather than stamp input-only
+/// numbers.
+#[test]
+fn observe_chunk_ignores_an_opening_usage_only_carrier() {
+    // Arrange
+    let (mut cap, _w, _dir) = capture();
+    let mut opening = routectl_core::OpeningUsage::new(
+        routectl_core::OpeningUsageOrigin::AnthropicMessages,
+        std::time::Instant::now(),
+        1_234,
+    );
+    opening.cache_read_input_tokens = Some(5_678);
+    let opener = ChatChunk {
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                role: Some(Role::Assistant),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        upstream_meta: Some(routectl_core::UpstreamMeta::from_opening_usage(opening)),
+        ..Default::default()
+    };
+
+    // Act
+    cap.observe_chunk(&opener);
+
+    // Assert
+    assert_eq!(cap.chunks, 1, "positive control: the chunk was observed");
+    assert!(cap.record.input_tokens.is_none());
+    assert!(cap.record.output_tokens.is_none());
+    assert!(cap.record.cache_read.is_none());
+    assert!(cap.record.quota_status.is_none());
+    assert!(cap.record.quota_utilization.is_none());
+    assert_eq!(cap.observed_prompt_total, 0);
+}
