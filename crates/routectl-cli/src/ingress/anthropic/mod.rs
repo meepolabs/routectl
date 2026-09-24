@@ -162,6 +162,7 @@ impl IngressStreamState for AnthropicStreamState {
 /// without a code change. Without this sweep, serde's
 /// silently-drop-unknown behavior would lose the field at the ingress
 /// boundary (the original `output_format` bug).
+pub mod context_anchor;
 mod parse;
 mod render;
 mod stream;
