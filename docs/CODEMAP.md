@@ -5160,6 +5160,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `log_hash::salted_log_hash`, duplicated rather than imported because this
   crate is a leaf; never a fingerprint, nothing may persist one or compare one
   across runs
+- `src/query/stream_extra.rs` -- `for_each_stream_extra` + `StreamExtraRow`:
+  visits every streaming row of one ingress dialect in a half-open window,
+  oldest first, handing back its persisted provider/kind/model/upstream, outcome and raw
+  `extra` text without interpreting it (a non-text `extra` is rendered as
+  text, never dropped), so a caller that classifies producer diagnostics
+  counts malformed rows instead of losing them. Tests: `stream_extra_tests.rs`
 - `src/query/calibration.rs` -- token-estimate calibration evidence read for
   the router's boot warm rebuild; exports `read_calibration_samples_since` +
   `CalibrationSampleRow`. Admission mirrors the live write row for row --
@@ -6038,8 +6044,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Drop` included, reads `opening_present = false`), then after the warm
   early frame, after the warm path binds its served lane, whenever the
   renderer accepts a changed terminal report (before any send), at the first
-  enqueued event, and at natural EOS.
-  Tests: `opening_diagnostics_tests.rs`
+  enqueued event, and at natural EOS. `is_terminal_evidence_label` maps a
+  persisted `terminal_source` back to `UsageInputSource::is_terminal_evidence`
+  for the read-side report (`commands/opening_accuracy/`), which also reads
+  `key::ALL` and the closed `OPENING_SOURCE_LABELS` / `OPENING_REASON_LABELS` /
+  `TERMINAL_SOURCE_LABELS` sets (built from the producers' own `as_str`
+  constants and pinned against them by test).
+  Tests: `opening_diagnostics_tests.rs`; `opening_accuracy_boundary_tests.rs`
+  reads rows two daemon processes wrote to one ledger back through the report
 - `src/handlers/usage_capture.rs` -- `UsageCapture`, the unified RAII capture
   guard (replaces the former `EgressStreamSummary`) that records exactly ONE
   `UsageRecord` per request on both ingress paths: a draft is seeded from the
@@ -7538,6 +7550,42 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
   the cap, so the grid always covers the window and never exceeds it
+- `src/commands/opening_accuracy/mod.rs` -- `routectl usage
+  --opening-accuracy`, the read-only context meter release-gate report over an
+  explicit window: builds `OpeningAccuracyReport` from
+  `routectl_usage::for_each_stream_extra` over the Anthropic ingress id. Every
+  streaming row is exactly one of legacy / unclassifiable (fixed kind) / no
+  opening / known (closed-set source), also per lane; the anchored cohort is
+  exactly the `opening_source = anchor` rows; unverified terminal reports are
+  counted for every outcome, globally, in the cohort and per lane. `run`
+  returns the `Verdict` whose `exit_code` `main.rs` exits with. Tests:
+  `report_tests.rs`, `verdict_tests.rs`, `render_tests.rs` over
+  `test_fixture.rs`; the restart boundary is
+  `handlers/opening_accuracy_boundary_tests.rs`, the process exit statuses
+  `tests/opening_accuracy_exit.rs`
+- `src/commands/opening_accuracy/test_fixture.rs` -- shared ledger-row
+  fixtures for the report's unit tests, built from the producer's label
+  constants: the hand-computed mixed fixture, lane tuples, `with` for a
+  single-key edit
+- `src/commands/opening_accuracy/classify.rs` -- one row's `extra` (capped at
+  16 KiB before parse) read through the producer's `opening_diagnostics` keys
+  and closed label sets: an exact `anchor` source is a known anchor whatever
+  its marker; any other row needs a consistent marker and a closed-set source
+  or is unclassifiable; legacy only when no producer key is present. Unknown
+  reason/terminal labels map to `<unrecognized>` and a field defect; names each
+  anchored non-pass against the cache-inclusive `terminal_input`, in integers
+- `src/commands/opening_accuracy/verdict.rs` -- `Numerical` (integer
+  `pass * 100 >= 95 * anchored`, `Insufficient` at zero) folded with legacy
+  completeness, the data-quality veto and backend provenance into `Verdict`
+  (`Pass` exit 0 only; `Fail` 1, `Insufficient`/`NoLedger` 2, `Indeterminate`
+  3, `BackendPending` 4, `ERROR_EXIT_CODE` 5)
+- `src/commands/opening_accuracy/lane.rs` -- the lane key
+  `kind:provider/model@upstream` from persisted columns, each component
+  printable ASCII and bounded, so repoints split and no value can add a line
+- `src/commands/opening_accuracy/render.rs` -- ASCII rendering: reconciliation,
+  defects, unverified counts, cohort and rate, error buckets by source,
+  cold-start buckets, lanes, then exactly one `verdict:` line and
+  `PROVENANCE_NOTICE`; the title is sanitized to one line
 - `src/commands/catalog/` -- `routectl catalog` (hidden alias `pricing`,
   dropped at 1.0), split into a command-entry facade plus three concern
   modules; every original
@@ -8096,6 +8144,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and a secret-never-leaks scan across the capture paths. Every config is a
   temp copy with XDG-scoped credential + usage-DB isolation so no live file is
   touched
+- `tests/opening_accuracy_exit.rs` -- real-binary exit statuses of `usage
+  --opening-accuracy` over temp ledgers seeded with the producer's label
+  constants: clean direct PASS 0, BACKEND_PENDING 4, FAIL 1, empty
+  INSUFFICIENT 2, missing NO_LEDGER 2 (creates nothing), unreadable DB and
+  missing window 5
 - `tests/init.rs` -- integration floor for `routectl init`: drives the REAL
   guided-setup command into a temp fresh-machine config via both the wizard (a
   non-interactive `StubInitIo`) and the `--yes` flag path, then asserts the

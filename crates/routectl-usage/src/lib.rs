@@ -67,11 +67,12 @@ pub use query::{
     DeadlineGuard, GroupDim, GroupKey, KCalibration, NearLosslessAttributionSummary, QueryError,
     QueryGroup, QueryMetrics, QueryResult, QuerySeries, QuerySpec, QueryTotals, QuotaSnapshot,
     ReductionSummary, ReuseSampleRow, RowCost, SUPPRESSED_SESSION_CAP, SeriesBucket,
-    ShadowMisfireSummary, SuppressedSessionRow, SuppressedSessions, TombstoneRow, WouldTrimSummary,
-    aggregate, cache_decision_summary, earliest_ts_start, errors_by_class, k_calibration_summary,
-    latest_quota_by_seat, latest_tombstone, near_lossless_attribution_summary, query,
-    read_calibration_samples_since, read_capability_events_after, read_reuse_samples_since,
-    reduction_summary, shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
+    ShadowMisfireSummary, StreamExtraRow, SuppressedSessionRow, SuppressedSessions, TombstoneRow,
+    WouldTrimSummary, aggregate, cache_decision_summary, earliest_ts_start, errors_by_class,
+    for_each_stream_extra, k_calibration_summary, latest_quota_by_seat, latest_tombstone,
+    near_lossless_attribution_summary, query, read_calibration_samples_since,
+    read_capability_events_after, read_reuse_samples_since, reduction_summary,
+    shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
 pub use record::{
     Outcome, PREFIX_EPOCH_RESEEDED, PREFIX_EPOCH_REWRITTEN, PREFIX_EPOCH_STABLE, ParseOutcomeError,

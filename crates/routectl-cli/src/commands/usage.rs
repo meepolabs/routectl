@@ -97,6 +97,17 @@ pub enum UsageError {
     Query(#[from] QueryError),
     #[error(transparent)]
     Open(#[from] OpenError),
+    #[error(
+        "--opening-accuracy needs an explicit window: --today, --this-week, --this-month, \
+         --all, or --since D [--until E]"
+    )]
+    OpeningAccuracyNeedsWindow,
+    #[error("usage db unavailable at {path}: {source}")]
+    Unavailable {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 // --- humanizing formatters ---------------------------------------------

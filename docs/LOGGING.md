@@ -800,6 +800,10 @@ Other dialects' rows carry none of these keys. A naturally completed turn
 also logs the source, reason, provisional and terminal labels on the
 `context meter opening settled` DEBUG line. The vocabulary lives in
 `crates/routectl-cli/src/handlers/opening_diagnostics.rs`.
+`routectl usage --opening-accuracy` reads these keys back read-only
+(CONFIGURATION.md, "Context meter opening accuracy"); it treats a label
+outside these sets as a data defect, so adding a label means extending the
+closed sets in `opening_diagnostics.rs`.
 
 ## Config-edit audit shape
 
