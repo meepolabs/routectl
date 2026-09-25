@@ -14029,6 +14029,65 @@ impl<T> typenum::type_operators::Same for routectl_router::ReplayTombstone
 pub type routectl_router::ReplayTombstone::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ReplayTombstone where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ReplayTombstone::into_shared(self) -> Shared
+pub struct routectl_router::RequestEstimate
+pub routectl_router::RequestEstimate::meter: u64
+pub routectl_router::RequestEstimate::total: u64
+impl core::clone::Clone for routectl_router::RequestEstimate
+pub fn routectl_router::RequestEstimate::clone(&self) -> routectl_router::RequestEstimate
+impl core::cmp::Eq for routectl_router::RequestEstimate
+impl core::cmp::PartialEq for routectl_router::RequestEstimate
+pub fn routectl_router::RequestEstimate::eq(&self, &routectl_router::RequestEstimate) -> bool
+impl core::fmt::Debug for routectl_router::RequestEstimate
+pub fn routectl_router::RequestEstimate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::RequestEstimate
+impl core::marker::StructuralPartialEq for routectl_router::RequestEstimate
+impl core::marker::Freeze for routectl_router::RequestEstimate
+impl core::marker::Send for routectl_router::RequestEstimate
+impl core::marker::Sync for routectl_router::RequestEstimate
+impl core::marker::Unpin for routectl_router::RequestEstimate
+impl core::marker::UnsafeUnpin for routectl_router::RequestEstimate
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::RequestEstimate
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::RequestEstimate
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::RequestEstimate where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::RequestEstimate::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::RequestEstimate where U: core::convert::From<T>
+pub fn routectl_router::RequestEstimate::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::RequestEstimate where U: core::convert::Into<T>
+pub type routectl_router::RequestEstimate::Error = core::convert::Infallible
+pub fn routectl_router::RequestEstimate::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::RequestEstimate where U: core::convert::TryFrom<T>
+pub type routectl_router::RequestEstimate::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::RequestEstimate::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::RequestEstimate where T: core::clone::Clone
+pub type routectl_router::RequestEstimate::Owned = T
+pub fn routectl_router::RequestEstimate::clone_into(&self, &mut T)
+pub fn routectl_router::RequestEstimate::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::RequestEstimate where T: core::clone::Clone
+pub fn routectl_router::RequestEstimate::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::RequestEstimate where T: 'static + ?core::marker::Sized
+pub fn routectl_router::RequestEstimate::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::RequestEstimate where T: ?core::marker::Sized
+pub fn routectl_router::RequestEstimate::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::RequestEstimate where T: ?core::marker::Sized
+pub fn routectl_router::RequestEstimate::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::RequestEstimate where T: core::clone::Clone
+pub unsafe fn routectl_router::RequestEstimate::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::RequestEstimate
+pub fn routectl_router::RequestEstimate::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::RequestEstimate where T: core::clone::Clone
+pub fn routectl_router::RequestEstimate::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::RequestEstimate
+impl<T> outref::AsOut<T> for routectl_router::RequestEstimate where T: core::marker::Copy
+pub fn routectl_router::RequestEstimate::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::RequestEstimate where T: ?core::marker::Sized
+pub fn routectl_router::RequestEstimate::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::RequestEstimate::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::RequestEstimate
+impl<T> tracing::instrument::WithSubscriber for routectl_router::RequestEstimate
+impl<T> typenum::type_operators::Same for routectl_router::RequestEstimate
+pub type routectl_router::RequestEstimate::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RequestEstimate where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::RequestEstimate::into_shared(self) -> Shared
 pub struct routectl_router::ResolvedModel
 pub routectl_router::ResolvedModel::auth_secret_ref: core::option::Option<routectl_auth::secret_ref::SecretRef>
 pub routectl_router::ResolvedModel::effective_row: routectl_router::catalog::EffectiveRow
@@ -15679,6 +15738,7 @@ pub fn routectl_router::effective_pricing(&routectl_router::config::Config, &rou
 pub fn routectl_router::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_router::ImpactClass) -> routectl_router::ImpactClass
 pub fn routectl_router::estimate_meter_tokens(&routectl_core::schema::ChatRequest) -> u64
+pub fn routectl_router::estimate_request(&routectl_core::schema::ChatRequest) -> routectl_router::RequestEstimate
 pub fn routectl_router::estimate_total_tokens(&routectl_core::schema::ChatRequest) -> u64
 pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
 pub fn routectl_router::is_cataloged_provider_kind(&str) -> bool

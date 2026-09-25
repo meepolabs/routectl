@@ -3532,33 +3532,96 @@ async fn upstream_400_message_survives_verbatim_without_leaking_the_body() {
     );
 }
 
-/// The synthesized first `message_start` on a streaming Anthropic request
-/// carries the display meter estimate of the inbound canonical request --
-/// the same serialized-bytes basis the router persists -- rather than the
-/// upstream's own opening count, which is withheld until the terminal
-/// `message_delta`.
+/// Anthropic SSE for one short text turn whose `message_start` carries
+/// `opening_usage` (a JSON `usage` object) when given.
+fn meter_sse_body(opening_usage: Option<&str>) -> String {
+    let usage = opening_usage.map_or_else(String::new, |u| format!(",\"usage\":{u}"));
+    format!(
+        "event: message_start\n\
+         data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_meter\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null{usage}}}}}\n\n{}",
+        concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+    )
+}
+
+/// A streaming Anthropic request whose fast winning upstream reports its own
+/// opening input and disjoint cache counts in `message_start` opens the
+/// client stream with exactly those counts, through the whole server.
+#[tokio::test]
+async fn stream_first_message_start_preserves_a_fast_upstream_opening_count() {
+    // Arrange
+    let opening = r#"{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":70,"cache_read_input_tokens":9000}"#;
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(meter_sse_body(Some(opening)))
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 256,
+        "stream": true,
+        "messages": [{"role": "user", "content": "caf\u{e9} \u{1f600} how long is this prompt?"}]
+    });
+
+    // Act
+    let downstream = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // Assert
+    let start = downstream
+        .split("\n\n")
+        .find(|frame| frame.contains("event: message_start"))
+        .and_then(|frame| frame.lines().find_map(|l| l.strip_prefix("data: ")))
+        .expect("a message_start frame");
+    let start: Value = serde_json::from_str(start).expect("message_start data is JSON");
+    assert_eq!(
+        start["message"]["usage"],
+        json!({
+            "input_tokens": 5,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 70,
+            "cache_read_input_tokens": 9000
+        }),
+        "got: {downstream}"
+    );
+}
+
+/// When the winning upstream's `message_start` reports no usage, the first
+/// `message_start` on a streaming Anthropic request carries the display
+/// meter estimate of the inbound canonical request -- the same
+/// serialized-bytes basis the router persists.
 #[tokio::test]
 async fn stream_first_message_start_carries_meter_estimate_of_inbound_request() {
     use axum::http::HeaderMap;
     use routectl_cli::ingress::IngressAdapter;
     use routectl_cli::ingress::anthropic::AnthropicIngress;
 
-    // Arrange: an upstream whose own opening count (5) differs from any
-    // estimate of the request below.
-    let sse_body = concat!(
-        "event: message_start\n",
-        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_meter\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
-        "event: content_block_start\n",
-        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-        "event: content_block_delta\n",
-        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
-        "event: content_block_stop\n",
-        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-        "event: message_delta\n",
-        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n",
-        "event: message_stop\n",
-        "data: {\"type\":\"message_stop\"}\n\n",
-    );
+    // Arrange: an upstream opener with no usage to preserve.
+    let sse_body = meter_sse_body(None);
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -3624,8 +3687,10 @@ async fn stream_first_message_start_carries_meter_estimate_of_inbound_request() 
         "exactly one message_start; got: {downstream}"
     );
     assert!(
-        expected > 5,
-        "fixture must separate estimate from upstream count"
+        starts[0]["message"]["usage"]
+            .get("cache_read_input_tokens")
+            .is_none(),
+        "an estimated opening carries no cache breakdown; got: {downstream}"
     );
     assert_eq!(
         starts[0]["message"]["usage"]["input_tokens"].as_u64(),

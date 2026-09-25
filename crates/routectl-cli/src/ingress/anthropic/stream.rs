@@ -1,6 +1,8 @@
 use serde_json::{Map, Value, json};
 
-use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result, sanitize_for_log};
+use routectl_core::{
+    ChatChunk, Error, OpaqueSseEvent, OpeningUsage, ReasoningDetail, Result, sanitize_for_log,
+};
 
 use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass, StreamRequestContext};
 
@@ -70,9 +72,15 @@ pub(super) fn render_chunk_internal(
         state.msg_model = Some(chunk.model.clone());
     }
 
-    // Emit message_start once.
+    // Emit message_start once. When the chunk that opens the client stream
+    // carries the upstream's own first-event usage, that count is the
+    // opening; otherwise the request-seeded estimate is.
     if !state.started {
-        emit_message_start(state, &mut events);
+        let opening = chunk
+            .upstream_meta
+            .as_ref()
+            .and_then(|meta| meta.opening_usage.as_ref());
+        emit_message_start(state, opening, &mut events);
         state.started = true;
     }
 
@@ -298,7 +306,19 @@ fn build_opaque_delta_payload(ingress_index: usize, raw_bytes: &[u8]) -> Option<
     ))
 }
 
-pub(super) fn emit_message_start(state: &AnthropicStreamState, events: &mut Vec<SseEvent>) {
+/// Emit the stream's `message_start`. With `opening`, its usage is the
+/// upstream's first-event input and cache breakdown field for field (the
+/// cache fields stay disjoint from `input_tokens`); without it, the
+/// request-seeded `input_tokens_estimate`.
+pub(super) fn emit_message_start(
+    state: &AnthropicStreamState,
+    opening: Option<&OpeningUsage>,
+    events: &mut Vec<SseEvent>,
+) {
+    let usage = opening.map_or_else(
+        || json!({"input_tokens": state.input_tokens_estimate, "output_tokens": 0}),
+        opening_usage_json,
+    );
     let msg = json!({
         "type": "message_start",
         "message": {
@@ -311,13 +331,26 @@ pub(super) fn emit_message_start(state: &AnthropicStreamState, events: &mut Vec<
                 .unwrap_or_default(),
             "stop_reason": Value::Null,
             "stop_sequence": Value::Null,
-            "usage": {"input_tokens": state.input_tokens_estimate, "output_tokens": 0},
+            "usage": usage,
         }
     });
     events.push(SseEvent::named(
         "message_start",
         serde_json::to_string(&msg).unwrap_or_default(),
     ));
+}
+
+fn opening_usage_json(opening: &OpeningUsage) -> Value {
+    let mut usage = Map::new();
+    usage.insert("input_tokens".into(), json!(opening.input_tokens));
+    usage.insert("output_tokens".into(), json!(0));
+    cache_fields_into(
+        &mut usage,
+        opening.cache_creation_input_tokens,
+        opening.cache_read_input_tokens,
+        opening.cache_creation.as_ref(),
+    );
+    Value::Object(usage)
 }
 
 fn emit_delta_events(

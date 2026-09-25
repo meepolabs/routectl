@@ -1071,3 +1071,29 @@ fn sse_response_cancelled_without_response_field_yields_upstream_error() {
         other => panic!("expected Upstream error, got {other:?}"),
     }
 }
+
+#[test]
+fn a_completed_response_usage_is_an_explicit_final_report() {
+    let mut state = ResponsesStreamState::default();
+    let chunks = drive(
+        &mut state,
+        json!({
+            "type": "response.completed",
+            "response": {"id": "r", "status": "completed", "model": "m", "output": [],
+                         "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19}}
+        }),
+    );
+
+    let terminal = chunks.last().expect("terminal");
+    assert_eq!(
+        terminal.usage.as_ref().and_then(|u| u.prompt_tokens),
+        Some(12)
+    );
+    assert_eq!(
+        terminal
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_input_source),
+        Some(routectl_core::UsageInputSource::ExplicitFinal)
+    );
+}

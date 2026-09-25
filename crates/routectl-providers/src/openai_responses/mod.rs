@@ -511,8 +511,11 @@ impl Provider for OpenAiResponsesProvider {
                                     // leaves None for every subsequent chunk.
                                     // Held across empty/keepalive events and
                                     // events that emit zero chunks.
-                                    if pending_upstream_meta.is_some() {
-                                        c.upstream_meta = pending_upstream_meta.take();
+                                    if let Some(head) = pending_upstream_meta.take() {
+                                        c.upstream_meta = Some(match c.upstream_meta.take() {
+                                            Some(own) => head.merge(own),
+                                            None => head,
+                                        });
                                     }
                                     yield Ok(c);
                                 }

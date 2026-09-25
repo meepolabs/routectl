@@ -97,6 +97,7 @@ impl Fixture {
             confirmation_advances: std::sync::Arc::new(
                 crate::server::confirmation_advance::ConfirmationTracker::new(),
             ),
+            context_anchors: std::sync::Arc::default(),
         });
         let app = axum::Router::new()
             .route(PURGE_PATH, post(purge_capability))

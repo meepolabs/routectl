@@ -25,7 +25,8 @@
 use serde_json::{Value, json};
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, sanitize_for_log,
+    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, UpstreamMeta,
+    UsageInputSource, sanitize_for_log,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -128,6 +129,7 @@ impl GeminiStreamState {
         // cumulative or interim, so stash the latest value rather than
         // treating its arrival as terminal. The latest write wins, so a
         // terminal event's own usage supersedes an interim value.
+        let event_reported_usage = event.usage_metadata.is_some();
         if let Some(usage) = event.usage_metadata {
             self.cached_usage = Some(usage);
         }
@@ -151,7 +153,7 @@ impl GeminiStreamState {
                     "gemini: candidate blocked on 200 surface"
                 );
             }
-            chunks.push(self.terminal_chunk(finish, usage));
+            chunks.push(self.terminal_chunk(finish, usage, event_reported_usage));
         } else if !has_candidate && let Some(reason) = prompt_block {
             // Prompt-level block: no finishReason and no candidate, but
             // promptFeedback.blockReason is present. This is PROVEN
@@ -167,7 +169,11 @@ impl GeminiStreamState {
                 block_reason = %sanitize_for_log(&reason),
                 "gemini: prompt blocked on 200 surface"
             );
-            chunks.push(self.terminal_chunk(Some("content_filter".to_string()), usage));
+            chunks.push(self.terminal_chunk(
+                Some("content_filter".to_string()),
+                usage,
+                event_reported_usage,
+            ));
         }
 
         Ok(chunks)
@@ -290,12 +296,23 @@ impl GeminiStreamState {
     /// `finish_reason` and the folded-in usage. The reason mapping happens
     /// at the call site so both the candidate-finish and prompt-block
     /// terminal paths share this constructor.
+    /// `own_usage` is whether the terminal event itself carried the usage;
+    /// otherwise the folded-in value is an interim report carried over.
     fn terminal_chunk(
         &self,
         finish: Option<String>,
         usage_meta: Option<UsageMetadata>,
+        own_usage: bool,
     ) -> ChatChunk {
         let usage = usage_meta.map(|m| usage_delta(&m));
+        let source = if own_usage {
+            UsageInputSource::ExplicitFinal
+        } else {
+            UsageInputSource::InterimCarry
+        };
+        let upstream_meta = usage
+            .as_ref()
+            .map(|_| UpstreamMeta::from_usage_input_source(source));
         ChatChunk {
             id: self.response_id.clone(),
             model: self.model.clone(),
@@ -307,7 +324,7 @@ impl GeminiStreamState {
             }],
             usage,
             opaque_events: Vec::new(),
-            upstream_meta: None,
+            upstream_meta,
         }
     }
 

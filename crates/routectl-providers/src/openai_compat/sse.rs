@@ -13,7 +13,7 @@
 use serde_json::Value;
 
 use routectl_core::schema::{ChunkChoice, ChunkDelta, UsageDelta};
-use routectl_core::{ChatChunk, Error, Result, sanitize_for_log};
+use routectl_core::{ChatChunk, Error, Result, UpstreamMeta, UsageInputSource, sanitize_for_log};
 
 use super::dialect::ReasoningDialect;
 use super::util::build_reasoning_detail;
@@ -327,7 +327,23 @@ pub fn parse_event(
     let chunk: ChatChunk = serde_json::from_value(val)
         .map_err(|e| Error::normalize_response(id, format!("chunk deserialize: {e}")))?;
 
-    Ok(Some(chunk))
+    Ok(Some(mark_reported_usage(chunk)))
+}
+
+/// An OpenAI-compatible usage object is the event's own report of the
+/// request's input, never a value carried over from an earlier event, so a
+/// chunk whose usage carries a prompt count is marked as reporting it.
+fn mark_reported_usage(mut chunk: ChatChunk) -> ChatChunk {
+    if chunk
+        .usage
+        .as_ref()
+        .is_some_and(|u| u.prompt_tokens.is_some())
+    {
+        chunk.upstream_meta = Some(UpstreamMeta::from_usage_input_source(
+            UsageInputSource::ExplicitFinal,
+        ));
+    }
+    chunk
 }
 
 /// Detect a mid-stream JSON error envelope (`{"error":{...}}`) emitted
@@ -654,14 +670,14 @@ impl ThinkTagAccumulator {
         // no immutable borrow is live and the `&mut val` lift is safe.
         let usage = extract_chunk_usage(provider_id, &mut val);
 
-        Ok(Some(ChatChunk {
+        Ok(Some(mark_reported_usage(ChatChunk {
             id: chunk_id,
             model,
             choices: new_choices,
             usage,
             opaque_events: Vec::new(),
             upstream_meta: None,
-        }))
+        })))
     }
 
     /// Split `text` into (outside_think_content, inside_think_content) while
@@ -1784,6 +1800,39 @@ mod tests {
             ),
             other => panic!("expected Error::Upstream, got: {other:?}"),
         }
+    }
+
+    /// A trailing usage object is the event's own report: marked explicit
+    /// on both parse paths; a chunk with no usage is left unmarked.
+    #[test]
+    fn a_trailing_usage_chunk_is_an_explicit_final_report_on_both_paths() {
+        let usage_only = json!({"id": "c", "model": "m", "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}})
+        .to_string();
+        let content = json!({"id": "c", "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]})
+        .to_string();
+        let source = |chunk: &ChatChunk| {
+            chunk
+                .upstream_meta
+                .as_ref()
+                .and_then(|m| m.usage_input_source)
+        };
+
+        let plain = parse_event("p", &usage_only, ReasoningDialect::OpenAi, &mut 0)
+            .unwrap()
+            .unwrap();
+        let think = ThinkTagAccumulator::new()
+            .process("p", &usage_only)
+            .unwrap()
+            .unwrap();
+        let bare = parse_event("p", &content, ReasoningDialect::OpenAi, &mut 0)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source(&plain), Some(UsageInputSource::ExplicitFinal));
+        assert_eq!(source(&think), Some(UsageInputSource::ExplicitFinal));
+        assert_eq!(source(&bare), None);
     }
 
     /// A terminal chunk driven through `ThinkTagAccumulator::process`

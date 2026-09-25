@@ -28,7 +28,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role,
+    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, UpstreamMeta,
+    UsageInputSource,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -571,9 +572,11 @@ impl ResponsesStreamState {
                 finish_reason,
                 matched_stop_sequence: None,
             }],
+            upstream_meta: usage_delta
+                .as_ref()
+                .map(|_| UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)),
             usage: usage_delta,
             opaque_events: Vec::new(),
-            upstream_meta: None,
         }])
     }
 

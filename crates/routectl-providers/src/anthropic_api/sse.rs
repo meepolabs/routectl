@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, Error, OpaqueSseEvent, OpeningUsage, OpeningUsageOrigin, ReasoningDetail, Result,
-    Role, UpstreamMeta, sanitize_for_log,
+    Role, UpstreamMeta, UsageInputSource, sanitize_for_log,
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -180,6 +180,10 @@ pub struct SseState {
     /// the Anthropic Messages wire; a wrapping transport that feeds this
     /// parser nested events sets its own via `with_opening_origin`.
     opening_origin: Option<OpeningUsageOrigin>,
+    /// Whether the first event came from the vendor's own endpoint, so an
+    /// input count carried over from it is the vendor's measurement.
+    /// `false` (the default) marks carried-over input as unverified.
+    vendor_opening: bool,
 }
 
 /// Input-side usage captured once from `message_start`, carried forward
@@ -229,6 +233,23 @@ impl SseState {
     pub const fn with_opening_origin(mut self, origin: OpeningUsageOrigin) -> Self {
         self.opening_origin = Some(origin);
         self
+    }
+
+    /// Mark the first event as the vendor's own measurement: the stream
+    /// came from the first-party endpoint, not an Anthropic-compatible
+    /// proxy in front of it.
+    #[must_use]
+    pub const fn with_vendor_opening(mut self) -> Self {
+        self.vendor_opening = true;
+        self
+    }
+
+    const fn opening_input_source(&self) -> UsageInputSource {
+        if self.vendor_opening {
+            UsageInputSource::VendorOpening
+        } else {
+            UsageInputSource::ProxyOpening
+        }
     }
 
     /// Parse one raw SSE data line (the JSON string after "data: ").
@@ -508,26 +529,47 @@ impl SseState {
                 // the closing chunk must carry it forward for OpenAI
                 // clients to see full prompt_tokens.
                 let captured = self.captured_input_usage.clone();
+                let mut usage_input_source = None;
                 let usage_delta = if usage.is_some() || captured.is_some() {
                     let cap = captured.as_ref();
-                    // Prefer delta when present and non-zero; fall back
-                    // to captured. Some(0) is "no info", not
-                    // "authoritative zero" -- placeholder restatements
-                    // must not blow away non-zero captured numbers.
-                    let pick = |delta: Option<u32>, cap_v: Option<u32>| -> Option<u32> {
-                        match (delta, cap_v) {
-                            (Some(d), _) if d > 0 => Some(d),
-                            (_, Some(c)) if c > 0 => Some(c),
-                            // Both arms above guarded; the rest are
-                            // zero-or-absent on both sides.
-                            _ => None,
+                    // A delta that reports any positive input or cache
+                    // component is an input report: each component it
+                    // states, zero included, is authoritative (a zero
+                    // uncached input beside a cache read is a fully cached
+                    // prompt). Otherwise its zeros are placeholder
+                    // restatements and must not blow away non-zero
+                    // captured numbers.
+                    let reports_input = usage.as_ref().is_some_and(|u| {
+                        [
+                            u.input_tokens,
+                            u.cache_creation_input_tokens,
+                            u.cache_read_input_tokens,
+                        ]
+                        .iter()
+                        .any(|v| v.is_some_and(|n| n > 0))
+                    });
+                    let pick_placeholder =
+                        |delta: Option<u32>, cap_v: Option<u32>| -> Option<u32> {
+                            match (delta, cap_v) {
+                                (Some(d), _) if d > 0 => Some(d),
+                                (_, Some(c)) if c > 0 => Some(c),
+                                // Both arms above guarded; the rest are
+                                // zero-or-absent on both sides.
+                                _ => None,
+                            }
+                        };
+                    let pick_input = |delta: Option<u32>, cap_v: Option<u32>| -> Option<u32> {
+                        if reports_input {
+                            delta.or(cap_v.filter(|c| *c > 0))
+                        } else {
+                            pick_placeholder(delta, cap_v)
                         }
                     };
-                    let cache_creation_input_tokens = pick(
+                    let cache_creation_input_tokens = pick_input(
                         usage.as_ref().and_then(|u| u.cache_creation_input_tokens),
                         cap.and_then(|c| c.cache_creation_input_tokens),
                     );
-                    let cache_read_input_tokens = pick(
+                    let cache_read_input_tokens = pick_input(
                         usage.as_ref().and_then(|u| u.cache_read_input_tokens),
                         cap.and_then(|c| c.cache_read_input_tokens),
                     );
@@ -538,10 +580,25 @@ impl SseState {
                     // not currently emit input_tokens on message_delta;
                     // routectl-rendered upstreams now also emit raw) and
                     // falls back to message_start's captured value.
-                    let raw_input = pick(
+                    let raw_input = pick_input(
                         usage.as_ref().and_then(|u| u.input_tokens),
                         cap.map(|c| c.input_tokens),
                     );
+                    let copied_from_opening = [
+                        (usage.as_ref().and_then(|u| u.input_tokens), raw_input),
+                        (
+                            usage.as_ref().and_then(|u| u.cache_creation_input_tokens),
+                            cache_creation_input_tokens,
+                        ),
+                        (
+                            usage.as_ref().and_then(|u| u.cache_read_input_tokens),
+                            cache_read_input_tokens,
+                        ),
+                    ]
+                    .iter()
+                    .any(|(reported, picked)| {
+                        picked.is_some() && !(reports_input && reported.is_some())
+                    });
                     let prompt_tokens = match (
                         raw_input,
                         cache_creation_input_tokens,
@@ -561,28 +618,52 @@ impl SseState {
                         (None, Some(c)) => Some(c),
                         (None, None) => None,
                     };
-                    // Per-TTL merge via the same `pick` so a delta with
+                    // Per-TTL merge via the placeholder rule so a delta with
                     // partial/empty `cache_creation` doesn't wholesale-
                     // replace the richer message_start object.
                     let delta_cc = usage.as_ref().and_then(|u| u.cache_creation.as_ref());
                     let cap_cc = cap.and_then(|c| c.cache_creation.as_ref());
-                    let cache_creation_5m = pick(
+                    let cache_creation_5m = pick_placeholder(
                         delta_cc.and_then(|c| c.ephemeral_5m_input_tokens),
                         cap_cc.and_then(|c| c.ephemeral_5m_input_tokens),
                     );
-                    let cache_creation_1h = pick(
+                    let cache_creation_1h = pick_placeholder(
                         delta_cc.and_then(|c| c.ephemeral_1h_input_tokens),
                         cap_cc.and_then(|c| c.ephemeral_1h_input_tokens),
                     );
-                    let cache_creation =
-                        if cache_creation_5m.is_some() || cache_creation_1h.is_some() {
-                            Some(CacheCreation {
-                                ephemeral_5m_input_tokens: cache_creation_5m,
-                                ephemeral_1h_input_tokens: cache_creation_1h,
-                            })
+                    let delta_states_cache_writes = reports_input
+                        && usage
+                            .as_ref()
+                            .is_some_and(|u| u.cache_creation_input_tokens.is_some());
+                    let cache_creation = if delta_states_cache_writes {
+                        // The delta's own write count is authoritative, so
+                        // its breakdown is too; a copied one could
+                        // contradict it.
+                        delta_cc.map(|c| CacheCreation {
+                            ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
+                            ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
+                        })
+                    } else if cache_creation_5m.is_some() || cache_creation_1h.is_some() {
+                        Some(CacheCreation {
+                            ephemeral_5m_input_tokens: cache_creation_5m,
+                            ephemeral_1h_input_tokens: cache_creation_1h,
+                        })
+                    } else {
+                        None
+                    };
+                    // Explicit only when the delta states the uncached input
+                    // itself and nothing positive came from the opener; an
+                    // absent cache field reads as zero on this wire.
+                    let states_raw_input = usage.as_ref().is_some_and(|u| u.input_tokens.is_some());
+                    usage_input_source = prompt_tokens.map(|_| {
+                        if copied_from_opening {
+                            self.opening_input_source()
+                        } else if states_raw_input {
+                            UsageInputSource::ExplicitFinal
                         } else {
-                            None
-                        };
+                            UsageInputSource::PartialFinal
+                        }
+                    });
                     Some(UsageDelta {
                         prompt_tokens,
                         completion_tokens,
@@ -617,7 +698,7 @@ impl SseState {
                     }],
                     usage: usage_delta,
                     opaque_events: Vec::new(),
-                    upstream_meta: None,
+                    upstream_meta: usage_input_source.map(UpstreamMeta::from_usage_input_source),
                 }))
             }
 
@@ -726,6 +807,7 @@ impl SseState {
         opening.cache_creation_input_tokens = captured.cache_creation_input_tokens;
         opening.cache_read_input_tokens = captured.cache_read_input_tokens;
         opening.cache_creation = captured.cache_creation.clone();
+        opening.from_vendor_endpoint = self.vendor_opening;
         Some(UpstreamMeta::from_opening_usage(opening))
     }
 

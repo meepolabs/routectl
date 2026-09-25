@@ -2568,6 +2568,54 @@ impl<T> core::convert::From<T> for routectl_core::upstream_meta::OpeningUsageOri
 pub fn routectl_core::upstream_meta::OpeningUsageOrigin::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::OpeningUsageOrigin
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::OpeningUsageOrigin
+#[non_exhaustive] pub enum routectl_core::upstream_meta::UsageInputSource
+pub routectl_core::upstream_meta::UsageInputSource::ExplicitFinal
+pub routectl_core::upstream_meta::UsageInputSource::InterimCarry
+pub routectl_core::upstream_meta::UsageInputSource::PartialFinal
+pub routectl_core::upstream_meta::UsageInputSource::ProxyOpening
+pub routectl_core::upstream_meta::UsageInputSource::VendorOpening
+impl routectl_core::upstream_meta::UsageInputSource
+pub const fn routectl_core::upstream_meta::UsageInputSource::is_terminal_evidence(self) -> bool
+impl core::clone::Clone for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::clone(&self) -> routectl_core::upstream_meta::UsageInputSource
+impl core::cmp::Eq for routectl_core::upstream_meta::UsageInputSource
+impl core::cmp::PartialEq for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::eq(&self, &routectl_core::upstream_meta::UsageInputSource) -> bool
+impl core::fmt::Debug for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::StructuralPartialEq for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Freeze for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Send for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Sync for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Unpin for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::UnsafeUnpin for routectl_core::upstream_meta::UsageInputSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::upstream_meta::UsageInputSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::upstream_meta::UsageInputSource
+impl<T, U> core::convert::Into<U> for routectl_core::upstream_meta::UsageInputSource where U: core::convert::From<T>
+pub fn routectl_core::upstream_meta::UsageInputSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::upstream_meta::UsageInputSource where U: core::convert::Into<T>
+pub type routectl_core::upstream_meta::UsageInputSource::Error = core::convert::Infallible
+pub fn routectl_core::upstream_meta::UsageInputSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::upstream_meta::UsageInputSource where U: core::convert::TryFrom<T>
+pub type routectl_core::upstream_meta::UsageInputSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::upstream_meta::UsageInputSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::upstream_meta::UsageInputSource where T: core::clone::Clone
+pub type routectl_core::upstream_meta::UsageInputSource::Owned = T
+pub fn routectl_core::upstream_meta::UsageInputSource::clone_into(&self, &mut T)
+pub fn routectl_core::upstream_meta::UsageInputSource::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::upstream_meta::UsageInputSource where T: 'static + ?core::marker::Sized
+pub fn routectl_core::upstream_meta::UsageInputSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::upstream_meta::UsageInputSource where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::UsageInputSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::upstream_meta::UsageInputSource where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::UsageInputSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::upstream_meta::UsageInputSource where T: core::clone::Clone
+pub unsafe fn routectl_core::upstream_meta::UsageInputSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::UsageInputSource
+impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::UsageInputSource
 #[non_exhaustive] pub struct routectl_core::upstream_meta::AnthropicUnifiedQuota
 pub routectl_core::upstream_meta::AnthropicUnifiedQuota::extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::upstream_meta::AnthropicUnifiedQuota::overage_status: core::option::Option<alloc::string::String>
@@ -2667,6 +2715,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::Co
 pub routectl_core::upstream_meta::OpeningUsage::cache_creation: core::option::Option<routectl_core::schema::CacheCreation>
 pub routectl_core::upstream_meta::OpeningUsage::cache_creation_input_tokens: core::option::Option<u32>
 pub routectl_core::upstream_meta::OpeningUsage::cache_read_input_tokens: core::option::Option<u32>
+pub routectl_core::upstream_meta::OpeningUsage::from_vendor_endpoint: bool
 pub routectl_core::upstream_meta::OpeningUsage::input_tokens: u32
 pub routectl_core::upstream_meta::OpeningUsage::observed_at: std::time::Instant
 pub routectl_core::upstream_meta::OpeningUsage::origin: routectl_core::upstream_meta::OpeningUsageOrigin
@@ -2715,10 +2764,12 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::Op
 pub routectl_core::upstream_meta::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
 pub routectl_core::upstream_meta::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
 pub routectl_core::upstream_meta::UpstreamMeta::opening_usage: core::option::Option<routectl_core::upstream_meta::OpeningUsage>
+pub routectl_core::upstream_meta::UpstreamMeta::usage_input_source: core::option::Option<routectl_core::upstream_meta::UsageInputSource>
 impl routectl_core::upstream_meta::UpstreamMeta
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(routectl_core::upstream_meta::AnthropicUnifiedQuota) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_codex(routectl_core::upstream_meta::CodexQuota) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_opening_usage(routectl_core::upstream_meta::OpeningUsage) -> Self
+pub const fn routectl_core::upstream_meta::UpstreamMeta::from_usage_input_source(routectl_core::upstream_meta::UsageInputSource) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::has_quota_family(&self) -> bool
 pub fn routectl_core::upstream_meta::UpstreamMeta::merge(self, Self) -> Self
 impl core::clone::Clone for routectl_core::upstream_meta::UpstreamMeta
@@ -3877,6 +3928,54 @@ pub fn routectl_core::tool_def::ToolDef::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::tool_def::ToolDef where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::tool_def::ToolDef
 impl<T> tracing::instrument::WithSubscriber for routectl_core::tool_def::ToolDef
+#[non_exhaustive] pub enum routectl_core::UsageInputSource
+pub routectl_core::UsageInputSource::ExplicitFinal
+pub routectl_core::UsageInputSource::InterimCarry
+pub routectl_core::UsageInputSource::PartialFinal
+pub routectl_core::UsageInputSource::ProxyOpening
+pub routectl_core::UsageInputSource::VendorOpening
+impl routectl_core::upstream_meta::UsageInputSource
+pub const fn routectl_core::upstream_meta::UsageInputSource::is_terminal_evidence(self) -> bool
+impl core::clone::Clone for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::clone(&self) -> routectl_core::upstream_meta::UsageInputSource
+impl core::cmp::Eq for routectl_core::upstream_meta::UsageInputSource
+impl core::cmp::PartialEq for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::eq(&self, &routectl_core::upstream_meta::UsageInputSource) -> bool
+impl core::fmt::Debug for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::StructuralPartialEq for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Freeze for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Send for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Sync for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::Unpin for routectl_core::upstream_meta::UsageInputSource
+impl core::marker::UnsafeUnpin for routectl_core::upstream_meta::UsageInputSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::upstream_meta::UsageInputSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::upstream_meta::UsageInputSource
+impl<T, U> core::convert::Into<U> for routectl_core::upstream_meta::UsageInputSource where U: core::convert::From<T>
+pub fn routectl_core::upstream_meta::UsageInputSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::upstream_meta::UsageInputSource where U: core::convert::Into<T>
+pub type routectl_core::upstream_meta::UsageInputSource::Error = core::convert::Infallible
+pub fn routectl_core::upstream_meta::UsageInputSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::upstream_meta::UsageInputSource where U: core::convert::TryFrom<T>
+pub type routectl_core::upstream_meta::UsageInputSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::upstream_meta::UsageInputSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::upstream_meta::UsageInputSource where T: core::clone::Clone
+pub type routectl_core::upstream_meta::UsageInputSource::Owned = T
+pub fn routectl_core::upstream_meta::UsageInputSource::clone_into(&self, &mut T)
+pub fn routectl_core::upstream_meta::UsageInputSource::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::upstream_meta::UsageInputSource where T: 'static + ?core::marker::Sized
+pub fn routectl_core::upstream_meta::UsageInputSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::upstream_meta::UsageInputSource where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::UsageInputSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::upstream_meta::UsageInputSource where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::UsageInputSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::upstream_meta::UsageInputSource where T: core::clone::Clone
+pub unsafe fn routectl_core::upstream_meta::UsageInputSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::upstream_meta::UsageInputSource
+pub fn routectl_core::upstream_meta::UsageInputSource::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::UsageInputSource
+impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::UsageInputSource
 pub enum routectl_core::Verdict
 pub routectl_core::Verdict::Assumed(bool)
 pub routectl_core::Verdict::Cleared
@@ -4854,6 +4953,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Message
 pub routectl_core::OpeningUsage::cache_creation: core::option::Option<routectl_core::schema::CacheCreation>
 pub routectl_core::OpeningUsage::cache_creation_input_tokens: core::option::Option<u32>
 pub routectl_core::OpeningUsage::cache_read_input_tokens: core::option::Option<u32>
+pub routectl_core::OpeningUsage::from_vendor_endpoint: bool
 pub routectl_core::OpeningUsage::input_tokens: u32
 pub routectl_core::OpeningUsage::observed_at: std::time::Instant
 pub routectl_core::OpeningUsage::origin: routectl_core::upstream_meta::OpeningUsageOrigin
@@ -5431,10 +5531,12 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::TokenCoun
 pub routectl_core::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
 pub routectl_core::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
 pub routectl_core::UpstreamMeta::opening_usage: core::option::Option<routectl_core::upstream_meta::OpeningUsage>
+pub routectl_core::UpstreamMeta::usage_input_source: core::option::Option<routectl_core::upstream_meta::UsageInputSource>
 impl routectl_core::upstream_meta::UpstreamMeta
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(routectl_core::upstream_meta::AnthropicUnifiedQuota) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_codex(routectl_core::upstream_meta::CodexQuota) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_opening_usage(routectl_core::upstream_meta::OpeningUsage) -> Self
+pub const fn routectl_core::upstream_meta::UpstreamMeta::from_usage_input_source(routectl_core::upstream_meta::UsageInputSource) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::has_quota_family(&self) -> bool
 pub fn routectl_core::upstream_meta::UpstreamMeta::merge(self, Self) -> Self
 impl core::clone::Clone for routectl_core::upstream_meta::UpstreamMeta

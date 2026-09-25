@@ -692,6 +692,7 @@ async fn serve_inner(
         cc_pin_drift: crate::server::cc_pin_drift::CcPinDriftGuard::new(),
         purge_settlements: Arc::clone(&purge_settlements),
         confirmation_advances: Arc::clone(&confirmation_advances),
+        context_anchors: Arc::default(),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is

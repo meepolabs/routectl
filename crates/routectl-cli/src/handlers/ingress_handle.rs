@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
+use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
 use crate::handlers::usage_capture::{
     StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
@@ -174,6 +175,11 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     let draft = build_usage_draft(adapter.id(), &req, request_id);
 
     let streaming = req.stream == Some(true);
+    // Admission of a metered stream: the turn's anchor order is reserved
+    // here, before the request is measured, and read off the same Router
+    // snapshot the dispatch will use.
+    let meter = (streaming && adapter.reports_opening_usage())
+        .then(|| OpeningMeter::admit(&state.context_anchors, &router, &req));
     // The confirmation tracker rides alongside the usage handle, by the same route
     // and for the same reason: both are daemon-owned sinks a request writes to, and
     // neither belongs to the request. Cloned Arcs, so the handler holds no borrow of
@@ -188,6 +194,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
             state.usage.clone(),
             confirmations,
             draft,
+            meter,
         )
         .await
     } else {
@@ -572,6 +579,12 @@ async fn complete_response<A: IngressAdapter>(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct owned input or sink the stream walk hands \
+              to its render task; the meter is the one request-scoped seed built at \
+              admission, before the request is moved here"
+)]
 async fn stream_response<A: IngressAdapter + 'static>(
     router: Arc<routectl_router::Router>,
     req: routectl_core::ChatRequest,
@@ -580,6 +593,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
     usage: UsageHandle,
     confirmations: Arc<ConfirmationTracker>,
     draft: UsageRecord,
+    meter: Option<OpeningMeter>,
 ) -> Response {
     let capture = UsageCapture::new(draft, usage, adapter.id().to_string());
     // Extract the canonical live session key BEFORE dispatch moves `req`
@@ -587,12 +601,21 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // K-sample recording at natural end-of-stream.
     let session_key = req.routectl_internal.inbound_session_key.clone();
     // Build the stream-state seed from `req` BEFORE dispatch moves it:
-    // the display input-token estimate (for a non-zero early
-    // `message_start.usage.input_tokens`) and the resolved model (for the
-    // early-frame model id). Adapters that need neither ignore it.
+    // the display input-token estimate (for a non-zero
+    // `message_start.usage.input_tokens`; a metered turn replaces it with
+    // its selected opening) and the resolved model (for the early-frame
+    // model id). Adapters that need neither ignore it.
     let stream_ctx = StreamRequestContext {
-        input_tokens_estimate: routectl_router::estimate_meter_tokens(&req),
+        input_tokens_estimate: meter.as_ref().map_or_else(
+            || routectl_router::estimate_meter_tokens(&req),
+            OpeningMeter::raw_tokens,
+        ),
         model: req.model.clone(),
+    };
+    let turn = StreamTurn {
+        session_key,
+        ctx: stream_ctx,
+        meter,
     };
     // Hold the dispatch UN-AWAITED. `stream_with_options` borrows `&self`
     // for the returned future's life, so an `Arc` clone is MOVED into the
@@ -603,26 +626,19 @@ async fn stream_response<A: IngressAdapter + 'static>(
     let router_for_dispatch = Arc::clone(&router);
     let fut: DispatchFut =
         Box::pin(async move { router_for_dispatch.stream_with_options(req, opts).await });
-    stream_dispatch_gated(
-        fut,
-        adapter,
-        capture,
-        router,
-        confirmations,
-        session_key,
-        stream_ctx,
-    )
-    .await
+    stream_dispatch_gated(fut, adapter, capture, router, confirmations, turn).await
 }
 
 /// Grace-gated commit (option (b')): hold the dispatch future for a bounded
 /// grace window (`STREAM_EARLY_FLUSH_GRACE`) via `tokio::select!`, then
 /// branch WITHOUT ever awaiting the dispatch to completion up front.
 ///
-/// FAST (dispatch resolves within grace) -- today's behavior verbatim:
-/// - `Ok(stream)` spawns the render task on the resolved stream (the
-///   synthetic `message_start` still emits on the first content chunk,
-///   carrying the estimate; no early frame).
+/// FAST (dispatch resolves within grace):
+/// - `Ok(stream)` spawns the render task on the resolved stream; no early
+///   frame. `message_start` emits on the first chunk, carrying the winning
+///   attempt's own first-event usage when that chunk has it, else the
+///   opening a metered turn selected against the served lane (the
+///   request-seeded estimate on an unmetered one).
 /// - `Err(e)` returns a REAL HTTP error status via `map_error` -- NOT an
 ///   in-stream frame -- so the SDK's pre-stream 529/5xx retry still fires.
 ///
@@ -637,8 +653,7 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
     mut capture: UsageCapture,
     router: Arc<routectl_router::Router>,
     confirmations: Arc<ConfirmationTracker>,
-    session_key: Option<String>,
-    stream_ctx: StreamRequestContext,
+    mut turn: StreamTurn,
 ) -> Response {
     let envelope = adapter.error_envelope_shape();
     let egress_id = adapter.id().to_string();
@@ -683,19 +698,12 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
             );
             match dispatched.result {
                 Ok(upstream) => {
+                    turn.seed_served(&dispatched.meta, &router);
                     // `adapter` + `capture` move INTO the render task, which
                     // finalizes on every stream exit (see `drive_stream`).
                     tokio::spawn(
-                        render_stream_task(
-                            upstream,
-                            adapter,
-                            capture,
-                            tx,
-                            router,
-                            session_key,
-                            stream_ctx,
-                        )
-                        .instrument(parent_span),
+                        render_stream_task(upstream, adapter, capture, tx, router, turn)
+                            .instrument(parent_span),
                     );
                     build_sse_response(rx, &egress_id)
                 }
@@ -715,17 +723,8 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
             // response now; the warm task owns the still-pending future and
             // flushes the early frame before awaiting it.
             tokio::spawn(
-                warm_render_task(
-                    fut,
-                    adapter,
-                    capture,
-                    tx,
-                    router,
-                    confirmations,
-                    session_key,
-                    stream_ctx,
-                )
-                .instrument(parent_span),
+                warm_render_task(fut, adapter, capture, tx, router, confirmations, turn)
+                    .instrument(parent_span),
             );
             build_sse_response(rx, &egress_id)
         }
@@ -749,6 +748,10 @@ fn build_sse_response(rx: tokio::sync::mpsc::Receiver<SseEvent>, egress_id: &str
 }
 
 /// Warm-hold render task (grace expired with the dispatch still pending).
+///
+/// A metered turn first selects its provisional opening against the route
+/// head (the winner is not known yet); that is the count the early frame
+/// carries, and the winning attempt's own opener is not rendered after it.
 ///
 /// For a dialect that OVERRIDES `early_frame` (Anthropic: emits
 /// `message_start`), emit-then-dispatch is a hard invariant -- that frame
@@ -777,12 +780,6 @@ fn build_sse_response(rx: tokio::sync::mpsc::Receiver<SseEvent>, egress_id: &str
 /// while awaiting the still-pending dispatch (the pre-content window the
 /// content-commit boundary keeps open). Both drop the guard un-finalized
 /// so Drop stamps `client_disconnect`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct owned sink or seed this task must hold for \
-              its whole life; bundling them would make one struct whose fields are \
-              read at four unrelated points"
-)]
 async fn warm_render_task<A: IngressAdapter>(
     mut fut: DispatchFut,
     adapter: A,
@@ -790,10 +787,10 @@ async fn warm_render_task<A: IngressAdapter>(
     tx: tokio::sync::mpsc::Sender<SseEvent>,
     router: Arc<routectl_router::Router>,
     confirmations: Arc<ConfirmationTracker>,
-    session_key: Option<String>,
-    stream_ctx: StreamRequestContext,
+    mut turn: StreamTurn,
 ) {
-    let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state(&stream_ctx);
+    turn.seed_provisional(&router);
+    let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state(&turn.ctx);
     // Emit-then-dispatch invariant: flush the early frame FIRST, before the
     // dispatch await, so the response head actually flushes.
     for ev in adapter.early_frame(state.as_mut()) {
@@ -850,7 +847,10 @@ async fn warm_render_task<A: IngressAdapter>(
     );
     match dispatched.result {
         Ok(upstream) => {
-            drive_stream(upstream, adapter, capture, tx, router, session_key, state).await;
+            if let Some(meter) = turn.meter.as_mut() {
+                meter.bind_served(&dispatched.meta);
+            }
+            drive_stream(upstream, adapter, capture, tx, router, turn, state).await;
         }
         Err(e) => {
             // Pre-content dispatch failure AFTER the SSE head committed: the
@@ -884,11 +884,10 @@ async fn render_stream_task<A: IngressAdapter>(
     capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
     router: Arc<routectl_router::Router>,
-    session_key: Option<String>,
-    stream_ctx: StreamRequestContext,
+    turn: StreamTurn,
 ) {
-    let state: Box<dyn IngressStreamState> = adapter.new_stream_state(&stream_ctx);
-    drive_stream(upstream, adapter, capture, tx, router, session_key, state).await;
+    let state: Box<dyn IngressStreamState> = adapter.new_stream_state(&turn.ctx);
+    drive_stream(upstream, adapter, capture, tx, router, turn, state).await;
 }
 
 /// Drive the upstream chunk stream through the ingress adapter, emitting
@@ -924,9 +923,14 @@ async fn drive_stream<A: IngressAdapter>(
     mut capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
     router: Arc<routectl_router::Router>,
-    session_key: Option<String>,
+    turn: StreamTurn,
     mut state: Box<dyn IngressStreamState>,
 ) {
+    let StreamTurn {
+        session_key,
+        mut meter,
+        ..
+    } = turn;
     // The capture guard is the RAII summary + usage row for this
     // stream. It fires on EVERY exit path (clean close, render error,
     // upstream mid-stream error, client disconnect, runtime task
@@ -958,8 +962,15 @@ async fn drive_stream<A: IngressAdapter>(
                 // stream head BEFORE rendering.
                 capture.mark_first_byte();
                 capture.observe_chunk(&chunk);
+                let candidate = meter.as_mut().map(|meter| {
+                    meter.observe_opening_chunk(&chunk);
+                    OpeningMeter::terminal_candidate(&chunk)
+                });
                 match adapter.render_chunk(chunk, state.as_mut()) {
                     Ok(events) => {
+                        if let (Some(meter), Some(candidate)) = (meter.as_mut(), candidate) {
+                            meter.accept_rendered(candidate, &events);
+                        }
                         for ev in events {
                             if tx.send(ev).await.is_err() {
                                 // Client disconnected mid-stream. The
@@ -1056,6 +1067,11 @@ async fn drive_stream<A: IngressAdapter>(
     // completion; the egress trace-summary fires from inside `finalize`.
     capture.record_k_sample(&router, session_key.as_deref());
     capture.record_calibration_sample(&router, session_key.as_deref());
+    // Only this natural, fully delivered end may anchor the next turn;
+    // every earlier return drops the pending turn unpublished.
+    if let Some(meter) = meter {
+        meter.settle_completed();
+    }
     capture.finalize(Outcome::Ok);
 }
 
@@ -1608,3 +1624,15 @@ fn anthropic_vocab_member(t: &str) -> Option<&'static str> {
 #[cfg(test)]
 #[path = "ingress_handle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "opening_rig_tests.rs"]
+pub(crate) mod opening_rig;
+
+#[cfg(test)]
+#[path = "opening_e2e_tests.rs"]
+mod opening_e2e_tests;
+
+#[cfg(test)]
+#[path = "opening_anchor_e2e_tests.rs"]
+mod opening_anchor_e2e_tests;

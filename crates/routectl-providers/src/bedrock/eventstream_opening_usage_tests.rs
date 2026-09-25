@@ -85,3 +85,38 @@ async fn invoke_stream_without_opening_usage_carries_nothing() {
     assert!(chunks.iter().all(|c| c.upstream_meta.is_none()));
     assert!(chunks.iter().all(|c| c.usage.is_none()));
 }
+
+#[tokio::test]
+async fn an_invoke_output_only_delta_carries_the_vendor_opening_source() {
+    // Arrange
+    const OUTPUT_ONLY_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}"#;
+
+    // Act
+    let chunks = decode(&[MESSAGE_START, TEXT_START, TEXT_DELTA, OUTPUT_ONLY_DELTA]).await;
+
+    // Assert
+    let terminal = chunks.last().expect("terminal chunk");
+    assert_eq!(
+        terminal.usage.as_ref().and_then(|u| u.prompt_tokens),
+        Some(321 + 654 + 987)
+    );
+    assert_eq!(
+        terminal
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_input_source),
+        Some(routectl_core::UsageInputSource::VendorOpening)
+    );
+}
+
+#[tokio::test]
+async fn an_invoke_opening_is_from_the_vendor_endpoint() {
+    let chunks = decode(&[MESSAGE_START, TEXT_START, TEXT_DELTA]).await;
+
+    let opening = chunks[0]
+        .upstream_meta
+        .as_ref()
+        .and_then(|m| m.opening_usage.as_ref())
+        .expect("opening carried");
+    assert!(opening.from_vendor_endpoint);
+}
