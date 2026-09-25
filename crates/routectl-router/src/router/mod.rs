@@ -41,6 +41,7 @@ pub(crate) mod fidelity_status;
 mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
+mod opening_lookup;
 mod overlays;
 mod paid_probe_authorize;
 mod paid_probe_dial;
@@ -81,6 +82,7 @@ pub use fidelity_status::{
 pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
 };
+pub use opening_lookup::OpeningLane;
 use overlays::{apply_layered_overlays, operator_betas};
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use paid_probe_ledger::{PaidProbeLedger, PaidProbeReservation};

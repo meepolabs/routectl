@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use routectl_core::ChatRequest;
 
-use crate::calibration::{Factor, LaneKey};
+use crate::calibration::Factor;
 
 use super::{DispatchTarget, Router};
 
@@ -136,14 +136,7 @@ impl Router {
     /// silently never match, holding every lane uncorrected forever while
     /// reading as health.
     fn calibration_factor(&self, target: &DispatchTarget, now: SystemTime) -> Option<Factor> {
-        if !self.config.calibration.enabled {
-            return None;
-        }
-        let key = LaneKey {
-            provider_kind: (*target.provider_kind.as_ref()?).to_string(),
-            nickname: target.nickname.clone()?,
-        };
-        self.calibration_store.factor_for(&key, now)
+        self.lane_calibration_factor(target.provider_kind?, target.nickname.as_deref()?, now)
     }
 
     /// Skip chain targets whose context window clearly cannot hold the

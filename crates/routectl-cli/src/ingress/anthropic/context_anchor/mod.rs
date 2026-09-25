@@ -35,26 +35,34 @@
 //!    older request cannot take a newer place in the order.
 //! 3. `TurnTicket::current_record()`, then `TurnTicket::measure(req,
 //!    prior_message_count)` to get a `PendingAnchor`.
-//! 4. `evaluate(record, pending.identity(), lane)` for the opening.
-//! 5. `PendingAnchor::settle(outcome)` once the turn ends. It consumes the
-//!    pending turn and publishes only into the store and under the key the
-//!    ticket was reserved for; dropping it unsettled publishes nothing.
+//! 4. `select_opening` for the opening count: the anchor verdict first,
+//!    then the lane's calibrated estimate, then the raw estimate. The basis
+//!    is `OpeningLaneBasis::served` when the winner is known, else
+//!    `OpeningLaneBasis::head` over `Router::opening_lane`; every head
+//!    basis, resolved or not, yields a provisional selection.
+//! 5. `PendingAnchor::settle(outcome)` once the turn ends, with
+//!    `AnchorLane::served`. It consumes the pending turn and publishes only
+//!    into the store and under the key the ticket was reserved for;
+//!    dropping it unsettled publishes nothing.
 //!
-//! `AnchorLane::generation` must be the Router's own publication
-//! generation, read through a Router accessor the handler wiring adds. The
-//! Router's existing `registry_generation` is NOT a substitute: the
-//! registry is shared across rebuilds and only moves when the registry
-//! does, so a reload that changes prompt-shaping config can leave it
-//! unchanged and keep a stale anchor alive.
+//! `AnchorLane::generation` is `Router::publication_generation` of the
+//! Router the request holds. The Router's `registry_generation` is NOT a
+//! substitute: the registry is shared across rebuilds and only moves when
+//! the registry does, so a reload that changes prompt-shaping config can
+//! leave it unchanged and keep a stale anchor alive.
 //!
 //! The store is in memory only: a restart starts cold, and a new router
-//! publication (once wired as above) moves the generation, so records from
-//! before a reload no longer apply. No prompt body is retained -- a record
-//! is counts, a digest, and a lane.
+//! publication moves the generation, so records from before a reload no
+//! longer apply. No prompt body is retained -- a record is counts, a
+//! digest, and a lane.
 
 mod digest;
+mod opening;
 mod store;
 
+pub use opening::{
+    AnchorProbe, OpeningLaneBasis, OpeningReason, OpeningSelection, OpeningSource, select_opening,
+};
 pub use store::{
     ANCHOR_CAPACITY, ContextAnchorStore, PendingAnchor, SettleOutcome, TurnOutcome, TurnTicket,
 };
@@ -126,8 +134,8 @@ pub struct AnchorLane {
     pub upstream_model: String,
     /// Router publication generation that resolved the target. A reload
     /// can change prompt-shaping policy after the inbound request was
-    /// measured, so a record from another generation never applies. Must
-    /// come from the Router's publication accessor, not its shared
+    /// measured, so a record from another generation never applies.
+    /// `Router::publication_generation`, never the shared
     /// `registry_generation` (see the module docs).
     pub generation: u64,
 }

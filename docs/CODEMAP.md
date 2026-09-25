@@ -3001,6 +3001,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `count_tokens`), and `src/router/field_repair_tests.rs` for the field
   kind, which IS behavioral on all three walks and carries the N-seat
   token-count ceiling test
+- `src/router/opening_lookup.rs` -- read-only pre-dispatch lookups for a
+  client-facing opening count: `Router::publication_generation` (the
+  per-Router probe incarnation, which advances on EVERY `publish_router`,
+  config-only reloads included -- unlike `registry_generation`),
+  `Router::opening_lane` -> `OpeningLane` (route head in dispatch's
+  alias / nickname / `default` order, off the installed table only: no
+  rotation cursor, sticky pin, quota read or pool counter moves; a pooled
+  head is the model's lane, not a seat's; forwarded heads report the
+  requested model as wire id, mixed-credential pools answer `None`), and
+  `Router::calibrated_estimate` (the raw estimate times the lane's factor,
+  never recorded). Owns `lane_calibration_factor`, the one factor lookup +
+  `[calibration]` kill switch the window gate also calls
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (per-target header/payload/beta/reasoning
   overlays), `operator_betas`, the `pub
@@ -3784,7 +3796,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   window (read via `ResolvedModel::context_window_tokens`, the accessor
   `/v1/models` discovery shares) clearly cannot hold
   `context_trim::estimate_total_tokens`
-  AS CORRECTED by the target's own learned per-lane factor (`calibration`; the
+  AS CORRECTED by the target's own learned per-lane factor (`calibration`, via
+  `opening_lookup`'s shared `lane_calibration_factor`; the
   corrected figure is a LOCAL here and deliberately not a shared helper the
   trim / advisory estimate call sites could adopt, and an uncorrected lane
   compares the raw estimate byte-identically), keyed on the
@@ -6690,6 +6703,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/ingress/anthropic/context_anchor/mod.rs` -- Anthropic session anchor:
   `RequestIdentity::measure` (prefix digest + normalized bytes/4), `evaluate`
   (`AnchorVerdict` / `MissReason`), `AnchorLane`, saturating `anchored_input`
+- `src/ingress/anthropic/context_anchor/opening.rs` -- pure opening-tier
+  selector `select_opening`: verified anchor, then the lane's calibrated
+  estimate, then raw; an anchored value is never re-corrected. Stable
+  `OpeningSource` / `OpeningReason` labels, `provisional` set for every
+  pre-dispatch basis (`OpeningLaneBasis::head(..)` -> `Head` /
+  `UnresolvedHead`) and cleared post-dispatch (`OpeningLaneBasis::served(..)`
+  -> `Served` / `UnresolvedServed`), and the lane builders
+  `AnchorLane::from(OpeningLane)` / `AnchorLane::served(&DispatchMeta, gen)`
 - `src/ingress/anthropic/context_anchor/digest.rs` -- one-pass streaming
   SHA-256 and byte count over the normalized prompt-affecting request stream
 - `src/ingress/anthropic/context_anchor/store.rs` -- `ContextAnchorStore`:

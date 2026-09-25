@@ -524,6 +524,96 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
     );
 }
 
+/// Config text for one openai-compat model whose prompt-shaping policy
+/// (`history_reasoning`) is the only thing a test varies.
+#[cfg(test)]
+fn prompt_shaping_config_text(history_reasoning: &str) -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+         [providers.compat]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:1/v1\"\n\
+         api_key_ref = \"env://ROUTECTL_PROMPT_SHAPING_TEST_KEY\"\n\n\
+         [models.glm]\n\
+         provider = \"compat\"\n\
+         upstream = \"glm-4.6\"\n\
+         history_reasoning = \"{history_reasoning}\"\n"
+    )
+}
+
+/// A config-only reload that changes prompt-shaping policy and nothing the
+/// learned registry tracks must still move the published Router's
+/// publication generation, so an opening anchored under the old policy
+/// cannot be reused. The registry generation stays put across the same
+/// reload: it is the negative control proving it could not serve instead.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_config_only_reload_advances_the_publication_generation() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let _key = ScopedEnv::set("ROUTECTL_PROMPT_SHAPING_TEST_KEY", "test-key");
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, prompt_shaping_config_text("strip")).unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = routectl_router::parse_config(&prompt_shaping_config_text("strip"))
+        .expect("fixture config parses");
+    let _usage_dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before = swap.load_full();
+    let lane_before = before.opening_lane("glm").expect("lane resolves");
+
+    // Act
+    std::fs::write(&cfg_path, prompt_shaping_config_text("preserve")).unwrap();
+    handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
+    )
+    .await
+    .expect("config-only reload applies");
+    let after = swap.load_full();
+    let lane_after = after.opening_lane("glm").expect("lane resolves");
+
+    // Assert
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "premise: the router was republished"
+    );
+    assert!(after.publication_generation() > before.publication_generation());
+    assert_eq!(lane_after.generation, after.publication_generation());
+    assert_ne!(lane_after.generation, lane_before.generation);
+    assert_eq!(
+        (
+            lane_after.provider_kind,
+            lane_after.nickname,
+            lane_after.upstream_model
+        ),
+        (
+            lane_before.provider_kind,
+            lane_before.nickname,
+            lane_before.upstream_model
+        ),
+        "only the generation distinguishes the two lanes"
+    );
+    assert_eq!(
+        after.registry_generation(),
+        before.registry_generation(),
+        "negative control: the registry generation does not move here"
+    );
+}
+
 /// `ReloadRequest::Config` and `ReloadRequest::CatalogOverlay` both
 /// call `handle_config_reload` -- the SAME loader re-reads config +
 /// overlay together regardless of which file changed -- but each
