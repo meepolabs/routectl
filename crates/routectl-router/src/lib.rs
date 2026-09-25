@@ -194,8 +194,8 @@ pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
     CatalogIndependentSurvivor, DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot,
     FieldPreflight, FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
-    PaidProbeLedger, PaidProbeReservation, PreflightBlockedReason, Router, RouterOptions,
-    acting_field_verdicts, class_debits,
+    OpeningLane, PaidProbeLedger, PaidProbeReservation, PreflightBlockedReason, Router,
+    RouterOptions, acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

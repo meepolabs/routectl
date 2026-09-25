@@ -26,7 +26,10 @@ impl Router {
     /// runtime depth cap (`ALIAS_MAX_RECURSION_DEPTH`); cycles are
     /// caught earlier by `validate_alias_chain_targets`, so this is
     /// only a defensive safety net.
-    fn resolve_v6_alias(&self, wire_model: &str) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
+    pub(super) fn resolve_v6_alias(
+        &self,
+        wire_model: &str,
+    ) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
         let aliases = &self.config.aliases;
         let value = match aliases
             .get(wire_model)
@@ -147,7 +150,7 @@ impl Router {
     /// Consult the catch-all `default` alias. Returns the resolved
     /// chain, or `None` if no `default` key is configured. Recurses
     /// through nested alias keys identically to `resolve_v6_alias`.
-    fn resolve_default_alias(&self) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
+    pub(super) fn resolve_default_alias(&self) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
         let value = match self.config.aliases.get("default").cloned() {
             Some(v) => v,
             None => return Ok(None),
