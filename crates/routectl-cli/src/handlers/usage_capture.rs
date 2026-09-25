@@ -22,6 +22,8 @@ use routectl_router::{DispatchMeta, ObservationDirection};
 use routectl_usage::{CapabilityEvent, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
 
+use crate::handlers::opening_diagnostics::OpeningDiagnostics;
+
 /// Seed a `UsageRecord` draft from the request shape + identity, before
 /// dispatch. The dispatch / token / outcome / timing columns are stamped
 /// later by `UsageCapture`. `ts_start` is the wall-clock epoch-ms when the
@@ -342,6 +344,9 @@ pub(crate) struct UsageCapture {
     ingress_id: String,
     start: Instant,
     first_byte: Option<Instant>,
+    /// When the first body event was enqueued for the client (server side,
+    /// not client receipt); see `mark_stream_http_committed`.
+    first_enqueue: Option<Instant>,
     finalized: bool,
     // Stream-summary observation state (mirrors the old
     // EgressStreamSummary): chunk count + last finish_reason for the
@@ -371,6 +376,7 @@ impl UsageCapture {
             ingress_id,
             start: Instant::now(),
             first_byte: None,
+            first_enqueue: None,
             finalized: false,
             chunks: 0,
             last_finish: None,
@@ -901,9 +907,13 @@ impl UsageCapture {
     /// is 200 the moment the head commits. Call it only from a first-
     /// successful-send site, never at spawn: a disconnect before any byte
     /// flushed leaves the head uncommitted and http_status stays NULL.
-    pub(crate) const fn mark_stream_http_committed(&mut self) {
+    /// The first call also records when the first body event was enqueued.
+    pub(crate) fn mark_stream_http_committed(&mut self) {
         if self.record.http_status.is_none() {
             self.record.http_status = Some(200);
+        }
+        if self.first_enqueue.is_none() {
+            self.first_enqueue = Some(Instant::now());
         }
     }
 
@@ -914,6 +924,12 @@ impl UsageCapture {
     /// `stream_stage`, `observe_meta`'s forwarded-credential
     /// `credential_source`).
     fn stamp_extra(&mut self, key: &str, value: &str) {
+        self.stamp_extra_value(key, Value::String(value.to_string()));
+    }
+
+    /// Merge one key of any JSON type into the record's `extra` object,
+    /// preserving the other keys.
+    fn stamp_extra_value(&mut self, key: &str, value: Value) {
         let obj = self
             .record
             .extra
@@ -922,7 +938,17 @@ impl UsageCapture {
             *obj = Value::Object(serde_json::Map::new());
         }
         if let Value::Object(map) = obj {
-            map.insert(key.to_string(), Value::String(value.to_string()));
+            map.insert(key.to_string(), value);
+        }
+    }
+
+    /// Merge a metered stream's opening diagnostics into `extra`, timed
+    /// against this request's start and first enqueued body event. Re-stamping as the
+    /// stream progresses overwrites only these keys, so the row keeps the
+    /// latest view on every exit, the `Drop` fallback included.
+    pub(crate) fn stamp_opening_diagnostics(&mut self, diagnostics: &OpeningDiagnostics) {
+        for (key, value) in diagnostics.extra_entries(self.start, self.first_enqueue) {
+            self.stamp_extra_value(key, value);
         }
     }
 

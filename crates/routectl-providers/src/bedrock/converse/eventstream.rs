@@ -541,9 +541,10 @@ fn build_closing_chunk(
             finish_reason,
             matched_stop_sequence,
         }],
-        upstream_meta: usage_delta
-            .as_ref()
-            .map(|_| UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)),
+        upstream_meta: usage_delta.as_ref().map(|_| {
+            UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)
+                .with_usage_from_vendor_endpoint(true)
+        }),
         usage: usage_delta,
         opaque_events: Vec::new(),
     }

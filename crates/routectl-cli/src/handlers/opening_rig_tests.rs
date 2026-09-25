@@ -426,6 +426,97 @@ pub(super) fn daemon(router: Router) -> (Arc<AppState>, tempfile::TempDir) {
     AppState::for_test(Arc::new(ArcSwap::from_pointee(router)))
 }
 
+/// A persisting usage ledger for a daemon, read back without stopping it.
+pub(super) struct Ledger {
+    usage: routectl_usage::UsageHandle,
+    /// Held so the writer keeps running; behind a lock only so a test's
+    /// futures borrowing the ledger stay `Send`.
+    _writer: Mutex<routectl_usage::UsageWriter>,
+    path: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+/// One persisted usage row, the columns the opening diagnostics tests read.
+#[derive(Debug)]
+pub(super) struct LedgerRow {
+    pub(super) ingress: String,
+    pub(super) outcome: String,
+    pub(super) ttfb_ms: Option<i64>,
+    pub(super) extra: Value,
+}
+
+impl Ledger {
+    /// Wait until `n` rows have been persisted, then read every row in
+    /// insertion order.
+    pub(super) async fn rows(&self, n: u64) -> Vec<LedgerRow> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.usage.counters().persisted() < n {
+            assert!(Instant::now() < deadline, "{n} usage rows never landed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let db = routectl_usage::open_readonly(&self.path).expect("open ledger");
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT ingress_dialect, outcome, ttfb_ms, extra FROM requests ORDER BY rowid")
+            .expect("prepare");
+        stmt.query_map([], |r| {
+            let extra: Option<String> = r.get(3)?;
+            Ok(LedgerRow {
+                ingress: r.get(0)?,
+                outcome: r.get(1)?,
+                ttfb_ms: r.get(2)?,
+                extra: extra.map_or(Value::Null, |text| {
+                    serde_json::from_str(&text).expect("extra json")
+                }),
+            })
+        })
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows")
+    }
+
+    /// The producer handle rows are written through.
+    pub(super) fn handle(&self) -> routectl_usage::UsageHandle {
+        self.usage.clone()
+    }
+
+    /// The only persisted row, once exactly one has landed.
+    pub(super) async fn only_row(&self) -> LedgerRow {
+        let mut rows = self.rows(1).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        rows.remove(0)
+    }
+}
+
+impl Ledger {
+    /// A fresh ledger in its own tempdir.
+    pub(super) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("ledger dir");
+        let path = dir.path().join("usage.db");
+        let (usage, writer) = routectl_usage::UsageWriter::start(
+            path.clone(),
+            routectl_usage::CHANNEL_CAPACITY,
+            0,
+            true,
+        );
+        Self {
+            usage,
+            _writer: Mutex::new(writer),
+            path,
+            _dir: dir,
+        }
+    }
+}
+
+/// Like [`daemon`], with a usage ledger that persists every row.
+pub(super) fn ledger_daemon(router: Router) -> (Arc<AppState>, Ledger) {
+    router.publish_probe_incarnation();
+    let ledger = Ledger::new();
+    let state =
+        AppState::for_test_with_usage(Arc::new(ArcSwap::from_pointee(router)), ledger.handle());
+    (state, ledger)
+}
+
 /// Hot-reload `state` onto `next`, carrying the published Router's shared
 /// state across the way a reload does.
 pub(super) fn reload(state: &AppState, mut next: Router) {
@@ -553,9 +644,21 @@ pub(super) async fn send<A: IngressAdapter + 'static>(
     headers: HeaderMap,
     body: &Value,
 ) -> Turn {
+    send_as(state, adapter, headers, body, None).await
+}
+
+/// [`send`] under a request id; the ledger keeps one row per id.
+pub(super) async fn send_as<A: IngressAdapter + 'static>(
+    state: &Arc<AppState>,
+    adapter: A,
+    headers: HeaderMap,
+    body: &Value,
+    request_id: Option<&str>,
+) -> Turn {
     let started = Instant::now();
     let bytes = Bytes::from(serde_json::to_vec(body).unwrap());
-    let resp = ingress_handle(Arc::clone(state), headers, None, Ok(bytes), adapter).await;
+    let request_id = request_id.map(|id| crate::server::request_id::RequestId(id.to_string()));
+    let resp = ingress_handle(Arc::clone(state), headers, request_id, Ok(bytes), adapter).await;
     let status = resp.status();
     let mut stream = resp.into_body().into_data_stream();
     let mut raw = String::new();

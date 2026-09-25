@@ -907,14 +907,16 @@ pub struct ChatChunk {
     /// blocks anyway).
     #[serde(skip)]
     pub opaque_events: Vec<crate::schema_opaque::OpaqueSseEvent>,
-    /// Transport-internal carrier for non-canonical upstream metadata
-    /// (provider quota families from the response head, plus the
-    /// first-event opening usage on Anthropic-shape streams). On a stream
-    /// this is set ONLY on the FIRST canonical chunk yielded; consumers
-    /// must NOT assume it on later chunks, and must not assume a carrier
-    /// holds a quota family (an opening-usage-only carrier is valid).
-    /// Skip-serialized so the wire shape is unchanged. See
-    /// `crate::upstream_meta`.
+    /// Transport-internal carrier for non-canonical upstream metadata.
+    /// Different families ride different chunks of a stream: the provider
+    /// quota families from the response head and the first-event opening
+    /// usage ride the FIRST canonical chunk, while the per-chunk
+    /// `usage_input_source` provenance rides whichever later chunk carries
+    /// the usage it describes (typically the terminal one). Consumers must
+    /// read the family they need from the chunk that carries it, and must
+    /// not assume a carrier holds a quota family (an opening-usage-only or
+    /// provenance-only carrier is valid). Skip-serialized so the wire shape
+    /// is unchanged. See `crate::upstream_meta`.
     #[serde(skip)]
     pub upstream_meta: Option<crate::upstream_meta::UpstreamMeta>,
 }

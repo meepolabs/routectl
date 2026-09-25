@@ -68,10 +68,7 @@ pub use store::{
 };
 
 use routectl_core::ChatRequest;
-
-/// The bytes/4 floor rule of the router's persisted estimate, applied here
-/// to the normalized stream instead of the raw serialized request.
-const NORMALIZED_BYTES_PER_TOKEN: u64 = 4;
+use routectl_router::BYTES_PER_TOKEN_ESTIMATE;
 
 /// SHA-256 output identifying a request prefix.
 pub type PrefixDigest = [u8; 32];
@@ -128,7 +125,7 @@ pub struct AnchorLane {
     /// Stable provider-kind token of the served target.
     pub provider_kind: String,
     /// Served model nickname.
-    pub model: String,
+    pub nickname: String,
     /// Upstream wire model id the nickname resolved to. A nickname
     /// repointed at another model is a different lane.
     pub upstream_model: String,
@@ -143,7 +140,7 @@ pub struct AnchorLane {
 impl AnchorLane {
     fn same_target(&self, other: &Self) -> bool {
         self.provider_kind == other.provider_kind
-            && self.model == other.model
+            && self.nickname == other.nickname
             && self.upstream_model == other.upstream_model
     }
 }
@@ -171,7 +168,7 @@ impl RequestIdentity {
             digest: digests.full,
             prior_prefix: digests.prefix,
             normalized_bytes: digests.normalized_bytes,
-            normalized_estimate: digests.normalized_bytes / NORMALIZED_BYTES_PER_TOKEN,
+            normalized_estimate: digests.normalized_bytes / BYTES_PER_TOKEN_ESTIMATE,
         }
     }
 

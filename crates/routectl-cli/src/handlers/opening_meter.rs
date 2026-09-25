@@ -28,11 +28,19 @@
 //! carry and an unmarked count are not evidence; a straggler after the stop
 //! is never seen. Every other end drops the pending turn, which publishes
 //! nothing.
+//!
+//! [`OpeningMeter::diagnostics`] snapshots what the turn's usage-ledger row
+//! records about the opening (see `opening_diagnostics`).
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use routectl_core::{ChatChunk, ChatRequest, OpeningUsageOrigin, UsageInputSource};
+use routectl_core::{ChatChunk, ChatRequest, OpeningUsage, OpeningUsageOrigin, UsageInputSource};
 use routectl_router::{DispatchMeta, Router, estimate_request};
+
+use crate::handlers::opening_diagnostics::{
+    OpeningDiagnostics, OpeningFacts, TerminalReport, UPSTREAM_OPENER_REASON, source,
+};
 
 use crate::ingress::anthropic::context_anchor::{
     AnchorKey, AnchorLane, AnchorProbe, AnchorRecord, ContextAnchorStore, OpeningLaneBasis,
@@ -67,11 +75,11 @@ impl OpeningOrigin {
             Self::UpstreamWire(WireOpening {
                 from_vendor_endpoint: true,
                 ..
-            }) => "upstream_wire",
+            }) => source::UPSTREAM_WIRE,
             Self::UpstreamWire(WireOpening {
                 from_vendor_endpoint: false,
                 ..
-            }) => "upstream_wire_unverified",
+            }) => source::UPSTREAM_WIRE_UNVERIFIED,
             Self::Selected(selection) => selection.source.as_str(),
         }
     }
@@ -79,7 +87,7 @@ impl OpeningOrigin {
     /// Stable, log-safe label of why the anchor tier did or did not apply.
     pub const fn reason_label(self) -> &'static str {
         match self {
-            Self::UpstreamWire(_) => "upstream_opener",
+            Self::UpstreamWire(_) => UPSTREAM_OPENER_REASON,
             Self::Selected(selection) => selection.reason.as_str(),
         }
     }
@@ -105,6 +113,32 @@ enum OpeningState {
     Rendered(OpeningOrigin),
 }
 
+/// What the serving attempt's own first event reported, whether or not it
+/// became the client's opening.
+#[derive(Debug, Clone, Copy)]
+struct UpstreamOpener {
+    observed_at: Instant,
+    cache_inclusive_input: u64,
+}
+
+impl UpstreamOpener {
+    fn of(opening: &OpeningUsage) -> Self {
+        Self {
+            observed_at: opening.observed_at,
+            cache_inclusive_input: cache_inclusive_opening_input(opening),
+        }
+    }
+}
+
+/// The input total the rendered `message_start` shows: `input_tokens` plus
+/// the disjoint write and read fields. The per-TTL breakdown splits the
+/// write field, so it is not added again.
+fn cache_inclusive_opening_input(opening: &OpeningUsage) -> u64 {
+    u64::from(opening.input_tokens)
+        + u64::from(opening.cache_creation_input_tokens.unwrap_or(0))
+        + u64::from(opening.cache_read_input_tokens.unwrap_or(0))
+}
+
 /// One keyed turn: the record it is checked against and its pending
 /// publication.
 struct AnchorTurn {
@@ -121,16 +155,18 @@ pub struct OpeningMeter {
     served_lane: Option<AnchorLane>,
     anchor: Option<AnchorTurn>,
     opening: OpeningState,
+    upstream_opener: Option<UpstreamOpener>,
     finish_seen: bool,
     stopped: bool,
     terminal_input: Option<u64>,
+    terminal_report: TerminalReport,
 }
 
 /// One chunk's terminal-input evidence, read before rendering.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalCandidate {
     finishes: bool,
-    input: Option<(u64, Option<UsageInputSource>)>,
+    input: Option<(u64, Option<UsageInputSource>, Option<bool>)>,
 }
 
 /// The Anthropic SSE event that ends a message.
@@ -164,9 +200,11 @@ impl OpeningMeter {
             served_lane: None,
             anchor,
             opening: OpeningState::Pending,
+            upstream_opener: None,
             finish_seen: false,
             stopped: false,
             terminal_input: None,
+            terminal_report: TerminalReport::Missing,
         }
     }
 
@@ -208,20 +246,25 @@ impl OpeningMeter {
         selection.tokens
     }
 
-    /// Observe the chunk that opens the client stream on the fast path.
-    /// A no-op once the opening is decided.
+    /// Observe one chunk before it is rendered: note the serving attempt's
+    /// own first event wherever it rides, and, for the chunk that opens the
+    /// client stream on the fast path, whether that event is the opening.
+    /// The opening is decided by the first chunk only.
     pub fn observe_opening_chunk(&mut self, chunk: &ChatChunk) {
+        let opening_usage = chunk
+            .upstream_meta
+            .as_ref()
+            .and_then(|meta| meta.opening_usage.as_ref());
+        if self.upstream_opener.is_none() {
+            self.upstream_opener = opening_usage.map(UpstreamOpener::of);
+        }
         let OpeningState::Seeded(selection) = self.opening else {
             return;
         };
-        let wire = chunk
-            .upstream_meta
-            .as_ref()
-            .and_then(|meta| meta.opening_usage.as_ref())
-            .map(|opening| WireOpening {
-                origin: opening.origin,
-                from_vendor_endpoint: opening.from_vendor_endpoint,
-            });
+        let wire = opening_usage.map(|opening| WireOpening {
+            origin: opening.origin,
+            from_vendor_endpoint: opening.from_vendor_endpoint,
+        });
         self.opening = OpeningState::Rendered(wire.map_or(
             OpeningOrigin::Selected(selection),
             OpeningOrigin::UpstreamWire,
@@ -237,11 +280,12 @@ impl OpeningMeter {
             .as_ref()
             .and_then(|usage| usage.prompt_tokens)
             .map(|prompt| {
-                let source = chunk
-                    .upstream_meta
-                    .as_ref()
-                    .and_then(|meta| meta.usage_input_source);
-                (u64::from(prompt), source)
+                let meta = chunk.upstream_meta.as_ref();
+                (
+                    u64::from(prompt),
+                    meta.and_then(|meta| meta.usage_input_source),
+                    meta.and_then(|meta| meta.usage_from_vendor_endpoint),
+                )
             });
         TerminalCandidate {
             // The Anthropic renderer reads the first choice only.
@@ -260,14 +304,23 @@ impl OpeningMeter {
     /// their usage never reached the client. Before it, a usage-bearing
     /// chunk counts only from the finish chunk on, and only when its parser
     /// marked the input as terminal evidence.
-    pub fn accept_rendered(&mut self, candidate: TerminalCandidate, events: &[SseEvent]) {
+    ///
+    /// Returns whether the accepted terminal report changed, so its caller
+    /// can refresh what the usage row records.
+    pub fn accept_rendered(&mut self, candidate: TerminalCandidate, events: &[SseEvent]) -> bool {
         if self.stopped {
-            return;
+            return false;
         }
+        let before = self.terminal_report;
         self.finish_seen |= candidate.finishes;
         if self.finish_seen
-            && let Some((prompt, source)) = candidate.input
+            && let Some((prompt, source, from_vendor)) = candidate.input
         {
+            self.terminal_report = TerminalReport::Reported {
+                input: prompt,
+                source,
+                from_vendor,
+            };
             self.terminal_input = source
                 .filter(|source| source.is_terminal_evidence())
                 .map(|_| prompt)
@@ -279,12 +332,15 @@ impl OpeningMeter {
         {
             self.stopped = true;
         }
+        self.terminal_report != before
     }
 
     /// Settle a naturally completed turn. Publishes only when accepted
     /// terminal evidence reported a nonzero cache-inclusive input total.
     pub fn settle_completed(self) -> SettleOutcome {
         let origin = self.opening();
+        let terminal = self.terminal_report;
+        let terminal_vendor_verified = terminal.vendor_verified();
         let outcome = match self.served_lane {
             Some(served_lane) => TurnOutcome::Completed {
                 served_lane,
@@ -296,8 +352,47 @@ impl OpeningMeter {
         let settled = self.anchor.map_or(SettleOutcome::NotPublished, |anchor| {
             anchor.pending.settle(outcome)
         });
-        log_settled_turn(origin, anchored, settled);
+        log_settled_turn(
+            origin,
+            SettledTerminal {
+                label: terminal.label(),
+                vendor_verified: terminal_vendor_verified,
+            },
+            anchored,
+            settled,
+        );
         settled
+    }
+
+    /// What the turn's usage row records about its opening, as of now.
+    pub fn diagnostics(&self) -> OpeningDiagnostics {
+        OpeningDiagnostics {
+            opening: self.opening().map(|origin| self.opening_facts(origin)),
+            upstream_first_event_at: self.upstream_opener.map(|opener| opener.observed_at),
+            terminal: self.terminal_report,
+        }
+    }
+
+    fn opening_facts(&self, origin: OpeningOrigin) -> OpeningFacts {
+        let (input, selected_on_head) = match origin {
+            OpeningOrigin::UpstreamWire(_) => (
+                self.upstream_opener
+                    .map(|opener| opener.cache_inclusive_input),
+                false,
+            ),
+            OpeningOrigin::Selected(selection) => (Some(selection.tokens), selection.provisional),
+        };
+        let lane_switched = self
+            .served_lane
+            .as_ref()
+            .map(|served| selected_on_head && self.head_lane.as_ref() != Some(served));
+        OpeningFacts {
+            source: origin.source_label(),
+            reason: origin.reason_label(),
+            input,
+            provisional: origin.is_provisional(),
+            lane_switched,
+        }
     }
 
     fn select(&self, router: &Router, basis: OpeningLaneBasis<'_>) -> OpeningSelection {
@@ -307,12 +402,23 @@ impl OpeningMeter {
         });
         let calibration_raw = self.calibration_raw_tokens;
         select_opening(probe, basis, self.raw_tokens, |lane, _| {
-            router.calibrated_estimate(&lane.provider_kind, &lane.model, calibration_raw)
+            router.calibrated_estimate(&lane.provider_kind, &lane.nickname, calibration_raw)
         })
     }
 }
 
-fn log_settled_turn(origin: Option<OpeningOrigin>, anchored: bool, settled: SettleOutcome) {
+/// The terminal-input labels a settled turn logs.
+struct SettledTerminal {
+    label: &'static str,
+    vendor_verified: bool,
+}
+
+fn log_settled_turn(
+    origin: Option<OpeningOrigin>,
+    terminal: SettledTerminal,
+    anchored: bool,
+    settled: SettleOutcome,
+) {
     let Some(origin) = origin else {
         return;
     };
@@ -320,6 +426,8 @@ fn log_settled_turn(origin: Option<OpeningOrigin>, anchored: bool, settled: Sett
         opening_source = origin.source_label(),
         opening_reason = origin.reason_label(),
         opening_provisional = origin.is_provisional(),
+        terminal_source = terminal.label,
+        terminal_vendor_verified = terminal.vendor_verified,
         anchored,
         anchor_published = matches!(settled, SettleOutcome::Published),
         "context meter opening settled",

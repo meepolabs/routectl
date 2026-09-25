@@ -670,7 +670,8 @@ pub(super) fn emit_message_delta(
         // cache fields to recover the raw value. Real Anthropic emits
         // `input_tokens` on message_delta mirroring the message_start
         // value, and downstream consumers need it because routectl's
-        // emit_message_start hardcodes {input_tokens:0, output_tokens:0}.
+        // `message_start` carries only the selected opening (an upstream
+        // first-event count or an estimate), not the terminal count.
         //
         // Always emit both `input_tokens` and `output_tokens` on the
         // closing delta. Anthropic requires both fields; when the

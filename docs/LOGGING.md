@@ -772,6 +772,35 @@ head commits, while a mid-stream provider failure keeps 200 and is carried
 by `outcome` / `error_class` / `stream_stage` instead (streaming rows
 written before this rule was in force are NULL and are not back-migrated).
 
+An Anthropic-ingress streaming row also carries its context meter opening in
+the same `extra` JSON (no schema column): `opening_present` (`false`, and no
+other opening key, when no opening event was enqueued for the client -- a
+pre-opening HTTP error, a stream that errors or fails to render before its
+first event, or a client gone before one), then
+`opening_source` (`upstream_wire`, `upstream_wire_unverified`, `anchor`,
+`calibrated`, `raw`), `opening_reason`, `opening_input` (the cache-inclusive
+count the client frame showed: `input_tokens` plus the write and read cache
+fields, the per-TTL breakdown not added), `opening_provisional`,
+`opening_lane_switched`, `opening_first_event_ms` (the serving upstream's own
+first event; first content is `ttfb_ms`), `opening_first_enqueue_ms` (when
+the first body event was handed to the response's SSE channel -- a
+server-side time, not when the client received it), `terminal_source`
+(`explicit_final`, `vendor_opening`, `proxy_opening`, `interim_carry`,
+`partial_final`, `unmarked` for a count whose parser stated no provenance,
+`unrecognized` for a provenance this build does not name, `missing`),
+`terminal_input` and `terminal_vendor_verified`. Counts, milliseconds and
+flags are JSON numbers and booleans. The terminal fields are refreshed each
+time the renderer accepts a new terminal report, so a stream that later
+errors or loses its client keeps the last one. `terminal_vendor_verified`
+comes from the endpoint the parser read the report from (the first-party API
+host, or an AWS Bedrock stream), never from numbers agreeing; `false` means
+not established: an explicit final report relayed by an Anthropic-compatible
+endpoint (a routectl back hop included) is only what that endpoint reported.
+Other dialects' rows carry none of these keys. A naturally completed turn
+also logs the source, reason, provisional and terminal labels on the
+`context meter opening settled` DEBUG line. The vocabulary lives in
+`crates/routectl-cli/src/handlers/opening_diagnostics.rs`.
+
 ## Config-edit audit shape
 
 `routectl config set` emits exactly one audit event on a successful

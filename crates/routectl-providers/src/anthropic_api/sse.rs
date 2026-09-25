@@ -698,7 +698,10 @@ impl SseState {
                     }],
                     usage: usage_delta,
                     opaque_events: Vec::new(),
-                    upstream_meta: usage_input_source.map(UpstreamMeta::from_usage_input_source),
+                    upstream_meta: usage_input_source.map(|source| {
+                        UpstreamMeta::from_usage_input_source(source)
+                            .with_usage_from_vendor_endpoint(self.vendor_opening)
+                    }),
                 }))
             }
 

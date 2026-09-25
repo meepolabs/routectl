@@ -59,8 +59,11 @@ pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
 /// Bytes-per-token divisor for the rough token estimate. Matches
 /// `routectl_core::context_reduction`'s `BYTES_PER_TOKEN_ESTIMATE` so the
 /// trimmer's `d` / `c` / `c_after` counts are consistent with the rest of the
-/// advisory (an operator-facing signal, not a billing figure).
-const BYTES_PER_TOKEN_ESTIMATE: u64 = 4;
+/// advisory (an operator-facing signal, not a billing figure). Also the
+/// denominator of every floor estimate [`estimate_total_tokens`] persists, so
+/// a caller measuring a different byte stream with the same rule divides by
+/// this rather than restating it.
+pub const BYTES_PER_TOKEN_ESTIMATE: u64 = 4;
 
 /// Fixed, content-independent placeholder substituted for an elided tool
 /// payload. Content-independent so the plan is deterministic and byte-stable

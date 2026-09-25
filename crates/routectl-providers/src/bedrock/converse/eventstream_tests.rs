@@ -1002,6 +1002,14 @@ fn converse_metadata_usage_is_an_explicit_final_report_and_its_absence_is_unmark
             .and_then(|m| m.usage_input_source),
         Some(routectl_core::UsageInputSource::ExplicitFinal)
     );
+    assert_eq!(
+        reported[0]
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_from_vendor_endpoint),
+        Some(true),
+        "Converse is AWS's own endpoint"
+    );
     assert!(bare[0].usage.is_none());
     assert!(bare[0].upstream_meta.is_none());
 }

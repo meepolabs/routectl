@@ -2764,6 +2764,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::Op
 pub routectl_core::upstream_meta::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
 pub routectl_core::upstream_meta::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
 pub routectl_core::upstream_meta::UpstreamMeta::opening_usage: core::option::Option<routectl_core::upstream_meta::OpeningUsage>
+pub routectl_core::upstream_meta::UpstreamMeta::usage_from_vendor_endpoint: core::option::Option<bool>
 pub routectl_core::upstream_meta::UpstreamMeta::usage_input_source: core::option::Option<routectl_core::upstream_meta::UsageInputSource>
 impl routectl_core::upstream_meta::UpstreamMeta
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(routectl_core::upstream_meta::AnthropicUnifiedQuota) -> Self
@@ -2772,6 +2773,7 @@ pub const fn routectl_core::upstream_meta::UpstreamMeta::from_opening_usage(rout
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_usage_input_source(routectl_core::upstream_meta::UsageInputSource) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::has_quota_family(&self) -> bool
 pub fn routectl_core::upstream_meta::UpstreamMeta::merge(self, Self) -> Self
+pub const fn routectl_core::upstream_meta::UpstreamMeta::with_usage_from_vendor_endpoint(self, bool) -> Self
 impl core::clone::Clone for routectl_core::upstream_meta::UpstreamMeta
 pub fn routectl_core::upstream_meta::UpstreamMeta::clone(&self) -> routectl_core::upstream_meta::UpstreamMeta
 impl core::cmp::PartialEq for routectl_core::upstream_meta::UpstreamMeta
@@ -5531,6 +5533,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::TokenCoun
 pub routectl_core::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
 pub routectl_core::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
 pub routectl_core::UpstreamMeta::opening_usage: core::option::Option<routectl_core::upstream_meta::OpeningUsage>
+pub routectl_core::UpstreamMeta::usage_from_vendor_endpoint: core::option::Option<bool>
 pub routectl_core::UpstreamMeta::usage_input_source: core::option::Option<routectl_core::upstream_meta::UsageInputSource>
 impl routectl_core::upstream_meta::UpstreamMeta
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(routectl_core::upstream_meta::AnthropicUnifiedQuota) -> Self
@@ -5539,6 +5542,7 @@ pub const fn routectl_core::upstream_meta::UpstreamMeta::from_opening_usage(rout
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_usage_input_source(routectl_core::upstream_meta::UsageInputSource) -> Self
 pub const fn routectl_core::upstream_meta::UpstreamMeta::has_quota_family(&self) -> bool
 pub fn routectl_core::upstream_meta::UpstreamMeta::merge(self, Self) -> Self
+pub const fn routectl_core::upstream_meta::UpstreamMeta::with_usage_from_vendor_endpoint(self, bool) -> Self
 impl core::clone::Clone for routectl_core::upstream_meta::UpstreamMeta
 pub fn routectl_core::upstream_meta::UpstreamMeta::clone(&self) -> routectl_core::upstream_meta::UpstreamMeta
 impl core::cmp::PartialEq for routectl_core::upstream_meta::UpstreamMeta

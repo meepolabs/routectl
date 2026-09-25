@@ -62,6 +62,14 @@ pub struct UpstreamMeta {
     /// a consumer must treat absence as unknown, never as terminal. Not a
     /// quota family.
     pub usage_input_source: Option<UsageInputSource>,
+    /// Whether the endpoint that produced this chunk's canonical usage is
+    /// the vendor's own (the first-party API host, or an AWS Bedrock
+    /// stream), set by the parser beside `usage_input_source`. Independent
+    /// of `opening_usage`, which a stream may never carry. `Some(false)`
+    /// for any other compatible endpoint; `None` when the parser cannot
+    /// say, which a consumer must treat as not established. Not a quota
+    /// family.
+    pub usage_from_vendor_endpoint: Option<bool>,
 }
 
 impl UpstreamMeta {
@@ -74,6 +82,7 @@ impl UpstreamMeta {
             codex: None,
             opening_usage: None,
             usage_input_source: None,
+            usage_from_vendor_endpoint: None,
         }
     }
 
@@ -84,6 +93,7 @@ impl UpstreamMeta {
             codex: Some(quota),
             opening_usage: None,
             usage_input_source: None,
+            usage_from_vendor_endpoint: None,
         }
     }
 
@@ -94,6 +104,7 @@ impl UpstreamMeta {
             codex: None,
             opening_usage: Some(opening),
             usage_input_source: None,
+            usage_from_vendor_endpoint: None,
         }
     }
 
@@ -104,7 +115,15 @@ impl UpstreamMeta {
             codex: None,
             opening_usage: None,
             usage_input_source: Some(source),
+            usage_from_vendor_endpoint: None,
         }
+    }
+
+    /// This carrier with the endpoint provenance of its usage recorded.
+    #[must_use]
+    pub const fn with_usage_from_vendor_endpoint(mut self, from_vendor: bool) -> Self {
+        self.usage_from_vendor_endpoint = Some(from_vendor);
+        self
     }
 
     /// True when this carrier holds a provider quota family. Opening usage
@@ -125,6 +144,9 @@ impl UpstreamMeta {
             codex: self.codex.or(other.codex),
             opening_usage: self.opening_usage.or(other.opening_usage),
             usage_input_source: self.usage_input_source.or(other.usage_input_source),
+            usage_from_vendor_endpoint: self
+                .usage_from_vendor_endpoint
+                .or(other.usage_from_vendor_endpoint),
         }
     }
 }
