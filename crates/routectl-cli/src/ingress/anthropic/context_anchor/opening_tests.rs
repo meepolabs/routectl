@@ -261,7 +261,7 @@ fn calibration_is_asked_for_the_selected_lane_only() {
     let identity = cold_identity();
     let seen = Cell::new(None::<&'static str>);
     let head = AnchorLane {
-        model: "opus".into(),
+        nickname: "opus".into(),
         ..lane()
     };
 

@@ -15,7 +15,7 @@ use super::{
 fn lane() -> AnchorLane {
     AnchorLane {
         provider_kind: "openai-compat".into(),
-        model: "glm".into(),
+        nickname: "glm".into(),
         upstream_model: "glm-4.6".into(),
         generation: 1,
     }

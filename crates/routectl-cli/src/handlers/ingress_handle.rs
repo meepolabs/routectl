@@ -657,6 +657,9 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
 ) -> Response {
     let envelope = adapter.error_envelope_shape();
     let egress_id = adapter.id().to_string();
+    // A metered row reads "no opening" until an opening event is actually
+    // enqueued, whichever way the stream then ends.
+    stamp_opening(&mut capture, turn.meter.as_ref());
 
     // Inner channel carries our `SseEvent` type so the rendering loop is
     // straightforward to unit-test (drain a `mpsc::Receiver<SseEvent>` and
@@ -805,6 +808,9 @@ async fn warm_render_task<A: IngressAdapter>(
         // is 200 regardless of how the pending dispatch resolves.
         capture.mark_stream_http_committed();
     }
+    // Stamped now, so a client leaving while the dispatch is still pending
+    // keeps the opening it was already sent.
+    stamp_opening(&mut capture, turn.meter.as_ref());
     // Now await the SAME dispatch that outran the grace window, but race it
     // against a client disconnect. The dispatch stays pending through any
     // content-free leading chunks (role, metadata) until the first real
@@ -850,6 +856,7 @@ async fn warm_render_task<A: IngressAdapter>(
             if let Some(meter) = turn.meter.as_mut() {
                 meter.bind_served(&dispatched.meta);
             }
+            stamp_opening(&mut capture, turn.meter.as_ref());
             drive_stream(upstream, adapter, capture, tx, router, turn, state).await;
         }
         Err(e) => {
@@ -941,6 +948,7 @@ async fn drive_stream<A: IngressAdapter>(
     // send failure, render failure, task cancellation) leaves the guard
     // un-finalized and Drop stamps the `client_disconnect` fallback. So
     // exactly one row lands per stream, mapped to the right outcome.
+    let mut opening_stamped = false;
     loop {
         let item = tokio::select! {
             biased;
@@ -968,8 +976,12 @@ async fn drive_stream<A: IngressAdapter>(
                 });
                 match adapter.render_chunk(chunk, state.as_mut()) {
                     Ok(events) => {
-                        if let (Some(meter), Some(candidate)) = (meter.as_mut(), candidate) {
-                            meter.accept_rendered(candidate, &events);
+                        if let (Some(meter), Some(candidate)) = (meter.as_mut(), candidate)
+                            && meter.accept_rendered(candidate, &events)
+                        {
+                            // Before any send can fail, so an error or a
+                            // disconnect after this chunk keeps its terminal.
+                            stamp_opening(&mut capture, Some(meter));
                         }
                         for ev in events {
                             if tx.send(ev).await.is_err() {
@@ -984,6 +996,12 @@ async fn drive_stream<A: IngressAdapter>(
                             // status is 200. Idempotent -- a later mid-
                             // stream upstream fault will not overwrite it.
                             capture.mark_stream_http_committed();
+                            // The first enqueued event is the opening: from
+                            // here on the row has one.
+                            if !opening_stamped {
+                                stamp_opening(&mut capture, meter.as_ref());
+                                opening_stamped = true;
+                            }
                         }
                     }
                     Err(e) => {
@@ -1069,10 +1087,19 @@ async fn drive_stream<A: IngressAdapter>(
     capture.record_calibration_sample(&router, session_key.as_deref());
     // Only this natural, fully delivered end may anchor the next turn;
     // every earlier return drops the pending turn unpublished.
+    stamp_opening(&mut capture, meter.as_ref());
     if let Some(meter) = meter {
         meter.settle_completed();
     }
     capture.finalize(Outcome::Ok);
+}
+
+/// Merge a metered stream's opening diagnostics into its usage row; a no-op
+/// for a dialect with no opening meter.
+fn stamp_opening(capture: &mut UsageCapture, meter: Option<&OpeningMeter>) {
+    if let Some(meter) = meter {
+        capture.stamp_opening_diagnostics(&meter.diagnostics());
+    }
 }
 
 /// Map a routectl `Error` to a short, client-safe summary suitable
@@ -1636,3 +1663,15 @@ mod opening_e2e_tests;
 #[cfg(test)]
 #[path = "opening_anchor_e2e_tests.rs"]
 mod opening_anchor_e2e_tests;
+
+#[cfg(test)]
+#[path = "opening_ledger_rig_tests.rs"]
+mod opening_ledger_rig;
+
+#[cfg(test)]
+#[path = "opening_ledger_accuracy_tests.rs"]
+mod opening_ledger_accuracy_tests;
+
+#[cfg(test)]
+#[path = "opening_ledger_exit_tests.rs"]
+mod opening_ledger_exit_tests;

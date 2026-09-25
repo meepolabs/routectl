@@ -250,7 +250,13 @@ fn translated_config(base: &str) -> Arc<Config> {
 
 /// Start routectl on a loopback listener and wait for `/health`.
 async fn routectl(config: Arc<Config>) -> String {
+    routectl_with_ledger(config).await.0
+}
+
+/// [`routectl`], also returning the path of its isolated usage ledger.
+async fn routectl_with_ledger(config: Arc<Config>) -> (String, std::path::PathBuf) {
     let config = common::isolate_usage_db(config);
+    let ledger = config.usage.db_path.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let base = format!("http://{}", listener.local_addr().expect("addr"));
     tokio::spawn(async move {
@@ -264,7 +270,7 @@ async fn routectl(config: Arc<Config>) -> String {
             .await
             .is_ok_and(|r| r.status().is_success())
         {
-            return base;
+            return (base, ledger);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -393,7 +399,70 @@ async fn read_turn(base: &str, session: &str, body: &Value) -> NetTurn {
     }
 }
 
+/// The `extra` of the ledger row with `request_id`, once it lands.
+async fn ledger_extra(ledger: &std::path::Path, request_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(db) = routectl_usage::open_readonly(ledger)
+            && let Ok(extra) = db.conn().query_row(
+                "SELECT extra FROM requests WHERE request_id = ?1",
+                [request_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+        {
+            return extra.map_or(Value::Null, |text| {
+                serde_json::from_str(&text).expect("json")
+            });
+        }
+        assert!(Instant::now() < deadline, "row {request_id} never landed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 // ------------------------------------------------------------ tests
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_served_daemon_persists_the_opening_its_network_client_received() {
+    // Arrange
+    let _env = isolate();
+    let up = upstream(vec![("/v1/messages", "", Script::now(anthropic_stream()))]).await;
+    let (base, ledger) = routectl_with_ledger(anthropic_config(&up)).await;
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .header(SESSION_HEADER, "net-ledger")
+        .header("x-request-id", "net-ledger-1")
+        .json(&turn(&[("user", "hi")]))
+        .send()
+        .await
+        .expect("request sent");
+    let text = resp.text().await.expect("body");
+    let extra = ledger_extra(&ledger, "net-ledger-1").await;
+
+    // Assert: the persisted count is the frame the client read.
+    let usage = NetTurn {
+        status: StatusCode::OK,
+        content_type: String::new(),
+        headers: Duration::ZERO,
+        first_body: Duration::ZERO,
+        text,
+    }
+    .opening_usage();
+    let rendered: u64 = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .map(|field| usage[field].as_u64().expect("field"))
+    .sum();
+    assert_eq!(extra["opening_input"], rendered, "{extra}");
+    assert_eq!(extra["opening_source"], "upstream_wire_unverified");
+    assert_eq!(extra["terminal_source"], "explicit_final");
+    assert_eq!(extra["terminal_vendor_verified"], false);
+}
 
 #[tokio::test]
 #[serial_test::serial]

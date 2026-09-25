@@ -61,7 +61,7 @@ pub fn feed_response(store: &QuotaStore, seat: Option<&SeatKey>, resp: &ChatResp
 ///
 /// Constructed with the served seat's key at the point the stream is handed
 /// back, then offered each chunk as it flows through. It feeds on the first
-/// chunk carrying metadata and disarms, so the reading is taken from the
+/// chunk carrying a quota family and disarms, so the reading is taken from the
 /// response head -- where it exists -- and never re-taken.
 pub struct FirstChunkFeed {
     store: Arc<QuotaStore>,

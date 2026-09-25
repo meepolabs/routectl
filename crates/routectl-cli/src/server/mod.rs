@@ -138,7 +138,14 @@ impl AppState {
         let dir = tempfile::tempdir().expect("usage tempdir");
         let (usage, _writer) =
             UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, false);
-        let state = Arc::new(Self {
+        (Self::for_test_with_usage(router, usage), dir)
+    }
+
+    /// Test-only constructor over a caller-owned usage handle, for a test
+    /// that reads back the rows its requests persist.
+    #[cfg(test)]
+    pub fn for_test_with_usage(router: Arc<ArcSwap<Router>>, usage: UsageHandle) -> Arc<Self> {
+        Arc::new(Self {
             router,
             usage,
             activation: Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -147,8 +154,7 @@ impl AppState {
             purge_settlements: Arc::new(purge_settlement::SettlementTracker::new().0),
             confirmation_advances: Arc::new(confirmation_advance::ConfirmationTracker::new()),
             context_anchors: Arc::default(),
-        });
-        (state, dir)
+        })
     }
 }
 

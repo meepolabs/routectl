@@ -15676,6 +15676,7 @@ pub type routectl_router::WouldTrimPanel::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::WouldTrimPanel where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::WouldTrimPanel::into_shared(self) -> Shared
 pub const routectl_router::ALIAS_MAX_RECURSION_DEPTH: usize
+pub const routectl_router::BYTES_PER_TOKEN_ESTIMATE: u64
 pub const routectl_router::CATALOG_OVERLAY_SCHEMA_VERSION: u32
 pub const routectl_router::CATALOG_SNAPSHOT_DATE: &str
 pub const routectl_router::CATALOG_VERSION: u32

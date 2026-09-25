@@ -13,7 +13,7 @@ const FULL_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"end_
 const PARTIAL_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":20,"output_tokens":9}}"#;
 
 const DIRECT: &str = "https://api.anthropic.com";
-const PROXY: &str = "http://127.0.0.1:8790";
+const PROXY: &str = "https://compat-proxy.example.invalid";
 
 fn terminal(base_url: &str, delta: &str) -> ChatChunk {
     let mut state = stream_state_for("test", base_url);
@@ -259,4 +259,51 @@ fn a_positive_cache_component_copied_from_the_opener_is_a_backfill() {
         Some(40 + 55 + 700)
     );
     assert_eq!(source(&chunk), Some(UsageInputSource::ProxyOpening));
+}
+
+/// A `message_start` carrying no usage at all, so the stream has no opening
+/// carrier to say which endpoint it came from.
+const START_WITHOUT_USAGE: &str = r#"{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x"}}"#;
+
+fn explicit_close_without_opener(base_url: &str) -> ChatChunk {
+    let mut state = stream_state_for("test", base_url);
+    let opener = state
+        .parse_event("test", START_WITHOUT_USAGE)
+        .expect("start parses")
+        .expect("role chunk");
+    assert!(
+        opener
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.opening_usage.as_ref())
+            .is_none(),
+        "premise: no opening carrier"
+    );
+    state
+        .parse_event("test", FULL_DELTA)
+        .expect("delta parses")
+        .expect("terminal chunk")
+}
+
+fn usage_from_vendor(chunk: &ChatChunk) -> Option<bool> {
+    chunk
+        .upstream_meta
+        .as_ref()
+        .and_then(|m| m.usage_from_vendor_endpoint)
+}
+
+#[test]
+fn an_explicit_close_records_its_endpoint_without_any_opening_carrier() {
+    let direct = explicit_close_without_opener(DIRECT);
+    let proxy = explicit_close_without_opener(PROXY);
+
+    // The two closes are byte-identical in usage and source; only the
+    // endpoint the parser read them from differs.
+    let total = |c: &ChatChunk| c.usage.as_ref().and_then(|u| u.prompt_tokens);
+    assert_eq!(total(&direct), Some(40_320));
+    assert_eq!(total(&direct), total(&proxy));
+    assert_eq!(source(&direct), Some(UsageInputSource::ExplicitFinal));
+    assert_eq!(source(&proxy), Some(UsageInputSource::ExplicitFinal));
+    assert_eq!(usage_from_vendor(&direct), Some(true));
+    assert_eq!(usage_from_vendor(&proxy), Some(false));
 }

@@ -141,10 +141,10 @@ pub use config_migrate::{
 pub use config_path::{PathError, PathShape, validate_config_path};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};
 pub use context_trim::{
-    ElisionMark, NearLosslessMarks, RequestEstimate, SteadyStateTrimParams, SteadyStateTrimPlan,
-    apply_trim_plan, collect_near_lossless_marks, estimate_meter_tokens, estimate_request,
-    estimate_total_tokens, near_lossless_candidate, propose_steady_state_trim,
-    trimmed_prefix_fingerprint,
+    BYTES_PER_TOKEN_ESTIMATE, ElisionMark, NearLosslessMarks, RequestEstimate,
+    SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan, collect_near_lossless_marks,
+    estimate_meter_tokens, estimate_request, estimate_total_tokens, near_lossless_candidate,
+    propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
 pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
 pub use doctor::{

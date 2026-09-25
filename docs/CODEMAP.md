@@ -56,7 +56,9 @@ license.
   provenance of the canonical usage's prompt count: `ExplicitFinal`,
   `VendorOpening`, `ProxyOpening`, `InterimCarry`, `PartialFinal`;
   `is_terminal_evidence`
-  holds for the first two; absence means unknown). `merge` combines a
+  holds for the first two; absence means unknown) with
+  `usage_from_vendor_endpoint` beside it (the parser read the usage from the
+  first-party host or AWS Bedrock; `None` means not established). `merge` combines a
   response-head quota carrier with a stream-body carrier; `has_quota_family`
   is the quota consumers' test (opening usage or a usage source alone is not
   a quota reading)
@@ -735,9 +737,15 @@ license.
   (`message_start`, `content_block_*`, `message_delta`, `message_stop`); the
   content-free `message_start` role chunk carries the captured input usage as
   `UpstreamMeta::opening_usage` (none when the event had no usage), and
-  `with_opening_origin` relabels it for a wrapping transport. `stream()` in
-  `mod.rs` MERGES the unified-quota head carrier into that first chunk rather
-  than replacing it
+  `with_opening_origin` relabels it for a wrapping transport. The closing
+  `message_delta` chunk stamps `UpstreamMeta::usage_input_source`
+  (`ExplicitFinal`, `PartialFinal`, or a backfill from the opener:
+  `VendorOpening` under `with_vendor_opening`, else `ProxyOpening`) and
+  `usage_from_vendor_endpoint` from the same flag, with or without an
+  opening carrier; `mod.rs` `stream_state_for` sets the vendor flag only for
+  the first-party host.
+  `stream()` in `mod.rs` MERGES the unified-quota head carrier into that first
+  chunk rather than replacing it
 - `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per
   unknown content block (per-block caps: 256 KB / 10000 deltas; per-stream
   ceiling: 4 MB / 40000 events), each degrading to sink-drain on overflow with
@@ -804,7 +812,9 @@ license.
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +
   `ThinkTagAccumulator` for the `<think>` cross-chunk path +
-  `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids)
+  `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids);
+  `mark_reported_usage` stamps `usage_input_source = ExplicitFinal` on any
+  chunk whose usage carries a prompt count
 - `src/openai_compat/util.rs` -- shared `build_reasoning_detail` helper for
   request/response/SSE normalizers
 
@@ -956,7 +966,8 @@ license.
 - `src/openai_responses/sse.rs` -- Responses SSE state machine keyed on
   `output_index` (Text/Reasoning/ToolUse blocks); carries the lane on
   `ResponsesStreamState::new` so streamed reasoning details bear the same
-  lane tag the non-streaming path emits
+  lane tag the non-streaming path emits; the completed-response chunk stamps
+  `usage_input_source = ExplicitFinal` beside its usage
 - `src/openai_responses/quota_headers.rs` -- tolerant parser for the
   `x-codex-*` quota response-header family (`parse_codex_quota` ->
   `CodexQuota`; None when absent, non-UTF8 values skipped, only
@@ -1073,7 +1084,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `translate_usage` maps `cachedContentTokenCount` ->
   `cache_read_input_tokens` and `thoughtsTokenCount` -> `reasoning_tokens`
 - `src/gemini/sse.rs` -- per-chunk `streamGenerateContent` SSE parsing ->
-  canonical `ChatChunk` (text + thought parts, usage)
+  canonical `ChatChunk` (text + thought parts, usage); `terminal_chunk`
+  stamps `usage_input_source` as `ExplicitFinal` when the terminal event
+  carried its own usage, `InterimCarry` when an earlier report was folded in
 - `src/gemini/sse_tests.rs` -- streaming-path unit tests for the SSE parser
 
 ### bedrock
@@ -1167,7 +1180,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
-  decoder; per-block-index state map
+  decoder; per-block-index state map; the `metadata` usage chunk stamps
+  `usage_input_source = ExplicitFinal` and `usage_from_vendor_endpoint`
 
 ### Tests
 
@@ -5992,14 +6006,40 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   called only on natural EOS and publishes via `PendingAnchor::settle` only
   with that input.
   Raw and calibration inputs come from one `estimate_request` pass.
-  `OpeningOrigin` exposes stable source / reason / provisional labels (not
-  persisted). `StreamTurn` bundles session key, stream context and meter.
+  `OpeningOrigin` exposes stable source / reason / provisional labels;
+  `diagnostics` snapshots them with the rendered cache-inclusive opening
+  input, head-vs-served lane switch, the serving attempt's first-event time
+  and vendor flag, and the accepted terminal's `UsageInputSource` (any
+  variant, or missing) for the usage row. `StreamTurn` bundles session key,
+  stream context and meter.
   Tests: `opening_meter_tests.rs`; end-to-end through `ingress_handle` in
   `opening_e2e_tests.rs` (fast/slow openings, fallback, other dialects) and
   `opening_anchor_e2e_tests.rs` (anchor hits, invalidations, publication),
   over the scripted loopback upstream in `opening_rig_tests.rs`; the network
   boundary (first body byte, HTTP status, client hangup) in
-  `tests/opening_count_network.rs`
+  `tests/opening_count_network.rs`; persisted diagnostics read back from a
+  real ledger in `opening_ledger_accuracy_tests.rs` (sources, numbers,
+  timings, terminal labels, vendor verification) and
+  `opening_ledger_exit_tests.rs` (no-opening rows, disconnects and errors
+  after an opening), over the shared `opening_ledger_rig_tests.rs`
+- `src/handlers/opening_diagnostics.rs` -- the usage-ledger vocabulary of a
+  metered stream's opening, stored in the existing `extra` JSON column (no
+  schema change): `key` (`opening_present`, `opening_source`,
+  `opening_reason`, `opening_input`, `opening_provisional`,
+  `opening_lane_switched`, `opening_first_event_ms`, `opening_first_enqueue_ms`,
+  `terminal_source`, `terminal_input`, `terminal_vendor_verified`), the
+  `source` and `terminal` label sets, `OpeningDiagnostics::extra_entries`
+  (numbers and booleans as JSON types; a row with no chosen opening or no
+  enqueued body event gets only `opening_present = false`) and
+  `TerminalReport::vendor_verified` (an explicit final report counts only
+  when its chunk's `usage_from_vendor_endpoint` is true).
+  `ingress_handle` stamps it via `UsageCapture::stamp_opening_diagnostics`:
+  primed at the stream gate before dispatch resolves (so every early exit,
+  `Drop` included, reads `opening_present = false`), then after the warm
+  early frame, after the warm path binds its served lane, whenever the
+  renderer accepts a changed terminal report (before any send), at the first
+  enqueued event, and at natural EOS.
+  Tests: `opening_diagnostics_tests.rs`
 - `src/handlers/usage_capture.rs` -- `UsageCapture`, the unified RAII capture
   guard (replaces the former `EgressStreamSummary`) that records exactly ONE
   `UsageRecord` per request on both ingress paths: a draft is seeded from the
@@ -6018,8 +6058,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pre-content dispatch failure distinct from a mid-stream cut (both are
   `UpstreamError`). Also owns the `http_status` transport-status contract (the
   status the CLIENT received): `observe_response` stamps a fixed 200,
-  `mark_stream_http_committed` stamps 200 at the first client-visible SSE byte
-  (idempotent -- writes only while `http_status` is unset), and
+  `mark_stream_http_committed` stamps 200 at the first SSE event enqueue
+  (idempotent -- writes only while `http_status` is unset; its first call
+  also records the first-enqueue instant `stamp_opening_diagnostics` times
+  against -- server side, not client receipt), and
   `observe_error` records an upstream status ONLY while `http_status` is still
   unset (pre-head) and never for the status-0 local sentinel, so a mid-stream
   provider failure after the head committed keeps the client-seen 200 with the

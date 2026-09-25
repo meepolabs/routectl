@@ -291,7 +291,7 @@ fn a_new_router_generation_misses() {
 #[test]
 fn a_different_nickname_on_the_same_upstream_misses() {
     let renamed = AnchorLane {
-        model: "glm-alias".into(),
+        nickname: "glm-alias".into(),
         ..lane()
     };
 
@@ -311,7 +311,7 @@ fn seat_rotation_within_the_same_target_hits() {
     // lanes from the same resolved target.
     let seat_b = AnchorLane {
         provider_kind: lane().provider_kind,
-        model: lane().model,
+        nickname: lane().nickname,
         upstream_model: lane().upstream_model,
         generation: lane().generation,
     };

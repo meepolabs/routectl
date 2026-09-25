@@ -107,6 +107,13 @@ async fn an_invoke_output_only_delta_carries_the_vendor_opening_source() {
             .and_then(|m| m.usage_input_source),
         Some(routectl_core::UsageInputSource::VendorOpening)
     );
+    assert_eq!(
+        terminal
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_from_vendor_endpoint),
+        Some(true)
+    );
 }
 
 #[tokio::test]

@@ -182,7 +182,7 @@ impl From<OpeningLane> for AnchorLane {
     fn from(lane: OpeningLane) -> Self {
         Self {
             provider_kind: lane.provider_kind.to_owned(),
-            model: lane.nickname,
+            nickname: lane.nickname,
             upstream_model: lane.upstream_model,
             generation: lane.generation,
         }
@@ -197,7 +197,7 @@ impl AnchorLane {
     pub fn served(meta: &DispatchMeta, generation: u64) -> Option<Self> {
         Some(Self {
             provider_kind: meta.served_provider_kind.clone()?,
-            model: meta.served_model.clone()?,
+            nickname: meta.served_model.clone()?,
             upstream_model: meta.served_upstream.clone()?,
             generation,
         })
