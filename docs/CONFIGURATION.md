@@ -3792,6 +3792,91 @@ for a per-request inspection.
   - `unpriced` -- no verified pricing row, so the break-even threshold
     could not be computed.
 
+### Context meter opening accuracy (`--opening-accuracy`)
+
+`routectl usage --opening-accuracy` reports how close the Anthropic context
+meter's anchored opening count came to the terminal input the upstream
+later reported. It reads the opening diagnostics each Anthropic-ingress
+streaming row carries in its `extra` column (see
+[LOGGING.md](LOGGING.md) "Usage accounting log shapes"), opens the
+database **read-only**, and needs an explicit window:
+
+```bash
+# after a deploy: a window that starts after BOTH hops run the new build;
+# rerun at any time, it writes nothing
+./routectl usage --opening-accuracy --since 2026-09-25
+./routectl usage --opening-accuracy --since 2026-09-25 --until 2026-09-26
+./routectl usage --opening-accuracy --today --db /path/to/usage.db
+echo "exit status: $?"
+```
+
+With no window flag and no `--since` it refuses rather than guessing. It
+cannot be combined with `--by`, `--detail` or `--k-calibration`, and it
+leaves the default `routectl usage` output unchanged.
+
+**Universe.** Every Anthropic-ingress streaming row whose start falls in
+the window, each counted in exactly one category; the report prints the
+sum so the categories reconcile to the total:
+
+- `legacy` -- no opening-diagnostics key at all (written before they
+  existed);
+- `unclassifiable` -- diagnostics present but unreadable, by a fixed kind
+  (`oversized` past 16 KiB, `invalid_json`, `not_an_object`,
+  `opening_present_missing`, `opening_present_not_bool`,
+  `no_opening_contradicted`, `opening_source_missing`,
+  `opening_source_unrecognized`);
+- `no opening` -- `opening_present = false` and nothing else;
+- `known` -- by `opening_source`.
+
+Only the producer's own labels are ever printed: an unknown reason or
+terminal label on a known row reads `<unrecognized>` and is counted as a
+data defect, never echoed. Lane keys (`kind:provider/model@upstream`, from
+the row's persisted `provider_kind`, `provider`, `model` and `upstream`
+columns, so a repointed nickname stays a separate lane) are reduced to
+printable ASCII and truncated.
+
+**Anchored cohort and rate.** The cohort is exactly the rows whose
+`opening_source` is `anchor`, including one whose `opening_present` marker
+is missing or wrong (a non-pass, `opening_marker_inconsistent`). The source
+is chosen before the terminal usage arrives, so no outcome removes a row.
+A row passes only when its marker is consistent, the turn completed
+(`outcome = ok`), its opening count is stated, its `terminal_source` is
+input evidence (`explicit_final` or `vendor_opening`), its cache-inclusive
+`terminal_input` is positive, and `|opening - terminal| * 100 <= 5 *
+terminal`. Every other anchored row is a non-pass with one reason
+(`outcome_not_ok`, `opening_unstated`, `opening_malformed`,
+`terminal_missing`, `terminal_malformed`, `terminal_unsupported`,
+`terminal_zero`, `outside_5pct`). The rate is `pass * 100 >= 95 *
+anchored`, in integers (19 of 20 passes, 18 of 20 fails), over the cohort
+alone; the ledger's cache-exclusive `input_tokens` column is never used.
+
+**Verdict and exit status.** One `verdict:` line, followed by the
+provenance notice:
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `PASS` | 0 | numerical pass, complete window, no data defect, every anchored terminal vendor-verified |
+| `FAIL` | 1 | numerical rate below 95% |
+| `INSUFFICIENT` | 2 | no anchored rows, or legacy rows in the window (choose a post-deploy window) |
+| `NO_LEDGER` | 2 | no database, or one this binary cannot read yet |
+| `INDETERMINATE` | 3 | numerical pass, but unclassifiable rows or data defects veto it |
+| `BACKEND_PENDING` | 4 | numerical pass, but some anchored row's terminal was relayed by a compatible endpoint |
+| error | 5 | no window given, or the database cannot be read |
+
+**Provenance.** A terminal relayed by an Anthropic-compatible endpoint --
+a routectl back hop included -- is only what that endpoint reported
+(`terminal_vendor_verified = false`). The report counts every such
+terminal, whatever the turn's outcome, globally, within the cohort and per
+lane. It cannot establish how a back hop's backend measured its counts;
+that needs a separate, operator-run check of both hops. Exit status 0 is
+not an authorization to deploy.
+
+Also printed: opening-to-terminal error buckets (0-5%, 5-10%, 10-20%,
+>20%, and `n/a` where no comparison is possible) per opening source, the
+same buckets for cold-start rows (anchor reason `cold`), and per lane the
+row categories, anchored/pass counts, unverified reports, defect rows and
+source, reason and `terminal_source` counts.
+
 ## Diagnostics (`routectl doctor` and `routectl provider probe`)
 
 `routectl doctor` and `routectl provider probe` are the two read-only

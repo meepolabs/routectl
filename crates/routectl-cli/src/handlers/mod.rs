@@ -6,7 +6,7 @@ pub mod ingress_handle;
 pub mod messages;
 pub mod messages_count_tokens;
 pub mod models;
-pub(crate) mod opening_diagnostics;
+pub mod opening_diagnostics;
 pub(crate) mod opening_meter;
 pub mod pure_proxy_admission;
 pub mod pure_proxy_metrics;

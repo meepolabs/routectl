@@ -1675,3 +1675,7 @@ mod opening_ledger_accuracy_tests;
 #[cfg(test)]
 #[path = "opening_ledger_exit_tests.rs"]
 mod opening_ledger_exit_tests;
+
+#[cfg(test)]
+#[path = "opening_accuracy_boundary_tests.rs"]
+mod opening_accuracy_boundary_tests;

@@ -8,6 +8,7 @@ mod deadline;
 mod grouped;
 mod reduction;
 mod session_ref;
+mod stream_extra;
 mod would_trim;
 
 pub use aggregate::{
@@ -27,6 +28,7 @@ pub use grouped::{
     QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
 };
 pub use reduction::{ReductionSummary, reduction_summary};
+pub use stream_extra::{StreamExtraRow, for_each_stream_extra};
 pub use would_trim::{
     KCalibration, NearLosslessAttributionSummary, ReuseSampleRow, ShadowMisfireSummary,
     WouldTrimSummary, k_calibration_summary, near_lossless_attribution_summary,

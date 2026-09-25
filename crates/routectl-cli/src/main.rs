@@ -325,6 +325,15 @@ enum Cmd {
         /// and exit. Window, --by, and --detail flags are ignored.
         #[arg(long = "k-calibration")]
         k_calibration: bool,
+        /// Print the context meter's anchored opening-accuracy gate over an
+        /// explicit window (a window flag or `--since`) and exit. A
+        /// numerical result only: it never establishes the backend
+        /// provenance of a relayed terminal count.
+        #[arg(
+            long = "opening-accuracy",
+            conflicts_with_all = ["by", "detail", "k_calibration"]
+        )]
+        opening_accuracy: bool,
     },
     /// Inspect, verify, import, or edit the cache-economics catalog.
     /// Hidden alias `pricing` kept for muscle memory (dropped at 1.0).
@@ -973,6 +982,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             detail,
             db,
             k_calibration,
+            opening_accuracy,
         } => {
             let loaded = load_config_unvalidated_with_overlay(cli.config.as_deref())?;
             let window = if today {
@@ -986,18 +996,40 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 commands::usage::WindowFlag::None
             };
-            let args = commands::usage::UsageArgs {
-                window,
-                since,
-                until,
-                by: by.as_deref().and_then(commands::usage::GroupDim::parse),
-                detail,
-                db,
-                k_calibration,
-            };
-            if let Err(e) = commands::usage::run(&loaded.config, &loaded.catalog_overlay, &args) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+            if opening_accuracy {
+                let db_path = db.unwrap_or_else(|| loaded.config.usage.db_path.clone());
+                match commands::opening_accuracy::run(
+                    &db_path,
+                    window,
+                    since.as_deref(),
+                    until.as_deref(),
+                ) {
+                    Ok(verdict) => {
+                        let code = verdict.exit_code();
+                        if code != 0 {
+                            std::process::exit(code);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(commands::opening_accuracy::ERROR_EXIT_CODE);
+                    }
+                }
+            } else {
+                let args = commands::usage::UsageArgs {
+                    window,
+                    since,
+                    until,
+                    by: by.as_deref().and_then(commands::usage::GroupDim::parse),
+                    detail,
+                    db,
+                    k_calibration,
+                };
+                if let Err(e) = commands::usage::run(&loaded.config, &loaded.catalog_overlay, &args)
+                {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         Cmd::Catalog { action } => match action {
@@ -1724,5 +1756,45 @@ mod tests {
         routectl_router::validate_mitm_config(&config)
             .expect("the repaired config must validate clean");
         assert_eq!(config.mitm.as_ref().unwrap().listen_port, 9443);
+    }
+
+    /// `--opening-accuracy` is opt-in and exclusive with the other report
+    /// modes; it takes the same window flags as the default report.
+    #[test]
+    fn usage_opening_accuracy_is_opt_in_and_exclusive_with_other_reports() {
+        let plain = Cli::try_parse_from(["routectl", "usage", "--today"]).expect("parses");
+        assert!(matches!(
+            plain.cmd,
+            Cmd::Usage {
+                opening_accuracy: false,
+                ..
+            }
+        ));
+        let report = Cli::try_parse_from([
+            "routectl",
+            "usage",
+            "--opening-accuracy",
+            "--since",
+            "2026-09-25",
+            "--until",
+            "2026-09-26",
+        ])
+        .expect("parses");
+        assert!(matches!(
+            report.cmd,
+            Cmd::Usage {
+                opening_accuracy: true,
+                ..
+            }
+        ));
+        for other in [
+            ["--by", "model"].as_slice(),
+            ["--detail"].as_slice(),
+            ["--k-calibration"].as_slice(),
+        ] {
+            let mut argv = vec!["routectl", "usage", "--opening-accuracy", "--all"];
+            argv.extend_from_slice(other);
+            assert!(Cli::try_parse_from(argv).is_err(), "{other:?}");
+        }
     }
 }

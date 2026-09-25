@@ -21,6 +21,7 @@ pub mod login_provider_block;
 pub mod login_surface;
 mod login_surface_availability;
 pub mod logout;
+pub mod opening_accuracy;
 pub mod parse_error_redaction;
 pub(crate) mod pricing;
 pub mod probe;

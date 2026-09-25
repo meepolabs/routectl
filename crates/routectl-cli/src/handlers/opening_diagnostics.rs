@@ -53,6 +53,8 @@ use std::time::Instant;
 use routectl_core::UsageInputSource;
 use serde_json::Value;
 
+use crate::ingress::anthropic::context_anchor::{MissReason, OpeningReason, OpeningSource};
+
 /// Ledger `extra` keys.
 pub mod key {
     /// Boolean: the stream's opening frame was enqueued for the client.
@@ -78,6 +80,21 @@ pub mod key {
     pub const TERMINAL_INPUT: &str = "terminal_input";
     /// Boolean: the terminal input is established as the vendor's own.
     pub const TERMINAL_VENDOR_VERIFIED: &str = "terminal_vendor_verified";
+
+    /// Every key above.
+    pub const ALL: [&str; 11] = [
+        OPENING_PRESENT,
+        OPENING_SOURCE,
+        OPENING_REASON,
+        OPENING_INPUT,
+        OPENING_PROVISIONAL,
+        OPENING_LANE_SWITCHED,
+        OPENING_FIRST_EVENT_MS,
+        OPENING_FIRST_ENQUEUE_MS,
+        TERMINAL_SOURCE,
+        TERMINAL_INPUT,
+        TERMINAL_VENDOR_VERIFIED,
+    ];
 }
 
 /// `opening_source` labels of an upstream-wire opening. A selected opening
@@ -114,6 +131,65 @@ pub mod terminal {
     /// No accepted terminal reported input.
     pub const MISSING: &str = "missing";
 }
+
+/// Every `opening_source` label a metered row can carry.
+pub const OPENING_SOURCE_LABELS: &[&str] = &[
+    OpeningSource::Anchor.as_str(),
+    OpeningSource::Calibrated.as_str(),
+    OpeningSource::Raw.as_str(),
+    source::UPSTREAM_WIRE,
+    source::UPSTREAM_WIRE_UNVERIFIED,
+];
+
+/// Every `opening_reason` label a metered row can carry.
+pub const OPENING_REASON_LABELS: &[&str] = &[
+    OpeningReason::AnchorHit.as_str(),
+    OpeningReason::Unanchored.as_str(),
+    OpeningReason::LaneUnresolved.as_str(),
+    MissReason::Cold.as_str(),
+    MissReason::LaneChanged.as_str(),
+    MissReason::GenerationChanged.as_str(),
+    MissReason::HistoryShrank.as_str(),
+    MissReason::PrefixChanged.as_str(),
+    UPSTREAM_OPENER_REASON,
+];
+
+/// Every `terminal_source` label a metered row can carry.
+pub const TERMINAL_SOURCE_LABELS: &[&str] = &[
+    terminal::EXPLICIT_FINAL,
+    terminal::VENDOR_OPENING,
+    terminal::PROXY_OPENING,
+    terminal::INTERIM_CARRY,
+    terminal::PARTIAL_FINAL,
+    terminal::UNMARKED,
+    terminal::UNRECOGNIZED,
+    terminal::MISSING,
+];
+
+/// Whether a persisted `terminal_source` label names terminal input evidence
+/// (`UsageInputSource::is_terminal_evidence`), for a reader of the ledger
+/// that has only the label. Unknown labels are not evidence.
+pub fn is_terminal_evidence_label(label: &str) -> bool {
+    NAMED_INPUT_SOURCES.into_iter().any(|source| {
+        source.is_terminal_evidence()
+            && TerminalReport::Reported {
+                input: 0,
+                source: Some(source),
+                from_vendor: None,
+            }
+            .label()
+                == label
+    })
+}
+
+/// Every provenance [`TerminalReport::label`] names.
+const NAMED_INPUT_SOURCES: [UsageInputSource; 5] = [
+    UsageInputSource::ExplicitFinal,
+    UsageInputSource::VendorOpening,
+    UsageInputSource::ProxyOpening,
+    UsageInputSource::InterimCarry,
+    UsageInputSource::PartialFinal,
+];
 
 /// The facts of a chosen opening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
