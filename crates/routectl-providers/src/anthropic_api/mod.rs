@@ -93,6 +93,18 @@ pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 use sse::SseState;
 
+/// The stream parser state for a response from `base_url`. Only the
+/// first-party endpoint's first event counts as the vendor's own input
+/// measurement; an Anthropic-compatible proxy's is unverified.
+fn stream_state_for(provider_id: &str, base_url: &str) -> SseState {
+    let state = SseState::new(provider_id);
+    if is_anthropic_api_host(base_url) {
+        state.with_vendor_opening()
+    } else {
+        state
+    }
+}
+
 #[cfg(feature = "bedrock")]
 pub use crate::mantle::MantleAuth;
 pub use client::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
@@ -525,8 +537,9 @@ impl Provider for AnthropicApiProvider {
         // when the cloak did not run or renamed nothing.
         let tool_reverse = cloak_result.map(|r| r.tool_reverse).unwrap_or_default();
 
+        let base_state = stream_state_for(&provider_id, &self.cfg.base_url);
         let stream = async_stream::stream! {
-            let mut state = SseState::new(&provider_id);
+            let mut state = base_state;
             state.tool_reverse = tool_reverse;
 
             futures::pin_mut!(event_stream);
@@ -1114,3 +1127,7 @@ mod request_drop_counter_tests;
 #[cfg(test)]
 #[path = "mod_background_isolation_tests.rs"]
 mod background_isolation_tests;
+
+#[cfg(test)]
+#[path = "sse_usage_source_tests.rs"]
+mod sse_usage_source_tests;

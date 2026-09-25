@@ -87,6 +87,7 @@ pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};
 pub use upstream_meta::{
     AnthropicUnifiedQuota, CodexQuota, OpeningUsage, OpeningUsageOrigin, UpstreamMeta,
+    UsageInputSource,
 };
 pub use volatile::{
     CallerPrefixAdvisory, CallerPrefixFinding, PrefixComponent, VolatileConfidence, VolatileKind,

@@ -26,6 +26,40 @@ use routectl_core::Error;
 use routectl_router::config::CredentialSource;
 use routectl_usage::{CHANNEL_CAPACITY, Outcome, UsageWriter};
 
+/// A test-owned loopback upstream that accepts every connection and closes
+/// it without a response, so a dispatch makes a real attempt and fails with
+/// a network error. Counts accepted connections for a positive control.
+struct ClosingUpstream {
+    base: String,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ClosingUpstream {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let base = format!("http://{}", listener.local_addr().expect("local addr"));
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        Self { base, accepted }
+    }
+
+    fn base(&self) -> &str {
+        &self.base
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// A tempdir-backed usage writer + handle for capture tests. Holding the
 /// `TempDir` keeps the DB path alive; `flush_and_read` drains the writer
 /// and reads the single emitted row back so tests can assert the per-
@@ -1435,8 +1469,7 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
     let events = drain(rx).await;
@@ -1547,8 +1580,7 @@ async fn drive_stream_cancels_immediately_on_client_disconnect() {
             capture,
             tx,
             k_test_router(),
-            None,
-            StreamRequestContext::default(),
+            StreamTurn::unmetered(None, StreamRequestContext::default()),
         ));
         rx.recv().await.expect("first event before disconnect");
         drop(rx);
@@ -1628,8 +1660,7 @@ async fn drive_stream_preserves_partial_usage_on_client_disconnect() {
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     ));
     rx.recv().await.expect("first event before disconnect");
     drop(rx);
@@ -1677,8 +1708,7 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
     let events = drain(rx).await;
@@ -1732,8 +1762,7 @@ async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
     let events = drain(rx).await;
@@ -1850,8 +1879,7 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
     let events = drain(rx).await;
@@ -2367,8 +2395,7 @@ async fn capture_stream_natural_eos_emits_single_ok_row() {
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
     let _ = drain(rx).await;
@@ -2414,8 +2441,7 @@ async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
         capture,
         tx,
         k_test_router(),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
     let _ = drain(rx).await;
@@ -2452,10 +2478,11 @@ async fn dispatch_err_with_attempts_maps_to_upstream_error() {
     use std::sync::Arc;
 
     // Arrange: a single unreachable provider, no fallback, one attempt.
+    let closing = ClosingUpstream::start().await;
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
+        ProviderEntry::openai_compat(closing.base(), crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
@@ -2495,6 +2522,11 @@ async fn dispatch_err_with_attempts_maps_to_upstream_error() {
     // DispatchMeta fields (attempt_count, fallback_count, provider,
     // alias) land on the persisted row.
     assert_eq!(mapped, Outcome::UpstreamError);
+    assert_eq!(
+        closing.accepted(),
+        1,
+        "positive control: the upstream was reached"
+    );
     assert!(
         dispatched.meta.attempt_count > 0,
         "an upstream attempt was charged: {:?}",
@@ -2525,10 +2557,11 @@ async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
     // Arrange: rpm_limit=1 so the second dispatch is RPM-gated.
     let mut runtime = ProviderRuntimePolicy::default();
     runtime.rpm_limit = Some(1);
+    let closing = ClosingUpstream::start().await;
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k"))
+        ProviderEntry::openai_compat(closing.base(), crate::test_secret::file_ref("k"))
             .with_runtime(runtime),
     );
     let mut models = BTreeMap::new();
@@ -2551,9 +2584,15 @@ async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
     let _first = router
         .complete_with_options(sample_request("a", false), Default::default())
         .await;
+    let reached_by_first = closing.accepted();
     let dispatched = router
         .complete_with_options(sample_request("a", false), Default::default())
         .await;
+    assert_eq!(
+        reached_by_first, 1,
+        "positive control: the first dispatch connected"
+    );
+    assert_eq!(closing.accepted(), 1, "the gated dispatch never connected");
 
     // Assert: gate refused before any upstream contact on the second.
     assert!(dispatched.result.is_err());
@@ -2583,10 +2622,11 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
     // Arrange: a single-entry chain pointed at an unreachable upstream.
     // The dispatch fails, but the chain walk still stamps the served
     // provider_kind / model onto the meta -- enough for a recording.
+    let closing = ClosingUpstream::start().await;
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
+        ProviderEntry::openai_compat(closing.base(), crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
@@ -2609,6 +2649,11 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
     let req = sample_request("a", false);
     let mut capture = rig.capture("openai", &req, "req-k");
     let dispatched = router.complete_with_options(req, Default::default()).await;
+    assert_eq!(
+        closing.accepted(),
+        1,
+        "positive control: the upstream was reached"
+    );
     capture.observe_meta(&dispatched.meta, 0, 0);
     let provider_kind = dispatched
         .meta
@@ -2759,10 +2804,11 @@ async fn k_recording_router_and_meta() -> (
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    let closing = ClosingUpstream::start().await;
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
+        ProviderEntry::openai_compat(closing.base(), crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
@@ -2780,6 +2826,11 @@ async fn k_recording_router_and_meta() -> (
     let router = Arc::new(build_test_router(config).await);
     let req = sample_request("a", true);
     let dispatched = router.complete_with_options(req, Default::default()).await;
+    assert_eq!(
+        closing.accepted(),
+        1,
+        "positive control: the upstream was reached"
+    );
     (router, dispatched.meta)
 }
 
@@ -2819,8 +2870,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
         capture,
         tx,
         Arc::clone(&router),
-        Some("sess".to_string()),
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(Some("sess".to_string()), StreamRequestContext::default()),
     )
     .await;
     let _ = drain(rx).await;
@@ -2860,8 +2910,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
         capture_err,
         tx_err,
         Arc::clone(&router_err),
-        Some("sess".to_string()),
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(Some("sess".to_string()), StreamRequestContext::default()),
     )
     .await;
     let _ = drain(rx_err).await;
@@ -3000,8 +3049,7 @@ async fn stream_gate_fast_ok_renders_message_start_with_estimate_no_early_frame(
         capture,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
 
@@ -3056,8 +3104,7 @@ async fn stream_gate_fast_err_returns_http_status_not_in_stream_frame() {
         capture,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        StreamRequestContext::default(),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
     )
     .await;
 
@@ -3124,8 +3171,7 @@ async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
         tx,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
     let events = drain(rx).await;
@@ -3187,8 +3233,7 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
         tx,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
     let events = drain(rx).await;
@@ -3316,8 +3361,7 @@ async fn warm_render_cancels_pending_dispatch_on_client_disconnect_before_conten
             tx,
             router,
             std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-            None,
-            stream_ctx,
+            StreamTurn::unmetered(None, stream_ctx),
         ));
         rx.recv().await.expect("early frame before disconnect");
         drop(rx);
@@ -3381,8 +3425,7 @@ async fn stream_gate_grace_expiry_commits_sse_response() {
         capture,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
 
@@ -3432,8 +3475,7 @@ async fn warm_render_ok_then_mid_stream_error_marks_mid_stream_stage() {
         tx,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
     let events = drain(rx).await;
@@ -3518,8 +3560,7 @@ async fn warm_render_post_content_anthropic_error_is_terminal_with_preserved_typ
         tx,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
     let events = drain(rx).await;
@@ -3604,8 +3645,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
         tx,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
 
@@ -3664,8 +3704,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
         capture,
         router,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        stream_ctx,
+        StreamTurn::unmetered(None, stream_ctx),
     )
     .await;
 
@@ -3701,11 +3740,13 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
         tx,
         router2,
         std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        None,
-        StreamRequestContext {
-            input_tokens_estimate: 5,
-            model: "m".into(),
-        },
+        StreamTurn::unmetered(
+            None,
+            StreamRequestContext {
+                input_tokens_estimate: 5,
+                model: "m".into(),
+            },
+        ),
     )
     .await;
     let events = drain(rx).await;

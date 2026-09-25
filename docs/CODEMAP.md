@@ -49,10 +49,17 @@ license.
   forward-compat + `is_overage()`) and `CodexQuota` (the `x-codex-*` family:
   `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`), plus
   `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
-  cache fields, exact, with `OpeningUsageOrigin` wire label and `observed_at`;
-  never rides canonical `ChatChunk.usage`). `merge` combines a response-head
-  quota carrier with a stream-body opening carrier; `has_quota_family` is the
-  quota consumers' test (opening usage alone is not a quota reading)
+  cache fields, exact, with `OpeningUsageOrigin` wire label, `observed_at` and
+  `from_vendor_endpoint` (first-party host or InvokeModel vs any compatible
+  endpoint);
+  never rides canonical `ChatChunk.usage`), and `UsageInputSource` (per-chunk
+  provenance of the canonical usage's prompt count: `ExplicitFinal`,
+  `VendorOpening`, `ProxyOpening`, `InterimCarry`, `PartialFinal`;
+  `is_terminal_evidence`
+  holds for the first two; absence means unknown). `merge` combines a
+  response-head quota carrier with a stream-body carrier; `has_quota_family`
+  is the quota consumers' test (opening usage or a usage source alone is not
+  a quota reading)
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
@@ -2083,7 +2090,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/context_trim.rs` -- advisory steady-state trimmer
   (`propose_steady_state_trim`, near-lossless marks) plus the whole-request
   token estimates: `estimate_total_tokens` (persisted floor) and
-  `estimate_meter_tokens` (client display wrapper over the same bytes)
+  `estimate_meter_tokens` (client display wrapper over the same bytes), and
+  `estimate_request` -> `RequestEstimate { total, meter }`, both from one
+  serialization
 - `src/calibration/mod.rs` -- learned per-lane correction of the router's token
   estimate; re-exports `Factor` + `CalibrationStore` / `LaneKey` / `cohort_of`
   and the warm-rebuild seam (`CalibrationLedgerReader` /
@@ -5430,8 +5439,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/server/mod.rs` -- server module hub: the shared `AppState` every axum
   handler reads (`Router` behind `ArcSwap` for lockless hot-swap, plus the
-  sibling usage handle, activation inventory, MITM seam nonce, and the
-  compiled-pin drift guard), the
+  sibling usage handle, activation inventory, MITM seam nonce, the
+  compiled-pin drift guard, and the daemon-owned `context_anchors`
+  `ContextAnchorStore`, kept across hot reload and cold on restart), the
   `check_bind_safety` loopback guard, the per-concern submodule declarations,
   and the `server::` re-exports callers use. Unit tests are paired
   per-concern: the `#[path]`-included hub sidecar `tests.rs` keeps only the
@@ -5920,11 +5930,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (b')): `stream_response` holds the dispatch as an un-awaited `'static`
   `DispatchFut` and hands it to `stream_dispatch_gated`, which
   `tokio::select!`s it (biased) against a `STREAM_EARLY_FLUSH_GRACE` (2500ms)
-  flush-timing backstop. FAST branch (resolves within grace): `Ok` spawns
-  `render_stream_task` on the resolved stream; `Err` returns a REAL HTTP
+  flush-timing backstop. On a dialect with `reports_opening_usage` the
+  admission builds an `OpeningMeter` first (see `opening_meter.rs`), carried
+  in a `StreamTurn`. FAST branch (resolves within grace): `Ok` seeds the
+  served-lane opening and spawns `render_stream_task` on the resolved stream
+  (the winner's own opener, if its opening chunk carries one, renders
+  instead); `Err` returns a REAL HTTP
   status via `map_error` (preserving the SDK pre-stream 529 retry).
   GRACE-EXPIRY branch: commits the SSE `Response` (`build_sse_response`) and
-  spawns `warm_render_task`, which flushes the dialect `early_frame` as the
+  spawns `warm_render_task`, which seeds the provisional head-lane opening and
+  flushes the dialect `early_frame` as the
   first body byte BEFORE awaiting the still-pending dispatch
   (emit-then-dispatch invariant), then on `Ok` drives the shared
   `drive_stream` loop (dedups the already-emitted `message_start`;
@@ -5959,6 +5974,32 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   emits one WARN carrying only safe dimensions (reason, status, a fixed
   `credential_source = "forwarded"` token, and the session-id-presence
   boolean) -- never the forwarded token itself
+- `src/handlers/opening_meter.rs` -- `OpeningMeter`: the Anthropic stream's
+  opening context count. `admit` reserves the session-anchor turn BEFORE
+  measuring the request (bounded `AnchorKey`; no key -> unanchored) and reads
+  the route head and publication generation off the request's Router;
+  `served_opening` (fast path, final) / `provisional_opening` (warm path,
+  head lane) run `select_opening`; `observe_opening_chunk` records whether the
+  fast winner's own opener replaced the seed (`OpeningOrigin::UpstreamWire`,
+  carrying `WireOpening { origin, from_vendor_endpoint }`: labelled
+  `upstream_wire` for the vendor endpoint, `upstream_wire_unverified` for a
+  compatible proxy);
+  `terminal_candidate` (read before render) + `accept_rendered` (after
+  render) keep only usage the Anthropic renderer accepted from the finish
+  chunk on (first choice only, as the renderer reads), whose
+  `UsageInputSource` is terminal evidence, and freeze once the
+  render emits `message_stop` (stragglers are ignored); `settle_completed` is
+  called only on natural EOS and publishes via `PendingAnchor::settle` only
+  with that input.
+  Raw and calibration inputs come from one `estimate_request` pass.
+  `OpeningOrigin` exposes stable source / reason / provisional labels (not
+  persisted). `StreamTurn` bundles session key, stream context and meter.
+  Tests: `opening_meter_tests.rs`; end-to-end through `ingress_handle` in
+  `opening_e2e_tests.rs` (fast/slow openings, fallback, other dialects) and
+  `opening_anchor_e2e_tests.rs` (anchor hits, invalidations, publication),
+  over the scripted loopback upstream in `opening_rig_tests.rs`; the network
+  boundary (first body byte, HTTP status, client hangup) in
+  `tests/opening_count_network.rs`
 - `src/handlers/usage_capture.rs` -- `UsageCapture`, the unified RAII capture
   guard (replaces the former `EgressStreamSummary`) that records exactly ONE
   `UsageRecord` per request on both ingress paths: a draft is seeded from the
@@ -6655,9 +6696,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/ingress/mod.rs` -- `IngressAdapter` trait (incl. `early_frame`:
   warm-hold first-body-byte SSE events, default no-op; Anthropic emits the
-  synthesized `message_start`, OpenAI / Responses emit nothing), `SseEvent`,
+  synthesized `message_start`, OpenAI / Responses emit nothing; and
+  `reports_opening_usage`, default `false`, `true` only for Anthropic, which
+  gates all opening/anchor work), `SseEvent`,
   `StreamRequestContext` (request-derived seed for `new_stream_state`:
-  display input-token estimate + resolved model), `read_alias_header`
+  opening input-token count + resolved model), `read_alias_header`
   (`x-routectl-alias` override); `MITM_PROXIED_HEADER`
   (`x-routectl-mitm-proxied`) -- the seam header the MITM front-proxy stamps
   on the re-injected `api.anthropic.com` inference leg, shared between the
@@ -6740,8 +6783,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Messages response body shape
 - `src/ingress/anthropic/stream.rs` -- canonical `ChatChunk` -> Anthropic SSE
   events with monotonic terminal-state guard; `new_state` seeds the state from
-  `StreamRequestContext` and `emit_message_start` carries the input-token
-  estimate (`usage.input_tokens`, `output_tokens` stays 0)
+  `StreamRequestContext`; `emit_message_start` renders the opening chunk's
+  `upstream_meta.opening_usage` field for field (input plus disjoint cache
+  fields and TTL breakdown) when present, else the seeded opening count
+  (`output_tokens` stays 0)
 - `src/ingress/openai_responses/mod.rs` -- `ResponsesIngress` impl (`POST
   /v1/responses`, OpenAI Responses dialect / Codex client) + streaming state
   types (`ResponsesStreamState`, `OpenOutputItem`, `ToolCallBuffer`); inverse

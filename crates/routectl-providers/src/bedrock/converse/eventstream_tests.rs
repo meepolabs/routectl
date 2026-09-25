@@ -977,3 +977,31 @@ async fn matched_stop_sequence_lifts_on_eof_flush_path() {
 }
 
 include!("eventstream_history_compat_tests.rs");
+
+#[test]
+fn converse_metadata_usage_is_an_explicit_final_report_and_its_absence_is_unmarked() {
+    // Arrange
+    let mut with = ConverseStreamState::default();
+    run("messageStop", r#"{"stopReason":"end_turn"}"#, &mut with);
+    let mut without = ConverseStreamState::default();
+    run("messageStop", r#"{"stopReason":"end_turn"}"#, &mut without);
+
+    // Act
+    let reported = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15}}"#,
+        &mut with,
+    );
+    let bare = run("metadata", "{}", &mut without);
+
+    // Assert
+    assert_eq!(
+        reported[0]
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_input_source),
+        Some(routectl_core::UsageInputSource::ExplicitFinal)
+    );
+    assert!(bare[0].usage.is_none());
+    assert!(bare[0].upstream_meta.is_none());
+}

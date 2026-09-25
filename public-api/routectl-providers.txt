@@ -134,6 +134,7 @@ impl routectl_providers::anthropic_api::sse::SseState
 pub fn routectl_providers::anthropic_api::sse::SseState::new(&str) -> Self
 pub fn routectl_providers::anthropic_api::sse::SseState::parse_event(&mut self, &str, &str) -> routectl_core::error::Result<core::option::Option<routectl_core::schema::ChatChunk>>
 pub const fn routectl_providers::anthropic_api::sse::SseState::with_opening_origin(self, routectl_core::upstream_meta::OpeningUsageOrigin) -> Self
+pub const fn routectl_providers::anthropic_api::sse::SseState::with_vendor_opening(self) -> Self
 impl core::default::Default for routectl_providers::anthropic_api::sse::SseState
 pub fn routectl_providers::anthropic_api::sse::SseState::default() -> routectl_providers::anthropic_api::sse::SseState
 impl core::fmt::Debug for routectl_providers::anthropic_api::sse::SseState

@@ -56,6 +56,12 @@ pub struct UpstreamMeta {
     /// chunk, on non-streaming responses, and when the first event carried
     /// no usage. Not a quota family: see [`Self::has_quota_family`].
     pub opening_usage: Option<OpeningUsage>,
+    /// Where the cache-inclusive prompt count on this chunk's canonical
+    /// `usage` came from, set by the parser that produced it. `None` on a
+    /// chunk carrying no usage, and on usage from a parser that cannot say:
+    /// a consumer must treat absence as unknown, never as terminal. Not a
+    /// quota family.
+    pub usage_input_source: Option<UsageInputSource>,
 }
 
 impl UpstreamMeta {
@@ -67,6 +73,7 @@ impl UpstreamMeta {
             anthropic_unified: Some(quota),
             codex: None,
             opening_usage: None,
+            usage_input_source: None,
         }
     }
 
@@ -76,6 +83,7 @@ impl UpstreamMeta {
             anthropic_unified: None,
             codex: Some(quota),
             opening_usage: None,
+            usage_input_source: None,
         }
     }
 
@@ -85,6 +93,17 @@ impl UpstreamMeta {
             anthropic_unified: None,
             codex: None,
             opening_usage: Some(opening),
+            usage_input_source: None,
+        }
+    }
+
+    /// Construct an `UpstreamMeta` carrying only the usage input source.
+    pub const fn from_usage_input_source(source: UsageInputSource) -> Self {
+        Self {
+            anthropic_unified: None,
+            codex: None,
+            opening_usage: None,
+            usage_input_source: Some(source),
         }
     }
 
@@ -105,7 +124,47 @@ impl UpstreamMeta {
             anthropic_unified: self.anthropic_unified.or(other.anthropic_unified),
             codex: self.codex.or(other.codex),
             opening_usage: self.opening_usage.or(other.opening_usage),
+            usage_input_source: self.usage_input_source.or(other.usage_input_source),
         }
+    }
+}
+
+/// Provenance of the cache-inclusive prompt count on a chunk's canonical
+/// usage. Describes what the parser saw on the wire, not who counted: an
+/// upstream that is itself a proxy may report any number it likes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UsageInputSource {
+    /// The upstream's own closing event reported the input side (for
+    /// example a final usage object, a completed-response usage, or an
+    /// Anthropic `message_delta` whose usage carries input fields). This is
+    /// what the IMMEDIATE upstream reported; when that upstream is itself a
+    /// proxy, it says nothing about how the proxy's own backend measured it.
+    ExplicitFinal,
+    /// The closing event reported output only; the input side was carried
+    /// over from the stream's first event, and that event came from the
+    /// vendor's own endpoint (the first-party Anthropic API, or an
+    /// InvokeModel stream).
+    VendorOpening,
+    /// The closing event reported output only; the input side was carried
+    /// over from the first event of an Anthropic-compatible endpoint that
+    /// is not the vendor's own, so its producer is unverified.
+    ProxyOpening,
+    /// The count was reported by an event before the stream's terminal
+    /// event and carried onto the closing chunk.
+    InterimCarry,
+    /// The closing event reported some input components but not the
+    /// uncached input itself, and nothing positive was carried over; the
+    /// total rests on treating the missing component as zero.
+    PartialFinal,
+}
+
+impl UsageInputSource {
+    /// Whether this source is terminal input evidence: the upstream's own
+    /// closing report, or the vendor's own opening report on a stream whose
+    /// closing event carries output only.
+    pub const fn is_terminal_evidence(self) -> bool {
+        matches!(self, Self::ExplicitFinal | Self::VendorOpening)
     }
 }
 
@@ -146,6 +205,11 @@ pub struct OpeningUsage {
     pub cache_read_input_tokens: Option<u32>,
     /// Per-TTL cache-write breakdown, if reported.
     pub cache_creation: Option<crate::schema::CacheCreation>,
+    /// Whether the event came from the vendor's own endpoint (the
+    /// first-party API host, or an InvokeModel stream). `false` for any
+    /// other Anthropic-compatible endpoint, whose count is only what that
+    /// immediate upstream reported.
+    pub from_vendor_endpoint: bool,
 }
 
 impl OpeningUsage {
@@ -163,6 +227,7 @@ impl OpeningUsage {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             cache_creation: None,
+            from_vendor_endpoint: false,
         }
     }
 }
@@ -384,6 +449,33 @@ mod tests {
 
         // Assert
         assert_eq!(merged.opening_usage.map(|o| o.input_tokens), Some(1));
+    }
+
+    #[test]
+    fn a_usage_source_is_not_a_quota_family_and_survives_a_quota_merge() {
+        // Arrange
+        let source = UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal);
+        let codex = UpstreamMeta::from_codex(CodexQuota::default());
+
+        // Act
+        let merged = codex.clone().merge(source.clone());
+
+        // Assert
+        assert!(!source.has_quota_family());
+        assert_eq!(merged.codex, codex.codex);
+        assert_eq!(
+            merged.usage_input_source,
+            Some(UsageInputSource::ExplicitFinal)
+        );
+    }
+
+    #[test]
+    fn only_explicit_and_vendor_sources_are_terminal_evidence() {
+        assert!(UsageInputSource::ExplicitFinal.is_terminal_evidence());
+        assert!(UsageInputSource::VendorOpening.is_terminal_evidence());
+        assert!(!UsageInputSource::ProxyOpening.is_terminal_evidence());
+        assert!(!UsageInputSource::InterimCarry.is_terminal_evidence());
+        assert!(!UsageInputSource::PartialFinal.is_terminal_evidence());
     }
 
     #[test]

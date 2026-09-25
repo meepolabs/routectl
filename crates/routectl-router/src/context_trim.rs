@@ -352,6 +352,26 @@ pub fn estimate_meter_tokens(req: &ChatRequest) -> u64 {
     meter_tokens_from_bytes(serialized_len(req))
 }
 
+/// Both whole-request estimates from one serialization of the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestEstimate {
+    /// Exactly [`estimate_total_tokens`]: the persisted, gating floor.
+    pub total: u64,
+    /// Exactly [`estimate_meter_tokens`]: the client-facing display value.
+    pub meter: u64,
+}
+
+/// [`estimate_total_tokens`] and [`estimate_meter_tokens`] of `req`,
+/// serializing it once instead of twice.
+#[must_use]
+pub fn estimate_request(req: &ChatRequest) -> RequestEstimate {
+    let bytes = serialized_len(req);
+    RequestEstimate {
+        total: bytes / BYTES_PER_TOKEN_ESTIMATE,
+        meter: meter_tokens_from_bytes(bytes),
+    }
+}
+
 /// Minimum-nonzero bytes/4: zero bytes show zero, any nonzero byte count
 /// shows at least one token, otherwise the floor quotient.
 const fn meter_tokens_from_bytes(bytes: u64) -> u64 {

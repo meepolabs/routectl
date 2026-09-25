@@ -15,7 +15,10 @@ use routectl_core::schema::{ChatRequest, Message, MessageContent, Role};
 use routectl_core::{CustomTool, SystemContent, ToolDef};
 use serde_json::json;
 
-use super::{estimate_meter_tokens, estimate_total_tokens, meter_tokens_from_bytes};
+use super::{
+    RequestEstimate, estimate_meter_tokens, estimate_request, estimate_total_tokens,
+    meter_tokens_from_bytes,
+};
 
 fn message(role: Role, content: MessageContent) -> Message {
     Message {
@@ -111,6 +114,14 @@ fn assert_golden(req: &ChatRequest, expected_json: &str, expected_floor: u64) {
         estimate_meter_tokens(req),
         expected_floor,
         "display wrapper must equal the floor once the request is >= 4 bytes"
+    );
+    assert_eq!(
+        estimate_request(req),
+        RequestEstimate {
+            total: expected_floor,
+            meter: expected_floor,
+        },
+        "the one-pass pair must equal both estimators"
     );
 }
 

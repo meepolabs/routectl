@@ -612,3 +612,64 @@ fn prompt_block_event_emits_single_content_filter_terminal_and_no_eos_warn() {
     assert_eq!(infos[0].field("origin"), Some("prompt_feedback"));
     assert_eq!(infos[0].field("block_reason"), Some("SAFETY"));
 }
+
+fn usage_meta(prompt: u32) -> UsageMetadata {
+    UsageMetadata {
+        prompt_token_count: prompt,
+        candidates_token_count: 2,
+        total_token_count: prompt + 2,
+        ..Default::default()
+    }
+}
+
+fn usage_source(chunk: &ChatChunk) -> Option<routectl_core::UsageInputSource> {
+    chunk
+        .upstream_meta
+        .as_ref()
+        .and_then(|m| m.usage_input_source)
+}
+
+#[test]
+fn a_finish_event_with_its_own_usage_is_an_explicit_final_report() {
+    let mut state = GeminiStreamState::default();
+
+    let chunks = state
+        .parse_event(
+            PID,
+            event(vec![text_part("hi")], Some("STOP"), Some(usage_meta(50))),
+        )
+        .unwrap();
+
+    let terminal = chunks.last().expect("terminal");
+    assert_eq!(
+        terminal.usage.as_ref().and_then(|u| u.prompt_tokens),
+        Some(50)
+    );
+    assert_eq!(
+        usage_source(terminal),
+        Some(routectl_core::UsageInputSource::ExplicitFinal)
+    );
+}
+
+#[test]
+fn usage_carried_from_an_interim_event_onto_the_finish_is_marked_interim() {
+    let mut state = GeminiStreamState::default();
+    state
+        .parse_event(PID, event(vec![text_part("a")], None, Some(usage_meta(50))))
+        .unwrap();
+
+    let chunks = state
+        .parse_event(PID, event(vec![text_part("b")], Some("STOP"), None))
+        .unwrap();
+
+    let terminal = chunks.last().expect("terminal");
+    assert_eq!(
+        terminal.usage.as_ref().and_then(|u| u.prompt_tokens),
+        Some(50),
+        "positive control: the interim count was carried"
+    );
+    assert_eq!(
+        usage_source(terminal),
+        Some(routectl_core::UsageInputSource::InterimCarry)
+    );
+}

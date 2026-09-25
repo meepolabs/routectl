@@ -402,7 +402,34 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   the terminal `message_delta` usage (server-side tools add input
   mid-response). The router's pre-content buffer replays it only for the
   attempt that reaches first content; a failed attempt's opener is dropped
-  with its buffer.
+  with its buffer. The Anthropic ingress renders it into the client
+  `message_start` only when the dispatch resolved inside the 2500ms flush
+  grace; after the grace the stream has already opened with an estimate
+  (session anchor, calibrated or raw), so the later opener is not rendered
+  and the terminal `message_delta` carries the real count.
+
+- **A terminal prompt count is not proof of terminal measurement.** The
+  Anthropic parser backfills the closing chunk's input and cache fields from
+  `message_start` when `message_delta` reports output only, and Gemini folds
+  an interim `usageMetadata` onto its finish chunk. Each parser therefore
+  stamps `upstream_meta.usage_input_source` beside the usage it emits:
+  `ExplicitFinal` when the closing event itself reported the input,
+  `VendorOpening` for a backfill from the first-party API host or a Bedrock
+  InvokeModel stream, `ProxyOpening` for a backfill from any other
+  Anthropic-compatible `base_url`, `InterimCarry` for Gemini's carry. A
+  closing delta that reports some input components but not all counts as a
+  backfill. A delta that reports any positive input or cache component is
+  an input report, and every component it states is authoritative, zero
+  included (zero uncached input beside a cache read is a fully cached
+  prompt); only a delta with no positive input component has its zeros
+  treated as placeholders. `ExplicitFinal` additionally requires the delta
+  to state `input_tokens` itself (an absent cache field reads as zero); a
+  delta stating only cache components, with nothing positive carried over,
+  is `PartialFinal`. Only `ExplicitFinal` and `VendorOpening` anchor
+  the context meter, and `ExplicitFinal` from a compatible proxy (a routectl
+  back hop included) is what that immediate upstream reported, not proof of
+  its backend's measurement. Client usage and ledger accounting read
+  `usage` unchanged.
 
 ## Bedrock surface
 

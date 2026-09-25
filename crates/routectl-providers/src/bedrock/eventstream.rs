@@ -64,7 +64,9 @@ where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
     let handler = InvokeFrameHandler {
-        sse_state: SseState::default().with_opening_origin(OpeningUsageOrigin::BedrockInvoke),
+        sse_state: SseState::default()
+            .with_opening_origin(OpeningUsageOrigin::BedrockInvoke)
+            .with_vendor_opening(),
     };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Invoke)
 }

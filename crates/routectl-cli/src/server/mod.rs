@@ -116,6 +116,13 @@ pub struct AppState {
     /// logged rather than treated as ambiguous routing state. See
     /// `confirmation_advance`.
     pub confirmation_advances: Arc<confirmation_advance::ConfirmationTracker>,
+    /// Session anchors for the Anthropic ingress's opening context count.
+    ///
+    /// A SIBLING of `router`, so a hot reload keeps the store; records from
+    /// before the reload stop applying because each carries the publication
+    /// generation of the Router that served it. In memory only: a restart
+    /// starts cold.
+    pub context_anchors: Arc<crate::ingress::anthropic::context_anchor::ContextAnchorStore>,
 }
 
 impl AppState {
@@ -139,6 +146,7 @@ impl AppState {
             cc_pin_drift: cc_pin_drift::CcPinDriftGuard::new(),
             purge_settlements: Arc::new(purge_settlement::SettlementTracker::new().0),
             confirmation_advances: Arc::new(confirmation_advance::ConfirmationTracker::new()),
+            context_anchors: Arc::default(),
         });
         (state, dir)
     }

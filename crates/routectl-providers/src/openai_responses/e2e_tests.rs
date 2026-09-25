@@ -784,10 +784,21 @@ async fn stream_carries_upstream_meta_on_first_chunk_only() {
     );
     for (i, c) in chunks.iter().enumerate().skip(1) {
         assert!(
-            c.upstream_meta.is_none(),
-            "chunk {i} must NOT carry upstream_meta (first-chunk-only contract)"
+            !c.upstream_meta
+                .as_ref()
+                .is_some_and(routectl_core::UpstreamMeta::has_quota_family),
+            "chunk {i} must NOT carry the quota family (first-chunk-only contract)"
         );
     }
+    // The terminal chunk carries only its usage provenance.
+    let terminal = chunks.last().expect("terminal chunk");
+    assert_eq!(
+        terminal
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_input_source),
+        Some(routectl_core::UsageInputSource::ExplicitFinal)
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -882,15 +893,59 @@ async fn probe_api_key_403_is_auth_failed() {
     ));
 }
 
+/// A test-owned loopback endpoint that reads each request's head, then
+/// closes the connection without writing any response. Returns its base URL
+/// and the request lines it received.
+async fn closing_endpoint() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::AsyncReadExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let base = format!("http://{}", listener.local_addr().expect("local addr"));
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let record = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut head = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let text = String::from_utf8_lossy(&head);
+            if let Some(line) = text.lines().next() {
+                record.lock().expect("lock").push(line.to_string());
+            }
+            drop(socket);
+        }
+    });
+    (base, seen)
+}
+
 #[tokio::test]
-async fn probe_api_key_connection_refused_is_unreachable() {
-    // A closed loopback port (nothing binds 127.0.0.1:1)
-    // deterministically refuses the connect.
-    let provider = api_key_provider("http://127.0.0.1:1");
-    assert!(matches!(
-        provider.probe().await,
-        ProbeOutcome::Unreachable(_)
-    ));
+async fn probe_api_key_connection_closed_without_a_response_is_unreachable() {
+    // Arrange
+    let (base, seen) = closing_endpoint().await;
+    let provider = api_key_provider(&base);
+
+    // Act
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), provider.probe())
+        .await
+        .expect("the probe settles within the bound");
+
+    // Assert: positive control -- the probe request reached the endpoint.
+    assert_eq!(
+        seen.lock().expect("lock").as_slice(),
+        ["GET /models HTTP/1.1"],
+        "the probe's request line arrived"
+    );
+    assert!(
+        matches!(outcome, ProbeOutcome::Unreachable(_)),
+        "got {outcome:?}"
+    );
 }
 
 /// BINDING read-only guard: a ChatgptOauth provider reports

@@ -136,10 +136,25 @@ async fn stream_carries_upstream_meta_on_first_chunk_only() {
     assert_eq!(quota.representative_claim.as_deref(), Some("five_hour"));
     for (i, c) in chunks.iter().enumerate().skip(1) {
         assert!(
-            c.upstream_meta.is_none(),
-            "chunk {i} must NOT carry upstream_meta (first-chunk-only contract)"
+            !c.upstream_meta
+                .as_ref()
+                .is_some_and(routectl_core::UpstreamMeta::has_quota_family),
+            "chunk {i} must NOT carry the quota family (first-chunk-only contract)"
         );
     }
+    // The closing delta reported output only; its input came from the
+    // proxy-hosted mock's first event.
+    let terminal = chunks
+        .iter()
+        .find(|c| c.usage.is_some())
+        .expect("a terminal usage chunk");
+    assert_eq!(
+        terminal
+            .upstream_meta
+            .as_ref()
+            .and_then(|m| m.usage_input_source),
+        Some(routectl_core::UsageInputSource::ProxyOpening)
+    );
 }
 
 #[tokio::test]

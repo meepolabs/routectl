@@ -523,11 +523,12 @@ pub enum ErrorEnvelopeShape {
 /// into the router.
 ///
 /// Today it carries:
-/// - `input_tokens_estimate`: the display estimate from
-///   `routectl_router::estimate_meter_tokens` (serialized bytes / 4, never
-///   zero for a nonempty request) so the synthesized early `message_start`
-///   frame can report a non-zero `usage.input_tokens` on the pre-inversion
-///   fast path instead of a stuck-at-zero context meter.
+/// - `input_tokens_estimate`: the opening input count a synthesized
+///   `message_start` reports when no upstream first-event usage replaces
+///   it. On a dialect that reports opening usage it is the selected
+///   opening (session anchor, calibrated or raw estimate); otherwise the
+///   display estimate from `routectl_router::estimate_meter_tokens`
+///   (serialized bytes / 4, never zero for a nonempty request).
 /// - `model`: the resolved request model, used as the early-frame model
 ///   id when the upstream stream's first chunk carries no model string.
 ///
@@ -631,6 +632,15 @@ pub trait IngressAdapter: Send + Sync {
     /// against the trait unchanged.
     fn early_frame(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
         Vec::new()
+    }
+
+    /// Whether this dialect's first stream event reports the turn's input
+    /// usage to the client, so the handler selects an opening count (and
+    /// measures the request against the session anchor) for its streams.
+    /// Default `false`: a dialect that reports usage only at the end does
+    /// no opening work at all.
+    fn reports_opening_usage(&self) -> bool {
+        false
     }
 
     /// Render one canonical chunk into zero or more SSE events. Adapters

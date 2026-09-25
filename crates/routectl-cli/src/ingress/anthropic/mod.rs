@@ -110,14 +110,12 @@ pub struct AnthropicStreamState {
     /// via `IngressAdapter::new_stream_state`; `None` on the `Default`
     /// path (tests, library consumers with no request context).
     pub(super) req_model: Option<String>,
-    /// Display input-token estimate for the originating request (see
-    /// `routectl_router::estimate_meter_tokens`). Emitted as
-    /// `usage.input_tokens` on the synthesized `message_start` so the
-    /// pre-inversion fast path reports a live context meter instead of
-    /// zero. The terminal
-    /// `message_delta` carries the authoritative upstream count and
-    /// overwrites this within seconds. Defaults to 0 on the `Default`
-    /// path.
+    /// Opening input-token count seeded from the request context (the
+    /// selected opening on a metered stream). Emitted as
+    /// `usage.input_tokens` on a `message_start` whose opening chunk
+    /// carries no upstream first-event usage, and on the early frame. The
+    /// terminal `message_delta` carries the authoritative upstream count.
+    /// Defaults to 0 on the `Default` path.
     pub(super) input_tokens_estimate: u64,
 }
 
@@ -344,10 +342,14 @@ impl IngressAdapter for AnthropicIngress {
         let s = anthropic_state_mut(state);
         let mut events = Vec::new();
         if !s.started {
-            emit_message_start(s, &mut events);
+            emit_message_start(s, None, &mut events);
             s.started = true;
         }
         events
+    }
+
+    fn reports_opening_usage(&self) -> bool {
+        true
     }
 
     fn render_chunk(
@@ -368,7 +370,7 @@ impl IngressAdapter for AnthropicIngress {
             // SDK consumers don't see a bare `message_stop` (which the
             // spec forbids).
             if !s.started {
-                emit_message_start(s, &mut events);
+                emit_message_start(s, None, &mut events);
                 s.started = true;
             }
             flush_tool_blocks(s, &mut events);
