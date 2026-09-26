@@ -1747,18 +1747,6 @@ fn cloak_with_normalize(
     c
 }
 
-/// Reject `http://` (cleartext) base_urls at build time so an
-/// operator typo doesn't silently exfiltrate API keys + prompts in
-/// the clear. Loopback URLs (127.x, ::1, localhost) are exempt
-/// because the local-dev workflow and integration tests rely on
-/// `http://127.0.0.1:N` mock servers.
-///
-/// Also rejects link-local hosts (IPv4 `169.254.0.0/16`, IPv6
-/// `fe80::/10`) regardless of scheme. The IPv4 link-local range
-/// covers cloud-instance-metadata services (AWS / Azure / GCP all
-/// use `169.254.169.254`) -- egress there would forward signed
-/// credentials to an untrusted endpoint. Defense-in-depth: routectl
-/// is a gateway, not a privileged client of the metadata service.
 /// Extract the embedded IPv4 of an IPv4-COMPATIBLE IPv6 address
 /// (`::a.b.c.d`, the `::/96` prefix -- first six segments all zero),
 /// distinct from the IPv4-MAPPED form (`::ffff:a.b.c.d`) that
