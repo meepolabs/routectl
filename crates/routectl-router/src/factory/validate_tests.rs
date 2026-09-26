@@ -357,6 +357,149 @@ mod base_url_validation_tests {
         }
     }
 
+    /// DNS names that merely look like loopback. Each is asserted to parse as
+    /// `Host::Domain` so the case exercises the cleartext guard rather than a
+    /// parser rejection or an IP-literal path.
+    const LOOPBACK_LOOKALIKE_DOMAINS: [&str; 7] = [
+        "http://127.evil.example/",
+        "http://127.0.0.1.nip.io/v1",
+        "http://127.0.0.x/",
+        "http://127../",
+        "http://127.0.0.1%2eevil.example/",
+        "http://localhost./",
+        "http://api.localhost/",
+    ];
+
+    fn assert_parses_as_domain(url: &str) {
+        let parsed = url::Url::parse(url).expect("fixture must parse");
+        assert!(
+            matches!(parsed.host(), Some(url::Host::Domain(_))),
+            "fixture {url} must parse as a DNS domain; got {:?}",
+            parsed.host()
+        );
+    }
+
+    fn assert_cleartext_rejected(url: &str) {
+        let result = validate_base_url_scheme("p", url);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("cleartext")),
+            "expected cleartext rejection for {url}; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn http_loopback_lookalike_domains_rejected() {
+        for url in LOOPBACK_LOOKALIKE_DOMAINS {
+            // Arrange
+            assert_parses_as_domain(url);
+
+            // Act + Assert
+            assert_cleartext_rejected(url);
+        }
+    }
+
+    #[test]
+    fn https_loopback_lookalike_domains_pass() {
+        for url in LOOPBACK_LOOKALIKE_DOMAINS {
+            // Arrange
+            let https = url.replacen("http://", "https://", 1);
+
+            // Act
+            let result = validate_base_url_scheme("p", &https);
+
+            // Assert
+            assert!(result.is_ok(), "expected {https} to pass; got: {result:?}");
+        }
+    }
+
+    #[test]
+    fn http_ipv4_loopback_literals_pass() {
+        for url in [
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.5/",
+            "http://127.255.255.254/",
+            "http://127.1/",
+            "http://2130706433/",
+            "http://user:pass@127.0.0.1:8080/v1",
+        ] {
+            let parsed = url::Url::parse(url).expect("fixture must parse");
+            assert!(
+                matches!(parsed.host(), Some(url::Host::Ipv4(_))),
+                "fixture {url} must parse as IPv4; got {:?}",
+                parsed.host()
+            );
+
+            let result = validate_base_url_scheme("p", url);
+
+            assert!(result.is_ok(), "expected {url} to pass; got: {result:?}");
+        }
+    }
+
+    #[test]
+    fn http_non_loopback_ipv4_rejected() {
+        for url in ["http://128.0.0.1/", "http://10.0.0.1/", "http://0.0.0.0/"] {
+            assert_cleartext_rejected(url);
+        }
+    }
+
+    #[test]
+    fn http_native_ipv6_loopback_passes() {
+        for url in [
+            "http://[::1]/",
+            "http://[0:0:0:0:0:0:0:1]:8080/v1",
+            "http://user:pass@[::1]/",
+        ] {
+            let result = validate_base_url_scheme("p", url);
+
+            assert!(result.is_ok(), "expected {url} to pass; got: {result:?}");
+        }
+    }
+
+    #[test]
+    fn http_ipv4_mapped_loopback_alias_passes() {
+        for url in ["http://[::ffff:127.0.0.5]/", "http://[::ffff:7f00:1]/"] {
+            let result = validate_base_url_scheme("p", url);
+
+            assert!(result.is_ok(), "expected {url} to pass; got: {result:?}");
+        }
+    }
+
+    /// The deprecated IPv4-compatible form (`::/96`) is not a native IPv6
+    /// loopback and can follow an ordinary IPv6 route.
+    #[test]
+    fn http_ipv4_compatible_loopback_rejected() {
+        for url in ["http://[::127.0.0.1]/", "http://[::7f00:1]:8080/"] {
+            assert_cleartext_rejected(url);
+        }
+    }
+
+    #[test]
+    fn http_non_loopback_ipv6_rejected() {
+        for url in [
+            "http://[::2]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[2001:db8::1]/",
+        ] {
+            assert_cleartext_rejected(url);
+        }
+    }
+
+    #[test]
+    fn http_exact_localhost_passes_case_insensitively() {
+        for url in [
+            "http://localhost/",
+            "http://LOCALHOST:8080/",
+            "http://LocalHost/v1",
+            "http://user:pass@localhost:8080/",
+        ] {
+            let result = validate_base_url_scheme("p", url);
+
+            assert!(result.is_ok(), "expected {url} to pass; got: {result:?}");
+        }
+    }
+
     #[test]
     fn unknown_scheme_rejected() {
         let err = validate_base_url_scheme("p", "ftp://example.com").unwrap_err();

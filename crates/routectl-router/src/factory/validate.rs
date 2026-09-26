@@ -10,6 +10,14 @@ use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use std::collections::BTreeMap;
 
+/// Reject cleartext `http://` base_urls unless the parsed host is loopback:
+/// an IPv4 literal in `127.0.0.0/8`, native `::1`, IPv4-mapped loopback, or
+/// the exact name `localhost`. Every other DNS name needs `https://`, even
+/// one whose text begins with `127.`.
+///
+/// Link-local hosts (IPv4 `169.254.0.0/16`, IPv6 `fe80::/10`) are rejected
+/// regardless of scheme: they cover cloud-metadata services, and egress
+/// there would forward credentials to an untrusted endpoint.
 pub(super) fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -90,29 +98,7 @@ pub(super) fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> R
     }
     // http:// is permitted only for loopback hosts so local-dev and
     // integration tests work.
-    let host = url.host_str().unwrap_or("");
-    let is_loopback = host == "localhost"
-        || host == "127.0.0.1"
-        || host == "[::1]"
-        || host == "::1"
-        || host.starts_with("127.")
-        || url
-            .host()
-            .and_then(|h| match h {
-                url::Host::Ipv4(ip) => Some(ip.is_loopback()),
-                // Canonicalize an IPv4-mapped IPv6 loopback
-                // (`::ffff:127.0.0.1`) so it is accepted as loopback
-                // http:// just like the bare `127.0.0.1`, rather than
-                // misleadingly rejected as cleartext non-loopback.
-                url::Host::Ipv6(ip) => Some(match ip.to_ipv4_mapped() {
-                    Some(v4) => v4.is_loopback(),
-                    None => ipv4_compatible_embedded(&ip)
-                        .map_or(ip.is_loopback(), |v4| v4.is_loopback()),
-                }),
-                url::Host::Domain(_) => None,
-            })
-            .unwrap_or(false);
-    if is_loopback {
+    if url.host().is_some_and(|h| is_cleartext_loopback_host(&h)) {
         return Ok(());
     }
     Err(routectl_core::Error::Config(format!(
@@ -120,6 +106,20 @@ pub(super) fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> R
          non-loopback host -- API keys and prompt content would be sent in \
          the clear. Use https:// (or bind a local proxy on 127.0.0.1)"
     )))
+}
+
+/// Classify on the parsed host variant, never on host text: a DNS name
+/// such as `127.evil.example` can resolve anywhere. The IPv4-compatible
+/// form (`::a.b.c.d`) is deliberately not loopback -- it is not native
+/// `::1` and may follow an ordinary IPv6 route.
+fn is_cleartext_loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(domain) => *domain == "localhost",
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
 }
 
 /// Validate the `account_id_ref` invariant for an openai-responses

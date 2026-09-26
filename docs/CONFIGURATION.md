@@ -541,7 +541,10 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `staleness_hint_days`          | `[capability]` global           | u64, default 14; display-only age past which a capability reads as stale in diagnostics (see `[capability]`) |
 
 **`base_url` scheme requirement.** `base_url` must use `https://` (or
-`http://` for loopback addresses only). Link-local addresses
+`http://` for loopback hosts only: an IPv4 loopback literal such as
+`127.0.0.1`, `[::1]`, an IPv4-mapped loopback such as `[::ffff:127.0.0.1]`,
+or the exact name `localhost`). Any other DNS name -- even one beginning
+with `127.` -- requires `https://`. Link-local addresses
 (IPv4 `169.254.0.0/16` and IPv6 `fe80::/10`) are rejected at provider
 build time regardless of scheme to prevent SSRF and cloud-metadata
 credential leaks. The startup error names the offending address.
