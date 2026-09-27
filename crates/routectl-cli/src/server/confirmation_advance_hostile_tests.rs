@@ -302,61 +302,113 @@ async fn close_cannot_return_while_an_admitted_slot_is_still_held() {
 async fn a_close_racing_claims_admits_each_claimant_exactly_once_or_not_at_all() {
     // The DISCRIMINATING half of the invariant above, and the reason the sweep is not
     // enough on its own: every assertion there holds vacuously if NO claim is ever
-    // admitted (a tracker that refused everything passes all four). This asserts the
-    // race actually produced both outcomes across the rounds -- some claims admitted,
-    // and the close still correct -- so the sweep is measuring a contended tracker
-    // rather than a closed one.
+    // admitted (a tracker that refused everything passes all four). This asserts, in
+    // EVERY round, that the close raced at least one admitted claim and still resolved
+    // each contender exactly once, so the sweep is measuring a contended tracker rather
+    // than a closed one.
     //
-    // Reported as an aggregate over rounds rather than per round, because WHICH side a
-    // given round lands on is genuinely nondeterministic: that is the race. What is
-    // deterministic is that over enough rounds at this width both sides appear.
-    let mut total_admitted = 0usize;
-    let mut total_refused = 0usize;
-    for _ in 1..=HOSTILE_ROUNDS {
+    // Admission is COORDINATED, not sampled. Left to the barrier alone, the closer can
+    // be released and close before any contender is polled, in every round, leaving
+    // the oracle nothing to measure. So the closer waits for the first admission before
+    // closing, and every admitted claimant holds its slot until the close has begun.
+    // Each round therefore races the close against at least one provably outstanding
+    // claim, while the remaining contenders still land on whichever side of it the
+    // scheduler puts them.
+    //
+    // Every wait is bounded by `WAIT`, so a broken handshake fails the test instead of
+    // hanging it.
+    for round in 1..=HOSTILE_ROUNDS {
         let tracker = Arc::new(ConfirmationTracker::new());
         let gate = Arc::new(tokio::sync::Barrier::new(HOSTILE_CLAIMERS + 1));
+        // `notify_one` stores a permit, so an admission that lands before the closer
+        // starts waiting is not lost.
+        let first_admitted = Arc::new(tokio::sync::Notify::new());
+        let (close_began_tx, close_began_rx) = tokio::sync::watch::channel(false);
+
         let contenders: Vec<_> = (0..HOSTILE_CLAIMERS)
             .map(|_| {
                 let tracker = Arc::clone(&tracker);
                 let gate = Arc::clone(&gate);
+                let first_admitted = Arc::clone(&first_admitted);
+                let mut close_began = close_began_rx.clone();
                 tokio::spawn(async move {
                     gate.wait().await;
-                    tracker.claim().is_some()
+                    let Some(claim) = tracker.claim() else {
+                        return false;
+                    };
+                    first_admitted.notify_one();
+                    tokio::time::timeout(WAIT, close_began.wait_for(|began| *began))
+                        .await
+                        .expect("the close must begin once a claim is admitted")
+                        .expect("the closer keeps the close-began sender alive");
+                    drop(claim);
+                    true
                 })
             })
             .collect();
+
         let closer = {
             let tracker = Arc::clone(&tracker);
             let gate = Arc::clone(&gate);
+            let first_admitted = Arc::clone(&first_admitted);
             tokio::spawn(async move {
                 gate.wait().await;
+                tokio::time::timeout(WAIT, first_admitted.notified())
+                    .await
+                    .expect("at least one contender must be admitted before the close");
+                let outstanding_at_close = tracker.in_flight();
+                close_began_tx.send_replace(true);
                 tracker.close_and_wait(WAIT).await;
+                (outstanding_at_close, tracker.in_flight())
             })
         };
+
+        let mut admitted = 0usize;
+        let mut refused = 0usize;
         for contender in contenders {
-            if contender.await.expect("no contender may panic") {
-                total_admitted += 1;
+            let was_admitted = tokio::time::timeout(WAIT, contender)
+                .await
+                .expect("every contender must finish")
+                .expect("no contender may panic");
+            if was_admitted {
+                admitted += 1;
             } else {
-                total_refused += 1;
+                refused += 1;
             }
         }
-        closer.await.expect("the closer must not panic");
+        let (outstanding_at_close, in_flight_at_return) = tokio::time::timeout(WAIT, closer)
+            .await
+            .expect("the close must finish once every held claim releases")
+            .expect("the closer must not panic");
+
+        assert!(
+            outstanding_at_close >= 1,
+            "round {round}: the close must race at least one admitted, still-held claim \
+             -- with none outstanding, every invariant here holds vacuously on a tracker \
+             that refused everything",
+        );
+        assert!(
+            admitted >= outstanding_at_close,
+            "round {round}: {admitted} contender(s) reported admission, but \
+             {outstanding_at_close} slot(s) were already held when the close began",
+        );
+        assert_eq!(
+            admitted + refused,
+            HOSTILE_CLAIMERS,
+            "round {round}: every contender is either admitted or refused, exactly once",
+        );
+        assert_eq!(
+            in_flight_at_return, 0,
+            "round {round}: close_and_wait returned while admitted claims were still held",
+        );
         assert_eq!(
             tracker.in_flight(),
             0,
-            "every admitted claim released, in every round",
+            "round {round}: every admitted claim released exactly once",
+        );
+        assert!(
+            tracker.claim().is_none(),
+            "round {round}: a closed tracker admits no further claim",
         );
     }
-
-    assert_eq!(
-        total_admitted + total_refused,
-        HOSTILE_CLAIMERS * HOSTILE_ROUNDS,
-        "every contender in every round is accounted for exactly once",
-    );
-    assert!(
-        total_admitted > 0,
-        "the race must actually admit claims across {HOSTILE_ROUNDS} rounds at width \
-         {HOSTILE_CLAIMERS} -- if it admitted none, every invariant the sibling sweep \
-         asserts would be holding vacuously on a tracker that refused everything",
-    );
 }
