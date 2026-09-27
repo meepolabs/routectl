@@ -787,6 +787,16 @@ fn stable_or_minted_id(item_id: &str) -> String {
     }
 }
 
+/// Terminal predicate for the Responses wire: every turn closes with exactly
+/// one of these. `incomplete` is success-with-cutoff; `failed` and
+/// `cancelled` are explicit upstream failures -- all four end the stream.
+pub fn is_terminal_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "response.completed" | "response.incomplete" | "response.failed" | "response.cancelled"
+    )
+}
+
 /// Parse one raw `data:` SSE payload into a typed event. A parse error
 /// returns `Err(Error::Streaming)` so the stream terminates -- a
 /// malformed event on the Responses surface is not a recoverable

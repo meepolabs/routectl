@@ -91,6 +91,7 @@ pub(crate) const LANE: &str = PROVIDER_KIND;
 /// response, sse) via `super::ANTHROPIC_FORMAT` paths.
 pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
+use crate::stream_completion::StreamCompletion;
 use sse::SseState;
 
 /// The stream parser state for a response from `base_url`. Only the
@@ -541,6 +542,7 @@ impl Provider for AnthropicApiProvider {
         let stream = async_stream::stream! {
             let mut state = base_state;
             state.tool_reverse = tool_reverse;
+            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
 
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
@@ -585,7 +587,11 @@ impl Provider for AnthropicApiProvider {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        match state.parse_event(&provider_id, &event.data) {
+                        let parsed = sse::decode_event(&event.data).and_then(|ev| {
+                            completion.observe(&ev);
+                            state.apply_event(&provider_id, ev)
+                        });
+                        match parsed {
                             Err(e) => {
                                 // Same triage hint as the event-stream Err
                                 // arm above: log the abandoned cache-write
@@ -615,6 +621,16 @@ impl Provider for AnthropicApiProvider {
                         }
                     }
                 }
+            }
+            if let Err(e) = completion.end_of_stream(&provider_id) {
+                tracing::warn!(
+                    provider = %provider_id,
+                    pending_cache_writes_count = state.pending_cache_writes.len(),
+                    "anthropic-api stream: upstream closed before message_stop; \
+                     aborting before post-stream cache drain"
+                );
+                yield Err(e);
+                return;
             }
             // Post-stream cache-write tail for context_management emulation.
             // Drains pending_cache_writes accumulated during SSE parsing into
@@ -1131,3 +1147,7 @@ mod background_isolation_tests;
 #[cfg(test)]
 #[path = "sse_usage_source_tests.rs"]
 mod sse_usage_source_tests;
+
+#[cfg(test)]
+#[path = "mod_stream_terminal_tests.rs"]
+mod stream_terminal_tests;

@@ -46,6 +46,8 @@ use routectl_core::{
     trace_outgoing_body, trace_upstream_success_body,
 };
 
+use crate::stream_completion::StreamCompletion;
+
 // Construction/config/auth-wiring types live in `client`; the test
 // modules reach these through `use super::*`, so they are re-imported
 // under `cfg(test)` to keep that glob surface intact without carrying
@@ -274,6 +276,7 @@ impl Provider for OpenAiResponsesProvider {
         futures::pin_mut!(event_stream);
         let mut completed_body: Option<Value> = None;
         let mut terminal_kind: Option<String> = None;
+        let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
         let mut accumulated_items: Vec<Value> = Vec::new();
         while let Some(result) = event_stream.next().await {
             let event = result.map_err(|e| Error::Streaming(e.to_string()))?;
@@ -283,6 +286,7 @@ impl Provider for OpenAiResponsesProvider {
             let parsed: Value = serde_json::from_str(&event.data)
                 .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
             let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            completion.observe(kind);
             match kind {
                 "response.output_item.done" => {
                     if let Some(item) = parsed.get("item") {
@@ -303,38 +307,29 @@ impl Provider for OpenAiResponsesProvider {
                         }
                     }
                 }
-                "response.completed"
-                | "response.incomplete"
-                | "response.failed"
-                | "response.cancelled" => {
+                terminal if sse::is_terminal_event(terminal) => {
                     if let Some(r) = parsed.get("response") {
                         completed_body = Some(r.clone());
                     }
-                    terminal_kind = Some(kind.to_string());
+                    terminal_kind = Some(terminal.to_string());
                     break;
                 }
                 _ => {}
             }
         }
+        completion.end_of_stream(&self.cfg.id)?;
 
+        // The terminal event fired but carried no `response` field: a
+        // malformed payload, reported as such rather than as a cut stream.
         let mut raw_body = completed_body.ok_or_else(|| {
-            // Two distinct cases land here:
-            //   - terminal_kind = None: the stream exhausted without
-            //     ever firing a terminal event (truncation, premature
-            //     close, network drop).
-            //   - terminal_kind = Some(failed|cancelled|completed|incomplete):
-            //     the terminal event fired but did NOT carry a `response`
-            //     field (malformed upstream payload).
-            // Surface the actual cause so operators don't chase a
-            // ghost stream-truncation when the real issue is a
-            // missing response field on a known-terminal event.
-            let msg = match terminal_kind.as_deref() {
-                None => "openai-responses: stream ended without a terminal event".to_string(),
-                Some(kind) => format!(
-                    "openai-responses: terminal {kind:?} event arrived without a `response` field"
+            Error::upstream(
+                &self.cfg.id,
+                0,
+                format!(
+                    "openai-responses: terminal {:?} event arrived without a `response` field",
+                    terminal_kind.as_deref().unwrap_or("?")
                 ),
-            };
-            Error::upstream(&self.cfg.id, 0, msg)
+            )
         })?;
 
         // Backfill `response.output` from accumulated `output_item.done`
@@ -480,6 +475,7 @@ impl Provider for OpenAiResponsesProvider {
         let stream = async_stream::stream! {
             let mut pending_upstream_meta = upstream_meta;
             let mut state = sse::ResponsesStreamState::new(auth_kind);
+            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
                 match result {
@@ -492,6 +488,12 @@ impl Provider for OpenAiResponsesProvider {
                         if event.data.is_empty() {
                             continue;
                         }
+                        // Gateway-style end sentinel. Not a terminal event:
+                        // ends the transport, and the completion verdict
+                        // below decides whether the turn finished first.
+                        if event.data.trim() == "[DONE]" {
+                            break;
+                        }
                         let parsed = match sse::parse_data_line(&provider_id, &event.data) {
                             Ok(p) => p,
                             Err(e) => {
@@ -499,6 +501,7 @@ impl Provider for OpenAiResponsesProvider {
                                 return;
                             }
                         };
+                        completion.observe(parsed.kind.as_str());
                         match state.parse_event(&provider_id, parsed) {
                             Err(e) => {
                                 yield Err(e);
@@ -523,6 +526,13 @@ impl Provider for OpenAiResponsesProvider {
                         }
                     }
                 }
+            }
+            if let Err(e) = completion.end_of_stream(&provider_id) {
+                tracing::warn!(
+                    provider = %provider_id,
+                    "openai-responses stream: upstream closed before a terminal event"
+                );
+                yield Err(e);
             }
         };
 
@@ -782,3 +792,7 @@ mod lane_tag_emission_tests;
 #[cfg(test)]
 #[path = "reasoning_continuity_tests.rs"]
 mod reasoning_continuity_tests;
+
+#[cfg(test)]
+#[path = "stream_terminal_tests.rs"]
+mod stream_terminal_tests;

@@ -99,6 +99,18 @@ impl OpenBlockKind {
     }
 }
 
+/// Decode one raw SSE data line (the JSON string after "data: ").
+pub(crate) fn decode_event(data: &str) -> Result<SseEvent> {
+    serde_json::from_str(data).map_err(|e| Error::Streaming(format!("bad sse json: {e}")))
+}
+
+/// Terminal predicate for the Messages wire: only `message_stop` closes a
+/// turn. `message_delta` carries the stop reason but precedes `message_stop`,
+/// so a body that ends after it was still cut.
+pub(crate) const fn is_terminal_event(event: &SseEvent) -> bool {
+    matches!(event, SseEvent::MessageStop)
+}
+
 /// Persistent state across SSE events for one streaming response.
 #[derive(Debug, Default)]
 pub struct SseState {
@@ -259,8 +271,17 @@ impl SseState {
     /// no-emit events ride out together with the next canonical
     /// emission (see `sse_opaque`).
     pub fn parse_event(&mut self, provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
-        let event: SseEvent = serde_json::from_str(data)
-            .map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
+        let event = decode_event(data)?;
+        self.apply_event(provider_id, event)
+    }
+
+    /// Dispatch one already-decoded event; the second half of
+    /// [`Self::parse_event`], for a caller that inspects the event first.
+    pub(crate) fn apply_event(
+        &mut self,
+        provider_id: &str,
+        event: SseEvent,
+    ) -> Result<Option<ChatChunk>> {
         let emitted = self.dispatch_event(provider_id, event)?;
         if emitted.is_some() {
             self.canonical_chunk_emitted = true;

@@ -376,7 +376,8 @@ license.
   `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
-  `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`
+  `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`,
+  `stream_completion`
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
   `BoundedLogSample<T>`, the collection-time bound for the diagnostic samples
   attached to aggregated WARN records (`push`, `push_distinct` for
@@ -459,6 +460,10 @@ license.
   a `tool_use` id still equals its `tool_result` correlator on every lane
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
   (401/403-vs-other auth-warn split) across egresses
+- `src/stream_completion.rs` -- `StreamCompletion`: shared end-of-stream
+  verdict for lanes whose wire closes each turn with a terminal event; each
+  lane injects its own predicate, and a stream that ends before it yields a
+  status-0 `Upstream` error instead of a clean close
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
   lifts the upstream provider's correlation id (first of `x-request-id` /
   `x-oai-request-id` / `cf-ray`) off an error response so the ingress can
@@ -749,7 +754,8 @@ license.
   opening carrier; `mod.rs` `stream_state_for` sets the vendor flag only for
   the first-party host.
   `stream()` in `mod.rs` MERGES the unified-quota head carrier into that first
-  chunk rather than replacing it
+  chunk rather than replacing it. `is_terminal_event` (`message_stop` only) is
+  the lane's `StreamCompletion` predicate
 - `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per
   unknown content block (per-block caps: 256 KB / 10000 deltas; per-stream
   ceiling: 4 MB / 40000 events), each degrading to sink-drain on overflow with
@@ -971,7 +977,9 @@ license.
   `output_index` (Text/Reasoning/ToolUse blocks); carries the lane on
   `ResponsesStreamState::new` so streamed reasoning details bear the same
   lane tag the non-streaming path emits; the completed-response chunk stamps
-  `usage_input_source = ExplicitFinal` beside its usage
+  `usage_input_source = ExplicitFinal` beside its usage. `is_terminal_event`
+  (completed / incomplete / failed / cancelled) is the lane's
+  `StreamCompletion` predicate for both `complete()` and `stream()`
 - `src/openai_responses/quota_headers.rs` -- tolerant parser for the
   `x-codex-*` quota response-header family (`parse_codex_quota` ->
   `CodexQuota`; None when absent, non-UTF8 values skipped, only
