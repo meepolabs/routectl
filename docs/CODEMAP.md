@@ -2394,7 +2394,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   token). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models` (refuses, with a WARN, a model whose nickname or
   pool member carries `#`, whose table key differs from its nickname, or whose
-  state key is already held by a slot seeded from a different provider),
+  state key is already held by a slot another identity seeded -- ownership
+  lives in `state_slots.rs` and outlives the table),
   the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_prefix_epochs_from` /
@@ -3826,6 +3827,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   RAII guards (Drop-settles the probe slot on every outcome incl.
   cancellation), and
   `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
+- `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`
+  (provider vs pool), `claim_state_slot` (creates a slot and records its
+  owner once; the owner persists for the slot's lifetime, independent of the
+  resolved-model table), and `state_slot_refusal` (the install-time check
+  against that recorded owner)
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH

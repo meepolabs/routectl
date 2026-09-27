@@ -184,3 +184,31 @@ fn the_lean_example_config_passes() {
 
     assert!(validate_state_key_names(&config).is_ok());
 }
+
+#[test]
+fn a_model_nickname_equal_to_a_provider_name_dispatching_through_a_pool_is_refused() {
+    // Arrange: `anthropic-work` is a provider AND a model whose traffic goes
+    // through pool `anthropic`, even though that pool's only member is the
+    // same-named provider. The provider slot and the pooled model's own slot
+    // would share one key.
+    let config = parse(&format!(
+        "{PROVIDER}\
+         [pools.anthropic]\nmembers = [\"anthropic-work\"]\n\
+         {}",
+        model("anthropic-work", "anthropic", true),
+    ));
+
+    // Act
+    let err = errors(&config);
+
+    // Assert
+    assert!(err.contains("model nickname `anthropic-work`"), "{err}");
+    assert!(err.contains("dispatches through `anthropic`"), "{err}");
+    assert!(
+        collect_config_validation(&config)
+            .errors
+            .iter()
+            .any(|e| e.contains("runtime state")),
+        "the refusal must surface through the collected suite"
+    );
+}

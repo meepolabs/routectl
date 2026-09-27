@@ -4,7 +4,7 @@
 //! with exponential backoff. Per-provider runtime gates (RPM bucket,
 //! circuit breaker) skip unhealthy providers in the chain.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // The registry tempo now flows through `LearnedCapabilityRegistry::
@@ -58,6 +58,7 @@ mod probe_seat;
 mod repair_budget;
 mod replay_repair;
 mod runtime_gate;
+mod state_slots;
 mod status;
 mod sticky;
 mod window_gate;
@@ -149,6 +150,11 @@ pub struct Router {
     /// dispatch paths and test fixtures using `register()` still find
     /// a gate).
     state: BTreeMap<String, Arc<Mutex<ProviderState>>>,
+    /// The identity that seeded each `state` slot, kept for as long as the
+    /// slot exists -- independent of `resolved_models`, so replacing or
+    /// emptying the table cannot let a later install take a slot under a
+    /// different identity. Written only through `claim_state_slot`.
+    slot_owners: BTreeMap<String, state_slots::SlotOwner>,
     /// v0.6.0 pre-resolved model table. Populated when an external
     /// caller built it via `factory::build_resolved_models`. When
     /// non-empty, the dispatch path walks `Arc<ResolvedModel>` chains
@@ -1972,20 +1978,6 @@ impl DispatchTarget {
     }
 }
 
-/// Every runtime-state key `m` occupies when installed under `nickname`,
-/// paired with the provider whose runtime policy seeds that slot: its own
-/// nickname slot plus one per pooled seat.
-fn slot_seeds(nickname: &str, m: &ResolvedModel) -> Vec<(String, String)> {
-    std::iter::once((nickname.to_string(), m.provider_name.clone()))
-        .chain(
-            m.seats
-                .iter()
-                .flat_map(|seats| seats.iter())
-                .map(|seat| (seat.state_key_for(nickname), seat.provider_name.clone())),
-        )
-        .collect()
-}
-
 impl Router {
     /// Build a router from a config, provisioning a runtime gate for every
     /// configured provider. Resolved models and providers are registered
@@ -1998,11 +1990,13 @@ impl Router {
     /// through the CLI's router builder, which runs the suite first.
     pub fn new(config: Arc<Config>) -> Self {
         let mut state = BTreeMap::new();
+        let mut slot_owners = BTreeMap::new();
         for (name, entry) in &config.providers {
             state.insert(
                 name.clone(),
                 Arc::new(Mutex::new(ProviderState::new(entry.runtime()))),
             );
+            slot_owners.insert(name.clone(), state_slots::SlotOwner::Provider(name.clone()));
         }
 
         // Build the suffix-glob index from the configured `[aliases]`
@@ -2073,6 +2067,7 @@ impl Router {
             config,
             providers: Default::default(),
             state,
+            slot_owners,
             resolved_models: BTreeMap::new(),
             alias_glob_index,
             round_robin: Default::default(),
@@ -2142,36 +2137,36 @@ impl Router {
     /// A model whose state keys are ambiguous is refused with a WARN and left
     /// out of the table: a nickname or pool member carrying the seat-key
     /// separator, a table key differing from the model's own nickname, or a
-    /// key already held by a slot seeded from a DIFFERENT provider's runtime
-    /// policy. A slot seeded from the same provider -- an identity reinstall,
-    /// or a direct model named after its own provider -- is reused unchanged.
+    /// key already held by a slot another identity seeded. Slot ownership
+    /// outlives the table, so a key stays bound to its first owner across
+    /// any number of installs, including through an empty table. A slot the
+    /// same identity seeded -- an identity reinstall, or a direct model named
+    /// after its own provider -- is reused unchanged.
     pub fn install_resolved_models(&mut self, models: BTreeMap<String, Arc<ResolvedModel>>) {
-        let seeded_by: HashMap<String, String> = self
-            .resolved_models
-            .iter()
-            .flat_map(|(nickname, m)| slot_seeds(nickname, m))
-            .collect();
         self.resolved_models = models
             .into_iter()
-            .filter(
-                |(nickname, m)| match self.state_slot_refusal(nickname, m, &seeded_by) {
-                    None => true,
-                    Some(reason) => {
-                        tracing::warn!(
-                            nickname = %routectl_core::sanitize_for_log(nickname),
-                            reason = %routectl_core::sanitize_for_log(&reason),
-                            "refusing resolved model: its runtime state key is ambiguous",
-                        );
-                        false
-                    }
-                },
-            )
+            .filter(|(nickname, m)| match self.state_slot_refusal(nickname, m) {
+                None => true,
+                Some(reason) => {
+                    tracing::warn!(
+                        nickname = %routectl_core::sanitize_for_log(nickname),
+                        reason = %routectl_core::sanitize_for_log(&reason),
+                        "refusing resolved model: its runtime state key is ambiguous",
+                    );
+                    false
+                }
+            })
             .collect();
         // Mirror the per-model providers into the `providers` map
         // (keyed by provider name) so legacy lookups still work, and
         // populate the state map with one entry per nickname so
         // dispatch's gate check is per-model.
-        for (nickname, m) in &self.resolved_models {
+        let installed: Vec<(String, Arc<ResolvedModel>)> = self
+            .resolved_models
+            .iter()
+            .map(|(nickname, m)| (nickname.clone(), Arc::clone(m)))
+            .collect();
+        for (nickname, m) in &installed {
             self.providers
                 .entry(m.provider_name.clone())
                 .or_insert_with(|| m.provider.clone());
@@ -2203,9 +2198,11 @@ impl Router {
                         .get(&seat.provider_name)
                         .map(|e| e.runtime().clone())
                         .unwrap_or_default();
-                    self.state
-                        .entry(seat.state_key_for(nickname))
-                        .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&seat_policy))));
+                    self.claim_state_slot(
+                        seat.state_key_for(nickname),
+                        state_slots::SlotOwner::Provider(seat.provider_name.clone()),
+                        &seat_policy,
+                    );
                 }
                 // Round-robin pools rotate the starting seat per request;
                 // register a cursor only for that selection mode, keyed by the
@@ -2217,55 +2214,13 @@ impl Router {
                     self.round_robin.register(m.rotation_key());
                 }
             }
-            self.state
-                .entry(nickname.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
+            self.claim_state_slot(
+                nickname.clone(),
+                state_slots::SlotOwner::of_model(m),
+                &policy,
+            );
         }
         self.admit_quota_seats();
-    }
-
-    /// Why `m`, filed under `nickname`, may not take runtime-state slots, or
-    /// `None` when every key it composes is unambiguous. `seeded_by` maps each
-    /// key of the table being replaced to the provider whose policy seeded
-    /// it; any other occupied slot is a provider slot `Router::new` seeded
-    /// from the provider of the same name.
-    fn state_slot_refusal(
-        &self,
-        nickname: &str,
-        m: &ResolvedModel,
-        seeded_by: &HashMap<String, String>,
-    ) -> Option<String> {
-        use crate::seat_pool::check_state_key_name;
-
-        if m.nickname != nickname {
-            return Some(format!(
-                "table key `{nickname}` differs from the model's own nickname `{}`",
-                m.nickname
-            ));
-        }
-        if let Err(reason) = check_state_key_name("model nickname", nickname) {
-            return Some(reason);
-        }
-        for seat in m.seats.iter().flat_map(|seats| seats.iter()) {
-            if let Err(reason) = check_state_key_name("pool member", &seat.provider_name) {
-                return Some(reason);
-            }
-        }
-        slot_seeds(nickname, m).into_iter().find_map(|(key, seed)| {
-            if !self.state.contains_key(&key) {
-                return None;
-            }
-            // INVARIANT: letting a model named after its own provider reuse
-            // that provider's slot is sound only while provider-name slots
-            // are seed placeholders that no production path looks up --
-            // every dispatch and status key is a model nickname or a seat
-            // key. A production read keyed by a bare provider name would make
-            // this reuse a shared gate between the provider and the model.
-            let holder = seeded_by.get(&key).map_or(key.as_str(), String::as_str);
-            (holder != seed).then(|| {
-                format!("state key `{key}` is already held by a slot of provider `{holder}`")
-            })
-        })
     }
 
     /// The nicknames whose outbound output-token ceiling came from the catalog
@@ -3035,9 +2990,11 @@ impl Router {
         let name = name.into();
         // Ensure a gate exists even for providers registered without a
         // matching config entry (test harnesses rely on this).
-        self.state
-            .entry(name.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&Default::default()))));
+        self.claim_state_slot(
+            name.clone(),
+            state_slots::SlotOwner::Provider(name.clone()),
+            &Default::default(),
+        );
         self.providers.insert(name, provider);
     }
 
@@ -3177,6 +3134,10 @@ mod seat_pool_dispatch_tests;
 #[cfg(test)]
 #[path = "state_slot_install_tests.rs"]
 mod state_slot_install_tests;
+
+#[cfg(test)]
+#[path = "state_key_rpm_isolation_tests.rs"]
+mod state_key_rpm_isolation_tests;
 
 #[cfg(test)]
 #[path = "quota_feed_dispatch_tests.rs"]

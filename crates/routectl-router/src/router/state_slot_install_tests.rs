@@ -243,3 +243,119 @@ fn an_exact_identity_reinstall_keeps_every_slot() {
         );
     }
 }
+
+#[test]
+fn a_key_readded_under_another_provider_after_an_empty_table_stays_refused() {
+    // Arrange: `m` is seeded from `p1`, then the whole table is removed. The
+    // slot outlives the table, so its owner must too -- otherwise `m` via a
+    // provider literally named `m` would pass as "a model named after its own
+    // provider" and inherit `p1`'s breaker and RPM bucket.
+    let mut router = router_with_providers(&["p1"]);
+    router.install_resolved_models(table(vec![("m", direct("m", "p1"))]));
+    let p1_slot = router.state.get("m").cloned().expect("model slot");
+    router.install_resolved_models(BTreeMap::new());
+    assert!(router.resolved_models.is_empty());
+
+    // Act
+    router.install_resolved_models(table(vec![("m", direct("m", "m"))]));
+
+    // Assert
+    assert!(!router.resolved_models.contains_key("m"));
+    assert!(
+        Arc::ptr_eq(&router.state["m"], &p1_slot),
+        "the retained slot is neither replaced nor handed to the new identity"
+    );
+}
+
+#[test]
+fn a_pooled_nickname_readded_as_a_direct_model_after_an_empty_table_stays_refused() {
+    // The pooled model's own slot was seeded from pool `pool`; a direct model
+    // through a provider named `opus` is a different identity.
+    let mut router = router_with_providers(&["anthropic-a"]);
+    router.install_resolved_models(table(vec![("opus", pooled("opus", &["anthropic-a"]))]));
+    let pool_slot = router.state.get("opus").cloned().expect("model slot");
+    router.install_resolved_models(BTreeMap::new());
+
+    router.install_resolved_models(table(vec![("opus", direct("opus", "opus"))]));
+
+    assert!(!router.resolved_models.contains_key("opus"));
+    assert!(Arc::ptr_eq(&router.state["opus"], &pool_slot));
+}
+
+#[test]
+fn an_exact_identity_readded_after_an_empty_table_reuses_its_retained_slots() {
+    // Positive control for the two refusals above, over the same sequence.
+    let mut router = router_with_providers(&["anthropic-a", "p1"]);
+    let models = || {
+        table(vec![
+            ("m", direct("m", "p1")),
+            ("opus", pooled("opus", &["anthropic-a"])),
+        ])
+    };
+    router.install_resolved_models(models());
+    let before: Vec<_> = ["m", "opus", "opus#anthropic-a"]
+        .iter()
+        .map(|key| router.state[*key].clone())
+        .collect();
+    router.install_resolved_models(BTreeMap::new());
+
+    router.install_resolved_models(models());
+
+    assert!(router.resolved_models.contains_key("m"));
+    assert!(router.resolved_models.contains_key("opus"));
+    for (key, slot) in ["m", "opus", "opus#anthropic-a"].iter().zip(&before) {
+        assert!(
+            Arc::ptr_eq(&router.state[*key], slot),
+            "{key} kept its slot"
+        );
+    }
+}
+
+fn pooled_via(nickname: &str, pool: &str, members: &[&str]) -> Arc<ResolvedModel> {
+    let seats: Vec<SeatTarget> = members
+        .iter()
+        .map(|member| SeatTarget {
+            provider_name: (*member).to_string(),
+            provider: provider(),
+            auth_secret_ref: None,
+        })
+        .collect();
+    Arc::new(ResolvedModel::new(nickname, pool, provider(), "u").with_seats(Arc::from(seats)))
+}
+
+#[test]
+fn a_pooled_model_named_after_a_provider_is_refused_at_install() {
+    // Arrange: `anthropic-work` is both a provider slot and the nickname of a
+    // model dispatching through a pool of that very provider.
+    let mut router = router_with_providers(&["anthropic-work"]);
+    let provider_slot = router.state.get("anthropic-work").cloned().expect("slot");
+
+    // Act
+    router.install_resolved_models(table(vec![(
+        "anthropic-work",
+        pooled_via("anthropic-work", "anthropic", &["anthropic-work"]),
+    )]));
+
+    // Assert
+    assert!(router.resolved_models.is_empty());
+    assert!(Arc::ptr_eq(&router.state["anthropic-work"], &provider_slot));
+    assert!(!router.state.contains_key("anthropic-work#anthropic-work"));
+}
+
+#[test]
+fn a_pooled_model_named_after_a_provider_is_refused_even_when_its_pool_shares_that_name() {
+    // An unvalidated table can name the pool after the provider too. The
+    // provider slot is still a provider's, not the pool's, so the same-name
+    // exception for direct models must not apply.
+    let mut router = router_with_providers(&["anthropic-work", "anthropic-b"]);
+    let provider_slot = router.state.get("anthropic-work").cloned().expect("slot");
+
+    router.install_resolved_models(table(vec![(
+        "anthropic-work",
+        pooled_via("anthropic-work", "anthropic-work", &["anthropic-b"]),
+    )]));
+
+    assert!(router.resolved_models.is_empty());
+    assert!(Arc::ptr_eq(&router.state["anthropic-work"], &provider_slot));
+    assert!(!router.state.contains_key("anthropic-work#anthropic-b"));
+}
