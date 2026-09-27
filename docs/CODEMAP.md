@@ -405,7 +405,10 @@ license.
   `routectl-cli` catalog-import fetch client), plus
   `redirect_not_followed_error` / `REDIRECT_NOT_FOLLOWED_MESSAGE`, the shared
   3xx -> upstream-502 mapping every lane's status gate calls before its
-  success path
+  success path; `in_band_error_status` / `IN_BAND_ERROR_DEFAULT_STATUS`
+  derive the status of an error object inside an HTTP-200 body (only
+  `400..=599` trusted, else 502), shared by the gemini and openai-compat
+  stream parsers
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller
   `reasoning.effort` against per-model `effort_levels` (rounds toward
   most-capable above max, least-capable below min). Returns `Option`: `None`
@@ -824,7 +827,9 @@ license.
   `ThinkTagAccumulator` for the `<think>` cross-chunk path +
   `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids);
   `mark_reported_usage` stamps `usage_input_source = ExplicitFinal` on any
-  chunk whose usage carries a prompt count
+  chunk whose usage carries a prompt count; `detect_error_envelope` maps an
+  in-band `error` object to `Error::Upstream` with its status clamped via
+  `http_client::in_band_error_status`
 - `src/openai_compat/util.rs` -- shared `build_reasoning_detail` helper for
   request/response/SSE normalizers
 
@@ -1098,7 +1103,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/gemini/sse.rs` -- per-chunk `streamGenerateContent` SSE parsing ->
   canonical `ChatChunk` (text + thought parts, usage); `terminal_chunk`
   stamps `usage_input_source` as `ExplicitFinal` when the terminal event
-  carried its own usage, `InterimCarry` when an earlier report was folded in
+  carried its own usage, `InterimCarry` when an earlier report was folded in;
+  `parse_data_line` maps a populated in-band `error` object to
+  `Error::Upstream` (benign `error: null` / `{}` pass through)
 - `src/gemini/sse_tests.rs` -- streaming-path unit tests for the SSE parser
 
 ### bedrock

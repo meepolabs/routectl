@@ -360,13 +360,48 @@ fn usage_delta(meta: &UsageMetadata) -> UsageDelta {
 
 /// Parse one raw `data:` SSE payload into a partial `GenerateContentResponse`.
 /// A parse error returns `Err(Error::Streaming)` so the stream terminates --
-/// a malformed event on the streaming surface is not recoverable.
+/// a malformed event on the streaming surface is not recoverable. An event
+/// carrying a populated top-level `error` object returns `Err(Error::Upstream)`
+/// instead: every `GenerateContentResponse` field is serde-default, so such an
+/// event would otherwise decode as an empty success.
 pub fn parse_data_line(provider_id: &str, data: &str) -> Result<GenerateContentResponse> {
-    serde_json::from_str(data).map_err(|e| {
+    let bad_json = |e: serde_json::Error| {
         Error::Streaming(format!(
             "gemini provider `{provider_id}`: bad SSE json: {e}"
         ))
-    })
+    };
+    let val: Value = serde_json::from_str(data).map_err(bad_json)?;
+    if let Some(err) = detect_in_band_error(provider_id, &val) {
+        return Err(err);
+    }
+    serde_json::from_value(val).map_err(bad_json)
+}
+
+/// Map a Gemini error object (`{"error":{"code":..,"message":..,"status":..}}`)
+/// delivered inside an HTTP-200 stream to `Error::Upstream`, lifting the same
+/// `error.status` / `error.code` classifier the non-streaming error path
+/// carries. A `null` or empty-object `error` is not an error: some gateways
+/// attach one to every healthy event.
+fn detect_in_band_error(provider_id: &str, val: &Value) -> Option<Error> {
+    let err = val.get("error")?;
+    if err.is_null() || err.as_object().is_some_and(serde_json::Map::is_empty) {
+        return None;
+    }
+    let status = crate::http_client::in_band_error_status(err.get("code"));
+    let message = err
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("upstream error in stream")
+        .to_string();
+    let (upstream_type, upstream_code) = super::classify_gemini_error_value(val);
+    Some(Error::upstream_full(
+        provider_id,
+        status,
+        message,
+        None,
+        upstream_type,
+        upstream_code,
+    ))
 }
 
 #[cfg(test)]

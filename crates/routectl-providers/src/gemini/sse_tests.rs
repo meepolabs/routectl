@@ -270,6 +270,83 @@ fn bad_sse_json_is_streaming_error() {
     );
 }
 
+fn in_band_upstream_error(data: &str) -> (u16, String, Option<Box<str>>, Option<Box<str>>) {
+    match parse_data_line(PID, data)
+        .expect_err("an in-band error object must not parse as a success")
+    {
+        routectl_core::Error::Upstream {
+            status,
+            body,
+            upstream_type,
+            upstream_code,
+            ..
+        } => (status, body, upstream_type, upstream_code),
+        other => panic!("expected Error::Upstream, got: {other:?}"),
+    }
+}
+
+#[test]
+fn in_band_error_object_surfaces_as_upstream_error_with_its_status() {
+    let data = r#"{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}"#;
+
+    let (status, body, upstream_type, upstream_code) = in_band_upstream_error(data);
+
+    assert_eq!(status, 429);
+    assert!(
+        body.contains("Resource has been exhausted"),
+        "the upstream message must reach the error body, got: {body}"
+    );
+    assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+    assert_eq!(upstream_code.as_deref(), Some("429"));
+}
+
+#[test]
+fn in_band_error_object_with_non_error_status_code_clamps_to_502() {
+    for code in ["200", "302", "600", "70000", "\"429\""] {
+        let data = format!(r#"{{"error":{{"code":{code},"message":"m"}}}}"#);
+
+        let (status, _, _, _) = in_band_upstream_error(&data);
+
+        assert_eq!(status, 502, "code {code} must clamp to 502");
+    }
+}
+
+#[test]
+fn in_band_error_object_without_code_or_message_defaults_to_502() {
+    let (status, body, _, _) = in_band_upstream_error(r#"{"error":{"status":"INTERNAL"}}"#);
+
+    assert_eq!(status, 502);
+    assert!(!body.is_empty(), "a fallback message must be supplied");
+}
+
+#[test]
+fn null_or_empty_error_field_on_a_content_event_parses_as_content() {
+    for error in ["null", "{}"] {
+        let data = format!(
+            r#"{{"candidates":[{{"content":{{"parts":[{{"text":"hi"}}],"role":"model"}},"index":0}}],"error":{error}}}"#
+        );
+
+        let parsed = parse_data_line(PID, &data)
+            .unwrap_or_else(|e| panic!("error:{error} must not abort the stream: {e:?}"));
+
+        let text = parsed.candidates[0]
+            .content
+            .as_ref()
+            .and_then(|c| c.parts[0].text.as_deref());
+        assert_eq!(text, Some("hi"), "error:{error} content must survive");
+    }
+}
+
+#[test]
+fn ordinary_content_event_parses_as_content() {
+    let data = r#"{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}],"responseId":"r"}"#;
+
+    let parsed = parse_data_line(PID, data).expect("a healthy event must parse");
+
+    assert_eq!(parsed.response_id.as_deref(), Some("r"));
+    assert_eq!(parsed.candidates[0].finish_reason.as_deref(), Some("STOP"));
+}
+
 #[test]
 fn trailing_usage_only_event_does_not_emit_second_terminal() {
     let mut state = GeminiStreamState::default();

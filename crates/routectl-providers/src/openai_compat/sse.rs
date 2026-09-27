@@ -352,7 +352,7 @@ fn mark_reported_usage(mut chunk: ChatChunk) -> ChatChunk {
 /// when the envelope is present so the caller can short-circuit instead
 /// of treating it as a malformed ChatChunk. A `null` or empty-object
 /// `error` field is not an envelope and returns `None`. Status defaults
-/// to 502 when `error.code` is absent or non-numeric; message defaults
+/// to 502 when `error.code` is not an integer in `400..=599`; message defaults
 /// to a generic string. The upstream `error.type` / `error.code`
 /// classifier is lifted onto the error so the surfaced fault matches what
 /// the non-streaming path carries. Shared by `parse_event` and `process`.
@@ -367,11 +367,7 @@ fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
         tracing::debug!(provider = %id, "skipping null/empty error field in stream chunk");
         return None;
     }
-    let status = val
-        .pointer("/error/code")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| u16::try_from(n).ok())
-        .unwrap_or(502);
+    let status = crate::http_client::in_band_error_status(val.pointer("/error/code"));
     let message = val
         .pointer("/error/message")
         .and_then(|v| v.as_str())
@@ -1798,6 +1794,66 @@ mod tests {
                 status, 502,
                 "out-of-range code must default to 502, not wrap"
             ),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    fn envelope_status_for_code(code: serde_json::Value) -> (u16, Option<Box<str>>) {
+        let raw = json!({"error": {"message": "in-band failure", "code": code}}).to_string();
+        match parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err() {
+            Error::Upstream {
+                status,
+                upstream_code,
+                ..
+            } => (status, upstream_code),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A numeric `code` that fits a u16 but is not an HTTP error status
+    /// (a success code, a 3xx, a vendor-private number) must surface as the
+    /// 502 default, so the status the client receives and the status the
+    /// router classifies on are the same number.
+    #[test]
+    fn mid_stream_error_envelope_non_error_status_code_clamps_to_502() {
+        for code in [0_u64, 200, 302, 399, 600, 999, 1000] {
+            let (status, _) = envelope_status_for_code(json!(code));
+
+            assert_eq!(status, 502, "code {code} must clamp to 502");
+        }
+    }
+
+    /// The clamp's edges are inclusive: 400 and 599 are real error
+    /// statuses and pass through unchanged.
+    #[test]
+    fn mid_stream_error_envelope_keeps_codes_at_error_range_edges() {
+        let (low, _) = envelope_status_for_code(json!(400));
+        let (high, _) = envelope_status_for_code(json!(599));
+
+        assert_eq!(low, 400);
+        assert_eq!(high, 599);
+    }
+
+    /// Clamping the status must not erase the upstream's own code: the raw
+    /// value stays on `upstream_code` for diagnostics.
+    #[test]
+    fn mid_stream_error_envelope_clamp_keeps_raw_upstream_code() {
+        let (status, upstream_code) = envelope_status_for_code(json!(1000));
+
+        assert_eq!(status, 502);
+        assert_eq!(upstream_code.as_deref(), Some("1000"));
+    }
+
+    /// The RawThinkTag path shares the same envelope detection, so an
+    /// out-of-range code clamps there too.
+    #[test]
+    fn process_mid_stream_error_envelope_clamps_non_error_status_code() {
+        let raw = json!({"error": {"message": "in-band failure", "code": 200}}).to_string();
+
+        let err = ThinkTagAccumulator::new().process("p", &raw).unwrap_err();
+
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(status, 502),
             other => panic!("expected Error::Upstream, got: {other:?}"),
         }
     }

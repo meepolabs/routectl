@@ -714,9 +714,14 @@ impl GeminiProvider {
 /// is not JSON. The Gemini envelope names its classifier `status`, unlike
 /// the OpenAI `error.type`, hence the dedicated parser.
 pub(super) fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
-    let Ok(v) = serde_json::from_str::<Value>(body_text) else {
-        return (None, None);
-    };
+    match serde_json::from_str::<Value>(body_text) {
+        Ok(v) => classify_gemini_error_value(&v),
+        Err(_) => (None, None),
+    }
+}
+
+/// [`parse_gemini_error_classifier`] over an already-decoded body.
+pub(super) fn classify_gemini_error_value(v: &Value) -> (Option<String>, Option<String>) {
     let upstream_type = v
         .pointer("/error/status")
         .and_then(|s| s.as_str())
@@ -1142,6 +1147,103 @@ mod e2e_tests {
         assert_eq!(terminal.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = terminal.usage.as_ref().expect("terminal usage");
         assert_eq!(usage.total_tokens, Some(7));
+    }
+
+    #[tokio::test]
+    async fn stream_surfaces_in_band_error_after_content_as_upstream_error() {
+        use futures::StreamExt;
+
+        let server = MockServer::start().await;
+        let body = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"pong\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"resp-stream\"}\n\n",
+            "data: {\"error\":{\"code\":429,\"message\":\"Resource has been exhausted\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:streamGenerateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let mut req = base_req();
+        req.stream = Some(true);
+
+        let items: Vec<_> = provider
+            .stream(req)
+            .await
+            .expect("stream open")
+            .collect()
+            .await;
+
+        let (last, earlier) = items.split_last().expect("at least one item");
+        let text: String = earlier
+            .iter()
+            .map(|item| item.as_ref().expect("content before the error stays Ok"))
+            .flat_map(|c| c.choices.iter())
+            .filter_map(|ch| ch.delta.content.clone())
+            .collect();
+        assert_eq!(text, "pong");
+        match last {
+            Err(Error::Upstream {
+                status,
+                upstream_type,
+                ..
+            }) => {
+                assert_eq!(*status, 429);
+                assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+            }
+            other => panic!("expected a terminal Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_with_null_error_field_on_every_event_completes_normally() {
+        use futures::StreamExt;
+
+        let server = MockServer::start().await;
+        let body = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"pong\"}],\"role\":\"model\"},\"index\":0}],\"error\":null}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" more\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"error\":{}}\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:streamGenerateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let mut req = base_req();
+        req.stream = Some(true);
+
+        let items: Vec<_> = provider
+            .stream(req)
+            .await
+            .expect("stream open")
+            .collect()
+            .await;
+
+        let chunks: Vec<_> = items
+            .into_iter()
+            .map(|item| item.expect("benign error fields must not abort the stream"))
+            .collect();
+        let text: String = chunks
+            .iter()
+            .flat_map(|c| c.choices.iter())
+            .filter_map(|ch| ch.delta.content.clone())
+            .collect();
+        assert_eq!(text, "pong more");
+        assert_eq!(
+            chunks
+                .last()
+                .and_then(|c| c.choices[0].finish_reason.as_deref()),
+            Some("stop")
+        );
     }
 
     #[test]

@@ -180,6 +180,23 @@ pub fn redirect_not_followed_error(provider_id: &str) -> routectl_core::Error {
     routectl_core::Error::upstream(provider_id, 502, REDIRECT_NOT_FOLLOWED_MESSAGE)
 }
 
+/// Status assumed for an error reported inside an HTTP-200 body when the
+/// body carries no usable HTTP error status of its own.
+pub const IN_BAND_ERROR_DEFAULT_STATUS: u16 = 502;
+
+/// Derive the HTTP status for an error object delivered inside a successful
+/// response body from its `code` member. Only an integer in `400..=599` is
+/// trusted; anything else (absent, string, success or redirect code,
+/// out-of-range number) yields [`IN_BAND_ERROR_DEFAULT_STATUS`]. The ingress
+/// maps any status it cannot render to 502, so an unclamped value would make
+/// the status the client sees disagree with the one the router classified.
+pub fn in_band_error_status(code: Option<&serde_json::Value>) -> u16 {
+    code.and_then(serde_json::Value::as_u64)
+        .and_then(|n| u16::try_from(n).ok())
+        .filter(|s| (400..=599).contains(s))
+        .unwrap_or(IN_BAND_ERROR_DEFAULT_STATUS)
+}
+
 /// Emit exactly one WARN when a response-body read trips the cap. `path`
 /// distinguishes the call site (`complete_success_body` | `error_body` |
 /// `success_body` | `count_tokens_success_body`); `content_length` is the
