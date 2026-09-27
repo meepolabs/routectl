@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::proxy::forward::{
     DEFAULT_MAX_CONCURRENT_STREAMS, ForwardBody, ForwardRequest, ForwardState, STREAM_IDLE_WINDOW,
-    build_client, forward,
+    forward,
 };
 use crate::proxy::metrics::{Leg, PathClass, ProxyMetrics};
 use crate::server::AppState;
@@ -295,25 +295,23 @@ fn into_axum_response(response: http::Response<ForwardBody>) -> Response {
 /// sharing its instance (that one lives inside the proxy listener task,
 /// which may never start at all when `[mitm]` is absent; this handler
 /// needs its own regardless of whether the front-proxy is running).
-/// `None` only if the shared [`build_client`] constructor itself fails
+/// `None` only if [`ForwardState::new`] itself fails to build a client
 /// (no working TLS backend) -- logged once, then every call degrades to
 /// the local list rather than retrying a build that will not succeed.
 fn forward_state() -> Option<&'static ForwardState> {
     static STATE: std::sync::OnceLock<Option<ForwardState>> = std::sync::OnceLock::new();
     STATE
-        .get_or_init(|| match build_client() {
-            Ok(client) => Some(ForwardState::new(
-                client,
-                DEFAULT_MAX_CONCURRENT_STREAMS,
-                STREAM_IDLE_WINDOW,
-            )),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "failed to build the forwarded /v1/models proxy client; \
-                     falling back to the local model list"
-                );
-                None
+        .get_or_init(|| {
+            match ForwardState::new(DEFAULT_MAX_CONCURRENT_STREAMS, STREAM_IDLE_WINDOW) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to build the forwarded /v1/models proxy client; \
+                         falling back to the local model list"
+                    );
+                    None
+                }
             }
         })
         .as_ref()

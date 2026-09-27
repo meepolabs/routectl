@@ -36,9 +36,7 @@ use tokio_rustls::TlsAcceptor;
 
 use super::ca;
 use super::cc_version::CcVersionWarnGuard;
-use super::forward::{
-    DEFAULT_MAX_CONCURRENT_STREAMS, ForwardState, STREAM_IDLE_WINDOW, build_client,
-};
+use super::forward::{DEFAULT_MAX_CONCURRENT_STREAMS, ForwardState, STREAM_IDLE_WINDOW};
 use super::metrics::{Leg, PathClass, ProxyMetrics, ResultClass, WarnOnce};
 use super::mitm::{MitmCtx, handle_mitm_connection};
 
@@ -498,9 +496,7 @@ pub async fn build_and_bind(
 ) -> Result<(TcpListener, TlsAcceptor, Arc<MitmCtx>), ProxyStartError> {
     let acceptor = ca::load_or_create(&config.cert_dir, &config.mitm_host)?;
 
-    let client = build_client()?;
-    let forward_state =
-        ForwardState::new(client, DEFAULT_MAX_CONCURRENT_STREAMS, STREAM_IDLE_WINDOW);
+    let forward_state = ForwardState::new(DEFAULT_MAX_CONCURRENT_STREAMS, STREAM_IDLE_WINDOW)?;
     let metrics = Arc::new(ProxyMetrics::new());
     let warn_once = Arc::new(WarnOnce::new());
     let upstream_origin =
@@ -752,7 +748,7 @@ mod tests {
 
     fn test_ctx(reinject_base: Url, upstream_origin: Url) -> Arc<MitmCtx> {
         Arc::new(MitmCtx {
-            forward_state: ForwardState::new(build_client().unwrap(), 8, Duration::from_secs(30)),
+            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
             metrics: Arc::new(ProxyMetrics::new()),
             warn_once: Arc::new(WarnOnce::new()),
             upstream_origin,

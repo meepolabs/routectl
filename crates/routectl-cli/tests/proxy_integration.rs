@@ -37,7 +37,7 @@
 //! only test-double HTTP server) has no TLS mode, so there is no
 //! in-process fake origin this file's booted server could legally point
 //! `upstream_origin` at without either dialing the real internet or
-//! weakening `build_client`'s TLS verification (out of scope -- that is
+//! weakening the forward clients' TLS verification (out of scope -- that is
 //! the MITM proxy's forward-leg transport, not this file's to change). That same
 //! scenario IS covered end-to-end -- CONNECT parse, TLS handoff, and the
 //! control-plane forward, all through this module's own real code paths

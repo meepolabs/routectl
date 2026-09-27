@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::{HeaderMap, Method, StatusCode};
 use http_body_util::BodyExt;
-use routectl_cli::proxy::forward::{ForwardRequest, ForwardState, build_client, forward};
+use routectl_cli::proxy::forward::{ForwardRequest, ForwardState, forward};
 use routectl_cli::proxy::metrics::{Leg, PathClass, ProxyMetrics, ResultClass};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -29,7 +29,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn test_state() -> ForwardState {
-    ForwardState::new(build_client().unwrap(), 8, Duration::from_secs(30))
+    ForwardState::new(8, Duration::from_secs(30)).unwrap()
 }
 
 fn get_request(raw_path_and_query: &str) -> ForwardRequest {
@@ -121,40 +121,63 @@ async fn accepts_a_clean_tail_with_the_same_upstream_base() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// Both legs have their own client, so both are exercised: each must hand
+/// back the 3xx + `Location` verbatim, and the cross-host target the
+/// redirect names -- live and answering, so a follower would reach it --
+/// must receive nothing.
 #[tokio::test]
-async fn returns_the_upstream_redirect_verbatim_instead_of_following_it() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", "https://example.invalid/elsewhere"),
+async fn returns_the_upstream_redirect_verbatim_instead_of_following_it_on_both_legs() {
+    for (leg, path_class) in [
+        (Leg::Inference, PathClass::Inference),
+        (Leg::ControlPlane, PathClass::ControlPlane),
+    ] {
+        let redirect_target = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&redirect_target)
+            .await;
+        let cross_host_location = format!(
+            "http://localhost:{}/elsewhere",
+            redirect_target.address().port()
+        );
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", cross_host_location.as_str()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let state = test_state();
+        let metrics = Arc::new(ProxyMetrics::new());
+        let upstream_base = reqwest::Url::parse(&mock_server.uri()).unwrap();
+
+        let response = forward(
+            &state,
+            &metrics,
+            &upstream_base,
+            get_request("/v1/messages"),
+            leg,
+            path_class,
         )
-        .mount(&mock_server)
         .await;
 
-    let state = test_state();
-    let metrics = Arc::new(ProxyMetrics::new());
-    let upstream_base = reqwest::Url::parse(&mock_server.uri()).unwrap();
-
-    let response = forward(
-        &state,
-        &metrics,
-        &upstream_base,
-        get_request("/v1/messages"),
-        Leg::Inference,
-        PathClass::Inference,
-    )
-    .await;
-
-    // A dumb forwarder must hand back the 3xx + Location verbatim, not
-    // silently chase the redirect and return whatever is at the other
-    // end (which here doesn't even resolve).
-    assert_eq!(response.status(), StatusCode::FOUND);
-    assert_eq!(
-        response.headers().get("location").unwrap(),
-        "https://example.invalid/elsewhere"
-    );
+        assert_eq!(response.status(), StatusCode::FOUND, "{leg:?}");
+        assert_eq!(
+            response.headers().get("location").unwrap(),
+            cross_host_location.as_str(),
+            "{leg:?}"
+        );
+        assert!(
+            redirect_target
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty(),
+            "{leg:?}: the redirect target must receive nothing"
+        );
+    }
 }
 
 #[tokio::test]

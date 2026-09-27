@@ -2,7 +2,9 @@
 //!
 //! This is the dumb byte forwarder BOTH split legs of the feature
 //! reuse: the loopback re-inject back to the local listener (:9100)
-//! and the catch-all forward to the real upstream. Deliberately
+//! and the catch-all forward to the real upstream. Each leg has its
+//! own client (see [`ForwardState`]) so the credential-bearing re-inject
+//! never follows an environment proxy. Deliberately
 //! classification-agnostic -- the caller (a later task) decides which
 //! `Leg`/`PathClass` a request is, this module just forwards bytes and
 //! records what it is told. Does NOT build the CONNECT listener,
@@ -33,9 +35,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::metrics::{Leg, PathClass, ProxyMetrics, ResultClass};
 
-/// Connect (TCP + TLS handshake) timeout for the shared forward
-/// client. Caps only the initial connection, never a per-read gap --
-/// see [`build_client`] for why no read timeout is set at all.
+/// Connect (TCP + TLS handshake) timeout for both forward clients.
+/// Caps only the initial connection, never a per-read gap: the
+/// clients carry long-polls and SSE, so staleness is bounded by the
+/// per-forward idle watchdog ([`STREAM_IDLE_WINDOW`]) instead.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Idle silence window before the stream watchdog gives up on a
@@ -78,11 +81,12 @@ const HOP_BY_HOP_HEADER_NAMES: &[&str] = &[
 /// [`HOP_BY_HOP_HEADER_NAMES`].
 const RECOMPUTED_HEADER_NAMES: &[&str] = &["host", "content-length"];
 
-/// Builds the single `reqwest::Client` both split legs share.
+/// The settings both forward clients share, so the two cannot drift
+/// on anything but proxy policy.
 ///
 /// Connect-only timeout (10s): a hung TCP/TLS handshake to a
 /// black-holed upstream must fail fast. Deliberately NO
-/// `read_timeout`/`timeout`: this client carries control-plane
+/// `read_timeout`/`timeout`: these clients carry control-plane
 /// long-polls and inference SSE alike, both of which can legitimately
 /// sit quiet for a while between bytes. `routectl-providers`'
 /// `STREAM_READ_TIMEOUT` (300s) is exactly the inherited default we
@@ -97,7 +101,7 @@ const RECOMPUTED_HEADER_NAMES: &[&str] = &["host", "content-length"];
 /// verbatim, including a bare 3xx + `Location` -- silently chasing the
 /// redirect here would substitute a different response than the one
 /// the upstream actually sent for this request.
-pub fn build_client() -> reqwest::Result<Client> {
+fn common_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .no_gzip()
@@ -105,7 +109,6 @@ pub fn build_client() -> reqwest::Result<Client> {
         .no_deflate()
         .no_zstd()
         .redirect(reqwest::redirect::Policy::none())
-        .build()
 }
 
 /// Bounds the number of concurrently forwarded streams. Shared by
@@ -133,24 +136,43 @@ impl StreamLimiter {
 }
 
 /// The forwarding machinery both split legs construct once and hold
-/// (typically behind an `Arc` in the caller's own proxy state): the
-/// shared client, the concurrency bound, and the idle-watchdog window.
-/// Per-request inputs live in [`ForwardRequest`], not here.
+/// (typically behind an `Arc` in the caller's own proxy state): one
+/// client per proxy policy, the concurrency bound both legs share, and
+/// the idle-watchdog window. Per-request inputs live in
+/// [`ForwardRequest`], not here.
 pub struct ForwardState {
-    client: Client,
+    /// Honors `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`
+    /// like any reqwest client: the upstream may only be reachable
+    /// through the operator's proxy.
+    external_client: Client,
+    /// `.no_proxy()`: this leg carries the caller's bearer and the
+    /// trusted seam header in cleartext, so it must never hand them to
+    /// an environment proxy, whatever destination it is pointed at.
+    reinject_client: Client,
     limiter: StreamLimiter,
     idle_window: Duration,
 }
 
 impl ForwardState {
-    /// `client` should come from [`build_client`]. `idle_window` is an
-    /// explicit parameter (not hardcoded to [`STREAM_IDLE_WINDOW`]) so
-    /// tests can inject a short window against a fake/paused clock.
-    pub fn new(client: Client, max_concurrent_streams: usize, idle_window: Duration) -> Self {
-        Self {
-            client,
+    /// Builds both forward clients. `idle_window` is an explicit
+    /// parameter (not hardcoded to [`STREAM_IDLE_WINDOW`]) so tests can
+    /// inject a short window against a fake/paused clock. Fails only
+    /// if a client cannot be built (no working TLS backend).
+    pub fn new(max_concurrent_streams: usize, idle_window: Duration) -> reqwest::Result<Self> {
+        Ok(Self {
+            external_client: common_client_builder().build()?,
+            reinject_client: common_client_builder().no_proxy().build()?,
             limiter: StreamLimiter::new(max_concurrent_streams),
             idle_window,
+        })
+    }
+
+    /// Chosen by the semantic leg rather than the destination host, so
+    /// re-pointing the re-inject leg can never make it proxy-eligible.
+    const fn client_for(&self, leg: Leg) -> &Client {
+        match leg {
+            Leg::Inference => &self.reinject_client,
+            Leg::ControlPlane | Leg::BlindTunnel => &self.external_client,
         }
     }
 }
@@ -393,7 +415,8 @@ fn build_streaming_response(
 /// Always returns a response (never an `Err`): a `..`-bearing tail
 /// yields 400 without ever touching the network or the concurrency
 /// bound; an unreachable upstream yields a clean 502; anything else is
-/// the upstream's real status and body, verbatim. Never retries.
+/// the upstream's real status and body, verbatim. Never retries, and
+/// never falls back from one leg's client to the other's.
 pub async fn forward(
     state: &ForwardState,
     metrics: &Arc<ProxyMetrics>,
@@ -433,7 +456,7 @@ pub async fn forward(
     strip_hop_by_hop_headers(&mut headers);
 
     let send_result = state
-        .client
+        .client_for(leg)
         .request(request.method, url)
         .headers(headers)
         .body(request.body)
@@ -471,8 +494,8 @@ mod tests {
     use http::header::{CONNECTION, HOST};
 
     #[test]
-    fn build_client_does_not_panic() {
-        build_client().expect("client build must succeed");
+    fn forward_state_builds_both_clients() {
+        ForwardState::new(1, Duration::from_secs(1)).expect("both clients must build");
     }
 
     #[test]

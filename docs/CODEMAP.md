@@ -6933,8 +6933,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/proxy/forward.rs` -- the dumb, classification-agnostic byte forwarder
   both split legs reuse (loopback re-inject and catch-all upstream forward):
   streams bytes and records what it is told, never classifies. `forward(...)`
-  is the async forward call, `build_client` builds the shared reqwest
-  `Client`, `ForwardState` holds it plus the concurrency cap + idle window,
+  is the async forward call, `ForwardState::new` builds two clients from one
+  common builder (a system-proxy external client and a `no_proxy()` client
+  chosen by `Leg::Inference` for the re-inject) plus the shared concurrency
+  cap + idle window,
   `ForwardRequest` carries the per-call inputs, `ForwardBody` =
   `UnsyncBoxBody<Bytes, ForwardBodyError>` (the `http` / `http-body` /
   `http-body-util` vocabulary reqwest and hyper 1.x share, so the
@@ -8308,6 +8310,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/client_fingerprint_pin.rs` -- exact-pins the five client-fingerprint
   dimensions the committed `driver/anthropic-api/` corpus carries, each with a
   reviewed `Relation` against routectl's minted values. Only UNPINNED reds
+- `tests/mitm_forward_proxy_policy.rs` -- isolated binary pinning the MITM
+  forwarder's proxy policy: the inference re-inject never reaches an
+  environment proxy, the control-plane leg still does (CONNECT included);
+  isolated because proxy variables are process-global
 - `tests/cc_version_warn_log.rs` -- pins each version warning's log target and
   exact field set, and that the two guards share no field name
 - `tests/log_sink.rs` -- byte-exact record-integrity tests for the production

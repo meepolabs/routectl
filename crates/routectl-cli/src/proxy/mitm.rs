@@ -200,14 +200,13 @@ mod tests {
 
     use super::*;
     use crate::proxy::ca::load_or_create;
-    use crate::proxy::forward::build_client;
     use crate::proxy::metrics::{ProxyMetrics, WarnOnce};
 
     const HOST: &str = "api.anthropic.com";
 
     fn test_ctx(reinject_base: Url, upstream_origin: Url) -> Arc<MitmCtx> {
         Arc::new(MitmCtx {
-            forward_state: ForwardState::new(build_client().unwrap(), 8, Duration::from_secs(30)),
+            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
             metrics: Arc::new(ProxyMetrics::new()),
             warn_once: Arc::new(WarnOnce::new()),
             upstream_origin,

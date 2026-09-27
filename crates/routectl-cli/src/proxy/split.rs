@@ -224,7 +224,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::proxy::forward::{ForwardState, build_client};
+    use crate::proxy::forward::ForwardState;
     use crate::proxy::metrics::{ProxyMetrics, WarnOnce};
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
 
     fn test_ctx(reinject_base: Url, upstream_origin: Url) -> MitmCtx {
         MitmCtx {
-            forward_state: ForwardState::new(build_client().unwrap(), 8, Duration::from_secs(30)),
+            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
             metrics: Arc::new(ProxyMetrics::new()),
             warn_once: Arc::new(WarnOnce::new()),
             upstream_origin,
