@@ -175,7 +175,7 @@ impl OpenAiResponsesProvider {
         // no-redirect posture (cookie-backed or not) -- see http_client.rs.
         #[cfg(feature = "bedrock")]
         if cfg.mantle.is_some() {
-            let client = crate::http_client::build_no_redirect(Some(&ua))
+            let client = crate::http_client::build_no_redirect(Some(&ua), &cfg.base_url)
                 .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
             return Self {
                 cfg,
@@ -199,14 +199,18 @@ impl OpenAiResponsesProvider {
         let (client, cookie_jar) = match cookie_path.as_deref() {
             Some(path) => {
                 let jar = cookies::load_jar(path);
-                let client =
-                    crate::http_client::build_with_cookie_provider(Some(&ua), Arc::clone(&jar));
+                let client = crate::http_client::build_with_cookie_provider(
+                    Some(&ua),
+                    &cfg.base_url,
+                    Arc::clone(&jar),
+                );
                 (client, Some(jar))
             }
             None => {
-                let client = crate::http_client::build_no_redirect(Some(&ua)).expect(
-                    "reqwest no-redirect client build failed (TLS init?); fatal at startup",
-                );
+                let client = crate::http_client::build_no_redirect(Some(&ua), &cfg.base_url)
+                    .expect(
+                        "reqwest no-redirect client build failed (TLS init?); fatal at startup",
+                    );
                 (client, None)
             }
         };

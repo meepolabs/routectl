@@ -32,6 +32,8 @@ use tracing::field::{Field, Visit};
 pub mod bench_alloc;
 pub mod bench_fixtures;
 
+pub mod loopback_vectors;
+
 pub mod redirect_pin;
 
 mod scoped_env;

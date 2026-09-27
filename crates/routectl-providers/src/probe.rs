@@ -47,7 +47,7 @@ pub async fn http_get_probe(
     headers: HeaderMap,
     timeout: Duration,
 ) -> ProbeOutcome {
-    let client = match crate::http_client::build_no_redirect(user_agent) {
+    let client = match crate::http_client::build_no_redirect(user_agent, url) {
         Ok(c) => c,
         Err(_) => return ProbeOutcome::Unreachable("probe client could not be built".into()),
     };

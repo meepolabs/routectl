@@ -17,7 +17,6 @@ pub const MAX_AWS_REGION_LEN: usize = 32;
 
 /// The AWS partition a region belongs to, which selects its DNS suffixes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum AwsPartition {
     /// The commercial `aws` partition.
     Commercial,
@@ -30,6 +29,7 @@ pub enum AwsPartition {
 impl AwsPartition {
     /// Regional service DNS suffix (`<service>.<region>.<suffix>`), per the
     /// AWS SDK partition metadata.
+    #[cfg(feature = "bedrock")]
     pub const fn dns_suffix(self) -> &'static str {
         match self {
             Self::Commercial | Self::GovCloud => "amazonaws.com",
@@ -69,11 +69,10 @@ impl<'a> AwsRegion<'a> {
 /// Why a region identifier was refused. The rejected value is deliberately
 /// not carried: it is untrusted input and may hold control characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum InvalidAwsRegion {
+pub enum Rejection {
     /// The identifier is empty.
     Empty,
-    /// The identifier exceeds [`MAX_AWS_REGION_LEN`] bytes.
+    /// The identifier exceeds `MAX_AWS_REGION_LEN` bytes.
     TooLong,
     /// A byte outside lowercase `a-z`, `0-9` and `-`.
     IllegalCharacter,
@@ -84,7 +83,7 @@ pub enum InvalidAwsRegion {
     UnsupportedPartition,
 }
 
-impl std::fmt::Display for InvalidAwsRegion {
+impl std::fmt::Display for Rejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let reason = match self {
             Self::Empty => "it is empty",
@@ -105,7 +104,34 @@ impl std::fmt::Display for InvalidAwsRegion {
     }
 }
 
+/// A region identifier refused by [`validate_aws_region`]. Its `Display`
+/// names the expected shape and the reason; it never carries the rejected
+/// value, which is untrusted input and may hold control characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidAwsRegion(Rejection);
+
+impl std::fmt::Display for InvalidAwsRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl std::error::Error for InvalidAwsRegion {}
+
+/// Check that `region` is a canonical AWS region identifier that every
+/// region-derived endpoint builder and signer in this crate accepts:
+/// lowercase `a-z`, `0-9` and `-` only, at most 32 bytes, in the
+/// commercial (`us-west-2`), GovCloud (`us-gov-west-1`) or China
+/// (`cn-north-1`) partition.
+///
+/// # Errors
+///
+/// Returns [`InvalidAwsRegion`] for any other value.
+pub fn validate_aws_region(region: &str) -> Result<(), InvalidAwsRegion> {
+    parse_aws_region(region)
+        .map(|_| ())
+        .map_err(InvalidAwsRegion)
+}
 
 /// Parse `region` as a canonical AWS region identifier.
 ///
@@ -116,18 +142,18 @@ impl std::error::Error for InvalidAwsRegion {}
 ///   - China: `cn-<name>-<n>` (e.g. `cn-north-1`)
 ///
 /// The length bound is checked before anything else scans the input.
-pub fn parse_aws_region(region: &str) -> Result<AwsRegion<'_>, InvalidAwsRegion> {
+pub fn parse_aws_region(region: &str) -> Result<AwsRegion<'_>, Rejection> {
     if region.is_empty() {
-        return Err(InvalidAwsRegion::Empty);
+        return Err(Rejection::Empty);
     }
     if region.len() > MAX_AWS_REGION_LEN {
-        return Err(InvalidAwsRegion::TooLong);
+        return Err(Rejection::TooLong);
     }
     if !region
         .bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {
-        return Err(InvalidAwsRegion::IllegalCharacter);
+        return Err(Rejection::IllegalCharacter);
     }
     let partition = match region.split('-').collect::<Vec<_>>().as_slice() {
         [area, name, number] if is_word(area) && is_word(name) && is_number(number) => {
@@ -139,10 +165,10 @@ pub fn parse_aws_region(region: &str) -> Result<AwsRegion<'_>, InvalidAwsRegion>
             if *area == "us" && *qualifier == "gov" {
                 AwsPartition::GovCloud
             } else {
-                return Err(InvalidAwsRegion::UnsupportedPartition);
+                return Err(Rejection::UnsupportedPartition);
             }
         }
-        _ => return Err(InvalidAwsRegion::Malformed),
+        _ => return Err(Rejection::Malformed),
     };
     Ok(AwsRegion {
         name: region,
@@ -161,13 +187,13 @@ pub fn require_aws_region(region: &str) -> routectl_core::Result<AwsRegion<'_>> 
 /// the AWS SDK endpoint metadata.
 const COMMERCIAL_AREAS: &[&str] = &["us", "eu", "ap", "sa", "ca", "me", "af", "il", "mx"];
 
-fn partition_for_area(area: &str) -> Result<AwsPartition, InvalidAwsRegion> {
+fn partition_for_area(area: &str) -> Result<AwsPartition, Rejection> {
     if area == "cn" {
         Ok(AwsPartition::China)
     } else if COMMERCIAL_AREAS.contains(&area) {
         Ok(AwsPartition::Commercial)
     } else {
-        Err(InvalidAwsRegion::UnsupportedPartition)
+        Err(Rejection::UnsupportedPartition)
     }
 }
 

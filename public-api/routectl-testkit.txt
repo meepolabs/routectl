@@ -166,6 +166,9 @@ impl<T> core::convert::From<T> for routectl_testkit::bench_fixtures::BenchFixtur
 pub fn routectl_testkit::bench_fixtures::BenchFixture::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_testkit::bench_fixtures::BenchFixture
 impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_fixtures::BenchFixture
+pub mod routectl_testkit::loopback_vectors
+pub const routectl_testkit::loopback_vectors::LOOPBACK_BASE_URLS: &[&str]
+pub const routectl_testkit::loopback_vectors::NON_LOOPBACK_BASE_URLS: &[&str]
 pub mod routectl_testkit::redirect_pin
 pub struct routectl_testkit::redirect_pin::CrossHostRedirect
 pub routectl_testkit::redirect_pin::CrossHostRedirect::origin: wiremock::mock_server::exposed_server::MockServer

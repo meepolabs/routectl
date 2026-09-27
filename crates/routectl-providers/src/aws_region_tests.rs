@@ -30,7 +30,7 @@ fn accepts_commercial_govcloud_and_china_regions_with_their_partition() {
 
 #[test]
 fn rejects_empty_region() {
-    assert_eq!(parse_aws_region(""), Err(InvalidAwsRegion::Empty));
+    assert_eq!(parse_aws_region(""), Err(Rejection::Empty));
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn rejects_url_structural_characters_dots_whitespace_and_uppercase() {
     for region in hostile {
         assert_eq!(
             parse_aws_region(region),
-            Err(InvalidAwsRegion::IllegalCharacter),
+            Err(Rejection::IllegalCharacter),
             "{region:?}"
         );
     }
@@ -92,7 +92,7 @@ fn rejects_well_charactered_values_that_are_not_region_shaped() {
     for region in malformed {
         assert_eq!(
             parse_aws_region(region),
-            Err(InvalidAwsRegion::Malformed),
+            Err(Rejection::Malformed),
             "{region:?}"
         );
     }
@@ -112,7 +112,7 @@ fn rejects_region_shapes_outside_the_supported_partitions() {
     for region in unsupported {
         assert_eq!(
             parse_aws_region(region),
-            Err(InvalidAwsRegion::UnsupportedPartition),
+            Err(Rejection::UnsupportedPartition),
             "{region:?}"
         );
     }
@@ -135,14 +135,14 @@ fn rejects_a_region_one_byte_over_the_length_bound() {
     let region = format!("us-{name}-1");
     assert_eq!(region.len(), MAX_AWS_REGION_LEN + 1);
 
-    assert_eq!(parse_aws_region(&region), Err(InvalidAwsRegion::TooLong));
+    assert_eq!(parse_aws_region(&region), Err(Rejection::TooLong));
 }
 
 #[test]
 fn rejects_a_very_long_hostile_value_as_too_long_before_scanning_it() {
     let region = format!("us-west-2{}", "@evil.example".repeat(10_000));
 
-    assert_eq!(parse_aws_region(&region), Err(InvalidAwsRegion::TooLong));
+    assert_eq!(parse_aws_region(&region), Err(Rejection::TooLong));
 }
 
 #[test]
@@ -154,4 +154,28 @@ fn error_message_names_the_expected_shape_without_echoing_the_input() {
     assert!(msg.contains("us-west-2"), "names an example: {msg}");
     assert!(!msg.contains("evil"), "must not echo input: {msg}");
     assert!(!msg.contains('\u{1b}'), "must not echo input: {msg}");
+}
+
+#[test]
+fn validate_aws_region_accepts_every_supported_partition() {
+    for &(region, _) in ACCEPTED {
+        let result = validate_aws_region(region);
+
+        assert!(result.is_ok(), "{region:?}: {result:?}");
+    }
+}
+
+#[test]
+fn validate_aws_region_rejects_host_altering_values() {
+    for region in [
+        "",
+        "us-west-2.evil.example",
+        "x@127.0.0.1:9/",
+        "US-WEST-2",
+        "aws-global",
+    ] {
+        let result = validate_aws_region(region);
+
+        assert!(result.is_err(), "{region:?} must be refused");
+    }
 }

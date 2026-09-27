@@ -286,20 +286,26 @@ impl BedrockProvider {
     /// (resolved) credential handle. The caller is responsible for
     /// running `auth::resolve` to produce the second arg; this is
     /// typically done once in the router's factory.
-    pub fn new(cfg: BedrockConfig, resolved: auth::ResolvedCreds) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when `cfg.region` is not a canonical AWS region,
+    /// before any client is built.
+    pub fn new(cfg: BedrockConfig, resolved: auth::ResolvedCreds) -> Result<Self> {
         // A signed request must never be auto-followed across a 3xx:
         // the SigV4 envelope (`x-amz-*`, including the security token)
         // is not in reqwest's default cross-host strip list, and
         // replaying the signature against a different host would fail
         // anyway. A redirect here is an upstream fault to surface, not
         // to chase.
-        let client = crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
+        let base_url = endpoint::bedrock_runtime_url(&cfg.region)?;
+        let client = crate::http_client::build_no_redirect(cfg.user_agent.as_deref(), &base_url)
             .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
-        Self {
+        Ok(Self {
             cfg,
             resolved,
             client,
-        }
+        })
     }
 
     /// Build, annotate, and SigV4-sign a Bedrock outbound request.
@@ -1217,7 +1223,7 @@ mod tests {
             key: "test-bearer-key".into(),
         };
         let resolved = auth::resolve(&creds, "us-west-2").await.expect("resolve");
-        let provider = BedrockProvider::new(probe_cfg(creds), resolved);
+        let provider = BedrockProvider::new(probe_cfg(creds), resolved).expect("canonical region");
         assert_eq!(
             provider.probe().await,
             routectl_core::ProbeOutcome::Reachable
@@ -1234,7 +1240,7 @@ mod tests {
             session_token: None,
         };
         let resolved = auth::resolve(&creds, "us-west-2").await.expect("resolve");
-        let provider = BedrockProvider::new(probe_cfg(creds), resolved);
+        let provider = BedrockProvider::new(probe_cfg(creds), resolved).expect("canonical region");
         assert_eq!(
             provider.probe().await,
             routectl_core::ProbeOutcome::Reachable

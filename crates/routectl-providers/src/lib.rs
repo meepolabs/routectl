@@ -111,9 +111,11 @@ pub mod translation_drop_metrics;
 pub mod mantle;
 
 // Canonical AWS region parsing shared by every region-derived endpoint
-// builder and signer, and by the router's config validation. Unconditional
-// and dependency-free for the same reason as `mantle`.
-pub mod aws_region;
+// builder and signer. Unconditional and dependency-free for the same reason
+// as `mantle`. Only the yes/no check and its error leave the crate (the
+// router's config validation); partitions and DNS suffixes stay internal.
+pub(crate) mod aws_region;
+pub use aws_region::{InvalidAwsRegion, validate_aws_region};
 
 // Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Gated like
 // `http_client` (both lean on `reqwest`, which any provider feature pulls

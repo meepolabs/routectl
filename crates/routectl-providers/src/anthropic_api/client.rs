@@ -350,7 +350,7 @@ impl AnthropicApiProvider {
         // list, so a followed 3xx from the configured host could carry
         // them to an unintended host. Either way a redirect on this lane
         // is an upstream fault to surface, not to chase.
-        let client = crate::http_client::build_no_redirect(ua.as_deref())
+        let client = crate::http_client::build_no_redirect(ua.as_deref(), &cfg.base_url)
             .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
         let cap = std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
             .expect("THINKING_CACHE_CAP is non-zero");

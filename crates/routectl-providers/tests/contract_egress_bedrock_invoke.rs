@@ -48,7 +48,7 @@ fn bedrock_invoke_provider() -> BedrockProvider {
     let resolved = ResolvedCreds::Bearer {
         key: "test-key".into(),
     };
-    BedrockProvider::new(cfg, resolved)
+    BedrockProvider::new(cfg, resolved).expect("canonical region")
 }
 
 // =====================================================================

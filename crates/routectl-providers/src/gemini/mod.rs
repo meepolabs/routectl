@@ -197,8 +197,9 @@ impl GeminiProvider {
         // host could carry either credential to an unintended host. A
         // redirect on this lane is an upstream fault to surface, not to
         // chase.
-        let client = crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
-            .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
+        let client =
+            crate::http_client::build_no_redirect(cfg.user_agent.as_deref(), &cfg.base_url)
+                .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
         Self {
             cfg,
             client,

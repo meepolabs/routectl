@@ -7,8 +7,8 @@
 //! are encoded in the *model id*, not the endpoint -- so the endpoint
 //! always uses the regional hostname even for `global.` model ids.
 //!
-//! Every builder parses the region through
-//! [`crate::aws_region::parse_aws_region`] and returns
+//! Every builder parses the region through the crate's canonical region
+//! parser (the one behind [`crate::validate_aws_region`]) and returns
 //! [`routectl_core::Error::Config`] for a non-canonical value, so no URL
 //! is ever produced from a region that could alter the parsed host.
 

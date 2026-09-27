@@ -53,7 +53,7 @@ async fn lane_client_does_not_follow_cross_host_redirect() {
     let resolved = auth::resolve(&redirect_creds(), "us-west-2")
         .await
         .expect("resolve");
-    let provider = BedrockProvider::new(redirect_cfg(), resolved);
+    let provider = BedrockProvider::new(redirect_cfg(), resolved).expect("canonical region");
 
     let resp = provider
         .client

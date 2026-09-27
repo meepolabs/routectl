@@ -596,194 +596,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_providers::anthropic_api::ToolRename::into_shared(self) -> Shared
 pub const routectl_providers::anthropic_api::MAX_THINKING_BUDGET_READER_KINDS: &[&str]
 pub fn routectl_providers::anthropic_api::egress_reads_max_thinking_budget(&str) -> bool
-pub mod routectl_providers::aws_region
-#[non_exhaustive] pub enum routectl_providers::aws_region::AwsPartition
-pub routectl_providers::aws_region::AwsPartition::China
-pub routectl_providers::aws_region::AwsPartition::Commercial
-pub routectl_providers::aws_region::AwsPartition::GovCloud
-impl routectl_providers::aws_region::AwsPartition
-pub const fn routectl_providers::aws_region::AwsPartition::dns_suffix(self) -> &'static str
-pub const fn routectl_providers::aws_region::AwsPartition::dual_stack_dns_suffix(self) -> &'static str
-impl core::clone::Clone for routectl_providers::aws_region::AwsPartition
-pub fn routectl_providers::aws_region::AwsPartition::clone(&self) -> routectl_providers::aws_region::AwsPartition
-impl core::cmp::Eq for routectl_providers::aws_region::AwsPartition
-impl core::cmp::PartialEq for routectl_providers::aws_region::AwsPartition
-pub fn routectl_providers::aws_region::AwsPartition::eq(&self, &routectl_providers::aws_region::AwsPartition) -> bool
-impl core::fmt::Debug for routectl_providers::aws_region::AwsPartition
-pub fn routectl_providers::aws_region::AwsPartition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_providers::aws_region::AwsPartition
-impl core::marker::StructuralPartialEq for routectl_providers::aws_region::AwsPartition
-impl core::marker::Freeze for routectl_providers::aws_region::AwsPartition
-impl core::marker::Send for routectl_providers::aws_region::AwsPartition
-impl core::marker::Sync for routectl_providers::aws_region::AwsPartition
-impl core::marker::Unpin for routectl_providers::aws_region::AwsPartition
-impl core::marker::UnsafeUnpin for routectl_providers::aws_region::AwsPartition
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_providers::aws_region::AwsPartition
-impl core::panic::unwind_safe::UnwindSafe for routectl_providers::aws_region::AwsPartition
-impl<Q, K> equivalent::Equivalent<K> for routectl_providers::aws_region::AwsPartition where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsPartition::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_providers::aws_region::AwsPartition where U: core::convert::From<T>
-pub fn routectl_providers::aws_region::AwsPartition::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_providers::aws_region::AwsPartition where U: core::convert::Into<T>
-pub type routectl_providers::aws_region::AwsPartition::Error = core::convert::Infallible
-pub fn routectl_providers::aws_region::AwsPartition::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_providers::aws_region::AwsPartition where U: core::convert::TryFrom<T>
-pub type routectl_providers::aws_region::AwsPartition::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_providers::aws_region::AwsPartition::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_providers::aws_region::AwsPartition where T: core::clone::Clone
-pub type routectl_providers::aws_region::AwsPartition::Owned = T
-pub fn routectl_providers::aws_region::AwsPartition::clone_into(&self, &mut T)
-pub fn routectl_providers::aws_region::AwsPartition::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_providers::aws_region::AwsPartition where T: 'static + ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsPartition::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_providers::aws_region::AwsPartition where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsPartition::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_providers::aws_region::AwsPartition where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsPartition::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_providers::aws_region::AwsPartition where T: core::clone::Clone
-pub unsafe fn routectl_providers::aws_region::AwsPartition::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_providers::aws_region::AwsPartition
-pub fn routectl_providers::aws_region::AwsPartition::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_providers::aws_region::AwsPartition where T: core::clone::Clone
-pub fn routectl_providers::aws_region::AwsPartition::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_providers::aws_region::AwsPartition
-impl<T> outref::AsOut<T> for routectl_providers::aws_region::AwsPartition where T: core::marker::Copy
-pub fn routectl_providers::aws_region::AwsPartition::as_out(&mut self) -> outref::Out<'_, T>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::aws_region::AwsPartition where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsPartition::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_providers::aws_region::AwsPartition::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_providers::aws_region::AwsPartition
-impl<T> tracing::instrument::WithSubscriber for routectl_providers::aws_region::AwsPartition
-impl<T> typenum::type_operators::Same for routectl_providers::aws_region::AwsPartition
-pub type routectl_providers::aws_region::AwsPartition::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::aws_region::AwsPartition where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_providers::aws_region::AwsPartition::into_shared(self) -> Shared
-#[non_exhaustive] pub enum routectl_providers::aws_region::InvalidAwsRegion
-pub routectl_providers::aws_region::InvalidAwsRegion::Empty
-pub routectl_providers::aws_region::InvalidAwsRegion::IllegalCharacter
-pub routectl_providers::aws_region::InvalidAwsRegion::Malformed
-pub routectl_providers::aws_region::InvalidAwsRegion::TooLong
-pub routectl_providers::aws_region::InvalidAwsRegion::UnsupportedPartition
-impl core::clone::Clone for routectl_providers::aws_region::InvalidAwsRegion
-pub fn routectl_providers::aws_region::InvalidAwsRegion::clone(&self) -> routectl_providers::aws_region::InvalidAwsRegion
-impl core::cmp::Eq for routectl_providers::aws_region::InvalidAwsRegion
-impl core::cmp::PartialEq for routectl_providers::aws_region::InvalidAwsRegion
-pub fn routectl_providers::aws_region::InvalidAwsRegion::eq(&self, &routectl_providers::aws_region::InvalidAwsRegion) -> bool
-impl core::error::Error for routectl_providers::aws_region::InvalidAwsRegion
-impl core::fmt::Debug for routectl_providers::aws_region::InvalidAwsRegion
-pub fn routectl_providers::aws_region::InvalidAwsRegion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for routectl_providers::aws_region::InvalidAwsRegion
-pub fn routectl_providers::aws_region::InvalidAwsRegion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_providers::aws_region::InvalidAwsRegion
-impl core::marker::StructuralPartialEq for routectl_providers::aws_region::InvalidAwsRegion
-impl core::marker::Freeze for routectl_providers::aws_region::InvalidAwsRegion
-impl core::marker::Send for routectl_providers::aws_region::InvalidAwsRegion
-impl core::marker::Sync for routectl_providers::aws_region::InvalidAwsRegion
-impl core::marker::Unpin for routectl_providers::aws_region::InvalidAwsRegion
-impl core::marker::UnsafeUnpin for routectl_providers::aws_region::InvalidAwsRegion
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_providers::aws_region::InvalidAwsRegion
-impl core::panic::unwind_safe::UnwindSafe for routectl_providers::aws_region::InvalidAwsRegion
-impl<Q, K> equivalent::Equivalent<K> for routectl_providers::aws_region::InvalidAwsRegion where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_providers::aws_region::InvalidAwsRegion::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_providers::aws_region::InvalidAwsRegion where U: core::convert::From<T>
-pub fn routectl_providers::aws_region::InvalidAwsRegion::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_providers::aws_region::InvalidAwsRegion where U: core::convert::Into<T>
-pub type routectl_providers::aws_region::InvalidAwsRegion::Error = core::convert::Infallible
-pub fn routectl_providers::aws_region::InvalidAwsRegion::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_providers::aws_region::InvalidAwsRegion where U: core::convert::TryFrom<T>
-pub type routectl_providers::aws_region::InvalidAwsRegion::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_providers::aws_region::InvalidAwsRegion::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_providers::aws_region::InvalidAwsRegion where T: core::clone::Clone
-pub type routectl_providers::aws_region::InvalidAwsRegion::Owned = T
-pub fn routectl_providers::aws_region::InvalidAwsRegion::clone_into(&self, &mut T)
-pub fn routectl_providers::aws_region::InvalidAwsRegion::to_owned(&self) -> T
-impl<T> alloc::string::ToString for routectl_providers::aws_region::InvalidAwsRegion where T: core::fmt::Display + ?core::marker::Sized
-pub fn routectl_providers::aws_region::InvalidAwsRegion::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for routectl_providers::aws_region::InvalidAwsRegion where T: 'static + ?core::marker::Sized
-pub fn routectl_providers::aws_region::InvalidAwsRegion::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_providers::aws_region::InvalidAwsRegion where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::InvalidAwsRegion::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_providers::aws_region::InvalidAwsRegion where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::InvalidAwsRegion::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_providers::aws_region::InvalidAwsRegion where T: core::clone::Clone
-pub unsafe fn routectl_providers::aws_region::InvalidAwsRegion::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_providers::aws_region::InvalidAwsRegion
-pub fn routectl_providers::aws_region::InvalidAwsRegion::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_providers::aws_region::InvalidAwsRegion where T: core::clone::Clone
-pub fn routectl_providers::aws_region::InvalidAwsRegion::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_providers::aws_region::InvalidAwsRegion
-impl<T> outref::AsOut<T> for routectl_providers::aws_region::InvalidAwsRegion where T: core::marker::Copy
-pub fn routectl_providers::aws_region::InvalidAwsRegion::as_out(&mut self) -> outref::Out<'_, T>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::aws_region::InvalidAwsRegion where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::InvalidAwsRegion::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_providers::aws_region::InvalidAwsRegion::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_providers::aws_region::InvalidAwsRegion
-impl<T> tracing::instrument::WithSubscriber for routectl_providers::aws_region::InvalidAwsRegion
-impl<T> typenum::type_operators::Same for routectl_providers::aws_region::InvalidAwsRegion
-pub type routectl_providers::aws_region::InvalidAwsRegion::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::aws_region::InvalidAwsRegion where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_providers::aws_region::InvalidAwsRegion::into_shared(self) -> Shared
-pub struct routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> routectl_providers::aws_region::AwsRegion<'a>
-pub const fn routectl_providers::aws_region::AwsRegion<'a>::as_str(&self) -> &'a str
-pub const fn routectl_providers::aws_region::AwsRegion<'a>::partition(&self) -> routectl_providers::aws_region::AwsPartition
-impl<'a> core::clone::Clone for routectl_providers::aws_region::AwsRegion<'a>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::clone(&self) -> routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::cmp::Eq for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::cmp::PartialEq for routectl_providers::aws_region::AwsRegion<'a>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::eq(&self, &routectl_providers::aws_region::AwsRegion<'a>) -> bool
-impl<'a> core::fmt::Debug for routectl_providers::aws_region::AwsRegion<'a>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'a> core::marker::Copy for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::marker::StructuralPartialEq for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::marker::Freeze for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::marker::Send for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::marker::Sync for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::marker::Unpin for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::marker::UnsafeUnpin for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for routectl_providers::aws_region::AwsRegion<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for routectl_providers::aws_region::AwsRegion<'a>
-impl<Q, K> equivalent::Equivalent<K> for routectl_providers::aws_region::AwsRegion<'a> where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsRegion<'a>::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_providers::aws_region::AwsRegion<'a> where U: core::convert::From<T>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_providers::aws_region::AwsRegion<'a> where U: core::convert::Into<T>
-pub type routectl_providers::aws_region::AwsRegion<'a>::Error = core::convert::Infallible
-pub fn routectl_providers::aws_region::AwsRegion<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_providers::aws_region::AwsRegion<'a> where U: core::convert::TryFrom<T>
-pub type routectl_providers::aws_region::AwsRegion<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_providers::aws_region::AwsRegion<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_providers::aws_region::AwsRegion<'a> where T: core::clone::Clone
-pub type routectl_providers::aws_region::AwsRegion<'a>::Owned = T
-pub fn routectl_providers::aws_region::AwsRegion<'a>::clone_into(&self, &mut T)
-pub fn routectl_providers::aws_region::AwsRegion<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_providers::aws_region::AwsRegion<'a> where T: 'static + ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsRegion<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_providers::aws_region::AwsRegion<'a> where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsRegion<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_providers::aws_region::AwsRegion<'a> where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsRegion<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_providers::aws_region::AwsRegion<'a> where T: core::clone::Clone
-pub unsafe fn routectl_providers::aws_region::AwsRegion<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_providers::aws_region::AwsRegion<'a>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_providers::aws_region::AwsRegion<'a> where T: core::clone::Clone
-pub fn routectl_providers::aws_region::AwsRegion<'a>::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_providers::aws_region::AwsRegion<'a>
-impl<T> outref::AsOut<T> for routectl_providers::aws_region::AwsRegion<'a> where T: core::marker::Copy
-pub fn routectl_providers::aws_region::AwsRegion<'a>::as_out(&mut self) -> outref::Out<'_, T>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::aws_region::AwsRegion<'a> where T: ?core::marker::Sized
-pub fn routectl_providers::aws_region::AwsRegion<'a>::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_providers::aws_region::AwsRegion<'a>
-impl<T> tracing::instrument::WithSubscriber for routectl_providers::aws_region::AwsRegion<'a>
-impl<T> typenum::type_operators::Same for routectl_providers::aws_region::AwsRegion<'a>
-pub type routectl_providers::aws_region::AwsRegion<'a>::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::aws_region::AwsRegion<'a> where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_providers::aws_region::AwsRegion<'a>::into_shared(self) -> Shared
-pub const routectl_providers::aws_region::MAX_AWS_REGION_LEN: usize
-pub fn routectl_providers::aws_region::parse_aws_region(&str) -> core::result::Result<routectl_providers::aws_region::AwsRegion<'_>, routectl_providers::aws_region::InvalidAwsRegion>
-pub fn routectl_providers::aws_region::require_aws_region(&str) -> routectl_core::error::Result<routectl_providers::aws_region::AwsRegion<'_>>
 pub mod routectl_providers::bedrock
 pub mod routectl_providers::bedrock::auth
 pub enum routectl_providers::bedrock::auth::ResolvedCreds
@@ -1035,7 +847,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_providers::bedrock::BedrockConfig::into_shared(self) -> Shared
 pub struct routectl_providers::bedrock::BedrockProvider
 impl routectl_providers::bedrock::BedrockProvider
-pub fn routectl_providers::bedrock::BedrockProvider::new(routectl_providers::bedrock::BedrockConfig, routectl_providers::bedrock::auth::ResolvedCreds) -> Self
+pub fn routectl_providers::bedrock::BedrockProvider::new(routectl_providers::bedrock::BedrockConfig, routectl_providers::bedrock::auth::ResolvedCreds) -> routectl_core::error::Result<Self>
 impl routectl_core::provider::Provider for routectl_providers::bedrock::BedrockProvider
 pub fn routectl_providers::bedrock::BedrockProvider::complete<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::ChatResponse>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_providers::bedrock::BedrockProvider::count_tokens<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::TokenCount>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
@@ -2294,5 +2106,66 @@ pub fn routectl_providers::translation_drop_metrics::translation_drop_snapshot()
 pub fn routectl_providers::translation_drop_metrics::translation_lane_seen(&str) -> u64
 pub fn routectl_providers::translation_drop_metrics::translation_policy_action_snapshot() -> alloc::vec::Vec<routectl_providers::translation_drop_metrics::TranslationPolicyActionSnapshotEntry>
 pub type routectl_providers::translation_drop_metrics::DropKey = (&'static str, &'static str)
+pub struct routectl_providers::InvalidAwsRegion(_)
+impl core::clone::Clone for routectl_providers::InvalidAwsRegion
+pub fn routectl_providers::InvalidAwsRegion::clone(&self) -> routectl_providers::InvalidAwsRegion
+impl core::cmp::Eq for routectl_providers::InvalidAwsRegion
+impl core::cmp::PartialEq for routectl_providers::InvalidAwsRegion
+pub fn routectl_providers::InvalidAwsRegion::eq(&self, &routectl_providers::InvalidAwsRegion) -> bool
+impl core::error::Error for routectl_providers::InvalidAwsRegion
+impl core::fmt::Debug for routectl_providers::InvalidAwsRegion
+pub fn routectl_providers::InvalidAwsRegion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_providers::InvalidAwsRegion
+pub fn routectl_providers::InvalidAwsRegion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_providers::InvalidAwsRegion
+impl core::marker::StructuralPartialEq for routectl_providers::InvalidAwsRegion
+impl core::marker::Freeze for routectl_providers::InvalidAwsRegion
+impl core::marker::Send for routectl_providers::InvalidAwsRegion
+impl core::marker::Sync for routectl_providers::InvalidAwsRegion
+impl core::marker::Unpin for routectl_providers::InvalidAwsRegion
+impl core::marker::UnsafeUnpin for routectl_providers::InvalidAwsRegion
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_providers::InvalidAwsRegion
+impl core::panic::unwind_safe::UnwindSafe for routectl_providers::InvalidAwsRegion
+impl<Q, K> equivalent::Equivalent<K> for routectl_providers::InvalidAwsRegion where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_providers::InvalidAwsRegion::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_providers::InvalidAwsRegion where U: core::convert::From<T>
+pub fn routectl_providers::InvalidAwsRegion::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_providers::InvalidAwsRegion where U: core::convert::Into<T>
+pub type routectl_providers::InvalidAwsRegion::Error = core::convert::Infallible
+pub fn routectl_providers::InvalidAwsRegion::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_providers::InvalidAwsRegion where U: core::convert::TryFrom<T>
+pub type routectl_providers::InvalidAwsRegion::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_providers::InvalidAwsRegion::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_providers::InvalidAwsRegion where T: core::clone::Clone
+pub type routectl_providers::InvalidAwsRegion::Owned = T
+pub fn routectl_providers::InvalidAwsRegion::clone_into(&self, &mut T)
+pub fn routectl_providers::InvalidAwsRegion::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_providers::InvalidAwsRegion where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_providers::InvalidAwsRegion::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_providers::InvalidAwsRegion where T: 'static + ?core::marker::Sized
+pub fn routectl_providers::InvalidAwsRegion::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_providers::InvalidAwsRegion where T: ?core::marker::Sized
+pub fn routectl_providers::InvalidAwsRegion::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_providers::InvalidAwsRegion where T: ?core::marker::Sized
+pub fn routectl_providers::InvalidAwsRegion::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_providers::InvalidAwsRegion where T: core::clone::Clone
+pub unsafe fn routectl_providers::InvalidAwsRegion::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_providers::InvalidAwsRegion
+pub fn routectl_providers::InvalidAwsRegion::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_providers::InvalidAwsRegion where T: core::clone::Clone
+pub fn routectl_providers::InvalidAwsRegion::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_providers::InvalidAwsRegion
+impl<T> outref::AsOut<T> for routectl_providers::InvalidAwsRegion where T: core::marker::Copy
+pub fn routectl_providers::InvalidAwsRegion::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::InvalidAwsRegion where T: ?core::marker::Sized
+pub fn routectl_providers::InvalidAwsRegion::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_providers::InvalidAwsRegion::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_providers::InvalidAwsRegion
+impl<T> tracing::instrument::WithSubscriber for routectl_providers::InvalidAwsRegion
+impl<T> typenum::type_operators::Same for routectl_providers::InvalidAwsRegion
+pub type routectl_providers::InvalidAwsRegion::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::InvalidAwsRegion where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_providers::InvalidAwsRegion::into_shared(self) -> Shared
 pub const routectl_providers::VALIDATION_EXCEPTION_TYPE: &str
 pub fn routectl_providers::aws_exception_type_is(&str, &str) -> bool
+pub fn routectl_providers::validate_aws_region(&str) -> core::result::Result<(), routectl_providers::InvalidAwsRegion>

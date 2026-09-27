@@ -23,9 +23,11 @@ use routectl_providers::anthropic_api::{
 use routectl_providers::bedrock::auth::{ResolvedCreds, resolve};
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 use routectl_providers::mantle::MantleAuth;
+#[cfg(feature = "openai-compat")]
 use routectl_providers::openai_compat::{
     HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
+#[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::{
     AuthKind as ResponsesAuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
 };
@@ -155,7 +157,7 @@ fn native_provider(
     creds: BedrockCreds,
     resolved: ResolvedCreds,
     shape: BedrockApiShape,
-) -> BedrockProvider {
+) -> routectl_core::Result<BedrockProvider> {
     BedrockProvider::new(
         BedrockConfig {
             id: "bedrock:tripwire".into(),
@@ -192,23 +194,28 @@ async fn tripwire_positive_control_observes_a_plaintext_request() {
 }
 
 #[tokio::test]
-async fn native_bedrock_refuses_a_host_altering_region_on_every_operation() {
+async fn native_bedrock_refuses_a_host_altering_region_at_construction() {
     let tripwire = Tripwire::start().await;
+    for creds in credential_shapes() {
+        let canonical = native_provider(
+            "us-west-2",
+            creds.clone(),
+            resolved(&creds).await,
+            BedrockApiShape::Invoke,
+        );
+        assert!(canonical.is_ok(), "a canonical region must construct");
+    }
 
     for region in tripwire.hostile_regions() {
         for creds in credential_shapes() {
             for shape in [BedrockApiShape::Invoke, BedrockApiShape::Converse] {
                 let context = format!("region={region:?} creds={creds:?} shape={shape:?}");
+
                 let provider =
-                    native_provider(&region, creds.clone(), resolved(&creds).await, shape);
+                    native_provider(&region, creds.clone(), resolved(&creds).await, shape)
+                        .map(|_| ());
 
-                let complete = provider.complete(request()).await;
-                let stream = provider.stream(request()).await.map(|_| ());
-                let count = provider.count_tokens(request()).await;
-
-                assert_region_refusal(&complete, &format!("complete {context}"));
-                assert_region_refusal(&stream, &format!("stream {context}"));
-                assert_region_refusal(&count, &format!("count_tokens {context}"));
+                assert_region_refusal(&provider, &format!("construction {context}"));
             }
         }
     }
@@ -248,6 +255,7 @@ fn anthropic_mantle(region: &str, resolved: ResolvedCreds) -> AnthropicApiProvid
     })
 }
 
+#[cfg(feature = "openai-compat")]
 fn compat_mantle(region: &str, resolved: ResolvedCreds) -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
         id: "mantle-compat:tripwire".into(),
@@ -267,6 +275,7 @@ fn compat_mantle(region: &str, resolved: ResolvedCreds) -> OpenAiCompatProvider 
     })
 }
 
+#[cfg(feature = "openai-responses")]
 fn responses_mantle(region: &str, resolved: ResolvedCreds) -> OpenAiResponsesProvider {
     OpenAiResponsesProvider::new(OpenAiResponsesConfig {
         id: "mantle-responses:tripwire".into(),
@@ -292,15 +301,17 @@ async fn every_mantle_lane_refuses_a_host_altering_region_before_signing() {
     for region in tripwire.hostile_regions() {
         for creds in credential_shapes() {
             let context = format!("region={region:?} creds={creds:?}");
-            let lanes: [(&str, Box<dyn Provider>); 3] = [
+            let lanes: Vec<(&str, Box<dyn Provider>)> = vec![
                 (
                     "anthropic",
                     Box::new(anthropic_mantle(&region, resolved(&creds).await)),
                 ),
+                #[cfg(feature = "openai-compat")]
                 (
                     "openai-compat",
                     Box::new(compat_mantle(&region, resolved(&creds).await)),
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "openai-responses",
                     Box::new(responses_mantle(&region, resolved(&creds).await)),

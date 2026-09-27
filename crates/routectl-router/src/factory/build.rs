@@ -663,7 +663,7 @@ async fn build_provider_inner(
                 additional_model_request_fields: overrides.additional_model_request_fields,
                 adaptive_thinking: overrides.adaptive_thinking,
             };
-            Ok(Arc::new(BedrockProvider::new(cfg, resolved)))
+            Ok(Arc::new(BedrockProvider::new(cfg, resolved)?))
         }
         #[cfg(feature = "gemini")]
         ProviderEntry::Gemini {

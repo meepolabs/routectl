@@ -104,7 +104,7 @@ fn bedrock_provider(
     let resolved = ResolvedCreds::Bearer {
         key: "test-key".into(),
     };
-    BedrockProvider::new(cfg, resolved)
+    BedrockProvider::new(cfg, resolved).expect("canonical region")
 }
 
 /// Anthropic provider pointed at a wiremock URI so the outbound

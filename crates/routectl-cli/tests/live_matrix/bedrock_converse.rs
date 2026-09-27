@@ -90,8 +90,9 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
-        let provider: ArcAlias<dyn routectl_core::Provider> =
-            ArcAlias::new(BedrockProvider::new(cfg, resolved));
+        let provider: ArcAlias<dyn routectl_core::Provider> = ArcAlias::new(
+            BedrockProvider::new(cfg, resolved).expect("AWS_REGION must be a canonical region"),
+        );
 
         providers.insert(
             provider_name.clone(),

@@ -549,6 +549,13 @@ with `127.` -- requires `https://`. Link-local addresses
 build time regardless of scheme to prevent SSRF and cloud-metadata
 credential leaks. The startup error names the offending address.
 
+**Outbound proxies.** Provider traffic to a non-loopback base URL honors the
+standard proxy environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+`NO_PROXY`, and their lower-case forms). Traffic to a loopback base URL --
+the same hosts the cleartext exemption above accepts -- is always sent
+directly, over `http://` and `https://` alike: it carries the provider
+credential, so it must not leave the machine.
+
 ## header_extras merge
 
 The router's `apply_layered_overlays` helper composes provider and

@@ -391,8 +391,10 @@ license.
   `push_distinct_lazily` / `is_full` are narrowed further to `anthropic-api`,
   their only caller. The per-request tally types stay per translator
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
-- `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin
-  and User-Agent override; also owns the response-body cap cluster shared by
+- `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin,
+  User-Agent override, and the host-keyed proxy policy (every builder takes
+  the client's base URL; a loopback host gets `no_proxy()`); tests in
+  `src/http_client_tests.rs`; also owns the response-body cap cluster shared by
   all five provider egresses: `read_body_capped` (two-guard buffered read --
   fast-reject on an honest over-cap `Content-Length` plus a mid-transfer
   running-total abort for chunked/understated bodies, returns `(bytes,
@@ -540,10 +542,9 @@ license.
   module's `pub` snapshot fns as the Debug-rendered
   `rc_translation_drop_counts` and `rc_translation_policy_action_counts`
   fields, unconditional (no feature gate), same rationale as `effort`/`mantle`
-- `src/aws_region.rs` -- `parse_aws_region` / `require_aws_region`: the one
-  canonical, length-bounded AWS region parser (`AwsRegion`, `AwsPartition`
-  DNS suffixes) behind every region-derived endpoint builder, signer, and the
-  router's config-load check
+- `src/aws_region.rs` -- crate-private canonical AWS region parser behind
+  every region-derived endpoint builder and signer; exports only
+  `validate_aws_region` / `InvalidAwsRegion` for the router's config-load check
 - `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: fallible
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->
@@ -1233,6 +1234,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ROUTECTL_LOG_REDACT_PROMPTS=1`: a recognized format tag still echoes, an
   unrecognized one collapses to `<unrecognized>`; isolated because the
   redaction knob freezes on first read per process
+- `tests/egress_proxy_policy.rs` -- isolated binary pinning the host-keyed
+  egress proxy policy across every provider transport, loopback and external,
+  `http://` and `https://`; isolated because proxy variables are process-global
 - `tests/context_management.rs` -- wiremock-driven complete() + streaming
   end-to-end for context-management emulation; asserts beta-header strip,
   context_management body-key strip, and thinking-block injection; gated on
@@ -1245,8 +1249,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   count_tokens, credential-resolve probe, and end-to-end AWS-403 scrub->Auth +
   429 retry_after preservation)
 - `tests/aws_region_egress.rs` -- raw-socket tripwire pins: native Bedrock
-  and all three mantle lanes built directly with a host-altering region send
-  nothing (no connection, auth header, or body) and fail with a config error
+  built directly with a host-altering region is refused at construction, and
+  each mantle lane present in the feature set sends nothing (no connection,
+  auth header, or body) and fails with a config error
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the
   public credential-resolution / auth-dispatch API (`bedrock::auth::resolve`
   Bearer vs SigV4 variants across regions)
@@ -8378,6 +8383,9 @@ Dev-dependency crate: shared test doubles and harnesses every other crate's
 - `src/scoped_env.rs` -- `ScopedEnv`, a restore-on-drop guard over one
   environment variable; std-only, and its `#[serial_test::serial]` requirement
   at call sites is a caller contract the guard cannot enforce
+- `src/loopback_vectors.rs` -- `LOOPBACK_BASE_URLS` / `NON_LOOPBACK_BASE_URLS`,
+  the shared vectors that keep the router's cleartext check and the providers'
+  proxy bypass classifying loopback hosts identically
 - `src/redirect_pin.rs` -- `CrossHostRedirect`, the two-mock-server
   cross-host-redirect pin every credentialed egress lane's redirect regression
   test drives (`start` / `origin_uri` / `assert_not_followed` /

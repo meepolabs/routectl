@@ -1782,3 +1782,7 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
 #[cfg(test)]
 #[path = "validate_tests.rs"]
 mod validate_tests;
+
+#[cfg(test)]
+#[path = "validate_loopback_vectors_tests.rs"]
+mod loopback_vectors_tests;

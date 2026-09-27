@@ -100,8 +100,9 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
-        let provider: ArcAlias<dyn routectl_core::Provider> =
-            ArcAlias::new(BedrockProvider::new(cfg, resolved));
+        let provider: ArcAlias<dyn routectl_core::Provider> = ArcAlias::new(
+            BedrockProvider::new(cfg, resolved).expect("AWS_REGION must be a canonical region"),
+        );
 
         // Placeholder provider entry so Router::new sees the provider
         // name in its config (used for runtime-state lookups). The
