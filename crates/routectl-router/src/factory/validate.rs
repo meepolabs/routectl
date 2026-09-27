@@ -1768,6 +1768,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = validate_pools(config) {
         errors.push(bare_validation_message(e));
     }
+    if let Err(e) = super::validate_state_keys::validate_state_key_names(config) {
+        errors.push(bare_validation_message(e));
+    }
 
     let mut warnings = class_policy_warnings(config);
     warnings.extend(super::warnings::codex_identity_warnings(config));

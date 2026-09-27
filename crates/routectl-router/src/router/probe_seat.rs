@@ -151,52 +151,30 @@ impl Router {
     ///
     /// The pooled key is resolved by RE-COMPOSING each candidate through
     /// `SeatTarget::state_key_for` and comparing, rather than by splitting the
-    /// key on the separator. Splitting requires knowing which separator
-    /// occurrence divides the two halves, and neither choice is sound:
-    /// `split_once` mis-parses a nickname containing one, `rsplit_once`
-    /// mis-parses a label containing one, and nothing in the config grammar
-    /// forbids either (see `seat_pool::seat_state_key`'s own collision note).
+    /// key on the separator, so this resolution never depends on the grammar
+    /// holding.
     ///
-    /// RECOMPOSITION IS NOT INJECTIVE, so comparing is only sound together with
-    /// a UNIQUENESS requirement -- and the candidates it must be unique across
-    /// are of TWO kinds, not one:
+    /// RECOMPOSITION IS NOT INJECTIVE over arbitrary names, so comparing is
+    /// only sound together with a UNIQUENESS requirement across TWO candidate
+    /// kinds:
     ///
     /// - a DIRECT hit, where the key is a `[models]` nickname outright;
     /// - a POOLED match, where some (model, member) pair recomposes to the key.
     ///
-    /// Two pooled pairs can collide with each other (model `a` with member `b#c`
-    /// and model `a#b` with member `c` both compose `a#b#c`), and a direct
-    /// nickname can collide with a pooled pair (a `[models]` entry literally
-    /// named `a#b` alongside model `a`'s member `b`) -- exactly the adversarial
-    /// shape `seat_pool::seat_state_key`'s own collision note describes. Each
-    /// candidate names a DIFFERENT account, so this counts candidates across
-    /// both kinds and answers `None` unless the COMBINED count is exactly one.
-    /// The direct hit deliberately does NOT short-circuit: returning it early
-    /// would silently prefer one account over an equally-valid pooled one
-    /// whenever both exist, which is the same defect as taking the first pooled
-    /// match by map order.
+    /// Two pooled pairs could collide with each other (model `a` with member
+    /// `b#c` and model `a#b` with member `c` both compose `a#b#c`), and a direct
+    /// nickname could collide with a pooled pair (a `[models]` entry literally
+    /// named `a#b` alongside model `a`'s member `b`). Each candidate names a
+    /// DIFFERENT account, so this counts candidates across both kinds and
+    /// answers `None` unless the COMBINED count is exactly one. The direct hit
+    /// deliberately does NOT short-circuit: returning it early would silently
+    /// prefer one account whenever both exist.
     ///
-    /// WHICH CONSTRUCTION PATH THIS PROTECTS. Normal factory construction
-    /// already rejects a `#` in a model NICKNAME (`factory::build_resolved_models`
-    /// drops such a model with a stated reason, precisely to keep a nickname from
-    /// colliding with a labeled seat's state key), so a config-built table cannot
-    /// present the nickname half of either collision. But
-    /// `Router::install_resolved_models` is PUBLIC and installs whatever map it
-    /// is handed, performing no such check -- a manually composed table may carry
-    /// nicknames containing the separator. Member names are not filtered for it
-    /// on either path. So the combined exact-one guard is fail-closed protection
-    /// for that construction path rather than a restatement of a factory
-    /// invariant, and it is what keeps a probe decision from depending on which
-    /// path built the table.
-    ///
-    /// SCOPE. This uniqueness holds for THIS resolver's answer only. It does not
-    /// make the wider runtime state-slot namespace collision-free -- a colliding
-    /// pair still shares one breaker and RPM bucket, and nothing here changes
-    /// that or validates it elsewhere. What it guarantees is narrower and is the
-    /// part this stage owns: no probe decision is made against a seat the key
-    /// does not uniquely name. Rejecting the separator globally is not the fix
-    /// either; it is legal in both halves, and a global ban would refuse
-    /// configurations the composer handles correctly.
+    /// Config validation and `Router::install_resolved_models` both reserve the
+    /// separator in nicknames and member names, so an installed table cannot
+    /// present either collision; this exact-one guard is defense in depth
+    /// behind them, keeping a probe decision from ever resting on a key that
+    /// names more than one seat.
     pub(super) fn probe_seat_for(&self, key: &FieldVerdictKey) -> Option<ProbeSeat> {
         let state_key = key.probe_state_key();
         // Both candidate kinds are collected before anything is returned, so the

@@ -98,26 +98,48 @@ const fn secret_ref_scheme(secret_ref: &SecretRef) -> &'static str {
     }
 }
 
+/// The byte that joins a model nickname to a pool member in a seat's
+/// runtime-state key. Reserved in every model nickname and provider name
+/// (see [`check_state_key_name`]), which is what makes the join injective.
+const SEAT_KEY_SEPARATOR: char = '#';
+
 /// Derive the runtime-state key for one seat of a pooled model.
 ///
 /// The DEFAULT seat (label `None`) keys as the bare `nickname` -- so a
 /// single-target model keys by nickname exactly as it always has. A NAMED
-/// seat keys as `"{nickname}#{label}"`, mirroring the established
-/// `provider#label` convention used by `oauth::seat_key` and `SecretRef`'s
-/// `Display`, which keeps the key operator-readable in logs.
+/// seat keys as `"{nickname}#{label}"`, which keeps the key
+/// operator-readable in logs. The OAuth `provider#label` seat key happens to
+/// use the same byte but is a separate keyspace with its own grammar.
 ///
-/// Collision boundary: a labeled-seat key collides with a real model
-/// nickname only if an operator declares a SEPARATE `[models.X]` whose
-/// nickname is literally `"{nickname}#{label}"` AND that label exists as a
-/// seat of the pooled `nickname`. Since labeled-seat keys are only minted
-/// for genuinely multi-seat oauth pools, this requires a deliberately
-/// adversarial config; the bare-nickname default-seat key (the common
-/// single-seat case) can never collide.
+/// Collision-free only because neither half may contain the separator: with
+/// that reserved, a direct key never contains it, a seat key contains it
+/// exactly once, and [`split_seat_state_key`] recovers both halves.
 pub fn seat_state_key(nickname: &str, label: Option<&str>) -> String {
     match label {
-        Some(label) => format!("{nickname}#{label}"),
+        Some(label) => format!("{nickname}{SEAT_KEY_SEPARATOR}{label}"),
         None => nickname.to_string(),
     }
+}
+
+/// Split a pooled seat's runtime-state key back into `(nickname, member)`,
+/// or `None` for a direct model key. The inverse of [`seat_state_key`] for
+/// every key whose halves passed [`check_state_key_name`].
+pub fn split_seat_state_key(state_key: &str) -> Option<(&str, &str)> {
+    state_key.split_once(SEAT_KEY_SEPARATOR)
+}
+
+/// Refuse a model nickname or provider name that would make a runtime-state
+/// key ambiguous: one carrying the seat-key separator could compose the
+/// same bytes as a different (model, member) pair. `role` names what the
+/// value is in the refusal message.
+pub fn check_state_key_name(role: &str, name: &str) -> Result<(), String> {
+    if name.contains(SEAT_KEY_SEPARATOR) {
+        return Err(format!(
+            "{role} `{name}` must not contain `{SEAT_KEY_SEPARATOR}` \
+             (reserved as the seat-pool state-key separator)"
+        ));
+    }
+    Ok(())
 }
 
 /// Derive the persistable credential identity of one dispatch target from
@@ -756,6 +778,62 @@ mod tests {
     #[test]
     fn seat_state_key_labeled_seat_is_hash_joined() {
         assert_eq!(seat_state_key("opus", Some("seat-b")), "opus#seat-b");
+    }
+
+    #[test]
+    fn a_composed_seat_key_splits_back_into_its_own_halves() {
+        // Arrange
+        let key = seat_state_key("opus", Some("anthropic-work"));
+
+        // Act
+        let halves = split_seat_state_key(&key);
+
+        // Assert
+        assert_eq!(halves, Some(("opus", "anthropic-work")));
+    }
+
+    #[test]
+    fn a_direct_model_key_has_no_seat_half() {
+        // Arrange
+        let key = seat_state_key("opus", None);
+
+        // Act / Assert
+        assert_eq!(split_seat_state_key(&key), None);
+    }
+
+    #[test]
+    fn a_state_key_name_carrying_the_separator_anywhere_is_refused() {
+        for name in ["#", "a#b", "#lead", "trail#", "a##b"] {
+            // Act
+            let err = check_state_key_name("model nickname", name)
+                .expect_err("a separator-bearing name must be refused");
+
+            // Assert
+            assert!(err.contains("model nickname"), "role named: {err}");
+            assert!(err.contains("`#`"), "reserved char named: {err}");
+            assert!(
+                err.contains("seat-pool state-key separator"),
+                "reservation explained: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_state_key_names_are_accepted() {
+        // Positive control for the refusal above: realistic names, including
+        // non-ASCII and punctuation other than the separator, pass untouched.
+        for name in [
+            "opus",
+            "anthropic-work",
+            "codex_fast.v2",
+            "modele-\u{e9}t\u{e9}",
+        ] {
+            assert_eq!(
+                check_state_key_name("provider name", name),
+                Ok(()),
+                "{name}"
+            );
+        }
     }
 
     #[test]

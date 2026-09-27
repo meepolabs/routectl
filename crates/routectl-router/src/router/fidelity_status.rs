@@ -555,7 +555,7 @@ impl Router {
     /// would fall through to a default.
     fn provider_name_for_state_key(&self, state_key: &str) -> String {
         // Pooled seat: `nick#member` -> the SUFFIX is the provider entry name.
-        if let Some((_base, member)) = state_key.split_once('#')
+        if let Some((_base, member)) = crate::seat_pool::split_seat_state_key(state_key)
             && self.config.providers.contains_key(member)
         {
             return member.to_string();
@@ -569,7 +569,7 @@ impl Router {
             return model.provider.clone();
         }
         // Pool fallback: if the base part is a configured model.
-        if let Some((base, _)) = state_key.split_once('#')
+        if let Some((base, _)) = crate::seat_pool::split_seat_state_key(state_key)
             && let Some(model) = self.config.models.get(base)
         {
             return model.provider.clone();
@@ -592,7 +592,7 @@ impl Router {
         // and the base when it is a pooled seat. Both are what a live DispatchTarget
         // carries, and the override resolver checks model-scoped first (matching them)
         // then provider-tier (matching the provider alone).
-        let nickname = key.status_state_key().split_once('#').map_or_else(
+        let nickname = crate::seat_pool::split_seat_state_key(key.status_state_key()).map_or_else(
             || key.status_state_key().to_string(),
             |(base, _)| base.to_string(),
         );

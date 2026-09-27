@@ -4,7 +4,7 @@
 //! with exponential backoff. Per-provider runtime gates (RPM bucket,
 //! circuit breaker) skip unhealthy providers in the chain.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // The registry tempo now flows through `LearnedCapabilityRegistry::
@@ -1972,6 +1972,20 @@ impl DispatchTarget {
     }
 }
 
+/// Every runtime-state key `m` occupies when installed under `nickname`,
+/// paired with the provider whose runtime policy seeds that slot: its own
+/// nickname slot plus one per pooled seat.
+fn slot_seeds(nickname: &str, m: &ResolvedModel) -> Vec<(String, String)> {
+    std::iter::once((nickname.to_string(), m.provider_name.clone()))
+        .chain(
+            m.seats
+                .iter()
+                .flat_map(|seats| seats.iter())
+                .map(|seat| (seat.state_key_for(nickname), seat.provider_name.clone())),
+        )
+        .collect()
+}
+
 impl Router {
     /// Build a router from a config, provisioning a runtime gate for every
     /// configured provider. Resolved models and providers are registered
@@ -2124,8 +2138,35 @@ impl Router {
     /// state is initialized from the parent provider's
     /// `ProviderRuntimePolicy` (rpm_limit, circuit_failures, etc.) so
     /// the operator's TOML knobs apply per model out of the box.
+    ///
+    /// A model whose state keys are ambiguous is refused with a WARN and left
+    /// out of the table: a nickname or pool member carrying the seat-key
+    /// separator, a table key differing from the model's own nickname, or a
+    /// key already held by a slot seeded from a DIFFERENT provider's runtime
+    /// policy. A slot seeded from the same provider -- an identity reinstall,
+    /// or a direct model named after its own provider -- is reused unchanged.
     pub fn install_resolved_models(&mut self, models: BTreeMap<String, Arc<ResolvedModel>>) {
-        self.resolved_models = models;
+        let seeded_by: HashMap<String, String> = self
+            .resolved_models
+            .iter()
+            .flat_map(|(nickname, m)| slot_seeds(nickname, m))
+            .collect();
+        self.resolved_models = models
+            .into_iter()
+            .filter(
+                |(nickname, m)| match self.state_slot_refusal(nickname, m, &seeded_by) {
+                    None => true,
+                    Some(reason) => {
+                        tracing::warn!(
+                            nickname = %routectl_core::sanitize_for_log(nickname),
+                            reason = %routectl_core::sanitize_for_log(&reason),
+                            "refusing resolved model: its runtime state key is ambiguous",
+                        );
+                        false
+                    }
+                },
+            )
+            .collect();
         // Mirror the per-model providers into the `providers` map
         // (keyed by provider name) so legacy lookups still work, and
         // populate the state map with one entry per nickname so
@@ -2181,6 +2222,50 @@ impl Router {
                 .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
         }
         self.admit_quota_seats();
+    }
+
+    /// Why `m`, filed under `nickname`, may not take runtime-state slots, or
+    /// `None` when every key it composes is unambiguous. `seeded_by` maps each
+    /// key of the table being replaced to the provider whose policy seeded
+    /// it; any other occupied slot is a provider slot `Router::new` seeded
+    /// from the provider of the same name.
+    fn state_slot_refusal(
+        &self,
+        nickname: &str,
+        m: &ResolvedModel,
+        seeded_by: &HashMap<String, String>,
+    ) -> Option<String> {
+        use crate::seat_pool::check_state_key_name;
+
+        if m.nickname != nickname {
+            return Some(format!(
+                "table key `{nickname}` differs from the model's own nickname `{}`",
+                m.nickname
+            ));
+        }
+        if let Err(reason) = check_state_key_name("model nickname", nickname) {
+            return Some(reason);
+        }
+        for seat in m.seats.iter().flat_map(|seats| seats.iter()) {
+            if let Err(reason) = check_state_key_name("pool member", &seat.provider_name) {
+                return Some(reason);
+            }
+        }
+        slot_seeds(nickname, m).into_iter().find_map(|(key, seed)| {
+            if !self.state.contains_key(&key) {
+                return None;
+            }
+            // INVARIANT: letting a model named after its own provider reuse
+            // that provider's slot is sound only while provider-name slots
+            // are seed placeholders that no production path looks up --
+            // every dispatch and status key is a model nickname or a seat
+            // key. A production read keyed by a bare provider name would make
+            // this reuse a shared gate between the provider and the model.
+            let holder = seeded_by.get(&key).map_or(key.as_str(), String::as_str);
+            (holder != seed).then(|| {
+                format!("state key `{key}` is already held by a slot of provider `{holder}`")
+            })
+        })
     }
 
     /// The nicknames whose outbound output-token ceiling came from the catalog
@@ -3088,6 +3173,10 @@ mod forwarded_model_transparency_tests;
 #[cfg(test)]
 #[path = "seat_pool_dispatch_tests.rs"]
 mod seat_pool_dispatch_tests;
+
+#[cfg(test)]
+#[path = "state_slot_install_tests.rs"]
+mod state_slot_install_tests;
 
 #[cfg(test)]
 #[path = "quota_feed_dispatch_tests.rs"]

@@ -1292,17 +1292,11 @@ pub async fn build_resolved_models_reported(
         }
         // A `#` in a model nickname would collide with a labeled seat's
         // runtime-state key (`{nickname}#{label}`), letting two distinct
-        // dispatch identities share one circuit breaker. Reject it here so
-        // the collision is impossible by construction; the offending model
-        // is dropped from the resolved table with a clear reason.
-        if nickname.contains('#') {
-            failed.push((
-                nickname.clone(),
-                format!(
-                    "model nickname `{nickname}` must not contain `#` \
-                     (reserved as the seat-pool state-key separator)"
-                ),
-            ));
+        // dispatch identities share one circuit breaker. Config validation
+        // already refuses it; this keeps an unvalidated config from building
+        // one, dropping the model with the reason.
+        if let Err(reason) = crate::seat_pool::check_state_key_name("model nickname", nickname) {
+            failed.push((nickname.clone(), reason));
             continue;
         }
         // Provider-or-pool resolution: `[models.X] provider` names either a

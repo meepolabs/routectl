@@ -6,6 +6,7 @@ mod installation_id;
 mod validate;
 #[cfg(feature = "bedrock")]
 mod validate_region;
+mod validate_state_keys;
 mod warnings;
 
 pub use build::ipv4_compatible_embedded;

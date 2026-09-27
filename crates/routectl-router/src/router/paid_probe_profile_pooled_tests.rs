@@ -76,15 +76,14 @@ fn a_pooled_identity_naming_no_live_member_yields_no_profile() {
     assert_eq!(router.paid_probe_profile(&pooled), None);
 }
 
-/// A router with TWO pooled models whose (model, member) pairs both compose the
-/// SAME state key, plus one model whose composed key is unique.
+/// A router handed TWO pooled models whose (model, member) pairs both compose
+/// the SAME state key, plus one model whose composed key is unique.
 ///
-/// The collision is real, not contrived to be impossible: `seat_state_key` joins
-/// the two halves with a separator that is legal in BOTH, so model `a` with
-/// member `b#c` and model `a#b` with member `c` compose `a#b#c` alike -- and
-/// each names a DIFFERENT credential. The unique model is installed in the same
-/// router so the positive control shares every other fixture fact with the
-/// collision case.
+/// Model `a` with member `b#c` and model `a#b` with member `c` compose `a#b#c`
+/// alike, each naming a DIFFERENT credential. The install boundary refuses both
+/// (each carries the reserved separator in one half), so the key names no
+/// account at all. The unique model is installed in the same router so the
+/// positive control shares every other fixture fact with the collision case.
 fn colliding_pooled_router() -> Router {
     let members = ["b#c", "c", "unique-seat"];
     let mut config = Config::default();
@@ -169,14 +168,13 @@ fn an_unambiguous_pooled_key_in_the_same_router_still_profiles() {
     assert_eq!(profile.max_tokens(), LEGACY_MIN_VIABLE_MAX_TOKENS);
 }
 
-/// A router where a DIRECT `[models]` nickname equals a POOLED (model, member)
-/// pair's composed key, alongside a direct-only and a pooled-only model.
+/// A router handed a DIRECT `[models]` nickname equal to a POOLED (model,
+/// member) pair's composed key, alongside a direct-only and a pooled-only model.
 ///
-/// The second collision kind, and the one a direct early return hides: model
-/// `p` carries member `s`, composing `p#s`, while a separate `[models]` entry is
-/// literally named `p#s` -- the adversarial shape `seat_pool::seat_state_key`'s
-/// own collision note describes. Both name a real, DIFFERENT account, so neither
-/// is the defensible answer. The two single-kind models live in the same router
+/// Model `p` carries member `s`, composing `p#s`, while a separate `[models]`
+/// entry is literally named `p#s`. Both name a real, DIFFERENT account; the
+/// install boundary refuses the separator-bearing direct nickname so the key
+/// keeps exactly one owner. The two single-kind models live in the same router
 /// so each control shares every other fixture fact with the collision case.
 fn direct_versus_pooled_collision_router() -> Router {
     let mut config = Config::default();
@@ -237,25 +235,24 @@ fn direct_versus_pooled_collision_router() -> Router {
 }
 
 #[test]
-fn a_direct_nickname_equal_to_a_pooled_composed_key_yields_no_profile() {
+fn a_direct_nickname_shadowing_a_pooled_composed_key_leaves_the_seat_its_only_owner() {
     let router = direct_versus_pooled_collision_router();
     // Premise, asserted rather than assumed: the pooled pair really does compose
-    // the direct model's own nickname. Without this the test could pass because
-    // the key matched neither candidate.
+    // the direct model's nickname, and the install boundary refused that direct
+    // model rather than letting it share the seat's key.
     let composed = crate::seat_pool::seat_state_key("p", Some("s"));
     assert_eq!(composed, "p#s", "premise: the pair must compose this key");
     assert!(
-        router.resolved_models.contains_key(&composed),
-        "premise: a DIRECT model of that exact nickname must also exist",
+        !router.resolved_models.contains_key(&composed),
+        "a separator-bearing DIRECT nickname must be refused at install",
     );
-    let ambiguous =
-        FieldVerdictKey::new(&composed, GROUNDED_PATH, "anthropic-api").expect("identity");
+    let pooled = FieldVerdictKey::new(&composed, GROUNDED_PATH, "anthropic-api").expect("identity");
 
-    assert_eq!(
-        router.paid_probe_profile(&ambiguous),
-        None,
-        "a direct nickname and a pooled pair name two accounts, so neither wins",
-    );
+    let profile = router
+        .paid_probe_profile(&pooled)
+        .expect("the pooled seat is now the key's only owner");
+
+    assert_eq!(profile.max_tokens(), LEGACY_MIN_VIABLE_MAX_TOKENS);
 }
 
 #[test]

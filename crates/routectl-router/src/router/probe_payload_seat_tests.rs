@@ -438,89 +438,52 @@ fn pooled_router_named(
     (router, calls)
 }
 
-#[tokio::test]
-async fn a_pooled_nickname_containing_the_separator_still_reaches_its_own_seat() {
-    // The key is composed as `{nickname}#{label}`, so a nickname that itself
-    // contains `#` puts a SECOND separator to the left of the real one.
-    //
-    // `split_once('#')` takes the FIRST, so it reads this key as nickname
-    // "weird" + label "name#seat-b" -- no such model, no such seat, nothing
-    // dialed. Recomposing each candidate's canonical key and comparing is
-    // indifferent to how many separators either half contains.
-    let (router, calls) = pooled_router_named("weird#name", ["seat-a", "seat-b"]);
-    let composed = crate::seat_pool::seat_state_key("weird#name", Some("seat-b"));
-    assert_eq!(
-        composed, "weird#name#seat-b",
-        "premise: the composer must actually produce two separators here"
-    );
+/// Probe one composed key against a router built by `pooled_router_named` and
+/// return which seats were dialed.
+async fn probe_composed(
+    nickname: &str,
+    labels: [&'static str; 2],
+    label: &str,
+) -> Vec<&'static str> {
+    let (router, calls) = pooled_router_named(nickname, labels);
+    let composed = crate::seat_pool::seat_state_key(nickname, Some(label));
     let key = FieldVerdictKey::new(&composed, GROUNDED_PATH, "anthropic-api").expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
-    let ran = router.run_due_probes().await;
+    router.run_due_probes().await;
 
-    assert_eq!(ran, 1);
-    assert_eq!(
-        calls.lock().as_slice(),
-        ["seat-b"],
-        "a nickname containing the separator must still reach the credential \
-         its own composed key names"
-    );
+    calls.lock().clone()
 }
 
 #[tokio::test]
-async fn a_pooled_label_containing_the_separator_still_reaches_its_own_seat() {
-    // The mirror case, and why `rsplit_once` is not the fix either: a LABEL
-    // containing `#` puts an extra separator to the right of the real one.
-    //
-    // `rsplit_once('#')` takes the LAST, reading this key as nickname
-    // "m1#seat" + label "b" -- again no such model and no such seat. Only one
-    // of the two splits is wrong for each of these two tests, which is the
-    // point: no single split direction is correct while the grammar permits
-    // the character on both sides.
-    let (router, calls) = pooled_router_named("m1", ["seat-a", "seat#b"]);
-    let composed = crate::seat_pool::seat_state_key("m1", Some("seat#b"));
-    assert_eq!(
-        composed, "m1#seat#b",
-        "premise: the composer must actually produce two separators here"
-    );
-    let key = FieldVerdictKey::new(&composed, GROUNDED_PATH, "anthropic-api").expect("identity");
-    router.activate_probe_lane(&key, ProbeValidator::CountTokens);
-
-    let ran = router.run_due_probes().await;
-
-    assert_eq!(ran, 1);
-    assert_eq!(
-        calls.lock().as_slice(),
-        ["seat#b"],
-        "a label containing the separator must still reach its own credential"
-    );
-}
-
-#[tokio::test]
-async fn a_pooled_key_with_separators_in_both_halves_reaches_its_own_seat() {
-    // Both at once, which no single split direction can parse: two separators
-    // to the left of the real one and one to its right. The recomposed
-    // comparison resolves it because it never has to decide WHICH separator
-    // is the delimiter -- it only asks which candidate composes to this key.
-    let (router, calls) = pooled_router_named("a#b#c", ["plain", "d#e"]);
-    let composed = crate::seat_pool::seat_state_key("a#b#c", Some("d#e"));
-    assert_eq!(composed, "a#b#c#d#e", "premise: four separators");
-    let key = FieldVerdictKey::new(&composed, GROUNDED_PATH, "anthropic-api").expect("identity");
-    router.activate_probe_lane(&key, ProbeValidator::CountTokens);
-
-    let ran = router.run_due_probes().await;
-
-    assert_eq!(ran, 1);
-    assert_eq!(
-        calls.lock().as_slice(),
-        ["d#e"],
-        "the intended credential must be reached regardless of separators in \
-         either half"
-    );
-    // And the SIBLING was not dialed, so this is a match rather than a
-    // fallback to an arbitrary seat.
+async fn a_pooled_nickname_containing_the_separator_is_never_probed() {
+    // `weird#name` on `seat-b` composes `weird#name#seat-b`, which splits as
+    // model `weird` + member `name#seat-b`. The install boundary refuses the
+    // nickname, so no probe can reach either reading.
     assert!(
-        !calls.lock().contains(&"plain"),
-        "no fallback to another member may occur"
+        probe_composed("weird#name", ["seat-a", "seat-b"], "seat-b")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_pooled_label_containing_the_separator_is_never_probed() {
+    // The mirror case: member `seat#b` makes `m1#seat#b` readable as model
+    // `m1#seat` + member `b`. The install boundary refuses the pool member.
+    assert!(
+        probe_composed("m1", ["seat-a", "seat#b"], "seat#b")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_separator_free_pooled_identity_in_the_same_fixture_is_probed() {
+    // Positive control for the two refusals above: same fixture builder,
+    // same composer, names that carry no separator.
+    assert_eq!(
+        probe_composed("m1", ["seat-a", "seat-b"], "seat-b").await,
+        ["seat-b"]
     );
 }

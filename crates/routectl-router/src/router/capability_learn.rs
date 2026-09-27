@@ -262,7 +262,7 @@ impl Router {
         if let Some(model) = self.resolved_models.get(state_key) {
             return (model.provider_name.clone(), state_key.to_string());
         }
-        if let Some((base, label)) = state_key.split_once('#') {
+        if let Some((base, label)) = crate::seat_pool::split_seat_state_key(state_key) {
             // The member entry when the label names one, the base model's own
             // provider otherwise -- a `#`-suffixed key whose label resolves nothing
             // still has a base that does. Resolved table first, then the config, so
@@ -321,18 +321,11 @@ impl Router {
         // one key (the pair names the target, the kind normalizes its capability
         // token), so a kind drawn from the base while the name came from the
         // member would describe two different provider entries as one identity.
+        let seat_halves = crate::seat_pool::split_seat_state_key(state_key);
         if let Some(kind) = self
             .configured_model_kind(state_key)
-            .or_else(|| {
-                state_key
-                    .split_once('#')
-                    .and_then(|(_base, label)| self.kind_of_provider(label))
-            })
-            .or_else(|| {
-                state_key
-                    .split_once('#')
-                    .and_then(|(base, _label)| self.configured_model_kind(base))
-            })
+            .or_else(|| seat_halves.and_then(|(_base, label)| self.kind_of_provider(label)))
+            .or_else(|| seat_halves.and_then(|(base, _label)| self.configured_model_kind(base)))
         {
             return kind;
         }

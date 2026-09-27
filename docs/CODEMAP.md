@@ -1766,6 +1766,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   fallback (and its WARN) is gone, unreachable behind the validation rejects
 - `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
   rejection of a non-canonical native `region` / `bedrock_mantle.region`
+- `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
+  config-load rejection, over EVERY `[models]` and `[providers]` key (selectable
+  or not, referenced or not), of a name carrying the reserved seat-key `#` and
+  of a model nickname equal to a provider it does not dispatch through
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation
   collection (incl. `validate_registry_patterns`, rejecting malformed
   `[registry]` glob keys at startup); `validate_class_policy` HARD-rejects an
@@ -2388,7 +2392,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `cache_front_decision` / `cache_terminal_decision` beside the legacy
   aggregate `cache_strategy`, which now carries the TERMINAL marker's
   token). Construction + hot-reload lifecycle: `new`,
-  `install_resolved_models`, the `carry_over_runtime_state_from` /
+  `install_resolved_models` (refuses, with a WARN, a model whose nickname or
+  pool member carries `#`, whose table key differs from its nickname, or whose
+  state key is already held by a slot seeded from a different provider),
+  the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_prefix_epochs_from` /
   `carry_over_calibration_from` / `carry_over_quota_from` /
@@ -3298,17 +3305,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `a#b` + member `c` both compose `a#b#c`), and a direct nickname can collide
   with a pooled pair (a `[models]` entry literally named `p#s` beside model `p`'s
   member `s`); each names a different credential, so the direct hit deliberately
-  does not early-return. WHICH PATH THIS PROTECTS: normal factory construction
-  already rejects a `#` in a model NICKNAME (`factory::build_resolved_models`
-  drops such a model with a stated reason), so a config-built table cannot present
-  the nickname half of either collision -- but `Router::install_resolved_models` is
-  PUBLIC and installs whatever map it is handed with no such check, so a manually
-  composed table may carry them (member names are filtered on neither path). The
-  guard is therefore fail-closed protection for that construction path, not a
-  restatement of a factory invariant. SCOPE: this is uniqueness of THIS resolver's
-  answer only. It does not make the wider runtime state-slot namespace
-  collision-free -- a colliding pair still shares one breaker and RPM bucket --
-  and nothing here changes or validates that elsewhere. `ProbeSeat` also carries
+  does not early-return. Config validation and `Router::install_resolved_models`
+  both reserve `#` in nicknames and member names, so an installed table cannot
+  present either collision; this guard is defense in depth behind them. `ProbeSeat` also carries
   the resolved
   model's `supports_adaptive_thinking`, its operator `max_output_tokens`, its
   `effective_row` (the catalog merge stamped at chain-build time), and the
@@ -3905,7 +3904,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `provider_name` + its own provider instance + credential ref, with
   `state_key_for(nickname)` deriving the per-model key so ONE seat set can be
   shared by every model naming the pool), `seat_state_key` (bare nickname for
-  a single target, `nickname#member` for a pool seat), `seat_identity` (the
+  a single target, `nickname#member` for a pool seat) with its inverse
+  `split_seat_state_key` and `check_state_key_name` (the one `#`-reservation
+  check config validation, the factory, and install all apply), `seat_identity` (the
   persistable `provider#label` credential identity of a `SecretRef`, `None`
   for every non-OAuth scheme so no path or env-var name reaches the usage
   ledger), `seat_order_for_request`
