@@ -1,11 +1,14 @@
-//! Canonical `req.system` -> Responses `instructions` translation.
+//! Canonical system content -> Responses `instructions` translation.
 //!
-//! The Responses API has no first-class system role: the prior chat-
-//! completions `system` message is collapsed into a top-level
-//! `instructions` string. When canonical carries
-//! `SystemContent::Blocks`, we flatten each block's text joined by
-//! `"\n\n"` (one blank line between blocks) so block boundaries remain
-//! visible to the model but the field stays a flat string.
+//! The Responses API has no first-class system role: system content is
+//! collapsed into a top-level `instructions` string. Two canonical surfaces
+//! feed it: the top-level `req.system` first, then the text of every
+//! `Role::System` message in message order (a direct library caller may
+//! put its system prompt in the messages array; the ingresses hoist those
+//! messages into `req.system` before they reach here). Each block, message
+//! and part is one entry, and entries join with `"\n\n"` (one blank line) so
+//! boundaries stay visible to the model while the field stays a flat string.
+//! A multi-part system message joins its own parts with `"\n"`.
 //!
 //! Lossy seam: per-block `cache_control` markers cannot ride the
 //! Responses wire (no Anthropic-style prompt cache surface here yet),
@@ -16,53 +19,85 @@
 //! module logs the system surface without counting it again.
 //!
 //! Withholding seam: the Claude Code billing/attribution block is stripped
-//! before flatten because OpenAI is a third-party upstream that must not
-//! receive the client fingerprint. The wire would carry the text, so the
-//! loss is routectl's own choice and rides the policy-action counter rather
-//! than the drop counter.
+//! from both surfaces before flatten because OpenAI is a third-party
+//! upstream that must not receive the client fingerprint. The wire would
+//! carry the text, so the loss is routectl's own choice and rides the
+//! policy-action counter rather than the drop counter.
 
-use routectl_core::{ChatRequest, SystemContent};
+use routectl_core::{ChatRequest, Message, MessageContent, Role, SystemContent};
 
-use crate::translation_drop_metrics::record_translation_policy_action;
+use crate::translation_drop_metrics::{
+    ClientFingerprintStripTally, record_translation_policy_action,
+};
 
-/// Build the `instructions` field for the Responses API from the
-/// canonical `system` field. Returns `None` when no system content is
-/// present so the caller can skip the field entirely (the parent
-/// `ResponsesRequest` always serializes `instructions`, even when
-/// empty; an empty string `""` is accepted by the server as
-/// "no system prompt").
+/// The separator between system entries in `instructions`.
+const ENTRY_SEPARATOR: &str = "\n\n";
+
+/// Build the `instructions` field for the Responses API from both canonical
+/// system surfaces. Returns `None` when neither carries content so the
+/// caller emits the empty string the server reads as "no system prompt".
 ///
-/// The billing-strip record fires from HERE rather than from inside
-/// [`flatten_filtered_system`], which returns `None` on several paths --
-/// a record placed after one of those early returns would miss exactly
-/// the requests whose whole system was the stripped block, while the
-/// lane's denominator still counted them.
-pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
-    let mut billing_stripped = false;
-    let instructions = flatten_filtered_system(req, &mut billing_stripped);
+/// Every withhold is recorded into `fingerprint`; the caller flushes it once
+/// per request, outside every fallible step of its assembly.
+pub(super) fn translate_system(
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Option<String> {
+    let mut system_withheld = false;
+    let top_level = flatten_filtered_system(req, &mut system_withheld);
     // Withheld by routectl, not by the wire: the Responses `instructions`
     // string would carry the block's text fine, and OpenAI is a third-party
     // upstream that must not receive the client fingerprint it holds. Shares
     // the class literal with the other egresses that strip the same content --
-    // one operator-facing label per action, keyed apart by lane.
+    // one operator-facing label per action, keyed apart by lane. The pin names
+    // the single-source test: a both-sources request sets the shared tally
+    // from the sibling site too.
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=the_billing_strip_counts_one_policy_action_for_the_request
-    if billing_stripped {
+    if system_withheld {
+        fingerprint.record();
         tracing::warn!(
             "openai-responses egress: Claude Code billing/attribution system block dropped",
         );
+    }
+
+    let mut message_withheld = false;
+    let from_messages = system_role_entries(&req.messages, &mut message_withheld);
+    // The second site of the one policy action above, sharing its tally.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_is_withheld_and_counted
+    if message_withheld {
+        fingerprint.record();
+        tracing::warn!(
+            "openai-responses egress: Claude Code billing/attribution block dropped from a \
+             system-role message",
+        );
+    }
+
+    let entries: Vec<String> = top_level.into_iter().chain(from_messages).collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(ENTRY_SEPARATOR))
+    }
+}
+
+/// Count the request's fingerprint withhold, if any. Called once per request
+/// by the orchestrator, outside every fallible step of its assembly, so a
+/// request whose whole system was the fingerprint -- or that withheld it and
+/// then failed -- still counts against the denominator that already counted
+/// it.
+pub(super) fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally) {
+    if fingerprint.stripped() {
         record_translation_policy_action(super::LANE, "client_fingerprint_stripped");
     }
-    instructions
 }
 
 /// Flatten the canonical system into `instructions` with the Claude Code
-/// billing/attribution block removed, setting `billing_stripped` when a block
-/// was removed. Every `None` return here is an absent-or-blank system, not a
+/// billing/attribution block removed, setting `withheld` when a block was
+/// removed. Every `None` return here is an absent-or-blank system, not a
 /// failure; the caller owns the record so no early return can skip it.
-fn flatten_filtered_system(req: &ChatRequest, billing_stripped: &mut bool) -> Option<String> {
+fn flatten_filtered_system(req: &ChatRequest, withheld: &mut bool) -> Option<String> {
     let s = req.system.as_ref()?;
-    let filtered = crate::system_filter::strip_billing_attribution(s, billing_stripped);
-    let filtered = filtered?;
+    let filtered = crate::system_filter::strip_billing_attribution(s, withheld)?;
     match &filtered {
         SystemContent::Text(t) if t.trim().is_empty() => None,
         SystemContent::Text(t) => Some(t.clone()),
@@ -76,10 +111,28 @@ fn flatten_filtered_system(req: &ChatRequest, billing_stripped: &mut bool) -> Op
             if combined.is_empty() {
                 None
             } else {
-                Some(combined.join("\n\n"))
+                Some(combined.join(ENTRY_SEPARATOR))
             }
         }
     }
+}
+
+/// One entry per `Role::System` message that keeps legitimate text after the
+/// billing/attribution strip, in message order. The strip runs per part
+/// before the parts of one message are joined, so a fingerprint part cannot
+/// hide behind legitimate text at the leading position the predicate tests.
+fn system_role_entries(messages: &[Message], withheld: &mut bool) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System) && !matches!(m.content, MessageContent::Null))
+        .filter_map(|message| {
+            let parts = crate::system_filter::system_role_texts_stripped(
+                std::slice::from_ref(message),
+                withheld,
+            );
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        })
+        .collect()
 }
 
 /// Emit a debug event for each block carrying a `cache_control` marker that
@@ -138,6 +191,15 @@ mod tests {
             .map_or(0, |e| e.action_count)
     }
 
+    /// Drive the system translation the way the orchestrator does: one tally,
+    /// flushed once after the build.
+    fn translate_and_flush(req: &ChatRequest) -> Option<String> {
+        let mut fingerprint = ClientFingerprintStripTally::default();
+        let instructions = translate_system(req, &mut fingerprint);
+        flush_fingerprint_tally(&fingerprint);
+        instructions
+    }
+
     fn block(text: &str) -> SystemBlock {
         SystemBlock {
             kind: "text".into(),
@@ -166,7 +228,7 @@ mod tests {
         ]));
 
         // Act
-        let instructions = translate_system(&req).expect("prompt block survives");
+        let instructions = translate_and_flush(&req).expect("prompt block survives");
 
         // Assert: only the real prompt reaches instructions.
         assert_eq!(instructions, "you are helpful");
@@ -185,7 +247,7 @@ mod tests {
         )]));
 
         // Act
-        let instructions = translate_system(&req);
+        let instructions = translate_and_flush(&req);
 
         // Assert: nothing survives, so no instructions field.
         assert!(
@@ -203,7 +265,7 @@ mod tests {
         ));
 
         // Act
-        let instructions = translate_system(&req);
+        let instructions = translate_and_flush(&req);
 
         // Assert
         assert!(
@@ -225,7 +287,7 @@ mod tests {
         )]));
 
         // Act
-        let instructions = translate_system(&req);
+        let instructions = translate_and_flush(&req);
 
         // Assert: still None, AND the warn fired.
         assert!(
@@ -253,7 +315,7 @@ mod tests {
             let req = req_with_system(system);
 
             // Act
-            let instructions = translate_system(&req);
+            let instructions = translate_and_flush(&req);
 
             // Assert
             assert!(
@@ -269,7 +331,7 @@ mod tests {
         let req = req_with_system(SystemContent::Blocks(vec![block("first"), block("second")]));
 
         // Act
-        let instructions = translate_system(&req).expect("blocks survive");
+        let instructions = translate_and_flush(&req).expect("blocks survive");
 
         // Assert
         assert_eq!(instructions, "first\n\nsecond");
@@ -293,7 +355,7 @@ mod tests {
 
         // Act
         let before = fingerprint_strip_count();
-        let instructions = translate_system(&req).expect("the prompt block survives");
+        let instructions = translate_and_flush(&req).expect("the prompt block survives");
         let after = fingerprint_strip_count();
 
         // Assert: counted once, the fingerprint is gone, the prompt remains.
@@ -324,7 +386,7 @@ mod tests {
 
         // Act
         let before = fingerprint_strip_count();
-        let instructions = translate_system(&req);
+        let instructions = translate_and_flush(&req);
         let after = fingerprint_strip_count();
 
         // Assert
@@ -350,7 +412,7 @@ mod tests {
 
         // Act
         let before = fingerprint_strip_count();
-        let instructions = translate_system(&req).expect("the prompt survives");
+        let instructions = translate_and_flush(&req).expect("the prompt survives");
         let after = fingerprint_strip_count();
 
         // Assert

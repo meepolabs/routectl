@@ -187,16 +187,14 @@ fn build_input_tallied(
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
     for msg in messages {
         match &msg.role {
-            // A system turn's content is not lost here: `system.rs` reads
-            // `req.system`, and BOTH ingresses that can reach this egress
-            // hoist every `Role::System` message into that field before the
-            // request leaves the ingress (`ingress::lift_system_messages`,
-            // called unconditionally on the Responses and the OpenAI
-            // ingress; the Anthropic ingress carries `system` as a
-            // top-level field only). So no `Role::System` message survives
-            // to reach this arm with content still on it, and the arm is a
-            // structural filter rather than a drop.
-            // TRANSLATION-DROP: structural -- system content is hoisted into `req.system` at ingress and emitted as `instructions`
+            // A system turn's content is not lost here: `system.rs` lifts the
+            // text of every `Role::System` message into `instructions` after
+            // the top-level `req.system`, with the billing/attribution block
+            // withheld. The ingresses also hoist these messages into
+            // `req.system` before the request leaves them, so this arm only
+            // sees a system turn from a direct library caller. Emitting it
+            // again as an input item would duplicate it.
+            // TRANSLATION-DROP: structural -- system-role text is lifted into `instructions` by the system translation, so an input item would duplicate it
             Role::System => {}
             Role::User => translate_user_message(id, msg, &mut out, tally)?,
             Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out, tally)?,

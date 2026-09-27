@@ -1309,7 +1309,7 @@ mod tests {
         let mut fingerprint = ClientFingerprintStripTally::default();
         let bag = build_additional_fields(cfg, req, None, &mut fingerprint)
             .unwrap_or(serde_json::Value::Null);
-        fingerprint.flush_for_test();
+        super::super::request::flush_fingerprint_tally(&fingerprint);
         bag
     }
 

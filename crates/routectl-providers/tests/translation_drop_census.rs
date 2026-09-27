@@ -104,15 +104,15 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("openai_responses/extras.rs", 6),
     ("openai_responses/messages.rs", 9),
     ("openai_responses/request.rs", 2),
-    ("openai_responses/system.rs", 2),
+    ("openai_responses/system.rs", 3),
     ("openai_responses/tools.rs", 4),
 ];
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
 const EXPECTED_LANE_MARKERS: usize = 60;
-const EXPECTED_POLICY_ACTION_MARKERS: usize = 7;
-const EXPECTED_STRUCTURAL_MARKERS: usize = 49;
+const EXPECTED_POLICY_ACTION_MARKERS: usize = 10;
+const EXPECTED_STRUCTURAL_MARKERS: usize = 47;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
 /// a worse defect to be FILED rather than an accepted drop. Pinned by CONTENT
@@ -160,6 +160,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "gemini/cloud_project_id_tests.rs",
     "gemini/redirect_tests.rs",
     "gemini/request_drop_counter_tests.rs",
+    "gemini/request_fingerprint_tests.rs",
     "gemini/sse_tests.rs",
     "openai_responses/auth_wiring_tests.rs",
     "openai_responses/e2e_tests.rs",
@@ -173,6 +174,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "openai_responses/request_drop_policy_tests.rs",
     "openai_responses/request_extras_tests.rs",
     "openai_responses/request_lane_observability_tests.rs",
+    "openai_responses/request_system_role_tests.rs",
     "openai_responses/request_test_support.rs",
     "openai_responses/request_tests.rs",
     "openai_responses/response_tests.rs",

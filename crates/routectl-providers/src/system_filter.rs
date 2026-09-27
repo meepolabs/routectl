@@ -5,14 +5,17 @@
 //! version + a client fingerprint). routectl must not forward that
 //! fingerprint to any upstream that isn't the genuine Anthropic billing
 //! party, so every egress strips it before flatten/translation. This
-//! module provides the predicate that identifies the block and a helper
-//! that drops it from a canonical `SystemContent`.
+//! module provides the predicate that identifies the block, a helper
+//! that drops it from a canonical `SystemContent`, and one that collects
+//! `Role::System` message text with it withheld.
 //!
-//! Used by all egresses (openai-compat, bedrock, openai-responses, and
-//! anthropic-api). The anthropic-api egress strips unconditionally too:
-//! an anthropic-api provider can be pointed at a third-party host, where
-//! the OAuth-gated identity cloak does not fire, so the strip has to run
-//! on the always-on normalize path rather than inside the cloak.
+//! Each egress collects and projects system content in its own wire shape
+//! and records every withhold into its per-request
+//! `ClientFingerprintStripTally`. The anthropic-api egress strips
+//! unconditionally too: an anthropic-api provider can be pointed at a
+//! third-party host, where the OAuth-gated identity cloak does not fire, so
+//! the strip has to run on the always-on normalize path rather than inside
+//! the cloak.
 
 use routectl_core::{SystemBlock, SystemContent};
 
@@ -63,6 +66,46 @@ pub fn strip_billing_attribution(
             }
         }
     }
+}
+
+/// The text of every `Role::System` message, in message order and, within a
+/// multi-part message, in part order -- one entry per non-blank text part,
+/// the same granularity an ingress gives each part when it hoists system
+/// messages into `system` blocks. Non-text parts carry no system text.
+///
+/// Every entry the billing/attribution predicate matches is withheld and
+/// `withheld` set. The predicate runs per PART, before any caller joins them:
+/// a fingerprint part that follows legitimate text in the same message is not
+/// at the leading position the predicate tests once the two are joined.
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
+pub fn system_role_texts_stripped(
+    messages: &[routectl_core::Message],
+    withheld: &mut bool,
+) -> Vec<String> {
+    use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role};
+
+    let mut texts = Vec::new();
+    for message in messages.iter().filter(|m| matches!(m.role, Role::System)) {
+        let parts: Vec<&str> = match &message.content {
+            MessageContent::Text(text) => vec![text.as_str()],
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Known(KnownContentPart::Text { text, .. }) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            MessageContent::Null => Vec::new(),
+        };
+        for text in parts.into_iter().filter(|t| !t.trim().is_empty()) {
+            if is_billing_attribution_block(text) {
+                *withheld = true;
+            } else {
+                texts.push(text.to_string());
+            }
+        }
+    }
+    texts
 }
 
 #[cfg(test)]

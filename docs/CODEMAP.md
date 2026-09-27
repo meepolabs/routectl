@@ -440,8 +440,10 @@ license.
   native tool-use items; gated on those two features (the anthropic-api egress
   keeps its own inline parse to stay byte-identical on the empty-id path)
 - `src/system_filter.rs` -- shared predicate + strip helper for the Claude
-  Code billing/attribution system block; used by the egresses before
-  forwarding upstream
+  Code billing/attribution system block, plus `system_role_texts_stripped`
+  (per-part `Role::System` text collection with the block withheld); used by
+  the egresses before forwarding upstream, each projecting into its own wire
+  shape
 - `src/sampling_drop_guard.rs` -- shared leak-guard
   (`warn_dropped_sampling_fields`): one WARN per
   request naming which of the canonical sampling knobs (`n`, `seed`,
@@ -541,7 +543,10 @@ license.
   snapshot (`routectl-router/src/router/mod.rs::log_snapshot`) reads this
   module's `pub` snapshot fns as the Debug-rendered
   `rc_translation_drop_counts` and `rc_translation_policy_action_counts`
-  fields, unconditional (no feature gate), same rationale as `effort`/`mantle`
+  fields, unconditional (no feature gate), same rationale as `effort`/`mantle`.
+  Also homes the crate-internal `ClientFingerprintStripTally`, the one
+  per-request `client_fingerprint_stripped` tally every stripping lane records
+  into and flushes once with its own lane constant
 - `src/aws_region.rs` -- crate-private canonical AWS region parser behind
   every region-derived endpoint builder and signer; exports only
   `validate_aws_region` / `InvalidAwsRegion` for the router's config-load check
@@ -940,7 +945,13 @@ license.
   fallible step, so a rejected request still counts toward the drop rate) and
   counts the `cache_control_unsupported` drop once per request
 - `src/openai_responses/system.rs` -- canonical `system` -> Responses
-  `instructions` flat string (drops per-block cache_control with DEBUG)
+  `instructions` flat string: filtered top-level `system` first, then surviving
+  `Role::System` message text in message order, billing/attribution block
+  withheld from both into one per-request tally (drops per-block cache_control
+  with DEBUG)
+- `src/openai_responses/request_system_role_tests.rs` -- `include!`d into
+  `request_tests.rs`: serialized-wire pins for `Role::System` delivery,
+  ordering, and the per-site fingerprint withhold and count-once contract
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses
   `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items); gates
   reasoning replay per target lane (family recognition + carry/strip/gray);
@@ -1063,7 +1074,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   oneof), `UsageMetadata` incl.
   `cachedContentTokenCount` / `thoughtsTokenCount`)
 - `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: system ->
-  `systemInstruction`, messages -> `contents`/`parts`, tools ->
+  `systemInstruction` (billing/attribution block withheld from both the
+  `Role::System` and the top-level surface, counted once per request),
+  messages -> `contents`/`parts`, tools ->
   `functionDeclarations`, `build_thinking_config` (Gemini-3+ ->
   `thinkingLevel` string by effort, selected by model generation; older
   -> numeric `thinkingBudget` verbatim / effort table / dynamic `-1`;
@@ -1091,6 +1104,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   EMITTED WIRE VALUE, representable sibling survives) plus the per-class
   counter deltas under `serial_test` guards, and the lane's policy-action
   pinning set for `merge_payload_extras`'s managed-key override refusal
+- `src/gemini/request_fingerprint_tests.rs` -- `include!`d into
+  `request.rs`'s `tests` module: serialized-wire pins for the fingerprint
+  withhold on each system surface alone and both together, order
+  preservation, and the policy-action counter under its serial guard
 - `src/gemini/schema.rs` -- `clean_schema_reporting`: pure JSON-Schema ->
   Gemini OpenAPI-subset cleaner shared by tool `parameters` and
   `generationConfig.responseSchema` (oneOf -> anyOf, strip
@@ -1298,6 +1315,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `test=` name resolving to a function in the tree, and one
   `record_translation_lane_seen` site per lane -- each with its planted-defect
   control
+- `tests/system_fingerprint_sweep.rs` -- cross-lane sweep over every enabled
+  egress's real `normalize_request` and both system surfaces: a fingerprint
+  sentinel never ships and a legitimate sentinel always does, with a
+  content-pinned register of known gaps that fails once a gap closes
 - `tests/translation_drop_scope_weld.rs` -- the scope weld: the four
   request-translation surfaces hold exactly the content-pinned in-scope file
   list plus the exempted files, each exemption carrying its reason, so a new
@@ -4692,6 +4713,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   with `stop_sequences` intact, the canonical request is unmutated, and one
   strip WARN correlates to the dispatching request id. Carries a span-aware
   capture layer (the shared testkit capture is event-only)
+- `tests/cross_lane_system_fingerprint_fallback.rs` -- Gemini -> OpenAI
+  Responses fallback against mock upstreams: each hop withholds the
+  billing/attribution block from both system surfaces, keeps legitimate system
+  content (Responses: top-level first, then message text), and the canonical
+  request is unmutated across the walk
 
 ## routectl-auth
 

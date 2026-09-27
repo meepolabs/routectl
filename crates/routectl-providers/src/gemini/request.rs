@@ -19,7 +19,8 @@ use routectl_core::{ChatRequest, ReasoningDetail, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
 use crate::translation_drop_metrics::{
-    record_translation_drop, record_translation_lane_seen, record_translation_policy_action,
+    ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
+    record_translation_policy_action,
 };
 
 use super::GEMINI_FORMAT;
@@ -145,8 +146,15 @@ impl GeminiDropTally {
 /// The config's `id` is used only for error attribution.
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
     let mut tally = GeminiDropTally::default();
-    let built = build_body(provider_id, req, &mut tally);
+    let mut fingerprint = ClientFingerprintStripTally::default();
+    let built = build_body(provider_id, req, &mut tally, &mut fingerprint);
     tally.flush(provider_id);
+    // Flushed beside the drop tally, outside every fallible step, so a request
+    // whose whole system was the fingerprint -- or that withheld it and then
+    // failed -- still counts against the denominator that already counted it.
+    if fingerprint.stripped() {
+        record_translation_policy_action(LANE, "client_fingerprint_stripped");
+    }
     built
 }
 
@@ -156,6 +164,7 @@ fn build_body(
     provider_id: &str,
     req: &ChatRequest,
     tally: &mut GeminiDropTally,
+    fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<GenerateContentRequest> {
     warn_dropped_cache_control(provider_id, req, tally);
     // `seed`, `presence_penalty` and `frequency_penalty` are translated onto
@@ -167,7 +176,7 @@ fn build_body(
         req,
         HONORED_SAMPLING_FIELDS,
     );
-    let system_instruction = build_system_instruction(req);
+    let system_instruction = build_system_instruction(req, fingerprint);
     let contents = build_contents(provider_id, req, tally)?;
     let (tools, tool_config) = build_tools_and_config(provider_id, req, tally);
     let generation_config = build_generation_config(req, tally);
@@ -238,35 +247,34 @@ fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest, tally: &mut 
 // System instruction
 // ---------------------------------------------------------------------------
 
-fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
-    let mut texts: Vec<String> = Vec::new();
-
+fn build_system_instruction(
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Option<SystemInstruction> {
     // Collect system-role messages. Blank texts contribute nothing -- an
     // empty part in systemInstruction is meaningless and the other
     // Anthropic-shape egresses already drop it.
-    for msg in &*req.messages {
-        // TRANSLATION-DROP: structural -- a non-system role is not this loop's subject; `build_contents` translates it
-        if !matches!(msg.role, Role::System) {
-            continue;
-        }
-        match &msg.content {
-            MessageContent::Text(t) => {
-                if !t.trim().is_empty() {
-                    texts.push(t.clone());
-                }
-            }
-            MessageContent::Parts(parts) => {
-                for p in parts {
-                    if let Some(t) = extract_text_from_part(p)
-                        && !t.trim().is_empty()
-                    {
-                        texts.push(t);
-                    }
-                }
-            }
-            // TRANSLATION-DROP: structural -- a Null system message carries no text; there is nothing to lift
-            MessageContent::Null => {}
-        }
+    //
+    // The billing/attribution strip runs on BOTH system surfaces: Gemini is a
+    // third-party upstream that must not receive the client fingerprint the
+    // block carries, and a client can deliver it on either one.
+    let mut message_withheld = false;
+    let mut texts =
+        crate::system_filter::system_role_texts_stripped(&req.messages, &mut message_withheld);
+    // Withheld by routectl, not by the wire: a `systemInstruction` part would
+    // carry the text fine. One class and one tally across both sites, so a
+    // request stripping on both surfaces is still one action. The pin names
+    // the SINGLE-SOURCE test: a both-sources request sets the shared tally
+    // from the sibling site too, so only a fingerprint on this surface alone
+    // fails when this record is deleted.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_is_withheld_from_gemini_and_counted
+    if message_withheld {
+        fingerprint.record();
+        tracing::warn!(
+            model = %sanitize_for_log(&req.model),
+            "gemini egress: Claude Code billing/attribution block dropped from a \
+             system-role message",
+        );
     }
 
     // Lift top-level `system` field if present (Anthropic ingress path).
@@ -275,13 +283,28 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
     // nothing: Gemini would otherwise receive a systemInstruction holding an
     // empty text part.
     use routectl_core::SystemContent;
-    if let Some(system) = req.system.as_ref().filter(|s| !s.is_blank()) {
+    let mut system_withheld = false;
+    let filtered_system = req
+        .system
+        .as_ref()
+        .filter(|s| !s.is_blank())
+        .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut system_withheld));
+    // The second site of the one policy action above, sharing its tally.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_the_top_level_system_is_withheld_from_gemini_and_counted
+    if system_withheld {
+        fingerprint.record();
+        tracing::warn!(
+            model = %sanitize_for_log(&req.model),
+            "gemini egress: Claude Code billing/attribution system block dropped",
+        );
+    }
+    if let Some(system) = filtered_system {
         match system {
-            SystemContent::Text(t) => texts.push(t.clone()),
+            SystemContent::Text(t) => texts.push(t),
             SystemContent::Blocks(blocks) => {
                 for block in blocks {
                     if !block.text.trim().is_empty() {
-                        texts.push(block.text.clone());
+                        texts.push(block.text);
                     }
                 }
             }
@@ -3866,4 +3889,5 @@ mod tests {
     // The three-assertion pinning set for every counted drop, plus the lane
     // denominator, lives in a sibling fragment so this file stays navigable.
     include!("request_drop_counter_tests.rs");
+    include!("request_fingerprint_tests.rs");
 }

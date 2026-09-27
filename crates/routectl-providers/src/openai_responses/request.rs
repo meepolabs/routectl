@@ -16,11 +16,13 @@ use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::{ChatRequest, ResponsesPassthroughItem, Result};
 
 use super::messages::build_input;
-use super::system::translate_system;
+use super::system::{flush_fingerprint_tally, translate_system};
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::{ResponseInput, ResponsesRequest};
 use super::{AuthKind, OpenAiResponsesConfig, extras};
-use crate::translation_drop_metrics::{record_translation_drop, record_translation_lane_seen};
+use crate::translation_drop_metrics::{
+    ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
+};
 
 /// Build a fully-populated `ResponsesRequest` from a routectl
 /// `ChatRequest`. The Provider's `complete()` toggles `stream` to
@@ -41,8 +43,13 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // loss isn't silent.
     crate::sampling_drop_guard::warn_dropped_sampling_fields(&cfg.id, req, &[]);
 
-    let instructions = translate_system(req).unwrap_or_default();
-    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req)?;
+    let mut fingerprint = ClientFingerprintStripTally::default();
+    let instructions = translate_system(req, &mut fingerprint).unwrap_or_default();
+    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req);
+    // Flushed before the input build's `?`, so a request that withheld the
+    // fingerprint and then failed translation still counts.
+    flush_fingerprint_tally(&fingerprint);
+    let input = input?;
     let tools = translate_tools(req);
     let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
 

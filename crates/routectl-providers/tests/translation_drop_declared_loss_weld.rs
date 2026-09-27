@@ -382,6 +382,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         3,
     ),
     ("gemini/request.rs", "build_response_format", 1),
+    ("gemini/request.rs", "build_system_instruction", 2),
     ("gemini/request.rs", "build_tools_and_config", 2),
     ("gemini/request.rs", "content_part_to_part", 7),
     ("gemini/request.rs", "drop_redacted_thinking", 1),
@@ -421,7 +422,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "warn_dropped_cache_control",
         1,
     ),
-    ("openai_responses/system.rs", "translate_system", 1),
+    ("openai_responses/system.rs", "translate_system", 2),
     (
         "openai_responses/system.rs",
         "warn_on_cache_control_loss",

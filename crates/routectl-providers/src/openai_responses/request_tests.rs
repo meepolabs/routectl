@@ -429,3 +429,5 @@ include!("request_extras_tests.rs");
 include!("request_content_tests.rs");
 include!("request_lane_observability_tests.rs");
 include!("request_drop_policy_tests.rs");
+
+include!("request_system_role_tests.rs");

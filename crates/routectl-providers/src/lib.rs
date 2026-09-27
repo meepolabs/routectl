@@ -201,12 +201,13 @@ pub(crate) mod tool_calls;
 
 // Shared filter that drops the Claude Code billing/attribution system
 // block before any egress forwards it to an upstream. Used by every
-// provider egress (openai-compat, bedrock, openai-responses, anthropic-api).
+// provider egress.
 #[cfg(any(
     feature = "openai-compat",
     feature = "bedrock",
     feature = "openai-responses",
-    feature = "anthropic-api"
+    feature = "anthropic-api",
+    feature = "gemini"
 ))]
 pub(crate) mod system_filter;
 

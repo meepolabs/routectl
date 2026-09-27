@@ -310,6 +310,49 @@ pub fn translation_lane_seen(lane: &str) -> u64 {
     with_registry_mut(|reg| reg.lane_seen.get(lane).copied().unwrap_or(0))
 }
 
+/// Per-request record that a lane withheld the Claude Code client fingerprint
+/// from its upstream on at least one surface.
+///
+/// ONE tally per request and lane, shared by every strip site on that lane,
+/// because `client_fingerprint_stripped` is counted per REQUEST: a request
+/// carrying the fingerprint on both the top-level `system` and a
+/// `Role::System` message trips two sites, and a record per site would count
+/// it twice against a denominator that counted it once.
+///
+/// The tally holds no counter call of its own. Each lane flushes it with its
+/// own lane constant, outside every fallible step of its assembly, so a
+/// request that withheld the fingerprint and then failed still counts, and so
+/// the lane-specific population rules (the anthropic lane excludes background
+/// probes) stay with the lane.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+#[must_use = "a fingerprint tally counts nothing until its lane flushes it"]
+#[derive(Debug, Default)]
+pub(crate) struct ClientFingerprintStripTally {
+    stripped: bool,
+}
+
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+impl ClientFingerprintStripTally {
+    /// Note that this request withheld the fingerprint at one more site.
+    /// Idempotent: the flush is per request, not per site.
+    pub(crate) const fn record(&mut self) {
+        self.stripped = true;
+    }
+
+    /// Whether any site on this request withheld the fingerprint.
+    pub(crate) const fn stripped(&self) -> bool {
+        self.stripped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

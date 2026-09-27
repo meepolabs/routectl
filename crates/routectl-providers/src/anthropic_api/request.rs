@@ -95,44 +95,22 @@ use super::extras::{effort_ratio, is_routectl_managed_key};
 // Per-request policy-action tallies
 // ---------------------------------------------------------------------------
 
-/// Per-request record of whether this request's Claude Code client
-/// fingerprint was withheld from the upstream ANYWHERE on the body-assembly
-/// path.
-///
-/// ONE tally for the whole lane rather than one per stripping site, because
-/// the class is counted per REQUEST and this path withholds the same
-/// fingerprint on two independent surfaces: the canonical top-level `system`
-/// and the `Role::System` legacy lift. They are mutually exclusive in one
-/// assembly -- the lift runs only when no canonical system survives -- but
-/// the exclusivity is a property of today's branch, not of the class, and a
-/// record per site would count a future request that tripped both twice
-/// against a denominator that counted it once, pushing the action rate above
-/// 1.0.
-///
-/// This is the convention for the class generally, not a quirk of this lane:
-/// one operator-facing label per action, one record per request, however many
-/// surfaces of that request carried the withheld content.
-#[derive(Default)]
-pub(crate) struct ClientFingerprintStripTally {
-    stripped: bool,
-}
+// This path withholds the fingerprint on three surfaces sharing one tally: the
+// canonical top-level `system`, the `Role::System` legacy lift, and forwarded
+// system turns. The two system-field surfaces are exclusive in one assembly
+// today -- the lift runs only when no canonical system survives -- but the
+// class is counted per request, not per branch.
+pub(crate) use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
-impl ClientFingerprintStripTally {
-    /// Note that this request withheld the fingerprint at one more site.
-    /// Idempotent by construction: the flush is per request, not per site.
-    pub(crate) const fn record(&mut self) {
-        self.stripped = true;
-    }
-
-    /// Takes the request so a background probe records nothing -- see
-    /// `super::probe_aware_metrics`.
-    fn flush(&self, req: &ChatRequest) {
-        if self.stripped && super::is_client_traffic(req) {
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "client_fingerprint_stripped",
-            );
-        }
+/// Count this request's fingerprint withhold on the anthropic lane. Takes the
+/// request so a background probe records nothing -- see
+/// `super::probe_aware_metrics`.
+fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally, req: &ChatRequest) {
+    if fingerprint.stripped() && super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_policy_action(
+            super::LANE,
+            "client_fingerprint_stripped",
+        );
     }
 }
 
@@ -955,7 +933,7 @@ pub(crate) fn normalize(
     // its replay-invariant walk was still counted by this lane's denominator.
     // Either shape missing from the numerator reads the action rate low for
     // precisely the requests that withhold the most.
-    fingerprint.flush(req);
+    flush_fingerprint_tally(&fingerprint, req);
     let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)

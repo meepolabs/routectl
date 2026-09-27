@@ -568,7 +568,7 @@ const TIER_TWO: &[TierTwoRow] = &[
         reason: "the shared fingerprint-withhold predicate, called from the ALWAYS-RUN normalize \
                  path of this lane -- so an anthropic-api provider pointed at a third-party host, \
                  where the cloak never fires, still does not leak the client's billing block. The \
-                 helper is lane-agnostic and three other lanes call it for the same reason; this \
+                 helper is lane-agnostic and four other lanes call it for the same reason; this \
                  row claims the anthropic-api call site, not exclusive ownership of the helper",
         test: "the_canonical_system_billing_strip_counts_one_policy_action",
         known_loss: Some(
