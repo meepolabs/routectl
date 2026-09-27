@@ -892,7 +892,9 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
 ///   - a non-default `base_url` -- `region` is the single source of truth
 ///     for the endpoint; the factory derives the URL, so a manual
 ///     `base_url` would drift from the region.
-///   - an empty / whitespace-only `region`.
+///
+/// The region's own validity is `validate_aws_regions`'s, shared by every
+/// region-deriving lane.
 #[cfg(feature = "bedrock")]
 pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
     use crate::config::default_anthropic_base;
@@ -905,7 +907,7 @@ pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
             base_url,
             auth_kind,
             credential_source,
-            bedrock_mantle: Some(mantle),
+            bedrock_mantle: Some(_),
             ..
         } = entry
         else {
@@ -939,12 +941,6 @@ pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
                  factory derives the URL from it); remove base_url"
             )));
         }
-        if mantle.region.trim().is_empty() {
-            return Err(Error::Config(format!(
-                "provider `{name}`: bedrock_mantle.region is empty -- it must name an AWS \
-                 region (e.g. \"us-east-1\"); the endpoint host and SigV4 scope derive from it"
-            )));
-        }
     }
 
     Ok(())
@@ -960,7 +956,6 @@ pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
 /// With `bedrock_mantle` set, this rejects on either lane:
 ///   - a non-empty `api_key_ref` -- `creds` is the single credential source.
 ///   - a non-empty `base_url` -- `region` derives the endpoint.
-///   - an empty / whitespace-only `region`.
 ///
 /// On `openai-responses` additionally:
 ///   - a set `account_id_ref` -- it belongs to the ChatGPT-OAuth surface,
@@ -984,7 +979,7 @@ pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
             ProviderEntry::OpenaiCompat {
                 api_key_ref,
                 base_url,
-                bedrock_mantle: Some(mantle),
+                bedrock_mantle: Some(_),
                 ..
             } => {
                 if !api_key_ref.is_empty() {
@@ -999,13 +994,6 @@ pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
                         "provider `{name}`: bedrock_mantle is set but base_url is non-empty -- \
                          bedrock_mantle.region is the single source of truth for the endpoint \
                          (the factory derives the URL from it); remove base_url"
-                    )));
-                }
-                if mantle.region.trim().is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle.region is empty -- it must name an AWS \
-                         region (e.g. \"us-east-1\"); the endpoint host and SigV4 scope derive \
-                         from it"
                     )));
                 }
             }
@@ -1028,9 +1016,9 @@ pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
                          mantle lane"
                     )));
                 }
-                let Some(mantle) = bedrock_mantle else {
+                if bedrock_mantle.is_none() {
                     continue;
-                };
+                }
                 if !api_key_ref.is_empty() {
                     return Err(Error::Config(format!(
                         "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- \
@@ -1061,13 +1049,6 @@ pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
                         "provider `{name}`: bedrock_mantle is set but payload_extras carries a \
                          `store` key -- the Responses store flag is forced off on the mantle lane \
                          and cannot be configured; remove it from payload_extras"
-                    )));
-                }
-                if mantle.region.trim().is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle.region is empty -- it must name an AWS \
-                         region (e.g. \"us-east-1\"); the endpoint host and SigV4 scope derive \
-                         from it"
                     )));
                 }
             }
@@ -1757,6 +1738,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_bedrock_creds_refs(config) {
+        errors.push(bare_validation_message(e));
+    }
+    #[cfg(feature = "bedrock")]
+    if let Err(e) = super::validate_region::validate_aws_regions(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {

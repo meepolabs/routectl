@@ -532,7 +532,11 @@ license.
   module's `pub` snapshot fns as the Debug-rendered
   `rc_translation_drop_counts` and `rc_translation_policy_action_counts`
   fields, unconditional (no feature gate), same rationale as `effort`/`mantle`
-- `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: pure
+- `src/aws_region.rs` -- `parse_aws_region` / `require_aws_region`: the one
+  canonical, length-bounded AWS region parser (`AwsRegion`, `AwsPartition`
+  DNS suffixes) behind every region-derived endpoint builder, signer, and the
+  router's config-load check
+- `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: fallible
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->
   `.../anthropic`, `mantle_openai_base` -> `.../openai/v1`, all
@@ -1099,7 +1103,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Authorization/x-amz-date/x-amz-security-token onto request. `apply` signs in
   the `bedrock` scope; `apply_with_service` takes the service scope as a
   parameter so non-bedrock AWS-signed lanes (mantle) can reuse the same signer
-- `src/bedrock/endpoint.rs` -- region-to-bedrock-runtime URL builders;
+- `src/bedrock/endpoint.rs` -- fallible region-to-bedrock-runtime URL
+  builders, the expected-host check behind the stream vendor-origin flag;
   ARN/bracket-suffix path encoding
 - `src/bedrock/frame.rs` -- shared AWS-eventstream framing driver for both
   Bedrock egresses; owns the byte loop, the 12-byte prelude/length/CRC
@@ -1224,6 +1229,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `bedrock-mantle` scope, no first-party Bearer, no-redirect 3xx, 501
   count_tokens, credential-resolve probe, and end-to-end AWS-403 scrub->Auth +
   429 retry_after preservation)
+- `tests/aws_region_egress.rs` -- raw-socket tripwire pins: native Bedrock
+  and all three mantle lanes built directly with a host-altering region send
+  nothing (no connection, auth header, or body) and fail with a config error
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the
   public credential-resolution / auth-dispatch API (`bedrock::auth::resolve`
   Bearer vs SigV4 variants across regions)
@@ -1736,6 +1744,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `BedrockMantle` runtime auth-kind marker), so all three mantle lanes derive
   their endpoint from `region` alone -- the legacy us-east-1 default-endpoint
   fallback (and its WARN) is gone, unreachable behind the validation rejects
+- `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
+  rejection of a non-canonical native `region` / `bedrock_mantle.region`
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation
   collection (incl. `validate_registry_patterns`, rejecting malformed
   `[registry]` glob keys at startup); `validate_class_policy` HARD-rejects an

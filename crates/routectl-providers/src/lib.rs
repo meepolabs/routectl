@@ -110,6 +110,11 @@ pub mod translation_drop_metrics;
 // into the bedrock signer, is gated on `bedrock`.
 pub mod mantle;
 
+// Canonical AWS region parsing shared by every region-derived endpoint
+// builder and signer, and by the router's config validation. Unconditional
+// and dependency-free for the same reason as `mantle`.
+pub mod aws_region;
+
 // Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Gated like
 // `http_client` (both lean on `reqwest`, which any provider feature pulls
 // in); every provider calls into it, so there is no dead code in a

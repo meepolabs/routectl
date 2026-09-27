@@ -1746,7 +1746,8 @@ pub enum ProviderEntry {
     #[cfg(feature = "bedrock")]
     #[non_exhaustive]
     Bedrock {
-        /// AWS region for the Bedrock runtime endpoint.
+        /// AWS region for the Bedrock runtime endpoint; must be a canonical
+        /// AWS region identifier (commercial, GovCloud or China partition).
         region: String,
         /// Wire shape: InvokeModel (default) or Converse.
         #[serde(default)]
@@ -1958,7 +1959,8 @@ pub enum BedrockCredsConfig {
 pub struct BedrockMantleConfig {
     /// AWS region the mantle endpoint lives in (e.g. `us-east-1`). The
     /// factory derives both the endpoint host and the SigV4 signing scope
-    /// from this single value, so it must be non-empty.
+    /// from this single value, so it must be a canonical AWS region
+    /// identifier (commercial, GovCloud or China partition).
     pub region: String,
     /// Credential descriptor for this lane: a long-term bearer key or a
     /// SigV4 credential source (static keys, named profile, or the AWS

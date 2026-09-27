@@ -152,6 +152,8 @@ pub use doctor::{
     MatrixLane, ProbeOutcome, Status, WouldTrimPanel, overall_exit,
 };
 #[cfg(feature = "bedrock")]
+pub use factory::validate_aws_regions;
+#[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_creds_refs;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;

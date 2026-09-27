@@ -57,7 +57,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
     let provider_name = format!("mantle-{}", sanitize_provider_name(model_id));
     let cfg = OpenAiCompatConfig {
         id: format!("mantle:{provider_name}"),
-        base_url: mantle_openai_base(&region),
+        base_url: mantle_openai_base(&region).expect("AWS_REGION must be a canonical region"),
         api_key: String::new(),
         header_extras: Vec::new(),
         payload_extras: None,

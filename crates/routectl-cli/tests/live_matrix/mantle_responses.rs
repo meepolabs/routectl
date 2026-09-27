@@ -58,7 +58,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
         id: format!("mantle:{provider_name}"),
         auth: Arc::new(routectl_core::StaticToken::new("")),
         account_id: None,
-        base_url: mantle_openai_base(&region),
+        base_url: mantle_openai_base(&region).expect("AWS_REGION must be a canonical region"),
         auth_kind: AuthKind::BedrockMantle,
         header_extras: Vec::new(),
         user_agent: Some("routectl-live-test/0.4".into()),

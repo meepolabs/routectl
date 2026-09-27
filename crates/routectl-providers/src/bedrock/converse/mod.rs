@@ -49,6 +49,7 @@ mod tools;
 mod types;
 
 pub(super) use eventstream::stream as eventstream_stream;
+pub(super) use eventstream::stream_from as eventstream_stream_from;
 
 use serde_json::Value;
 

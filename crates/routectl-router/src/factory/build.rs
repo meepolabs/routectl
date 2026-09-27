@@ -261,12 +261,13 @@ async fn build_provider_inner(
                     base_url.trim().is_empty(),
                     "mantle lane requires an empty base_url; validation must reject a manual base_url"
                 );
+                let mantle_base = routectl_providers::mantle::mantle_openai_base(&m.region)?;
                 let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
                 let resolved =
                     routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
                 let cfg = OpenAiCompatConfig {
                     id: format!("openai-compat:{name}"),
-                    base_url: routectl_providers::mantle::mantle_openai_base(&m.region),
+                    base_url: mantle_base,
                     // Empty on the lane: the mantle credential rides the
                     // signed request and the first-party `Authorization:
                     // Bearer <api_key>` insert is skipped. Validation already
@@ -354,13 +355,14 @@ async fn build_provider_inner(
                     &crate::config::default_anthropic_base(),
                     "mantle lane requires base_url at its default; validation must reject a manual base_url"
                 );
+                let mantle_base = routectl_providers::mantle::mantle_anthropic_base(&m.region)?;
                 let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
                 let resolved =
                     routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
                 let cfg = AnthropicApiConfig {
                     id: format!("anthropic-api:{name}"),
                     auth: Arc::new(routectl_core::StaticToken::new(String::new())),
-                    base_url: routectl_providers::mantle::mantle_anthropic_base(&m.region),
+                    base_url: mantle_base,
                     anthropic_version: anthropic_version.clone(),
                     // Force api-key on the lane rather than copying the
                     // config value: the mantle credential rides the signed
@@ -509,6 +511,7 @@ async fn build_provider_inner(
                     base_url.as_deref().is_none_or(|s| s.trim().is_empty()),
                     "mantle lane requires an unset base_url; validation must reject a manual base_url"
                 );
+                let mantle_base = routectl_providers::mantle::mantle_openai_base(&m.region)?;
                 let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
                 let resolved =
                     routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
@@ -516,7 +519,7 @@ async fn build_provider_inner(
                     format!("openai-responses:{name}"),
                     Arc::new(routectl_core::StaticToken::new(String::new())),
                 );
-                cfg.base_url = routectl_providers::mantle::mantle_openai_base(&m.region);
+                cfg.base_url = mantle_base;
                 cfg.auth_kind = OpenaiResponsesAuthKind::BedrockMantle;
                 cfg.header_extras = header_extras
                     .iter()

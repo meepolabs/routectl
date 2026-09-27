@@ -60,7 +60,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
     let cfg = AnthropicApiConfig {
         id: format!("mantle:{provider_name}"),
         auth: Arc::new(routectl_core::StaticToken::new("")),
-        base_url: mantle_anthropic_base(&region),
+        base_url: mantle_anthropic_base(&region).expect("AWS_REGION must be a canonical region"),
         anthropic_version: "2023-06-01".into(),
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),

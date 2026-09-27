@@ -436,6 +436,13 @@ pub async fn run(config_path: &Path, args: CaptureArgs) -> i32 {
             return 1;
         }
     };
+    let url = match endpoint::invoke_url(&target.region, &target.model_id, false) {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
 
     let store = match CompositeStore::open_default().await {
         Ok(store) => store,
@@ -461,7 +468,6 @@ pub async fn run(config_path: &Path, args: CaptureArgs) -> i32 {
     };
 
     let client = reqwest::Client::new();
-    let url = endpoint::invoke_url(&target.region, &target.model_id, false);
 
     let mut captured: Vec<(CanaryKind, Vec<u8>)> = Vec::with_capacity(ALL_CANARIES.len());
     for kind in ALL_CANARIES {

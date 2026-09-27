@@ -107,6 +107,9 @@ pub struct ConverseStreamState {
     /// non-streaming `extract_matched_stop_sequence` gate so streaming
     /// canonical chunks carry the same `matched_stop_sequence` shape.
     pending_stop_sequence: Option<String>,
+    /// Set when the response did not come from the Bedrock-runtime
+    /// endpoint, so its usage report is not the vendor's own.
+    endpoint_is_foreign: bool,
     /// Set once the reserved history-compat dummy tool has been observed
     /// in a `contentBlockStart` on this stream. `handle_block_start` runs
     /// per block, so without this flag two dummy blocks in one response
@@ -154,8 +157,24 @@ pub fn stream<S>(provider_id: String, byte_stream: S) -> BoxStream<'static, Resu
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
+    stream_from(provider_id, byte_stream, true)
+}
+
+/// [`stream`], attributing the final usage report to the vendor endpoint
+/// only when `from_vendor_endpoint` holds.
+pub fn stream_from<S>(
+    provider_id: String,
+    byte_stream: S,
+    from_vendor_endpoint: bool,
+) -> BoxStream<'static, Result<ChatChunk>>
+where
+    S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
+{
     let handler = ConverseFrameHandler {
-        state: ConverseStreamState::default(),
+        state: ConverseStreamState {
+            endpoint_is_foreign: !from_vendor_endpoint,
+            ..ConverseStreamState::default()
+        },
     };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Converse)
 }
@@ -543,7 +562,7 @@ fn build_closing_chunk(
         }],
         upstream_meta: usage_delta.as_ref().map(|_| {
             UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)
-                .with_usage_from_vendor_endpoint(true)
+                .with_usage_from_vendor_endpoint(!state.endpoint_is_foreign)
         }),
         usage: usage_delta,
         opaque_events: Vec::new(),

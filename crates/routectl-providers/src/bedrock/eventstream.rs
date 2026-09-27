@@ -33,6 +33,7 @@ use serde_json::Value;
 
 use routectl_core::{ChatChunk, Error, OpeningUsageOrigin, Result};
 
+use super::BedrockApiShape;
 use super::frame::{self, FrameHandler, FrameLabel};
 use crate::anthropic_api::sse::SseState;
 
@@ -56,6 +57,9 @@ impl FrameHandler for InvokeFrameHandler {
 /// response from `reqwest`. The shared `frame::decode_frames` driver
 /// handles the AWS-eventstream framing; this function supplies only the
 /// Anthropic-SSE payload interpretation.
+///
+/// Usage is attributed to the vendor endpoint; a caller that knows the
+/// response came from elsewhere uses the provider's own decode path.
 pub fn invoke_stream<S>(
     provider_id: String,
     byte_stream: S,
@@ -63,12 +67,47 @@ pub fn invoke_stream<S>(
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    let handler = InvokeFrameHandler {
-        sse_state: SseState::default()
-            .with_opening_origin(OpeningUsageOrigin::BedrockInvoke)
-            .with_vendor_opening(),
+    invoke_stream_from(provider_id, byte_stream, true)
+}
+
+fn invoke_stream_from<S>(
+    provider_id: String,
+    byte_stream: S,
+    from_vendor_endpoint: bool,
+) -> BoxStream<'static, Result<ChatChunk>>
+where
+    S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    let sse_state = SseState::default().with_opening_origin(OpeningUsageOrigin::BedrockInvoke);
+    let sse_state = if from_vendor_endpoint {
+        sse_state.with_vendor_opening()
+    } else {
+        sse_state
     };
+    let handler = InvokeFrameHandler { sse_state };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Invoke)
+}
+
+/// Decode a Bedrock streaming response body for `shape`, attributing its
+/// usage to the vendor only when `endpoint` -- the URL that actually
+/// answered -- is the Bedrock-runtime endpoint for `region`.
+pub(crate) fn response_stream<S>(
+    shape: BedrockApiShape,
+    provider_id: String,
+    region: &str,
+    endpoint: &reqwest::Url,
+    byte_stream: S,
+) -> BoxStream<'static, Result<ChatChunk>>
+where
+    S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    let from_vendor = super::endpoint::is_bedrock_runtime_endpoint(region, endpoint);
+    match shape {
+        BedrockApiShape::Invoke => invoke_stream_from(provider_id, byte_stream, from_vendor),
+        BedrockApiShape::Converse => {
+            super::converse::eventstream_stream_from(provider_id, byte_stream, from_vendor)
+        }
+    }
 }
 
 /// Decode Bedrock ConverseStream frames into routectl `ChatChunk`s.
@@ -715,3 +754,7 @@ mod tests {
 #[cfg(test)]
 #[path = "eventstream_opening_usage_tests.rs"]
 mod eventstream_opening_usage_tests;
+
+#[cfg(test)]
+#[path = "eventstream_vendor_origin_tests.rs"]
+mod eventstream_vendor_origin_tests;

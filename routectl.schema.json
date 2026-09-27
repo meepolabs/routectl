@@ -182,7 +182,7 @@
           "description": "Credential descriptor for this lane: a long-term bearer key or a\nSigV4 credential source (static keys, named profile, or the AWS\ndefault provider chain)."
         },
         "region": {
-          "description": "AWS region the mantle endpoint lives in (e.g. `us-east-1`). The\nfactory derives both the endpoint host and the SigV4 signing scope\nfrom this single value, so it must be non-empty.",
+          "description": "AWS region the mantle endpoint lives in (e.g. `us-east-1`). The\nfactory derives both the endpoint host and the SigV4 signing scope\nfrom this single value, so it must be a canonical AWS region\nidentifier (commercial, GovCloud or China partition).",
           "type": "string"
         }
       },
@@ -1510,7 +1510,7 @@
               ]
             },
             "region": {
-              "description": "AWS region for the Bedrock runtime endpoint.",
+              "description": "AWS region for the Bedrock runtime endpoint; must be a canonical\nAWS region identifier (commercial, GovCloud or China partition).",
               "type": "string"
             },
             "request_timeout_ms": {

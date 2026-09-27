@@ -47,12 +47,16 @@ pub async fn apply(req: &mut reqwest::Request, creds: &ResolvedCreds, region: &s
 /// For `Sigv4`  -- fetches the latest credentials from the provider,
 /// SigV4-signs the request in `service` scope, and merges the auth
 /// headers into `req`.
+///
+/// A non-canonical `region` is refused with [`Error::Config`] before any
+/// credential is fetched or header attached.
 pub async fn apply_with_service(
     req: &mut reqwest::Request,
     creds: &ResolvedCreds,
     region: &str,
     service: &str,
 ) -> Result<()> {
+    crate::aws_region::require_aws_region(region)?;
     match creds {
         ResolvedCreds::Bearer { key } => {
             tracing::debug!(auth_kind = "Bearer", region = %region, service = %service, "applying bedrock auth");
@@ -368,5 +372,45 @@ mod tests {
             .get("x-amz-security-token")
             .and_then(|v| v.to_str().ok());
         assert_eq!(token, Some("session-token-test"));
+    }
+
+    /// Every credential shape must refuse a non-canonical region before it
+    /// attaches anything: the region is the SigV4 scope, and on the
+    /// region-derived lanes it also names the host.
+    #[tokio::test]
+    async fn refuses_a_non_canonical_region_before_attaching_any_auth_header() {
+        let shapes = [
+            BedrockCreds::BearerKey {
+                key: "bedrock-api-key-xyz".into(),
+            },
+            BedrockCreds::Static {
+                access_key: "testkey-sign-xyz".into(),
+                secret_key: "test-secret-key".into(),
+                session_token: Some("session-token-test".into()),
+            },
+        ];
+        for creds in shapes {
+            let resolved = resolve(&creds, "us-west-2").await.unwrap();
+            for region in ["x@127.0.0.1:9/", "us-west-2.evil.example", "US-WEST-2", ""] {
+                let mut req = reqwest::Client::new()
+                    .post("https://bedrock-runtime.us-west-2.amazonaws.com/model/test/invoke")
+                    .body("{}")
+                    .build()
+                    .unwrap();
+
+                let result = apply_with_service(&mut req, &resolved, region, "bedrock").await;
+
+                assert!(
+                    matches!(result, Err(Error::Config(ref m)) if m.contains("region")),
+                    "{region:?}: {result:?}"
+                );
+                assert!(req.headers().get(AUTHORIZATION).is_none(), "{region:?}");
+                assert!(req.headers().get("x-amz-date").is_none(), "{region:?}");
+                assert!(
+                    req.headers().get("x-amz-security-token").is_none(),
+                    "{region:?}"
+                );
+            }
+        }
     }
 }

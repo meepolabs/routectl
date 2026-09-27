@@ -9,27 +9,34 @@
 /// AWS SigV4 service scope for the Bedrock mantle lanes.
 pub const MANTLE_SERVICE: &str = "bedrock-mantle";
 
-/// Mantle host for `region`, without a trailing slash.
+/// Mantle host for `region`, without a trailing slash, refusing a
+/// non-canonical region.
 ///
-/// Shape: `https://bedrock-mantle.<region>.api.aws`. Path-free so lane
-/// bases can append their own vocabulary segment.
-pub fn mantle_host(region: &str) -> String {
-    format!("https://bedrock-mantle.{region}.api.aws")
+/// Shape: `https://bedrock-mantle.<region>.<partition dual-stack suffix>`
+/// (`api.aws` outside China). Path-free so lane bases can append their own
+/// vocabulary segment.
+pub fn mantle_host(region: &str) -> routectl_core::Result<String> {
+    let region = crate::aws_region::require_aws_region(region)?;
+    Ok(format!(
+        "https://bedrock-mantle.{}.{}",
+        region.as_str(),
+        region.partition().dual_stack_dns_suffix()
+    ))
 }
 
 /// Anthropic-vocabulary base URL for `region`, without a trailing slash.
 ///
 /// The Anthropic client appends `/v1/messages`, so this base ends at
 /// `/anthropic`.
-pub fn mantle_anthropic_base(region: &str) -> String {
-    format!("{}/anthropic", mantle_host(region))
+pub fn mantle_anthropic_base(region: &str) -> routectl_core::Result<String> {
+    Ok(format!("{}/anthropic", mantle_host(region)?))
 }
 
 /// OpenAI-vocabulary base URL for `region`, without a trailing slash.
 ///
 /// Shape: `<host>/openai/v1`.
-pub fn mantle_openai_base(region: &str) -> String {
-    format!("{}/openai/v1", mantle_host(region))
+pub fn mantle_openai_base(region: &str) -> routectl_core::Result<String> {
+    Ok(format!("{}/openai/v1", mantle_host(region)?))
 }
 
 /// Bedrock mantle authentication shared by the mantle egress lanes.
@@ -139,26 +146,77 @@ mod tests {
 
     #[test]
     fn host_has_expected_shape_and_no_trailing_slash() {
-        let host = mantle_host("us-east-1");
+        let host = mantle_host("us-east-1").unwrap();
         assert_eq!(host, "https://bedrock-mantle.us-east-1.api.aws");
         assert!(!host.ends_with('/'));
     }
 
     #[test]
     fn anthropic_base_ends_at_anthropic_segment() {
-        let base = mantle_anthropic_base("eu-west-1");
+        let base = mantle_anthropic_base("eu-west-1").unwrap();
         assert_eq!(base, "https://bedrock-mantle.eu-west-1.api.aws/anthropic");
         assert!(!base.ends_with('/'));
     }
 
     #[test]
     fn openai_base_has_v1_suffix() {
-        let base = mantle_openai_base("ap-southeast-2");
+        let base = mantle_openai_base("ap-southeast-2").unwrap();
         assert_eq!(
             base,
             "https://bedrock-mantle.ap-southeast-2.api.aws/openai/v1"
         );
         assert!(!base.ends_with('/'));
+    }
+
+    #[test]
+    fn host_follows_the_region_partition_dual_stack_suffix() {
+        let cases = [
+            ("us-west-2", "bedrock-mantle.us-west-2.api.aws"),
+            ("us-gov-west-1", "bedrock-mantle.us-gov-west-1.api.aws"),
+            (
+                "cn-north-1",
+                "bedrock-mantle.cn-north-1.api.amazonwebservices.com.cn",
+            ),
+        ];
+
+        for (region, host) in cases {
+            let base = mantle_host(region).unwrap();
+            let parsed = reqwest::Url::parse(&base).unwrap();
+
+            assert_eq!(parsed.scheme(), "https", "{region}");
+            assert_eq!(parsed.host_str(), Some(host), "{region}");
+            assert_eq!(parsed.port(), None, "{region}");
+        }
+    }
+
+    #[test]
+    fn every_builder_refuses_a_host_altering_region() {
+        let hostile = [
+            "x@127.0.0.1:9/",
+            "us-west-2.evil.example/",
+            "evil.example#",
+            "evil.example?",
+            "us-west-2 ",
+            "US-WEST-2",
+            "",
+        ];
+
+        for region in hostile {
+            let results = [
+                mantle_host(region),
+                mantle_anthropic_base(region),
+                mantle_openai_base(region),
+            ];
+
+            for result in results {
+                match result {
+                    Err(routectl_core::Error::Config(msg)) => {
+                        assert!(msg.contains("region"), "{region:?}: {msg}");
+                    }
+                    other => panic!("{region:?} must be refused, got {other:?}"),
+                }
+            }
+        }
     }
 
     #[cfg(feature = "bedrock")]

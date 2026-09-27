@@ -15788,6 +15788,7 @@ pub fn routectl_router::unread_thinking_budget_warnings(&routectl_router::config
 pub fn routectl_router::upsert_pool_members(&mut toml_edit::document::DocumentMut, &str, &[&str])
 pub fn routectl_router::validate_alias_chain_targets(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_alias_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>
+pub fn routectl_router::validate_aws_regions(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_creds_refs(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_global_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_invoke_model_family(&routectl_router::config::Config) -> routectl_core::error::Result<()>

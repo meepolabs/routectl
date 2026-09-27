@@ -424,10 +424,10 @@ impl Provider for BedrockProvider {
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
-                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, false)
+                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, false)?
             }
             BedrockApiShape::Converse => {
-                endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, false)
+                endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, false)?
             }
         };
 
@@ -526,10 +526,10 @@ impl Provider for BedrockProvider {
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
-                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, true)
+                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, true)?
             }
             BedrockApiShape::Converse => {
-                endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, true)
+                endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, true)?
             }
         };
 
@@ -587,13 +587,14 @@ impl Provider for BedrockProvider {
         );
 
         let provider_id = self.cfg.id.clone();
-        let byte_stream = resp.bytes_stream();
-        let stream = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => eventstream::invoke_stream(provider_id.clone(), byte_stream),
-            BedrockApiShape::Converse => {
-                eventstream::converse_stream(provider_id.clone(), byte_stream)
-            }
-        };
+        let endpoint = resp.url().clone();
+        let stream = eventstream::response_stream(
+            self.cfg.api_shape,
+            provider_id.clone(),
+            &self.cfg.region,
+            &endpoint,
+            resp.bytes_stream(),
+        );
         Ok(routectl_core::wrap_stream_with_summary(
             stream,
             "upstream",
@@ -653,7 +654,7 @@ impl Provider for BedrockProvider {
             &body,
         );
 
-        let url = endpoint::count_tokens_url(&self.cfg.region, &self.cfg.model_id);
+        let url = endpoint::count_tokens_url(&self.cfg.region, &self.cfg.model_id)?;
         let body_str = serde_json::to_vec(&body)
             .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
         let request = self

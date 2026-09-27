@@ -52,7 +52,11 @@ impl std::fmt::Debug for ResolvedCreds {
 /// Build a runtime credentials handle from the configured `BedrockCreds`.
 /// Async because `Profile` and `DefaultChain` may need to load credential
 /// chains (and on a cold start, hit SSO endpoints) before returning.
+///
+/// A non-canonical `region` is refused with [`Error::Config`] before any
+/// credential chain is consulted.
 pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds> {
+    crate::aws_region::require_aws_region(region)?;
     match creds {
         BedrockCreds::BearerKey { key } => Ok(ResolvedCreds::Bearer { key: key.clone() }),
 
@@ -195,6 +199,35 @@ mod tests {
                 );
             }
             Err(other) => panic!("expected Auth or Ok, got {other:?}"),
+        }
+    }
+
+    /// Credential resolution is refused for a non-canonical region before
+    /// any credential chain (which can reach STS / SSO / IMDS scoped by that
+    /// region) is consulted.
+    #[tokio::test]
+    async fn resolve_refuses_a_non_canonical_region_for_every_credential_shape() {
+        let shapes = [
+            BedrockCreds::BearerKey {
+                key: "test-bearer-key".into(),
+            },
+            BedrockCreds::Static {
+                access_key: "testkey-access-xyz".into(),
+                secret_key: "testkey-secret-xyz".into(),
+                session_token: None,
+            },
+            BedrockCreds::Profile {
+                name: "routectl-test-profile-that-does-not-exist".into(),
+            },
+            BedrockCreds::DefaultChain,
+        ];
+        for creds in &shapes {
+            let result = resolve(creds, "us-west-2.evil.example").await;
+
+            assert!(
+                matches!(result, Err(Error::Config(ref m)) if m.contains("region")),
+                "{creds:?}: {result:?}"
+            );
         }
     }
 }

@@ -827,6 +827,22 @@ Both shapes are wired for Anthropic models on Bedrock; see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region) for the
 adaptive-thinking interaction.
 
+### AWS region values
+
+Every region-derived lane -- native `bedrock` `region` and each
+`bedrock_mantle.region` -- builds its endpoint host from the region and
+signs under it, so the value must be a canonical AWS region identifier:
+lowercase `a-z`, `0-9` and `-` only, at most 32 bytes, in the commercial
+(`us-west-2`, `eu-central-1`), GovCloud (`us-gov-west-1`) or China
+(`cn-north-1`) partition. Anything else -- empty, whitespace, uppercase,
+a dot, or a URL character such as `@`, `/`, `:`, `#` or `?` -- is REJECTED
+at config load, and a library caller that constructs a provider directly
+with such a region gets a config error before any credential is resolved,
+any request is signed, or any connection is opened. The host follows the
+partition's DNS suffix: `bedrock-runtime.<region>.amazonaws.com`
+(`.amazonaws.com.cn` in China) and `bedrock-mantle.<region>.api.aws`
+(`.api.amazonwebservices.com.cn` in China).
+
 ## `[providers.X.bedrock_mantle]` -- Bedrock mantle Anthropic lane
 
 An `anthropic-api`-kind provider reaches AWS Bedrock's managed mantle
@@ -852,8 +868,9 @@ upstream = "claude-haiku-4-5-20251001-v1:0"   # bare model id, no "us." prefix
 
 Fields:
 
-- `region` (required, non-empty) -- the AWS region the mantle endpoint
-  lives in (e.g. `us-east-1`). It is the SINGLE source of truth: the
+- `region` (required, a canonical AWS region -- see
+  [AWS region values](#aws-region-values)) -- the AWS region the mantle
+  endpoint lives in (e.g. `us-east-1`). It is the SINGLE source of truth: the
   factory derives both the endpoint host
   (`https://bedrock-mantle.<region>.api.aws/anthropic`) and the SigV4
   signing scope from it. Do NOT set `base_url` on a mantle provider.
@@ -883,7 +900,8 @@ incoherent mantle entry:
   source, so a stray `api_key_ref` is dead config.
 - a non-default `base_url` -- REJECTED. `region` derives the endpoint, so a
   manual `base_url` would drift from it.
-- an empty / whitespace-only `region` -- REJECTED.
+- a `region` that is not a canonical AWS region identifier (including an
+  empty or whitespace-only value) -- REJECTED.
 
 The mantle lane uses a no-redirect client: any 3xx from the upstream is a
 fault to surface, never followed (auto-following a signed POST would
@@ -953,7 +971,8 @@ Validation (build, reload, `config check`) rejects an incoherent entry:
 - a set `account_id_ref` -- REJECTED (a ChatGPT-account id has no meaning
   on the mantle lane).
 - a non-default `base_url` -- REJECTED (`region` derives the endpoint).
-- an empty / whitespace-only `region` -- REJECTED.
+- a `region` that is not a canonical AWS region identifier (including an
+  empty or whitespace-only value) -- REJECTED.
 - a `store` key in `payload_extras` -- REJECTED (see above).
 - `auth_kind = "bedrock-mantle"` WITHOUT the sub-table -- REJECTED with a
   hard error naming the block form. See the migration note below.
@@ -1011,7 +1030,8 @@ Validation rejects an incoherent entry:
 - a non-empty `api_key_ref` -- REJECTED (`creds` is the single credential
   source).
 - a non-empty `base_url` -- REJECTED (`region` derives the endpoint).
-- an empty / whitespace-only `region` -- REJECTED.
+- a `region` that is not a canonical AWS region identifier (including an
+  empty or whitespace-only value) -- REJECTED.
 
 `count_tokens` on the mantle compat lane returns a deterministic 501
 (`NotImplemented`): the router never walks the compat lane for token

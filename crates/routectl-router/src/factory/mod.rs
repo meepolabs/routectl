@@ -4,6 +4,8 @@ mod build;
 #[cfg(feature = "openai-responses")]
 mod installation_id;
 mod validate;
+#[cfg(feature = "bedrock")]
+mod validate_region;
 mod warnings;
 
 pub use build::ipv4_compatible_embedded;
@@ -29,6 +31,8 @@ pub use validate::{
     validate_codex_version, validate_mitm_config, validate_pools,
     validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
+#[cfg(feature = "bedrock")]
+pub use validate_region::validate_aws_regions;
 pub use warnings::{
     class_policy_warnings, cloudcode_host_warnings, cloudcode_model_warnings,
     codex_identity_warnings, per_block_breakpoint_warnings, unread_thinking_budget_warnings,

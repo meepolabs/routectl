@@ -2702,10 +2702,13 @@ kind = "anthropic-api"
 bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mantle"), "msg: {msg}");
-        assert!(msg.contains("region"), "msg: {msg}");
+        let errors = collect_config_validation(&cfg).errors;
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("mantle") && e.contains("bedrock_mantle.region")),
+            "errors: {errors:?}"
+        );
     }
 }
 
@@ -2799,9 +2802,11 @@ api_key_ref = ""
 bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("region"), "msg: {msg}");
+        let errors = collect_config_validation(&cfg).errors;
+        assert!(
+            errors.iter().any(|e| e.contains("bedrock_mantle.region")),
+            "errors: {errors:?}"
+        );
     }
 
     #[test]
@@ -2983,9 +2988,11 @@ api_key_ref = ""
 bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("region"), "msg: {msg}");
+        let errors = collect_config_validation(&cfg).errors;
+        assert!(
+            errors.iter().any(|e| e.contains("bedrock_mantle.region")),
+            "errors: {errors:?}"
+        );
     }
 
     #[cfg(feature = "openai-responses")]
