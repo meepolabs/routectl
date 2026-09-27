@@ -58,7 +58,7 @@ webbrowser = { version = "1", optional = true }
 fd-lock = { version = "4", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 uuid.workspace = true
 serial_test = "3"
 wiremock.workspace = true

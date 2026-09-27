@@ -109,6 +109,9 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-22.04
+    # Recent runs finish in about 45 minutes; the network-isolation step
+    # carries its own per-leg deadlines inside this bound.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -122,12 +125,14 @@ jobs:
       # The standard gate under hostile conditions: every credential
       # variable the live provider tests read is planted with a synthetic
       # value, then `cargo test --workspace --all-features` runs in a
-      # network namespace that records every DNS query and outbound
-      # connection. Zero attempts is the pass condition; the explicit live
-      # command run under the same variables is the positive control that
-      # must attempt. --require-netns: on CI a missing namespace is a
-      # failure, not a skip. The live tests themselves never run here.
+      # network namespace whose recorder captures every packet to a
+      # non-loopback address or to the resolver. Zero attempts is the pass
+      # condition; each live target, named explicitly under the same
+      # variables, is a positive control that must attempt -- inside the
+      # namespace, so nothing leaves the runner. --require-netns: on CI a
+      # missing namespace is a failure, not a skip.
       - name: standard test gate makes no network attempt
+        timeout-minutes: 90
         run: bash scripts/check-live-gate-isolation.sh --require-netns
 
       # The workspace leg above builds routectl-router without gen-catalog, so

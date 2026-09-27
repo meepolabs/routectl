@@ -46,36 +46,77 @@ fn synthetic_response(status: u16, body: &str) -> reqwest::Response {
     reqwest::Response::from(http_resp)
 }
 
-/// A client whose every connection lands on a closed loopback port, whatever
-/// host the request names: the refresh flow pins its token URL to a const, so
-/// this is what keeps the POST from reaching the real token endpoint. The
-/// request fails with a connect error after the pre-POST event has fired.
-fn unroutable_client(host: &str) -> reqwest::Client {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("reserve a loopback port");
-    reqwest::Client::builder()
+/// A loopback listener this test owns for the whole request, plus a client that
+/// sends every connection for `host` to it: the refresh flow pins its token URL to
+/// a const, so this is what keeps the POST from reaching the real token endpoint.
+/// The listener accepts one connection and closes it at once, so the request fails
+/// after the pre-POST event has fired. The returned task yields the accepted peer,
+/// proving the request dialled here and nowhere else.
+async fn sinkhole_client(
+    host: &str,
+) -> (
+    reqwest::Client,
+    tokio::task::JoinHandle<std::io::Result<std::net::SocketAddr>>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a test-owned loopback listener");
+    let addr = listener.local_addr().expect("listener address");
+    let accept = tokio::spawn(async move {
+        let (conn, peer) = listener.accept().await?;
+        drop(conn);
+        Ok(peer)
+    });
+    let client = reqwest::Client::builder()
         .no_proxy()
-        .resolve(host, closed)
+        .resolve(host, addr)
+        .connect_timeout(CLIENT_TIMEOUT)
+        .timeout(CLIENT_TIMEOUT)
         .build()
-        .expect("build unroutable client")
+        .expect("build sinkhole client");
+    (client, accept)
+}
+
+/// Bounds the refresh request and the wait for the listener to see it.
+const CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait, boundedly, for the listener to accept; abort it if it never does.
+async fn accepted_peer(
+    accept: tokio::task::JoinHandle<std::io::Result<std::net::SocketAddr>>,
+) -> std::net::SocketAddr {
+    let abort = accept.abort_handle();
+    match tokio::time::timeout(CLIENT_TIMEOUT, accept).await {
+        Ok(joined) => joined
+            .expect("the listener task must not panic")
+            .expect("the listener must accept the refresh connection"),
+        Err(_) => {
+            abort.abort();
+            panic!("the refresh request never reached the test-owned listener");
+        }
+    }
 }
 
 /// Drive the xAI OAuth refresh path through the public `OAuthFlow` trait.
 /// We split coverage into the pre-POST event (fired inside `refresh_token`)
 /// and the response-side events (fired inside `decode_token_response_traced`).
-/// The public path test lets the network leg fail since we do not run a
-/// server; the pre-POST debug already fired before the POST is issued.
+/// The public path test lets the network leg fail -- the test-owned listener
+/// closes the connection -- after the pre-POST debug has already fired.
 mod public_path {
     use super::*;
     use routectl_auth::oauth::testing::xai_refresh;
 
     #[tokio::test]
     async fn pre_post_event_carries_grant_type_and_refresh_token_sha8() {
-        let http = unroutable_client("auth.x.ai");
+        let (http, accept) = sinkhole_client("auth.x.ai").await;
         let refresh = "test-xai-refresh-token-ABC";
 
-        let (_result, events) = with_capture(xai_refresh(&http, refresh)).await;
+        let (result, events) = with_capture(xai_refresh(&http, refresh)).await;
+        let peer = accepted_peer(accept).await;
+        assert!(peer.ip().is_loopback(), "unexpected peer {peer}");
+        assert!(
+            result.is_err(),
+            "a closed connection cannot yield a refreshed token"
+        );
 
         let pre = events
             .iter()

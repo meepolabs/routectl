@@ -247,8 +247,10 @@ task it serves.
 # environment (also true with --all-features).
 cargo test --workspace --release
 
-# Live integration matrix: the only command that calls real providers
-# (explicit opt-in; skips per-provider when its env key is absent).
+# Live integration: calls real providers (explicit opt-in; skips
+# per-provider when its env key is absent). The live targets are
+# live_matrix and live_anthropic_oauth; any --test that names or globs
+# one with live-integration enabled is a live command.
 cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix -- --nocapture --test-threads=1
 ```

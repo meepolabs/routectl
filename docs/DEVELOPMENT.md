@@ -25,12 +25,14 @@ cargo test --workspace --features bedrock,test-utils --release
 # which carries no test legs.
 cargo test -p routectl-router --features gen-catalog --lib
 
-# Live matrix against real providers -- the ONLY command that makes
-# provider calls, and it spends real money. The live targets are
-# `test = false`, so no command above (nor `--all-features`,
-# `--all-targets`, or `--tests`) ever builds or runs them, whatever
-# credentials the shell carries; they run only when named with `--test`.
-# Each provider's tests skip cleanly when their env key is absent, so set
+# Live matrix against real providers. It makes provider calls and spends
+# real money. The live targets (`live_matrix`, `live_anthropic_oauth`) are
+# `test = false`, so no command above -- nor `--all-features`,
+# `--all-targets`, or `--tests` -- builds or runs them, whatever
+# credentials the shell carries. Any invocation that enables
+# `live-integration` AND selects a live target explicitly IS live: a
+# `--test` naming one, or a `--test` glob that matches one (`'live*'`,
+# `'*'`). Each provider's tests skip cleanly when their env key is absent, so set
 # keys for whatever you want to exercise:
 #   OPENROUTER_API_KEY / OPENCODE_GO_API_KEY / NIM_API_KEY
 #                                  -- openai-compat matrix (5 tests)
@@ -66,9 +68,11 @@ RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
 # The standard gate under hostile conditions: plants a synthetic value in
 # every credential variable the live tests read, runs
 # `cargo test --workspace --all-features` inside a private network
-# namespace, and fails on any DNS query or outbound connection. CI runs
-# it with --require-netns; locally it skips by name where unprivileged
-# user namespaces are unavailable.
+# namespace, and fails on any packet to a non-loopback address or to the
+# resolver. As positive controls it runs each live target by name under
+# the same variables and requires each to attempt. CI runs it with
+# --require-netns; locally it skips by name where unprivileged user
+# namespaces are unavailable.
 bash scripts/check-live-gate-isolation.sh
 ```
 
@@ -78,6 +82,10 @@ Safe and live commands, side by side:
 |---|---|---|
 | Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --release` | never, regardless of environment |
 | Live gate (explicit, costs money) | `cargo test -p routectl-cli --features live-integration --release --test live_matrix [--test live_anthropic_oauth]` | yes, for every provider whose credential is set |
+
+The safe rows stay safe only while they select no live target. Adding a
+`--test` that names a live target, or a `--test` glob that matches one,
+to a command with `live-integration` enabled makes it a live command.
 
 The workspace has seven crates: `routectl-core`, `routectl-auth`,
 `routectl-providers`, `routectl-router`, `routectl-usage` (SQLite

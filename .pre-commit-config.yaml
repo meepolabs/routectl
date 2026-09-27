@@ -186,8 +186,8 @@ repos:
       # real gap and no stage here closes it.
       #
       # Makes no provider calls whatever credentials the shell carries: the
-      # live provider tests are `test = false` targets that only an explicit
-      # `--test live_matrix` runs (see docs/DEVELOPMENT.md), and never here.
+      # live provider tests are `test = false` targets that run only when a
+      # `--test` names or globs them (see docs/DEVELOPMENT.md), never here.
       #
       # The conservation suite is deliberately NOT run here. It is a known
       # intermittent (the shared test module compiles into 21 test binaries

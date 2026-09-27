@@ -30,12 +30,14 @@ can read them in order. Each test prints a PASS/FAIL row per model with
 latency, content preview, and reasoning-shape signals (`rd=N` is the
 number of `reasoning_details[]` entries; `fmt=...` is the format tag).
 
-The live test targets are `test = false` and require the
-`live-integration` feature, so they run only when named with `--test`
-as above. No other `cargo test` invocation -- `--workspace`,
-`--all-features`, `--all-targets`, `--tests` -- builds or runs them,
-even with every credential variable set; `scripts/check-live-gate-isolation.sh`
-verifies that in a network namespace.
+The live test targets (`live_matrix` and `live_anthropic_oauth`) are
+`test = false` and require the `live-integration` feature, so implicit
+target selection -- `--workspace`, `--all-features`, `--all-targets`,
+`--tests` -- never builds or runs them, even with every credential
+variable set; `scripts/check-live-gate-isolation.sh` verifies that in a
+network namespace. Explicit selection is live: a `--test` naming a live
+target, or a `--test` glob that matches one (`'live*'`, `'*'`), runs it
+whenever `live-integration` is enabled.
 
 ## Coverage philosophy
 

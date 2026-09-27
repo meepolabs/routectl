@@ -120,7 +120,7 @@ libc = "0.2"
 # credentials from the environment (OPENROUTER_API_KEY, NIM_API_KEY,
 # AWS_BEARER_TOKEN_BEDROCK, etc.). The feature alone runs nothing: the live
 # targets are `test = false` (see the [[test]] entries below), so they run
-# only when named. Run with:
+# only when a `--test` names or globs them. Run with:
 #   cargo test -p routectl-cli --features live-integration --release \
 #     --test live_matrix -- --nocapture --test-threads=1
 live-integration = []
@@ -172,7 +172,8 @@ nix = { version = "0.31", features = ["signal"] }
 # enables `live-integration` (`--all-features` included) into real,
 # billable provider traffic. `test = false` removes these targets from
 # every implicit selection -- plain, `--workspace`, `--all-features`,
-# `--all-targets`, `--tests` -- and they run only when named with `--test`.
+# `--all-targets`, `--tests` -- and they run only when a `--test` names
+# them or a `--test` glob matches them (`'live*'` or `'*'` is live).
 # `required-features` turns naming one without the feature into an error
 # instead of an empty binary. Being unselected also hides them from
 # `clippy --all-targets` (even alongside `--test`), so the lint gates run a

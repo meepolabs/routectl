@@ -8329,8 +8329,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   submodule must derive its alias target through, so a dot-free model id
   can never collide with its own alias key) plus `#[path]` wiring of the
   per-scenario submodules; one test binary, gated by the `live-integration`
-  feature and declared `test = false`, so it runs only when named with
-  `--test live_matrix`
+  feature and declared `test = false`, so it runs only when a `--test`
+  names or globs it
 - `tests/live_matrix/openai_compat.rs` -- openai-compat matrices (OpenRouter /
   opencode-go / NIM)
 - `tests/live_matrix/bedrock_invoke.rs` -- Anthropic-on-Bedrock via
@@ -8507,6 +8507,7 @@ new section or a second doc.
 - `check-nav-index.test.sh` -- self-test for the navigation-index check
 - `check-live-gate-isolation.sh` -- hostile-environment check that the
   standard all-features test gate makes zero network attempts with every
-  live-test credential variable planted, inside a private network namespace
-- `net-oracle.py` -- the DNS / TCP attempt recorder that check runs inside
-  the namespace
+  live-test credential variable planted, inside a private network namespace,
+  with per-live-target positive controls
+- `net-oracle.py` -- the loopback packet-capture attempt recorder (plus DNS
+  responder) that check runs inside the namespace

@@ -298,51 +298,144 @@ async fn close_cannot_return_while_an_admitted_slot_is_still_held() {
     assert_eq!(tracker.in_flight(), 0);
 }
 
+/// What one contender saw: refused, or admitted and then released, and whether its
+/// slot was still held at an instant the tracker itself reported closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContenderOutcome {
+    Refused,
+    Admitted { held_while_closed: bool },
+}
+
+/// The closer's half of the coordination: do not close until at least one contender
+/// holds a slot. `notify_one` stores a permit, so an admission that lands before this
+/// starts waiting is not lost.
+async fn await_first_admission(first_admitted: &tokio::sync::Notify) {
+    tokio::time::timeout(WAIT, first_admitted.notified())
+        .await
+        .expect("at least one contender must be admitted before the close");
+}
+
+/// The claimant's half of the coordination: keep the slot until the tracker is
+/// ACTUALLY closed, read from the tracker rather than from a message the closer sent
+/// before closing. Polled, because the tracker publishes no close event.
+async fn hold_until_closed(tracker: &ConfirmationTracker) {
+    tokio::time::timeout(WAIT, async {
+        while !tracker.is_closed() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the close must take effect while an admitted claim is held");
+}
+
+/// One contender: claim, and if admitted, announce it and hold the slot across the
+/// close. `held_while_closed` is read with the claim still alive, so `true` is direct
+/// evidence that an admitted slot overlapped the closed state.
+async fn contend(
+    tracker: &ConfirmationTracker,
+    first_admitted: &tokio::sync::Notify,
+) -> ContenderOutcome {
+    let Some(claim) = tracker.claim() else {
+        return ContenderOutcome::Refused;
+    };
+    first_admitted.notify_one();
+    hold_until_closed(tracker).await;
+    let held_while_closed = tracker.is_closed();
+    drop(claim);
+    ContenderOutcome::Admitted { held_while_closed }
+}
+
+/// The closer: wait for an admission, then close. Returns the in-flight count at the
+/// instant `close_and_wait` returned.
+async fn close_after_first_admission(
+    tracker: &ConfirmationTracker,
+    first_admitted: &tokio::sync::Notify,
+) -> usize {
+    await_first_admission(first_admitted).await;
+    tracker.close_and_wait(WAIT).await;
+    tracker.in_flight()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_admitted_claim_is_held_across_the_close_it_races() {
+    // The single-source pin for the coordination the hostile sweep below relies on.
+    // On a current-thread runtime spawned tasks run in spawn order and only at await
+    // points, so each half of the coordination is the ONLY thing standing between this
+    // test and a deterministic failure:
+    //
+    //   - without `await_first_admission`, the closer (spawned first) closes before the
+    //     contender is polled, the contender is refused, and nothing is admitted;
+    //   - without `hold_until_closed`, the contender claims and releases without
+    //     yielding, so the close begins with nothing outstanding.
+    //
+    // Either way the assertions below fail rather than hang: every wait is bounded.
+    let tracker = Arc::new(ConfirmationTracker::new());
+    let first_admitted = Arc::new(tokio::sync::Notify::new());
+
+    let closer = {
+        let tracker = Arc::clone(&tracker);
+        let first_admitted = Arc::clone(&first_admitted);
+        tokio::spawn(async move { close_after_first_admission(&tracker, &first_admitted).await })
+    };
+    let contender = {
+        let tracker = Arc::clone(&tracker);
+        let first_admitted = Arc::clone(&first_admitted);
+        tokio::spawn(async move { contend(&tracker, &first_admitted).await })
+    };
+
+    let outcome = tokio::time::timeout(WAIT, contender)
+        .await
+        .expect("the contender must finish")
+        .expect("the contender must not panic");
+    let in_flight_at_return = tokio::time::timeout(WAIT, closer)
+        .await
+        .expect("the close must finish")
+        .expect("the closer must not panic");
+
+    assert_eq!(
+        outcome,
+        ContenderOutcome::Admitted {
+            held_while_closed: true
+        },
+        "the contender must be admitted and still hold its slot when the tracker reports \
+         closed",
+    );
+    assert_eq!(
+        in_flight_at_return, 0,
+        "close_and_wait returned while the claim was still held"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_close_racing_claims_admits_each_claimant_exactly_once_or_not_at_all() {
     // The DISCRIMINATING half of the invariant above, and the reason the sweep is not
     // enough on its own: every assertion there holds vacuously if NO claim is ever
     // admitted (a tracker that refused everything passes all four). This asserts, in
-    // EVERY round, that the close raced at least one admitted claim and still resolved
-    // each contender exactly once, so the sweep is measuring a contended tracker rather
-    // than a closed one.
+    // EVERY round, that at least one admitted claim was still held while the tracker
+    // reported closed, and that each contender still resolved exactly once, so the
+    // sweep is measuring a contended tracker rather than a closed one.
     //
     // Admission is COORDINATED, not sampled. Left to the barrier alone, the closer can
     // be released and close before any contender is polled, in every round, leaving
-    // the oracle nothing to measure. So the closer waits for the first admission before
-    // closing, and every admitted claimant holds its slot until the close has begun.
-    // Each round therefore races the close against at least one provably outstanding
-    // claim, while the remaining contenders still land on whichever side of it the
-    // scheduler puts them.
-    //
-    // Every wait is bounded by `WAIT`, so a broken handshake fails the test instead of
-    // hanging it.
+    // the oracle nothing to measure. So the closer waits for the first admission
+    // before closing, and every admitted claimant holds its slot until the tracker
+    // itself reads closed -- not until the closer merely announces it is about to
+    // close. The remaining contenders still land on whichever side of the close the
+    // scheduler puts them. `an_admitted_claim_is_held_across_the_close_it_races` pins
+    // each half of that coordination deterministically.
     for round in 1..=HOSTILE_ROUNDS {
         let tracker = Arc::new(ConfirmationTracker::new());
         let gate = Arc::new(tokio::sync::Barrier::new(HOSTILE_CLAIMERS + 1));
-        // `notify_one` stores a permit, so an admission that lands before the closer
-        // starts waiting is not lost.
         let first_admitted = Arc::new(tokio::sync::Notify::new());
-        let (close_began_tx, close_began_rx) = tokio::sync::watch::channel(false);
 
         let contenders: Vec<_> = (0..HOSTILE_CLAIMERS)
             .map(|_| {
                 let tracker = Arc::clone(&tracker);
                 let gate = Arc::clone(&gate);
                 let first_admitted = Arc::clone(&first_admitted);
-                let mut close_began = close_began_rx.clone();
                 tokio::spawn(async move {
                     gate.wait().await;
-                    let Some(claim) = tracker.claim() else {
-                        return false;
-                    };
-                    first_admitted.notify_one();
-                    tokio::time::timeout(WAIT, close_began.wait_for(|began| *began))
-                        .await
-                        .expect("the close must begin once a claim is admitted")
-                        .expect("the closer keeps the close-began sender alive");
-                    drop(claim);
-                    true
+                    contend(&tracker, &first_admitted).await
                 })
             })
             .collect();
@@ -353,44 +446,43 @@ async fn a_close_racing_claims_admits_each_claimant_exactly_once_or_not_at_all()
             let first_admitted = Arc::clone(&first_admitted);
             tokio::spawn(async move {
                 gate.wait().await;
-                tokio::time::timeout(WAIT, first_admitted.notified())
-                    .await
-                    .expect("at least one contender must be admitted before the close");
-                let outstanding_at_close = tracker.in_flight();
-                close_began_tx.send_replace(true);
-                tracker.close_and_wait(WAIT).await;
-                (outstanding_at_close, tracker.in_flight())
+                close_after_first_admission(&tracker, &first_admitted).await
             })
         };
 
-        let mut admitted = 0usize;
         let mut refused = 0usize;
+        let mut admitted = 0usize;
+        let mut held_while_closed = 0usize;
         for contender in contenders {
-            let was_admitted = tokio::time::timeout(WAIT, contender)
+            let outcome = tokio::time::timeout(WAIT, contender)
                 .await
                 .expect("every contender must finish")
                 .expect("no contender may panic");
-            if was_admitted {
-                admitted += 1;
-            } else {
-                refused += 1;
+            match outcome {
+                ContenderOutcome::Refused => refused += 1,
+                ContenderOutcome::Admitted {
+                    held_while_closed: held,
+                } => {
+                    admitted += 1;
+                    held_while_closed += usize::from(held);
+                }
             }
         }
-        let (outstanding_at_close, in_flight_at_return) = tokio::time::timeout(WAIT, closer)
+        let in_flight_at_return = tokio::time::timeout(WAIT, closer)
             .await
             .expect("the close must finish once every held claim releases")
             .expect("the closer must not panic");
 
         assert!(
-            outstanding_at_close >= 1,
-            "round {round}: the close must race at least one admitted, still-held claim \
-             -- with none outstanding, every invariant here holds vacuously on a tracker \
-             that refused everything",
+            held_while_closed >= 1,
+            "round {round}: no admitted claim was still held while the tracker reported \
+             closed -- with none, every invariant here holds vacuously on a tracker that \
+             refused everything",
         );
-        assert!(
-            admitted >= outstanding_at_close,
-            "round {round}: {admitted} contender(s) reported admission, but \
-             {outstanding_at_close} slot(s) were already held when the close began",
+        assert_eq!(
+            held_while_closed, admitted,
+            "round {round}: every admitted claimant holds its slot until the tracker \
+             reads closed, so each must have observed the close while holding",
         );
         assert_eq!(
             admitted + refused,

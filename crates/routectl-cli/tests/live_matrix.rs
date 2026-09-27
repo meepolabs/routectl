@@ -19,10 +19,10 @@
 //!   cargo test -p routectl-cli --features live-integration --release \
 //!     --test live_matrix -- --nocapture --test-threads=1
 //!
-//! This target is `test = false` in Cargo.toml: it runs only when named
-//! with `--test`, never under `--workspace` / `--all-features` /
-//! `--all-targets`, so ambient credentials cannot turn a standard test run
-//! into provider traffic.
+//! This target is `test = false` in Cargo.toml: it runs only when a
+//! `--test` names it or a `--test` glob matches it, never under
+//! `--workspace` / `--all-features` / `--all-targets`, so ambient
+//! credentials cannot turn a standard test run into provider traffic.
 //!
 //! Setting `--test-threads=1` keeps the per-provider reports legible.
 
