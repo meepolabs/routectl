@@ -225,7 +225,7 @@ mod tests {
 
     use super::*;
     use crate::proxy::forward::ForwardState;
-    use crate::proxy::metrics::{ProxyMetrics, WarnOnce};
+    use crate::proxy::metrics::{ProxyMetrics, ResultClass, WarnOnce};
 
     #[test]
     fn anthropic_inference_paths_excludes_direct_client_dialects() {
@@ -294,6 +294,21 @@ mod tests {
 
         let response = handle_request(&ctx, req).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        // `forward` selects the direct, no-proxy client from the leg it
+        // is handed, and records that same leg -- so the metric pins
+        // which client carried the credential-bearing re-inject.
+        assert_eq!(
+            ctx.metrics
+                .request_count(Leg::Inference, ResultClass::Success, PathClass::Inference),
+            1,
+            "the re-inject must be dispatched on the inference leg"
+        );
+        assert_eq!(
+            ctx.metrics.requests_total(),
+            1,
+            "the re-inject must be recorded exactly once and on no other leg"
+        );
 
         let last_request = reinject_server
             .received_requests()
