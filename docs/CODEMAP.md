@@ -8509,11 +8509,9 @@ new section or a second doc.
   appears by path in this file or `DEVELOPMENT.md`; existence only, never
   row wording or freshness
 - `check-nav-index.test.sh` -- self-test for the navigation-index check
-- `check-live-gate-isolation.sh` -- hostile-environment check that the
-  standard all-features test gate makes zero network attempts with every
-  live-test and product credential variable planted, inside private network
-  + mount namespaces with host Unix sockets masked, with a recorder control,
-  a Unix-socket canary control, and per-live-target positive controls
+- `check-live-gate-isolation.sh` -- hostile-environment check proving the
+  standard all-features gate makes zero network attempts under planted
+  credentials inside private network and mount namespaces
 - `check-live-gate-isolation.test.sh` -- self-test for that check's static
   contract: deadline budget vs the CI step timeout, the fixed planted
   credential names, and run-from-anywhere source resolution
