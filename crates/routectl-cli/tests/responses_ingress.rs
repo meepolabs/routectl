@@ -283,3 +283,145 @@ async fn auth_rejects_bogus_token() {
         .unwrap();
     assert_eq!(resp.status(), 401);
 }
+
+// ---------------------------------------------------------------------------
+// additional_tools: inline tool declarations reach routing and egress
+// ---------------------------------------------------------------------------
+
+/// Chain `[no-search, fallback]`, each on its own upstream. `no-search`
+/// declares `web_search` unsupported, so the capability pre-filter skips
+/// it for any request whose canonical tools carry a web_search tool.
+fn capability_chain_config(no_search_base: &str, fallback_base: &str) -> Arc<Config> {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "no-search".to_string(),
+        ProviderEntry::openai_compat(no_search_base.to_string(), common::file_ref("test-key")),
+    );
+    providers.insert(
+        "fallback".to_string(),
+        ProviderEntry::openai_compat(fallback_base.to_string(), common::file_ref("test-key")),
+    );
+
+    let mut models = BTreeMap::new();
+    models.insert(
+        "no-search-model".to_string(),
+        ModelEntry::new("no-search", "mock-model")
+            .with_unsupported_features(vec!["web_search".to_string()]),
+    );
+    models.insert(
+        "fallback-model".to_string(),
+        ModelEntry::new("fallback", "mock-model"),
+    );
+
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "tool-chain".to_string(),
+        AliasValue::Chain(vec!["no-search-model".into(), "fallback-model".into()]),
+    );
+
+    Arc::new(Config {
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            strict_translation: false,
+            allow_disable_fallbacks: true,
+            ..Default::default()
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    })
+}
+
+async fn post_responses(base: &str, input: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&json!({"model": "tool-chain", "input": input}))
+        .send()
+        .await
+        .unwrap()
+}
+
+fn user_input_item() -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "look it up"}]
+    })
+}
+
+#[tokio::test]
+async fn additional_tools_participate_in_capability_routing_and_reach_the_egress() {
+    // Arrange: no top-level `tools`; the declarations ride an
+    // `additional_tools` input item, as responses-lite clients send them.
+    let no_search = MockServer::start().await;
+    let fallback = MockServer::start().await;
+    mount_upstream(&no_search).await;
+    mount_upstream(&fallback).await;
+    let base = helpers::spawn(capability_chain_config(&no_search.uri(), &fallback.uri())).await;
+    let declaring_item = json!({
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "function",
+                "name": "shell",
+                "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+            },
+            {"type": "web_search"}
+        ]
+    });
+
+    // Act
+    let resp = post_responses(&base, json!([declaring_item, user_input_item()])).await;
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let skipped = no_search.received_requests().await.expect("requests");
+    assert!(
+        skipped.is_empty(),
+        "the web_search-incapable target must be skipped, got {} request(s)",
+        skipped.len()
+    );
+    let received = fallback.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream_body["tools"][0]["function"]["name"], "shell",
+        "cross-dialect egress must carry the inline declaration: {upstream_body}"
+    );
+    assert_eq!(
+        upstream_body["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"], "string",
+        "{upstream_body}"
+    );
+}
+
+#[tokio::test]
+async fn request_without_inline_tools_routes_to_the_first_chain_target() {
+    // Arrange: positive control for the routing assertion above -- with no
+    // tool declarations the first target is eligible and serves the turn.
+    let no_search = MockServer::start().await;
+    let fallback = MockServer::start().await;
+    mount_upstream(&no_search).await;
+    mount_upstream(&fallback).await;
+    let base = helpers::spawn(capability_chain_config(&no_search.uri(), &fallback.uri())).await;
+
+    // Act
+    let resp = post_responses(&base, json!([user_input_item()])).await;
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        no_search.received_requests().await.expect("requests").len(),
+        1
+    );
+    assert!(
+        fallback
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+}

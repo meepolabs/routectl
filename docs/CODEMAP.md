@@ -69,7 +69,9 @@ license.
   array of `SystemBlock` with per-block cache_control); `is_blank` is the
   shared egress screen that keeps a meaningless `system: ""` off every wire
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` +
-  `ToolDef::Other(Value)` with `from_openai_function` interop
+  `ToolDef::Other(Value)` with `from_openai_function` interop; accepts
+  `inputSchema` as an exact alias of `input_schema` and lifts a legacy
+  untyped `{function:{...}}` element into `Custom`
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, STRUCTURE-ONLY
   breakpoint validator (4-cap, 1h-before-5m TTL ordering; unrecognized `type`
   / `ttl` values forward verbatim -- marker vocabulary is upstream's to
@@ -975,7 +977,8 @@ license.
   `reasoning_format_foreign`, `reasoning_scheme_incompatible`) exactly once,
   never once per dropped block
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
-  `{type,name,description,parameters}` shape; tool_choice mapping
+  `{type,name,description,parameters}` shape, omitting tools a replayed
+  `additional_tools` input item already declares; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
   provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock.
   `apply_reasoning` sets `effort` from the canonical value, defaults `summary`
@@ -6915,7 +6918,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `function_call` / `function_call_output` / `reasoning`) into `messages[]`,
   lifts `instructions`->`system`, `max_output_tokens`->`max_tokens`,
   `text.format`->`response_format` (a flat `json_schema` format is rewritten
-  into the nested canonical member; other tags ride verbatim); forward-compat
+  into the nested canonical member; other tags ride verbatim); declarations in
+  `additional_tools` input items append to `tools[]` (deduped by function name
+  / identical value; the item also rides the passthrough); forward-compat
   sweep into
   `provider_extras`. `reasoning.effort` lifts to canonical `ReasoningConfig`;
   the reasoning remainder (`summary`/`context`/`mode`/future) is stashed under

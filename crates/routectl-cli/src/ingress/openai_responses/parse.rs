@@ -17,6 +17,8 @@
 //!   - unknown item kind                -> preserved verbatim for a
 //!     same-dialect Responses egress to replay (never 500)
 //! - `tools`                            -> `tools[]` (ToolDef)
+//! - `additional_tools` input item      -> appended to `tools[]` (and still
+//!   preserved verbatim for same-dialect replay)
 //! - `tool_choice`                      -> `tool_choice` (named-forcing shape normalized to nested)
 //! - `reasoning` (object)               -> `reasoning` (ReasoningConfig)
 //! - `max_output_tokens`                -> `max_tokens`
@@ -51,6 +53,11 @@ use routectl_core::OPENAI_RESPONSES_V1;
 /// NOT in this set is swept into `provider_extras` so a future Responses
 /// field reaches the egress without a code edit (forward-compat seam,
 /// mirroring the openai / anthropic ingress sweeps).
+/// Responses `input[]` item kind that declares tools inline instead of in
+/// the top-level `tools` array (responses-lite clients omit `tools`
+/// entirely and send every declaration this way).
+const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
+
 const HANDLED_TOP_LEVEL_FIELDS: &[&str] = &[
     "model",
     "instructions",
@@ -105,15 +112,21 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
 
     // input -> messages[]. Unmodeled item kinds are captured verbatim
     // into routectl_internal for a same-dialect Responses egress replay
-    // (see build_messages) rather than dropped.
-    if let Some(input) = obj.remove("input") {
-        let ParsedInput {
-            messages,
-            passthrough,
-        } = build_messages(input);
-        req.messages = messages.into();
-        req.routectl_internal.responses_input_passthrough = passthrough;
-    }
+    // (see build_messages) rather than dropped. Tool declarations from
+    // `additional_tools` items are held until the top-level tools parse.
+    let additional_tools: Vec<Value> = match obj.remove("input") {
+        Some(input) => {
+            let ParsedInput {
+                messages,
+                passthrough,
+                additional_tools,
+            } = build_messages(input);
+            req.messages = messages.into();
+            req.routectl_internal.responses_input_passthrough = passthrough;
+            additional_tools
+        }
+        None => Vec::new(),
+    };
 
     // Lift in-array system/developer messages into req.system so loose
     // Role::System entries do not reach mutual-exclusion egresses.
@@ -123,6 +136,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     if let Some(tools) = obj.remove("tools") {
         req.tools = build_tools(tools);
     }
+    req.tools = merge_additional_tools(req.tools.take(), &additional_tools);
 
     // tool_choice -> canonical tool_choice. The Responses wire uses a
     // flat named-forcing shape; normalize it to the nested OpenAI form
@@ -290,6 +304,9 @@ fn take_instructions(obj: &mut Map<String, Value>) -> Option<SystemContent> {
 struct ParsedInput {
     messages: Vec<Message>,
     passthrough: Vec<ResponsesPassthroughItem>,
+    /// Tool declarations carried by `additional_tools` input items, in
+    /// input order.
+    additional_tools: Vec<Value>,
 }
 
 /// Turn the Responses `input` field into canonical `messages[]`. `input`
@@ -303,6 +320,7 @@ fn build_messages(input: Value) -> ParsedInput {
         Value::String(text) => ParsedInput {
             messages: vec![user_text_message(text)],
             passthrough: Vec::new(),
+            additional_tools: Vec::new(),
         },
         Value::Array(items) => build_messages_from_items(items),
         // Any other shape is unusable as conversation input; degrade to
@@ -317,6 +335,7 @@ fn build_messages(input: Value) -> ParsedInput {
             ParsedInput {
                 messages: Vec::new(),
                 passthrough: Vec::new(),
+                additional_tools: Vec::new(),
             }
         }
     }
@@ -325,6 +344,7 @@ fn build_messages(input: Value) -> ParsedInput {
 fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
     let mut messages: Vec<Message> = Vec::with_capacity(items.len());
     let mut passthrough: Vec<ResponsesPassthroughItem> = Vec::new();
+    let mut additional_tools: Vec<Value> = Vec::new();
     // Count of modeled (non-passthrough) input items seen so far. Recorded
     // on each preserved item as its "modeled-prefix index" so the Responses
     // egress can splice the item back at its original conversation position
@@ -358,6 +378,11 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
                 modeled_prefix += 1;
             }
             other => {
+                if other == ADDITIONAL_TOOLS_ITEM
+                    && let Some(declared) = item.get("tools").and_then(Value::as_array)
+                {
+                    additional_tools.extend(declared.iter().cloned());
+                }
                 // Unmodeled item kind: preserve it verbatim for a
                 // same-dialect Responses egress to replay, mirroring how
                 // unknown CONTENT blocks survive as `ContentPart::Other`.
@@ -384,6 +409,7 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
     ParsedInput {
         messages,
         passthrough,
+        additional_tools,
     }
 }
 
@@ -784,6 +810,43 @@ fn build_tools(tools: Value) -> Option<Vec<ToolDef>> {
         out.push(build_tool(tool));
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// Append the declarations carried by `additional_tools` input items to
+/// the top-level tools. A declaration already present -- a function tool
+/// with the same name, or an identical non-function tool -- is skipped so
+/// the merged list never names one tool twice; the earlier declaration
+/// wins.
+fn merge_additional_tools(
+    tools: Option<Vec<ToolDef>>,
+    additional: &[Value],
+) -> Option<Vec<ToolDef>> {
+    if additional.is_empty() {
+        return tools;
+    }
+    let mut merged = tools.unwrap_or_default();
+    for raw in additional {
+        let candidate = build_tool(raw);
+        if !merged
+            .iter()
+            .any(|known| same_declaration(known, &candidate))
+        {
+            merged.push(candidate);
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn same_declaration(a: &ToolDef, b: &ToolDef) -> bool {
+    match (a, b) {
+        (ToolDef::Custom(x), ToolDef::Custom(y)) => x.name == y.name,
+        (ToolDef::Other(x), ToolDef::Other(y)) => x == y,
+        _ => false,
+    }
 }
 
 fn build_tool(tool: &Value) -> ToolDef {

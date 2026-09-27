@@ -20,15 +20,67 @@ use routectl_core::{ChatRequest, ToolDef, sanitize_for_log};
 use super::types::{ResponsesFunctionTag, ResponsesTool};
 use crate::translation_drop_metrics::record_translation_drop;
 
+/// Responses `input[]` item kind that declares tools inline. The ingress
+/// merges its declarations into `req.tools` AND preserves the item for
+/// verbatim replay, so this egress must not re-declare them top-level.
+const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
+
+/// Tool declarations carried by the replayed `additional_tools` input
+/// items: function names, plus the raw value of every declaration.
+struct InlineDeclarations<'a> {
+    function_names: Vec<&'a str>,
+    raw: Vec<&'a Value>,
+}
+
+impl<'a> InlineDeclarations<'a> {
+    fn collect(req: &'a ChatRequest) -> Self {
+        let mut decl = Self {
+            function_names: Vec::new(),
+            raw: Vec::new(),
+        };
+        let items = req.routectl_internal.responses_input_passthrough.iter();
+        for p in items
+            .filter(|p| p.item.get("type").and_then(Value::as_str) == Some(ADDITIONAL_TOOLS_ITEM))
+        {
+            for tool in p
+                .item
+                .get("tools")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if tool.get("type").and_then(Value::as_str) == Some("function")
+                    && let Some(name) = tool.get("name").and_then(Value::as_str)
+                {
+                    decl.function_names.push(name);
+                }
+                decl.raw.push(tool);
+            }
+        }
+        decl
+    }
+
+    fn declares(&self, td: &ToolDef) -> bool {
+        match td {
+            ToolDef::Custom(c) => self.function_names.contains(&c.name.as_str()),
+            ToolDef::Other(v) => self.raw.contains(&v),
+        }
+    }
+}
+
 /// Translate `req.tools` into the Responses `tools` array. Returns an
 /// empty Vec when no tools are configured -- the parent
-/// `ResponsesRequest` skips serializing the field when empty.
+/// `ResponsesRequest` skips serializing the field when empty. Tools an
+/// `additional_tools` input item already declares are omitted: that item
+/// is replayed verbatim in `input[]`, and declaring a tool twice is
+/// rejected upstream.
 pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
     let Some(tools) = req.tools.as_ref() else {
         return Vec::new();
     };
+    let inline = InlineDeclarations::collect(req);
     let mut out: Vec<ResponsesTool> = Vec::with_capacity(tools.len());
-    for td in tools {
+    for td in tools.iter().filter(|td| !inline.declares(td)) {
         match td {
             ToolDef::Custom(c) => {
                 // Flat Responses shape: {type, name, description?, parameters, strict?}

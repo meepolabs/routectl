@@ -1614,6 +1614,52 @@ mod tests {
     }
 
     #[test]
+    fn openai_ingress_accepts_legacy_bare_function_tool_without_type() {
+        // Arrange: `{function:{...}}` with no `type` -- the legacy shape
+        // some clients still send. It used to 400 the whole request.
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "function": {"name": "typed", "parameters": {"type": "object"}}},
+                {"function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }}
+            ]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body.clone())
+            .expect("bare-function tool must not reject the request");
+
+        // Assert
+        let tools = req.tools.expect("tools present");
+        assert_eq!(tools.len(), 2);
+        assert!(
+            matches!(&tools[0], routectl_core::ToolDef::Other(v) if v == &body["tools"][0]),
+            "typed function tool stays verbatim: {:?}",
+            tools[0]
+        );
+        let routectl_core::ToolDef::Custom(c) = &tools[1] else {
+            panic!(
+                "expected Custom for the bare-function element, got {:?}",
+                tools[1]
+            );
+        };
+        assert_eq!(c.name, "get_weather");
+        assert_eq!(
+            c.input_schema, body["tools"][1]["function"]["parameters"],
+            "schema must be the caller's parameters, not the empty default"
+        );
+    }
+
+    #[test]
     fn tool_choice_passes_through_canonical_unchanged() {
         // tool_choice translation belongs in the egress (different
         // upstreams want different shapes -- openai-compat wants the

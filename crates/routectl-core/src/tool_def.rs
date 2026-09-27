@@ -21,7 +21,10 @@
 //! Discrimination on the wire: the `type` field decides. Absent or
 //! `"custom"` -> `Custom`. Anything else -> `Other`. This avoids
 //! `name`-based heuristics that would falsely absorb builtin tools
-//! (which also carry `name`) into the typed variant.
+//! (which also carry `name`) into the typed variant. A legacy
+//! bare-function element (`{function: {name, ...}}`, no `type`, no
+//! top-level `name`) is lifted into `Custom` rather than failing on the
+//! missing `name`.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -53,8 +56,11 @@ pub struct CustomTool {
     /// Human-readable tool description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// JSON Schema for the tool's input arguments.
-    #[serde(default = "empty_object_schema")]
+    /// JSON Schema for the tool's input arguments. `inputSchema` (the
+    /// MCP / Agent SDK spelling) is accepted on the wire as an exact
+    /// alias; carrying both spellings on one tool is a duplicate-field
+    /// error. Always serialized as `input_schema`.
+    #[serde(default = "empty_object_schema", alias = "inputSchema")]
     pub input_schema: Value,
     /// Optional cache breakpoint marker on this tool definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,13 +180,53 @@ impl<'de> Deserialize<'de> for ToolDef {
             // from the same Value (rather than re-serializing) to keep
             // unknown fields silently ignored, matching today's behavior
             // for ChatRequest as a whole.
-            None | Some("custom") => serde_json::from_value::<CustomTool>(value)
-                .map(ToolDef::Custom)
-                .map_err(serde::de::Error::custom),
+            None | Some("custom") => {
+                let value = if type_field.is_none() {
+                    lift_bare_function(value)
+                } else {
+                    value
+                };
+                serde_json::from_value::<CustomTool>(value)
+                    .map(ToolDef::Custom)
+                    .map_err(serde::de::Error::custom)
+            }
             // Builtin or unknown discriminator -> opaque passthrough.
             Some(_) => Ok(Self::Other(value)),
         }
     }
+}
+
+/// Rewrite a legacy bare-function element -- `{function: {name,
+/// description?, parameters?, strict?}}` with no `type` and no top-level
+/// `name` -- into the canonical `CustomTool` wire shape. Any other value is
+/// returned unchanged, so a conventional custom tool that also happens to
+/// carry a `function` key keeps its own top-level fields.
+fn lift_bare_function(value: Value) -> Value {
+    let Value::Object(mut obj) = value else {
+        return value;
+    };
+    if obj.contains_key("name") {
+        return Value::Object(obj);
+    }
+    let func = match obj.remove("function") {
+        Some(Value::Object(func)) => func,
+        Some(other) => {
+            obj.insert("function".into(), other);
+            return Value::Object(obj);
+        }
+        None => return Value::Object(obj),
+    };
+    for (from, to) in [
+        ("name", "name"),
+        ("description", "description"),
+        ("parameters", "input_schema"),
+        ("strict", "strict"),
+    ] {
+        if let Some(v) = func.get(from) {
+            obj.entry(to).or_insert_with(|| v.clone());
+        }
+    }
+    Value::Object(obj)
 }
 
 #[cfg(test)]
@@ -250,6 +296,134 @@ mod tests {
         } else {
             panic!("expected Custom variant");
         }
+    }
+
+    #[test]
+    fn camelcase_input_schema_yields_the_same_schema_as_snake_case() {
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        });
+        let snake = json!({"name": "read_file", "input_schema": schema.clone()});
+        let camel = json!({"name": "read_file", "inputSchema": schema.clone()});
+
+        // Act
+        let from_snake: ToolDef = serde_json::from_value(snake).unwrap();
+        let from_camel: ToolDef = serde_json::from_value(camel).unwrap();
+
+        // Assert
+        let (ToolDef::Custom(s), ToolDef::Custom(c)) = (&from_snake, &from_camel) else {
+            panic!("expected Custom for both spellings: {from_snake:?} / {from_camel:?}");
+        };
+        assert_eq!(c.input_schema, schema);
+        assert_eq!(c.input_schema, s.input_schema);
+    }
+
+    #[test]
+    fn camelcase_input_schema_serializes_under_the_canonical_key() {
+        // Arrange
+        let v = json!({"name": "t", "inputSchema": {"type": "object", "required": ["x"]}});
+
+        // Act
+        let td: ToolDef = serde_json::from_value(v).unwrap();
+        let out = serde_json::to_value(&td).unwrap();
+
+        // Assert
+        assert_eq!(out["input_schema"]["required"], json!(["x"]));
+        assert!(out.get("inputSchema").is_none(), "{out}");
+    }
+
+    #[test]
+    fn both_schema_spellings_on_one_tool_is_rejected() {
+        // Arrange
+        let v = json!({
+            "name": "t",
+            "input_schema": {"type": "object"},
+            "inputSchema": {"type": "object", "required": ["x"]}
+        });
+
+        // Act
+        let err = serde_json::from_value::<ToolDef>(v).unwrap_err();
+
+        // Assert
+        assert!(err.to_string().contains("duplicate field"), "{err}");
+    }
+
+    #[test]
+    fn bare_function_element_without_type_becomes_custom_tool() {
+        // Arrange
+        let v = json!({
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                "strict": true
+            }
+        });
+
+        // Act
+        let td: ToolDef = serde_json::from_value(v).unwrap();
+
+        // Assert
+        let ToolDef::Custom(c) = td else {
+            panic!("expected Custom variant");
+        };
+        assert_eq!(c.name, "get_weather");
+        assert_eq!(c.description.as_deref(), Some("Get weather"));
+        assert_eq!(c.input_schema["properties"]["city"]["type"], "string");
+        assert_eq!(c.strict, Some(true));
+        assert_eq!(c.type_tag, None);
+    }
+
+    #[test]
+    fn bare_function_element_without_parameters_gets_default_schema() {
+        // Arrange
+        let v = json!({"function": {"name": "noop"}});
+
+        // Act
+        let td: ToolDef = serde_json::from_value(v).unwrap();
+
+        // Assert
+        let ToolDef::Custom(c) = td else {
+            panic!("expected Custom variant");
+        };
+        assert_eq!(c.name, "noop");
+        assert_eq!(c.input_schema, empty_object_schema());
+    }
+
+    #[test]
+    fn bare_function_element_without_a_name_is_still_rejected() {
+        // Arrange
+        let v = json!({"function": {"description": "nameless"}});
+
+        // Act
+        let err = serde_json::from_value::<ToolDef>(v).unwrap_err();
+
+        // Assert
+        assert!(err.to_string().contains("name"), "{err}");
+    }
+
+    #[test]
+    fn top_level_name_wins_over_a_nested_function_object() {
+        // Arrange: a conventional custom tool that happens to carry a
+        // `function` key keeps its own top-level fields.
+        let v = json!({
+            "name": "outer",
+            "input_schema": {"type": "object", "required": ["a"]},
+            "function": {"name": "inner", "parameters": {"type": "object"}}
+        });
+
+        // Act
+        let td: ToolDef = serde_json::from_value(v).unwrap();
+
+        // Assert
+        let ToolDef::Custom(c) = td else {
+            panic!("expected Custom variant");
+        };
+        assert_eq!(c.name, "outer");
+        assert_eq!(c.input_schema["required"], json!(["a"]));
     }
 
     #[test]

@@ -366,6 +366,59 @@ fn passthrough_item_preserves_original_source_order() {
 }
 
 #[test]
+fn tools_declared_by_a_replayed_additional_tools_item_are_not_repeated_top_level() {
+    // Arrange: canonical tools = one top-level declaration plus the two an
+    // `additional_tools` input item declared; the item itself rides the
+    // passthrough for verbatim replay.
+    let declared = json!([
+        {"type": "function", "name": "shell", "parameters": {"type": "object"}},
+        {"type": "web_search"}
+    ]);
+    let item = json!({"type": "additional_tools", "role": "developer", "tools": declared});
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![
+        ToolDef::Custom(from_value(json!({"name": "top_only"})).unwrap()),
+        ToolDef::Custom(
+            from_value(json!({"name": "shell", "input_schema": {"type": "object"}})).unwrap(),
+        ),
+        ToolDef::Other(json!({"type": "web_search"})),
+    ]);
+    req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+        modeled_prefix: 0,
+        item: item.clone(),
+    }];
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let tools = v["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1, "got: {v}");
+    assert_eq!(tools[0]["name"], "top_only");
+    assert_eq!(v["input"][0], item, "the declaring item replays verbatim");
+}
+
+#[test]
+fn only_additional_tools_items_suppress_top_level_tools() {
+    // Arrange: positive control -- an unrelated passthrough kind that
+    // happens to carry a `tools` key must not hide anything.
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![ToolDef::Custom(
+        from_value(json!({"name": "shell"})).unwrap(),
+    )]);
+    req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+        modeled_prefix: 0,
+        item: json!({"type": "tool_search_output", "tools": [{"type": "function", "name": "shell"}]}),
+    }];
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["tools"][0]["name"], "shell", "got: {v}");
+}
+
+#[test]
 fn tool_choice_auto_serializes_as_string() {
     // Arrange
     let mut req = req_with(vec![user_text("ping")]);

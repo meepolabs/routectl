@@ -621,3 +621,39 @@ fn parse_request_null_output_format_is_dropped() {
         "null output_format must not inject a format key into output_config"
     );
 }
+
+#[test]
+fn camelcase_input_schema_tool_keeps_its_schema() {
+    // Arrange: an MCP / Agent-SDK-shaped tool spells the schema key in
+    // camelCase; a snake_case sibling is the positive control.
+    let schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+    });
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {"name": "snake", "input_schema": schema.clone()},
+            {"name": "camel", "inputSchema": schema.clone()}
+        ]
+    });
+
+    // Act
+    let req = AnthropicIngress
+        .parse_request_value(&HeaderMap::new(), body)
+        .unwrap();
+
+    // Assert
+    let tools = req.tools.expect("tools present");
+    let schemas: Vec<&serde_json::Value> = tools
+        .iter()
+        .map(|t| match t {
+            routectl_core::ToolDef::Custom(c) => &c.input_schema,
+            other => panic!("expected Custom, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(schemas, vec![&schema, &schema]);
+}

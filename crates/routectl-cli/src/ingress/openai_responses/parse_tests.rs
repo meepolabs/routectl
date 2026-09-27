@@ -604,6 +604,169 @@ fn unknown_tool_shape_passes_through_as_other() {
     assert!(matches!(&tools[0], ToolDef::Other(_)));
 }
 
+/// A responses-lite style body: no top-level `tools`, every declaration
+/// rides an `additional_tools` input item ahead of the conversation.
+fn additional_tools_body(tools: serde_json::Value) -> serde_json::Value {
+    json!({
+        "model": "m",
+        "input": [
+            {"type": "additional_tools", "id": "at_1", "role": "developer", "tools": tools},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        ]
+    })
+}
+
+#[test]
+fn additional_tools_input_item_merges_into_canonical_tools() {
+    // Arrange
+    let body = additional_tools_body(json!([
+        {
+            "type": "function",
+            "name": "shell",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        },
+        {"type": "web_search"}
+    ]));
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("additional_tools must populate req.tools");
+    assert_eq!(tools.len(), 2);
+    match &tools[0] {
+        ToolDef::Custom(c) => {
+            assert_eq!(c.name, "shell");
+            assert_eq!(c.input_schema["properties"]["cmd"]["type"], "string");
+        }
+        other => panic!("expected Custom, got {other:?}"),
+    }
+    assert!(
+        matches!(&tools[1], ToolDef::Other(v) if v == &json!({"type": "web_search"})),
+        "{:?}",
+        tools[1]
+    );
+}
+
+#[test]
+fn additional_tools_item_is_still_preserved_for_same_dialect_replay() {
+    // Arrange
+    let body = additional_tools_body(json!([{"type": "function", "name": "shell"}]));
+    let item = body["input"][0].clone();
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let passthrough = &req.routectl_internal.responses_input_passthrough;
+    assert_eq!(passthrough.len(), 1);
+    assert_eq!(passthrough[0].item, item);
+    assert_eq!(passthrough[0].modeled_prefix, 0);
+    assert_eq!(req.messages.len(), 1, "the user turn still parses");
+}
+
+#[test]
+fn additional_tools_append_after_top_level_tools_in_input_order() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "tools": [{"type": "function", "name": "top"}],
+        "input": [
+            {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "first"}]},
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "second"}]}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let names: Vec<&str> = req
+        .tools
+        .as_deref()
+        .expect("tools present")
+        .iter()
+        .map(|t| match t {
+            ToolDef::Custom(c) => c.name.as_str(),
+            other => panic!("expected Custom, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["top", "first", "second"]);
+}
+
+#[test]
+fn additional_tools_redeclaring_a_known_tool_is_not_duplicated() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "tools": [
+            {"type": "function", "name": "shell", "description": "top-level wins"},
+            {"type": "web_search"}
+        ],
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [
+                {"type": "function", "name": "shell", "description": "redeclared"},
+                {"type": "web_search"},
+                {"type": "function", "name": "extra"}
+            ]
+        }]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("tools present");
+    assert_eq!(tools.len(), 3, "{tools:?}");
+    match &tools[0] {
+        ToolDef::Custom(c) => assert_eq!(c.description.as_deref(), Some("top-level wins")),
+        other => panic!("expected Custom, got {other:?}"),
+    }
+    assert!(matches!(&tools[2], ToolDef::Custom(c) if c.name == "extra"));
+}
+
+#[test]
+fn additional_tools_item_without_a_tools_array_adds_nothing() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": [
+            {"type": "additional_tools", "role": "developer"},
+            {"type": "additional_tools", "role": "developer", "tools": "not-an-array"},
+            {"type": "additional_tools", "role": "developer", "tools": []}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert!(req.tools.is_none(), "{:?}", req.tools);
+    assert_eq!(req.routectl_internal.responses_input_passthrough.len(), 3);
+}
+
+#[test]
+fn request_without_additional_tools_keeps_tools_absent() {
+    // Arrange: positive control -- an unrelated unmodeled item kind must
+    // not be mistaken for a tool declaration.
+    let body = json!({
+        "model": "m",
+        "input": [
+            {"type": "local_shell_call", "call_id": "c1", "tools": [{"type": "function", "name": "x"}]},
+            {"type": "message", "role": "user", "content": "hi"}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert!(req.tools.is_none(), "{:?}", req.tools);
+}
+
 #[test]
 fn tool_choice_string_passes_through_verbatim() {
     for tc in ["auto", "required", "none"] {
