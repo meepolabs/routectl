@@ -675,7 +675,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    routectl_cli::log_sink::init();
 
     let cli = Cli::parse();
 
@@ -1116,17 +1116,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
-    let filter = EnvFilter::try_from_env("ROUTECTL_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .with_span_events(FmtSpan::CLOSE)
-        .with_writer(std::io::stderr)
-        .init();
 }
 
 /// Cold-start config load, via the SINGLE shared loader

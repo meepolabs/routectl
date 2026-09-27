@@ -225,41 +225,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ripgrep is NOT on the ubuntu-22.04 runner image, and
-      # check-log-display.sh hard-requires it -- it prints
-      # "ripgrep (rg) not found; the gate cannot scan" and exits 1. So this
-      # job failed on a MISSING TOOL rather than on a finding, and had been
-      # red for that reason across multiple pushes while looking like a
-      # real gate failure.
-      #
-      # The script is right to fail closed: a scanner that cannot scan must
-      # never report clean. The defect was CI never providing what it needs.
-      # Installed here rather than made optional, because the alternative --
-      # skipping the scan when rg is absent -- is the false-all-clear this
-      # gate exists to prevent.
-      # The DISTRO package is not sufficient: it is built without PCRE2, and
-      # every pattern in the log-display gate uses `-P` with lookaround. Such
-      # a build matches NOTHING and the scan reports clean -- measured, and
-      # the gate's own self-test caught it as 25 reject assertions flipping to
-      # "expected CAUGHT but passed". So install the official binary, which
-      # ships PCRE2, pinned and checksum-verified before it executes exactly
-      # as the other scanners here are.
-      - name: install ripgrep with PCRE2 (required by the log-display gate)
-        env:
-          RG_VERSION: 14.1.1
-        run: |
-          set -euo pipefail
-          BASE="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}"
-          TAR="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          curl -sSfL -o "/tmp/${TAR}" "${BASE}/${TAR}"
-          curl -sSfL -o "/tmp/${TAR}.sha256" "${BASE}/${TAR}.sha256"
-          ( cd /tmp && awk '{print $1"  '"${TAR}"'"}' "${TAR}.sha256" | sha256sum --check --status )
-          tar -xzf "/tmp/${TAR}" -C /tmp
-          sudo install -m0755 "/tmp/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
-          rg --version
-          # Fail here rather than let the gate report a vacuous clean.
-          printf 'x\n' | rg -P '(?<!y)x' >/dev/null
-
       - name: compute scan base
         id: range
         run: |
@@ -282,13 +247,19 @@ jobs:
       - name: scan commit messages
         run: bash scripts/check-internal-ids.sh --commit-range "${{ steps.range.outputs.base }}..HEAD"
 
-      # Whole-tree, not range-scoped: the gate is cheap (pure ripgrep) and a
-      # tree-wide scan also catches a site a merge reintroduced outside the
-      # pushed range.
-      - name: scan % tracing fields on wire-derived values
+      # The log-sink inventory reads targets and dependency kinds from
+      # `cargo metadata --offline --no-deps`, which needs cargo but no
+      # registry access or build.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.95.0
+
+      # Whole-tree, not range-scoped: a second subscriber a merge introduced
+      # outside the pushed range bypasses the escaping sink just the same.
+      - name: production log-sink inventory
         run: bash scripts/check-log-display.sh
 
-      - name: log-display gate self-test
+      - name: log-sink inventory self-test
         run: bash scripts/check-log-display.test.sh
 
       # Self-test only: the toolchain preflight itself is not run on CI's rust

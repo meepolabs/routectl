@@ -2927,10 +2927,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Field-by-field reference in `docs/LOGGING.md` "Envelope-field pre-flight
   decision DEBUG + WARN". `action = field_preflight_drop` is
   attached only to a record that ACTED -- labelling a fail-open with it would
-  name an action the walk did not take. `scripts/check-log-display.sh` scans
-  this file for a raw `state_key` through its own `STATE_KEY_PATHS` tier
-  (scoped to one file deliberately: widening `CONFIG_KEY_FIELDS` flags 29
-  pre-existing sites across ten other modules, which is separate work).
+  name an action the walk did not take.
   Read-only on the verdict: it draws no `RepairBudget` and claims no
   single-flight slot, because it acts on a verdict already resident and settled
   rather than one this attempt is establishing. It takes NO repair budget at
@@ -7324,6 +7321,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (neither restart-required nor high-consequence -- `[fidelity]` has no
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
+- `src/log_sink.rs` -- the production tracing sink: `subscriber` (the one
+  builder `main` installs via `init`) and `EscapingFields`, the field
+  formatter that escapes control, format, separator and default-ignorable
+  characters
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift`. Decides only -- it emits nothing itself
@@ -8305,6 +8306,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reviewed `Relation` against routectl's minted values. Only UNPINNED reds
 - `tests/cc_version_warn_log.rs` -- pins each version warning's log target and
   exact field set, and that the two guards share no field name
+- `tests/log_sink.rs` -- byte-exact record-integrity tests for the production
+  subscriber builder against a stock `DefaultFields` control and the
+  `fixtures/ucd_escape_extract.txt` Unicode oracle
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor
@@ -8485,11 +8489,12 @@ new section or a second doc.
   `--range`, `--commit-range`); the single source of truth for the
   pattern set
 - `check-internal-ids.test.sh` -- self-test for the internal-ID scanner
-- `check-log-display.sh` -- scans for tracing fields that render
-  wire-derived strings via unescaped `%` (Display) instead of a sanitizer,
-  across the ingress/egress/router/server/CLI surfaces that touch caller
-  or upstream bytes
-- `check-log-display.test.sh` -- self-test for the log-display scanner
+- `check-log-display.sh` -- production log-sink inventory entry point: fails
+  unless `routectl-cli/src/log_sink.rs` is the only production subscriber and
+  wires the escaping formatter
+- `check-log-display.py` -- the inventory checker `check-log-display.sh` runs:
+  a Rust lexer, `cargo metadata` target walk, and the approved-module pin
+- `check-log-display.test.sh` -- self-test for the log-sink inventory
 - `check-subject-length.sh` -- commit-msg stage gate rejecting a commit
   subject line over the configured character limit
 - `check-subject-length.test.sh` -- self-test for the subject-length gate

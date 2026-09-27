@@ -1,0 +1,6 @@
+# Rust sources, manifests, and scripts are LF in the index; the log-sink
+# inventory also normalizes CR on read, so this only keeps diffs clean.
+*.rs text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf

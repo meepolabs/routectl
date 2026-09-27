@@ -68,7 +68,7 @@ repos:
 
   # Every leg below is `always_run` + `pass_filenames: false`. They are
   # whole-workspace gates, and several read inputs no file filter would
-  # match: the log-display scan consults tools/log-display-allowlist.txt,
+  # match: the log-sink inventory reads every Cargo manifest,
   # the public-api leg diffs against public-api/*.txt, and each cargo leg
   # can be broken by a Cargo manifest or a lint config rather than by a
   # `.rs` file. A `types: [rust]` filter would green those commits.
@@ -82,7 +82,7 @@ repos:
         pass_filenames: false
 
       - id: log-display
-        name: log-display scan (% tracing fields on wire-derived values)
+        name: production log-sink inventory (one escaping subscriber)
         entry: bash scripts/check-log-display.sh
         language: system
         always_run: true

@@ -12,6 +12,7 @@ pub(crate) mod config_classify;
 #[doc(hidden)]
 pub mod handlers;
 pub mod ingress;
+pub mod log_sink;
 #[doc(hidden)]
 pub mod proxy;
 pub mod server;

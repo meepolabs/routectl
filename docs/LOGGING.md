@@ -33,6 +33,14 @@ routectl uses `tracing` with the env filter `ROUTECTL_LOG` (NOT the
 default `RUST_LOG`, since we don't want stray `RUST_LOG=debug` exports
 turning routectl into a firehose).
 
+Every record is exactly one line. Control, format, line/paragraph
+separator, and default-ignorable characters (soft hyphen, zero-width,
+bidi, BOM, tag characters, ...) in any field, span field, or message are
+written as visible ASCII escapes (`\n`, `\r`, `\t`, `\x1b`,
+`\u{202e}`), so a value can never start a second record, restyle the
+terminal, or hide text. A field whose own rendering fails keeps its
+escaped partial text followed by `[field formatting failed]`.
+
 Default level is `info`. Every log line carries the module path
 (`routectl_router::router`, `routectl_providers::bedrock`, etc.) and,
 inside an HTTP request, the `request_id` field for correlation across

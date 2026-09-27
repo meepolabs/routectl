@@ -1186,8 +1186,8 @@ impl AnthropicApiProvider {
         };
         // Every one of these is an upstream header value: `to_str` rejects
         // \n / \r / ESC but lets tab through and caps nothing, so the
-        // rendered `%` field still needs the sanitizer -- applied at each
-        // field site so the log-display gate can see it there.
+        // rendered `%` field still needs the sanitizer's length cap --
+        // applied at each field site.
         let claim = current_claim.unwrap_or("");
         let overage_status = quota.overage_status.as_deref().unwrap_or("");
         let utilization = quota.utilization.as_deref().unwrap_or("");

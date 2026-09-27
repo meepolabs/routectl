@@ -97,7 +97,8 @@ treat the list below as a same-order summary, not a substitute for
 reading it. In order: a toolchain preflight, the gitleaks staged-secret
 scan (its `rev` pins the binary, in lockstep with `GITLEAKS_VERSION` in
 `.github/workflows/gitleaks.yml`), an internal-identifier scan, a
-log-display scan (flags `%`-rendered wire data in tracing fields),
+log-sink inventory (the escaping formatter is the only production
+subscriber),
 `cargo fmt --check`, a separate leg that runs rustfmt on `include!`d
 fragments `cargo fmt` never opens, `cargo clippy`, a lean
 providers-only `cargo check`, a public-api-baseline check that skips
