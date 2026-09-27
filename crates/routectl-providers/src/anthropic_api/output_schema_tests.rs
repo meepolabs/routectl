@@ -14,8 +14,11 @@
 use serde_json::{Value, json};
 
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Role};
+use routectl_testkit::{CapturedEvent, capture_events};
 
-use super::{MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES, probe, repair_schema};
+use super::{
+    ADDITIONAL_PROPERTIES_FORWARD_EVENT, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES, probe, repair_schema,
+};
 use crate::anthropic_api::request::normalize;
 use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
 
@@ -51,9 +54,32 @@ fn req_with_caller_output_schema(schema: Value) -> ChatRequest {
     req
 }
 
+/// Assemble `req` and return the body plus every event the assembly emitted.
+///
+/// Every assembly in this file runs under a thread-local capture, including
+/// the ones that assert nothing about logs: an uncaptured first emission that
+/// races another thread's subscriber install can cache the callsite's
+/// interest as `never` for the whole process, blinding every later capture
+/// of that WARN.
+fn assembled(req: &ChatRequest) -> (Value, Vec<CapturedEvent>) {
+    let mut body = Value::Null;
+    let events = capture_events(|| {
+        body = normalize(PROVIDER, req, false, &[], false, None, false, true).unwrap();
+    });
+    (body, events)
+}
+
 fn assembled_schema(req: &ChatRequest) -> Value {
-    let body = normalize(PROVIDER, req, false, &[], false, None, false, true).unwrap();
-    body["output_config"]["format"]["schema"].clone()
+    assembled(req).0["output_config"]["format"]["schema"].clone()
+}
+
+/// The forward-WARN records among `events`, matched on the structured `event`
+/// field rather than on rendered text.
+fn forward_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.field("event") == Some(ADDITIONAL_PROPERTIES_FORWARD_EVENT))
+        .collect()
 }
 
 fn repair(schema: Value) -> Value {
@@ -140,7 +166,7 @@ fn leaves_a_body_without_an_output_schema_untouched() {
     let req = user_req();
 
     // Act
-    let body = normalize(PROVIDER, &req, false, &[], false, None, false, true).unwrap();
+    let (body, _) = assembled(&req);
 
     // Assert
     assert!(body.get("output_config").is_none());
@@ -170,7 +196,6 @@ fn forwards_a_present_additional_properties_true_verbatim() {
 }
 
 #[test]
-#[tracing_test::traced_test]
 fn warns_once_naming_the_path_when_a_present_value_is_not_false() {
     // Arrange
     let req = req_with_caller_output_schema(json!({
@@ -182,19 +207,23 @@ fn warns_once_naming_the_path_when_a_present_value_is_not_false() {
     }));
 
     // Act
-    let _ = assembled_schema(&req);
+    let (_, events) = assembled(&req);
 
     // Assert
-    assert!(logs_contain(
-        "output_schema_additional_properties_not_false"
-    ));
-    assert!(logs_contain("schema.properties.bag"));
+    let warns = forward_warns(&events);
+    assert_eq!(warns.len(), 1, "expected exactly one WARN; got: {events:?}");
+    assert_eq!(warns[0].level, tracing::Level::WARN);
+    assert_eq!(warns[0].field("provider"), Some(PROVIDER));
+    let paths = warns[0].field("paths").unwrap_or_default();
+    assert!(
+        paths.contains("schema.properties.bag"),
+        "the WARN must name the offending path; got paths={paths}"
+    );
 }
 
 /// The WARN must name paths only. A schema's property names and values are
 /// caller data, so the record carries the location and nothing else.
 #[test]
-#[tracing_test::traced_test]
 fn never_logs_schema_values() {
     // Arrange
     let req = req_with_caller_output_schema(json!({
@@ -204,18 +233,31 @@ fn never_logs_schema_values() {
     }));
 
     // Act
-    let _ = assembled_schema(&req);
+    let (_, events) = assembled(&req);
 
     // Assert
-    assert!(logs_contain(
-        "output_schema_additional_properties_not_false"
-    ));
-    assert!(!logs_contain("caller-secret-value"));
+    assert_eq!(
+        forward_warns(&events).len(),
+        1,
+        "the schema-valued forward must WARN; got: {events:?}"
+    );
+    let leaked: Vec<&CapturedEvent> = events
+        .iter()
+        .filter(|e| {
+            e.message.contains("caller-secret-value")
+                || e.fields
+                    .iter()
+                    .any(|(_, v)| v.contains("caller-secret-value"))
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a caller schema value reached a log record: {leaked:?}"
+    );
 }
 
 /// A routine repair is not an operator decision, so injecting emits nothing.
 #[test]
-#[tracing_test::traced_test]
 fn injecting_alone_emits_no_warning() {
     // Arrange
     let req = req_with_caller_output_schema(json!({
@@ -224,12 +266,13 @@ fn injecting_alone_emits_no_warning() {
     }));
 
     // Act
-    let _ = assembled_schema(&req);
+    let (_, events) = assembled(&req);
 
     // Assert
-    assert!(!logs_contain(
-        "output_schema_additional_properties_not_false"
-    ));
+    assert!(
+        forward_warns(&events).is_empty(),
+        "injecting alone must not WARN; got: {events:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1791,7 +1791,6 @@ mod tests {
     /// passes must still yield ONE WARN. An operator counting these lines
     /// would otherwise double-count every such request.
     #[test]
-    #[tracing_test::traced_test]
     fn additional_properties_forward_warns_once_across_both_repair_passes() {
         // Arrange
         let mut cfg = fake_cfg();
@@ -1813,7 +1812,10 @@ mod tests {
         }));
 
         // Act
-        let body = normalize_request(&cfg, &req).unwrap();
+        let mut body = serde_json::Value::Null;
+        let events = routectl_testkit::capture_events(|| {
+            body = normalize_request(&cfg, &req).unwrap();
+        });
 
         // Assert
         assert_eq!(
@@ -1821,21 +1823,16 @@ mod tests {
             json!(true),
             "a present non-false value is forwarded verbatim, never overwritten: {body}"
         );
-        logs_assert(|lines: &[&str]| {
-            let warns = lines
-                .iter()
-                .filter(|l| {
-                    l.contains("output_schema_additional_properties_not_false")
-                        && l.contains("WARN")
-                })
-                .count();
-            if warns == 1 {
-                return Ok(());
-            }
-            Err(format!(
-                "one request must produce exactly one additionalProperties WARN; got {warns}"
-            ))
-        });
+        let warns: Vec<&routectl_testkit::CapturedEvent> = events
+            .iter()
+            .filter(|e| e.field("event") == Some("output_schema_additional_properties_not_false"))
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "one request must produce exactly one additionalProperties WARN; got {events:?}"
+        );
+        assert_eq!(warns[0].level, tracing::Level::WARN);
     }
 
     /// This lane egresses to a Bedrock endpoint, never to the genuine
