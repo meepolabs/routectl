@@ -109,9 +109,11 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-22.04
-    # Recent runs finish in about 45 minutes; the network-isolation step
-    # carries its own per-leg deadlines inside this bound.
-    timeout-minutes: 120
+    # Recent runs spend about 45 minutes outside the network-isolation step,
+    # which is bounded at 90 by its own timeout and per-leg deadlines;
+    # scripts/check-live-gate-isolation.test.sh keeps this at least 60
+    # minutes above that step and the script's deadlines inside it.
+    timeout-minutes: 170
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -283,6 +285,12 @@ jobs:
 
       - name: log-sink inventory self-test
         run: bash scripts/check-log-display.test.sh
+
+      # Static contract of the network-isolation check: its deadline sum
+      # fits the step timeout above, the fixed credential names are always
+      # planted, and it resolves its sources from any cwd.
+      - name: live-gate isolation self-test
+        run: bash scripts/check-live-gate-isolation.test.sh
 
       # Self-test only: the toolchain preflight itself is not run on CI's rust
       # jobs, which select the toolchain through the setup action rather than

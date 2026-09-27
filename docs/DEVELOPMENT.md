@@ -66,26 +66,41 @@ cargo check -p routectl-providers --no-default-features \
 RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
 
 # The standard gate under hostile conditions: plants a synthetic value in
-# every credential variable the live tests read, runs
-# `cargo test --workspace --all-features` inside a private network
-# namespace, and fails on any packet to a non-loopback address or to the
-# resolver. As positive controls it runs each live target by name under
-# the same variables and requires each to attempt. CI runs it with
-# --require-netns; locally it skips by name where unprivileged user
-# namespaces are unavailable.
+# every credential variable the live tests read plus a fixed set of product
+# and router-smoke credential names, runs
+# `cargo test --workspace --all-features` inside private user, network, pid
+# and mount namespaces, and fails on any packet to a non-loopback address
+# or to the resolver. Host Unix sockets (/run, /var/run, SSH agent, D-Bus,
+# Docker) are masked, and a test-owned canary socket proves the mask. As
+# positive controls it runs each live target by name under the same
+# variables and requires each to attempt. CI runs it with --require-netns;
+# locally it skips by name where unprivileged user namespaces are
+# unavailable. It does not pass --ignored, so it does not cover the
+# ignored router smoke described below.
 bash scripts/check-live-gate-isolation.sh
+# Its static contract (deadline budget vs the CI step timeout, the fixed
+# credential names, run-from-anywhere source resolution), no namespace:
+bash scripts/check-live-gate-isolation.test.sh
 ```
 
 Safe and live commands, side by side:
 
 | | Command | Provider calls |
 |---|---|---|
-| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --release` | never, regardless of environment |
+| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --release` | never, regardless of environment, as long as neither `--ignored` nor `--include-ignored` is passed |
 | Live gate (explicit, costs money) | `cargo test -p routectl-cli --features live-integration --release --test live_matrix [--test live_anthropic_oauth]` | yes, for every provider whose credential is set |
 
 The safe rows stay safe only while they select no live target. Adding a
 `--test` that names a live target, or a `--test` glob that matches one,
 to a command with `live-integration` enabled makes it a live command.
+
+`--ignored` / `--include-ignored` are also live: they select the
+ignored router smoke `live_openai_unsupported_parameter_is_learned`
+(`routectl-router`, `learned_capability_loop` target), which calls the
+real provider at `ROUTECTL_LIVE_BASE_URL` whenever `ROUTECTL_LIVE_BASE_URL`
+and `ROUTECTL_LIVE_API_KEY` are set. That smoke is outside the `test = false`
+boundary, so the no-provider-call guarantee holds only for commands that
+pass neither flag.
 
 The workspace has seven crates: `routectl-core`, `routectl-auth`,
 `routectl-providers`, `routectl-router`, `routectl-usage` (SQLite

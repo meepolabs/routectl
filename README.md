@@ -244,7 +244,9 @@ task it serves.
 
 ```bash
 # Unit + integration tests, no provider calls even with credentials in the
-# environment (also true with --all-features).
+# environment (also true with --all-features). Not with --ignored or
+# --include-ignored: those select an ignored router live smoke that calls
+# the provider named by ROUTECTL_LIVE_BASE_URL / ROUTECTL_LIVE_API_KEY.
 cargo test --workspace --release
 
 # Live integration: calls real providers (explicit opt-in; skips

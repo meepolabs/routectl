@@ -188,6 +188,8 @@ repos:
       # Makes no provider calls whatever credentials the shell carries: the
       # live provider tests are `test = false` targets that run only when a
       # `--test` names or globs them (see docs/DEVELOPMENT.md), never here.
+      # Adding --ignored or --include-ignored would change that: they select
+      # an ignored router smoke that reads ROUTECTL_LIVE_* and dials out.
       #
       # The conservation suite is deliberately NOT run here. It is a known
       # intermittent (the shared test module compiles into 21 test binaries

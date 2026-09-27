@@ -37,7 +37,11 @@ target selection -- `--workspace`, `--all-features`, `--all-targets`,
 variable set; `scripts/check-live-gate-isolation.sh` verifies that in a
 network namespace. Explicit selection is live: a `--test` naming a live
 target, or a `--test` glob that matches one (`'live*'`, `'*'`), runs it
-whenever `live-integration` is enabled.
+whenever `live-integration` is enabled. Separately, `--ignored` and
+`--include-ignored` select the ignored router smoke in
+`routectl-router`'s `learned_capability_loop` target, which calls a real
+provider when `ROUTECTL_LIVE_BASE_URL` and `ROUTECTL_LIVE_API_KEY` are set;
+the isolation check does not pass those flags and does not cover it.
 
 ## Coverage philosophy
 

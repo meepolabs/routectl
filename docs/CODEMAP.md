@@ -4803,10 +4803,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `tests/secret_resolution.rs` -- `SecretRef::parse` happy/error paths plus
   `MemoryStore` env/file resolution
 - `tests/codex_refresh_tracing.rs` -- refresh-flow tracing coverage for the
-  codex (chatgpt-oauth) provider; drives the response decoder through the
-  success and 401-`refresh_token_expired` paths under a captured subscriber,
-  asserting the contractual structured fields (status,
+  codex (chatgpt-oauth) provider; drives the public refresh path against a
+  test-owned loopback sinkhole (the pinned token host resolved to it, so no
+  request reaches the real token endpoint) for the pre-POST event, and the
+  response decoder through the success and 401-`refresh_token_expired`
+  paths, asserting the contractual structured fields (status,
   `new_refresh_token_present`, sha8) emit without leaking token values
+- `tests/xai_refresh_tracing.rs` -- the same tracing coverage for the xAI
+  OAuth refresh flow, with the same loopback sinkhole for its token host
 
 ## routectl-usage
 
@@ -8507,7 +8511,11 @@ new section or a second doc.
 - `check-nav-index.test.sh` -- self-test for the navigation-index check
 - `check-live-gate-isolation.sh` -- hostile-environment check that the
   standard all-features test gate makes zero network attempts with every
-  live-test credential variable planted, inside a private network namespace,
-  with per-live-target positive controls
+  live-test and product credential variable planted, inside private network
+  + mount namespaces with host Unix sockets masked, with a recorder control,
+  a Unix-socket canary control, and per-live-target positive controls
+- `check-live-gate-isolation.test.sh` -- self-test for that check's static
+  contract: deadline budget vs the CI step timeout, the fixed planted
+  credential names, and run-from-anywhere source resolution
 - `net-oracle.py` -- the loopback packet-capture attempt recorder (plus DNS
   responder) that check runs inside the namespace

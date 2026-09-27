@@ -5,7 +5,7 @@
 # tests read, then runs the standard all-features workspace test gate inside
 # a private network namespace and asserts it makes ZERO network attempts.
 #
-# Each leg runs in fresh user + network + pid namespaces. The network
+# Each leg runs in fresh user + network + pid + mount namespaces. The network
 # namespace has only a loopback interface, and every IPv4 / IPv6
 # destination is routed to it, so no packet can leave the machine and every
 # packet crosses `lo`. The recorder (net-oracle.py) captures on `lo` and
@@ -14,11 +14,25 @@
 # clients fail fast. Traffic between loopback addresses is not a network
 # attempt and is not logged.
 #
+# A Unix socket is a way out the packet recorder cannot see (a Docker or
+# D-Bus daemon, the host resolver's varlink socket, an SSH agent), so each
+# leg's mount namespace masks the host runtime socket trees (/run, and
+# /var/run where it is not a symlink into /run) with an empty tmpfs, then
+# recreates the resolver config inside it when /etc/resolv.conf pointed
+# there. SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS, DBUS_SYSTEM_BUS_ADDRESS
+# and DOCKER_HOST are unset, and a socket they named outside those trees is
+# covered by a bind mount. Abstract Unix sockets belong to the network
+# namespace and are already private. Every leg first checks that a
+# test-owned canary socket in the masked tree, reachable outside, cannot be
+# reached inside.
+#
 # Legs, in order:
 #
 #   1. recorder control -- a DNS lookup, a connect to the name it resolved,
 #      and direct-IP TCP / UDP to non-standard ports; the recorder MUST log
-#      each one, or the check could not see such an attempt at all.
+#      each one, or the check could not see such an attempt at all. The same
+#      leg connects to the canary and to every host daemon socket present
+#      outside (Docker, D-Bus, resolver, nscd, SSH agent); each MUST fail.
 #   2. standard gate    -- `cargo test --workspace --all-features`; MUST
 #      pass and log nothing.
 #   3. live controls    -- each live target named explicitly, one leg per
@@ -29,8 +43,16 @@
 # A leg is valid only if the recorder was still running when the leg's
 # command finished, then stopped cleanly on request with no error logged.
 # A recorder that dies, raises, or drops packets fails the leg: an empty log
-# from a dead recorder is not evidence. Every step has a deadline, and an
-# interrupted run kills every process of the running leg.
+# from a dead recorder is not evidence. Before the recorder is asked to stop,
+# every other process left in the leg's pid namespace (a daemon a test
+# spawned and never reaped) is killed and awaited, so no process of the leg
+# outlives the capture. Every step has a deadline, and an interrupted run
+# kills every process of the running leg.
+#
+# The deadlines sum, with every kill slack and the cleanup allowance, to
+# less than STEP_BUDGET, the CI step timeout; the script refuses to start
+# otherwise, and check-live-gate-isolation.test.sh ties STEP_BUDGET to the
+# workflow.
 #
 # Dependencies are fetched first, outside the namespace and with no planted
 # variable set; the legs then build and run `--offline` inside it, so build
@@ -39,12 +61,17 @@
 # Proxy variables are cleared for the namespaced legs.
 #
 # Needs util-linux `unshare` with unprivileged user namespaces, iproute2
-# `ip`, python3, and bash >= 5.1. Without the namespace the check SKIPS BY
-# NAME and exits 0, unless --require-netns is given (CI passes it), in which
+# `ip`, python3, bash >= 5.1, and a directory under /run the invoking user
+# can write for the canary ($XDG_RUNTIME_DIR, or the sticky /run/lock).
+# Without the namespace the check SKIPS BY NAME and exits 0, unless --require-netns is given (CI passes it), in which
 # case the missing namespace is a failure.
 #
-# Run from anywhere inside the repo:
+# Run from anywhere:
 #   bash scripts/check-live-gate-isolation.sh [--require-netns]
+#   bash scripts/check-live-gate-isolation.sh --self-check
+#
+# --self-check runs no namespace and no cargo: it checks the deadline budget
+# and prints it, then prints the planted variable names, one per line.
 #
 # Exit codes: 0 = pass (or named skip), 1 = a leg failed, 2 = usage.
 
@@ -56,8 +83,23 @@ ORACLE="$HERE/net-oracle.py"
 SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 
 LIVE_SOURCES=(
-    crates/routectl-cli/tests/live_*.rs
-    crates/routectl-cli/tests/live_matrix/*.rs
+    "$REPO_ROOT"/crates/routectl-cli/tests/live_*.rs
+    "$REPO_ROOT"/crates/routectl-cli/tests/live_matrix/*.rs
+)
+# Credential variables planted whatever the source scan finds: the product's
+# provider credentials (config `env://` conventions and the AWS chain) and
+# the router live smoke's variables, which live outside LIVE_SOURCES.
+FIXED_PLANTED_NAMES=(
+    ANTHROPIC_API_KEY
+    OPENAI_API_KEY
+    GEMINI_API_KEY
+    AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY
+    AWS_SESSION_TOKEN
+    AWS_BEARER_TOKEN_BEDROCK
+    AWS_REGION
+    ROUTECTL_LIVE_BASE_URL
+    ROUTECTL_LIVE_API_KEY
 )
 LIVE_TARGETS=(live_matrix live_anthropic_oauth)
 STANDARD_GATE=(cargo test --workspace --all-features --offline --no-fail-fast)
@@ -66,17 +108,38 @@ live_command() {
         --test "$1" -- --test-threads=1)
 }
 PROXY_VARS=(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy)
+HOST_SOCKET_VARS=(SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DOCKER_HOST)
+MASKED_TREES=(/run /var/run)
+# Host daemon sockets the control leg must fail to reach, when present.
+WELL_KNOWN_SOCKETS=(
+    /run/docker.sock
+    /var/run/docker.sock
+    /run/containerd/containerd.sock
+    /run/dbus/system_bus_socket
+    /run/systemd/resolve/io.systemd.Resolve
+    /run/nscd/socket
+    /run/systemd/journal/stdout
+)
 
-# Deadlines, in seconds.
-FETCH_DEADLINE=900
+# Deadlines, in seconds. STEP_BUDGET is the CI step's timeout-minutes * 60.
+STEP_BUDGET=5400
+FETCH_DEADLINE=300
 CONTROL_DEADLINE=120
-STANDARD_DEADLINE=3600
-LIVE_DEADLINE=1500
-# Inside a leg: recorder start-up, and its clean stop once asked.
+STANDARD_DEADLINE=3000
+LIVE_DEADLINE=750
+# `timeout --kill-after` grace for every bounded command.
+KILL_AFTER=10
+# Inside a leg: recorder start-up, residual-process kill, recorder stop.
 ORACLE_START_DEADLINE=10
+RESIDUAL_KILL_DEADLINE=10
 ORACLE_STOP_DEADLINE=10
-# Slack the outer hard kill allows beyond a leg's own deadline.
+# Slack the outer hard kill allows beyond a leg's own deadline; it must
+# cover everything inside() does besides the leg's command.
 LEG_KILL_SLACK=60
+# Canary start-up, trap cleanup, and the verdict, after the last leg.
+CLEANUP_ALLOWANCE=60
+# Required headroom between the worst case and STEP_BUDGET.
+BUDGET_HEADROOM=120
 
 log() { echo "check-live-gate-isolation: $*" >&2; }
 
@@ -93,9 +156,90 @@ wait_until_gone() {
     done
 }
 
+# Connects to each Unix socket path given and writes `<result> <path>` per
+# path to argv[1]: `connected`, or the errno name the connect failed with.
+UNIX_PROBE_LIB='
+import errno, os, socket, sys
+def probe_unix(out_path, paths):
+    with open(out_path, "w", encoding="utf-8", errors="replace") as out:
+        for path in paths:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2)
+            try:
+                s.connect(path)
+                result = "connected"
+            except OSError as exc:
+                result = errno.errorcode.get(exc.errno, "error")
+            finally:
+                s.close()
+            out.write(result + " " + path + "\n")
+'
+
+# Resolver config survives the mask: when /etc/resolv.conf resolves into a
+# masked tree, its content is written back at the same path.
+mask_host_sockets() {
+    local resolv_target resolv_content="" tree real path
+    resolv_target="$(readlink -f /etc/resolv.conf)" || return 1
+    resolv_content="$(cat /etc/resolv.conf)" || return 1
+    local -A masked=()
+    for tree in "${MASKED_TREES[@]}"; do
+        [[ -d "$tree" ]] || continue
+        real="$(readlink -f "$tree")"
+        [[ -n "${masked[$real]:-}" ]] && continue
+        mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$real" || return 1
+        masked[$real]=1
+    done
+    if ! [[ -r /etc/resolv.conf ]]; then
+        mkdir -p "$(dirname "$resolv_target")" || return 1
+        printf '%s\n' "$resolv_content" >"$resolv_target" || return 1
+    fi
+    while IFS= read -r path; do
+        [[ -n "$path" && -S "$path" ]] || continue
+        mount --bind /dev/null "$path" || return 1
+    done <<<"${MASK_SOCKET_PATHS:-}"
+}
+
+# Kills and awaits every process of this pid namespace but this shell and
+# the recorder. Orphans reparent to this shell (pid 1), which reaps them; a
+# zombie cannot act, so it counts as gone.
+kill_residual() {
+    local keep="$1" status="$2" tenths=$((RESIDUAL_KILL_DEADLINE * 10)) entry pid stat survivors
+    local first=1
+    while :; do
+        survivors=()
+        for entry in /proc/[0-9]*; do
+            pid="${entry#/proc/}"
+            [[ "$pid" == "$BASHPID" || "$pid" == "$keep" ]] && continue
+            read -r stat <"$entry/stat" 2>/dev/null || continue
+            stat="${stat##*) }"
+            [[ "${stat%% *}" == Z ]] && continue
+            survivors+=("$pid")
+        done
+        if ((first)); then
+            echo "residual_killed=${#survivors[@]}" >>"$status"
+            first=0
+        fi
+        ((${#survivors[@]})) || return 0
+        kill -KILL "${survivors[@]}" 2>/dev/null
+        ((tenths-- > 0)) || return 1
+        sleep 0.1
+    done
+}
+
 inside() {
     local log_path="$1" ready="$2" status="$3" deadline="$4"
     shift 4
+    if ! mask_host_sockets; then
+        echo "unix-mask=setup-failed" >>"$status"
+        return 90
+    fi
+    local canary_seen
+    canary_seen="$(python3 -c "$UNIX_PROBE_LIB
+probe_unix('/dev/stdout', ['$CANARY_SOCKET'])")"
+    if [[ "$canary_seen" != "ENOENT $CANARY_SOCKET" ]]; then
+        echo "unix-mask=canary-visible ($canary_seen)" >>"$status"
+        return 92
+    fi
     ip link set lo up || return 90
     ip route add local 0.0.0.0/0 dev lo || return 90
     # IPv6 may be disabled in the namespace; then it has no route at all.
@@ -115,7 +259,7 @@ inside() {
 
     # The leg runs as the invoking user again, in a nested user namespace:
     # as namespace root, permission-denied tests would pass their writes.
-    timeout --kill-after=10 "$deadline" \
+    timeout --kill-after="$KILL_AFTER" "$deadline" \
         python3 "$ORACLE" --as-user "$OUTER_UID" "$OUTER_GID" -- "$@" &
     local leg_pid=$! first="" rc=0
     wait -n -p first "$oracle_pid" "$leg_pid"
@@ -126,6 +270,10 @@ inside() {
         return 91
     fi
     echo "leg_rc=$rc" >>"$status"
+    if ! kill_residual "$oracle_pid" "$status"; then
+        echo "recorder=residual-processes-survived" >>"$status"
+        return 91
+    fi
     if ! kill -0 "$oracle_pid" 2>/dev/null; then
         echo "recorder=died-before-leg-finished" >>"$status"
         return 91
@@ -150,15 +298,64 @@ fi
 # ---------------------------------------------------------------------------
 # Outside the namespace.
 # ---------------------------------------------------------------------------
+# Worst-case wall time of a full run, from every deadline and kill slack.
+worst_case_seconds() {
+    local leg_cost=$((LEG_KILL_SLACK + KILL_AFTER))
+    echo $((FETCH_DEADLINE + KILL_AFTER +
+        CONTROL_DEADLINE + leg_cost +
+        STANDARD_DEADLINE + leg_cost +
+        ${#LIVE_TARGETS[@]} * (LIVE_DEADLINE + leg_cost) +
+        CLEANUP_ALLOWANCE))
+}
+
+check_budget() {
+    local worst inner
+    worst="$(worst_case_seconds)"
+    inner=$((ORACLE_START_DEADLINE + KILL_AFTER + RESIDUAL_KILL_DEADLINE + ORACLE_STOP_DEADLINE))
+    if ((inner >= LEG_KILL_SLACK)); then
+        log "FAIL: in-leg overhead ${inner}s does not fit LEG_KILL_SLACK=${LEG_KILL_SLACK}s"
+        return 1
+    fi
+    if ((worst + BUDGET_HEADROOM > STEP_BUDGET)); then
+        log "FAIL: worst case ${worst}s + ${BUDGET_HEADROOM}s headroom exceeds STEP_BUDGET=${STEP_BUDGET}s"
+        return 1
+    fi
+    echo "budget worst_case=$worst step=$STEP_BUDGET headroom=$((STEP_BUDGET - worst))"
+}
+
+# Every SCREAMING_SNAKE_CASE string literal in the live sources: env var
+# names are read either inline or through a named const, and both are string
+# literals there. A literal that is not an env var name is planted harmlessly.
+derive_planted_names() {
+    grep -ohE '"[A-Z][A-Z0-9]*(_[A-Z0-9]+)+"' "${LIVE_SOURCES[@]}" | tr -d '"' | sort -u
+}
+
+planted_names() {
+    local derived
+    derived="$(derive_planted_names)"
+    if [[ -z "$derived" ]]; then
+        log "FAIL: no variable names derived from ${LIVE_SOURCES[*]}"
+        return 1
+    fi
+    printf '%s\n' "$derived" "${FIXED_PLANTED_NAMES[@]}" | sort -u
+}
+
 require_netns=0
 case "${1:-}" in
     "") ;;
     --require-netns) require_netns=1 ;;
+    --self-check)
+        check_budget || exit 1
+        planted_names || exit 1
+        exit 0
+        ;;
     *)
-        echo "usage: $0 [--require-netns]" >&2
+        echo "usage: $0 [--require-netns | --self-check]" >&2
         exit 2
         ;;
 esac
+
+check_budget >/dev/null || exit 1
 
 skip_or_fail() {
     if ((require_netns)); then
@@ -175,14 +372,15 @@ fi
 for tool in unshare ip python3 cargo timeout pkill; do
     command -v "$tool" >/dev/null 2>&1 || skip_or_fail "required tool '$tool' not found"
 done
-UNSHARE=(unshare --user --map-root-user --net --pid --fork --kill-child --mount-proc)
-"${UNSHARE[@]}" ip link set lo up 2>/dev/null ||
-    skip_or_fail "cannot create unprivileged user + network + pid namespaces"
+UNSHARE=(unshare --user --map-root-user --net --pid --mount --fork --kill-child --mount-proc)
+"${UNSHARE[@]}" bash -c 'ip link set lo up && mount -t tmpfs tmpfs /run' 2>/dev/null ||
+    skip_or_fail "cannot create unprivileged user + network + pid + mount namespaces"
 
 cd "$REPO_ROOT" || exit 1
 
 WORK="$(mktemp -d)"
 RUNNING_PID=""
+CANARY_PID=""
 
 # Kills whatever step is running -- for a leg, its `timeout` wrapper and the
 # `unshare` under it, whose --kill-child takes the whole pid namespace down.
@@ -195,6 +393,11 @@ stop_running() {
 }
 cleanup() {
     stop_running
+    if [[ -n "$CANARY_PID" ]]; then
+        kill -KILL "$CANARY_PID" 2>/dev/null
+        wait "$CANARY_PID" 2>/dev/null
+    fi
+    [[ -n "${CANARY_SOCKET:-}" ]] && rm -f "$CANARY_SOCKET"
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -207,18 +410,11 @@ trap 'log "terminated"; exit 143' TERM HUP
 run_bounded() {
     local deadline="$1"
     shift
-    timeout --kill-after=10 "$deadline" "$@" &
+    timeout --kill-after="$KILL_AFTER" "$deadline" "$@" &
     RUNNING_PID=$!
     STEP_RC=0
     wait "$RUNNING_PID" || STEP_RC=$?
     RUNNING_PID=""
-}
-
-# Every SCREAMING_SNAKE_CASE string literal in the live sources: env var
-# names are read either inline or through a named const, and both are string
-# literals there. A literal that is not an env var name is planted harmlessly.
-derive_planted_names() {
-    grep -ohE '"[A-Z][A-Z0-9]*(_[A-Z0-9]+)+"' "${LIVE_SOURCES[@]}" | tr -d '"' | sort -u
 }
 
 # A JWT-shaped bearer carrying the account claim the OAuth live tests
@@ -236,11 +432,7 @@ PY
 
 build_planted_env() {
     local names jwt token_file name
-    names="$(derive_planted_names)"
-    if [[ -z "$names" ]]; then
-        log "FAIL: no variable names derived from ${LIVE_SOURCES[*]}"
-        return 1
-    fi
+    names="$(planted_names)" || return 1
     jwt="$(synthetic_jwt)" || return 1
     token_file="$WORK/synthetic-token"
     printf '%s\n' "$jwt" >"$token_file"
@@ -268,9 +460,10 @@ run_leg() {
     : >"$LEG_LOG"
     : >"$LEG_STATUS"
     local unset_args=() var
-    for var in "${PROXY_VARS[@]}"; do unset_args+=(-u "$var"); done
+    for var in "${PROXY_VARS[@]}" "${HOST_SOCKET_VARS[@]}"; do unset_args+=(-u "$var"); done
     run_bounded $((deadline + LEG_KILL_SLACK)) \
         env "${unset_args[@]}" "${PLANTED[@]}" OUTER_UID="$(id -u)" OUTER_GID="$(id -g)" \
+        CANARY_SOCKET="$CANARY_SOCKET" MASK_SOCKET_PATHS="$MASK_SOCKET_PATHS" \
         "${UNSHARE[@]}" \
         bash "$SELF" --inside "$LEG_LOG" "$WORK/$name.ready" "$LEG_STATUS" "$deadline" "$@"
     rm -f "$WORK/$name.ready"
@@ -286,7 +479,9 @@ judge_leg() {
     if [[ "$inside_rc" -eq 124 || "$inside_rc" -eq 137 ]]; then
         LEG_ERROR="leg exceeded its hard deadline and was killed"
     elif [[ "$inside_rc" -eq 90 ]]; then
-        LEG_ERROR="namespace or recorder setup failed (${state:-no recorder state})"
+        LEG_ERROR="namespace or recorder setup failed (${state:-no recorder state}$(sed -n 's/^unix-mask=/, unix mask: /p' "$LEG_STATUS"))"
+    elif [[ "$inside_rc" -eq 92 ]]; then
+        LEG_ERROR="host Unix socket tree visible inside the namespace ($(sed -n 's/^unix-mask=//p' "$LEG_STATUS"))"
     elif [[ "$inside_rc" -ne 0 || "$state" != "exited rc=0" ]]; then
         LEG_ERROR="recorder did not run for the whole leg and stop cleanly (${state:-no recorder state}, harness exit $inside_rc)"
     elif grep -q '^oracle-error' "$LEG_LOG"; then
@@ -295,6 +490,11 @@ judge_leg() {
         LEG_ERROR="recorder log is missing its ready or stopped sentinel"
     elif [[ "$LEG_RC" -eq 124 || "$LEG_RC" -eq 137 ]]; then
         LEG_ERROR="the leg's command exceeded its deadline"
+    fi
+    local residual
+    residual="$(sed -n 's/^residual_killed=//p' "$LEG_STATUS")"
+    if [[ -z "$LEG_ERROR" && "${residual:-0}" -gt 0 ]]; then
+        log "note: killed $residual leftover process(es) of the leg before stopping the recorder"
     fi
 }
 
@@ -309,7 +509,89 @@ fail() {
     fails=$((fails + 1))
 }
 
+# The unix: socket path a host socket variable names, if any.
+socket_path_of() {
+    local var="$1" value="${!1:-}"
+    case "$var" in
+        SSH_AUTH_SOCK) printf '%s\n' "$value" ;;
+        DOCKER_HOST) [[ "$value" == unix://* ]] && printf '%s\n' "${value#unix://}" ;;
+        DBUS_*)
+            local part
+            IFS=';' read -ra parts <<<"$value"
+            for part in "${parts[@]}"; do
+                [[ "$part" == unix:*path=* ]] || continue
+                part="${part#*path=}"
+                printf '%s\n' "${part%%,*}"
+            done
+            ;;
+    esac
+}
+
+# A directory under a masked tree this user can create a socket in.
+canary_dir() {
+    local dir
+    for dir in "${XDG_RUNTIME_DIR:-}" /run/lock "/run/user/$(id -u)"; do
+        [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || continue
+        case "$(readlink -f "$dir")/" in
+            /run/*) echo "$dir"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+start_canary() {
+    local dir tenths=100
+    dir="$(canary_dir)" || {
+        log "FAIL: no writable directory under /run for the Unix-socket canary"
+        return 1
+    }
+    CANARY_SOCKET="$dir/routectl-gate-canary-$$.sock"
+    python3 -c '
+import os, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(sys.argv[1])
+s.listen(8)
+while True:
+    conn, _ = s.accept()
+    conn.close()
+' "$CANARY_SOCKET" &
+    CANARY_PID=$!
+    while [[ ! -S "$CANARY_SOCKET" ]]; do
+        if ((tenths-- <= 0)) || ! kill -0 "$CANARY_PID" 2>/dev/null; then
+            log "FAIL: the Unix-socket canary did not start"
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+# Socket paths the control leg must fail to reach: the canary, the well-known
+# daemon sockets, the runtime-dir session bus, and whatever the host socket
+# variables name. Sets MASK_SOCKET_PATHS (variable-named paths only) and
+# UNIX_TARGETS, and writes their pre-isolation reachability to outside.unix.
+collect_unix_targets() {
+    local var path
+    MASK_SOCKET_PATHS=""
+    for var in "${HOST_SOCKET_VARS[@]}"; do
+        while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            MASK_SOCKET_PATHS+="$path"$'\n'
+            UNIX_TARGETS+=("$path")
+        done < <(socket_path_of "$var")
+    done
+    UNIX_TARGETS=("$CANARY_SOCKET" "${WELL_KNOWN_SOCKETS[@]}" "/run/user/$(id -u)/bus" "${UNIX_TARGETS[@]}")
+    python3 -c "$UNIX_PROBE_LIB
+probe_unix(sys.argv[1], sys.argv[2:])" "$WORK/outside.unix" "${UNIX_TARGETS[@]}"
+}
+
 build_planted_env || exit 1
+UNIX_TARGETS=()
+start_canary || exit 1
+collect_unix_targets || exit 1
+if [[ "$(head -n1 "$WORK/outside.unix")" != "connected $CANARY_SOCKET" ]]; then
+    log "FAIL: the Unix-socket canary is not reachable before isolation: $(head -n1 "$WORK/outside.unix")"
+    exit 1
+fi
 
 log "fetching dependencies outside the namespace"
 run_bounded "$FETCH_DEADLINE" env -u CARGO_NET_OFFLINE cargo fetch --locked
@@ -318,8 +600,7 @@ if ((STEP_RC != 0)); then
     exit 1
 fi
 
-CONTROL_PROBE='
-import os, socket, sys
+CONTROL_PROBE="$UNIX_PROBE_LIB"'
 def attempt(fn):
     try:
         fn()
@@ -330,6 +611,10 @@ attempt(lambda: socket.create_connection(("198.51.100.7", 8443), timeout=2).clos
 attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("192.0.2.1", 9999)))
 if os.path.exists(sys.argv[1]):
     attempt(lambda: socket.create_connection(("2001:db8::7", 2222), timeout=2).close())
+with open(sys.argv[2], "w", encoding="ascii") as env_out:
+    for var in sys.argv[3].split():
+        env_out.write(var + ("=set" if var in os.environ else "=unset") + "\n")
+probe_unix(sys.argv[4], sys.argv[5:])
 '
 CONTROL_EXPECTED=(
     '^dns qtype=[0-9]+ name=recorder-control\.example\.com$'
@@ -338,8 +623,31 @@ CONTROL_EXPECTED=(
     '^udp dest=192\.0\.2\.1:9999$'
 )
 
+# Inside the control leg: every host socket variable unset, and no probed
+# socket reachable -- the canary above all, which was reachable outside.
+judge_unix_isolation() {
+    local leaked reached present
+    leaked="$(grep -v '=unset$' "$WORK/control.env" 2>/dev/null)"
+    if [[ ! -s "$WORK/control.env" || -n "$leaked" ]]; then
+        fail "Unix-socket isolation: host socket variables visible inside: ${leaked:-<probe wrote nothing>}"
+        return
+    fi
+    if [[ "$(wc -l <"$WORK/control.unix" 2>/dev/null)" -ne ${#UNIX_TARGETS[@]} ]]; then
+        fail "Unix-socket isolation: probe covered $(wc -l <"$WORK/control.unix" 2>/dev/null) of ${#UNIX_TARGETS[@]} sockets"
+        return
+    fi
+    reached="$(grep '^connected ' "$WORK/control.unix")"
+    if [[ -n "$reached" ]]; then
+        fail "Unix-socket isolation: reachable inside: $(tr '\n' ' ' <<<"$reached")"
+        return
+    fi
+    present="$(awk '$1 != "ENOENT" {print $2}' "$WORK/outside.unix" | tr '\n' ' ')"
+    echo "PASS: no host Unix socket reachable inside; present outside and blocked: $present"
+}
+
 log "leg 1: recorder control"
-run_leg control "$CONTROL_DEADLINE" python3 -c "$CONTROL_PROBE" "$WORK/control.status.ipv6"
+run_leg control "$CONTROL_DEADLINE" python3 -c "$CONTROL_PROBE" "$WORK/control.status.ipv6" \
+    "$WORK/control.env" "${HOST_SOCKET_VARS[*]}" "$WORK/control.unix" "${UNIX_TARGETS[@]}"
 control="$(attempts "$LEG_LOG")"
 expected=("${CONTROL_EXPECTED[@]}")
 if [[ -e "$WORK/control.status.ipv6" ]]; then
@@ -359,6 +667,7 @@ else
     else
         echo "PASS: recorder sees DNS, name-resolved TCP, and direct-IP TCP / UDP on non-standard ports"
     fi
+    judge_unix_isolation
 fi
 
 log "leg 2: standard gate: ${STANDARD_GATE[*]}"
