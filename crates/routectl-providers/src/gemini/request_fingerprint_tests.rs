@@ -352,3 +352,137 @@ fn translating_leaves_the_callers_request_unmodified() {
     assert_eq!(serde_json::to_value(&req).expect("serialize"), before);
     assert_eq!(first, second, "a retried attempt emits the same body");
 }
+
+// ---------------------------------------------------------------------------
+// Top-level `metadata` from the ingress sweep
+// ---------------------------------------------------------------------------
+
+const METADATA_TELL: &str = "meta-fp-9k2";
+
+/// A request whose ingress sweep carried the Anthropic `metadata` block.
+fn req_with_ingress_metadata() -> ChatRequest {
+    ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![make_user("hi")].into(),
+        provider_extras: Some(json!({
+            "metadata": {"user_id": METADATA_TELL, "account_uuid": METADATA_TELL},
+            "safetySettings": []
+        })),
+        ..Default::default()
+    }
+}
+
+/// The full provider body pipeline, counted.
+fn provider_body_and_strip_delta(req: &ChatRequest) -> (Value, u64) {
+    let before = gemini_fingerprint_strip_count();
+    let body = provider_body("gemini:test", req).expect("provider body builds");
+    let after = gemini_fingerprint_strip_count();
+    (body, after - before)
+}
+
+/// Single-source pin for the metadata strip site: no system content at all,
+/// so neither system site can set the tally.
+#[test]
+#[serial_test::serial(gemini_client_fingerprint_stripped)]
+fn ingress_metadata_is_withheld_from_the_gemini_body_and_counted() {
+    // Arrange
+    let req = req_with_ingress_metadata();
+
+    // Act
+    let (body, delta) = provider_body_and_strip_delta(&req);
+
+    // Assert
+    let rendered = rendered(&body);
+    assert!(body.get("metadata").is_none(), "{rendered}");
+    assert!(!rendered.contains(METADATA_TELL), "{rendered}");
+    assert_eq!(
+        body["safetySettings"],
+        json!([]),
+        "other extras still merge"
+    );
+    assert_eq!(delta, 1, "the metadata withhold is one policy action");
+}
+
+#[test]
+#[serial_test::serial(gemini_client_fingerprint_stripped)]
+fn operator_metadata_survives_while_the_ingress_contribution_is_withheld() {
+    // Arrange: the dispatch layer deep-merged the operator's metadata over
+    // the ingress one, so `provider_extras` holds both sets of keys.
+    let mut req = req_with_ingress_metadata();
+    req.provider_extras = Some(json!({
+        "metadata": {"user_id": METADATA_TELL, "trace": "operator-set"}
+    }));
+    req.routectl_internal.operator_payload_extras = Some(std::sync::Arc::new(
+        json!({"metadata": {"trace": "operator-set"}}),
+    ));
+
+    // Act
+    let (body, delta) = provider_body_and_strip_delta(&req);
+
+    // Assert
+    assert_eq!(body["metadata"], json!({"trace": "operator-set"}));
+    assert!(!rendered(&body).contains(METADATA_TELL));
+    assert_eq!(delta, 1, "the ingress contribution was withheld");
+}
+
+#[test]
+#[serial_test::serial(gemini_client_fingerprint_stripped)]
+fn operator_only_metadata_reaches_the_wire_and_is_not_counted() {
+    // Arrange
+    let mut req = req_with_ingress_metadata();
+    req.provider_extras = Some(json!({"metadata": {"trace": "operator-set"}}));
+    req.routectl_internal.operator_payload_extras = Some(std::sync::Arc::new(
+        json!({"metadata": {"trace": "operator-set"}}),
+    ));
+
+    // Act
+    let (body, delta) = provider_body_and_strip_delta(&req);
+
+    // Assert
+    assert_eq!(body["metadata"], json!({"trace": "operator-set"}));
+    assert_eq!(delta, 0, "nothing client-sourced was withheld");
+}
+
+#[test]
+#[serial_test::serial(gemini_client_fingerprint_stripped)]
+fn metadata_and_both_system_fingerprints_count_one_policy_action() {
+    // Arrange
+    let mut req = req_with_ingress_metadata();
+    req.system = Some(SystemContent::Text(FINGERPRINT.into()));
+    req.messages = vec![make_system(FINGERPRINT), make_user("hi")].into();
+
+    // Act
+    let (body, delta) = provider_body_and_strip_delta(&req);
+
+    // Assert
+    let rendered = rendered(&body);
+    assert!(!rendered.contains(FINGERPRINT_TELL), "{rendered}");
+    assert!(!rendered.contains(METADATA_TELL), "{rendered}");
+    assert_eq!(delta, 1, "three withhold sites, one request, one action");
+}
+
+#[test]
+#[serial_test::serial(gemini_client_fingerprint_stripped)]
+fn the_metadata_withhold_never_logs_metadata_values() {
+    // Arrange
+    let req = req_with_ingress_metadata();
+
+    // Act
+    let mut body = Value::Null;
+    let events = routectl_testkit::capture_events(|| {
+        body = provider_body("gemini:test", &req).expect("provider body builds");
+    });
+
+    // Assert
+    assert!(
+        events.iter().any(|e| e.message.contains("metadata")),
+        "the withhold is reported: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| !format!("{e:?}").contains(METADATA_TELL)),
+        "no event may echo a metadata value: {events:?}"
+    );
+    assert!(body.get("metadata").is_none());
+}

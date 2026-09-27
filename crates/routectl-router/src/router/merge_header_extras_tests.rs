@@ -483,3 +483,60 @@ fn apply_layered_overlays_preserves_the_probe_origin_facts() {
         "client traffic must not be marked as a background probe",
     );
 }
+
+#[test]
+fn apply_layered_overlays_records_operator_payload_extras_excluding_the_ingress_sweep() {
+    // Arrange
+    let mut config = Config::default();
+    config.providers.insert(
+        "test-prov".into(),
+        crate::config::ProviderEntry::anthropic_api("literal:k").with_payload_extras(
+            serde_json::json!({"metadata": {"trace": "prov", "shared": "prov"}}),
+        ),
+    );
+    let model: Arc<ResolvedModel> = Arc::new(
+        ResolvedModel::new("nick", "test-prov", Arc::new(StubProvider), "claude-x")
+            .with_payload_extras(serde_json::json!({"metadata": {"shared": "model"}})),
+    );
+    let target = into_one_dispatch_target(model);
+    let mut req = req_with_betas(vec![]);
+    req.provider_extras = Some(serde_json::json!({"metadata": {"user_id": "client"}}));
+
+    // Act
+    apply_layered_overlays(&config, &target, &mut req);
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.operator_payload_extras.as_deref(),
+        Some(&serde_json::json!({"metadata": {"trace": "prov", "shared": "model"}})),
+        "provider + model only, model winning"
+    );
+    assert_eq!(
+        req.provider_extras,
+        Some(serde_json::json!({
+            "metadata": {"user_id": "client", "trace": "prov", "shared": "model"}
+        })),
+        "the full union is unchanged"
+    );
+}
+
+#[test]
+fn apply_layered_overlays_leaves_operator_payload_extras_absent_without_config() {
+    // Arrange
+    let config = Config::default();
+    let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+        "nick",
+        "test-prov",
+        Arc::new(StubProvider),
+        "claude-x",
+    ));
+    let target = into_one_dispatch_target(model);
+    let mut req = req_with_betas(vec![]);
+    req.provider_extras = Some(serde_json::json!({"metadata": {"user_id": "client"}}));
+
+    // Act
+    apply_layered_overlays(&config, &target, &mut req);
+
+    // Assert
+    assert_eq!(req.routectl_internal.operator_payload_extras, None);
+}

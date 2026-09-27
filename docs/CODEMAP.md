@@ -1079,6 +1079,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: system ->
   `systemInstruction` (billing/attribution block withheld from both the
   `Role::System` and the top-level surface, counted once per request),
+  `provider_body` (translate + serialize + `provider_extras` merge; the
+  ingress-swept top-level `metadata` is withheld while the operator's
+  `payload_extras` value for it is restored, sharing the same tally),
   messages -> `contents`/`parts`, tools ->
   `functionDeclarations`, `build_thinking_config` (Gemini-3+ ->
   `thinkingLevel` string by effort, selected by model generation; older
@@ -3097,7 +3100,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[calibration]` kill switch the window gate also calls
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (per-target header/payload/beta/reasoning
-  overlays), `operator_betas`, the `pub
+  overlays), `operator_betas`, `operator_payload_extras` (provider + model
+  payload extras without the ingress sweep), the `pub
   merge_header_extras`/`merge_payload_extras` deep-merge helpers
   (anthropic-beta comma-union, model>provider>ingress precedence),
   `deep_merge_value`, and the `is_auth_reserved`/`is_managed_reserved` guards
@@ -6919,8 +6923,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lifts `instructions`->`system`, `max_output_tokens`->`max_tokens`,
   `text.format`->`response_format` (a flat `json_schema` format is rewritten
   into the nested canonical member; other tags ride verbatim); declarations in
-  `additional_tools` input items append to `tools[]` (deduped by function name
-  / identical value; the item also rides the passthrough); forward-compat
+  `additional_tools` input items merge into `tools[]` (a later same-name
+  function replaces the earlier one in place; identical opaque values collapse;
+  `namespace` containers stay out of canonical tools; the item also rides the
+  passthrough); forward-compat
   sweep into
   `provider_extras`. `reasoning.effort` lifts to canonical `ReasoningConfig`;
   the reasoning remainder (`summary`/`context`/`mode`/future) is stashed under

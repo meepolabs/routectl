@@ -2142,6 +2142,7 @@ pub routectl_core::schema::RoutectlInternal::inbound_session_key: core::option::
 pub routectl_core::schema::RoutectlInternal::max_output_tokens: u32
 pub routectl_core::schema::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::schema::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
+pub routectl_core::schema::RoutectlInternal::operator_payload_extras: core::option::Option<alloc::sync::Arc<serde_json::value::Value>>
 pub routectl_core::schema::RoutectlInternal::originating_claude_code_session: core::option::Option<bool>
 pub routectl_core::schema::RoutectlInternal::provenance: routectl_core::schema::RequestProvenance
 pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::CoreReasoningDialect>
@@ -5310,6 +5311,7 @@ pub routectl_core::RoutectlInternal::inbound_session_key: core::option::Option<a
 pub routectl_core::RoutectlInternal::max_output_tokens: u32
 pub routectl_core::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
+pub routectl_core::RoutectlInternal::operator_payload_extras: core::option::Option<alloc::sync::Arc<serde_json::value::Value>>
 pub routectl_core::RoutectlInternal::originating_claude_code_session: core::option::Option<bool>
 pub routectl_core::RoutectlInternal::provenance: routectl_core::schema::RequestProvenance
 pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::CoreReasoningDialect>

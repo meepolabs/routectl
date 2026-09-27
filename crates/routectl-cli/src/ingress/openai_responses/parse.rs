@@ -17,8 +17,9 @@
 //!   - unknown item kind                -> preserved verbatim for a
 //!     same-dialect Responses egress to replay (never 500)
 //! - `tools`                            -> `tools[]` (ToolDef)
-//! - `additional_tools` input item      -> appended to `tools[]` (and still
-//!   preserved verbatim for same-dialect replay)
+//! - `additional_tools` input item      -> merged into `tools[]`, a later
+//!   same-name function replacing the earlier one; `namespace` containers
+//!   skipped (the item is still preserved verbatim for same-dialect replay)
 //! - `tool_choice`                      -> `tool_choice` (named-forcing shape normalized to nested)
 //! - `reasoning` (object)               -> `reasoning` (ReasoningConfig)
 //! - `max_output_tokens`                -> `max_tokens`
@@ -49,15 +50,18 @@ use crate::ingress::read_alias_header;
 use crate::ingress::session_key::{first_session_header, resolve_session_key};
 use routectl_core::OPENAI_RESPONSES_V1;
 
-/// Top-level Responses request fields handled explicitly below. Anything
-/// NOT in this set is swept into `provider_extras` so a future Responses
-/// field reaches the egress without a code edit (forward-compat seam,
-/// mirroring the openai / anthropic ingress sweeps).
 /// Responses `input[]` item kind that declares tools inline instead of in
 /// the top-level `tools` array (responses-lite clients omit `tools`
 /// entirely and send every declaration this way).
 const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
 
+/// Tool `type` of a container grouping nested tool declarations.
+const NAMESPACE_TOOL_TYPE: &str = "namespace";
+
+/// Top-level Responses request fields handled explicitly below. Anything
+/// NOT in this set is swept into `provider_extras` so a future Responses
+/// field reaches the egress without a code edit (forward-compat seam,
+/// mirroring the openai / anthropic ingress sweeps).
 const HANDLED_TOP_LEVEL_FIELDS: &[&str] = &[
     "model",
     "instructions",
@@ -812,11 +816,15 @@ fn build_tools(tools: Value) -> Option<Vec<ToolDef>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Append the declarations carried by `additional_tools` input items to
-/// the top-level tools. A declaration already present -- a function tool
-/// with the same name, or an identical non-function tool -- is skipped so
-/// the merged list never names one tool twice; the earlier declaration
-/// wins.
+/// Merge the declarations carried by `additional_tools` input items into
+/// the top-level tools, in input order. A later function declaration with
+/// an already-merged name replaces the earlier one in place, because the
+/// same-dialect replay emits the inline item verbatim and every other lane
+/// must route and serialize that same definition. An identical opaque
+/// declaration is not repeated.
+///
+/// `namespace` containers are skipped: their nested tools have no canonical
+/// representation, so the container reaches only the verbatim replay.
 fn merge_additional_tools(
     tools: Option<Vec<ToolDef>>,
     additional: &[Value],
@@ -825,13 +833,17 @@ fn merge_additional_tools(
         return tools;
     }
     let mut merged = tools.unwrap_or_default();
-    for raw in additional {
+    for raw in additional
+        .iter()
+        .filter(|raw| raw.get("type").and_then(Value::as_str) != Some(NAMESPACE_TOOL_TYPE))
+    {
         let candidate = build_tool(raw);
-        if !merged
+        match merged
             .iter()
-            .any(|known| same_declaration(known, &candidate))
+            .position(|known| same_declaration(known, &candidate))
         {
-            merged.push(candidate);
+            Some(at) => merged[at] = candidate,
+            None => merged.push(candidate),
         }
     }
     if merged.is_empty() {

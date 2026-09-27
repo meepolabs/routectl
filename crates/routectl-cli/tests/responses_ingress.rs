@@ -425,3 +425,204 @@ async fn request_without_inline_tools_routes_to_the_first_chain_target() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cross_dialect() {
+    // Arrange: the top-level `shell` and a later inline `shell` disagree on
+    // schema, description, and strictness; the inline item also carries a
+    // namespace container, which must not reach the cross-dialect egress.
+    let no_search = MockServer::start().await;
+    let fallback = MockServer::start().await;
+    mount_upstream(&no_search).await;
+    mount_upstream(&fallback).await;
+    let base = helpers::spawn(capability_chain_config(&no_search.uri(), &fallback.uri())).await;
+    let body = json!({
+        "model": "tool-chain",
+        "tools": [{
+            "type": "function",
+            "name": "shell",
+            "description": "stale top-level",
+            "parameters": {"type": "object", "properties": {"stale": {"type": "string"}}},
+            "strict": false
+        }],
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell",
+                        "description": "authoritative inline",
+                        "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                        "strict": true
+                    },
+                    {"type": "namespace", "name": "ns_tell", "tools": [{"type": "function", "name": "nested_tell"}]},
+                    {"type": "web_search"}
+                ]
+            },
+            user_input_item()
+        ]
+    });
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    assert!(
+        no_search
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "the merged inline web_search must drive capability routing"
+    );
+    let received = fallback.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let functions: Vec<&Value> = upstream_body["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter(|t| t["type"] == "function")
+        .collect();
+    assert_eq!(functions.len(), 1, "one shell declaration: {upstream_body}");
+    assert_eq!(
+        functions[0]["function"],
+        json!({
+            "name": "shell",
+            "description": "authoritative inline",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+            "strict": true
+        }),
+        "{upstream_body}"
+    );
+    let rendered = upstream_body.to_string();
+    assert!(!rendered.contains("stale"), "{rendered}");
+    assert!(!rendered.contains("ns_tell"), "{rendered}");
+    assert!(!rendered.contains("nested_tell"), "{rendered}");
+}
+
+#[tokio::test]
+async fn same_dialect_replay_carries_the_inline_item_verbatim_and_no_duplicate_top_level_tool() {
+    // Arrange: same fixture shape as the cross-dialect test, routed to a
+    // Responses upstream.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_completed_sse()),
+        )
+        .mount(&upstream)
+        .await;
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "responses-mock".to_string(),
+        ProviderEntry::openai_responses(common::file_ref("test-key"))
+            .with_openai_responses_base_url(upstream.uri())
+            .with_openai_responses_auth_kind(
+                routectl_providers::openai_responses::AuthKind::ApiKey,
+            ),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "responses-model".to_string(),
+        ModelEntry::new("responses-mock", "mock-model"),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "tool-chain".to_string(),
+        AliasValue::Single("responses-model".into()),
+    );
+    let config = Arc::new(Config {
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            strict_translation: false,
+            allow_disable_fallbacks: true,
+            ..Default::default()
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+    let base = helpers::spawn(config).await;
+    let declaring_item = json!({
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "function",
+                "name": "shell",
+                "description": "authoritative inline",
+                "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                "strict": true
+            },
+            {"type": "namespace", "name": "ns_tell", "tools": [{"type": "function", "name": "nested_tell"}]},
+            {"type": "web_search"}
+        ]
+    });
+    let body = json!({
+        "model": "tool-chain",
+        "tools": [
+            {"type": "function", "name": "shell", "description": "stale top-level", "strict": false},
+            {"type": "function", "name": "top_only"}
+        ],
+        "input": [declaring_item.clone(), user_input_item()]
+    });
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(upstream_body["input"][0], declaring_item, "{upstream_body}");
+    let top_level: Vec<&str> = upstream_body["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert_eq!(top_level, vec!["top_only"], "{upstream_body}");
+    assert!(
+        !upstream_body.to_string().contains("stale"),
+        "{upstream_body}"
+    );
+}
+
+/// A single terminal Responses SSE event; the egress drains `complete` as
+/// a stream.
+fn responses_completed_sse() -> String {
+    let completed = json!({
+        "id": "resp_01",
+        "object": "response",
+        "status": "completed",
+        "model": "mock-model",
+        "output": [{
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "ok"}]
+        }],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    });
+    format!("data: {{\"type\":\"response.completed\",\"response\":{completed}}}\n\n")
+}

@@ -695,21 +695,43 @@ fn additional_tools_append_after_top_level_tools_in_input_order() {
     assert_eq!(names, vec!["top", "first", "second"]);
 }
 
+fn custom_named<'a>(tools: &'a [ToolDef], name: &str) -> Vec<&'a routectl_core::CustomTool> {
+    tools
+        .iter()
+        .filter_map(|t| match t {
+            ToolDef::Custom(c) if c.name == name => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn additional_tools_redeclaring_a_known_tool_is_not_duplicated() {
-    // Arrange
+fn inline_function_redeclaring_a_top_level_function_replaces_it_in_place() {
+    // Arrange: the inline declaration differs from the top-level one in
+    // schema, description, and strictness.
     let body = json!({
         "model": "m",
         "tools": [
-            {"type": "function", "name": "shell", "description": "top-level wins"},
-            {"type": "web_search"}
+            {
+                "type": "function",
+                "name": "shell",
+                "description": "top-level",
+                "parameters": {"type": "object", "properties": {"old": {"type": "string"}}},
+                "strict": false
+            },
+            {"type": "function", "name": "after"}
         ],
         "input": [{
             "type": "additional_tools",
             "role": "developer",
             "tools": [
-                {"type": "function", "name": "shell", "description": "redeclared"},
-                {"type": "web_search"},
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "inline",
+                    "parameters": {"type": "object", "properties": {"new": {"type": "integer"}}},
+                    "strict": true
+                },
                 {"type": "function", "name": "extra"}
             ]
         }]
@@ -720,12 +742,163 @@ fn additional_tools_redeclaring_a_known_tool_is_not_duplicated() {
 
     // Assert
     let tools = req.tools.expect("tools present");
-    assert_eq!(tools.len(), 3, "{tools:?}");
-    match &tools[0] {
-        ToolDef::Custom(c) => assert_eq!(c.description.as_deref(), Some("top-level wins")),
-        other => panic!("expected Custom, got {other:?}"),
-    }
-    assert!(matches!(&tools[2], ToolDef::Custom(c) if c.name == "extra"));
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| match t {
+            ToolDef::Custom(c) => c.name.as_str(),
+            other => panic!("expected Custom, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["shell", "after", "extra"],
+        "first position kept"
+    );
+    let shell = custom_named(&tools, "shell");
+    assert_eq!(shell.len(), 1, "one canonical declaration: {tools:?}");
+    assert_eq!(shell[0].description.as_deref(), Some("inline"));
+    assert_eq!(
+        shell[0].input_schema,
+        json!({"type": "object", "properties": {"new": {"type": "integer"}}})
+    );
+    assert_eq!(shell[0].strict, Some(true));
+}
+
+#[test]
+fn a_later_inline_item_redeclaring_a_function_replaces_the_earlier_inline_one() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {"type": "function", "name": "shell", "description": "first", "parameters": {"type": "object", "required": ["a"]}},
+                    {"type": "function", "name": "other"}
+                ]
+            },
+            {"type": "message", "role": "user", "content": "hi"},
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {"type": "function", "name": "shell", "description": "second", "parameters": {"type": "object", "required": ["b"]}, "strict": true}
+                ]
+            }
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("tools present");
+    assert_eq!(tools.len(), 2, "{tools:?}");
+    let shell = custom_named(&tools, "shell");
+    assert_eq!(shell.len(), 1);
+    assert_eq!(shell[0].description.as_deref(), Some("second"));
+    assert_eq!(shell[0].input_schema["required"], json!(["b"]));
+    assert_eq!(shell[0].strict, Some(true));
+    assert!(matches!(&tools[0], ToolDef::Custom(c) if c.name == "shell"));
+    assert!(matches!(&tools[1], ToolDef::Custom(c) if c.name == "other"));
+}
+
+#[test]
+fn identical_opaque_inline_declarations_are_not_repeated() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "tools": [{"type": "web_search"}],
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "web_search"}, {"type": "web_search", "search_context_size": "high"}]
+        }]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("tools present");
+    assert_eq!(
+        tools.len(),
+        2,
+        "exact duplicates collapse, variants append: {tools:?}"
+    );
+    assert!(matches!(&tools[0], ToolDef::Other(v) if v == &json!({"type": "web_search"})));
+}
+
+#[test]
+fn namespace_containers_stay_out_of_canonical_tools_while_siblings_merge() {
+    // Arrange: a namespace container between an ordinary function and a
+    // hosted tool, all in one inline item.
+    let body = json!({
+        "model": "m",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {"type": "function", "name": "shell", "parameters": {"type": "object"}},
+                    {
+                        "type": "namespace",
+                        "name": "mcp_docs",
+                        "tools": [
+                            {"type": "function", "name": "nested_lookup", "parameters": {"type": "object"}}
+                        ]
+                    },
+                    {"type": "web_search"}
+                ]
+            },
+            {"type": "message", "role": "user", "content": "hi"}
+        ]
+    });
+    let item = body["input"][0].clone();
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("supported siblings still merge");
+    assert_eq!(tools.len(), 2, "{tools:?}");
+    assert!(matches!(&tools[0], ToolDef::Custom(c) if c.name == "shell"));
+    assert!(matches!(&tools[1], ToolDef::Other(v) if v == &json!({"type": "web_search"})));
+    let rendered = serde_json::to_string(&tools).expect("tools render");
+    assert!(!rendered.contains("namespace"), "{rendered}");
+    assert!(!rendered.contains("mcp_docs"), "{rendered}");
+    assert!(
+        !rendered.contains("nested_lookup"),
+        "nested children must not be fabricated: {rendered}"
+    );
+    let passthrough = &req.routectl_internal.responses_input_passthrough;
+    assert_eq!(passthrough.len(), 1);
+    assert_eq!(
+        serde_json::to_vec(&passthrough[0].item).expect("item renders"),
+        serde_json::to_vec(&item).expect("item renders"),
+        "the declaring item replays byte-for-byte"
+    );
+}
+
+#[test]
+fn an_inline_item_holding_only_a_namespace_adds_no_canonical_tools() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "namespace", "name": "ns", "tools": []}]
+        }]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert!(req.tools.is_none(), "{:?}", req.tools);
+    assert_eq!(req.routectl_internal.responses_input_passthrough.len(), 1);
 }
 
 #[test]

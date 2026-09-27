@@ -284,3 +284,64 @@ fn every_excluded_pair_really_leaks_today() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Top-level `metadata` from the ingress sweep
+// ---------------------------------------------------------------------------
+
+const METADATA_TELL: &str = "sweep-meta-5v";
+
+/// Lanes that forward the ingress `metadata` block by design: the
+/// anthropic-api egress speaks to the party the block is addressed to.
+/// Content-pinned by [`first_party_lanes_really_forward_ingress_metadata`].
+const METADATA_FIRST_PARTY: &[&str] = &["anthropic"];
+
+fn request_with_ingress_metadata() -> ChatRequest {
+    let mut req = request_for(Source::TopLevelSystem);
+    req.provider_extras = Some(serde_json::json!({
+        "metadata": {"user_id": METADATA_TELL, "account_uuid": METADATA_TELL}
+    }));
+    req
+}
+
+#[test]
+fn no_third_party_egress_ships_ingress_metadata() {
+    // Arrange
+    let req = request_with_ingress_metadata();
+
+    for (lane, provider) in lanes() {
+        if METADATA_FIRST_PARTY.contains(&lane) {
+            continue;
+        }
+
+        // Act
+        let body = wire(provider.as_ref(), &req);
+
+        // Assert
+        assert!(
+            !body.contains(METADATA_TELL),
+            "{lane} shipped the client metadata block: {body}"
+        );
+        assert!(
+            body.contains(LEGITIMATE),
+            "{lane} lost legitimate system content: {body}"
+        );
+    }
+}
+
+/// Positive control for the sweep above: the fixture's metadata does reach a
+/// wire when no withhold applies, so its absence elsewhere is evidence.
+#[test]
+fn first_party_lanes_really_forward_ingress_metadata() {
+    for lane_name in METADATA_FIRST_PARTY {
+        let (_, provider) = lanes()
+            .into_iter()
+            .find(|(lane, _)| lane == lane_name)
+            .unwrap_or_else(|| panic!("{lane_name} is not an enabled egress"));
+        let body = wire(provider.as_ref(), &request_with_ingress_metadata());
+        assert!(
+            body.contains(METADATA_TELL),
+            "{lane_name} no longer forwards ingress metadata; drop its first-party entry"
+        );
+    }
+}

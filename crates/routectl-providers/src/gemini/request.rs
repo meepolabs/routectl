@@ -45,7 +45,7 @@ const LANE: &str = super::PROVIDER_KIND;
 /// Threaded through `build_contents` -> `content_to_parts` ->
 /// `content_part_to_part`, through `build_tools_and_config`, and through
 /// `build_generation_config` -> `build_response_format`; then flushed from
-/// [`translate`] on both the Ok and the Err arm -- which is also why the
+/// `translate_counted` on both the Ok and the Err arm -- which is also why the
 /// lane-seen denominator is bumped there unconditionally: that flush is the
 /// one point in this egress every request passes exactly once, dropped
 /// content or not.
@@ -144,21 +144,105 @@ impl GeminiDropTally {
 /// Build a `GenerateContentRequest` from a canonical `ChatRequest`.
 ///
 /// The config's `id` is used only for error attribution.
+#[cfg(test)]
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
-    let mut tally = GeminiDropTally::default();
     let mut fingerprint = ClientFingerprintStripTally::default();
-    let built = build_body(provider_id, req, &mut tally, &mut fingerprint);
-    tally.flush(provider_id);
-    // Flushed beside the drop tally, outside every fallible step, so a request
-    // whose whole system was the fingerprint -- or that withheld it and then
-    // failed -- still counts against the denominator that already counted it.
-    if fingerprint.stripped() {
-        record_translation_policy_action(LANE, "client_fingerprint_stripped");
-    }
+    let built = translate_counted(provider_id, req, &mut fingerprint);
+    flush_fingerprint_tally(&fingerprint);
     built
 }
 
-/// Assemble the wire body. Separated from [`translate`] only so the tally
+/// The full outgoing body: the translated request, serialized, with the
+/// dispatch-time `provider_extras` merged over it. One fingerprint tally
+/// spans translation and the extras merge, flushed once outside every
+/// fallible step, so a request withholding the fingerprint on several
+/// surfaces -- or withholding it and then failing -- counts exactly once.
+pub(super) fn provider_body(provider_id: &str, req: &ChatRequest) -> Result<Value> {
+    let mut fingerprint = ClientFingerprintStripTally::default();
+    let body = assemble_provider_body(provider_id, req, &mut fingerprint);
+    flush_fingerprint_tally(&fingerprint);
+    body
+}
+
+fn assemble_provider_body(
+    provider_id: &str,
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Result<Value> {
+    let translated = translate_counted(provider_id, req, fingerprint)?;
+    let mut body = serde_json::to_value(&translated)
+        .map_err(|e| routectl_core::Error::normalize_request(provider_id, e.to_string()))?;
+    // The merge is shallow: an entry colliding with a routectl-managed key --
+    // including the whole `generationConfig` object -- is dropped with a WARN,
+    // so no field nested inside one is reachable. See `is_gemini_managed_key`.
+    if let Some(extras) = req.provider_extras.as_ref() {
+        merge_payload_extras(provider_id, &mut body, extras);
+        strip_client_metadata(provider_id, req, &mut body, fingerprint);
+    }
+    Ok(body)
+}
+
+/// Top-level extras key carrying the Anthropic client identity block
+/// (`user_id`, `account_uuid`).
+const CLIENT_METADATA_KEY: &str = "metadata";
+
+/// Withhold the ingress-swept `metadata` block from the Gemini body while
+/// keeping an operator's own `payload_extras` value for the key. The merged
+/// `provider_extras` cannot tell the two apart, so the operator layer the
+/// dispatch step recorded is what gets restored.
+///
+/// Withheld by routectl, not by the wire, and one of three surfaces of this
+/// lane that withhold client identity; all share the request's tally, so a
+/// request carrying it on several still counts once. Deliberately does not
+/// log the value.
+/// TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=ingress_metadata_is_withheld_from_the_gemini_body_and_counted
+fn strip_client_metadata(
+    provider_id: &str,
+    req: &ChatRequest,
+    body: &mut Value,
+    fingerprint: &mut ClientFingerprintStripTally,
+) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let Some(merged) = obj.remove(CLIENT_METADATA_KEY) else {
+        return;
+    };
+    let operator = req
+        .routectl_internal
+        .operator_payload_extras
+        .as_ref()
+        .and_then(|v| v.get(CLIENT_METADATA_KEY));
+    if operator != Some(&merged) {
+        fingerprint.record();
+        tracing::warn!(
+            provider = %provider_id,
+            "gemini egress: client-supplied top-level metadata dropped (third-party upstream)",
+        );
+    }
+    if let Some(v) = operator {
+        obj.insert(CLIENT_METADATA_KEY.to_string(), v.clone());
+    }
+}
+
+fn translate_counted(
+    provider_id: &str,
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Result<GenerateContentRequest> {
+    let mut tally = GeminiDropTally::default();
+    let built = build_body(provider_id, req, &mut tally, fingerprint);
+    tally.flush(provider_id);
+    built
+}
+
+fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally) {
+    if fingerprint.stripped() {
+        record_translation_policy_action(LANE, "client_fingerprint_stripped");
+    }
+}
+
+/// Assemble the wire body. Separated from `translate_counted` only so the tally
 /// flush there runs on the Err arm too, without an early `?` skipping it.
 fn build_body(
     provider_id: &str,

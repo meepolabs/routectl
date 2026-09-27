@@ -389,6 +389,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "flush", 2),
     ("gemini/request.rs", "merge_payload_extras", 1),
     ("gemini/request.rs", "reasoning_details_to_thought_parts", 1),
+    ("gemini/request.rs", "strip_client_metadata", 1),
     ("gemini/request.rs", "tool_call_to_function_call_part", 1),
     ("gemini/request.rs", "warn_dropped_cache_control", 1),
     (

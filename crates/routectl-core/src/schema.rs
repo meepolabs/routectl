@@ -368,6 +368,18 @@ pub struct RoutectlInternal {
     /// `cfg.header_extras` provider floor is the only operator source.
     pub operator_betas: Vec<String>,
 
+    /// Operator-configured payload extras composed by the dispatch layer
+    /// from provider + model `payload_extras` (deep-merged, model wins),
+    /// EXCLUDING the ingress forward-compat sweep. `ChatRequest.provider_extras`
+    /// carries the full union; an egress that withholds a client-sourced key
+    /// reads this to restore the operator's own value for it.
+    ///
+    /// `None` when neither layer configured payload extras, and for library
+    /// consumers that construct a `ChatRequest` without the router.
+    ///
+    /// `Arc` so the once-per-attempt clone is a refcount bump.
+    pub operator_payload_extras: Option<std::sync::Arc<serde_json::Value>>,
+
     /// Whether the ORIGINATING request presented a genuine Claude Code
     /// session capture, as a single bit.
     ///

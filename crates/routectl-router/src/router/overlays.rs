@@ -151,7 +151,25 @@ pub(super) fn apply_layered_overlays(
     // `merge_header_extras`) so Bedrock's `filter_bedrock_betas` and the
     // log-safe summary still see the complete set.
     internal.operator_betas = operator_betas(provider_headers, &target.model.header_extras);
+    internal.operator_payload_extras = operator_payload_extras(
+        &target.provider_name,
+        provider_payload,
+        target.model.payload_extras.as_ref(),
+    );
     req.routectl_internal = internal;
+}
+
+/// The operator's own payload extras: provider then model `payload_extras`,
+/// deep-merged with the same precedence `merge_payload_extras` applies, but
+/// without the ingress sweep underneath.
+fn operator_payload_extras(
+    provider_name: &str,
+    provider_extras: Option<&Value>,
+    model_extras: Option<&Value>,
+) -> Option<std::sync::Arc<Value>> {
+    let mut operator = ChatRequest::default();
+    merge_payload_extras(provider_name, provider_extras, model_extras, &mut operator);
+    operator.provider_extras.map(std::sync::Arc::new)
 }
 
 /// Collect the operator-configured `anthropic-beta` floor: the union of
