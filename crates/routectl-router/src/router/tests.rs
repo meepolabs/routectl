@@ -422,9 +422,14 @@ fn carry_over_runtime_state_from_preserves_existing_state_arcs() {
     let policy = ProviderRuntimePolicy::default();
 
     let mut old = Router::new(config.clone());
-    // "model-a" exists in both routers -- state must be carried over.
+    // "model-a" exists in both routers under the same owner -- state must be
+    // carried over.
     let old_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
     old.state.insert("model-a".to_string(), old_arc.clone());
+    old.slot_owners.insert(
+        "model-a".to_string(),
+        state_slots::SlotOwner::Provider("p".into()),
+    );
     // "model-x" exists only in the old router -- must NOT be injected.
     let old_only_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
     old.state.insert("model-x".to_string(), old_only_arc);
@@ -432,6 +437,10 @@ fn carry_over_runtime_state_from_preserves_existing_state_arcs() {
     let mut new = Router::new(config);
     let fresh_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
     new.state.insert("model-a".to_string(), fresh_arc);
+    new.slot_owners.insert(
+        "model-a".to_string(),
+        state_slots::SlotOwner::Provider("p".into()),
+    );
     // "model-new" exists only in the new router -- must remain unchanged.
     let new_only_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
     new.state

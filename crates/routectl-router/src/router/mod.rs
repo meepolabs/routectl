@@ -2280,19 +2280,32 @@ impl Router {
     }
 
     /// Carry over per-nickname runtime state from a previous Router.
-    /// For each key in `previous.state` that also exists in `self.state`,
-    /// replaces the fresh-allocated `Arc` with the prior one so that
-    /// circuit-breaker counters and RPM token buckets survive a hot-reload.
-    /// Nicknames present only in `self` (genuinely new models) keep their
-    /// fresh-allocated state unchanged.
+    /// For each key in `previous.state` that also exists in `self.state`
+    /// with the SAME recorded slot owner, replaces the fresh-allocated `Arc`
+    /// with the prior one so that circuit-breaker counters and RPM token
+    /// buckets survive a hot-reload.
+    ///
+    /// A key whose owner changed across the rebuild (a direct model moved to
+    /// another provider, a direct model turned pooled, or the reverse) keeps
+    /// the replacement's fresh state: the old gate measured a different
+    /// upstream identity. Keys present only in `self` (genuinely new models)
+    /// and keys with no recorded owner on either side keep their fresh state
+    /// too.
     ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in, to
     /// avoid resetting gates that took time to build up across reloads.
     pub fn carry_over_runtime_state_from(&mut self, previous: &Self) {
         for (key, state) in &previous.state {
-            if self.state.contains_key(key.as_str()) {
-                self.state.insert(key.clone(), state.clone());
+            let Some(slot) = self.state.get_mut(key.as_str()) else {
+                continue;
+            };
+            let same_owner = match (previous.slot_owners.get(key), self.slot_owners.get(key)) {
+                (Some(old), Some(new)) => old == new,
+                _ => false,
+            };
+            if same_owner {
+                *slot = state.clone();
             }
         }
     }
@@ -3138,6 +3151,10 @@ mod state_slot_install_tests;
 #[cfg(test)]
 #[path = "state_key_rpm_isolation_tests.rs"]
 mod state_key_rpm_isolation_tests;
+
+#[cfg(test)]
+#[path = "state_carry_over_owner_tests.rs"]
+mod state_carry_over_owner_tests;
 
 #[cfg(test)]
 #[path = "quota_feed_dispatch_tests.rs"]

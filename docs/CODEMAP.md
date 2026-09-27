@@ -3831,7 +3831,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (provider vs pool), `claim_state_slot` (creates a slot and records its
   owner once; the owner persists for the slot's lifetime, independent of the
   resolved-model table), and `state_slot_refusal` (the install-time check
-  against that recorded owner)
+  against that recorded owner); `carry_over_runtime_state_from` in `mod.rs`
+  adopts a prior slot only when both Routers record the same owner for its key
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
