@@ -8329,7 +8329,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   submodule must derive its alias target through, so a dot-free model id
   can never collide with its own alias key) plus `#[path]` wiring of the
   per-scenario submodules; one test binary, gated by the `live-integration`
-  feature
+  feature and declared `test = false`, so it runs only when named with
+  `--test live_matrix`
 - `tests/live_matrix/openai_compat.rs` -- openai-compat matrices (OpenRouter /
   opencode-go / NIM)
 - `tests/live_matrix/bedrock_invoke.rs` -- Anthropic-on-Bedrock via
@@ -8363,7 +8364,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   routectl-managed `oauth://antigravity` bearer source, plus an
   `#[ignore]`d sweep over the whole servable-model set
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against
-  `api.anthropic.com`; gated by env token file
+  `api.anthropic.com`; `test = false` behind `live-integration`, then gated
+  by env token file
 - `tests/anthropic_forward_compat_stream.rs` -- full-pipeline integration
   tests for the Anthropic SSE forward-compat opaque-events fix; hand-crafted
   SSE wire-byte fixtures driven egress -> canonical -> ingress, asserting
@@ -8503,3 +8505,8 @@ new section or a second doc.
   appears by path in this file or `DEVELOPMENT.md`; existence only, never
   row wording or freshness
 - `check-nav-index.test.sh` -- self-test for the navigation-index check
+- `check-live-gate-isolation.sh` -- hostile-environment check that the
+  standard all-features test gate makes zero network attempts with every
+  live-test credential variable planted, inside a private network namespace
+- `net-oracle.py` -- the DNS / TCP attempt recorder that check runs inside
+  the namespace

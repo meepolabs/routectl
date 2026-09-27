@@ -30,8 +30,12 @@ can read them in order. Each test prints a PASS/FAIL row per model with
 latency, content preview, and reasoning-shape signals (`rd=N` is the
 number of `reasoning_details[]` entries; `fmt=...` is the format tag).
 
-The suite is feature-gated behind `live-integration`, so a regular
-`cargo test --workspace` does NOT hit the network.
+The live test targets are `test = false` and require the
+`live-integration` feature, so they run only when named with `--test`
+as above. No other `cargo test` invocation -- `--workspace`,
+`--all-features`, `--all-targets`, `--tests` -- builds or runs them,
+even with every credential variable set; `scripts/check-live-gate-isolation.sh`
+verifies that in a network namespace.
 
 ## Coverage philosophy
 

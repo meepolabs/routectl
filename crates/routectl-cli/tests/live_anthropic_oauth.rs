@@ -9,6 +9,9 @@
 //!
 //!   cargo test -p routectl-cli --features live-integration --release \
 //!     --test live_anthropic_oauth -- --nocapture
+//!
+//! This target is `test = false` in Cargo.toml, so only an explicit
+//! `--test` runs it.
 
 #![cfg(feature = "live-integration")]
 

@@ -25,9 +25,13 @@ cargo test --workspace --features bedrock,test-utils --release
 # which carries no test legs.
 cargo test -p routectl-router --features gen-catalog --lib
 
-# Live matrix against real providers. Each provider's tests skip
-# cleanly when their env key is absent, so set keys for whatever you
-# want to exercise:
+# Live matrix against real providers -- the ONLY command that makes
+# provider calls, and it spends real money. The live targets are
+# `test = false`, so no command above (nor `--all-features`,
+# `--all-targets`, or `--tests`) ever builds or runs them, whatever
+# credentials the shell carries; they run only when named with `--test`.
+# Each provider's tests skip cleanly when their env key is absent, so set
+# keys for whatever you want to exercise:
 #   OPENROUTER_API_KEY / OPENCODE_GO_API_KEY / NIM_API_KEY
 #                                  -- openai-compat matrix (5 tests)
 #   AWS_BEARER_TOKEN_BEDROCK (+ AWS_REGION)
@@ -58,7 +62,22 @@ cargo check -p routectl-providers --no-default-features \
 # --document-private-items: that flag makes private targets resolvable,
 # which would green-light exactly the links this gate rejects.
 RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
+
+# The standard gate under hostile conditions: plants a synthetic value in
+# every credential variable the live tests read, runs
+# `cargo test --workspace --all-features` inside a private network
+# namespace, and fails on any DNS query or outbound connection. CI runs
+# it with --require-netns; locally it skips by name where unprivileged
+# user namespaces are unavailable.
+bash scripts/check-live-gate-isolation.sh
 ```
+
+Safe and live commands, side by side:
+
+| | Command | Provider calls |
+|---|---|---|
+| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --release` | never, regardless of environment |
+| Live gate (explicit, costs money) | `cargo test -p routectl-cli --features live-integration --release --test live_matrix [--test live_anthropic_oauth]` | yes, for every provider whose credential is set |
 
 The workspace has seven crates: `routectl-core`, `routectl-auth`,
 `routectl-providers`, `routectl-router`, `routectl-usage` (SQLite

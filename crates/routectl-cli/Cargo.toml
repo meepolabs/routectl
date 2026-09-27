@@ -116,10 +116,11 @@ libc = "0.2"
 # supported CLI build target, so no provider-gating features are declared
 # here -- any such flag would be decorative (feature unification re-enables
 # every provider through the two deps above regardless of it).
-# Enable live integration tests that hit real providers using API keys
-# from the environment (OPENROUTER_API_KEY, NIM_API_KEY, ANTHROPIC_API_KEY,
-# AWS_BEARER_TOKEN_BEDROCK, etc.). Tests skip cleanly when their key is
-# absent. Run with:
+# Compiles the live integration tests that hit real providers using
+# credentials from the environment (OPENROUTER_API_KEY, NIM_API_KEY,
+# AWS_BEARER_TOKEN_BEDROCK, etc.). The feature alone runs nothing: the live
+# targets are `test = false` (see the [[test]] entries below), so they run
+# only when named. Run with:
 #   cargo test -p routectl-cli --features live-integration --release \
 #     --test live_matrix -- --nocapture --test-threads=1
 live-integration = []
@@ -165,6 +166,27 @@ fd-lock = "4"
 # process. Confined to `cfg(unix)` test paths.
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.31", features = ["signal"] }
+
+# Live provider tests. A live test skips only when its credential variable
+# is absent, so an ambient credential would turn any `cargo test` that
+# enables `live-integration` (`--all-features` included) into real,
+# billable provider traffic. `test = false` removes these targets from
+# every implicit selection -- plain, `--workspace`, `--all-features`,
+# `--all-targets`, `--tests` -- and they run only when named with `--test`.
+# `required-features` turns naming one without the feature into an error
+# instead of an empty binary. Being unselected also hides them from
+# `clippy --all-targets` (even alongside `--test`), so the lint gates run a
+# separate clippy that names them.
+# scripts/check-live-gate-isolation.sh verifies all of this end to end.
+[[test]]
+name = "live_matrix"
+test = false
+required-features = ["live-integration"]
+
+[[test]]
+name = "live_anthropic_oauth"
+test = false
+required-features = ["live-integration"]
 
 # Ingress hot-path micro-benches (parse, token estimate, response render).
 # `harness = false`: the bench provides its own `main` so it can install the

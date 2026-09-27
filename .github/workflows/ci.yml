@@ -43,6 +43,12 @@ jobs:
       - name: cargo clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The live provider test targets are `test = false`, which hides them
+      # from `--all-targets` -- even when `--test` names them in the same
+      # invocation -- so they get their own lint step.
+      - name: cargo clippy (live provider test targets)
+        run: cargo clippy -p routectl-cli --all-features --test live_matrix --test live_anthropic_oauth -- -D warnings
+
       - name: cargo check (lean providers build, no aws-* deps)
         run: cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
 
@@ -112,6 +118,17 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace --release
+
+      # The standard gate under hostile conditions: every credential
+      # variable the live provider tests read is planted with a synthetic
+      # value, then `cargo test --workspace --all-features` runs in a
+      # network namespace that records every DNS query and outbound
+      # connection. Zero attempts is the pass condition; the explicit live
+      # command run under the same variables is the positive control that
+      # must attempt. --require-netns: on CI a missing namespace is a
+      # failure, not a skip. The live tests themselves never run here.
+      - name: standard test gate makes no network attempt
+        run: bash scripts/check-live-gate-isolation.sh --require-netns
 
       # The workspace leg above builds routectl-router without gen-catalog, so
       # the two tests behind that feature -- the selectors/snapshot flag weld

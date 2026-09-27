@@ -243,10 +243,12 @@ task it serves.
 ## Testing
 
 ```bash
-# Unit + integration tests, no network.
+# Unit + integration tests, no provider calls even with credentials in the
+# environment (also true with --all-features).
 cargo test --workspace --release
 
-# Live integration matrix (opt-in; skips per-provider when its env key is absent).
+# Live integration matrix: the only command that calls real providers
+# (explicit opt-in; skips per-provider when its env key is absent).
 cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix -- --nocapture --test-threads=1
 ```

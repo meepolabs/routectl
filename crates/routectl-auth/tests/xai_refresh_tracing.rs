@@ -46,6 +46,21 @@ fn synthetic_response(status: u16, body: &str) -> reqwest::Response {
     reqwest::Response::from(http_resp)
 }
 
+/// A client whose every connection lands on a closed loopback port, whatever
+/// host the request names: the refresh flow pins its token URL to a const, so
+/// this is what keeps the POST from reaching the real token endpoint. The
+/// request fails with a connect error after the pre-POST event has fired.
+fn unroutable_client(host: &str) -> reqwest::Client {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("reserve a loopback port");
+    reqwest::Client::builder()
+        .no_proxy()
+        .resolve(host, closed)
+        .build()
+        .expect("build unroutable client")
+}
+
 /// Drive the xAI OAuth refresh path through the public `OAuthFlow` trait.
 /// We split coverage into the pre-POST event (fired inside `refresh_token`)
 /// and the response-side events (fired inside `decode_token_response_traced`).
@@ -57,7 +72,7 @@ mod public_path {
 
     #[tokio::test]
     async fn pre_post_event_carries_grant_type_and_refresh_token_sha8() {
-        let http = reqwest::Client::new();
+        let http = unroutable_client("auth.x.ai");
         let refresh = "test-xai-refresh-token-ABC";
 
         let (_result, events) = with_capture(xai_refresh(&http, refresh)).await;
