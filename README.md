@@ -56,7 +56,7 @@ routectl --help
 Gatekeeper does not prompt. If you downloaded via a browser instead,
 run once: `xattr -d com.apple.quarantine /usr/local/bin/routectl`
 
-Releases ship a cosign-signed `SHA256SUMS`; verify with:
+Releases ship a cosign-signed `SHA256SUMS`; verify with Cosign 3:
 
 ```bash
 cosign verify-blob \
