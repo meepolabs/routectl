@@ -21,7 +21,8 @@
 ))]
 
 use routectl_core::{
-    ChatRequest, Message, MessageContent, Provider, Role, SystemBlock, SystemContent,
+    ChatRequest, Message, MessageContent, Provider, RequestProvenance, Role, SystemBlock,
+    SystemContent,
 };
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 use routectl_providers::bedrock::{
@@ -343,5 +344,101 @@ fn first_party_lanes_really_forward_ingress_metadata() {
             body.contains(METADATA_TELL),
             "{lane_name} no longer forwards ingress metadata; drop its first-party entry"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Credential-bearing ingress extras
+// ---------------------------------------------------------------------------
+
+const CREDENTIAL_TELL: &str = "sweep-mcp-tok-4r";
+
+/// Lanes that forward a swept `mcp_servers` entry from either ingress today.
+/// The Gemini source boundary does not cover them; they are recorded here so
+/// the sweep states its reach instead of implying it. Content-pinned in both
+/// directions by
+/// [`every_lane_outside_the_credential_boundary_really_forwards_it_today`].
+const CREDENTIAL_FORWARDING_LANES: &[&str] = &["anthropic", "bedrock-converse", "bedrock-invoke"];
+
+const INGRESS_PROVENANCES: &[RequestProvenance] = &[
+    RequestProvenance::AnthropicIngress,
+    RequestProvenance::OpenaiIngress,
+];
+
+/// The shape an Anthropic Messages client sends for a remote MCP server: the
+/// server's bearer rides inside the swept extras.
+fn request_with_ingress_credential(provenance: RequestProvenance) -> ChatRequest {
+    let mut req = request_for(Source::TopLevelSystem);
+    req.provider_extras = Some(serde_json::json!({
+        "mcp_servers": [{
+            "type": "url",
+            "url": "https://mcp.example.com/sse",
+            "name": "sweep",
+            "authorization_token": CREDENTIAL_TELL
+        }]
+    }));
+    req.routectl_internal.provenance = provenance;
+    req
+}
+
+#[test]
+fn no_egress_inside_the_boundary_ships_an_ingress_credential() {
+    for &provenance in INGRESS_PROVENANCES {
+        // Arrange
+        let req = request_with_ingress_credential(provenance);
+
+        for (lane, provider) in lanes() {
+            if CREDENTIAL_FORWARDING_LANES.contains(&lane) {
+                continue;
+            }
+
+            // Act
+            let body = wire(provider.as_ref(), &req);
+
+            // Assert
+            assert!(
+                !body.contains(CREDENTIAL_TELL),
+                "{lane} shipped an ingress credential from {provenance:?}: {body}"
+            );
+            assert!(
+                body.contains(LEGITIMATE),
+                "{lane} lost legitimate system content from {provenance:?}: {body}"
+            );
+        }
+    }
+}
+
+/// Positive control for the Gemini arm of the sweep above: the same fixture
+/// from a trusted library caller does reach the Gemini wire, so its absence
+/// on the ingress provenances is the boundary and not a fixture that carries
+/// nothing.
+#[test]
+fn a_library_caller_credential_reaches_the_gemini_wire() {
+    let (_, gemini) = lanes()
+        .into_iter()
+        .find(|(lane, _)| *lane == "gemini")
+        .expect("gemini is an enabled egress");
+    let body = wire(
+        gemini.as_ref(),
+        &request_with_ingress_credential(RequestProvenance::Library),
+    );
+    assert!(body.contains(CREDENTIAL_TELL), "{body}");
+}
+
+#[test]
+fn every_lane_outside_the_credential_boundary_really_forwards_it_today() {
+    for (lane, provider) in lanes() {
+        for &provenance in INGRESS_PROVENANCES {
+            let body = wire(
+                provider.as_ref(),
+                &request_with_ingress_credential(provenance),
+            );
+            assert_eq!(
+                body.contains(CREDENTIAL_TELL),
+                CREDENTIAL_FORWARDING_LANES.contains(&lane),
+                "{lane} from {provenance:?} no longer matches its CREDENTIAL_FORWARDING_LANES \
+                 entry; update the register so the sweep covers what it claims"
+            );
+        }
     }
 }

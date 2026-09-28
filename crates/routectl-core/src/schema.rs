@@ -204,6 +204,12 @@ pub struct ChatRequest {
 /// Which ingress dialect produced this canonical request. `Library`
 /// is the default for consumers that construct a `ChatRequest`
 /// directly (no ingress in the loop).
+///
+/// Also a forwarding-policy input, not only observability: an egress whose
+/// dialect no ingress speaks (Gemini) forwards `provider_extras` only for
+/// `Library`, and for every other variant -- including any added later --
+/// forwards only the operator's `RoutectlInternal::operator_payload_extras`.
+/// A new variant that should forward client extras there needs its own arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RequestProvenance {
@@ -372,7 +378,8 @@ pub struct RoutectlInternal {
     /// from provider + model `payload_extras` (deep-merged, model wins),
     /// EXCLUDING the ingress forward-compat sweep. `ChatRequest.provider_extras`
     /// carries the full union; an egress that withholds a client-sourced key
-    /// reads this to restore the operator's own value for it.
+    /// reads this to restore the operator's own value for it, and the Gemini
+    /// egress forwards only this layer for a request an ingress produced.
     ///
     /// `None` when neither layer configured payload extras, and for library
     /// consumers that construct a `ChatRequest` without the router.
@@ -429,7 +436,8 @@ pub struct RoutectlInternal {
     /// Which ingress dialect produced this canonical request. Set by the
     /// ingress adapter at parse time; defaults to `Library` for consumers
     /// that build a `ChatRequest` directly (no ingress in the loop).
-    /// Pure observability metadata -- never serialized to any upstream.
+    /// Never serialized to any upstream; it does select which extras layer
+    /// the Gemini egress forwards (see [`RequestProvenance`]).
     pub provenance: RequestProvenance,
 
     /// Responses `input[]` items whose `type` this hub does not model,

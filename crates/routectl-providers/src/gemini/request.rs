@@ -10,12 +10,13 @@
 //!     carrying `functionResponse` parts. Gemini receives tool results as a
 //!     user turn (not a separate "tool" role).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
-use routectl_core::{ChatRequest, ReasoningDetail, Result, sanitize_for_log};
+use routectl_core::{ChatRequest, ReasoningDetail, RequestProvenance, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
 use crate::translation_drop_metrics::{
@@ -153,14 +154,16 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
 }
 
 /// The full outgoing body: the translated request, serialized, with the
-/// dispatch-time `provider_extras` merged over it. One fingerprint tally
-/// spans translation and the extras merge, flushed once outside every
-/// fallible step, so a request withholding the fingerprint on several
-/// surfaces -- or withholding it and then failing -- counts exactly once.
+/// forwardable payload extras merged over it. One fingerprint tally spans
+/// translation and the extras merge, flushed once outside every fallible
+/// step, so a request withholding the fingerprint on several surfaces -- or
+/// withholding it and then failing -- counts exactly once. The ingress-extras
+/// withhold is reported there too, for the same reason.
 pub(super) fn provider_body(provider_id: &str, req: &ChatRequest) -> Result<Value> {
     let mut fingerprint = ClientFingerprintStripTally::default();
     let body = assemble_provider_body(provider_id, req, &mut fingerprint);
     flush_fingerprint_tally(&fingerprint);
+    report_withheld_ingress_extras(provider_id, req);
     body
 }
 
@@ -175,21 +178,96 @@ fn assemble_provider_body(
     // The merge is shallow: an entry colliding with a routectl-managed key --
     // including the whole `generationConfig` object -- is dropped with a WARN,
     // so no field nested inside one is reachable. See `is_gemini_managed_key`.
-    if let Some(extras) = req.provider_extras.as_ref() {
-        merge_payload_extras(provider_id, &mut body, extras);
-        strip_client_metadata(provider_id, req, &mut body, fingerprint);
+    if let Some(extras) = forwardable_extras(req) {
+        merge_payload_extras(provider_id, &mut body, &extras);
     }
+    strip_client_metadata(provider_id, req, &mut body, fingerprint);
     Ok(body)
+}
+
+/// The extras layer this request may forward to Gemini, chosen by where the
+/// request came from. A library caller built its `provider_extras` itself and
+/// is trusted with them. Every other provenance arrived through an HTTP
+/// ingress that speaks another vendor's dialect, so its swept extras are
+/// addressed to that vendor, and only the operator's own `payload_extras`
+/// forward -- including any provenance added later, until it opts in with an
+/// arm of its own.
+fn forwardable_extras(req: &ChatRequest) -> Option<Cow<'_, Value>> {
+    match req.routectl_internal.provenance {
+        RequestProvenance::Library => req.provider_extras.as_ref().map(Cow::Borrowed),
+        _ => operator_extras_still_dispatched(req).map(Cow::Owned),
+    }
+}
+
+/// The operator's `payload_extras`, restricted to the keys the attempt's
+/// merged `provider_extras` still carries: a dispatch-time strip that removed
+/// a key from this attempt must not see the operator layer put it back.
+fn operator_extras_still_dispatched(req: &ChatRequest) -> Option<Value> {
+    let dispatched = req.provider_extras.as_ref()?.as_object()?;
+    let operator = req
+        .routectl_internal
+        .operator_payload_extras
+        .as_deref()?
+        .as_object()?;
+    let kept: serde_json::Map<String, Value> = operator
+        .iter()
+        .filter(|(k, _)| dispatched.contains_key(*k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Some(Value::Object(kept))
+}
+
+/// Top-level extras keys of a non-library request that did not survive the
+/// operator-only selection: absent from the operator layer, or carrying a
+/// client contribution the operator's value does not. `metadata` is left to
+/// [`strip_client_metadata`], which counts it on the fingerprint tally.
+/// Sorted, so the diagnostic is deterministic.
+fn withheld_ingress_keys(req: &ChatRequest) -> Vec<&str> {
+    if matches!(req.routectl_internal.provenance, RequestProvenance::Library) {
+        return Vec::new();
+    }
+    let Some(dispatched) = req.provider_extras.as_ref().and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let operator = req.routectl_internal.operator_payload_extras.as_deref();
+    let mut keys: Vec<&str> = dispatched
+        .iter()
+        .filter(|(k, _)| k.as_str() != CLIENT_METADATA_KEY)
+        .filter(|(k, v)| operator.and_then(|o| o.get(k.as_str())) != Some(*v))
+        .map(|(k, _)| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// Withheld by routectl, not by the wire: Gemini would accept these keys.
+/// One count and one WARN per request, naming only sanitized keys -- a value
+/// may be a credential (`mcp_servers[].authorization_token`), so none is
+/// ever logged.
+/// TRANSLATION-DROP: policy-action class=ingress_extra_withheld test=anthropic_ingress_mcp_servers_never_reach_the_gemini_body_and_count_one_withhold
+fn report_withheld_ingress_extras(provider_id: &str, req: &ChatRequest) {
+    let keys = withheld_ingress_keys(req);
+    if keys.is_empty() {
+        return;
+    }
+    record_translation_policy_action(LANE, "ingress_extra_withheld");
+    tracing::warn!(
+        provider = %provider_id,
+        keys = %sanitize_for_log(&keys.join(",")),
+        count = keys.len(),
+        "gemini egress: client-supplied ingress extras dropped (third-party upstream; \
+         only operator payload_extras forward)",
+    );
 }
 
 /// Top-level extras key carrying the Anthropic client identity block
 /// (`user_id`, `account_uuid`).
 const CLIENT_METADATA_KEY: &str = "metadata";
 
-/// Withhold the ingress-swept `metadata` block from the Gemini body while
-/// keeping an operator's own `payload_extras` value for the key. The merged
-/// `provider_extras` cannot tell the two apart, so the operator layer the
-/// dispatch step recorded is what gets restored.
+/// Withhold the client's `metadata` block from the Gemini body, whatever the
+/// request's provenance, while keeping an operator's own `payload_extras`
+/// value for the key. The merged `provider_extras` cannot tell the two apart,
+/// so the operator layer the dispatch step recorded is what gets restored.
 ///
 /// Withheld by routectl, not by the wire, and one of three surfaces of this
 /// lane that withhold client identity; all share the request's tally, so a
@@ -205,7 +283,12 @@ fn strip_client_metadata(
     let Some(obj) = body.as_object_mut() else {
         return;
     };
-    let Some(merged) = obj.remove(CLIENT_METADATA_KEY) else {
+    obj.remove(CLIENT_METADATA_KEY);
+    let Some(merged) = req
+        .provider_extras
+        .as_ref()
+        .and_then(|v| v.get(CLIENT_METADATA_KEY))
+    else {
         return;
     };
     let operator = req
@@ -213,7 +296,7 @@ fn strip_client_metadata(
         .operator_payload_extras
         .as_ref()
         .and_then(|v| v.get(CLIENT_METADATA_KEY));
-    if operator != Some(&merged) {
+    if operator != Some(merged) {
         fingerprint.record();
         tracing::warn!(
             provider = %provider_id,
@@ -3974,4 +4057,5 @@ mod tests {
     // denominator, lives in a sibling fragment so this file stays navigable.
     include!("request_drop_counter_tests.rs");
     include!("request_fingerprint_tests.rs");
+    include!("request_extras_boundary_tests.rs");
 }
