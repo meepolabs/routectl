@@ -192,8 +192,9 @@ is_excluded() {
 #
 # The cores spell their own character classes rather than relying on `grep -i`,
 # because `scan_text` runs one case-SENSITIVE pattern per tier.
-# MEASURED: all cores return zero lines across all tracked files minus
-# `EXCLUDE_PATHS`.
+# The gate evaluates added lines and commit messages. Historical tracked content
+# may still match a core; range and history modes prevent new matches from
+# entering reachable commits.
 #
 # KNOWN COVERAGE GAP, accepted: short lowercase prefix-hyphen-token ids
 # (a two-letter lowercase prefix, a hyphen, then a slug or digits) are NOT
