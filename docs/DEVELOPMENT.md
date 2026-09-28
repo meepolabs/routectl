@@ -138,7 +138,8 @@ conditions -- lives in the config itself, each leg named as it runs;
 treat the list below as a same-order summary, not a substitute for
 reading it. In order: a toolchain preflight, the gitleaks staged-secret
 scan (its `rev` pins the binary, in lockstep with `GITLEAKS_VERSION` in
-`.github/workflows/gitleaks.yml`), an internal-identifier scan, a
+`.github/workflows/gitleaks.yml`), an internal-identifier scan and its
+self-test, a
 log-sink inventory (the escaping formatter is the only production
 subscriber),
 `cargo fmt --check`, a separate leg that runs rustfmt on `include!`d

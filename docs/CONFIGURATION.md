@@ -485,6 +485,20 @@ selectable = true                         # default true
   around while wiring without making it servable. A disabled entry still
   loads, but `config check` errors if an alias chain references it.
 
+**Reserved names.** Model nicknames, pool seats, and provider entries
+share one runtime-state namespace (circuit breaker, rate limit, probes,
+learned capability state), so two rules apply to every `[models]` and
+`[providers]` key, selectable or not, referenced or not. `config check`,
+`serve`, and hot reload all refuse a config that breaks either:
+
+- `#` is reserved. It separates a pool nickname from its member in a
+  seat's state key, so neither a model nickname nor a provider name may
+  contain it.
+- A model nickname may not equal the name of a DIFFERENT provider entry.
+  A model named after its own provider (`[models.openrouter]` with
+  `provider = "openrouter"`, the shape `routectl init` writes) is still
+  valid.
+
 Everything else on `[models.X]` is a per-model behavior knob -- reasoning
 declaration, output caps, header and payload extras, response labels --
 documented under [Per-model knobs](#per-model-knobs), with the full merge
@@ -587,6 +601,11 @@ forward-compat sweep) is preserved -- the merge layers
 provider + model ON TOP. A provider-side `payload_extras = { foo = "p" }`
 wins over a swept ingress value at the same key; a model-side value
 wins over both.
+
+The Gemini egress is the exception: it forwards the operator layer
+alone for ingress traffic, so a swept client value never reaches it,
+even underneath an operator value at the same key. See the
+[Gemini `payload_extras`](#providersx-gemini-kind--gemini) entry.
 
 ## Reserved-header buckets
 
@@ -1112,6 +1131,23 @@ Fields:
   routectl assembles itself) is dropped with a WARN rather than merged,
   and no field inside it can be set this way. Merged per the
   [payload_extras merge](#payload_extras-merge) rules.
+
+  Only the operator's `payload_extras` reach Gemini for traffic arriving
+  through the Anthropic Messages, OpenAI Chat Completions, or OpenAI
+  Responses ingress. Those ingresses sweep unrecognized top-level client
+  fields into the request so that same-dialect upstreams can receive
+  them, but those fields are addressed to another vendor. On a Gemini
+  target they are withheld: `mcp_servers` (which can carry a remote
+  server's bearer), `safety_identifier`, `prompt_cache_key`, and any
+  future key alike. Where the client and the operator set the same key,
+  only the operator's value is sent. Each request that withheld at least
+  one such key bumps the `(gemini, ingress_extra_withheld)` policy-action
+  counter once and logs one WARN naming the sanitized keys and their
+  count, never their values. The client's `metadata` block is always
+  withheld, whatever the request's origin, and counts under
+  `client_fingerprint_stripped`; an operator-set `metadata` value is
+  still sent. A library caller that builds its own `ChatRequest` without
+  an ingress keeps forwarding its explicit `provider_extras`.
 - `user_agent` (optional) -- override the outbound `User-Agent`.
 - `auth_mode` (optional, default `"api-key"`) -- selects how the
   provider authenticates:

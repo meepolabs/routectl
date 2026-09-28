@@ -69,9 +69,8 @@ license.
   array of `SystemBlock` with per-block cache_control); `is_blank` is the
   shared egress screen that keeps a meaningless `system: ""` off every wire
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` +
-  `ToolDef::Other(Value)` with `from_openai_function` interop; accepts
-  `inputSchema` as an exact alias of `input_schema` and lifts a legacy
-  untyped `{function:{...}}` element into `Custom`
+  `ToolDef::Other(Value)`, with the `from_openai_function` /
+  `from_responses_function` shape normalizers
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, STRUCTURE-ONLY
   breakpoint validator (4-cap, 1h-before-5m TTL ordering; unrecognized `type`
   / `ttl` values forward verbatim -- marker vocabulary is upstream's to
@@ -380,6 +379,8 @@ license.
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
   `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`,
   `stream_completion`
+- `src/alloc_probe.rs` -- test-only thread-local allocation counter for
+  OpenAI Responses request tests; absent from other feature combinations
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
   `BoundedLogSample<T>`, the collection-time bound for the diagnostic samples
   attached to aggregated WARN records (`push`, `push_distinct` for
@@ -441,11 +442,8 @@ license.
   bedrock-converse and openai-responses egresses to re-emit `tool_calls` as
   native tool-use items; gated on those two features (the anthropic-api egress
   keeps its own inline parse to stay byte-identical on the empty-id path)
-- `src/system_filter.rs` -- shared predicate + strip helper for the Claude
-  Code billing/attribution system block, plus `system_role_texts_stripped`
-  (per-part `Role::System` text collection with the block withheld); used by
-  the egresses before forwarding upstream, each projecting into its own wire
-  shape
+- `src/system_filter.rs` -- predicate + strip helpers for the Claude Code
+  billing/attribution system block, shared by every egress
 - `src/sampling_drop_guard.rs` -- shared leak-guard
   (`warn_dropped_sampling_fields`): one WARN per
   request naming which of the canonical sampling knobs (`n`, `seed`,
@@ -518,37 +516,9 @@ license.
   harness's `classify_validation`) gates through one reduction and a
   still-namespaced discriminator is never silently missed by an exact match
   against the bare name; `strip_aws_namespace` itself stays crate-private
-- `src/translation_drop_metrics.rs` -- process-wide, per-request-tallied
-  `(lane, drop_class)` drop counters for translation-time drops in the
-  `translate_*`/`build_*` egress functions: `record_translation_drop(lane,
-  drop_class)` and `record_translation_lane_seen(lane)` bump plain `u64`
-  counters in a `Mutex`-guarded registry keyed by a `BTreeMap` (no fixed
-  enum/array, so independent fix/sweep arms never collide on this file; the
-  map itself needs the lock, and once every access holds it exclusively a
-  per-entry atomic would buy nothing and imply lock-free access is possible);
-  `translation_drop_snapshot() -> Vec<TranslationDropSnapshotEntry>` reads
-  them back (`lane`, `drop_class`, `drop_count`, `lane_seen_count`,
-  `.drop_rate()`), and `translation_lane_seen(lane) -> u64` reads one lane's
-  denominator alone, without the snapshot's need for an existing drop row.
-  `record_translation_policy_action(lane, policy_class)` /
-  `translation_policy_action_snapshot() ->
-  Vec<TranslationPolicyActionSnapshotEntry>` (`.action_rate()`) are the
-  sibling counter for content routectl DECLINED to send or refused to
-  override (a privacy strip, a managed-key collision guard) as opposed to
-  content the wire could not represent: a second `BTreeMap` in the same
-  `Registry` under the same mutex, sharing the one `lane_seen` denominator,
-  with a class vocabulary disjoint from the drop counter's so a
-  near-every-request policy action cannot swamp `drop_rate()`. Homed here
-  rather than on the router's `RouterMetrics`
-  because the drops fire from providers-side translate/build functions and
-  router depends on providers, never the reverse; the router's metrics
-  snapshot (`routectl-router/src/router/mod.rs::log_snapshot`) reads this
-  module's `pub` snapshot fns as the Debug-rendered
-  `rc_translation_drop_counts` and `rc_translation_policy_action_counts`
-  fields, unconditional (no feature gate), same rationale as `effort`/`mantle`.
-  Also homes the crate-internal `ClientFingerprintStripTally`, the one
-  per-request `client_fingerprint_stripped` tally every stripping lane records
-  into and flushes once with its own lane constant
+- `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
+  drop and policy-action counters with their snapshot readers, plus the
+  crate-internal `ClientFingerprintStripTally`
 - `src/aws_region.rs` -- crate-private canonical AWS region parser behind
   every region-derived endpoint builder and signer; exports only
   `validate_aws_region` / `InvalidAwsRegion` for the router's config-load check
@@ -825,10 +795,9 @@ license.
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum +
   format-tag accessors
 - `src/openai_compat/request.rs` -- `ChatRequest` -> OpenAI-compat wire body
-  (dialect dispatch + extras merge); withholds the Claude Code
-  billing/attribution block from this third-party upstream and counts that
-  once per request on the POLICY-ACTION counter, recorded ahead of the system
-  lowering so a request whose whole system was the block still counts
+  (system projection, dialect dispatch, extras merge)
+- `src/openai_compat/request_system_tests.rs` -- `include!`d into
+  `request.rs`'s `tests` module: system-content wire and count pins
 - `src/openai_compat/response.rs` -- response normalization; lifts
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +
@@ -946,14 +915,10 @@ license.
   lane's single `record_translation_lane_seen` site (bumped before the first
   fallible step, so a rejected request still counts toward the drop rate) and
   counts the `cache_control_unsupported` drop once per request
-- `src/openai_responses/system.rs` -- canonical `system` -> Responses
-  `instructions` flat string: filtered top-level `system` first, then surviving
-  `Role::System` message text in message order, billing/attribution block
-  withheld from both into one per-request tally (drops per-block cache_control
-  with DEBUG)
+- `src/openai_responses/system.rs` -- canonical `system` and `Role::System`
+  message text -> Responses `instructions` string
 - `src/openai_responses/request_system_role_tests.rs` -- `include!`d into
-  `request_tests.rs`: serialized-wire pins for `Role::System` delivery,
-  ordering, and the per-site fingerprint withhold and count-once contract
+  `request_tests.rs`: serialized-wire pins for system-message delivery
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses
   `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items); gates
   reasoning replay per target lane (family recognition + carry/strip/gray);
@@ -976,9 +941,8 @@ license.
   (`image_source_kind_unrepresentable`, `reasoning_detail_kind_unsupported`,
   `reasoning_format_foreign`, `reasoning_scheme_incompatible`) exactly once,
   never once per dropped block
-- `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
-  `{type,name,description,parameters}` shape, omitting tools a replayed
-  `additional_tools` input item already declares; tool_choice mapping
+- `src/openai_responses/tools.rs` -- canonical tools -> flat Responses tool
+  shape (`translate_tools`) and `tool_choice` mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
   provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock.
   `apply_reasoning` sets `effort` from the canonical value, defaults `summary`
@@ -1076,34 +1040,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Content`/`Part`, `ThinkingConfig` (`thinkingBudget` | `thinkingLevel`
   oneof), `UsageMetadata` incl.
   `cachedContentTokenCount` / `thoughtsTokenCount`)
-- `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: system ->
-  `systemInstruction` (billing/attribution block withheld from both the
-  `Role::System` and the top-level surface, counted once per request),
-  `provider_body` (translate + serialize + `provider_extras` merge; the
-  ingress-swept top-level `metadata` is withheld while the operator's
-  `payload_extras` value for it is restored, sharing the same tally),
-  messages -> `contents`/`parts`, tools ->
-  `functionDeclarations`, `build_thinking_config` (Gemini-3+ ->
-  `thinkingLevel` string by effort, selected by model generation; older
-  -> numeric `thinkingBudget` verbatim / effort table / dynamic `-1`;
-  `includeThoughts`), `build_response_format`
-  (json_schema / json_object -> `responseMimeType` + `clean_schema`-ed
-  `responseSchema`; unrecognized shape warns),
-  thought-part replay carrying `thoughtSignature`; `split_base64_data_uri`
-  is the one RFC 2397 base64 `data:` URI parser (params before `;base64,`
-  tolerated), shared by the image arm (via `data_uri_inline_data`) and the
-  `File` arm, which reads the canonical inner OpenAI object the Anthropic
-  and Converse egresses read; every bytes-carrying arm (`Image`,
-  `ImageUrl`, `File`, `Document`) drops-with-warn rather than emit a part
-  with no bytes (a `data:` URI never falls through to text; a non-base64
-  or reference-only source never becomes empty `inlineData`);
-  `warn_dropped_cache_control`
-  emits the drop-with-warn breadcrumb for caller `cache_control` markers
-  (Gemini has no breakpoint surface), matching the openai-compat/responses
-  egresses; `GeminiDropTally` is the per-request drop tally flushed once from
-  `translate` on both the Ok and the Err arm -- the lane's single
-  `record_translation_lane_seen("gemini")` denominator site, and the single
-  `record_translation_drop` site for every counted class
+- `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: `translate`,
+  `provider_body` (full-body assembly incl. extras source selection), system,
+  contents, tools, thinking, and response-format builders, `merge_payload_extras`
 - `src/gemini/request_drop_counter_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: the three-assertion pinning set per counted
   drop (warn/debug captured via `capture_events`, field absent from the
@@ -1111,9 +1050,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   counter deltas under `serial_test` guards, and the lane's policy-action
   pinning set for `merge_payload_extras`'s managed-key override refusal
 - `src/gemini/request_fingerprint_tests.rs` -- `include!`d into
-  `request.rs`'s `tests` module: serialized-wire pins for the fingerprint
-  withhold on each system surface alone and both together, order
-  preservation, and the policy-action counter under its serial guard
+  `request.rs`'s `tests` module: system-surface fingerprint withhold pins
+- `src/gemini/request_extras_boundary_tests.rs` -- `include!`d into
+  `request.rs`'s `tests` module: extras-source and `metadata` withhold pins
 - `src/gemini/schema.rs` -- `clean_schema_reporting`: pure JSON-Schema ->
   Gemini OpenAPI-subset cleaner shared by tool `parameters` and
   `generationConfig.responseSchema` (oneOf -> anyOf, strip
@@ -1292,16 +1231,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `tests/contract_stream_egress.rs` -- canned SSE bodies through `stream()`
   asserting canonical chunk sequence (catches stream-ordering and usage-merge
   regressions)
-- `tests/translation_drop_census.rs` -- the `TRANSLATION-DROP:` marker
-  grammar rules (each violation a parse error with its own control) and the
-  content-pinned population recovered from the four request-translation
-  surfaces (`openai_compat/wire_lift/`, `bedrock/converse/`, `gemini/`,
-  `openai_responses/`): per-FILE marker counts, per-verdict counts, and the
-  `fidelity-risk` / `unresolved` / `silent` registers. Test code is excluded by
-  a content-pinned FILE list rather than by `#[cfg(test)]` position, with a
-  positive control on the markers that sit below a test-only helper attribute.
-  States its own ceiling: no source-derived side can see a fully silent drop,
-  so the `silent` register is a human register rather than a derivation
+- `tests/translation_drop_census.rs` -- the `TRANSLATION-DROP:` marker grammar
+  and the content-pinned marker population and registers over the
+  request-translation surfaces
 - `tests/translation_drop_census/marker.rs` -- the marker parser itself
   (surface enumeration, test-file predicate, per-marker parse), as a shared
   module so the welds built on the census consume one parse rather than each
@@ -1321,10 +1253,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `test=` name resolving to a function in the tree, and one
   `record_translation_lane_seen` site per lane -- each with its planted-defect
   control
-- `tests/system_fingerprint_sweep.rs` -- cross-lane sweep over every enabled
-  egress's real `normalize_request` and both system surfaces: a fingerprint
-  sentinel never ships and a legitimate sentinel always does, with a
-  content-pinned register of known gaps that fails once a gap closes
+- `tests/system_fingerprint_sweep.rs` -- cross-lane sweep of every enabled
+  egress's system surfaces and ingress extras against content-pinned registers
 - `tests/translation_drop_scope_weld.rs` -- the scope weld: the four
   request-translation surfaces hold exactly the content-pinned in-scope file
   list plus the exempted files, each exemption carrying its reason, so a new
@@ -1794,9 +1724,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
   rejection of a non-canonical native `region` / `bedrock_mantle.region`
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
-  config-load rejection, over EVERY `[models]` and `[providers]` key (selectable
-  or not, referenced or not), of a name carrying the reserved seat-key `#` and
-  of a model nickname equal to a provider it does not dispatch through
+  config-load check of `[models]` and `[providers]` names that key runtime state
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation
   collection (incl. `validate_registry_patterns`, rejecting malformed
   `[registry]` glob keys at startup); `validate_class_policy` HARD-rejects an
@@ -2419,11 +2347,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `cache_front_decision` / `cache_terminal_decision` beside the legacy
   aggregate `cache_strategy`, which now carries the TERMINAL marker's
   token). Construction + hot-reload lifecycle: `new`,
-  `install_resolved_models` (refuses, with a WARN, a model whose nickname or
-  pool member carries `#`, whose table key differs from its nickname, or whose
-  state key is already held by a slot another identity seeded -- ownership
-  lives in `state_slots.rs` and outlives the table),
-  the `carry_over_runtime_state_from` /
+  `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_prefix_epochs_from` /
   `carry_over_calibration_from` / `carry_over_quota_from` /
@@ -3099,12 +3023,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   never recorded). Owns `lane_calibration_factor`, the one factor lookup +
   `[calibration]` kill switch the window gate also calls
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
-  `apply_layered_overlays` (per-target header/payload/beta/reasoning
-  overlays), `operator_betas`, `operator_payload_extras` (provider + model
-  payload extras without the ingress sweep), the `pub
-  merge_header_extras`/`merge_payload_extras` deep-merge helpers
-  (anthropic-beta comma-union, model>provider>ingress precedence),
-  `deep_merge_value`, and the `is_auth_reserved`/`is_managed_reserved` guards
+  `apply_layered_overlays`, `operator_betas`, `operator_payload_extras`, the
+  `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
   application: `filter_chain_by_features` (alias-chain pre-filter with the
   prior/learned soft-drop tail: prior-demoted targets sort ahead of
@@ -3323,26 +3243,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   refusal warning. All `&self` bookkeeping: dials nothing, awaits nothing, never
   delays the admitted request
 - `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
-  `probe_entry_is_attributable`, `paid_probe_daily_cap`: which seat an identity
-  names and whether a rejection from it is attributable. A pooled identity is
-  resolved by RECOMPOSING each candidate member's canonical state key and
-  comparing -- never by splitting on the separator, never seat zero. Because
-  recomposition is NOT injective, the resolver counts candidates of BOTH kinds --
-  a DIRECT `[models]` nickname hit and every POOLED (model, member) pair that
-  recomposes to the key -- and returns a seat only when the COMBINED count is
-  exactly one. Two pooled pairs can collide (model `a` + member `b#c` and model
-  `a#b` + member `c` both compose `a#b#c`), and a direct nickname can collide
-  with a pooled pair (a `[models]` entry literally named `p#s` beside model `p`'s
-  member `s`); each names a different credential, so the direct hit deliberately
-  does not early-return. Config validation and `Router::install_resolved_models`
-  both reserve `#` in nicknames and member names, so an installed table cannot
-  present either collision; this guard is defense in depth behind them. `ProbeSeat` also carries
-  the resolved
-  model's `supports_adaptive_thinking`, its operator `max_output_tokens`, its
-  `effective_row` (the catalog merge stamped at chain-build time), and the
-  configured entry's `kind_str` -- all read off the MODEL or the operator's own
-  entry rather than re-derived at dial time, so no stage can size a body against
-  a shape, a cap, a cell, or a lane the egress does not use
+  `probe_entry_is_attributable`, `paid_probe_daily_cap`: which seat a probe
+  identity names and whether a rejection from it is attributable
 - `src/router/probe_failure_class.rs` -- two closed mappings off the SHARED
   `routectl_core` classifier: what a failure means for free validation, and for
   paid settlement (one arm per variant). Both fail closed; reasoning in module docs
@@ -3637,6 +3539,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   staying available on the same suspended router (planted LAPSED, since the
   reactive arm refuses an ACTING verdict by its own documented rule), and the
   end-to-end dispatched bytes through a real walk
+- `src/router/field_preflight_isolation_tests.rs` -- `include!`d fragment of
+  `field_preflight_tests.rs`: child-process isolation with a parent deadline
+  for tests whose threads may not terminate
 - `src/router/paid_probe_hostile_claim_tests.rs` -- `include!`d fragment of
   `paid_probe_authorize_tests.rs`: the hostile paid-claim proof. 512
   contenders gathered at an async barrier and released together against ONE
@@ -3855,12 +3760,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   RAII guards (Drop-settles the probe slot on every outcome incl.
   cancellation), and
   `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
-- `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`
-  (provider vs pool), `claim_state_slot` (creates a slot and records its
-  owner once; the owner persists for the slot's lifetime, independent of the
-  resolved-model table), and `state_slot_refusal` (the install-time check
-  against that recorded owner); `carry_over_runtime_state_from` in `mod.rs`
-  adopts a prior slot only when both Routers record the same owner for its key
+- `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`,
+  `claim_state_slot`, `state_slot_refusal`
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
@@ -3935,39 +3836,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `unavailable_pool_error` (the boot / reload refusal naming both the dead
   pool and every model routed at it). Nothing here carries a store error
   string, credential path, or account id
-- `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget` (one pool member's
-  `provider_name` + its own provider instance + credential ref, with
-  `state_key_for(nickname)` deriving the per-model key so ONE seat set can be
-  shared by every model naming the pool), `seat_state_key` (bare nickname for
-  a single target, `nickname#member` for a pool seat) with its inverse
-  `split_seat_state_key` and `check_state_key_name` (the one `#`-reservation
-  check config validation, the factory, and install all apply), `seat_identity` (the
-  persistable `provider#label` credential identity of a `SecretRef`, `None`
-  for every non-OAuth scheme so no path or env-var name reaches the usage
-  ledger), `seat_order_for_request`
-  + `RoundRobinCursors` (one `Arc<AtomicUsize>` per POOL rotating the start
-  seat per request under `RoundRobin`, so two models naming one pool share ONE
-  cursor and interleave across its accounts; carried across a hot-reload into
-  a FRESH map by `carry_over_pool_state_from`, so a renamed or dropped pool
-  starts over rather than accumulating; `FillFirst` walks a fixed
-  default-first order);
-  `StickyLeastLoaded` selection adds `StickyPins` (a bounded-LRU
-  `sticky_pin_key(session, pool) -> SeatPin{member, repinned}` map -- keyed per
-  session per POOL, so a session stays on ONE ACCOUNT across every model of
-  that pool, and storing the MEMBER rather than a model-scoped `state_key`
-  because a model-scoped key would read as a miss for every sibling model
-  sharing the pin; held behind an `Arc` on `Router` and
-  SHARED -- not copied -- across a hot-reload via `carry_over_sticky_from`,
-  which also shares the anti-herd `tiebreak` counter), the pure comparator
-  `pick_least_loaded`
-  (dispatchable filter + Closed-preferred health + the subscription-quota
-  partition where it decides, else max RPM headroom + deterministic anti-herd
-  tiebreak -- quota supersedes ONLY the headroom ranking, and only for a birth),
-  and `sticky_least_loaded_order` returning the walk
-  order + a `SelectionOutcome` (Birth / Stay / one-time OverflowRepin with
-  hysteresis / DeferNoHealthy) + the `QuotaDecision` arm that ran, home-first
-  with the fill-first tail kept as fallback. A healthy pin and a migration pick
-  never consult quota, so no soft cap can move a warm session
+- `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget`, the seat state-key
+  grammar (`seat_state_key` / `split_seat_state_key` / `check_state_key_name`),
+  `seat_identity`, and the round-robin and sticky least-loaded seat selection
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
   pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date
   suffixes (e.g. `_20250305`) so `unsupported_features` on
@@ -4721,10 +4592,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   strip WARN correlates to the dispatching request id. Carries a span-aware
   capture layer (the shared testkit capture is event-only)
 - `tests/cross_lane_system_fingerprint_fallback.rs` -- Gemini -> OpenAI
-  Responses fallback against mock upstreams: each hop withholds the
-  billing/attribution block from both system surfaces, keeps legitimate system
-  content (Responses: top-level first, then message text), and the canonical
-  request is unmutated across the walk
+  Responses fallback against mock upstreams: system-content filtering on each hop
 
 ## routectl-auth
 
@@ -6918,27 +6786,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   types (`ResponsesStreamState`, `OpenOutputItem`, `ToolCallBuffer`); inverse
   of the openai-responses egress
 - `src/ingress/openai_responses/parse.rs` -- Responses body -> canonical
-  `ChatRequest`: flattens the tagged-union `input[]` (`message` /
-  `function_call` / `function_call_output` / `reasoning`) into `messages[]`,
-  lifts `instructions`->`system`, `max_output_tokens`->`max_tokens`,
-  `text.format`->`response_format` (a flat `json_schema` format is rewritten
-  into the nested canonical member; other tags ride verbatim); declarations in
-  `additional_tools` input items merge into `tools[]` (a later same-name
-  function replaces the earlier one in place; identical opaque values collapse;
-  `namespace` containers stay out of canonical tools; the item also rides the
-  passthrough); forward-compat
-  sweep into
-  `provider_extras`. `reasoning.effort` lifts to canonical `ReasoningConfig`;
-  the reasoning remainder (`summary`/`context`/`mode`/future) is stashed under
-  `provider_extras["reasoning"]` and forwarded verbatim (no sub-key vocabulary
-  or type validation -- upstream owns validity; a null sub-key means unset and
-  is dropped). Statefulness
-  contract: `previous_response_id` -> 400; `store:true` (no prior id) accepted
-  with WARN (persistence ignored). Captures the inbound per-conversation key
-  into `routectl_internal.inbound_session_key` via `ingress::session_key`
-  (first curated allowlist header, else the body's top-level
-  `prompt_cache_key`); the lift is a copy, so the swept `prompt_cache_key`
-  still forwards to the Responses egress
+  `ChatRequest`: `input[]` items, `instructions`, tools incl. `additional_tools`
+  merge, reasoning, and the forward-compat `provider_extras` sweep
 - `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` ->
   Responses response body (`object:"response"`, `status`, `output[]` of
   message / function_call / reasoning items)
@@ -6975,19 +6824,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/proxy/cc_version.rs` -- `CcVersionWarnGuard`: opt-in MITM check of the
   observed version against the operator's `[mitm] tested_cc_version`. Warns,
   never refuses; reads any post-prefix token through core's loose helper
-- `src/proxy/forward.rs` -- the dumb, classification-agnostic byte forwarder
-  both split legs reuse (loopback re-inject and catch-all upstream forward):
-  streams bytes and records what it is told, never classifies. `forward(...)`
-  is the async forward call, `ForwardState::new` builds two clients from one
-  common builder (a system-proxy external client and a `no_proxy()` client
-  chosen by `Leg::Inference` for the re-inject) plus the shared concurrency
-  cap + idle window,
-  `ForwardRequest` carries the per-call inputs, `ForwardBody` =
-  `UnsyncBoxBody<Bytes, ForwardBodyError>` (the `http` / `http-body` /
-  `http-body-util` vocabulary reqwest and hyper 1.x share, so the
-  `http::Response<ForwardBody>` hands straight to a hyper `Service`). Consts:
-  `CONNECT_TIMEOUT` (10s), `STREAM_IDLE_WINDOW` (10m),
-  `DEFAULT_MAX_CONCURRENT_STREAMS` (256)
+- `src/proxy/forward.rs` -- classification-agnostic byte forwarder both split
+  legs reuse: `forward`, `ForwardState` (per-leg clients + concurrency cap),
+  `ForwardRequest`, `ForwardBody`
 - `src/proxy/listener.rs` -- the CONNECT front-listener assembly point: binds
   a loopback TCP port, speaks the HTTP `CONNECT` tunneling protocol a client
   configures via `HTTPS_PROXY`, and dispatches each accepted connection to
@@ -8271,6 +8110,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `/v1/responses` ingress reaches every structured-output egress (responses,
   openai-compat, anthropic-api, gemini, bedrock-invoke) carrying the caller's
   schema
+- `tests/gemini_ingress_extras_boundary.rs` -- HTTP ingress through the server
+  to a mock Gemini upstream: which extras reach the upstream body and logs
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`
   shape per ingress
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` ->
@@ -8356,9 +8197,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   dimensions the committed `driver/anthropic-api/` corpus carries, each with a
   reviewed `Relation` against routectl's minted values. Only UNPINNED reds
 - `tests/mitm_forward_proxy_policy.rs` -- isolated binary pinning the MITM
-  forwarder's proxy policy: the inference re-inject never reaches an
-  environment proxy, the control-plane leg still does (CONNECT included);
-  isolated because proxy variables are process-global
+  forwarder's per-leg environment-proxy policy
 - `tests/cc_version_warn_log.rs` -- pins each version warning's log target and
   exact field set, and that the two guards share no field name
 - `tests/log_sink.rs` -- byte-exact record-integrity tests for the production
@@ -8543,9 +8382,11 @@ new section or a second doc.
   distilled baseline record to an output dir
 - `check-internal-ids.sh` -- internal-planning-ID scanner shared by the
   pre-commit, commit-msg, and CI stages (`--staged`, `--commit-msg`,
-  `--range`, `--commit-range`); the single source of truth for the
-  pattern set
-- `check-internal-ids.test.sh` -- self-test for the internal-ID scanner
+  `--range`, `--history`, `--commit-range`), plus `--push-inputs`, which
+  resolves the CI job's per-scan inputs; the single source of truth for
+  the pattern set
+- `check-internal-ids.test.sh` -- self-test for the internal-ID scanner, its
+  exit contract, and its gate wiring
 - `check-log-display.sh` -- production log-sink inventory entry point: fails
   unless `routectl-cli/src/log_sink.rs` is the only production subscriber and
   wires the escaping formatter
