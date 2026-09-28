@@ -633,7 +633,7 @@ fn additional_tools_input_item_merges_into_canonical_tools() {
 
     // Assert
     let tools = req.tools.expect("additional_tools must populate req.tools");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 1, "only the function is canonical: {tools:?}");
     match &tools[0] {
         ToolDef::Custom(c) => {
             assert_eq!(c.name, "shell");
@@ -641,11 +641,6 @@ fn additional_tools_input_item_merges_into_canonical_tools() {
         }
         other => panic!("expected Custom, got {other:?}"),
     }
-    assert!(
-        matches!(&tools[1], ToolDef::Other(v) if v == &json!({"type": "web_search"})),
-        "{:?}",
-        tools[1]
-    );
 }
 
 #[test]
@@ -805,7 +800,7 @@ fn a_later_inline_item_redeclaring_a_function_replaces_the_earlier_inline_one() 
 }
 
 #[test]
-fn identical_opaque_inline_declarations_are_not_repeated() {
+fn inline_hosted_declarations_do_not_duplicate_or_alter_top_level_ones() {
     // Arrange
     let body = json!({
         "model": "m",
@@ -821,17 +816,13 @@ fn identical_opaque_inline_declarations_are_not_repeated() {
     let req = parse(body);
 
     // Assert
-    let tools = req.tools.expect("tools present");
-    assert_eq!(
-        tools.len(),
-        2,
-        "exact duplicates collapse, variants append: {tools:?}"
-    );
+    let tools = req.tools.expect("top-level tools present");
+    assert_eq!(tools.len(), 1, "{tools:?}");
     assert!(matches!(&tools[0], ToolDef::Other(v) if v == &json!({"type": "web_search"})));
 }
 
 #[test]
-fn namespace_containers_stay_out_of_canonical_tools_while_siblings_merge() {
+fn namespace_containers_stay_out_of_canonical_tools_while_function_siblings_merge() {
     // Arrange: a namespace container between an ordinary function and a
     // hosted tool, all in one inline item.
     let body = json!({
@@ -861,10 +852,9 @@ fn namespace_containers_stay_out_of_canonical_tools_while_siblings_merge() {
     let req = parse(body);
 
     // Assert
-    let tools = req.tools.expect("supported siblings still merge");
-    assert_eq!(tools.len(), 2, "{tools:?}");
+    let tools = req.tools.expect("the function sibling still merges");
+    assert_eq!(tools.len(), 1, "{tools:?}");
     assert!(matches!(&tools[0], ToolDef::Custom(c) if c.name == "shell"));
-    assert!(matches!(&tools[1], ToolDef::Other(v) if v == &json!({"type": "web_search"})));
     let rendered = serde_json::to_string(&tools).expect("tools render");
     assert!(!rendered.contains("namespace"), "{rendered}");
     assert!(!rendered.contains("mcp_docs"), "{rendered}");
@@ -879,6 +869,164 @@ fn namespace_containers_stay_out_of_canonical_tools_while_siblings_merge() {
         serde_json::to_vec(&item).expect("item renders"),
         "the declaring item replays byte-for-byte"
     );
+}
+
+/// One inline item mixing a valid function with every declaration kind that
+/// has no portable canonical form. Each opaque entry carries a distinctive
+/// marker so a leak into canonical tools is visible in the rendered output.
+fn mixed_inline_item() -> serde_json::Value {
+    json!({
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}},
+            {"type": "file_search", "vector_store_ids": ["vs_marker_hosted"]},
+            {
+                "type": "mcp",
+                "server_label": "marker_mcp_label",
+                "server_url": "https://marker-mcp.example.invalid/sse",
+                "headers": {"Authorization": "Bearer marker-mcp-credential"}
+            },
+            {"type": "namespace", "name": "marker_namespace", "tools": [{"type": "function", "name": "marker_nested"}]},
+            {"type": "marker_future_kind", "token": "marker-unknown-secret"},
+            {"type": "function", "name": "marker_bad_description", "description": 42},
+            {"type": "function", "description": "marker_nameless"}
+        ]
+    })
+}
+
+const OPAQUE_MARKERS: &[&str] = &[
+    "vs_marker_hosted",
+    "marker_mcp_label",
+    "marker-mcp.example.invalid",
+    "marker-mcp-credential",
+    "marker_namespace",
+    "marker_nested",
+    "marker_future_kind",
+    "marker-unknown-secret",
+    "marker_bad_description",
+    "marker_nameless",
+];
+
+#[test]
+fn mixed_inline_item_admits_only_the_normalized_function_canonically() {
+    // Arrange
+    let item = mixed_inline_item();
+    let body = json!({
+        "model": "m",
+        "input": [item.clone(), {"type": "message", "role": "user", "content": "hi"}]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("the function is canonical");
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    match &tools[0] {
+        ToolDef::Custom(c) => {
+            assert_eq!(c.name, "shell");
+            assert_eq!(c.input_schema["properties"]["cmd"]["type"], "string");
+        }
+        other => panic!("expected Custom, got {other:?}"),
+    }
+    let canonical = serde_json::to_string(&tools).expect("tools render");
+    for marker in OPAQUE_MARKERS {
+        assert!(!canonical.contains(marker), "{marker} leaked: {canonical}");
+    }
+}
+
+#[test]
+fn mixed_inline_item_keeps_every_opaque_marker_in_the_passthrough() {
+    // Arrange
+    let item = mixed_inline_item();
+    let body = json!({
+        "model": "m",
+        "input": [item.clone(), {"type": "message", "role": "user", "content": "hi"}]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let passthrough = &req.routectl_internal.responses_input_passthrough;
+    assert_eq!(passthrough.len(), 1);
+    let replayed = serde_json::to_vec(&passthrough[0].item).expect("item renders");
+    assert_eq!(
+        replayed,
+        serde_json::to_vec(&item).expect("item renders"),
+        "the declaring item replays byte-for-byte"
+    );
+    let replayed = String::from_utf8(replayed).expect("utf8");
+    for marker in OPAQUE_MARKERS {
+        assert!(replayed.contains(marker), "{marker} missing: {replayed}");
+    }
+}
+
+#[test]
+fn an_inline_item_holding_only_opaque_declarations_adds_no_canonical_tools() {
+    // Arrange: every non-function entry of the mixed item, and nothing else.
+    let mut item = mixed_inline_item();
+    item["tools"].as_array_mut().expect("tools array").remove(0);
+    let body = json!({"model": "m", "input": [item]});
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert!(req.tools.is_none(), "{:?}", req.tools);
+    assert_eq!(req.routectl_internal.responses_input_passthrough.len(), 1);
+}
+
+#[test]
+fn a_malformed_inline_function_does_not_replace_a_valid_top_level_one() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "tools": [{"type": "function", "name": "shell", "description": "top-level"}],
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "function", "name": "shell", "description": 42}]
+        }]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("tools present");
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert!(
+        matches!(&tools[0], ToolDef::Custom(c) if c.description.as_deref() == Some("top-level")),
+        "{tools:?}"
+    );
+}
+
+#[test]
+fn top_level_opaque_tools_stay_canonical_beside_an_inline_item() {
+    // Arrange: top-level hosted and MCP declarations keep their existing
+    // ToolDef::Other treatment; the inline filter applies only to inline items.
+    let mcp = json!({"type": "mcp", "server_label": "top_mcp", "server_url": "https://top.example.invalid/sse"});
+    let body = json!({
+        "model": "m",
+        "tools": [{"type": "web_search"}, mcp.clone()],
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "function", "name": "shell"}, {"type": "file_search"}]
+        }]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("tools present");
+    assert_eq!(tools.len(), 3, "{tools:?}");
+    assert!(matches!(&tools[0], ToolDef::Other(v) if v == &json!({"type": "web_search"})));
+    assert!(matches!(&tools[1], ToolDef::Other(v) if v == &mcp));
+    assert!(matches!(&tools[2], ToolDef::Custom(c) if c.name == "shell"));
 }
 
 #[test]

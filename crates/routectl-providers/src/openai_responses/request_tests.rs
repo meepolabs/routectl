@@ -399,6 +399,69 @@ fn tools_declared_by_a_replayed_additional_tools_item_are_not_repeated_top_level
 }
 
 #[test]
+fn a_malformed_inline_function_does_not_suppress_a_same_name_top_level_tool() {
+    for malformed in [
+        json!({"type": "function", "name": "shell", "description": 42}),
+        json!({"type": "function", "name": "shell", "strict": "yes"}),
+    ] {
+        // Arrange: the inline declaration names `shell` but a mistyped field
+        // keeps it from normalizing, so the canonical `shell` is the valid
+        // top-level one and nothing else declares it upstream.
+        let item = json!({"type": "additional_tools", "role": "developer", "tools": [malformed]});
+        let mut req = req_with(vec![user_text("hi")]);
+        req.tools = Some(vec![ToolDef::Custom(
+            from_value(json!({"name": "shell", "description": "top-level"})).unwrap(),
+        )]);
+        req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+            modeled_prefix: 0,
+            item: item.clone(),
+        }];
+
+        // Act
+        let v = translate_to_json(&cfg(), &req);
+
+        // Assert
+        let tools = v["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1, "got: {v}");
+        assert_eq!(tools[0]["name"], "shell", "got: {v}");
+        assert_eq!(tools[0]["description"], "top-level", "got: {v}");
+        assert_eq!(
+            v["input"][0], item,
+            "the inline item still replays verbatim"
+        );
+    }
+}
+
+#[test]
+fn a_valid_inline_function_still_suppresses_the_same_name_top_level_tool() {
+    // Arrange: positive control for the test above -- a normalizable inline
+    // declaration of the same name does suppress the top-level one.
+    let valid = json!({"type": "function", "name": "shell", "description": "inline"});
+    let item = json!({"type": "additional_tools", "role": "developer", "tools": [valid]});
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![
+        ToolDef::Custom(from_value(json!({"name": "shell", "description": "inline"})).unwrap()),
+        ToolDef::Custom(from_value(json!({"name": "top_only"})).unwrap()),
+    ]);
+    req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+        modeled_prefix: 0,
+        item,
+    }];
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let names: Vec<&str> = v["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["top_only"], "got: {v}");
+}
+
+#[test]
 fn only_additional_tools_items_suppress_top_level_tools() {
     // Arrange: positive control -- an unrelated passthrough kind that
     // happens to carry a `tools` key must not hide anything.

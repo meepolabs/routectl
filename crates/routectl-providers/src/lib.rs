@@ -38,6 +38,17 @@ compile_error!(
      --no-default-features --features openai-compat,anthropic-api"
 );
 
+/// Test-only global allocator: lets a test assert that an egress path
+/// allocates independently of an input's size. Only compiled into the lib
+/// test binary, never into the shipped library, and only with the one lane
+/// whose tests measure allocations -- elsewhere `count_allocs` is dead code.
+#[cfg(all(test, feature = "openai-responses"))]
+#[global_allocator]
+static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
+
+#[cfg(all(test, feature = "openai-responses"))]
+pub(crate) mod alloc_probe;
+
 // Collection-time bounding for the diagnostic samples the egresses attach to
 // aggregated WARN records. Dependency-free, so the gate is on the lanes that
 // actually collect samples rather than on any one provider: the two

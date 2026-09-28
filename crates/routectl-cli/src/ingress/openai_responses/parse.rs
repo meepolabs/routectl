@@ -17,9 +17,13 @@
 //!   - unknown item kind                -> preserved verbatim for a
 //!     same-dialect Responses egress to replay (never 500)
 //! - `tools`                            -> `tools[]` (ToolDef)
-//! - `additional_tools` input item      -> merged into `tools[]`, a later
-//!   same-name function replacing the earlier one; `namespace` containers
-//!   skipped (the item is still preserved verbatim for same-dialect replay)
+//! - `additional_tools` input item      -> its function declarations merged
+//!   into `tools[]`, a later same-name function replacing the earlier one;
+//!   every other declaration stays out of `tools[]` (the item is still
+//!   preserved verbatim for same-dialect replay). "Function declaration"
+//!   means one `CustomTool::from_responses_function` accepts; the Responses
+//!   egress applies the same predicate, `CustomTool::responses_function_name`,
+//!   to the replayed item.
 //! - `tool_choice`                      -> `tool_choice` (named-forcing shape normalized to nested)
 //! - `reasoning` (object)               -> `reasoning` (ReasoningConfig)
 //! - `max_output_tokens`                -> `max_tokens`
@@ -41,9 +45,9 @@ use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
 use routectl_core::{
-    ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningConfig,
-    ReasoningDetail, ReasoningDetailKind, ResponsesPassthroughItem, Result, Role, SystemContent,
-    ToolDef,
+    ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
+    ReasoningConfig, ReasoningDetail, ReasoningDetailKind, ResponsesPassthroughItem, Result, Role,
+    SystemContent, ToolDef,
 };
 
 use crate::ingress::read_alias_header;
@@ -54,9 +58,6 @@ use routectl_core::OPENAI_RESPONSES_V1;
 /// the top-level `tools` array (responses-lite clients omit `tools`
 /// entirely and send every declaration this way).
 const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
-
-/// Tool `type` of a container grouping nested tool declarations.
-const NAMESPACE_TOOL_TYPE: &str = "namespace";
 
 /// Top-level Responses request fields handled explicitly below. Anything
 /// NOT in this set is swept into `provider_extras` so a future Responses
@@ -816,15 +817,16 @@ fn build_tools(tools: Value) -> Option<Vec<ToolDef>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Merge the declarations carried by `additional_tools` input items into
-/// the top-level tools, in input order. A later function declaration with
-/// an already-merged name replaces the earlier one in place, because the
+/// Merge the function declarations carried by `additional_tools` input
+/// items into the top-level tools, in input order. A later function with an
+/// already-merged name replaces the earlier one in place, because the
 /// same-dialect replay emits the inline item verbatim and every other lane
-/// must route and serialize that same definition. An identical opaque
-/// declaration is not repeated.
+/// must route and serialize that same definition.
 ///
-/// `namespace` containers are skipped: their nested tools have no canonical
-/// representation, so the container reaches only the verbatim replay.
+/// Only declarations that normalize to `ToolDef::Custom` are admitted.
+/// Hosted, MCP, namespace, unknown, and malformed declarations have no
+/// portable canonical form and may carry server URLs or credentials, so they
+/// reach only the verbatim Responses replay, never another dialect's wire.
 fn merge_additional_tools(
     tools: Option<Vec<ToolDef>>,
     additional: &[Value],
@@ -833,17 +835,16 @@ fn merge_additional_tools(
         return tools;
     }
     let mut merged = tools.unwrap_or_default();
-    for raw in additional
+    for candidate in additional
         .iter()
-        .filter(|raw| raw.get("type").and_then(Value::as_str) != Some(NAMESPACE_TOOL_TYPE))
+        .filter_map(CustomTool::from_responses_function)
     {
-        let candidate = build_tool(raw);
         match merged
             .iter()
-            .position(|known| same_declaration(known, &candidate))
+            .position(|known| matches!(known, ToolDef::Custom(k) if k.name == candidate.name))
         {
-            Some(at) => merged[at] = candidate,
-            None => merged.push(candidate),
+            Some(at) => merged[at] = ToolDef::Custom(candidate),
+            None => merged.push(ToolDef::Custom(candidate)),
         }
     }
     if merged.is_empty() {
@@ -853,46 +854,12 @@ fn merge_additional_tools(
     }
 }
 
-fn same_declaration(a: &ToolDef, b: &ToolDef) -> bool {
-    match (a, b) {
-        (ToolDef::Custom(x), ToolDef::Custom(y)) => x.name == y.name,
-        (ToolDef::Other(x), ToolDef::Other(y)) => x == y,
-        _ => false,
-    }
-}
-
+/// A flat Responses function declaration becomes `ToolDef::Custom`; every
+/// other value -- builtin, unknown, or a malformed function -- passes
+/// through verbatim so the egress can forward it or surface its own error.
 fn build_tool(tool: &Value) -> ToolDef {
-    let is_function = tool.get("type").and_then(Value::as_str) == Some("function");
-    let has_name = tool.get("name").and_then(Value::as_str).is_some();
-    if is_function && has_name {
-        // Rewrite the flat Responses function shape into the canonical
-        // CustomTool wire shape (`{name, description?, input_schema,
-        // strict?}`) and let serde build the typed variant. parameters ->
-        // input_schema is the field rename canonical expects.
-        if let Some(custom) = custom_tool_from_responses_function(tool) {
-            return ToolDef::Custom(custom);
-        }
-    }
-    // Builtin / unknown / malformed: pass through verbatim so the egress
-    // can forward it or surface its own error.
-    ToolDef::Other(tool.clone())
-}
-
-fn custom_tool_from_responses_function(tool: &Value) -> Option<routectl_core::CustomTool> {
-    let obj = tool.as_object()?;
-    let name = obj.get("name").and_then(Value::as_str)?.to_string();
-    let mut custom = Map::new();
-    custom.insert("name".into(), Value::String(name));
-    if let Some(desc) = obj.get("description") {
-        custom.insert("description".into(), desc.clone());
-    }
-    if let Some(params) = obj.get("parameters") {
-        custom.insert("input_schema".into(), params.clone());
-    }
-    if let Some(strict) = obj.get("strict") {
-        custom.insert("strict".into(), strict.clone());
-    }
-    serde_json::from_value(Value::Object(custom)).ok()
+    CustomTool::from_responses_function(tool)
+        .map_or_else(|| ToolDef::Other(tool.clone()), ToolDef::Custom)
 }
 
 // ---------------------------------------------------------------------------

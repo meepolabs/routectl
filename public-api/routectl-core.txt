@@ -2485,6 +2485,8 @@ pub routectl_core::tool_def::CustomTool::strict: core::option::Option<bool>
 pub routectl_core::tool_def::CustomTool::type_tag: core::option::Option<alloc::string::String>
 impl routectl_core::tool_def::CustomTool
 pub fn routectl_core::tool_def::CustomTool::from_openai_function(&serde_json::value::Value) -> core::option::Option<Self>
+pub fn routectl_core::tool_def::CustomTool::from_responses_function(&serde_json::value::Value) -> core::option::Option<Self>
+pub fn routectl_core::tool_def::CustomTool::responses_function_name(&serde_json::value::Value) -> core::option::Option<&str>
 impl core::clone::Clone for routectl_core::tool_def::CustomTool
 pub fn routectl_core::tool_def::CustomTool::clone(&self) -> routectl_core::tool_def::CustomTool
 impl core::fmt::Debug for routectl_core::tool_def::CustomTool
@@ -4743,6 +4745,8 @@ pub routectl_core::CustomTool::strict: core::option::Option<bool>
 pub routectl_core::CustomTool::type_tag: core::option::Option<alloc::string::String>
 impl routectl_core::tool_def::CustomTool
 pub fn routectl_core::tool_def::CustomTool::from_openai_function(&serde_json::value::Value) -> core::option::Option<Self>
+pub fn routectl_core::tool_def::CustomTool::from_responses_function(&serde_json::value::Value) -> core::option::Option<Self>
+pub fn routectl_core::tool_def::CustomTool::responses_function_name(&serde_json::value::Value) -> core::option::Option<&str>
 impl core::clone::Clone for routectl_core::tool_def::CustomTool
 pub fn routectl_core::tool_def::CustomTool::clone(&self) -> routectl_core::tool_def::CustomTool
 impl core::fmt::Debug for routectl_core::tool_def::CustomTool

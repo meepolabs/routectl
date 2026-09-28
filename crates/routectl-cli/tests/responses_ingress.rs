@@ -352,16 +352,11 @@ fn user_input_item() -> Value {
     })
 }
 
-#[tokio::test]
-async fn additional_tools_participate_in_capability_routing_and_reach_the_egress() {
-    // Arrange: no top-level `tools`; the declarations ride an
-    // `additional_tools` input item, as responses-lite clients send them.
-    let no_search = MockServer::start().await;
-    let fallback = MockServer::start().await;
-    mount_upstream(&no_search).await;
-    mount_upstream(&fallback).await;
-    let base = helpers::spawn(capability_chain_config(&no_search.uri(), &fallback.uri())).await;
-    let declaring_item = json!({
+/// An inline item mixing a valid function with hosted, MCP, namespace,
+/// unknown, and malformed declarations. Each opaque entry carries a marker
+/// that must never reach a non-Responses wire body.
+fn mixed_inline_item() -> Value {
+    json!({
         "type": "additional_tools",
         "role": "developer",
         "tools": [
@@ -370,31 +365,153 @@ async fn additional_tools_participate_in_capability_routing_and_reach_the_egress
                 "name": "shell",
                 "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
             },
-            {"type": "web_search"}
+            {"type": "web_search", "search_context_size": "marker_hosted_size"},
+            {
+                "type": "mcp",
+                "server_label": "marker_mcp_label",
+                "server_url": "https://marker-mcp.example.invalid/sse",
+                "headers": {"Authorization": "Bearer marker-mcp-credential"}
+            },
+            {"type": "namespace", "name": "marker_namespace", "tools": [{"type": "function", "name": "marker_nested"}]},
+            {"type": "marker_future_kind", "token": "marker-unknown-secret"},
+            {"type": "function", "name": "marker_bad_description", "description": 42}
         ]
-    });
+    })
+}
+
+const OPAQUE_MARKERS: &[&str] = &[
+    "web_search",
+    "marker_hosted_size",
+    "marker_mcp_label",
+    "marker-mcp.example.invalid",
+    "marker-mcp-credential",
+    "marker_namespace",
+    "marker_nested",
+    "marker_future_kind",
+    "marker-unknown-secret",
+    "marker_bad_description",
+];
+
+fn assert_no_opaque_markers(upstream_body: &Value) {
+    let rendered = upstream_body.to_string();
+    for marker in OPAQUE_MARKERS {
+        assert!(!rendered.contains(marker), "{marker} leaked: {rendered}");
+    }
+}
+
+#[tokio::test]
+async fn inline_functions_reach_an_openai_compat_egress_without_opaque_declarations() {
+    // Arrange: no top-level `tools`; the declarations ride an
+    // `additional_tools` input item, as responses-lite clients send them.
+    let no_search = MockServer::start().await;
+    let fallback = MockServer::start().await;
+    mount_upstream(&no_search).await;
+    mount_upstream(&fallback).await;
+    let base = helpers::spawn(capability_chain_config(&no_search.uri(), &fallback.uri())).await;
 
     // Act
-    let resp = post_responses(&base, json!([declaring_item, user_input_item()])).await;
+    let resp = post_responses(&base, json!([mixed_inline_item(), user_input_item()])).await;
 
     // Assert
     assert_eq!(resp.status(), 200);
-    let skipped = no_search.received_requests().await.expect("requests");
     assert!(
-        skipped.is_empty(),
-        "the web_search-incapable target must be skipped, got {} request(s)",
-        skipped.len()
+        fallback
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "an inline hosted tool is not canonical, so it must not steer routing"
     );
-    let received = fallback.received_requests().await.expect("requests");
+    let received = no_search.received_requests().await.expect("requests");
     assert_eq!(received.len(), 1);
     let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let tools = upstream_body["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1, "{upstream_body}");
+    assert_eq!(tools[0]["function"]["name"], "shell", "{upstream_body}");
     assert_eq!(
-        upstream_body["tools"][0]["function"]["name"], "shell",
-        "cross-dialect egress must carry the inline declaration: {upstream_body}"
+        tools[0]["function"]["parameters"]["properties"]["cmd"]["type"], "string",
+        "{upstream_body}"
+    );
+    assert_no_opaque_markers(&upstream_body);
+}
+
+#[tokio::test]
+async fn inline_functions_reach_an_anthropic_egress_without_opaque_declarations() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "anthropic-mock".to_string(),
+        ProviderEntry::anthropic_api(common::file_ref("test-key")).with_base_url(upstream.uri()),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5"),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("tool-chain".to_string(), AliasValue::Single("haiku".into()));
+    let base = helpers::spawn(single_alias_config(providers, models, aliases)).await;
+
+    // Act
+    let resp = post_responses(&base, json!([mixed_inline_item(), user_input_item()])).await;
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let tools = upstream_body["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1, "{upstream_body}");
+    assert_eq!(tools[0]["name"], "shell", "{upstream_body}");
+    assert_eq!(
+        tools[0]["input_schema"]["properties"]["cmd"]["type"], "string",
+        "{upstream_body}"
+    );
+    assert_no_opaque_markers(&upstream_body);
+}
+
+#[tokio::test]
+async fn a_top_level_hosted_tool_still_participates_in_capability_routing() {
+    // Arrange: positive control for the routing assertions -- the explicit
+    // top-level `tools` path keeps carrying hosted tools canonically.
+    let no_search = MockServer::start().await;
+    let fallback = MockServer::start().await;
+    mount_upstream(&no_search).await;
+    mount_upstream(&fallback).await;
+    let base = helpers::spawn(capability_chain_config(&no_search.uri(), &fallback.uri())).await;
+    let body = json!({
+        "model": "tool-chain",
+        "tools": [{"type": "web_search"}],
+        "input": [user_input_item()]
+    });
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    assert!(
+        no_search
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "the web_search-incapable target must be skipped"
     );
     assert_eq!(
-        upstream_body["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"], "string",
-        "{upstream_body}"
+        fallback.received_requests().await.expect("requests").len(),
+        1
     );
 }
 
@@ -430,7 +547,8 @@ async fn request_without_inline_tools_routes_to_the_first_chain_target() {
 async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cross_dialect() {
     // Arrange: the top-level `shell` and a later inline `shell` disagree on
     // schema, description, and strictness; the inline item also carries a
-    // namespace container, which must not reach the cross-dialect egress.
+    // namespace container and a hosted tool, which must not reach the
+    // cross-dialect egress.
     let no_search = MockServer::start().await;
     let fallback = MockServer::start().await;
     mount_upstream(&no_search).await;
@@ -475,22 +593,13 @@ async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cro
 
     // Assert
     assert_eq!(resp.status(), 200);
-    assert!(
-        no_search
-            .received_requests()
-            .await
-            .expect("requests")
-            .is_empty(),
-        "the merged inline web_search must drive capability routing"
-    );
-    let received = fallback.received_requests().await.expect("requests");
+    let received = no_search.received_requests().await.expect("requests");
     assert_eq!(received.len(), 1);
     let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
     let functions: Vec<&Value> = upstream_body["tools"]
         .as_array()
         .expect("tools array")
         .iter()
-        .filter(|t| t["type"] == "function")
         .collect();
     assert_eq!(functions.len(), 1, "one shell declaration: {upstream_body}");
     assert_eq!(
@@ -507,12 +616,90 @@ async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cro
     assert!(!rendered.contains("stale"), "{rendered}");
     assert!(!rendered.contains("ns_tell"), "{rendered}");
     assert!(!rendered.contains("nested_tell"), "{rendered}");
+    assert!(!rendered.contains("web_search"), "{rendered}");
 }
 
 #[tokio::test]
-async fn same_dialect_replay_carries_the_inline_item_verbatim_and_no_duplicate_top_level_tool() {
+async fn same_dialect_replay_carries_the_mixed_inline_item_verbatim_and_no_duplicate_top_level_tool()
+ {
     // Arrange: same fixture shape as the cross-dialect test, routed to a
     // Responses upstream.
+    let (upstream, base) = spawn_responses_upstream().await;
+    let declaring_item = mixed_inline_item();
+    let body = json!({
+        "model": "tool-chain",
+        "tools": [
+            {"type": "function", "name": "shell", "description": "stale top-level", "strict": false},
+            {"type": "function", "name": "top_only"}
+        ],
+        "input": [declaring_item.clone(), user_input_item()]
+    });
+
+    // Act
+    let upstream_body = post_to_responses_upstream(&upstream, &base, &body).await;
+
+    // Assert
+    assert_eq!(
+        serde_json::to_vec(&upstream_body["input"][0]).unwrap(),
+        serde_json::to_vec(&declaring_item).unwrap(),
+        "the declaring item replays byte-for-byte: {upstream_body}"
+    );
+    let replayed = upstream_body["input"][0].to_string();
+    for marker in OPAQUE_MARKERS {
+        assert!(replayed.contains(marker), "{marker} missing: {replayed}");
+    }
+    let top_level: Vec<&str> = upstream_body["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert_eq!(top_level, vec!["top_only"], "{upstream_body}");
+    assert!(
+        !upstream_body.to_string().contains("stale"),
+        "{upstream_body}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_inline_function_does_not_hide_a_valid_same_name_top_level_tool() {
+    // Arrange: the inline `shell` carries a non-string description, so it is
+    // not a function declaration routectl can normalize; the top-level
+    // `shell` is the only valid definition of that name.
+    let (upstream, base) = spawn_responses_upstream().await;
+    let declaring_item = json!({
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "function", "name": "shell", "description": 42}]
+    });
+    let body = json!({
+        "model": "tool-chain",
+        "tools": [{"type": "function", "name": "shell", "description": "valid top-level"}],
+        "input": [declaring_item.clone(), user_input_item()]
+    });
+
+    // Act
+    let upstream_body = post_to_responses_upstream(&upstream, &base, &body).await;
+
+    // Assert
+    assert_eq!(
+        serde_json::to_vec(&upstream_body["input"][0]).unwrap(),
+        serde_json::to_vec(&declaring_item).unwrap(),
+        "the inline item replays byte-for-byte: {upstream_body}"
+    );
+    let top_level = upstream_body["tools"].as_array().expect("tools array");
+    assert_eq!(top_level.len(), 1, "{upstream_body}");
+    assert_eq!(top_level[0]["type"], "function", "{upstream_body}");
+    assert_eq!(top_level[0]["name"], "shell", "{upstream_body}");
+    assert_eq!(
+        top_level[0]["description"], "valid top-level",
+        "{upstream_body}"
+    );
+}
+
+/// A Responses upstream answering every POST with one completed event,
+/// behind a routectl whose `tool-chain` alias targets it alone.
+async fn spawn_responses_upstream() -> (MockServer, String) {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/responses"))
@@ -542,70 +729,23 @@ async fn same_dialect_replay_carries_the_inline_item_verbatim_and_no_duplicate_t
         "tool-chain".to_string(),
         AliasValue::Single("responses-model".into()),
     );
-    let config = Arc::new(Config {
-        server: ServerConfig {
-            host: "127.0.0.1".into(),
-            port: 0,
-            strict_translation: false,
-            allow_disable_fallbacks: true,
-            ..Default::default()
-        },
-        providers,
-        aliases,
-        retry: RetryPolicy::default(),
-        models,
-        ..Default::default()
-    });
-    let base = helpers::spawn(config).await;
-    let declaring_item = json!({
-        "type": "additional_tools",
-        "role": "developer",
-        "tools": [
-            {
-                "type": "function",
-                "name": "shell",
-                "description": "authoritative inline",
-                "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
-                "strict": true
-            },
-            {"type": "namespace", "name": "ns_tell", "tools": [{"type": "function", "name": "nested_tell"}]},
-            {"type": "web_search"}
-        ]
-    });
-    let body = json!({
-        "model": "tool-chain",
-        "tools": [
-            {"type": "function", "name": "shell", "description": "stale top-level", "strict": false},
-            {"type": "function", "name": "top_only"}
-        ],
-        "input": [declaring_item.clone(), user_input_item()]
-    });
+    let base = helpers::spawn(single_alias_config(providers, models, aliases)).await;
+    (upstream, base)
+}
 
-    // Act
+/// POST `body` to routectl's Responses ingress, require a 200, and return
+/// the single request body the upstream received.
+async fn post_to_responses_upstream(upstream: &MockServer, base: &str, body: &Value) -> Value {
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/responses"))
-        .json(&body)
+        .json(body)
         .send()
         .await
         .unwrap();
-
-    // Assert
     assert_eq!(resp.status(), 200);
     let received = upstream.received_requests().await.expect("requests");
     assert_eq!(received.len(), 1);
-    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
-    assert_eq!(upstream_body["input"][0], declaring_item, "{upstream_body}");
-    let top_level: Vec<&str> = upstream_body["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
-    assert_eq!(top_level, vec!["top_only"], "{upstream_body}");
-    assert!(
-        !upstream_body.to_string().contains("stale"),
-        "{upstream_body}"
-    );
+    serde_json::from_slice(&received[0].body).unwrap()
 }
 
 /// A single terminal Responses SSE event; the egress drains `complete` as
@@ -625,4 +765,38 @@ fn responses_completed_sse() -> String {
         "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
     });
     format!("data: {{\"type\":\"response.completed\",\"response\":{completed}}}\n\n")
+}
+
+fn single_alias_config(
+    providers: BTreeMap<String, ProviderEntry>,
+    models: BTreeMap<String, ModelEntry>,
+    aliases: BTreeMap<String, AliasValue>,
+) -> Arc<Config> {
+    Arc::new(Config {
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            strict_translation: false,
+            allow_disable_fallbacks: true,
+            ..Default::default()
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    })
+}
+
+fn anthropic_response_body() -> Value {
+    json!({
+        "id": "msg_01",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-haiku-4-5",
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "output_tokens": 1}
+    })
 }

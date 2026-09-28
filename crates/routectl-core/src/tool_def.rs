@@ -10,7 +10,13 @@
 //!   `crates/routectl-cli/src/ingress/openai.rs`). The reverse
 //!   translation lives on the egress leg -- the openai-compat egress
 //!   detects a `{type: "function", ...}` `Other` value via
-//!   `CustomTool::from_openai_function` and lifts it there.
+//!   `CustomTool::from_openai_function` and lifts it there. The flat
+//!   OpenAI Responses function shape (`{type: "function", name, ...}`)
+//!   IS lifted at the Responses ingress, through
+//!   `CustomTool::from_responses_function`. The Responses egress decides
+//!   which replayed inline declarations already declare a canonical
+//!   function through `CustomTool::responses_function_name`, the
+//!   allocation-free predicate that normalization is built on.
 //! - `ToolDef::Other(Value)` -- forward-compat catchall. Anthropic
 //!   built-in tools (`bash_*`, `code_execution_*`, `web_search_*`),
 //!   server-side tools, and future shapes pass through verbatim. The
@@ -120,6 +126,60 @@ impl CustomTool {
             strict,
             type_tag: None,
         })
+    }
+
+    /// If `v` is a flat OpenAI Responses function declaration (`{type:
+    /// "function", name, description?, parameters?, strict?}`), normalize it
+    /// into a canonical `CustomTool`: `parameters` becomes `input_schema`
+    /// (defaulting to an empty object schema) and every other field is
+    /// dropped. Returns `None` for any other `type`, a missing or non-string
+    /// `name`, or a present field whose value does not fit its canonical
+    /// type (e.g. a numeric `description`).
+    ///
+    /// Accepts exactly the values [`CustomTool::responses_function_name`]
+    /// accepts, so the Responses ingress (admission into `req.tools`) and the
+    /// Responses egress (duplicate suppression against a replayed inline
+    /// declaration) agree on which raw declarations count as functions.
+    pub fn from_responses_function(v: &Value) -> Option<Self> {
+        let name = Self::responses_function_name(v)?;
+        let field = |key: &str| v.get(key).filter(|f| !f.is_null());
+        Some(Self {
+            name: name.to_owned(),
+            description: field("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            input_schema: v
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(empty_object_schema),
+            cache_control: None,
+            defer_loading: None,
+            strict: field("strict").and_then(Value::as_bool),
+            type_tag: None,
+        })
+    }
+
+    /// The name of `v` if [`CustomTool::from_responses_function`] would
+    /// accept it, borrowed from `v` itself; `None` exactly when that
+    /// normalization returns `None`. Accepted shape: `type` is the string
+    /// `"function"`, `name` is a string, `parameters` is any JSON value (the
+    /// canonical schema is an untyped `Value`, and JSON Schema admits boolean
+    /// schemas), and each of `description` (string) and `strict` (bool) is
+    /// absent, `null`, or of that type. Allocates nothing, so a caller that
+    /// only needs the name never copies the schema.
+    pub fn responses_function_name(v: &Value) -> Option<&str> {
+        let obj = v.as_object()?;
+        if obj.get("type").and_then(Value::as_str) != Some("function") {
+            return None;
+        }
+        let fits = |key: &str, is_type: fn(&Value) -> bool| {
+            obj.get(key).is_none_or(|f| f.is_null() || is_type(f))
+        };
+        let fields_fit = fits("description", Value::is_string) && fits("strict", Value::is_boolean);
+        if !fields_fit {
+            return None;
+        }
+        obj.get("name").and_then(Value::as_str)
     }
 }
 
@@ -424,6 +484,203 @@ mod tests {
         };
         assert_eq!(c.name, "outer");
         assert_eq!(c.input_schema["required"], json!(["a"]));
+    }
+
+    #[test]
+    fn responses_function_normalizes_to_custom_tool_with_renamed_schema() {
+        // Arrange
+        let v = json!({
+            "type": "function",
+            "name": "shell",
+            "description": "run a command",
+            "parameters": {"type": "object", "required": ["cmd"]},
+            "strict": true
+        });
+
+        // Act
+        let c = CustomTool::from_responses_function(&v).expect("normalizes");
+
+        // Assert
+        assert_eq!(
+            serde_json::to_value(&c).unwrap(),
+            json!({
+                "name": "shell",
+                "description": "run a command",
+                "input_schema": {"type": "object", "required": ["cmd"]},
+                "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn responses_function_without_parameters_gets_default_schema() {
+        // Arrange
+        let v = json!({"type": "function", "name": "noop"});
+
+        // Act
+        let c = CustomTool::from_responses_function(&v).expect("normalizes");
+
+        // Assert
+        assert_eq!(c.input_schema, empty_object_schema());
+        assert_eq!(c.description, None);
+        assert_eq!(c.strict, None);
+    }
+
+    #[test]
+    fn responses_function_drops_fields_outside_the_flat_function_shape() {
+        // Arrange: canonical-only and alias spellings are not part of the
+        // flat Responses function shape and must not leak into the result.
+        let v = json!({
+            "type": "function",
+            "name": "shell",
+            "inputSchema": {"type": "object", "required": ["alias"]},
+            "cache_control": {"type": "ephemeral"},
+            "defer_loading": true,
+            "extra": "ignored"
+        });
+
+        // Act
+        let c = CustomTool::from_responses_function(&v).expect("normalizes");
+
+        // Assert
+        assert_eq!(
+            serde_json::to_value(&c).unwrap(),
+            json!({"name": "shell", "input_schema": empty_object_schema()})
+        );
+    }
+
+    /// Values that are not a well-formed flat Responses function
+    /// declaration, one mistyped or missing field per case.
+    fn malformed_responses_functions() -> Vec<Value> {
+        vec![
+            json!(null),
+            json!("function"),
+            json!([{"type": "function", "name": "shell"}]),
+            json!({"name": "shell"}),
+            json!({"type": "custom", "name": "shell"}),
+            json!({"type": "web_search", "name": "shell"}),
+            json!({"type": ["function"], "name": "shell"}),
+            json!({"type": "function"}),
+            json!({"type": "function", "name": null}),
+            json!({"type": "function", "name": 7}),
+            json!({"type": "function", "name": "shell", "description": 42}),
+            json!({"type": "function", "name": "shell", "description": ["a"]}),
+            json!({"type": "function", "name": "shell", "strict": "yes"}),
+            json!({"type": "function", "name": "shell", "strict": 1}),
+            json!({"type": "function", "function": {"name": "shell"}}),
+        ]
+    }
+
+    #[test]
+    fn responses_function_rejects_values_that_are_not_well_formed_functions() {
+        for v in malformed_responses_functions() {
+            // Act
+            let normalized = CustomTool::from_responses_function(&v);
+            let name = CustomTool::responses_function_name(&v);
+
+            // Assert
+            assert!(
+                normalized.is_none(),
+                "{v} must not normalize: {normalized:?}"
+            );
+            assert!(name.is_none(), "{v} must not yield a name: {name:?}");
+        }
+    }
+
+    #[test]
+    fn responses_function_name_agrees_with_normalization_on_well_formed_functions() {
+        for v in [
+            json!({"type": "function", "name": "shell"}),
+            json!({"type": "function", "name": "", "parameters": {}}),
+            json!({
+                "type": "function",
+                "name": "shell",
+                "description": "run",
+                "parameters": {"type": "object"},
+                "strict": false
+            }),
+            json!({
+                "type": "function",
+                "name": "shell",
+                "description": null,
+                "parameters": null,
+                "strict": null
+            }),
+            json!({"type": "function", "name": "shell", "extra": 42, "inputSchema": 7}),
+        ] {
+            // Act
+            let normalized = CustomTool::from_responses_function(&v);
+            let name = CustomTool::responses_function_name(&v);
+
+            // Assert
+            let normalized = normalized.unwrap_or_else(|| panic!("{v} must normalize"));
+            assert_eq!(name, Some(normalized.name.as_str()), "{v}");
+        }
+    }
+
+    #[test]
+    fn responses_function_carries_any_parameters_value_verbatim() {
+        for params in [
+            json!(42),
+            json!("{}"),
+            json!([{"type": "object"}]),
+            json!(true),
+            json!(false),
+            json!(null),
+            json!({}),
+            json!({"type": "object", "required": ["cmd"]}),
+        ] {
+            // Arrange
+            let v = json!({"type": "function", "name": "shell", "parameters": params});
+
+            // Act
+            let normalized = CustomTool::from_responses_function(&v);
+            let name = CustomTool::responses_function_name(&v);
+
+            // Assert
+            let normalized = normalized.unwrap_or_else(|| panic!("{v} must normalize"));
+            assert_eq!(normalized.input_schema, params, "{v}");
+            assert_eq!(name, Some("shell"), "{v}");
+        }
+    }
+
+    #[test]
+    fn responses_function_null_fields_normalize_as_their_serde_defaults() {
+        // A present `null` maps the way serde maps it onto the canonical
+        // fields: `None` for the optional ones, a literal null schema for
+        // `input_schema` (its default applies only when the key is absent).
+        // Arrange
+        let v = json!({
+            "type": "function",
+            "name": "shell",
+            "description": null,
+            "parameters": null,
+            "strict": null
+        });
+
+        // Act
+        let c = CustomTool::from_responses_function(&v).expect("normalizes");
+
+        // Assert
+        assert_eq!(c.description, None);
+        assert_eq!(c.strict, None);
+        assert_eq!(c.input_schema, Value::Null);
+    }
+
+    #[test]
+    fn responses_function_name_borrows_the_declarations_own_name() {
+        // Arrange
+        let v = json!({"type": "function", "name": "shell", "parameters": {"type": "object"}});
+
+        // Act
+        let name = CustomTool::responses_function_name(&v).expect("a function");
+
+        // Assert
+        let original = v["name"].as_str().expect("string name");
+        assert!(
+            std::ptr::eq(name, original),
+            "the name must point into the declaration, not a copy"
+        );
     }
 
     #[test]

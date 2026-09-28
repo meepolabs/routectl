@@ -15,18 +15,22 @@
 
 use serde_json::{Value, json};
 
-use routectl_core::{ChatRequest, ToolDef, sanitize_for_log};
+use routectl_core::{ChatRequest, CustomTool, ToolDef, sanitize_for_log};
 
 use super::types::{ResponsesFunctionTag, ResponsesTool};
 use crate::translation_drop_metrics::record_translation_drop;
 
 /// Responses `input[]` item kind that declares tools inline. The ingress
-/// merges its declarations into `req.tools` AND preserves the item for
-/// verbatim replay, so this egress must not re-declare them top-level.
+/// merges its function declarations into `req.tools` AND preserves the item
+/// for verbatim replay, so this egress must not re-declare them top-level.
 const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
 
 /// Tool declarations carried by the replayed `additional_tools` input
-/// items: function names, plus the raw value of every declaration.
+/// items: the names of the declarations the ingress admitted as canonical
+/// functions, plus the raw value of every declaration. A function name is
+/// recorded only when `CustomTool::responses_function_name` accepts the raw
+/// declaration -- the same test the ingress's normalization applies -- so a
+/// malformed inline declaration never hides a valid same-name top-level tool.
 struct InlineDeclarations<'a> {
     function_names: Vec<&'a str>,
     raw: Vec<&'a Value>,
@@ -49,9 +53,7 @@ impl<'a> InlineDeclarations<'a> {
                 .into_iter()
                 .flatten()
             {
-                if tool.get("type").and_then(Value::as_str) == Some("function")
-                    && let Some(name) = tool.get("name").and_then(Value::as_str)
-                {
+                if let Some(name) = CustomTool::responses_function_name(tool) {
                     decl.function_names.push(name);
                 }
                 decl.raw.push(tool);
@@ -467,5 +469,76 @@ mod tool_choice_drop_tests {
             assert_eq!(name_drop_count(), before_name, "{choice} counted a drop");
             assert_eq!(shape_drop_count(), before_shape, "{choice} counted a drop");
         }
+    }
+}
+
+#[cfg(test)]
+mod inline_declaration_tests {
+    use super::InlineDeclarations;
+    use crate::alloc_probe::count_allocs;
+    use routectl_core::{ChatRequest, CustomTool, ResponsesPassthroughItem};
+    use serde_json::{Map, Value, json};
+
+    /// A request replaying one `additional_tools` item that declares a
+    /// single function whose schema carries `properties` entries.
+    fn request_declaring_one_function(properties: usize) -> ChatRequest {
+        let props: Map<String, Value> = (0..properties)
+            .map(|i| (format!("field_{i}"), json!({"type": "string"})))
+            .collect();
+        let item = json!({
+            "type": "additional_tools",
+            "tools": [{
+                "type": "function",
+                "name": "shell",
+                "parameters": {"type": "object", "properties": props}
+            }]
+        });
+        let mut req = ChatRequest::default();
+        req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+            modeled_prefix: 0,
+            item,
+        }];
+        req
+    }
+
+    fn collect_counting(req: &ChatRequest) -> (usize, u64) {
+        count_allocs(|| InlineDeclarations::collect(req).function_names.len())
+    }
+
+    #[test]
+    fn collecting_inline_names_never_copies_the_declared_schema() {
+        // Arrange
+        let small = request_declaring_one_function(1);
+        let large = request_declaring_one_function(2_000);
+
+        // Act
+        let (small_names, small_allocs) = collect_counting(&small);
+        let (large_names, large_allocs) = collect_counting(&large);
+
+        // Assert
+        assert_eq!((small_names, large_names), (1, 1));
+        assert_eq!(
+            large_allocs, small_allocs,
+            "collection must allocate the same for a 2000-property schema as for a 1-property one"
+        );
+    }
+
+    #[test]
+    fn normalizing_a_large_declaration_does_copy_its_schema() {
+        // Arrange: negative control -- the probe observes a schema copy, so
+        // the equality above would fail if collection normalized the tool.
+        let large = request_declaring_one_function(2_000);
+        let tool = &large.routectl_internal.responses_input_passthrough[0].item["tools"][0];
+
+        // Act
+        let (normalized, allocs) =
+            count_allocs(|| CustomTool::from_responses_function(tool).is_some());
+
+        // Assert
+        assert!(normalized);
+        assert!(
+            allocs > 2_000,
+            "a schema copy allocates per property; observed {allocs}"
+        );
     }
 }
