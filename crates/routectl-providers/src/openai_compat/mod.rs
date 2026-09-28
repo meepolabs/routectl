@@ -97,10 +97,14 @@ pub struct OpenAiCompatConfig {
     /// Override the User-Agent on outbound requests. `None` keeps reqwest's default.
     pub user_agent: Option<String>,
     /// When `true`, requests carrying canonical-only fields (`cache_control`,
-    /// `anthropic_beta`, `ToolDef::Other`, `ContentPart::Other`,
+    /// `anthropic_beta`, non-function `ToolDef::Other`, `ContentPart::Other`,
     /// `SystemContent::Blocks` with cache_control, etc.) are rejected with
-    /// `Error::Validation` instead of warn-and-dropped. Set from
-    /// `[server] strict_translation` at provider build time.
+    /// `Error::Validation`. When `false`, each is warned about and then
+    /// handled by kind: fields the wire cannot carry (cache_control markers,
+    /// `anthropic_beta`, Anthropic builtin tools) are dropped, while an opaque
+    /// `ContentPart::Other` block is forwarded verbatim for the upstream to
+    /// interpret. Set from `[server] strict_translation` at provider build
+    /// time.
     pub strict_translation: bool,
     /// When `true`, suppress the auto-injected
     /// `stream_options.include_usage = true` on streaming requests.

@@ -195,10 +195,10 @@ const CALLER_ATTRIBUTED_HELPERS: &[(&str, &str, &str)] = &[
 ///   elsewhere, where none of the three derivable resolutions applies -- the
 ///   symbol emits no counter beside its log, and a caller of it is itself
 ///   unmarked;
-/// - a request-side loss this lane declares ONLY through its WARN (and a
-///   strict-mode rejection), with no counter yet. These are uncounted drops,
-///   not accepted ones: each entry is the record of that gap until the arm
-///   gains a counter and a marker.
+/// - a request-side loss or fidelity risk this lane declares ONLY through its
+///   WARN (and a strict-mode rejection), with no counter yet. These are
+///   uncounted, not accepted: each entry is the record of that gap until the
+///   arm gains a counter and a marker.
 const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     (
         "bedrock/converse/eventstream.rs",
@@ -302,12 +302,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
         "check_dropped_anthropic_fields",
         "tool cache_control dropped",
         "uncounted request-side loss: a custom tool's cache breakpoint has no openai-compat wire field, declared by this WARN and strict mode only",
-    ),
-    (
-        "openai_compat/request.rs",
-        "check_dropped_anthropic_fields",
-        "forward-compat content block dropped",
-        "uncounted request-side loss: an unmodeled content block type is not forwarded, declared by this WARN and by the strict-mode rejection only",
     ),
     (
         "openai_compat/request.rs",

@@ -6,8 +6,10 @@
 //! fingerprint to any upstream that isn't the genuine Anthropic billing
 //! party, so every egress strips it before flatten/translation. This
 //! module provides the predicate that identifies the block, a helper
-//! that drops it from a canonical `SystemContent`, and one that collects
-//! `Role::System` message text with it withheld.
+//! that drops it from a canonical `SystemContent`, one that collects
+//! `Role::System` message text with it withheld, and one that withholds it
+//! from `Role::System` messages kept in place (for an egress that forwards
+//! system turns as messages).
 //!
 //! Each egress collects and projects system content in its own wire shape
 //! and records every withhold into its per-request

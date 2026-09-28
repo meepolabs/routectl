@@ -9,6 +9,13 @@
 //!
 //! Per-dialect logic lives in `dialects/*.rs`; this module is a thin
 //! envelope around that dispatch.
+//!
+//! System content is projected before serialization: the filtered top-level
+//! `system` lowers to a leading `role: "system"` message and every
+//! `Role::System` turn stays in place, with the Claude Code
+//! billing/attribution block withheld from both surfaces. The withhold counts
+//! once per request on the policy-action counter, flushed ahead of the first
+//! fallible step so a request that later fails translation is still counted.
 
 use serde_json::Value;
 use tracing::warn;
@@ -65,8 +72,10 @@ pub fn normalize(
     let system = project_system(id, req, &mut fingerprint);
     flush_fingerprint_tally(&fingerprint);
 
-    // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
-    // can't carry. Default mode warns + continues; strict mode 400s.
+    // Seams the OpenAI-compat wire can't represent: Anthropic-only
+    // fields dropped from the body, plus unmodeled content blocks that
+    // are forwarded verbatim. Default mode warns + continues; strict
+    // mode 400s on either.
     check_dropped_anthropic_fields(id, req, strict_translation)?;
 
     let mut body =
@@ -349,11 +358,19 @@ fn is_routectl_managed_key(key: &str) -> bool {
         )
 }
 
-/// Emit `tracing::warn!` for each Anthropic-only canonical field
-/// dropped on the openai-compat wire. Default mode warns + returns
-/// `Ok(())`; strict mode collects the findings and returns an
-/// `Error::Validation` (HTTP 400) so the operator sees the loss
-/// before the upstream does.
+/// Emit `tracing::warn!` for each canonical field or block the
+/// openai-compat wire cannot represent. Two kinds of finding:
+///
+/// - Anthropic-only fields (`cache_control` on the request, system,
+///   tools, or content blocks; `anthropic_beta`) that are dropped
+///   from the outbound body.
+/// - `ContentPart::Other` blocks routectl does not model. These are
+///   NOT dropped: default mode forwards them verbatim for the
+///   upstream to accept or reject.
+///
+/// Default mode warns + returns `Ok(())`; strict mode collects both
+/// kinds of finding and returns an `Error::Validation` (HTTP 400) so
+/// the operator sees them before the upstream does.
 fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> Result<()> {
     let mut findings: Vec<String> = Vec::new();
     let mut record = |msg: String| {
@@ -424,7 +441,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
                             provider = id,
                             message_index = i,
                             block_type = %sanitize_for_log(type_tag),
-                            "openai-compat egress: forward-compat content block dropped",
+                            "openai-compat egress: forward-compat content block is unmodeled",
                         );
                         record(format!("forward-compat block `{type_tag}` on message {i}"));
                     }
@@ -1754,6 +1771,114 @@ mod tests {
             lane_seen_count() > before,
             "the Err arm must count the request in the lane denominator too"
         );
+    }
+
+    /// A request whose user turn carries one block type no canonical variant
+    /// models, so it deserializes to `ContentPart::Other`.
+    fn req_with_unknown_block() -> ChatRequest {
+        let part: ContentPart = serde_json::from_value(json!({
+            "type": "future_widget_block",
+            "widget_id": "wdg_01",
+            "payload": {"nested": [1, 2, 3]}
+        }))
+        .expect("an unknown block type deserializes");
+        assert!(
+            matches!(&part, ContentPart::Other { .. }),
+            "fixture must exercise the forward-compat variant, got {part:?}"
+        );
+        let mut req = simple_req("m");
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(vec![part]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        req
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn lenient_mode_warns_that_an_unknown_content_block_is_unmodeled_without_claiming_a_drop() {
+        // Arrange
+        let req = req_with_unknown_block();
+
+        // Act
+        let _ = lenient_normalize(&req);
+
+        // Assert
+        logs_assert(|lines: &[&str]| {
+            let warned: Vec<&&str> = lines
+                .iter()
+                .filter(|line| line.contains("future_widget_block"))
+                .collect();
+            match warned.as_slice() {
+                [line]
+                    if line.contains("forward-compat content block is unmodeled")
+                        && !line.contains("dropped") =>
+                {
+                    Ok(())
+                }
+                _ => Err(format!(
+                    "expected one warning calling the block unmodeled and not dropped, since \
+                     lenient mode forwards it: {warned:?}"
+                )),
+            }
+        });
+    }
+
+    #[test]
+    fn lenient_mode_forwards_an_unknown_content_block_verbatim() {
+        // Arrange
+        let req = req_with_unknown_block();
+
+        // Act
+        let body = lenient_normalize(&req);
+
+        // Assert
+        let parts = body["messages"][1]["content"]
+            .as_array()
+            .expect("the unknown block's turn keeps its parts array");
+        assert_eq!(
+            parts,
+            &vec![json!({
+                "type": "future_widget_block",
+                "widget_id": "wdg_01",
+                "payload": {"nested": [1, 2, 3]}
+            })],
+            "the unknown block must reach the wire with its type and extras intact"
+        );
+    }
+
+    #[test]
+    fn strict_mode_rejects_an_unknown_content_block() {
+        // Arrange
+        let req = req_with_unknown_block();
+
+        // Act
+        let res = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            true,
+        );
+
+        // Assert
+        match res {
+            Err(Error::Validation(msg)) => assert!(
+                msg.contains("forward-compat block `future_widget_block` on message 1"),
+                "the rejection must name the unknown block, got: {msg}"
+            ),
+            other => panic!("strict mode must reject the unknown block, got {other:?}"),
+        }
     }
 
     include!("request_system_tests.rs");
