@@ -134,10 +134,11 @@ is_excluded() {
 # caught while a token embedded in a larger identifier (e.g.
 # `xR2-EXAMPLEy`, `myRV-99thing`) is NOT -- identical on GNU and BSD.
 #
-# The last three cores catch the planning-shorthand class (task /
-# feature / decision ids): `f<n>.<m>` task shorthand, `(pre-|post-)f<n>`
-# planning commentary, and standalone `D<nn>` decision shorthand (the
-# token boundary keeps `d17_tail`-style identifiers and hex bytes clear).
+# The planning-shorthand cores catch task / feature / decision ids:
+# `f<n>.<m>` task shorthand, the `f<n>'s` / `f<n> matrix` feature labels,
+# `(pre-|post-)f<n>` planning commentary, and standalone `D<nn>` decision
+# shorthand (the token boundary keeps `d17_tail`-style identifiers and hex
+# bytes clear).
 #
 # CAUTION on the task-shorthand core: bare `f<n>` is NOT catchable -- it
 # collides with the Rust float types `f16` / `f32` / `f64` / `f128`, and
@@ -173,6 +174,12 @@ is_excluded() {
 # re-read it. The width boundaries it hinges on (15/17, 31/33, 63/65,
 # 127/129) are asserted in the self-test; keep them there.
 #
+# The same run (`FEATURE_RUN`) also anchors two label forms of a bare
+# feature number: the possessive (`f3's`) and the matrix label
+# (`f4 matrix`). Bare `f<n>` stays uncatchable for the float-width reason
+# above, and the width exclusion applies unchanged: `f32's` and
+# `f64 matrix` are ordinary Rust prose.
+#
 # The stage-label cores are NARROWED to the spellings that actually occurred,
 # because this scanner BLOCKS commits and a false positive on legitimate prose
 # is a developer-facing outage. Measured against the labels the 2026-08-11
@@ -203,6 +210,17 @@ is_excluded() {
 # pattern for it would block legitimate commits. Keeping ids of that shape
 # out of code and commit messages is the author's and reviewer's job, not
 # this gate's.
+#
+# Feature run: any digit run that does not spell a Rust float width (16 /
+# 32 / 64 / 128). The arms, in order: one digit; two digits excluding
+# 16/32/64; three digits excluding 128; four or more digits.
+FEATURE_RUN='([0-9]|1[0-57-9]|3[0-13-9]|6[0-35-9]|[0245789][0-9]|12[0-79]|1[013-9][0-9]|[02-9][0-9][0-9]|[0-9]{4,})'
+
+# The private-docs directory name, assembled from fragments at runtime so
+# this file never spells the name it guards against; the self-test fails if
+# either script spells it again.
+PRIVATE_DOCS_DIR="$(printf '%s_%s' 'llm' 'context')"
+
 PATTERNS=(
     # ORG-WIDE decision and tracking ids. Unlike every other core in this
     # tier these are NOT routectl's -- they are conventions every project
@@ -232,11 +250,9 @@ PATTERNS=(
     'TODO\(M[0-9]{1,3}(-[A-Za-z0-9_-]+)?\)'
     'M[0-9]+\.[0-9]+'
     'H[0-9]{1,3} (fix|invariant)'
-    # Task shorthand `f<run>.<digits>`, where <run> is any digit run that
-    # does not spell a Rust float width (16 / 32 / 64 / 128). The arms, in
-    # order: one digit; two digits excluding 16/32/64; three digits
-    # excluding 128; four or more digits.
-    'f([0-9]|1[0-57-9]|3[0-13-9]|6[0-35-9]|[0245789][0-9]|12[0-79]|1[013-9][0-9]|[02-9][0-9][0-9]|[0-9]{4,})\.[0-9]+'
+    "f$FEATURE_RUN\\.[0-9]+"
+    "f$FEATURE_RUN's"
+    "f$FEATURE_RUN matrix"
     '(pre-|post-)f[0-9]+'
     'D[0-9]{2}'
     'SLICE [0-9]{1,3}'
@@ -262,9 +278,13 @@ PATTERNS=(
     # bounds are load-bearing rather than cosmetic:
     #   - `Table [AB]` needs its leading word boundary: without it,
     #     "...for the mutable Table Api" and similar prose would match.
-    #   - the private-docs path core lives in its own tier below
-    #     (`PATTERNS_PATH_PREFIX`), not here: a whole-token RIGHT boundary
-    #     stops at the `/` the core ends in, so any path with a tail passed.
+    #   - the private-docs directory core is the bare name, not a `/`-suffixed
+    #     path: the whole-token boundaries catch it before a `/` (any path
+    #     tail at any depth), a space, a period, a backtick, or a colon, while
+    #     the left boundary keeps a longer identifier that merely ENDS in the
+    #     name clean (the catalog codegen has a real function of that shape)
+    #     and the right boundary keeps a `<name>_window`-style identifier
+    #     clean.
     'Table-[AB]'
     'Table [AB]'
     'lane-contract'
@@ -284,6 +304,7 @@ PATTERNS=(
     # `cloak_population`), so no code identifier can match this core.
     'cloak-baseline'
     'foundations\.md'
+    "$PRIVATE_DOCS_DIR"
 )
 
 # Second tier: same whole-token wrapping, but the LEFT boundary also
@@ -313,39 +334,16 @@ PATTERNS_NO_HYPHEN=(
     'this milestone'
 )
 
-# Third tier: path PREFIXES. Left boundary only, no right boundary: the core
-# ends in `/`, and whatever follows it (any filename, any depth) is the path
-# tail the core exists to catch.
-#
-# The left boundary is the default one (`[^[:alnum:]_]`): it keeps a longer
-# identifier that merely ENDS in the directory name clean (the catalog
-# codegen has a real function of that shape, and an underscore-prefixed
-# directory is not this one), while still catching the core after `/`, `./`,
-# a backtick, a quote, or line start. The trailing `/` keeps the bare name
-# clean where it is an ordinary identifier (a parameter, a `<name>_window`
-# helper).
-#
-# The directory name is assembled from fragments at runtime so this file
-# never spells the path it guards against; the self-test fails if either
-# script spells it again.
-#
-# MEASURED: across all tracked files minus `EXCLUDE_PATHS`, this core
-# returns zero lines, the same as the whole-token form it replaced.
-PRIVATE_DOCS_DIR="$(printf '%s_%s' 'llm' 'context')"
 LEFT_BOUNDARY='(^|[^[:alnum:]_])'
-PATTERNS_PATH_PREFIX=(
-    "$PRIVATE_DOCS_DIR/"
-)
 
-# Join the cores of all three tiers into one ERE: the first two tiers wrap
-# each core in whole-token boundaries (the second tier's left boundary
-# additionally excludes `-`), the path tier takes a left boundary only, then
-# all are OR-ed with `|`.
+# Join the cores of both tiers into one ERE: each core is wrapped in
+# whole-token boundaries (the second tier's left boundary additionally
+# excludes `-`), then all are OR-ed with `|`.
 joined_pattern() {
     local out=""
     local p
     for p in "${PATTERNS[@]}"; do
-        local wrapped="(^|[^[:alnum:]_])($p)([^[:alnum:]_]|\$)"
+        local wrapped="$LEFT_BOUNDARY($p)([^[:alnum:]_]|\$)"
         if [[ -z "$out" ]]; then
             out="$wrapped"
         else
@@ -355,9 +353,6 @@ joined_pattern() {
     for p in "${PATTERNS_NO_HYPHEN[@]}"; do
         local wrapped="(^|[^[:alnum:]_-])($p)([^[:alnum:]_]|\$)"
         out="$out|$wrapped"
-    done
-    for p in "${PATTERNS_PATH_PREFIX[@]}"; do
-        out="$out|$LEFT_BOUNDARY($p)"
     done
     printf '%s' "$out"
 }
@@ -420,9 +415,9 @@ scan_file() {
 
 # Added lines of the scanner's own sources are exempt from the pattern set,
 # but never from the private-docs directory name: neither file may spell it.
-# It takes the path tier's left boundary but no trailing `/`, so the bare
-# name is caught too, while a longer identifier that merely ENDS in the name
-# stays clean here exactly as it does in every other file.
+# It takes the pattern set's left boundary but no right boundary, so a
+# longer identifier that merely ENDS in the name stays clean here exactly as
+# it does in every other file.
 SCANNER_SOURCE_PATTERN="$LEFT_BOUNDARY$PRIVATE_DOCS_DIR"
 
 scan_scanner_source_file() {

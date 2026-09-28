@@ -115,6 +115,31 @@ assert_caught "(pre-)f<n> planning commentary" "adjust pre-f2 before merge"
 assert_caught "(post-)f<n> planning commentary" "post-f3 cleanup pass"
 assert_caught "D<nn> decision shorthand" "recorded under D42 rationale"
 
+# POSITIVE (feature-run labels): the possessive and matrix forms of a bare
+# feature run. They share the task shorthand's run, so the neighbours of the
+# f16 width are caught here too.
+assert_caught "feature-run possessive" "sourced from f3's capture pass"
+assert_caught "two-digit feature-run possessive" "reuses f10's fixture layout"
+assert_caught "possessive just below the f16 width" "inherits f15's bound"
+assert_caught "possessive just above the f16 width" "inherits f17's bound"
+assert_caught "feature-run possessive before a sentence period" "carried over from f3's."
+assert_caught "feature-run matrix label" "the f4 matrix runner reads the rig"
+assert_caught "matrix label at line end" "reported by the f4 matrix"
+
+# NEGATIVE (feature-run labels): Rust float-width vocabulary in the same
+# shapes, and a bare run followed by an ordinary word.
+assert_clean "f16 possessive" "clamp below f16's largest finite value"
+assert_clean "f32 possessive" "a value below f32's smallest subnormal"
+assert_clean "f64 possessive" "within f64's mantissa width"
+assert_clean "f128 possessive" "past f128's exponent range"
+assert_clean "f16 matrix" "upload the f16 matrix to the device"
+assert_clean "f32 matrix" "multiply the f32 matrix in place"
+assert_clean "f64 matrix" "invert the f64 matrix first"
+assert_clean "f128 matrix" "store an f128 matrix for the check"
+assert_clean "bare feature run before an ordinary word" "the f2 feature flag is off"
+assert_clean "feature-run possessive inside an identifier" "call cast_f3's helper"
+assert_clean "matrix word without a run" "the matrix runner reads the rig"
+
 # POSITIVE (stage-label class): the three spellings that actually occurred in
 # this repo -- all-caps with a space, hyphenated, and the possessive form.
 assert_caught "hyphenated slice label" "mirrors the slice-2 renderer"
@@ -327,12 +352,28 @@ assert_clean "a longer name ending in the directory name is not a private-docs p
     "cached under lite$DOCS_DIR/window"
 assert_clean "an underscore-prefixed directory is not a private-docs path" \
     "cached under my_$DOCS_DIR/window"
-# Without the trailing slash the token is an ordinary identifier shape
-# (a `<name>_window` helper, a parameter named after it), not a path.
+assert_clean "a longer identifier ending in the directory name is clean" \
+    "the lite$DOCS_DIR helper builds the window"
 assert_clean "an identifier prefixed with the directory name is clean" \
     "let size = ${DOCS_DIR}_window(entry);"
-assert_clean "a parameter named after the directory is clean" \
+assert_clean "a leading-underscore identifier is clean" \
+    "the _$DOCS_DIR field stays private"
+
+# The bare directory token is caught as a whole token, not only as a path.
+assert_caught "the bare private-docs directory before a space is caught" \
+    "notes live in $DOCS_DIR for now"
+assert_caught "the bare private-docs directory before a period is caught" \
+    "notes live in $DOCS_DIR."
+assert_caught "the backticked bare private-docs directory is caught" \
+    "notes live in \`$DOCS_DIR\` for now"
+assert_caught "a parameter named after the directory is caught" \
     "fn build($DOCS_DIR: &Ctx) -> Plan"
+assert_diff_caught "the bare private-docs directory in an ordinary source is caught" \
+"+++ b/crates/routectl-providers/src/x.rs
++// notes live in $DOCS_DIR for now"
+assert_diff_clean "the same ordinary-source line without the directory is clean" \
+"+++ b/crates/routectl-providers/src/x.rs
++// notes live in for now"
 
 # The cloak enumeration's private companion, same class as the lane document
 # above. The paired accepts below are the reason the core is safe to add: the
