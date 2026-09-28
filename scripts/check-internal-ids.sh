@@ -12,12 +12,30 @@
 #   --staged            Scan ADDED lines of the staged diff (code path).
 #   --commit-msg FILE   Scan a commit-message file.
 #   --range A..B        Scan ADDED lines of `git diff A..B` (CI PR path).
+#   --history A..B      Scan ADDED lines of EVERY commit in `A..B` against
+#                       its first parent (CI path). Content added by one
+#                       commit and removed by a later one is invisible to
+#                       `--range`, which compares only the two endpoints.
 #   --commit-range A..B Scan commit messages in `git log A..B` (CI path).
+#   --push-inputs BEFORE
+#                       Print the CI scan inputs for a push whose previous
+#                       tip is BEFORE (or a PR base) as `endpoint=`,
+#                       `history=`, and `messages=` lines, for `--range`,
+#                       `--history`, and `--commit-range` respectively. An
+#                       empty or all-zero BEFORE (a push that creates the
+#                       branch) compares the empty tree to HEAD and covers
+#                       every commit reachable from HEAD, root included.
+#
+# Every diff mode disables rename detection: a 100% rename emits no added
+# lines, so a file moved from an excluded path to a scanned one would
+# otherwise carry its whole content past the scan.
 #
 # Local bypass: ROUTECTL_SKIP_ID_SCAN=1 exits 0 without scanning. CI MUST
 # NOT set this (the guard fails closed).
 #
-# Exit codes: 0 = clean, 1 = a banned token was found, 2 = usage error.
+# Exit codes: 0 = clean, 1 = a banned token was found, 2 = usage error,
+# 3 = scanner or tool error (grep or git failed, missing, or could not read
+# its input). Only 0 means clean.
 
 set -euo pipefail
 
@@ -36,13 +54,22 @@ fi
 # This script excludes ITSELF for the same reason: it IS the rule set, so
 # its pattern literals are indistinguishable from real leaks and any diff
 # that edits the rule set would block its own commit. Accepted cost: the
-# scanner's own source is never scanned for genuine leaks.
-EXCLUDE_PATHS=(
-    "crates/routectl-cli/tests/fixtures/captured/"
-    "crates/routectl-router/catalog_data/"
+# scanner's own source is never scanned against the full pattern set. It is
+# still scanned for the one literal neither file may ever spell, the
+# private-docs directory name (see `scan_scanner_source_text`).
+SCANNER_SOURCES=(
     "scripts/check-internal-ids.sh"
     "scripts/check-internal-ids.test.sh"
 )
+EXCLUDE_PATHS=(
+    "crates/routectl-cli/tests/fixtures/captured/"
+    "crates/routectl-router/catalog_data/"
+    "${SCANNER_SOURCES[@]}"
+)
+
+EXIT_FOUND=1
+EXIT_USAGE=2
+EXIT_TOOL=3
 
 # LINE-level exemption, deliberately not a path entry.
 #
@@ -234,10 +261,9 @@ PATTERNS=(
     # bounds are load-bearing rather than cosmetic:
     #   - `Table [AB]` needs its leading word boundary: without it,
     #     "...for the mutable Table Api" and similar prose would match.
-    #   - the private-docs path needs a trailing `/` AND a non-letter to its left:
-    #     the bare directory name false-matched a catalog helper, a real
-    #     function name in the catalog codegen, verified before this bound
-    #     was added.
+    #   - the private-docs path core lives in its own tier below
+    #     (`PATTERNS_PATH_PREFIX`), not here: a whole-token RIGHT boundary
+    #     stops at the `/` the core ends in, so any path with a tail passed.
     'Table-[AB]'
     'Table [AB]'
     'lane-contract'
@@ -257,7 +283,6 @@ PATTERNS=(
     # `cloak_population`), so no code identifier can match this core.
     'cloak-baseline'
     'foundations\.md'
-    'llm''_context/'
 )
 
 # Second tier: same whole-token wrapping, but the LEFT boundary also
@@ -287,9 +312,34 @@ PATTERNS_NO_HYPHEN=(
     'this milestone'
 )
 
-# Join the cores of both tiers into one ERE: each core is wrapped in
-# whole-token boundaries (the second tier's left boundary additionally
-# excludes `-`), then all are OR-ed with `|`.
+# Third tier: path PREFIXES. Left boundary only, no right boundary: the core
+# ends in `/`, and whatever follows it (any filename, any depth) is the path
+# tail the core exists to catch.
+#
+# The left boundary is the default one (`[^[:alnum:]_]`): it keeps a longer
+# identifier that merely ENDS in the directory name clean (the catalog
+# codegen has a real function of that shape, and an underscore-prefixed
+# directory is not this one), while still catching the core after `/`, `./`,
+# a backtick, a quote, or line start. The trailing `/` keeps the bare name
+# clean where it is an ordinary identifier (a parameter, a `<name>_window`
+# helper).
+#
+# The directory name is assembled from fragments at runtime so this file
+# never spells the path it guards against; the self-test fails if either
+# script spells it again.
+#
+# MEASURED: across all tracked files minus `EXCLUDE_PATHS`, this core
+# returns zero lines, the same as the whole-token form it replaced.
+PRIVATE_DOCS_DIR="$(printf '%s_%s' 'llm' 'context')"
+LEFT_BOUNDARY='(^|[^[:alnum:]_])'
+PATTERNS_PATH_PREFIX=(
+    "$PRIVATE_DOCS_DIR/"
+)
+
+# Join the cores of all three tiers into one ERE: the first two tiers wrap
+# each core in whole-token boundaries (the second tier's left boundary
+# additionally excludes `-`), the path tier takes a left boundary only, then
+# all are OR-ed with `|`.
 joined_pattern() {
     local out=""
     local p
@@ -305,94 +355,302 @@ joined_pattern() {
         local wrapped="(^|[^[:alnum:]_-])($p)([^[:alnum:]_]|\$)"
         out="$out|$wrapped"
     done
+    for p in "${PATTERNS_PATH_PREFIX[@]}"; do
+        out="$out|$LEFT_BOUNDARY($p)"
+    done
     printf '%s' "$out"
 }
 
-# Scan a blob of text on stdin. Prints offending lines (prefixed) and
-# returns 1 if any banned token is present, 0 otherwise.
-scan_text() {
-    local label="$1"
-    local pattern
-    pattern="$(joined_pattern)"
-    local matches
-    # grep -E returns 1 on no-match; tolerate that without `set -e` abort.
-    matches="$(grep -nE "$pattern" || true)"
-    # Drop matched lines that carry the synthetic control-fixture marker.
-    # Runs AFTER `grep -n` so the reported line numbers stay accurate.
-    if [[ -n "$matches" ]]; then
-        matches="$(printf '%s\n' "$matches" | grep -vF "$CONTROL_FIXTURE_MARKER" || true)"
-    fi
-    if [[ -n "$matches" ]]; then
-        echo "check-internal-ids: banned internal ID(s) found in $label:" >&2
-        echo "$matches" >&2
-        return 1
-    fi
-    return 0
+# Every git-produced input is fixed against user and repo config that would
+# change its shape: color, an external diff driver or textconv, custom or
+# mnemonic path prefixes, a relative diff root, or rename detection. The
+# `+++ b/<path>` header is how `split_added_lines` attributes a line to its
+# file, so any of those could silently re-home or hide content.
+DIFF_FLAGS=(
+    --no-color
+    --no-ext-diff
+    --no-textconv
+    --no-relative
+    --no-renames
+    --unified=0
+    --src-prefix=a/
+    --dst-prefix=b/
+)
+
+WORK_DIR=""
+
+tool_error() {
+    echo "check-internal-ids: scanner error: $*" >&2
+    exit "$EXIT_TOOL"
 }
 
-# Emit the ADDED lines (without the leading '+') of a diff on stdin,
-# skipping the +++ file header and excluded paths. Tracks the current
-# target file from the +++ header so excluded files contribute no added
-# lines.
-added_lines_from_diff() {
-    local skip=0
-    local line path
-    while IFS= read -r line; do
+ensure_work_dir() {
+    if [[ -z "$WORK_DIR" ]]; then
+        WORK_DIR="$(mktemp -d)" || tool_error "could not create a temporary directory"
+        trap 'rm -rf -- "$WORK_DIR"' EXIT
+    fi
+}
+
+# Scan FILE against the full pattern set. Returns 0 when clean and 1 when a
+# banned token is present; any grep status above 1 (bad pattern, unreadable
+# input, missing binary) is a scanner error, never a clean result.
+scan_file() {
+    local label="$1" file="$2"
+    local pattern matches filtered rc
+    pattern="$(joined_pattern)"
+    matches="$(grep -nE -- "$pattern" "$file")" && rc=0 || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;
+        *) tool_error "grep exited $rc while scanning $label" ;;
+    esac
+    # Drop matched lines that carry the synthetic control-fixture marker.
+    # Runs AFTER `grep -n` so the reported line numbers stay accurate.
+    filtered="$(printf '%s\n' "$matches" | grep -vF -- "$CONTROL_FIXTURE_MARKER")" && rc=0 || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;
+        *) tool_error "grep exited $rc while filtering $label" ;;
+    esac
+    echo "check-internal-ids: banned internal ID(s) found in $label:" >&2
+    printf '%s\n' "$filtered" >&2
+    return 1
+}
+
+# Added lines of the scanner's own sources are exempt from the pattern set,
+# but never from the private-docs directory name: neither file may spell it.
+# It takes the path tier's left boundary but no trailing `/`, so the bare
+# name is caught too, while a longer identifier that merely ENDS in the name
+# stays clean here exactly as it does in every other file.
+SCANNER_SOURCE_PATTERN="$LEFT_BOUNDARY$PRIVATE_DOCS_DIR"
+
+scan_scanner_source_file() {
+    local label="$1" file="$2"
+    local matches rc
+    matches="$(grep -nE -- "$SCANNER_SOURCE_PATTERN" "$file")" && rc=0 || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;
+        *) tool_error "grep exited $rc while scanning scanner sources in $label" ;;
+    esac
+    echo "check-internal-ids: scanner source spells the private-docs directory in $label:" >&2
+    printf '%s\n' "$matches" >&2
+    return 1
+}
+
+is_scanner_source() {
+    local path="$1" src
+    for src in "${SCANNER_SOURCES[@]}"; do
+        if [[ "$path" == "$src" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+append_line() {
+    printf '%s\n' "$2" >>"$1" || tool_error "could not write $1"
+}
+
+# Split the ADDED lines (without the leading '+') of the unified diff in
+# DIFF into SCANNED (every non-excluded path) and SOURCES (the scanner's own
+# sources). The target path comes from the `+++ ` header, which is honoured
+# only inside a file header -- before the first hunk, or after a
+# `diff --git` line and before that file's first `@@` -- so an added line
+# whose content begins `++ ` cannot re-home the lines after it.
+split_added_lines() {
+    local diff="$1" scanned="$2" sources="$3"
+    local in_header=1 dest="$scanned" line path
+    [[ -r "$diff" ]] || tool_error "could not read diff $diff"
+    : >"$scanned" || tool_error "could not write $scanned"
+    : >"$sources" || tool_error "could not write $sources"
+    while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in
+            'diff --git '*)
+                in_header=1
+                ;;
+            '@@'*)
+                in_header=0
+                ;;
             '+++ '*)
-                path="${line#+++ }"
-                path="${path#b/}"
-                if is_excluded "$path"; then
-                    skip=1
-                else
-                    skip=0
+                if [[ "$in_header" -eq 1 ]]; then
+                    path="${line#+++ }"
+                    path="${path#b/}"
+                    if is_scanner_source "$path"; then
+                        dest="$sources"
+                    elif is_excluded "$path"; then
+                        dest=""
+                    else
+                        dest="$scanned"
+                    fi
+                elif [[ -n "$dest" ]]; then
+                    append_line "$dest" "${line#+}"
                 fi
                 ;;
             '+'*)
-                if [[ "$skip" -eq 0 ]]; then
-                    printf '%s\n' "${line#+}"
+                if [[ -n "$dest" ]]; then
+                    append_line "$dest" "${line#+}"
                 fi
                 ;;
         esac
-    done
+    done <"$diff"
+}
+
+# Scan the unified diff in DIFF: the pattern set over non-excluded added
+# lines, and the private-docs literal over the scanner's own added lines.
+scan_diff_file() {
+    local label="$1" diff="$2"
+    local status=0
+    ensure_work_dir
+    split_added_lines "$diff" "$WORK_DIR/scanned" "$WORK_DIR/sources"
+    scan_file "$label added lines" "$WORK_DIR/scanned" || status=1
+    scan_scanner_source_file "$label" "$WORK_DIR/sources" || status=1
+    return "$status"
+}
+
+# Run `git <args>` into OUT, turning any git failure into a scanner error.
+git_to_file() {
+    local out="$1" rc
+    shift
+    git "$@" >"$out" && rc=0 || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        tool_error "git $1 exited $rc"
+    fi
+}
+
+scan_staged() {
+    ensure_work_dir
+    git_to_file "$WORK_DIR/diff" diff --cached "${DIFF_FLAGS[@]}"
+    scan_diff_file "staged diff" "$WORK_DIR/diff"
+}
+
+scan_range() {
+    local range="$1"
+    ensure_work_dir
+    git_to_file "$WORK_DIR/diff" diff "${DIFF_FLAGS[@]}" --end-of-options "$range" --
+    scan_diff_file "diff range $range" "$WORK_DIR/diff"
+}
+
+# Each commit in RANGE against its first parent (a root commit against the
+# empty tree). A merge's first-parent diff covers what it brought in, and
+# the merged commits are also in the range, so each is scanned on its own.
+scan_history() {
+    local range="$1" commit status=0 count=0
+    ensure_work_dir
+    git_to_file "$WORK_DIR/commits" rev-list --reverse --end-of-options "$range" --
+    [[ -r "$WORK_DIR/commits" ]] || tool_error "could not read commit list"
+    while IFS= read -r commit; do
+        [[ -n "$commit" ]] || continue
+        count=$((count + 1))
+        git_to_file "$WORK_DIR/diff" diff-tree -p --no-commit-id --root \
+            --diff-merges=first-parent "${DIFF_FLAGS[@]}" "$commit"
+        scan_diff_file "commit $commit" "$WORK_DIR/diff" || status=1
+    done <"$WORK_DIR/commits"
+    echo "check-internal-ids: scanned $count commit(s) in $range" >&2
+    return "$status"
+}
+
+scan_commit_messages() {
+    local range="$1"
+    ensure_work_dir
+    git_to_file "$WORK_DIR/messages" log --format=%B --end-of-options "$range" --
+    scan_file "commit messages in $range" "$WORK_DIR/messages"
+}
+
+# The tree object with no entries, in this repository's object format.
+empty_tree() {
+    local tree rc
+    tree="$(git hash-object -t tree /dev/null)" && rc=0 || rc=$?
+    [[ "$rc" -eq 0 && -n "$tree" ]] || tool_error "git hash-object exited $rc"
+    printf '%s' "$tree"
+}
+
+# True (0) when BEFORE names no previous tip: empty, or git's all-zero id
+# for a push that creates the branch (40 or 64 zeros by object format).
+is_null_before() {
+    [[ -z "$1" || "$1" =~ ^(0{40}|0{64})$ ]]
+}
+
+# Print the three CI scan inputs for a push from BEFORE to HEAD. With no
+# previous tip every commit reachable from HEAD is new, so the endpoint scan
+# starts from the empty tree and the per-commit and message scans take all
+# of HEAD's history -- never `HEAD~1`, which a root commit does not have and
+# which would skip every earlier commit of a multi-commit initial push.
+push_inputs() {
+    local before="$1" base rc
+    if is_null_before "$before"; then
+        base="$(empty_tree)" || exit "$EXIT_TOOL"
+        printf 'endpoint=%s..HEAD\n' "$base"
+        printf 'history=HEAD\n'
+        printf 'messages=HEAD\n'
+        return 0
+    fi
+    base="$(git rev-parse --verify --quiet --end-of-options "$before^{commit}")" && rc=0 || rc=$?
+    [[ "$rc" -eq 0 && -n "$base" ]] || tool_error "push base $before does not name a commit"
+    printf 'endpoint=%s...HEAD\n' "$base"
+    printf 'history=%s..HEAD\n' "$base"
+    printf 'messages=%s..HEAD\n' "$base"
+}
+
+scan_diff_stdin() {
+    ensure_work_dir
+    cat >"$WORK_DIR/diff" || tool_error "could not read diff from stdin"
+    scan_diff_file "diff (stdin)" "$WORK_DIR/diff"
 }
 
 usage() {
-    echo "usage: $0 --staged | --commit-msg FILE | --range A..B | --commit-range A..B | --diff-stdin" >&2
-    exit 2
+    echo "usage: $0 --staged | --commit-msg FILE | --range A..B | --history A..B | --commit-range A..B | --push-inputs BEFORE | --diff-stdin" >&2
+    exit "$EXIT_USAGE"
+}
+
+# Map a mode's status onto the exit contract: 0 clean, 1 found, and anything
+# else a scanner error.
+finish() {
+    case "$1" in
+        0) exit 0 ;;
+        1) exit "$EXIT_FOUND" ;;
+        *) tool_error "scan ended with unexpected status $1" ;;
+    esac
 }
 
 main() {
     [[ $# -ge 1 ]] || usage
-    local mode="$1"
+    local mode="$1" status
     case "$mode" in
         --staged)
-            git diff --cached --unified=0 -- . | added_lines_from_diff \
-                | scan_text "staged added lines"
+            scan_staged && status=0 || status=$?
             ;;
         --commit-msg)
             [[ $# -ge 2 ]] || usage
-            scan_text "commit message" <"$2"
+            scan_file "commit message" "$2" && status=0 || status=$?
             ;;
         --range)
             [[ $# -ge 2 ]] || usage
-            git diff --unified=0 "$2" -- . | added_lines_from_diff \
-                | scan_text "diff range $2 added lines"
+            scan_range "$2" && status=0 || status=$?
+            ;;
+        --history)
+            [[ $# -ge 2 ]] || usage
+            scan_history "$2" && status=0 || status=$?
             ;;
         --commit-range)
             [[ $# -ge 2 ]] || usage
-            git log --format=%B "$2" | scan_text "commit messages in $2"
+            scan_commit_messages "$2" && status=0 || status=$?
+            ;;
+        --push-inputs)
+            [[ $# -ge 2 ]] || usage
+            push_inputs "$2" && status=0 || status=$?
             ;;
         --diff-stdin)
             # Test-only seam: scan a unified diff supplied on stdin
             # through the same added-lines + exclusion path the git modes
             # use, without invoking git. Exercised by the self-test.
-            added_lines_from_diff | scan_text "diff (stdin) added lines"
+            scan_diff_stdin && status=0 || status=$?
             ;;
         *)
             usage
             ;;
     esac
+    finish "$status"
 }
 
 main "$@"

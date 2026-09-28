@@ -81,6 +81,15 @@ repos:
         always_run: true
         pass_filenames: false
 
+      # The scan above exits 0 only when its tool chain ran, so the
+      # self-test proving that contract rides the same stage.
+      - id: internal-ids-self-test
+        name: internal-ID scanner self-test
+        entry: bash scripts/check-internal-ids.test.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
       - id: log-display
         name: production log-sink inventory (one escaping subscriber)
         entry: bash scripts/check-log-display.sh

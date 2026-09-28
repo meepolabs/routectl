@@ -14,62 +14,65 @@ SCANNER="$HERE/check-internal-ids.sh"
 
 fails=0
 
-# Assert that scanning TEXT in commit-msg mode is CAUGHT (exit 1).
+# Scanner exit contract: 0 clean, 1 banned token found, 3 scanner or tool
+# error. Every assertion below requires the EXACT status, so a scanner that
+# errors can never read as either verdict.
+EXIT_CLEAN=0
+EXIT_FOUND=1
+EXIT_TOOL=3
+
+TMP="$(mktemp -d)"
+trap 'rm -rf -- "$TMP"' EXIT
+
+# Record a pass when ACTUAL equals EXPECTED, a failure otherwise.
+expect_status() {
+    local desc="$1" expected="$2" actual="$3"
+    if [[ "$actual" -eq "$expected" ]]; then
+        echo "PASS: exit $actual -- $desc"
+    else
+        echo "FAIL: expected exit $expected, got $actual -- $desc"
+        fails=$((fails + 1))
+    fi
+}
+
+# Exit status of scanning TEXT in commit-msg mode.
+commit_msg_status() {
+    local text="$1" tmp rc
+    tmp="$(mktemp "$TMP/msg.XXXXXX")" || return "$EXIT_TOOL"
+    printf '%s\n' "$text" >"$tmp" || return "$EXIT_TOOL"
+    bash "$SCANNER" --commit-msg "$tmp" >/dev/null 2>&1 && rc=0 || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# Exit status of scanning a unified DIFF in --diff-stdin mode.
+diff_stdin_status() {
+    local diff="$1"
+    printf '%s\n' "$diff" | bash "$SCANNER" --diff-stdin >/dev/null 2>&1
+}
+
 assert_caught() {
-    local desc="$1"
-    local text="$2"
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s\n' "$text" >"$tmp"
-    if bash "$SCANNER" --commit-msg "$tmp" >/dev/null 2>&1; then
-        echo "FAIL: expected CAUGHT but passed -- $desc"
-        fails=$((fails + 1))
-    else
-        echo "PASS: caught -- $desc"
-    fi
-    rm -f "$tmp"
+    local rc
+    commit_msg_status "$2" && rc=0 || rc=$?
+    expect_status "caught -- $1" "$EXIT_FOUND" "$rc"
 }
 
-# Assert that scanning TEXT in commit-msg mode is CLEAN (exit 0).
 assert_clean() {
-    local desc="$1"
-    local text="$2"
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s\n' "$text" >"$tmp"
-    if bash "$SCANNER" --commit-msg "$tmp" >/dev/null 2>&1; then
-        echo "PASS: clean -- $desc"
-    else
-        echo "FAIL: expected CLEAN but caught -- $desc"
-        fails=$((fails + 1))
-    fi
-    rm -f "$tmp"
+    local rc
+    commit_msg_status "$2" && rc=0 || rc=$?
+    expect_status "clean -- $1" "$EXIT_CLEAN" "$rc"
 }
 
-# Assert that scanning a unified DIFF (on stdin) in --diff-stdin mode is
-# CAUGHT (exit 1).
 assert_diff_caught() {
-    local desc="$1"
-    local diff="$2"
-    if printf '%s\n' "$diff" | bash "$SCANNER" --diff-stdin >/dev/null 2>&1; then
-        echo "FAIL: expected CAUGHT but passed -- $desc"
-        fails=$((fails + 1))
-    else
-        echo "PASS: caught -- $desc"
-    fi
+    local rc
+    diff_stdin_status "$2" && rc=0 || rc=$?
+    expect_status "caught -- $1" "$EXIT_FOUND" "$rc"
 }
 
-# Assert that scanning a unified DIFF (on stdin) in --diff-stdin mode is
-# CLEAN (exit 0).
 assert_diff_clean() {
-    local desc="$1"
-    local diff="$2"
-    if printf '%s\n' "$diff" | bash "$SCANNER" --diff-stdin >/dev/null 2>&1; then
-        echo "PASS: clean -- $desc"
-    else
-        echo "FAIL: expected CLEAN but caught -- $desc"
-        fails=$((fails + 1))
-    fi
+    local rc
+    diff_stdin_status "$2" && rc=0 || rc=$?
+    expect_status "clean -- $1" "$EXIT_CLEAN" "$rc"
 }
 
 # POSITIVE: each of the 6 banned formats is caught.
@@ -269,10 +272,11 @@ assert_diff_clean "catalog selector source with vendor model name is clean" \
 # INTERNAL DOCUMENT references. This class leaked four times in one
 # feature's batch and passed every hook, because the id tiers look for
 # identifier shapes and a private doc's filename is ordinary prose to
-# them. Each accept below is the false positive that shaped a bound:
-# A catalog helper is a real function name that a bare directory-name
-# core matched, and `Table Api` / `table_a_helper` are the prose and
-# identifier forms an unbounded table-label core would catch.
+# them. Each accept below is the false positive that shaped a bound: a
+# real catalog-codegen function whose name ends in the private-docs
+# directory name matched a bare-name core, and `Table Api` /
+# `table_a_helper` are the prose and identifier forms an unbounded
+# table-label core would catch.
 assert_diff_caught "a table label from the internal lane document is caught" \
 "+++ b/crates/routectl-providers/src/x.rs
 +// classified TRANSLATION-per-Table-A here"
@@ -281,9 +285,54 @@ assert_diff_caught "the internal lane document's own name is caught" \
 "+++ b/crates/routectl-providers/src/x.rs
 +// see lane-contract for the ruling"
 
-assert_diff_caught "a private-docs path is caught" \
+# PRIVATE-DOCS PATH class. The directory name is assembled from fragments so
+# this file never spells it; every fixture below derives from it. Every
+# positive fixture names a filename no other core can match, so only the
+# path core can catch it; each is paired with the same line minus the
+# directory prefix, asserted clean, which proves the rest of the line trips
+# nothing.
+DOCS_DIR="$(printf '%s_%s' 'llm' 'context')"
+NESTED_TAIL="notes/drafts/example-slug.md"
+
+assert_diff_caught "a private-docs path with an unrelated filename is caught" \
 "+++ b/crates/routectl-providers/src/x.rs
-+// per llm""_context/architecture/foundations"".md"
++// per $DOCS_DIR/notes.txt"
+assert_diff_clean "the same line without the private-docs directory is clean" \
+"+++ b/crates/routectl-providers/src/x.rs
++// per notes.txt"
+
+assert_caught "a nested private-docs path is caught" \
+    "moved from $DOCS_DIR/$NESTED_TAIL"
+assert_clean "the nested tail alone is clean" \
+    "moved from $NESTED_TAIL"
+
+assert_caught "a one-character tail under the private-docs dir is caught" \
+    "see $DOCS_DIR/x"
+assert_caught "the bare private-docs directory with its slash is caught" \
+    "kept under $DOCS_DIR/"
+assert_caught "a relative private-docs path is caught" \
+    "written to ./$DOCS_DIR/scratch/draft.txt"
+assert_caught "a private-docs path inside a longer path is caught" \
+    "found at ../project/$DOCS_DIR/research/notes.txt"
+assert_caught "a backticked private-docs path is caught" \
+    "see \`$DOCS_DIR/research/notes.txt\` for detail"
+assert_caught "a private-docs path at line start is caught" \
+    "$DOCS_DIR/research/notes.txt"
+
+# The left boundary is what keeps the path core off real identifiers: the
+# catalog codegen has a function whose name ends in the directory name, and
+# a directory or crate whose name merely ENDS in it is not the private-docs
+# directory.
+assert_clean "a longer name ending in the directory name is not a private-docs path" \
+    "cached under lite$DOCS_DIR/window"
+assert_clean "an underscore-prefixed directory is not a private-docs path" \
+    "cached under my_$DOCS_DIR/window"
+# Without the trailing slash the token is an ordinary identifier shape
+# (a `<name>_window` helper, a parameter named after it), not a path.
+assert_clean "an identifier prefixed with the directory name is clean" \
+    "let size = ${DOCS_DIR}_window(entry);"
+assert_clean "a parameter named after the directory is clean" \
+    "fn build($DOCS_DIR: &Ctx) -> Plan"
 
 # The cloak enumeration's private companion, same class as the lane document
 # above. The paired accepts below are the reason the core is safe to add: the
@@ -307,14 +356,593 @@ assert_diff_clean "an underscored cloak identifier is not the document" \
 +pub const CLOAK_DIR: &str = \"anthropic_api/cloak\";
 +fn cloak_baseline_population() {}"
 
-assert_diff_clean "litellm_context is not a private-docs path" \
+assert_diff_clean "the catalog codegen function is not a private-docs path" \
 "+++ b/crates/routectl-router/src/catalog_codegen.rs
-+    let window = litellm_context(entry)?;"
++    let window = lite$DOCS_DIR(entry)?;"
 
 assert_diff_clean "table prose and identifiers are not internal labels" \
 "+++ b/crates/routectl-providers/src/x.rs
 +// the mutable Table Api wrapper
 +fn table_a_helper() {}"
+
+# DIFF-PATH (header attribution): an ADDED line whose content begins with
+# `++ b/<excluded path>` renders as `+++ b/...` in the diff. It must not
+# re-home the lines after it into an excluded file.
+assert_diff_caught "added content shaped like a file header cannot exempt later lines" \
+"diff --git a/crates/routectl-core/src/lib.rs b/crates/routectl-core/src/lib.rs
+--- a/crates/routectl-core/src/lib.rs
++++ b/crates/routectl-core/src/lib.rs
+@@ -0,0 +1,2 @@
++++ b/scripts/check-internal-ids.test.sh
++see RV-99 here"
+
+# DIFF-PATH (scanner sources): the scanner's own sources skip the pattern
+# set, but an added line spelling the private-docs directory is still
+# caught there. The paired clean case proves the rest of the line is inert.
+assert_diff_caught "a scanner-source line spelling the private-docs directory is caught" \
+"+++ b/scripts/check-internal-ids.sh
++# moved to $DOCS_DIR/notes.txt"
+assert_diff_clean "the same scanner-source line without the directory is clean" \
+"+++ b/scripts/check-internal-ids.sh
++# moved to notes.txt"
+
+# The scanner-source check shares the path tier's LEFT boundary: the bare
+# directory name is caught there too, but a longer identifier that merely
+# ends in it is not the private-docs directory, in either path.
+assert_diff_caught "a scanner-source line naming the bare private-docs directory is caught" \
+"+++ b/scripts/check-internal-ids.test.sh
++# see the $DOCS_DIR tree"
+assert_diff_caught "a backticked private-docs directory in a scanner source is caught" \
+"+++ b/scripts/check-internal-ids.sh
++# see \`$DOCS_DIR\` here"
+assert_diff_clean "a scanner-source identifier ending in the directory name is clean" \
+"+++ b/scripts/check-internal-ids.sh
++    let window = lite$DOCS_DIR(entry)?;"
+assert_diff_clean "an underscore-prefixed directory in a scanner source is clean" \
+"+++ b/scripts/check-internal-ids.test.sh
++# cached under my_$DOCS_DIR/window"
+assert_diff_clean "an underscore-prefixed directory in an ordinary source is clean" \
+"+++ b/crates/routectl-router/src/catalog_codegen.rs
++// cached under my_$DOCS_DIR/window"
+assert_diff_caught "the same ordinary-source line with the bare directory is caught" \
+"+++ b/crates/routectl-router/src/catalog_codegen.rs
++// cached under $DOCS_DIR/window"
+
+# PORTABLE mktemp. BSD / macOS mktemp has no `-p DIR` and no long options;
+# a GNU-only spelling in the self-test turns every commit-msg case into a
+# scanner error there. The stand-in refuses exactly those spellings and
+# otherwise defers to the real mktemp, and the same case must still verdict.
+BSD_MKTEMP_BIN="$TMP/bsd-mktemp-bin"
+mkdir -p "$BSD_MKTEMP_BIN"
+REAL_MKTEMP="$(command -v mktemp)"
+{
+    echo '#!/bin/sh'
+    echo 'for arg in "$@"; do'
+    # shellcheck disable=SC2016
+    echo '    case "$arg" in -p|-p*|--*) echo "mktemp: illegal option $arg" >&2; exit 1 ;; esac'
+    echo 'done'
+    printf 'exec "%s" "$@"\n' "$REAL_MKTEMP"
+} >"$BSD_MKTEMP_BIN/mktemp"
+chmod +x "$BSD_MKTEMP_BIN/mktemp"
+
+if PATH="$BSD_MKTEMP_BIN:$PATH" mktemp -p "$TMP" >/dev/null 2>&1; then
+    echo "FAIL: the BSD mktemp stand-in accepted -p"
+    fails=$((fails + 1))
+else
+    echo "PASS: the BSD mktemp stand-in refuses -p"
+fi
+PATH="$BSD_MKTEMP_BIN:$PATH" commit_msg_status "deferred to RV-99 backlog" && rc=0 || rc=$?
+expect_status "caught under a BSD-style mktemp" "$EXIT_FOUND" "$rc"
+PATH="$BSD_MKTEMP_BIN:$PATH" commit_msg_status "this change improves the retry policy" && rc=0 || rc=$?
+expect_status "clean under a BSD-style mktemp" "$EXIT_CLEAN" "$rc"
+
+# TOOL ERRORS. A grep that cannot run must never read as a clean scan. Each
+# case is paired with the verdict the same input earns from a working grep.
+STUB_BIN="$TMP/stub-bin"
+EMPTY_BIN="$TMP/empty-bin"
+FILTER_STUB_BIN="$TMP/filter-stub-bin"
+mkdir -p "$STUB_BIN" "$EMPTY_BIN" "$FILTER_STUB_BIN"
+printf '#!/bin/sh\nexit 2\n' >"$STUB_BIN/grep"
+# Fails only the marker-filter pass, so the first pass reports a match.
+REAL_GREP="$(command -v grep)"
+{
+    echo '#!/bin/sh'
+    echo "[ \"\$1\" = -vF ] && exit 2"
+    printf 'exec "%s" "$@"\n' "$REAL_GREP"
+} >"$FILTER_STUB_BIN/grep"
+chmod +x "$STUB_BIN/grep" "$FILTER_STUB_BIN/grep"
+
+tool_error_status() {
+    local path="$1" mode="$2" input="$3" rc
+    PATH="$path" "$BASH" "$SCANNER" "$mode" "$input" >/dev/null 2>&1 && rc=0 || rc=$?
+    return "$rc"
+}
+
+clean_msg="$TMP/clean-msg"
+printf 'this change improves the retry policy\n' >"$clean_msg"
+found_msg="$TMP/found-msg"
+printf 'deferred to RV-99 backlog\n' >"$found_msg"
+
+tool_error_status "$STUB_BIN:$PATH" --commit-msg "$clean_msg" && rc=0 || rc=$?
+expect_status "grep exiting 2 on clean input is a scanner error" "$EXIT_TOOL" "$rc"
+tool_error_status "$STUB_BIN:$PATH" --commit-msg "$found_msg" && rc=0 || rc=$?
+expect_status "grep exiting 2 on banned input is a scanner error" "$EXIT_TOOL" "$rc"
+tool_error_status "$PATH" --commit-msg "$clean_msg" && rc=0 || rc=$?
+expect_status "the same clean input with a working grep is clean" "$EXIT_CLEAN" "$rc"
+tool_error_status "$FILTER_STUB_BIN:$PATH" --commit-msg "$found_msg" && rc=0 || rc=$?
+expect_status "grep failing while filtering a match is a scanner error" "$EXIT_TOOL" "$rc"
+tool_error_status "$EMPTY_BIN" --commit-msg "$clean_msg" && rc=0 || rc=$?
+expect_status "no grep on PATH is a scanner error" "$EXIT_TOOL" "$rc"
+tool_error_status "$PATH" --commit-msg "$TMP/no-such-message" && rc=0 || rc=$?
+expect_status "an unreadable commit-message file is a scanner error" "$EXIT_TOOL" "$rc"
+
+# GIT-BACKED MODES. Each case builds a throwaway repository, isolated from
+# the caller's git config and from any hook environment that points git at
+# another index or directory, and commits through plumbing so no hook or
+# signing config can intervene.
+make_repo() {
+    local repo="$1"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+}
+
+commit_all() {
+    local repo="$1" msg="$2" tree parent commit
+    git -C "$repo" add -A
+    tree="$(git -C "$repo" write-tree)"
+    if parent="$(git -C "$repo" rev-parse -q --verify HEAD)"; then
+        commit="$(git -C "$repo" commit-tree "$tree" -p "$parent" -m "$msg")"
+    else
+        commit="$(git -C "$repo" commit-tree "$tree" -m "$msg")"
+    fi
+    git -C "$repo" update-ref HEAD "$commit"
+}
+
+scan_in() {
+    local repo="$1" rc
+    shift
+    (cd "$repo" && bash "$SCANNER" "$@") >/dev/null 2>&1 && rc=0 || rc=$?
+    return "$rc"
+}
+
+ALL_ZERO_BEFORE="0000000000000000000000000000000000000000"
+
+# Resolve the three CI scan inputs for BEFORE in REPO, exactly as the CI job
+# does, into PUSH_ENDPOINT / PUSH_HISTORY / PUSH_MESSAGES. Returns the
+# scanner's status.
+push_inputs_in() {
+    local repo="$1" before="$2" out rc
+    PUSH_ENDPOINT="" PUSH_HISTORY="" PUSH_MESSAGES=""
+    out="$(cd "$repo" && bash "$SCANNER" --push-inputs "$before" 2>/dev/null)" && rc=0 || rc=$?
+    [[ "$rc" -eq 0 ]] || return "$rc"
+    PUSH_ENDPOINT="$(printf '%s\n' "$out" | sed -n 's/^endpoint=//p')"
+    PUSH_HISTORY="$(printf '%s\n' "$out" | sed -n 's/^history=//p')"
+    PUSH_MESSAGES="$(printf '%s\n' "$out" | sed -n 's/^messages=//p')"
+    [[ -n "$PUSH_ENDPOINT" && -n "$PUSH_HISTORY" && -n "$PUSH_MESSAGES" ]] || return "$EXIT_TOOL"
+}
+
+# Assert the three CI scans of a push with BEFORE in REPO: the endpoint
+# (--range), per-commit (--history), and commit-message (--commit-range)
+# scans must return exactly the listed statuses.
+expect_push_scans() {
+    local desc="$1" repo="$2" before="$3" want_endpoint="$4" want_history="$5" want_messages="$6" rc
+    push_inputs_in "$repo" "$before" && rc=0 || rc=$?
+    expect_status "$desc: scan inputs resolve" "$EXIT_CLEAN" "$rc"
+    [[ "$rc" -eq 0 ]] || return 0
+    scan_in "$repo" --range "$PUSH_ENDPOINT" && rc=0 || rc=$?
+    expect_status "$desc: endpoint scan" "$want_endpoint" "$rc"
+    scan_in "$repo" --history "$PUSH_HISTORY" && rc=0 || rc=$?
+    expect_status "$desc: history scan" "$want_history" "$rc"
+    scan_in "$repo" --commit-range "$PUSH_MESSAGES" && rc=0 || rc=$?
+    expect_status "$desc: message scan" "$want_messages" "$rc"
+}
+
+# CI scan inputs. A push that creates the branch reports an all-zero
+# `before`: nothing on the remote precedes it, so every commit reachable from
+# HEAD is new. Each leak below is paired with the same history minus the leak,
+# which must scan clean, so a verdict can only come from the leak.
+scan_input_cases() {
+    local repo root merge_base side main_tip tree
+
+    # Single root commit: there is no HEAD~1 to fall back to.
+    repo="$TMP/push-root-clean"
+    make_repo "$repo"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "initial import"
+    expect_push_scans "clean single root commit" "$repo" "$ALL_ZERO_BEFORE" \
+        "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_CLEAN"
+    expect_push_scans "clean single root commit, empty before" "$repo" "" \
+        "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_CLEAN"
+
+    repo="$TMP/push-root-content"
+    make_repo "$repo"
+    printf 'fn main() {}\n// see RV-99 here\n' >"$repo/main.rs"
+    commit_all "$repo" "initial import"
+    expect_push_scans "single root commit adding a token" "$repo" "$ALL_ZERO_BEFORE" \
+        "$EXIT_FOUND" "$EXIT_FOUND" "$EXIT_CLEAN"
+
+    repo="$TMP/push-root-message"
+    make_repo "$repo"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "initial import, see RV-99"
+    expect_push_scans "single root commit with a token in its message" "$repo" "$ALL_ZERO_BEFORE" \
+        "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_FOUND"
+
+    repo="$TMP/push-root-source"
+    make_repo "$repo"
+    mkdir -p "$repo/scripts"
+    printf '#!/usr/bin/env bash\n# see %s/x\n' "$DOCS_DIR" >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "initial import"
+    expect_push_scans "single root commit whose scanner source spells the directory" "$repo" \
+        "$ALL_ZERO_BEFORE" "$EXIT_FOUND" "$EXIT_FOUND" "$EXIT_CLEAN"
+
+    # Multi-commit initial push, each leak added and later removed, so the
+    # endpoint diff sees nothing and only every-commit coverage can catch it.
+    repo="$TMP/push-initial-clean"
+    make_repo "$repo"
+    mkdir -p "$repo/scripts"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "initial import"
+    printf 'fn main() {}\n// see notes here\n' >"$repo/main.rs"
+    printf '#!/usr/bin/env bash\n# see notes/x\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "add notes"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "drop notes"
+    expect_push_scans "clean multi-commit initial push" "$repo" "$ALL_ZERO_BEFORE" \
+        "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_CLEAN"
+
+    repo="$TMP/push-initial-content"
+    make_repo "$repo"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "initial import"
+    printf 'fn main() {}\n// see RV-99 here\n' >"$repo/main.rs"
+    commit_all "$repo" "add notes"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "drop notes"
+    expect_push_scans "initial push adding then removing a token" "$repo" "$ALL_ZERO_BEFORE" \
+        "$EXIT_CLEAN" "$EXIT_FOUND" "$EXIT_CLEAN"
+
+    repo="$TMP/push-initial-source"
+    make_repo "$repo"
+    mkdir -p "$repo/scripts"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "initial import"
+    printf '#!/usr/bin/env bash\n# see %s/x\n' "$DOCS_DIR" >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "add notes"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "drop notes"
+    expect_push_scans "initial push adding then removing the directory in a scanner source" \
+        "$repo" "$ALL_ZERO_BEFORE" "$EXIT_CLEAN" "$EXIT_FOUND" "$EXIT_CLEAN"
+
+    repo="$TMP/push-initial-message"
+    make_repo "$repo"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "initial import"
+    printf 'fn main() {}\n// see notes here\n' >"$repo/main.rs"
+    commit_all "$repo" "add notes for RV-99"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "drop notes"
+    expect_push_scans "initial push with a token in a middle commit message" "$repo" \
+        "$ALL_ZERO_BEFORE" "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_FOUND"
+
+    # An ordinary push still scans only what it adds: a leak already on the
+    # remote before `before` is not re-reported, while one after it is.
+    expect_push_scans "ordinary push after an already-pushed token" "$repo" \
+        "$(git -C "$repo" rev-parse HEAD~1)" "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_CLEAN"
+    expect_push_scans "ordinary push covering the token commit" "$repo" \
+        "$(git -C "$repo" rev-parse HEAD~2)" "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_FOUND"
+
+    # Merge commits. The merge's own tree adds a line neither parent carries
+    # (content only a first-parent diff of the merge can see); the side
+    # branch adds a token the merge then drops.
+    merge_fixture() {
+        local repo="$1" side_line="$2" merge_line="$3" merge_msg="$4"
+        make_repo "$repo"
+        printf 'fn main() {}\n' >"$repo/main.rs"
+        commit_all "$repo" "initial import"
+        root="$(git -C "$repo" rev-parse HEAD)"
+        printf 'fn side() {}\n%s\n' "$side_line" >"$repo/side.rs"
+        commit_all "$repo" "side work"
+        side="$(git -C "$repo" rev-parse HEAD)"
+        git -C "$repo" update-ref HEAD "$root"
+        git -C "$repo" read-tree HEAD
+        rm -f "$repo/side.rs"
+        printf 'fn main() {}\nfn helper() {}\n' >"$repo/main.rs"
+        commit_all "$repo" "main work"
+        main_tip="$(git -C "$repo" rev-parse HEAD)"
+        printf 'fn main() {}\nfn helper() {}\n%s\n' "$merge_line" >"$repo/main.rs"
+        printf 'fn side() {}\n' >"$repo/side.rs"
+        git -C "$repo" add -A
+        tree="$(git -C "$repo" write-tree)"
+        merge_base="$(git -C "$repo" commit-tree "$tree" -p "$main_tip" -p "$side" -m "$merge_msg")"
+        git -C "$repo" update-ref HEAD "$merge_base"
+    }
+
+    merge_fixture "$TMP/push-merge-clean" "// side notes" "// merge notes" "merge side work"
+    expect_push_scans "clean merge, initial push" "$TMP/push-merge-clean" "$ALL_ZERO_BEFORE" \
+        "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_CLEAN"
+    expect_push_scans "clean merge, ordinary push" "$TMP/push-merge-clean" "$root" \
+        "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_CLEAN"
+
+    merge_fixture "$TMP/push-merge-own" "// side notes" "// see RV-99 here" "merge side work"
+    expect_push_scans "merge whose own tree adds a token, initial push" "$TMP/push-merge-own" \
+        "$ALL_ZERO_BEFORE" "$EXIT_FOUND" "$EXIT_FOUND" "$EXIT_CLEAN"
+    expect_push_scans "merge whose own tree adds a token, ordinary push" "$TMP/push-merge-own" \
+        "$root" "$EXIT_FOUND" "$EXIT_FOUND" "$EXIT_CLEAN"
+
+    merge_fixture "$TMP/push-merge-side" "// see RV-99 here" "// merge notes" "merge side work"
+    expect_push_scans "side-branch token dropped by the merge, initial push" "$TMP/push-merge-side" \
+        "$ALL_ZERO_BEFORE" "$EXIT_CLEAN" "$EXIT_FOUND" "$EXIT_CLEAN"
+    expect_push_scans "side-branch token dropped by the merge, ordinary push" "$TMP/push-merge-side" \
+        "$root" "$EXIT_CLEAN" "$EXIT_FOUND" "$EXIT_CLEAN"
+
+    merge_fixture "$TMP/push-merge-message" "// side notes" "// merge notes" "merge RV-99 work"
+    expect_push_scans "merge with a token in its message, initial push" "$TMP/push-merge-message" \
+        "$ALL_ZERO_BEFORE" "$EXIT_CLEAN" "$EXIT_CLEAN" "$EXIT_FOUND"
+
+    # A `before` that names no commit is a scanner error, never a clean scan.
+    push_inputs_in "$TMP/push-root-clean" "no-such-ref" && rc=0 || rc=$?
+    expect_status "scan inputs for an unknown before are a scanner error" "$EXIT_TOOL" "$rc"
+}
+
+# Runs in a subshell so the git environment it clears stays local; it
+# reports its own failure count as its exit status.
+git_mode_cases() (
+    read -r -d '' -a git_local_env < <(git rev-parse --local-env-vars)
+    unset "${git_local_env[@]}"
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CEILING_DIRECTORIES="$TMP"
+    export GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.invalid
+    export GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@example.invalid
+    CAPTURED_DIR="crates/routectl-cli/tests/fixtures/captured"
+
+    # Excluded-to-scanned 100% rename. Rename detection would pair the two
+    # paths and emit no added lines; with it disabled, the destination's
+    # whole content is added content. The clean rename is the control.
+    repo="$TMP/rename"
+    make_repo "$repo"
+    mkdir -p "$repo/$CAPTURED_DIR" "$repo/src"
+    printf 'see RV-99 here\n' >"$repo/$CAPTURED_DIR/leak.json"
+    printf 'plain content\n' >"$repo/$CAPTURED_DIR/plain.json"
+    commit_all "$repo" "base"
+    base="$(git -C "$repo" rev-parse HEAD)"
+    git -C "$repo" mv "$CAPTURED_DIR/leak.json" src/leak.rs
+    scan_in "$repo" --staged && rc=0 || rc=$?
+    expect_status "staged excluded-to-scanned rename emits added content" "$EXIT_FOUND" "$rc"
+    commit_all "$repo" "move"
+    scan_in "$repo" --range "$base...HEAD" && rc=0 || rc=$?
+    expect_status "range excluded-to-scanned rename emits added content" "$EXIT_FOUND" "$rc"
+    scan_in "$repo" --history "$base..HEAD" && rc=0 || rc=$?
+    expect_status "history excluded-to-scanned rename emits added content" "$EXIT_FOUND" "$rc"
+    git -C "$repo" mv "$CAPTURED_DIR/plain.json" src/plain.rs
+    scan_in "$repo" --staged && rc=0 || rc=$?
+    expect_status "staged rename of clean content stays clean" "$EXIT_CLEAN" "$rc"
+
+    # Added then removed. The endpoints are identical, so only a per-commit
+    # scan sees the leak; the range result is the control proving it.
+    repo="$TMP/add-remove"
+    make_repo "$repo"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "base"
+    base="$(git -C "$repo" rev-parse HEAD)"
+    printf 'fn main() {}\n// see RV-99 here\n' >"$repo/main.rs"
+    commit_all "$repo" "add"
+    printf 'fn main() {}\n' >"$repo/main.rs"
+    commit_all "$repo" "remove"
+    scan_in "$repo" --range "$base...HEAD" && rc=0 || rc=$?
+    expect_status "range cannot see a token added then removed" "$EXIT_CLEAN" "$rc"
+    scan_in "$repo" --history "$base..HEAD" && rc=0 || rc=$?
+    expect_status "history catches a token added then removed" "$EXIT_FOUND" "$rc"
+
+    # The private-docs directory added to a scanner source, then removed.
+    # The pattern set skips that file, so only the scanner-source check can
+    # catch it; the same edit without the directory is the control.
+    repo="$TMP/source-literal"
+    make_repo "$repo"
+    mkdir -p "$repo/scripts"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "base"
+    base="$(git -C "$repo" rev-parse HEAD)"
+    printf '#!/usr/bin/env bash\n# see %s/x\n' "$DOCS_DIR" >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "add"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "remove"
+    scan_in "$repo" --history "$base..HEAD" && rc=0 || rc=$?
+    expect_status "history catches the directory added then removed in a scanner source" "$EXIT_FOUND" "$rc"
+    ctl="$(git -C "$repo" rev-parse HEAD)"
+    printf '#!/usr/bin/env bash\n# see notes/x\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "add clean"
+    printf '#!/usr/bin/env bash\n' >"$repo/scripts/check-internal-ids.sh"
+    commit_all "$repo" "remove clean"
+    scan_in "$repo" --history "$ctl..HEAD" && rc=0 || rc=$?
+    expect_status "history of the same scanner-source edit without the directory is clean" "$EXIT_CLEAN" "$rc"
+
+    # A git failure is a scanner error in every git mode.
+    scan_in "$repo" --range "no-such-ref...HEAD" && rc=0 || rc=$?
+    expect_status "range over an unknown ref is a scanner error" "$EXIT_TOOL" "$rc"
+    scan_in "$repo" --history "no-such-ref..HEAD" && rc=0 || rc=$?
+    expect_status "history over an unknown ref is a scanner error" "$EXIT_TOOL" "$rc"
+    scan_in "$repo" --commit-range "no-such-ref..HEAD" && rc=0 || rc=$?
+    expect_status "commit-range over an unknown ref is a scanner error" "$EXIT_TOOL" "$rc"
+    scan_in "$TMP/empty-bin" --staged && rc=0 || rc=$?
+    expect_status "staged outside a repository is a scanner error" "$EXIT_TOOL" "$rc"
+
+    scan_input_cases
+
+    exit "$fails"
+)
+
+before_git_cases="$fails"
+fails=0
+git_mode_cases && git_fails=0 || git_fails=$?
+fails=$((before_git_cases + git_fails))
+
+# WIRING. The self-test and the per-commit scan only protect anything while
+# a gate runs them: the pre-commit config must run the self-test at the
+# commit stage, and the CI internal-id job must run both. Each check is
+# proven able to fail on a stub that lacks the wiring.
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+PRE_COMMIT_CONFIG="$REPO_ROOT/.pre-commit-config.yaml"
+CI_WORKFLOW="$REPO_ROOT/.github/workflows/ci.yml"
+SELF_TEST_CMD="bash scripts/check-internal-ids.test.sh"
+HISTORY_CMD="bash scripts/check-internal-ids.sh --history"
+
+# The hook block whose entry is the self-test, printed when it runs at the
+# commit stage (no `stages:` key inherits the config's commit-stage default).
+precommit_runs_self_test() {
+    awk -v want="        entry: $SELF_TEST_CMD" '
+        /^      - id: / { if (hit && !elsewhere) found = 1; hit = 0; elsewhere = 0; next }
+        $0 == want { hit = 1 }
+        /^        stages:/ && $0 !~ /pre-commit/ { elsewhere = 1 }
+        END { if (hit && !elsewhere) found = 1; exit !found }
+    ' "$1"
+}
+
+# Lines of the CI `internal-ids` job.
+ci_internal_ids_job() {
+    awk '
+        /^  internal-ids:$/ { in_job = 1; next }
+        in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
+        in_job { print }
+    ' "$1"
+}
+
+ci_job_runs() {
+    local workflow="$1" cmd="$2" job
+    job="$(ci_internal_ids_job "$workflow")"
+    grep -qF -- "run: $cmd" <<<"$job"
+}
+
+wiring_stub="$TMP/wiring-stub.yml"
+printf 'repos:\n  - repo: local\n    hooks:\n      - id: other\n        entry: bash other.sh\njobs:\n  internal-ids:\n    steps:\n      - run: bash other.sh\n' >"$wiring_stub"
+if precommit_runs_self_test "$wiring_stub"; then
+    echo "FAIL: pre-commit wiring check passed a config without the self-test"
+    fails=$((fails + 1))
+else
+    echo "PASS: pre-commit wiring check fires on a config without the self-test"
+fi
+if ci_job_runs "$wiring_stub" "$SELF_TEST_CMD" || ci_job_runs "$wiring_stub" "$HISTORY_CMD"; then
+    echo "FAIL: CI wiring check passed a job without the self-test or history scan"
+    fails=$((fails + 1))
+else
+    echo "PASS: CI wiring check fires on a job without the self-test or history scan"
+fi
+
+if precommit_runs_self_test "$PRE_COMMIT_CONFIG"; then
+    echo "PASS: pre-commit runs the self-test at the commit stage"
+else
+    echo "FAIL: pre-commit does not run '$SELF_TEST_CMD' at the commit stage"
+    fails=$((fails + 1))
+fi
+
+# Every scan must consume the input `--push-inputs` resolved for it; a
+# shared base, or a parent-of-HEAD fallback, is what dropped the root commit
+# and all but the last commit of an initial push. These are workflow text,
+# matched literally, so nothing in them is meant to expand here.
+# shellcheck disable=SC2016
+PUSH_INPUTS_CMD='bash scripts/check-internal-ids.sh --push-inputs "$before" >> "$GITHUB_OUTPUT"'
+# shellcheck disable=SC2016
+RANGE_CMD='bash scripts/check-internal-ids.sh --range "${{ steps.range.outputs.endpoint }}"'
+# shellcheck disable=SC2016
+HISTORY_INPUT_CMD='bash scripts/check-internal-ids.sh --history "${{ steps.range.outputs.history }}"'
+# shellcheck disable=SC2016
+MESSAGES_CMD='bash scripts/check-internal-ids.sh --commit-range "${{ steps.range.outputs.messages }}"'
+# shellcheck disable=SC2016
+ENDPOINT_FED_HISTORY_CMD='bash scripts/check-internal-ids.sh --history "${{ steps.range.outputs.endpoint }}"'
+# shellcheck disable=SC2016
+PARENT_FALLBACK_LINE='base="$(git rev-parse HEAD~1)"'
+
+ci_job_spells() {
+    local workflow="$1" text="$2" job
+    job="$(ci_internal_ids_job "$workflow")"
+    grep -qF -- "$text" <<<"$job"
+}
+
+ci_job_uses_push_inputs() {
+    local workflow="$1"
+    ci_job_spells "$workflow" "$PUSH_INPUTS_CMD" &&
+        ci_job_runs "$workflow" "$RANGE_CMD" &&
+        ci_job_runs "$workflow" "$HISTORY_INPUT_CMD" &&
+        ci_job_runs "$workflow" "$MESSAGES_CMD" &&
+        ! ci_job_spells "$workflow" 'HEAD~'
+}
+
+fallback_stub="$TMP/fallback-stub.yml"
+{
+    printf 'jobs:\n  internal-ids:\n    steps:\n      - run: |\n'
+    printf '          %s\n' "$PARENT_FALLBACK_LINE" "$PUSH_INPUTS_CMD"
+    printf '      - run: %s\n' "$RANGE_CMD" "$HISTORY_INPUT_CMD" "$MESSAGES_CMD"
+} >"$fallback_stub"
+if ci_job_uses_push_inputs "$fallback_stub"; then
+    echo "FAIL: CI scan-input check passed a job with a parent-of-HEAD fallback"
+    fails=$((fails + 1))
+else
+    echo "PASS: CI scan-input check fires on a parent-of-HEAD fallback"
+fi
+shared_base_stub="$TMP/shared-base-stub.yml"
+{
+    printf 'jobs:\n  internal-ids:\n    steps:\n'
+    printf '      - run: %s\n' "$PUSH_INPUTS_CMD" "$RANGE_CMD" "$ENDPOINT_FED_HISTORY_CMD" "$MESSAGES_CMD"
+} >"$shared_base_stub"
+if ci_job_uses_push_inputs "$shared_base_stub"; then
+    echo "FAIL: CI scan-input check passed a history scan fed the endpoint input"
+    fails=$((fails + 1))
+else
+    echo "PASS: CI scan-input check fires on a history scan fed the endpoint input"
+fi
+if ci_job_uses_push_inputs "$CI_WORKFLOW"; then
+    echo "PASS: CI internal-id job feeds each scan its own resolved input"
+else
+    echo "FAIL: CI internal-id job does not feed each scan its own --push-inputs input"
+    fails=$((fails + 1))
+fi
+
+for cmd in "$SELF_TEST_CMD" "$HISTORY_CMD"; do
+    if ci_job_runs "$CI_WORKFLOW" "$cmd"; then
+        echo "PASS: CI internal-id job runs '$cmd'"
+    else
+        echo "FAIL: CI internal-id job does not run '$cmd'"
+        fails=$((fails + 1))
+    fi
+done
+
+# SOURCE-TEXT guard. Neither shipped script may spell the private-docs
+# directory name: the scanner excludes both files from its own scan, so a
+# literal reintroduced here would never be caught by the gate itself. The
+# control proves the check can fire on a file that does spell it.
+spells_docs_dir() {
+    grep -qE -- "(^|[^[:alnum:]_])$DOCS_DIR" "$1"
+}
+
+guard_control="$(mktemp "$TMP/guard.XXXXXX")"
+printf 'see %s/x\n' "$DOCS_DIR" >"$guard_control"
+if spells_docs_dir "$guard_control"; then
+    echo "PASS: source guard fires on a file spelling the directory name"
+else
+    echo "FAIL: source guard did not fire on its positive control"
+    fails=$((fails + 1))
+fi
+printf 'let window = lite%s(entry)?;\ncached under my_%s/window\n' "$DOCS_DIR" "$DOCS_DIR" >"$guard_control"
+if spells_docs_dir "$guard_control"; then
+    echo "FAIL: source guard fired on identifiers that only end in the directory name"
+    fails=$((fails + 1))
+else
+    echo "PASS: source guard ignores identifiers that only end in the directory name"
+fi
+rm -f "$guard_control"
+
+for src in "$SCANNER" "$HERE/check-internal-ids.test.sh"; do
+    if [[ ! -r "$src" ]]; then
+        echo "FAIL: source guard cannot read $src"
+        fails=$((fails + 1))
+    elif spells_docs_dir "$src"; then
+        echo "FAIL: $src spells the private-docs directory name literally"
+        fails=$((fails + 1))
+    else
+        echo "PASS: $(basename "$src") does not spell the private-docs directory name"
+    fi
+done
 
 if [[ "$fails" -ne 0 ]]; then
     echo "check-internal-ids self-test: $fails failure(s)" >&2

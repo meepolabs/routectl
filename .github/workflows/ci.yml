@@ -249,27 +249,40 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: compute scan base
+      # One base cannot serve every scan: a push that creates the branch
+      # reports an all-zero "before", and a parent-of-HEAD fallback would both
+      # fail on a root commit and skip every earlier commit of the push. The
+      # scanner resolves the endpoint, per-commit, and message inputs itself
+      # so the self-test exercises the same logic this job runs.
+      - name: compute scan inputs
         id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
-            base="origin/${{ github.event.pull_request.base.ref }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin "$PR_BASE_REF"
+            before="origin/$PR_BASE_REF"
           else
-            base="${{ github.event.before }}"
-            # First push / branch create reports an all-zero "before";
-            # fall back to the parent of HEAD (or HEAD on a root commit).
-            if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
-              base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
-            fi
+            before="$PUSH_BEFORE"
           fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
+          bash scripts/check-internal-ids.sh --push-inputs "$before" >> "$GITHUB_OUTPUT"
 
       - name: scan diff added lines
-        run: bash scripts/check-internal-ids.sh --range "${{ steps.range.outputs.base }}...HEAD"
+        run: bash scripts/check-internal-ids.sh --range "${{ steps.range.outputs.endpoint }}"
+
+      # The endpoint diff above cannot see content one commit adds and a
+      # later commit removes; history stays public either way, so every
+      # commit is also scanned against its own parent.
+      - name: scan every commit's added lines
+        run: bash scripts/check-internal-ids.sh --history "${{ steps.range.outputs.history }}"
 
       - name: scan commit messages
-        run: bash scripts/check-internal-ids.sh --commit-range "${{ steps.range.outputs.base }}..HEAD"
+        run: bash scripts/check-internal-ids.sh --commit-range "${{ steps.range.outputs.messages }}"
+
+      - name: internal-id scanner self-test
+        run: bash scripts/check-internal-ids.test.sh
 
       # The log-sink inventory reads targets and dependency kinds from
       # `cargo metadata --offline --no-deps`, which needs cargo but no
