@@ -2742,127 +2742,404 @@ fn a_verdict_that_moves_between_the_two_authorization_reads_is_refused() {
     );
 }
 
+/// How many incarnations the churn writer moves the identity through.
+const CHURN_ROUNDS: u64 = 256;
+
+/// The deadline for EVERY churn round to be observed authorized, shared by the
+/// whole run rather than granted per round, so a lost wakeup costs one budget
+/// instead of one per round. It bounds only a failing run: a passing round is
+/// released by the first authorized read, never by this clock.
+const AUTHORIZED_WINDOWS_BUDGET: Duration = Duration::from_secs(30);
+
+/// How many threads read the identity's authorization while it churns.
+const AUTHORIZATION_READERS: usize = 64;
+
+/// The rendezvous between the churn writer and the readers: readers record
+/// every incarnation they have seen authorized, and the writer holds each
+/// freshly reconciled incarnation until one of them has.
+struct AuthorizedWindow {
+    observed: Mutex<std::collections::BTreeSet<u64>>,
+    live_readers: AtomicUsize,
+    changed: parking_lot::Condvar,
+}
+
+impl AuthorizedWindow {
+    fn new(readers: usize) -> Self {
+        Self {
+            observed: Mutex::new(std::collections::BTreeSet::new()),
+            live_readers: AtomicUsize::new(readers),
+            changed: parking_lot::Condvar::new(),
+        }
+    }
+
+    fn publish_authorized(&self, incarnation: u64) {
+        if self.observed.lock().insert(incarnation) {
+            self.changed.notify_all();
+        }
+    }
+
+    // Takes the set's lock before notifying: the writer re-reads the reader
+    // count under that lock, so an exit landing after its read cannot notify
+    // until the writer has parked.
+    fn reader_exited(&self) {
+        self.live_readers.fetch_sub(1, Ordering::SeqCst);
+        let _held = self.observed.lock();
+        self.changed.notify_all();
+    }
+
+    fn was_observed(&self, incarnation: u64) -> bool {
+        self.observed.lock().contains(&incarnation)
+    }
+
+    /// Whether some reader saw `incarnation` authorized before `deadline`. Also
+    /// returns early, unobserved, once every reader has exited -- a reader that
+    /// died on an assertion must fail the test with ITS message, not stall the
+    /// writer until the deadline.
+    fn await_authorized(&self, incarnation: u64, deadline: Instant) -> bool {
+        let mut observed = self.observed.lock();
+        self.changed.wait_while_until(
+            &mut observed,
+            |seen| !seen.contains(&incarnation) && self.live_readers.load(Ordering::SeqCst) > 0,
+            deadline,
+        );
+        observed.contains(&incarnation)
+    }
+}
+
+/// Reports a reader's exit to the writer's window on drop, so a reader
+/// unwinding from a failed assertion still releases the writer.
+struct ReaderExit(Arc<AuthorizedWindow>);
+
+impl Drop for ReaderExit {
+    fn drop(&mut self) {
+        self.0.reader_exited();
+    }
+}
+
+/// Read `key`'s authorization until `stop`, asserting every authorization that
+/// reports quorum against resident state and publishing its incarnation only
+/// once those assertions hold.
+fn spawn_authorization_reader(
+    router: &Arc<Router>,
+    key: &FieldVerdictKey,
+    generation: u64,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+    exit: ReaderExit,
+) -> std::thread::JoinHandle<()> {
+    let router = Arc::clone(router);
+    let key = key.clone();
+    let stop = Arc::clone(stop);
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            let Some(auth) =
+                router
+                    .field_verdicts()
+                    .preflight_authorization(&key, generation, Instant::now())
+            else {
+                continue;
+            };
+            if auth.confirmations < crate::config::PREFIX_QUORUM {
+                continue;
+            }
+            // The count the authorization reported must be a count some writer
+            // actually WROTE. Only two writers exist here -- the fixture seed
+            // and the churn -- and both write exactly `PREFIX_QUORUM`, so any
+            // other value is fabricated. This is what a `u32::MAX` (or any
+            // invented count) mutation trips, and it is race-stable: the bound
+            // holds whatever the churn has reached.
+            assert_eq!(
+                auth.confirmations,
+                crate::config::PREFIX_QUORUM,
+                "the only counts any writer in this test produces are \
+                 PREFIX_QUORUM, so a different value was fabricated rather \
+                 than read from resident state",
+            );
+            // And the pair must be CONSISTENT: while the identity is still on
+            // the incarnation this authorization validated, the resident count
+            // must be the one it reported. Conditional on the incarnation
+            // deliberately -- the churn may have moved the lifecycle on since,
+            // and refusing to check then is correct rather than a weaker
+            // assertion, because the authorization describes the state it
+            // validated and not a later one.
+            let snap = router
+                .field_verdicts()
+                .canaries()
+                .snapshot(&key)
+                .expect("an authorized identity is resident");
+            if snap.incarnation == auth.incarnation {
+                assert_eq!(
+                    auth.confirmations, snap.confirmations,
+                    "on the incarnation the authorization validated, its count \
+                     must be the resident one",
+                );
+            }
+            exit.0.publish_authorized(auth.incarnation);
+        }
+    })
+}
+
+/// Sets the readers' stop flag on drop, so a coordinator that unwinds before
+/// reaching its explicit stop still releases every reader.
+struct StopReaders(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for StopReaders {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// How often the coordinator re-checks whether its readers have terminated.
+const READER_TERMINATION_POLL: Duration = Duration::from_millis(1);
+
+/// How late past its deadline the bounded join may report and still pass.
+/// Covers a descheduled coordinator on a loaded host (512 test threads);
+/// kept under a second so a join that overruns its deadline by whole
+/// seconds cannot pass.
+const STALL_VERDICT_SLACK: Duration = Duration::from_millis(500);
+
+/// Wait until `deadline` for every reader thread to TERMINATE, then join only
+/// the ones known to have, re-raising the first reader panic. Returns the
+/// indices still running at the deadline; those are never joined.
+///
+/// Termination is read from `JoinHandle::is_finished`, not from any report the
+/// reader makes on its way out: a report sent from a drop guard precedes the
+/// thread's end, so a reader that reports and then blocks would still hang a
+/// join gated on the report.
+fn join_finished_readers(
+    readers: Vec<std::thread::JoinHandle<()>>,
+    deadline: Instant,
+) -> Vec<usize> {
+    while Instant::now() < deadline && !readers.iter().all(std::thread::JoinHandle::is_finished) {
+        std::thread::sleep(READER_TERMINATION_POLL);
+    }
+    let mut stalled = Vec::new();
+    let mut first_panic = None;
+    for (index, reader) in readers.into_iter().enumerate() {
+        if !reader.is_finished() {
+            stalled.push(index);
+            continue;
+        }
+        if let Err(panic) = reader.join() {
+            first_panic.get_or_insert(panic);
+        }
+    }
+    if let Some(panic) = first_panic {
+        std::panic::resume_unwind(panic);
+    }
+    stalled
+}
+
+/// Move the identity to a new incarnation, make it quorum-satisfying, and hold
+/// it there until a reader has observed it authorized. Returns the incarnation
+/// the round reconciled.
+fn churn_round(
+    router: &Router,
+    key: &FieldVerdictKey,
+    window: &AuthorizedWindow,
+    deadline: Instant,
+) -> Result<u64, String> {
+    let prefix = prefix_key();
+    router
+        .learned_capabilities
+        .bump_incarnation_for_tests("m0", &prefix, ANTHROPIC);
+    let incarnation = router
+        .learned_capabilities
+        .resident_incarnation_for_tests("m0", &prefix, ANTHROPIC);
+    let ack = router.field_verdicts().canaries().acknowledge_confirmation(
+        key,
+        incarnation,
+        crate::config::PREFIX_QUORUM,
+    );
+    if !ack.accepted {
+        return Err(format!(
+            "the quorum reconcile onto incarnation {incarnation} was refused, so \
+             the round could never be authorized"
+        ));
+    }
+    if !window.await_authorized(incarnation, deadline) {
+        return Err(format!(
+            "no reader observed incarnation {incarnation} authorized within the \
+             {AUTHORIZED_WINDOWS_BUDGET:?} run budget, though it stayed \
+             quorum-satisfying for the whole wait -- the authorized branch never \
+             executed on it"
+        ));
+    }
+    Ok(incarnation)
+}
+
+/// How long the readers get to TERMINATE once stop is set, timed from the stop
+/// itself: a churn that spent its whole run budget still leaves them this long.
+const READER_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+
+const HOSTILE_CHURN_TEST: &str =
+    "the_authorization_read_stays_consistent_under_hostile_concurrency";
+
 #[test]
 fn the_authorization_read_stays_consistent_under_hostile_concurrency() {
+    // Run in a child process of this test binary, not in-process: a reader
+    // that never terminates can be neither joined nor cancelled, and a
+    // detached one would keep spinning on the router under every later test
+    // in the binary. A child's stalled readers die with it, and the parent
+    // kills and reaps a child that overruns its bound.
+    if entered_as_isolated_child(HOSTILE_CHURN_TEST) {
+        run_authorization_churn();
+        return;
+    }
+    let bound = AUTHORIZED_WINDOWS_BUDGET + READER_SHUTDOWN_BUDGET + CHILD_PROCESS_SLACK;
+
+    let run = run_isolated_child(&IsolatedChild::of_this_binary(HOSTILE_CHURN_TEST), bound)
+        .unwrap_or_else(|why| panic!("{why}"));
+
+    child_verdict(&run, HOSTILE_CHURN_TEST).unwrap_or_else(|why| panic!("{why}"));
+}
+
+fn run_authorization_churn() {
     // The companion stress to the deterministic pin above: many threads reading
     // one identity's authorization while a writer churns it. The property is not
     // a count -- a racing writer makes either outcome legal -- but that an
     // authorization reporting quorum is BACKED by a resident count at least as
     // large, re-read immediately after.
     //
-    // THE HAZARD THIS TEST ITSELF HAS, and the reason for the counters below: a
-    // writer that only bumped the incarnation would make every read refuse on
-    // the incarnation re-check, so the protected branch would execute ZERO times
-    // and the test would pass against any implementation of it. So the churn
-    // alternates BOTH axes -- it bumps the incarnation and then reconciles a
-    // quorum-satisfying count onto the new one -- which keeps authorized windows
-    // genuinely reachable, and the branch's execution count is asserted nonzero
-    // rather than assumed.
+    // THE HAZARD THIS TEST ITSELF HAS: the assertions live in the branch a read
+    // enters only when it reports quorum, so a churn that never left an
+    // authorizable window would execute them ZERO times and pass against any
+    // implementation. Scheduling cannot be trusted to leave that window open, so
+    // every round is a rendezvous: the writer bumps the incarnation (readers race
+    // the bump-to-reconcile gap), reconciles a quorum-satisfying count onto it,
+    // and then HOLDS until a reader has passed the assertions on that very
+    // incarnation. Each of the rounds therefore proves one executed branch.
     let (router, _seen) = single_seat(Answer::ServeImmediately);
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let router = Arc::new(router);
     let key = prefix_verdict_key("m0");
     let generation = router.registry_generation();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // How many times the PROTECTED branch ran: a read that reported quorum and
-    // therefore had its backing re-checked. Zero means the window was never
-    // reached and every assertion inside it was vacuous.
-    let authorized = Arc::new(AtomicUsize::new(0));
-
-    let churn = {
-        let router = Arc::clone(&router);
-        let stop = Arc::clone(&stop);
-        let key = key.clone();
-        let prefix = prefix_key();
-        std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                // Move the lifecycle forward, then make the NEW incarnation
-                // quorum-satisfying. Without the second step the identity would
-                // be permanently unauthorized and the readers below would never
-                // enter their protected branch.
-                router
-                    .learned_capabilities
-                    .bump_incarnation_for_tests("m0", &prefix, ANTHROPIC);
-                let incarnation = router
-                    .learned_capabilities
-                    .resident_incarnation_for_tests("m0", &prefix, ANTHROPIC);
-                router.field_verdicts().canaries().acknowledge_confirmation(
-                    &key,
-                    incarnation,
-                    crate::config::PREFIX_QUORUM,
-                );
-            }
-        })
-    };
-
-    let readers: Vec<_> = (0..64)
+    // Armed before the first spawn: a panic anywhere in reader setup would
+    // otherwise unwind past readers that are already spinning on `stop`.
+    let stop_on_unwind = StopReaders(Arc::clone(&stop));
+    let window = Arc::new(AuthorizedWindow::new(AUTHORIZATION_READERS));
+    let readers: Vec<_> = (0..AUTHORIZATION_READERS)
         .map(|_| {
-            let router = Arc::clone(&router);
-            let key = key.clone();
-            let authorized = Arc::clone(&authorized);
-            std::thread::spawn(move || {
-                for _ in 0..500 {
-                    let Some(auth) = router.field_verdicts().preflight_authorization(
-                        &key,
-                        generation,
-                        Instant::now(),
-                    ) else {
-                        continue;
-                    };
-                    if auth.confirmations < crate::config::PREFIX_QUORUM {
-                        continue;
-                    }
-                    authorized.fetch_add(1, Ordering::Relaxed);
-                    // The count the authorization reported must be a count some
-                    // writer actually WROTE. Only two writers exist here -- the
-                    // fixture seed and the churn -- and both write exactly
-                    // `PREFIX_QUORUM`, so any other value is fabricated. This is
-                    // what a `u32::MAX` (or any invented count) mutation trips,
-                    // and it is race-stable: the bound holds whatever the churn
-                    // has reached.
-                    assert_eq!(
-                        auth.confirmations,
-                        crate::config::PREFIX_QUORUM,
-                        "the only counts any writer in this test produces are \
-                         PREFIX_QUORUM, so a different value was fabricated rather \
-                         than read from resident state",
-                    );
-                    // And the pair must be CONSISTENT: while the identity is
-                    // still on the incarnation this authorization validated, the
-                    // resident count must be the one it reported. Conditional on
-                    // the incarnation deliberately -- the churn may have moved
-                    // the lifecycle on since, and refusing to check then is
-                    // correct rather than a weaker assertion, because the
-                    // authorization describes the state it validated and not a
-                    // later one.
-                    let snap = router
-                        .field_verdicts()
-                        .canaries()
-                        .snapshot(&key)
-                        .expect("an authorized identity is resident");
-                    if snap.incarnation == auth.incarnation {
-                        assert_eq!(
-                            auth.confirmations, snap.confirmations,
-                            "on the incarnation the authorization validated, its count \
-                             must be the resident one",
-                        );
-                    }
-                }
-            })
+            let exit = ReaderExit(Arc::clone(&window));
+            spawn_authorization_reader(&router, &key, generation, &stop, exit)
         })
         .collect();
 
-    for reader in readers {
-        reader.join().expect("reader thread");
-    }
-    stop.store(true, Ordering::Relaxed);
-    churn.join().expect("churn thread");
-
+    let deadline = Instant::now() + AUTHORIZED_WINDOWS_BUDGET;
+    let reconciled: std::result::Result<Vec<u64>, String> = (0..CHURN_ROUNDS)
+        .map(|round| {
+            churn_round(&router, &key, &window, deadline)
+                .map_err(|why| format!("round {round}: {why}"))
+        })
+        .collect();
+    drop(stop_on_unwind);
+    let stalled = join_finished_readers(readers, Instant::now() + READER_SHUTDOWN_BUDGET);
     assert!(
-        authorized.load(Ordering::Relaxed) > 0,
-        "the protected branch must have executed: zero authorized reads means the \
-         churn never left an authorizable window and every assertion inside the \
-         branch was vacuous",
+        stalled.is_empty(),
+        "reader stall: readers {stalled:?} had not terminated within \
+         {READER_SHUTDOWN_BUDGET:?} of stop being set (churn outcome: {:?})",
+        reconciled.as_ref().map(Vec::len),
+    );
+
+    let reconciled = reconciled
+        .unwrap_or_else(|why| panic!("every churn round must be observed authorized: {why}"));
+    // Checked apart from the writer's hold, so a churn that stopped waiting for
+    // its readers fails here instead of passing on whatever few windows the
+    // scheduler happened to leave open.
+    let unobserved: Vec<u64> = reconciled
+        .iter()
+        .copied()
+        .filter(|incarnation| !window.was_observed(*incarnation))
+        .collect();
+    assert!(
+        unobserved.is_empty(),
+        "{} of {} reconciled incarnations were never observed authorized, so the \
+         assertions in the authorized branch never ran on them: {unobserved:?}",
+        unobserved.len(),
+        reconciled.len(),
+    );
+}
+
+#[test]
+fn a_reader_that_reports_its_exit_but_never_terminates_is_named_stalled_within_the_deadline() {
+    // The stall shape a report-gated join cannot bound: the exit guard has
+    // already told the writer's window the reader is gone, but the thread is
+    // still blocked afterwards.
+    let window = Arc::new(AuthorizedWindow::new(1));
+    let (release, blocked) = std::sync::mpsc::channel::<()>();
+    let exit = ReaderExit(Arc::clone(&window));
+    let reader = std::thread::spawn(move || {
+        drop(exit);
+        let _ = blocked.recv();
+    });
+    let reported = Instant::now() + Duration::from_secs(5);
+    while window.live_readers.load(Ordering::SeqCst) != 0 && Instant::now() < reported {
+        std::thread::sleep(READER_TERMINATION_POLL);
+    }
+    assert_eq!(
+        window.live_readers.load(Ordering::SeqCst),
+        0,
+        "premise: the reader reported its exit before blocking",
+    );
+    let budget = Duration::from_millis(200);
+    let (joined, outcome) = std::sync::mpsc::channel();
+    let started = Instant::now();
+
+    std::thread::spawn(move || {
+        let _ = joined.send(join_finished_readers(vec![reader], started + budget));
+    });
+    let stalled = outcome.recv_timeout(budget + STALL_VERDICT_SLACK);
+
+    let waited = started.elapsed();
+    drop(release);
+    let stalled = stalled.unwrap_or_else(|_| {
+        panic!(
+            "the bounded join must return by its {budget:?} deadline plus \
+             {STALL_VERDICT_SLACK:?} scheduling slack; no verdict after {waited:?}"
+        )
+    });
+    assert_eq!(stalled, vec![0], "the blocked reader must be named stalled");
+    assert!(
+        waited >= budget,
+        "the join gave up before its deadline: waited {waited:?} of {budget:?}",
+    );
+}
+
+#[test]
+fn a_finished_reader_panic_is_re_raised_by_the_bounded_join() {
+    // Arrange
+    let quiet = std::thread::spawn(|| {});
+    let failing = std::thread::spawn(|| panic!("planted reader assertion"));
+
+    // Act
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        join_finished_readers(
+            vec![quiet, failing],
+            Instant::now() + Duration::from_secs(5),
+        )
+    }));
+
+    // Assert
+    let panic = outcome.expect_err("a reader panic must propagate to the coordinator");
+    assert_eq!(
+        panic.downcast_ref::<&str>().copied(),
+        Some("planted reader assertion"),
+        "the coordinator must re-raise the reader's own panic payload",
+    );
+}
+
+#[test]
+fn every_terminated_reader_is_joined_and_none_is_reported_stalled() {
+    // Arrange
+    let readers: Vec<_> = (0..4).map(|_| std::thread::spawn(|| {})).collect();
+
+    // Act
+    let stalled = join_finished_readers(readers, Instant::now() + Duration::from_secs(5));
+
+    // Assert
+    assert!(
+        stalled.is_empty(),
+        "no reader is still running: {stalled:?}"
     );
 }
 
@@ -4107,3 +4384,4 @@ fn the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class() {
 include!("field_preflight_action_tests.rs");
 include!("field_preflight_provenance_tests.rs");
 include!("field_preflight_persistence_tests.rs");
+include!("field_preflight_isolation_tests.rs");
