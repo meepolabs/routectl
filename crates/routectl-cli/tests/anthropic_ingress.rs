@@ -1484,6 +1484,39 @@ async fn cross_anthropic_system_lowers_to_openai_system_message() {
     assert_eq!(messages[1]["role"], "user");
 }
 
+/// This ingress does not lift `role: "system"` turns out of `messages`, so
+/// an openai-compat upstream receives them as sent -- minus the Claude Code
+/// billing/attribution block, which never reaches a third-party upstream.
+#[tokio::test]
+async fn cross_anthropic_system_role_message_reaches_openai_compat_without_the_fingerprint() {
+    // Arrange + Act
+    let up = capture_openai_egress_body(json!({
+        "model": "heavy",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=9.9.9; cch=ingr3ss"},
+                {"type": "text", "text": "ingress-legit-sentinel"}
+            ]},
+            {"role": "user", "content": "hi"}
+        ],
+    }))
+    .await;
+
+    // Assert
+    assert!(
+        !up.to_string().contains("ingr3ss"),
+        "the client fingerprint reached the openai-compat upstream: {up}"
+    );
+    let messages = up["messages"].as_array().expect("messages array");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(
+        messages[0]["content"],
+        json!([{"type": "text", "text": "ingress-legit-sentinel"}])
+    );
+    assert_eq!(messages[1]["role"], "user");
+}
+
 #[tokio::test]
 async fn cross_anthropic_stop_sequences_renamed_to_stop() {
     let up = capture_openai_egress_body(json!({

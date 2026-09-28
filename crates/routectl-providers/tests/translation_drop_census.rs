@@ -1,6 +1,7 @@
 //! Census over the `TRANSLATION-DROP:` verdict markers carried by the four
 //! request-translation surfaces (`openai_compat/wire_lift/`,
-//! `bedrock/converse/`, `gemini/`, `openai_responses/`).
+//! `bedrock/converse/`, `gemini/`, `openai_responses/`), plus the single
+//! files swept beside them (`openai_compat/request.rs`).
 //!
 //! This file owns the GRAMMAR RULES and the pinned population. The parser
 //! itself lives in `translation_drop_census/marker.rs` as a shared module, so
@@ -77,8 +78,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "translation_drop_census/marker.rs"]
 mod marker;
 use marker::{
-    LANES, MARKER_TOKEN, Marker, SURFACES, Verdict, census, census_over, expect, holds_line_number,
-    holds_task_id, is_test_file, parse_file, parse_stub, read_source, src_root, surface_files,
+    LANES, MARKER_TOKEN, Marker, SURFACE_FILES, SURFACES, Verdict, census, census_over, expect,
+    holds_line_number, holds_task_id, is_test_file, parse_file, parse_stub, read_source, src_root,
+    surface_files,
 };
 
 /// Marker population per production FILE, content-pinned. Per-file rather than
@@ -94,6 +96,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("gemini/mod.rs", 1),
     ("gemini/request.rs", 19),
     ("gemini/schema.rs", 5),
+    ("openai_compat/request.rs", 2),
     ("openai_compat/wire_lift/content.rs", 6),
     ("openai_compat/wire_lift/response_format.rs", 4),
     ("openai_compat/wire_lift/thinking.rs", 3),
@@ -111,7 +114,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
 const EXPECTED_LANE_MARKERS: usize = 60;
-const EXPECTED_POLICY_ACTION_MARKERS: usize = 12;
+const EXPECTED_POLICY_ACTION_MARKERS: usize = 14;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 47;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
@@ -433,6 +436,13 @@ fn every_surface_contributes_markers_the_parse_recovered() {
         assert!(
             markers.iter().any(|m| m.file.starts_with(surface)),
             "no marker recovered from {surface}, which demonstrably carries them"
+        );
+    }
+    for file in SURFACE_FILES {
+        assert!(
+            markers.iter().any(|m| m.file == *file),
+            "no marker recovered from the single-file surface {file}, which demonstrably carries \
+             them; a file outside the sweep lets a marker there survive being made unparseable"
         );
     }
     let lanes: BTreeSet<&str> = markers

@@ -49,7 +49,7 @@ enum Source {
 /// source. Content-pinned: [`every_excluded_pair_really_leaks_today`] fails
 /// the moment an entry's lane stops leaking, so a fixed lane cannot keep its
 /// exemption.
-const KNOWN_GAPS: &[(&str, &str)] = &[("openai-compat", "SystemRoleMessage")];
+const KNOWN_GAPS: &[(&str, &str)] = &[];
 
 fn is_known_gap(lane: &str, source: Source) -> bool {
     KNOWN_GAPS

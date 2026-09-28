@@ -194,13 +194,6 @@ const UNSWEPT_POLICY_CLASSES: &[UnsweptPolicyClass] = &[
         test: "the_canonical_system_billing_strip_counts_one_policy_action",
     },
     UnsweptPolicyClass {
-        class: "client_fingerprint_stripped",
-        file: "openai_compat/request.rs",
-        reason: "the same class on the openai-compat assembly path; that lane's swept surface is \
-         its wire_lift subdirectory, and the request path sits outside it",
-        test: "an_all_billing_system_still_counts_the_openai_compat_policy_action",
-    },
-    UnsweptPolicyClass {
         class: "cloak_classified_non_cc",
         file: "anthropic_api/client.rs",
         reason: "the anthropic-api cloak's classification split; its transforms live in a nested \

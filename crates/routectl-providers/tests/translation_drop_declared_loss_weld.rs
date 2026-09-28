@@ -194,7 +194,11 @@ const CALLER_ATTRIBUTED_HELPERS: &[(&str, &str, &str)] = &[
 /// - a request-side log whose loss is already declared at a marked arm
 ///   elsewhere, where none of the three derivable resolutions applies -- the
 ///   symbol emits no counter beside its log, and a caller of it is itself
-///   unmarked.
+///   unmarked;
+/// - a request-side loss this lane declares ONLY through its WARN (and a
+///   strict-mode rejection), with no counter yet. These are uncounted drops,
+///   not accepted ones: each entry is the record of that gap until the arm
+///   gains a counter and a marker.
 const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     (
         "bedrock/converse/eventstream.rs",
@@ -274,6 +278,60 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
         "functioncall beyond cap",
         "response-side streaming: truncates upstream output past a bounded-growth cap, so the \
          loss costs model output rather than caller content",
+    ),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        "top-level cache_control dropped",
+        "uncounted request-side loss: the top-level cache breakpoint has no openai-compat wire field, declared by this WARN and by the strict-mode rejection only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        "anthropic_beta flags dropped",
+        "uncounted request-side loss: Anthropic beta flags have no openai-compat wire field, declared by this WARN and by the strict-mode rejection only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        "per-block cache_control on system dropped",
+        "uncounted request-side loss: system block cache breakpoints do not survive the lowering to one system message, declared by this WARN and strict mode only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        "tool cache_control dropped",
+        "uncounted request-side loss: a custom tool's cache breakpoint has no openai-compat wire field, declared by this WARN and strict mode only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        "forward-compat content block dropped",
+        "uncounted request-side loss: an unmodeled content block type is not forwarded, declared by this WARN and by the strict-mode rejection only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        "per-block cache_control dropped",
+        "uncounted request-side loss: a message part's cache breakpoint is stripped by the content lift, declared by this WARN and strict mode only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "merge_extras",
+        "anthropic `metadata` object dropped",
+        "uncounted request-side loss: the ingress-swept metadata object is withheld from strict openai-compat hosts, declared by this WARN only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "merge_extras",
+        "forward-compat extra has no openai-compat equivalent",
+        "uncounted request-side loss: a swept forward-compat extra with no openai-compat field is dropped by design, declared by this DEBUG only",
+    ),
+    (
+        "openai_compat/request.rs",
+        "merge_extras",
+        "extras attempted to override routectl-managed key",
+        "uncounted request-side loss: an extras entry naming a routectl-managed key is refused so it cannot replace assembled fields, declared by this WARN only",
     ),
     (
         "openai_responses/client.rs",
@@ -393,6 +451,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "strip_client_metadata", 1),
     ("gemini/request.rs", "tool_call_to_function_call_part", 1),
     ("gemini/request.rs", "warn_dropped_cache_control", 1),
+    ("openai_compat/request.rs", "project_system", 2),
     (
         "openai_compat/wire_lift/mod.rs",
         "reject_or_drop_unrepresentable",

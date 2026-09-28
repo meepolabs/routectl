@@ -325,6 +325,7 @@ pub fn translation_lane_seen(lane: &str) -> u64 {
 /// the lane-specific population rules (the anthropic lane excludes background
 /// probes) stay with the lane.
 #[cfg(any(
+    feature = "openai-compat",
     feature = "anthropic-api",
     feature = "openai-responses",
     feature = "gemini"
@@ -336,6 +337,7 @@ pub(crate) struct ClientFingerprintStripTally {
 }
 
 #[cfg(any(
+    feature = "openai-compat",
     feature = "anthropic-api",
     feature = "openai-responses",
     feature = "gemini"

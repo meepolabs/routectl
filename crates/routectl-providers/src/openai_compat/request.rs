@@ -14,12 +14,13 @@ use serde_json::Value;
 use tracing::warn;
 
 use routectl_core::{
-    ChatRequest, Error, Result, ToolDef, is_canonical_request_key, sanitize_for_log,
+    ChatRequest, Error, Message, Result, ToolDef, is_canonical_request_key, sanitize_for_log,
 };
 
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
+use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
 /// `source` value passed to [`merge_extras`] for operator-config-supplied
 /// extras (`[providers.X] payload_extras = {...}` -- renamed from the
@@ -56,6 +57,14 @@ pub fn normalize(
     // whole lane.
     crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
 
+    // The system projection is infallible and runs first, so its tally is
+    // flushed before any `?` below: a request that withheld the fingerprint
+    // and then failed translation still counts against the denominator that
+    // already counted it.
+    let mut fingerprint = ClientFingerprintStripTally::default();
+    let system = project_system(id, req, &mut fingerprint);
+    flush_fingerprint_tally(&fingerprint);
+
     // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
     // can't carry. Default mode warns + continues; strict mode 400s.
     check_dropped_anthropic_fields(id, req, strict_translation)?;
@@ -67,80 +76,7 @@ pub fn normalize(
         .as_object_mut()
         .ok_or_else(|| Error::normalize_request(id, "serialized request is not an object"))?;
 
-    // Lower canonical `system` (Anthropic-shape top-level field) into a
-    // synthetic `role: "system"` message. Strict OpenAI-compat hosts
-    // (NIM) reject the top-level field with `400 Validation:
-    // Unsupported parameter(s): system`.
-    //
-    // A blank canonical system reads as "no canonical system supplied"
-    // (same as None): it must not lower a meaningless empty system message,
-    // and -- because lowering also drops the existing role:system entries --
-    // it must not silently discard a real prompt a direct caller put in the
-    // messages array.
-    if let Some(sys) = req.system.as_ref().filter(|s| !s.is_blank()) {
-        // Drop the Claude Code billing/attribution block before flatten:
-        // openai-compat is a third-party upstream and must not receive the
-        // client fingerprint the block carries.
-        let mut billing_dropped = false;
-        let filtered = crate::system_filter::strip_billing_attribution(sys, &mut billing_dropped);
-        // Withheld by routectl, not by the wire: the lowered `role: "system"`
-        // message would carry the block's text fine, and an openai-compat host
-        // is a third-party upstream that must not receive the client
-        // fingerprint it holds. Shares the class literal with the other
-        // egresses that strip the same content -- one operator-facing label per
-        // action, keyed apart by lane.
-        //
-        // Recorded HERE rather than beside the message insert below: a request
-        // whose whole system IS the block flattens to empty text and skips that
-        // insert entirely, so a record placed past it would miss exactly the
-        // requests that stripped the most while this lane's denominator still
-        // counted them. Nothing between the strip and this point can fail, so
-        // no later `?` can skip it either. The flag is one bool per request, so
-        // a system carrying several such blocks is still one action.
-        // NO TRANSLATION-DROP MARKER HERE, deliberately: this file is outside
-        // the census's swept surfaces, so a marker on it is never parsed and
-        // cannot fail -- one was verified to survive being replaced by an
-        // unparseable verdict with every weld green. A pin that cannot fail is
-        // worse than none, because it reads as enforcement. The behavior is
-        // covered by the per-arm tests named below; widening the census to this
-        // surface is filed separately.
-        // Covered by: an_all_billing_system_still_counts_the_openai_compat_policy_action
-        if billing_dropped {
-            warn!(
-                provider = id,
-                "openai-compat egress: Claude Code billing/attribution system block dropped",
-            );
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "client_fingerprint_stripped",
-            );
-        }
-        let text = filtered
-            .as_ref()
-            .map(routectl_core::SystemContent::flatten)
-            .unwrap_or_default();
-        if !text.trim().is_empty() {
-            let messages = obj
-                .entry("messages")
-                .or_insert_with(|| Value::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or_else(|| {
-                    Error::normalize_request(id, "serialized messages is not an array")
-                })?;
-            // Direct callers (no ingress) may send both req.system AND
-            // Role::System messages. Drop the existing role:system
-            // entries so the lowered system prompt isn't duplicated.
-            // The OpenAI ingress already does this lift at parse time;
-            // doing it here protects library callers too.
-            messages.retain(|m| {
-                m.as_object()
-                    .and_then(|o| o.get("role"))
-                    .and_then(|r| r.as_str())
-                    != Some("system")
-            });
-            messages.insert(0, serde_json::json!({"role": "system", "content": text}));
-        }
-    }
+    apply_system_projection(id, obj, system)?;
 
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
     obj.remove("system");
@@ -213,6 +149,103 @@ pub fn normalize(
     }
 
     Ok(body)
+}
+
+/// Canonical system content projected onto this lane's wire, with the Claude
+/// Code billing/attribution block withheld from both canonical surfaces:
+/// openai-compat is a third-party upstream and must not receive the client
+/// fingerprint the block carries.
+struct SystemProjection {
+    /// The filtered top-level `system`, flattened for the leading
+    /// `role: "system"` message. `None` when absent, blank, or wholly
+    /// withheld.
+    lowered: Option<String>,
+    /// `messages` with the block withheld from every `Role::System` turn.
+    /// `None` when no turn carried it, so the serialized array stands.
+    messages: Option<Vec<Message>>,
+}
+
+fn project_system(
+    id: &str,
+    req: &ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> SystemProjection {
+    // A blank canonical system reads as "no canonical system supplied" (same
+    // as None): it lowers no meaningless empty system message.
+    let mut system_withheld = false;
+    let lowered = req
+        .system
+        .as_ref()
+        .filter(|s| !s.is_blank())
+        .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut system_withheld))
+        .map(|s| s.flatten())
+        .filter(|text| !text.trim().is_empty());
+    // Withheld by routectl, not by the wire: the lowered `role: "system"`
+    // message would carry the block's text fine. One class and one tally
+    // across both surfaces, so a request stripping on both is still one
+    // action. The pin names the SINGLE-SOURCE test: a both-sources request
+    // sets the shared tally from the sibling site too, so only a fingerprint
+    // on this surface alone fails when this record is deleted.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_the_top_level_system_is_withheld_from_openai_compat_and_counted
+    if system_withheld {
+        fingerprint.record();
+        warn!(
+            provider = id,
+            "openai-compat egress: Claude Code billing/attribution system block dropped",
+        );
+    }
+
+    let messages = crate::system_filter::strip_system_role_messages(&req.messages);
+    // The second site of the one policy action above, sharing its tally. A
+    // system-role turn reaches this egress unlifted from the Anthropic ingress
+    // and from library callers, with or without a top-level system.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_is_withheld_from_openai_compat_and_counted
+    if messages.is_some() {
+        fingerprint.record();
+        warn!(
+            provider = id,
+            "openai-compat egress: Claude Code billing/attribution block dropped from a \
+             system-role message",
+        );
+    }
+
+    SystemProjection { lowered, messages }
+}
+
+/// Count this request's fingerprint withhold, if any, once.
+fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally) {
+    if fingerprint.stripped() {
+        crate::translation_drop_metrics::record_translation_policy_action(
+            super::LANE,
+            "client_fingerprint_stripped",
+        );
+    }
+}
+
+/// Write the projection into the serialized body. The top-level `system` is
+/// lowered into a leading `role: "system"` message because strict
+/// OpenAI-compat hosts (NIM) reject the top-level field with
+/// `400 Validation: Unsupported parameter(s): system`. Every `Role::System`
+/// turn the caller sent keeps its position after it: equal content is not
+/// provenance, so nothing is deduplicated.
+fn apply_system_projection(
+    id: &str,
+    obj: &mut serde_json::Map<String, Value>,
+    system: SystemProjection,
+) -> Result<()> {
+    if let Some(messages) = system.messages {
+        let messages = serde_json::to_value(messages)
+            .map_err(|e| Error::normalize_request(id, e.to_string()))?;
+        obj.insert("messages".into(), messages);
+    }
+    if let Some(text) = system.lowered {
+        obj.entry("messages")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| Error::normalize_request(id, "serialized messages is not an array"))?
+            .insert(0, serde_json::json!({"role": "system", "content": text}));
+    }
+    Ok(())
 }
 
 /// Shallow-merge `extras` into `obj` with a routectl-managed-keys
@@ -1303,9 +1336,8 @@ mod tests {
         }
     }
 
-    /// A blank canonical system must not discard a direct caller's
-    /// Role::System message: lowering drops the existing role:system entries,
-    /// so blank has to skip the lowering entirely.
+    /// A blank canonical system lowers nothing, and a direct caller's
+    /// Role::System message stays first on the wire.
     #[test]
     fn blank_canonical_system_preserves_role_system_message() {
         use routectl_core::SystemContent;
@@ -1343,52 +1375,6 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "you are helpful");
-    }
-
-    #[test]
-    fn direct_caller_with_both_req_system_and_role_system_dedupes() {
-        // Direct callers (no ingress) might send both `req.system` AND
-        // a Role::System message. The egress must drop the existing
-        // role:system entries when injecting from req.system, so the
-        // wire body doesn't carry two competing system prompts.
-        use routectl_core::SystemContent;
-        let mut req = simple_req("test-model");
-        req.system = Some(SystemContent::Text("the real system prompt".into()));
-        insert_msg(
-            &mut req,
-            0,
-            Message {
-                refusal: None,
-                role: Role::System,
-                content: MessageContent::Text("legacy duplicate".into()),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        );
-        let body = normalize(
-            "test",
-            &req,
-            ReasoningDialect::Passthrough,
-            HistoryReasoning::Auto,
-            None,
-            false,
-        )
-        .unwrap();
-        let messages = body["messages"].as_array().unwrap();
-        let system_count = messages.iter().filter(|m| m["role"] == "system").count();
-        assert_eq!(
-            system_count, 1,
-            "expected exactly one role:system message, got: {body}"
-        );
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "the real system prompt");
-        assert_ne!(
-            messages[0]["content"], "legacy duplicate",
-            "the lowered req.system must win, not the legacy Role::System message"
-        );
     }
 
     /// `request_carries_reasoning` must return `true` when an assistant
@@ -1769,4 +1755,6 @@ mod tests {
             "the Err arm must count the request in the lane denominator too"
         );
     }
+
+    include!("request_system_tests.rs");
 }

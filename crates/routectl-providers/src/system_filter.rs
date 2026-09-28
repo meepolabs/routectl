@@ -108,6 +108,77 @@ pub fn system_role_texts_stripped(
     texts
 }
 
+/// `messages` with the billing/attribution block withheld from every
+/// `Role::System` message, or `None` when no message carries it, so the caller
+/// keeps its own copy untouched.
+///
+/// For an egress that keeps system-role messages in place rather than lifting
+/// their text out. The predicate runs per text PART, for the same reason as
+/// [`system_role_texts_stripped`]. Every other message and every surviving
+/// part keeps its position; a system message left with no content is removed
+/// rather than shipped empty. Equal content is never treated as a duplicate.
+#[cfg(feature = "openai-compat")]
+pub fn strip_system_role_messages(
+    messages: &[routectl_core::Message],
+) -> Option<Vec<routectl_core::Message>> {
+    if !messages.iter().any(system_message_carries_billing_block) {
+        return None;
+    }
+    Some(
+        messages
+            .iter()
+            .filter_map(without_billing_attribution)
+            .collect(),
+    )
+}
+
+#[cfg(feature = "openai-compat")]
+fn system_message_carries_billing_block(message: &routectl_core::Message) -> bool {
+    use routectl_core::{MessageContent, Role};
+
+    matches!(message.role, Role::System)
+        && match &message.content {
+            MessageContent::Text(text) => is_billing_attribution_block(text),
+            MessageContent::Parts(parts) => parts.iter().any(is_billing_text_part),
+            MessageContent::Null => false,
+        }
+}
+
+#[cfg(feature = "openai-compat")]
+fn is_billing_text_part(part: &routectl_core::ContentPart) -> bool {
+    use routectl_core::{ContentPart, KnownContentPart};
+
+    matches!(
+        part,
+        ContentPart::Known(KnownContentPart::Text { text, .. })
+            if is_billing_attribution_block(text)
+    )
+}
+
+/// `message` with the block withheld, or `None` when nothing is left of it.
+#[cfg(feature = "openai-compat")]
+fn without_billing_attribution(message: &routectl_core::Message) -> Option<routectl_core::Message> {
+    use routectl_core::{Message, MessageContent};
+
+    if !system_message_carries_billing_block(message) {
+        return Some(message.clone());
+    }
+    match &message.content {
+        MessageContent::Parts(parts) => {
+            let kept: Vec<_> = parts
+                .iter()
+                .filter(|part| !is_billing_text_part(part))
+                .cloned()
+                .collect();
+            (!kept.is_empty()).then(|| Message {
+                content: MessageContent::Parts(kept),
+                ..message.clone()
+            })
+        }
+        MessageContent::Text(_) | MessageContent::Null => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

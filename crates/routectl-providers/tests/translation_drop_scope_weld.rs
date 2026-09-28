@@ -66,6 +66,7 @@ const INSCOPE_FILES: &[&str] = &[
     "gemini/mod.rs",
     "gemini/request.rs",
     "gemini/schema.rs",
+    "openai_compat/request.rs",
     "openai_compat/wire_lift/content.rs",
     "openai_compat/wire_lift/mod.rs",
     "openai_compat/wire_lift/response_format.rs",

@@ -1,5 +1,5 @@
 //! Canonical system content across a cross-lane fallback: Gemini first, then
-//! OpenAI Responses.
+//! OpenAI Responses; and openai-compat first, then OpenAI Responses.
 //!
 //! The billing/attribution strip is attempt-local. Each lane filters its own
 //! projection of the caller's ORIGINAL canonical request, so a first hop that
@@ -19,6 +19,9 @@ use routectl_core::{
     ChatRequest, Message, MessageContent, Provider, Role, SystemBlock, SystemContent,
 };
 use routectl_providers::gemini::{GeminiConfig, GeminiProvider};
+use routectl_providers::openai_compat::{
+    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
+};
 use routectl_providers::openai_responses::{
     AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
 };
@@ -99,18 +102,32 @@ fn completed_sse() -> String {
 }
 
 fn fallback_router(gemini: Arc<dyn Provider>, responses: Arc<dyn Provider>) -> Router {
-    let mut config = Config::default();
-    config.providers.insert(
-        "p-gemini".into(),
+    fallback_router_from(
+        "p-gemini",
         ProviderEntry::gemini(common::file_ref("k")),
-    );
+        gemini,
+        "gemini-2.5-pro",
+        responses,
+    )
+}
+
+/// A two-hop chain: `first` (under `first_id`), then the Responses provider.
+fn fallback_router_from(
+    first_id: &str,
+    first_entry: ProviderEntry,
+    first: Arc<dyn Provider>,
+    first_model: &str,
+    responses: Arc<dyn Provider>,
+) -> Router {
+    let mut config = Config::default();
+    config.providers.insert(first_id.into(), first_entry);
     config.providers.insert(
         "p-responses".into(),
         ProviderEntry::openai_responses(common::file_ref("k")),
     );
     config.aliases.insert(
         "fast".into(),
-        AliasValue::Chain(vec!["m-gemini".into(), "m-responses".into()]),
+        AliasValue::Chain(vec!["m-first".into(), "m-responses".into()]),
     );
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
@@ -120,13 +137,8 @@ fn fallback_router(gemini: Arc<dyn Provider>, responses: Arc<dyn Provider>) -> R
 
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
-        "m-gemini".into(),
-        Arc::new(ResolvedModel::new(
-            "m-gemini",
-            "p-gemini",
-            gemini,
-            "gemini-2.5-pro",
-        )),
+        "m-first".into(),
+        Arc::new(ResolvedModel::new("m-first", first_id, first, first_model)),
     );
     models.insert(
         "m-responses".into(),
@@ -224,6 +236,110 @@ async fn each_fallback_hop_withholds_the_fingerprint_and_keeps_both_system_sourc
     );
 
     // The caller's canonical request left the walk as it entered.
+    assert_eq!(
+        serde_json::to_value(&caller_req).expect("renders"),
+        serde_json::to_value(caller_request()).expect("renders"),
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn an_openai_compat_first_hop_withholds_the_fingerprint_and_keeps_every_system_turn() {
+    // Arrange
+    let jar_dir = tempfile::tempdir().expect("temp dir");
+    let _jar = routectl_testkit::ScopedEnv::set(
+        "ROUTECTL_COOKIE_FILE",
+        jar_dir.path().join("cookies.json"),
+    );
+    let compat_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
+        .mount(&compat_upstream)
+        .await;
+    let responses_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(completed_sse()),
+        )
+        .mount(&responses_upstream)
+        .await;
+
+    let compat = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "p-compat".into(),
+        base_url: compat_upstream.uri(),
+        api_key: "test-key".into(),
+        header_extras: Vec::new(),
+        payload_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: HistoryReasoning::Auto,
+        user_agent: None,
+        strict_translation: false,
+        disable_stream_include_usage: false,
+        mantle: None,
+    });
+    let mut responses_cfg = OpenAiResponsesConfig::new("p-responses", "test-key");
+    responses_cfg.auth_kind = AuthKind::ApiKey;
+    responses_cfg.base_url = responses_upstream.uri();
+    let router = fallback_router_from(
+        "p-compat",
+        ProviderEntry::openai_compat(compat_upstream.uri(), common::file_ref("k")),
+        Arc::new(compat),
+        "gpt-4o",
+        Arc::new(OpenAiResponsesProvider::new(responses_cfg)),
+    );
+    let caller_req = caller_request();
+
+    // Act
+    let Dispatched { meta, result } = router
+        .complete_with_options(caller_req.clone(), RouterOptions::new())
+        .await;
+
+    // Assert -- the chain really fell back, and the second hop served.
+    result.expect("the Responses hop serves the request");
+    assert_eq!(meta.fallback_count, 1, "exactly one fallback hop");
+    assert_eq!(meta.served_provider.as_deref(), Some("p-responses"));
+
+    // The first hop: lowered top-level system first, then the surviving
+    // system-role turn in place, fingerprint withheld from both.
+    let compat_body: serde_json::Value =
+        serde_json::from_str(&only_body(&compat_upstream).await).expect("json body");
+    assert!(
+        !compat_body.to_string().contains(FINGERPRINT_TELL),
+        "the openai-compat hop shipped the client fingerprint: {compat_body}"
+    );
+    let roles_and_contents: Vec<(String, serde_json::Value)> = compat_body["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .map(|m| {
+            (
+                m["role"].as_str().expect("role").to_string(),
+                m["content"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        roles_and_contents,
+        vec![
+            ("system".to_string(), serde_json::json!(CANONICAL_PROMPT)),
+            ("system".to_string(), serde_json::json!(MESSAGE_PROMPT)),
+            ("user".to_string(), serde_json::json!("hi")),
+        ]
+    );
+
+    // The fallback hop, re-derived from the original request.
+    let responses_body: serde_json::Value =
+        serde_json::from_str(&only_body(&responses_upstream).await).expect("json body");
+    assert!(
+        !responses_body.to_string().contains(FINGERPRINT_TELL),
+        "the Responses hop shipped the client fingerprint: {responses_body}"
+    );
+    assert_eq!(
+        responses_body["instructions"],
+        serde_json::json!(format!("{CANONICAL_PROMPT}\n\n{MESSAGE_PROMPT}")),
+    );
     assert_eq!(
         serde_json::to_value(&caller_req).expect("renders"),
         serde_json::to_value(caller_request()).expect("renders"),

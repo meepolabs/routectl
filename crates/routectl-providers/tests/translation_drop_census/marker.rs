@@ -25,6 +25,13 @@ pub const SURFACES: &[&str] = &[
     "openai_responses",
 ];
 
+/// Single files swept individually, relative to the crate's `src`: a lane's
+/// request path that sits BESIDE its swept directory rather than inside it.
+/// Listed file by file because the directory holding each one also holds a
+/// nested directory and response-side modules, which the flat directory sweep
+/// would refuse or would have to classify wholesale.
+pub const SURFACE_FILES: &[&str] = &["openai_compat/request.rs"];
+
 /// The token that opens every marker. Renaming it in source without updating
 /// it here empties the census, which the non-vacuity guards below turn into a
 /// loud failure rather than a green run.
@@ -119,7 +126,8 @@ pub fn is_test_file(relative: &str) -> bool {
     name.contains("_tests") || name.contains("_test_support")
 }
 
-/// Every `.rs` file in the four surfaces, sorted, relative to `src`.
+/// Every `.rs` file in the four surfaces plus every [`SURFACE_FILES`] entry,
+/// sorted, relative to `src`.
 pub fn surface_files() -> Result<Vec<String>, String> {
     let mut files = Vec::new();
     for surface in SURFACES {
@@ -153,6 +161,15 @@ pub fn surface_files() -> Result<Vec<String>, String> {
                 "{surface} holds no .rs file; the census is looking in the wrong place"
             ));
         }
+    }
+    for file in SURFACE_FILES {
+        if !src_root().join(file).is_file() {
+            return Err(format!(
+                "{file} is listed as a swept file but is not a readable file; the census is \
+                 looking in the wrong place"
+            ));
+        }
+        files.push((*file).to_string());
     }
     files.sort();
     Ok(files)
