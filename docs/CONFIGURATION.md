@@ -363,6 +363,17 @@ the `max_body_bytes` cap):
     retrieval-by-id against this stateless proxy will find nothing).
   - `store: false` / absent -> normal stateless path.
 
+On every inference route (including `count_tokens`), a transcript whose
+tool calls and tool results are not correctly paired is a **local HTTP
+400** (`invalid_request_error` on the Anthropic envelope,
+`validation_error` on the OpenAI one) with no upstream call, retry, or
+fallback. Each tool call must be answered by exactly one result, matched
+on its id, in the result turns that follow it before the next non-result
+turn or the end of the request; parallel results may arrive in any
+order. The error names the defect class and the offending message index,
+never a tool id or tool content. routectl does not repair a malformed
+transcript by synthesizing or dropping turns.
+
 `GET /v1/models` lists the configured aliases; `GET /health` is the
 only route outside the auth layer (so liveness probes work under
 `--unsafe-public`).

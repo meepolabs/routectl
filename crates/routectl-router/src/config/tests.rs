@@ -1233,6 +1233,23 @@ async fn trim_to_params_is_identical_across_both_consumers() {
             messages: vec![
                 text_msg(Role::User, "head turn"),
                 Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::ToolUse {
+                            id: "toolu_1".into(),
+                            name: "Tool".into(),
+                            input: serde_json::json!({}),
+                            cache_control: None,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    refusal: None,
+                },
+                Message {
                     role: Role::User,
                     content: MessageContent::Parts(vec![ContentPart::Known(
                         KnownContentPart::ToolResult {

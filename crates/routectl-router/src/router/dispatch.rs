@@ -87,6 +87,22 @@ fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
     provider_kind != Some(RESPONSES_PROVIDER_KIND)
 }
 
+/// Reject a request whose tool calls and tool results are not correctly
+/// paired, as a local validation error. Runs at the top of every dispatch
+/// walk, before chain selection, so a malformed transcript never reaches a
+/// provider, a retry, a fallback, or a health debit.
+pub(super) fn validate_request_transcript(req: &ChatRequest) -> Result<()> {
+    routectl_core::validate_tool_pairing(&req.messages).map_err(|e| {
+        tracing::debug!(
+            defect = %e.defect(),
+            message_index = e.message_index(),
+            item_index = ?e.item_index(),
+            "tool call/result pairing rejected before dispatch"
+        );
+        Error::Validation(e.to_string())
+    })
+}
+
 /// Emit the single aggregated reasoning-replay degradation WARN for a
 /// resolved request. Fires exactly ONCE when the strip-repair branch
 /// degraded a carried reasoning artifact anywhere in the chain walk, and
@@ -259,6 +275,7 @@ impl Router {
         opts: RouterOptions,
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
+        validate_request_transcript(&req)?;
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
         // Re-probes the chain filter admitted, owned by a request-scoped set
         // that settles them on transfer or on drop. `take(state_key)` moves a
@@ -1273,6 +1290,7 @@ impl Router {
         opts: RouterOptions,
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        validate_request_transcript(&req)?;
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
         // See `complete_inner`: re-probes the filter admitted, owned by a
         // request-scoped set that settles each on transfer (`take`) or on drop

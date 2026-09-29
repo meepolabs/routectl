@@ -2056,7 +2056,8 @@ chain = ["m_a", "m_b"]
 
 /// POST one `/v1/chat/completions` carrying an assistant turn whose
 /// stringified `function.arguments` is `PRETTY_ARGUMENTS` -- the reducer's
-/// target. No `cache_control` anywhere, so the whole message list is the
+/// target -- followed by that call's tool result, so the transcript is
+/// correctly paired. No `cache_control` anywhere, so the whole message list is the
 /// mutable tail. `max_tokens` is above `probe_max_tokens` (default 1) so the
 /// request is never treated as an availability probe (a probe fast-fails
 /// instead of walking the fallback chain).
@@ -2074,7 +2075,8 @@ async fn post_reduction_probe(
                 "id": "call_1",
                 "type": "function",
                 "function": {"name": "search", "arguments": PRETTY_ARGUMENTS}
-            }]}
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "no results"}
         ]
     });
     let resp = client

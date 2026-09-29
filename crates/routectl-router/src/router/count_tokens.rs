@@ -41,7 +41,7 @@ use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
     emit_replay_degradation, forwarded_terminal_status, is_capability_error,
     log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
-    replay_rejection_body_free, upstream_status_for_remap,
+    replay_rejection_body_free, upstream_status_for_remap, validate_request_transcript,
 };
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
@@ -217,6 +217,7 @@ impl Router {
         mode: FieldSettlementMode,
         meta: &mut DispatchMeta,
     ) -> Result<TokenCount> {
+        validate_request_transcript(&req)?;
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
         // A token-count is not a messages-capability test, so a re-probe the
         // filter admitted here settles OtherError: release the in_flight slot

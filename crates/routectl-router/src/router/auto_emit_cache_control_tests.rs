@@ -372,14 +372,15 @@ async fn stream_path_also_injects() {
 
 // -- steady-state would-trim advisory (NON-MUTATING recording) ---------
 
-/// A bulky tool_result message (`tokens` tokens at ~4 bytes/token).
-fn tool_result_msg(tokens: usize) -> Message {
+/// A bulky tool_result message (`tokens` tokens at ~4 bytes/token)
+/// answering the call `tool_use_id`.
+fn tool_result_msg(tool_use_id: &str, tokens: usize) -> Message {
     let payload = "x".repeat(tokens * 4);
     Message {
         refusal: None,
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ToolResult {
-            tool_use_id: "toolu_1".into(),
+            tool_use_id: tool_use_id.into(),
             content: serde_json::json!(payload),
             is_error: None,
             cache_control: None,
@@ -413,9 +414,10 @@ fn long_tool_request() -> ChatRequest {
         text_msg(Role::User, "system framing turn one"),
         text_msg(Role::Assistant, "acknowledged"),
     ];
-    for _ in 0..12 {
-        messages.push(text_msg(Role::Assistant, "calling a tool"));
-        messages.push(tool_result_msg(12_000));
+    for i in 0..12 {
+        let id = format!("toolu_{i}");
+        messages.push(tool_use_of(&id, serde_json::json!({})));
+        messages.push(tool_result_msg(&id, 12_000));
     }
     for i in 0..6 {
         messages.push(text_msg(Role::User, &format!("recent turn {i}")));

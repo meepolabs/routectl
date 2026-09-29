@@ -71,6 +71,12 @@ license.
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` +
   `ToolDef::Other(Value)`, with the `from_openai_function` /
   `from_responses_function` shape normalizers
+- `src/tool_pairing.rs` -- `validate_tool_pairing`: pure, read-only check
+  that every tool call has exactly one result (keyed on correlation id across
+  `tool_calls`, typed / passthrough tool parts, and `tool_call_id`;
+  chronological, segment-local); rejects with `ToolPairingError` (a
+  `ToolPairingDefect` class plus bounded message / item indexes, no ids or
+  content)
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, STRUCTURE-ONLY
   breakpoint validator (4-cap, 1h-before-5m TTL ordering; unrecognized `type`
   / `ttl` values forward verbatim -- marker vocabulary is upstream's to
@@ -2443,7 +2449,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
   `complete`/`complete_with_options` + `stream`/`stream_with_options` and
-  their `complete_inner`/`stream_inner` loop bodies, which walk the resolved
+  their `complete_inner`/`stream_inner` loop bodies, which first run
+  `validate_request_transcript` (tool pairing -> local `Error::Validation`,
+  shared with `count_tokens`, before chain selection) and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
   `DispatchTarget`, retrying within a provider per `RetryPolicy` with
   exponential backoff (`add_jitter`/`mul_duration`, `INLOOP_RETRY_AFTER_CAP`);
@@ -8105,6 +8113,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/responses_ingress.rs` -- `/v1/responses` end-to-end (Responses body
   -> openai-compat upstream -> Responses-shaped completion,
   `previous_response_id` -> 400, `store:true` accepted, listener auth)
+- `tests/tool_pairing_ingress.rs` -- malformed tool call / result pairing
+  on every inference route (chat completions, messages, responses,
+  count_tokens; complete and stream) returns the dialect's 400 with zero
+  calls to a two-target chain's upstream; paired control reaches upstream;
+  every replay fixture transcript passes the validator
 - `tests/tool_choice_egress_e2e.rs` -- chained tool_choice path: a flat
   Responses `{type:function,name:X}` through the `/v1/responses` ingress
   reaches the Anthropic egress as `{type:tool,name:X}` and the openai-compat

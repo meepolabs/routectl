@@ -3934,6 +3934,58 @@ pub fn routectl_core::tool_def::ToolDef::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::tool_def::ToolDef where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::tool_def::ToolDef
 impl<T> tracing::instrument::WithSubscriber for routectl_core::tool_def::ToolDef
+#[non_exhaustive] pub enum routectl_core::ToolPairingDefect
+pub routectl_core::ToolPairingDefect::CrossSegmentResult
+pub routectl_core::ToolPairingDefect::DuplicateCallId
+pub routectl_core::ToolPairingDefect::DuplicateResult
+pub routectl_core::ToolPairingDefect::InterruptedCalls
+pub routectl_core::ToolPairingDefect::OrphanResult
+pub routectl_core::ToolPairingDefect::ResultBeforeCall
+pub routectl_core::ToolPairingDefect::TrailingPendingCalls
+impl core::clone::Clone for routectl_core::ToolPairingDefect
+pub fn routectl_core::ToolPairingDefect::clone(&self) -> routectl_core::ToolPairingDefect
+impl core::cmp::Eq for routectl_core::ToolPairingDefect
+impl core::cmp::PartialEq for routectl_core::ToolPairingDefect
+pub fn routectl_core::ToolPairingDefect::eq(&self, &routectl_core::ToolPairingDefect) -> bool
+impl core::fmt::Debug for routectl_core::ToolPairingDefect
+pub fn routectl_core::ToolPairingDefect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_core::ToolPairingDefect
+pub fn routectl_core::ToolPairingDefect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::ToolPairingDefect
+impl core::marker::StructuralPartialEq for routectl_core::ToolPairingDefect
+impl core::marker::Freeze for routectl_core::ToolPairingDefect
+impl core::marker::Send for routectl_core::ToolPairingDefect
+impl core::marker::Sync for routectl_core::ToolPairingDefect
+impl core::marker::Unpin for routectl_core::ToolPairingDefect
+impl core::marker::UnsafeUnpin for routectl_core::ToolPairingDefect
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::ToolPairingDefect
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::ToolPairingDefect
+impl<T, U> core::convert::Into<U> for routectl_core::ToolPairingDefect where U: core::convert::From<T>
+pub fn routectl_core::ToolPairingDefect::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::ToolPairingDefect where U: core::convert::Into<T>
+pub type routectl_core::ToolPairingDefect::Error = core::convert::Infallible
+pub fn routectl_core::ToolPairingDefect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::ToolPairingDefect where U: core::convert::TryFrom<T>
+pub type routectl_core::ToolPairingDefect::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::ToolPairingDefect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::ToolPairingDefect where T: core::clone::Clone
+pub type routectl_core::ToolPairingDefect::Owned = T
+pub fn routectl_core::ToolPairingDefect::clone_into(&self, &mut T)
+pub fn routectl_core::ToolPairingDefect::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_core::ToolPairingDefect where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_core::ToolPairingDefect::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_core::ToolPairingDefect where T: 'static + ?core::marker::Sized
+pub fn routectl_core::ToolPairingDefect::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::ToolPairingDefect where T: ?core::marker::Sized
+pub fn routectl_core::ToolPairingDefect::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::ToolPairingDefect where T: ?core::marker::Sized
+pub fn routectl_core::ToolPairingDefect::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::ToolPairingDefect where T: core::clone::Clone
+pub unsafe fn routectl_core::ToolPairingDefect::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::ToolPairingDefect
+pub fn routectl_core::ToolPairingDefect::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::ToolPairingDefect
+impl<T> tracing::instrument::WithSubscriber for routectl_core::ToolPairingDefect
 #[non_exhaustive] pub enum routectl_core::UsageInputSource
 pub routectl_core::UsageInputSource::ExplicitFinal
 pub routectl_core::UsageInputSource::InterimCarry
@@ -5536,6 +5588,55 @@ pub fn routectl_core::schema::TokenCount::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::schema::TokenCount where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::schema::TokenCount
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::TokenCount
+pub struct routectl_core::ToolPairingError
+impl routectl_core::ToolPairingError
+pub const fn routectl_core::ToolPairingError::defect(&self) -> routectl_core::ToolPairingDefect
+pub const fn routectl_core::ToolPairingError::item_index(&self) -> core::option::Option<usize>
+pub const fn routectl_core::ToolPairingError::message_index(&self) -> usize
+impl core::clone::Clone for routectl_core::ToolPairingError
+pub fn routectl_core::ToolPairingError::clone(&self) -> routectl_core::ToolPairingError
+impl core::cmp::Eq for routectl_core::ToolPairingError
+impl core::cmp::PartialEq for routectl_core::ToolPairingError
+pub fn routectl_core::ToolPairingError::eq(&self, &routectl_core::ToolPairingError) -> bool
+impl core::error::Error for routectl_core::ToolPairingError
+impl core::fmt::Debug for routectl_core::ToolPairingError
+pub fn routectl_core::ToolPairingError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_core::ToolPairingError
+pub fn routectl_core::ToolPairingError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::ToolPairingError
+impl core::marker::Freeze for routectl_core::ToolPairingError
+impl core::marker::Send for routectl_core::ToolPairingError
+impl core::marker::Sync for routectl_core::ToolPairingError
+impl core::marker::Unpin for routectl_core::ToolPairingError
+impl core::marker::UnsafeUnpin for routectl_core::ToolPairingError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::ToolPairingError
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::ToolPairingError
+impl<T, U> core::convert::Into<U> for routectl_core::ToolPairingError where U: core::convert::From<T>
+pub fn routectl_core::ToolPairingError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::ToolPairingError where U: core::convert::Into<T>
+pub type routectl_core::ToolPairingError::Error = core::convert::Infallible
+pub fn routectl_core::ToolPairingError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::ToolPairingError where U: core::convert::TryFrom<T>
+pub type routectl_core::ToolPairingError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::ToolPairingError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::ToolPairingError where T: core::clone::Clone
+pub type routectl_core::ToolPairingError::Owned = T
+pub fn routectl_core::ToolPairingError::clone_into(&self, &mut T)
+pub fn routectl_core::ToolPairingError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_core::ToolPairingError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_core::ToolPairingError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_core::ToolPairingError where T: 'static + ?core::marker::Sized
+pub fn routectl_core::ToolPairingError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::ToolPairingError where T: ?core::marker::Sized
+pub fn routectl_core::ToolPairingError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::ToolPairingError where T: ?core::marker::Sized
+pub fn routectl_core::ToolPairingError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::ToolPairingError where T: core::clone::Clone
+pub unsafe fn routectl_core::ToolPairingError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::ToolPairingError
+pub fn routectl_core::ToolPairingError::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::ToolPairingError
+impl<T> tracing::instrument::WithSubscriber for routectl_core::ToolPairingError
 #[non_exhaustive] pub struct routectl_core::UpstreamMeta
 pub routectl_core::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
 pub routectl_core::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
@@ -5829,5 +5930,6 @@ pub fn routectl_core::trace_structural_summary(&str, &str, &str, &serde_json::va
 pub fn routectl_core::trace_upstream_response_headers(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::trace_upstream_success_body(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::validate_source<S: routectl_core::cache_control::CacheBreakpointSource>(&S) -> routectl_core::error::Result<()>
+pub fn routectl_core::validate_tool_pairing(&[routectl_core::schema::Message]) -> core::result::Result<(), routectl_core::ToolPairingError>
 pub fn routectl_core::wrap_stream_with_summary<S>(S, &'static str, &'static str, alloc::string::String) -> futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>> where S: futures_core::stream::Stream<Item = routectl_core::error::Result<routectl_core::schema::ChatChunk>> + core::marker::Send + 'static
 pub type routectl_core::Result<T, E> = core::result::Result<T, E>

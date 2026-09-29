@@ -190,29 +190,49 @@ fn anthropic_entry_reduction_off() -> ProviderEntry {
     }
 }
 
-/// A request whose single mutable-tail message carries a tool_result
-/// whose content is a pretty (whitespace-laden) JSON STRING.
+/// A request whose last message carries a tool_result whose content is a
+/// pretty (whitespace-laden) JSON STRING, answering the tool_use turn
+/// before it.
 fn req_with_pretty_tool_result() -> ChatRequest {
     let pretty = "{\n  \"rows\": [1, 2, 3]\n}";
     ChatRequest {
         model: "m".into(),
-        messages: vec![Message {
-            refusal: None,
-            role: Role::User,
-            content: MessageContent::Parts(vec![ContentPart::Known(
-                KnownContentPart::ToolResult {
-                    tool_use_id: "toolu_1".into(),
-                    content: serde_json::json!(pretty),
-                    is_error: None,
-                    cache_control: None,
-                },
-            )]),
-            reasoning: None,
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        }]
+        messages: vec![
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "Tool".into(),
+                        input: serde_json::json!({}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        content: serde_json::json!(pretty),
+                        is_error: None,
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ]
         .into(),
         ..Default::default()
     }
@@ -223,7 +243,7 @@ fn req_with_pretty_tool_result() -> ChatRequest {
 fn req_with_plain_tool_result() -> ChatRequest {
     let mut req = req_with_pretty_tool_result();
     let messages = Arc::make_mut(&mut req.messages);
-    let MessageContent::Parts(parts) = &mut messages[0].content else {
+    let MessageContent::Parts(parts) = &mut messages[1].content else {
         panic!("expected parts");
     };
     let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &mut parts[0] else {
@@ -233,9 +253,9 @@ fn req_with_plain_tool_result() -> ChatRequest {
     req
 }
 
-/// Read the tool_result content string out of the first message's parts.
+/// Read the tool_result content string out of the result message's parts.
 fn first_tool_result_content(req: &ChatRequest) -> &serde_json::Value {
-    let MessageContent::Parts(parts) = &req.messages[0].content else {
+    let MessageContent::Parts(parts) = &req.messages[1].content else {
         panic!("expected parts");
     };
     let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &parts[0] else {
@@ -816,8 +836,10 @@ async fn applied_pass_writes_all_four_counters_from_the_delta() {
 async fn nothing_to_strip_pass_writes_measured_zeros_and_the_skip_count() {
     // A pass that examined the tail and changed nothing is a MEASURED zero,
     // not an absence: compressed / bytes are Some(0) while the untouchable
-    // target is accounted for as skipped. `None` would be indistinguishable
-    // from "reduction never ran", which is the whole point of the split.
+    // targets -- the prose tool_result and the structured tool_use input it
+    // answers -- are accounted for as skipped. `None` would be
+    // indistinguishable from "reduction never ran", which is the whole point
+    // of the split.
     let (router, _captured) = rig(anthropic_entry(), true, false);
     let dispatched = router
         .complete_with_options(req_with_plain_tool_result(), RouterOptions::default())
@@ -830,7 +852,7 @@ async fn nothing_to_strip_pass_writes_measured_zeros_and_the_skip_count() {
     );
     assert_eq!(
         counters(&dispatched.meta),
-        (Some(0), Some(1), Some(0), Some(0)),
+        (Some(0), Some(2), Some(0), Some(0)),
     );
 }
 
