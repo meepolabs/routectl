@@ -428,11 +428,11 @@ HOST_BIN="${ROUTECTL_BIN:-$REPO_ROOT/target/release/routectl}"
     die "host routectl binary '$HOST_BIN' is missing or not executable; build it (cargo build --release) or point ROUTECTL_BIN at one. the image carries no routectl." 15
 
 # Resolved through its DIRECTORY, then recombined. `abspath_physical`
-# resolves a path by `cd -P`-ing into its nearest existing ancestor, which
-# cannot be a regular file -- handed the binary itself it fails outright.
-# The dirname is the ancestor that matters anyway: a symlinked directory in
-# the path is what would make the mounted binary a different file from the
-# one checked above.
+# refuses a final component that is a symlink, and `ROUTECTL_BIN` may
+# legitimately name a symlinked binary (the checks above follow it), so
+# only the directory goes through the helper. The dirname is the ancestor
+# that matters anyway: a symlinked directory in the path is what would
+# make the mounted binary a different file from the one checked above.
 HOST_BIN_DIR_ABS="$(abspath_physical "$(dirname "$HOST_BIN")")" ||
     die "could not physically resolve the directory of the host binary '$HOST_BIN'" 15
 [ -n "$HOST_BIN_DIR_ABS" ] ||

@@ -40,16 +40,24 @@ abspath_lexical() {
     }'
 }
 
-# Physically resolve a path to absolute, FOLLOWING symlinks, so a
-# symlinked component cannot disguise an out-of-tree destination as an
-# in-tree one. The path need not exist yet: walk up the RAW path (no
-# lexical `..` collapse first -- collapsing before symlink resolution is
-# unsafe, since `link/..` must resolve through the link, not cancel its
-# name) to the nearest EXISTING ancestor, resolve THAT with
-# `cd -P` / `pwd -P` (portable; no `realpath -m` dependency), then
-# re-append the non-existing tail. Tail components do not exist, so they
-# cannot be symlinks; a final lexical collapse of the combined path is
-# therefore physically faithful.
+# Physically resolve a directory path, a not-yet-created path, or an
+# existing regular file to absolute, FOLLOWING symlinks, so a symlinked
+# component cannot disguise an out-of-tree destination as an in-tree one.
+# A not-yet-created path: walk up the RAW path (no lexical `..` collapse
+# first -- collapsing before symlink resolution is unsafe, since
+# `link/..` must resolve through the link, not cancel its name) to the
+# nearest EXISTING ancestor, resolve THAT with `cd -P` / `pwd -P`
+# (portable; no `realpath -m` dependency), then re-append the
+# non-existing tail. Tail components do not exist, so they cannot be
+# symlinks; a final lexical collapse of the combined path is therefore
+# physically faithful.
+#
+# An existing regular file cannot be `cd`-ed into, so its PARENT is the
+# ancestor resolved and its own name is re-appended. That name is
+# faithful only because it is not a symlink: a final component that is a
+# symlink, or any other existing non-directory, is refused (exit 2)
+# rather than returned unresolved, and so is a path that continues below
+# an existing file.
 abspath_physical() {
   case "$1" in
     /*) _p="$1" ;;
@@ -60,6 +68,10 @@ abspath_physical() {
     _tail="$(basename "$_p")${_tail:+/$_tail}"
     _p="$(dirname "$_p")"
   done
+  if [ -z "$_tail" ] && [ -f "$_p" ] && [ ! -L "$_p" ]; then
+    _tail="$(basename "$_p")"
+    _p="$(dirname "$_p")"
+  fi
   _phys="$(cd -P "$_p" 2>/dev/null && pwd -P)" || {
     echo "cannot physically resolve path ancestor: $_p" >&2
     exit 2

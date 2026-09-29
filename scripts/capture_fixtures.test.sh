@@ -3363,6 +3363,32 @@ check "physical resolution alone reads the dangling path as confined" \
     "confined" "$phys_verdict"
 rm -rf "$work"
 
+# An existing REGULAR FILE resolves through its parent: reached via a
+# symlinked directory it comes back as the physical file path. The same
+# name as a symlink is refused (exit 2) rather than returned unresolved,
+# so the fail-closed direction holds for a file-shaped input too.
+work="$(make_repo)"
+mkdir -p "$work/real"
+: >"$work/real/file"
+ln -s "$work/real" "$work/via"
+ln -s "$work/real/file" "$work/real/file-link"
+file_verdict="$(
+    # shellcheck source=scripts/drivers/lib/confine.sh
+    . "$CONFINE"
+    expected="$(abspath_physical "$work/real")/file"
+    resolved="$(abspath_physical "$work/via/file")"
+    link_rc=0
+    (abspath_physical "$work/via/file-link") >/dev/null 2>&1 || link_rc=$?
+    if [ "$resolved" = "$expected" ]; then
+        printf 'resolved link_rc=%s\n' "$link_rc"
+    else
+        printf 'unresolved(%s) link_rc=%s\n' "$resolved" "$link_rc"
+    fi
+)"
+check "a regular file resolves physically; a symlinked file name is refused" \
+    "resolved link_rc=2" "$file_verdict"
+rm -rf "$work"
+
 # REFUSAL 2: a LIVE symlink component under the captured tree pointing
 # out of it. Distinct from refusal 1 -- this one the physical compare
 # would also catch, so it pins that a resolvable link is refused at the
