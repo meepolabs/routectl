@@ -461,7 +461,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "map_tool_choice",
         4,
     ),
-    ("openai_responses/extras.rs", "responses_text_format", 5),
+    ("openai_responses/extras.rs", "responses_text_format", 4),
     ("openai_responses/messages.rs", "lift_reasoning_details", 1),
     ("openai_responses/messages.rs", "translate_image_source", 1),
     ("openai_responses/messages.rs", "translate_other_message", 1),

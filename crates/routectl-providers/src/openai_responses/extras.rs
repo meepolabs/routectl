@@ -293,12 +293,11 @@ pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRe
 /// lane.
 ///
 /// Each field is a per-request FLAG, not an occurrence count: a request
-/// carries exactly one `response_format`, so its five failing arms are one
-/// request's worth of loss for whichever class fired -- never five events.
-/// The three classes are the three distinct operator problems (a directive
-/// whose envelope cannot be read, a type token with no Responses spelling,
-/// and a `json_schema` entry carrying no schema), which is also how the
-/// openai-compat lift splits the same surface.
+/// carries exactly one `response_format`, so its four failing arms are one
+/// request's worth of loss for whichever class fired -- never four events.
+/// The two classes are the two distinct operator problems (a directive whose
+/// envelope cannot be read, and a `json_schema` entry carrying no schema).
+/// An unrecognized type token is not a class here: this lane forwards it.
 ///
 /// The denominator is NOT touched here: `request::translate` owns the
 /// single `record_translation_lane_seen` site for this lane, and a second
@@ -307,7 +306,6 @@ pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRe
 #[must_use = "a tally records nothing until flush() runs"]
 struct ResponseFormatDropTally {
     shape_unrepresentable: bool,
-    type_unrepresentable: bool,
     schema_missing: bool,
 }
 
@@ -316,12 +314,6 @@ impl ResponseFormatDropTally {
     /// not an object, or carrying no string `type`.
     const fn record_shape_unrepresentable(&mut self) {
         self.shape_unrepresentable = true;
-    }
-
-    /// Record a directive whose `type` token has no Responses `text.format`
-    /// spelling.
-    const fn record_type_unrepresentable(&mut self) {
-        self.type_unrepresentable = true;
     }
 
     /// Record a `json_schema` directive carrying no usable schema.
@@ -333,9 +325,6 @@ impl ResponseFormatDropTally {
         if self.shape_unrepresentable {
             record_translation_drop(super::LANE, "response_format_shape_unrepresentable");
         }
-        if self.type_unrepresentable {
-            record_translation_drop(super::LANE, "response_format_type_unrepresentable");
-        }
         if self.schema_missing {
             record_translation_drop(super::LANE, "response_format_schema_missing");
         }
@@ -345,7 +334,7 @@ impl ResponseFormatDropTally {
 /// Convert the canonical OpenAI Chat-shape `response_format` into the
 /// Responses API `text.format` object (flattened: the whole `json_schema`
 /// member's keys at the top level, not nested). Returns `None` for an
-/// absent or unrecognized shape. The Responses API requires `name` on a
+/// unusable shape. The Responses API requires `name` on a
 /// json_schema format, so a missing name defaults to `"response"` (matching
 /// the openai-compat wire-lift default).
 ///
@@ -438,25 +427,13 @@ fn responses_text_format(
         // metric for the drops that ARE real.
         "text" => Some(serde_json::json!({"type": "text"})),
 
-        // A type token from neither dialect's known vocabulary (a future
-        // OpenAI format, or a client typo). The Responses `text.format` union
-        // admits only the tags handled above, so routectl cannot know which
-        // member an unknown tag was meant to become and the upstream rejects
-        // it -- inventing a member would silently constrain the model's
-        // output shape. Lane: openai-responses, construction-time
-        // translation. Baked seed verdict: it stands until this lane's own
-        // wire evidence contradicts it, and is not eligible for deletion
-        // until then.
-        // TRANSLATION-DROP: lane=openai-responses class=response_format_type_unrepresentable test=responses_unrecognized_response_format_type_drops_and_counts_once
-        other => {
-            tally.record_type_unrepresentable();
-            tracing::warn!(
-                response_format_type = other,
-                "unrecognized response_format shape; dropping structured-output \
-                 directive on Responses egress"
-            );
-            None
-        }
+        // A tag outside the vocabulary above -- most plausibly a newer
+        // Responses `text.format` member this lane's own ingress lifted
+        // verbatim. The upstream is the authority on its own union, so the
+        // whole object is forwarded unchanged: a rejection surfaces as the
+        // upstream's own error, whereas dropping it would silently return
+        // prose to a client parsing for structured output.
+        _ => Some(Value::Object(obj.clone())),
     }
 }
 
@@ -581,10 +558,6 @@ mod response_format_drop_tests {
         drop_count("response_format_shape_unrepresentable")
     }
 
-    fn type_count() -> u64 {
-        drop_count("response_format_type_unrepresentable")
-    }
-
     fn schema_count() -> u64 {
         drop_count("response_format_schema_missing")
     }
@@ -668,36 +641,44 @@ mod response_format_drop_tests {
         assert_eq!(after - before, 1);
     }
 
-    /// NEGATIVE CONTROL: an unrecognized `type` token drops, warns naming the
-    /// token, and counts once on its own class.
+    /// An unrecognized `type` token is forwarded as the WHOLE format object,
+    /// sibling keys included, with no warning and no counted drop: the tag is
+    /// the upstream's to judge, not this lane's to censor.
     #[test]
-    #[serial_test::serial(openai_responses_response_format_type_unrepresentable)]
-    fn responses_unrecognized_response_format_type_drops_and_counts_once() {
+    #[serial_test::serial(
+        openai_responses_response_format_schema_missing,
+        openai_responses_response_format_shape_unrepresentable
+    )]
+    fn responses_unrecognized_response_format_type_survives_verbatim() {
         // Arrange
-        let before = type_count();
+        let directive = json!({
+            "type": "marker_future_format_tag",
+            "marker_future_member": {"nested": [1, "two"]},
+            "strict": true
+        });
+        let before = (shape_count(), schema_count());
 
         // Act
-        let (wire, events) = emitted(Some(json!({"type": "marker_future_format_tag"})));
-        let after = type_count();
+        let (wire, events) = emitted(Some(directive.clone()));
 
         // Assert
-        let warn = events
-            .iter()
-            .find(|e| {
-                e.level == tracing::Level::WARN
-                    && e.message.contains("unrecognized response_format shape")
-            })
-            .unwrap_or_else(|| panic!("the drop must warn; got: {events:?}"));
         assert_eq!(
-            warn.field("response_format_type"),
-            Some("marker_future_format_tag")
+            wire["text"]["format"], directive,
+            "the unknown tag's whole object must reach the wire; emitted: {wire}"
         );
-        assert_format_absent_sibling_survives(&wire);
+        assert_eq!(
+            wire["text"]["verbosity"], "low",
+            "the text sibling must survive beside the forwarded format; emitted: {wire}"
+        );
         assert!(
-            !wire.to_string().contains("marker_future_format_tag"),
-            "no trace of the dropped tag may reach the wire; emitted: {wire}"
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a forwarded tag is no loss and must not warn; got: {events:?}"
         );
-        assert_eq!(after - before, 1);
+        assert_eq!(
+            (shape_count(), schema_count()),
+            before,
+            "a forwarded tag must count no drop"
+        );
     }
 
     /// NEGATIVE CONTROL: a `json_schema` directive with no `json_schema`
@@ -757,13 +738,12 @@ mod response_format_drop_tests {
 
     /// POSITIVE CONTROL for every fixture above: a representable directive of
     /// each recognized type reaches the emitted body, warns not at all, and
-    /// advances NONE of the three counters. Without it the absence assertions
+    /// advances NONE of the counters. Without it the absence assertions
     /// would pass against an egress that dropped every directive.
     #[test]
     #[serial_test::serial(
         openai_responses_response_format_schema_missing,
-        openai_responses_response_format_shape_unrepresentable,
-        openai_responses_response_format_type_unrepresentable
+        openai_responses_response_format_shape_unrepresentable
     )]
     fn representable_response_formats_survive_and_advance_no_counter() {
         for directive in [
@@ -781,7 +761,7 @@ mod response_format_drop_tests {
             }),
         ] {
             // Arrange
-            let before = (shape_count(), type_count(), schema_count());
+            let before = (shape_count(), schema_count());
 
             // Act
             let (wire, events) = emitted(Some(directive.clone()));
@@ -796,7 +776,7 @@ mod response_format_drop_tests {
                 "{directive} must reach the wire; emitted: {wire}"
             );
             assert_eq!(
-                (shape_count(), type_count(), schema_count()),
+                (shape_count(), schema_count()),
                 before,
                 "{directive} counted a drop"
             );

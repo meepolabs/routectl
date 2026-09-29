@@ -8114,7 +8114,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `text.format = {type:json_schema, name, schema, strict}` through the
   `/v1/responses` ingress reaches every structured-output egress (responses,
   openai-compat, anthropic-api, gemini, bedrock-invoke) carrying the caller's
-  schema
+  schema; an unknown tag reaches the responses egress verbatim and drops on the
+  gemini, anthropic-api and bedrock-invoke egresses
 - `tests/gemini_ingress_extras_boundary.rs` -- HTTP ingress through the server
   to a mock Gemini upstream: which extras reach the upstream body and logs
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`
