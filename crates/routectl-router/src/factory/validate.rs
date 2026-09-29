@@ -870,6 +870,73 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Provider id of the managed Anthropic subscription credential family.
+const MANAGED_ANTHROPIC_PROVIDER: &str = "anthropic";
+
+/// True when any secret reference the entry carries parses to an
+/// `oauth://anthropic` reference, bare or labeled. Every reference slot
+/// counts (not only `api_key_ref`): an account-id or Bedrock credential slot
+/// resolves through the same store and would carry the same token. The
+/// primary `api_key_ref` is chained in explicitly because `secret_uris`
+/// omits it on the Bedrock mantle lane.
+fn carries_managed_anthropic_ref(entry: &ProviderEntry) -> bool {
+    let primary = entry.api_key_ref();
+    primary.into_iter().chain(entry.secret_uris()).any(|uri| {
+        matches!(
+            routectl_auth::SecretRef::parse(uri),
+            Ok(routectl_auth::SecretRef::OAuth { provider, .. })
+                if provider == MANAGED_ANTHROPIC_PROVIDER
+        )
+    })
+}
+
+/// True when the entry is the one lane a managed Anthropic token may ride:
+/// `anthropic-api`, `credential_source = "own"`, no Bedrock mantle lane, and
+/// an https `base_url` whose host is exactly `api.anthropic.com`.
+fn is_managed_anthropic_lane(entry: &ProviderEntry) -> bool {
+    let ProviderEntry::AnthropicApi {
+        base_url,
+        credential_source,
+        #[cfg(feature = "bedrock")]
+        bedrock_mantle,
+        ..
+    } = entry
+    else {
+        return false;
+    };
+    #[cfg(feature = "bedrock")]
+    if bedrock_mantle.is_some() {
+        return false;
+    }
+    *credential_source == CredentialSource::Own
+        && is_anthropic_api_host(base_url)
+        && url::Url::parse(base_url).is_ok_and(|u| u.scheme() == "https")
+}
+
+/// Contain the managed Anthropic subscription token to the Anthropic API
+/// host. Any reference parsing to `oauth://anthropic[#label]` is accepted only
+/// on an `anthropic-api` entry with `credential_source = "own"`, no Bedrock
+/// mantle lane, and a `base_url` whose host is exactly `api.anthropic.com`;
+/// every other kind and every other host (loopback included) is rejected.
+/// Static `env://` / `file://` credentials are unaffected.
+///
+/// Pure and self-sufficient: the factory calls it before resolving any secret
+/// for the entry, since direct callers reach the factory without config
+/// validation. The message names the provider and the required shape only;
+/// the `base_url`, the reference, and the seat label are withheld because
+/// each can carry credentials or identify a seat.
+pub fn validate_managed_anthropic_credential(name: &str, entry: &ProviderEntry) -> Result<()> {
+    if !carries_managed_anthropic_ref(entry) || is_managed_anthropic_lane(entry) {
+        return Ok(());
+    }
+    Err(routectl_core::Error::Config(format!(
+        "provider `{name}`: the managed Anthropic credential is accepted only on \
+         `anthropic-api` with credential_source = \"own\", no bedrock_mantle, and base_url \
+         omitted or https://api.anthropic.com. For a gateway or passthrough use a static \
+         env:// or file:// credential; no override. base_url and ref are withheld"
+    )))
+}
+
 /// Reject an incoherent `bedrock_mantle` sub-config on any
 /// `[providers.X]` `anthropic-api` entry. The mere PRESENCE of the
 /// sub-table selects the Bedrock mantle lane, on which every other
@@ -1727,6 +1794,11 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     }
     if let Err(e) = validate_provider_credential_sources(config) {
         errors.push(bare_validation_message(e));
+    }
+    for (name, entry) in &config.providers {
+        if let Err(e) = validate_managed_anthropic_credential(name, entry) {
+            errors.push(bare_validation_message(e));
+        }
     }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_provider_bedrock_mantle(config) {

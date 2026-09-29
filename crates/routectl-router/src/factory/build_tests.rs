@@ -2406,3 +2406,154 @@ mod openai_mantle_factory_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod managed_anthropic_credential_factory_tests {
+    //! The factory enforces the managed Anthropic containment rule on its
+    //! own, before any secret is resolved: direct callers reach it without
+    //! config validation.
+
+    use super::*;
+    use crate::config::{Config, ModelEntry, ProviderEntry};
+    use async_trait::async_trait;
+    use routectl_auth::{MemoryStore, SecretRef, SecretStore};
+    use routectl_providers::anthropic_api::AuthKind;
+    use std::sync::Arc;
+
+    const SENTINEL_HOST: &str = "https://gateway.sentinel-host.example/sentinel-path";
+
+    struct PanicOnAccessStore;
+
+    #[async_trait]
+    impl SecretStore for PanicOnAccessStore {
+        async fn get(&self, _: &SecretRef) -> routectl_core::Result<String> {
+            panic!("secret store read before containment rejection");
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            panic!("secret store write before containment rejection");
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            panic!("secret store delete before containment rejection");
+        }
+        async fn peek_session_id(&self, _: &SecretRef) -> Option<String> {
+            panic!("secret store session read before containment rejection");
+        }
+        async fn account_id(&self, _: &SecretRef) -> routectl_core::Result<Option<String>> {
+            panic!("secret store account read before containment rejection");
+        }
+        async fn list_seats(&self, _: &SecretRef) -> routectl_core::Result<Vec<SecretRef>> {
+            panic!("secret store seat listing before containment rejection");
+        }
+    }
+
+    fn rejected_entries(r: &str) -> Vec<(&'static str, ProviderEntry)> {
+        let mut v = vec![
+            (
+                "anthropic-api gateway",
+                ProviderEntry::anthropic_api(r)
+                    .with_auth_kind(AuthKind::OauthBearer)
+                    .with_base_url(SENTINEL_HOST),
+            ),
+            (
+                "anthropic-api loopback",
+                ProviderEntry::anthropic_api(r)
+                    .with_auth_kind(AuthKind::OauthBearer)
+                    .with_base_url("http://127.0.0.1:18080"),
+            ),
+            (
+                "anthropic-api forwarded",
+                ProviderEntry::anthropic_api(r).with_credential_source(CredentialSource::Forwarded),
+            ),
+            (
+                "openai-compat",
+                ProviderEntry::openai_compat("https://api.anthropic.com", r),
+            ),
+        ];
+        #[cfg(feature = "openai-responses")]
+        v.push(("openai-responses", ProviderEntry::openai_responses(r)));
+        #[cfg(feature = "gemini")]
+        v.push(("gemini", ProviderEntry::gemini(r)));
+        v
+    }
+
+    #[tokio::test]
+    async fn build_provider_rejects_before_any_secret_access() {
+        for r in ["oauth://anthropic", "oauth://anthropic#secret-seat-label"] {
+            for (label, entry) in rejected_entries(r) {
+                let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+                let err = match build_provider("p", &entry, store).await {
+                    Ok(_) => panic!("{label} with {r} must be rejected"),
+                    Err(e) => e.to_string(),
+                };
+
+                assert!(err.contains("provider `p`"), "{label}: {err}");
+                for leaked in [
+                    "sentinel-host",
+                    "127.0.0.1",
+                    "oauth://anthropic",
+                    "secret-seat-label",
+                ] {
+                    assert!(!err.contains(leaked), "{label} leaks {leaked}: {err}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn build_provider_still_builds_the_default_host_managed_shape() {
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry =
+            ProviderEntry::anthropic_api("oauth://anthropic").with_auth_kind(AuthKind::OauthBearer);
+
+        let built = build_provider("p", &entry, store).await;
+
+        assert!(built.is_ok(), "{:?}", built.err());
+    }
+
+    #[tokio::test]
+    async fn build_resolved_models_skips_a_rejected_provider_without_touching_the_store() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "gw".into(),
+            ProviderEntry::anthropic_api("oauth://anthropic")
+                .with_auth_kind(AuthKind::OauthBearer)
+                .with_base_url(SENTINEL_HOST),
+        );
+        cfg.models
+            .insert("m".into(), ModelEntry::new("gw", "claude-opus-4-7"));
+        let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("a rejected provider is skipped, not fatal");
+
+        assert!(built.models.is_empty());
+        assert_eq!(built.failed.len(), 1);
+        assert!(!built.failed[0].1.contains("sentinel-host"));
+    }
+
+    #[tokio::test]
+    async fn a_pool_member_on_a_foreign_host_is_omitted_without_touching_the_store() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "gw".into(),
+            ProviderEntry::anthropic_api("oauth://anthropic")
+                .with_auth_kind(AuthKind::OauthBearer)
+                .with_base_url(SENTINEL_HOST),
+        );
+        cfg.pools.insert(
+            "pool".into(),
+            crate::config::PoolEntry::new(vec!["gw".into()]),
+        );
+        cfg.models
+            .insert("m".into(), ModelEntry::new("pool", "claude-opus-4-7"));
+        let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+        let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect_err("a pool with no usable member refuses to build");
+
+        assert!(!err.to_string().contains("sentinel-host"), "{err}");
+    }
+}

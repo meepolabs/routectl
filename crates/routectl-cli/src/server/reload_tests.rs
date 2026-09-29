@@ -118,7 +118,6 @@ strict_translation = false
 
 [providers.anthropic_oauth]
 kind = "anthropic-api"
-base_url = "http://127.0.0.1:1"
 api_key_ref = "oauth://anthropic"
 auth_kind = "oauth-bearer"
 

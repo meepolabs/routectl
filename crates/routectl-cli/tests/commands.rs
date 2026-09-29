@@ -407,7 +407,7 @@ async fn test_command_resolves_oauth_ref_when_logged_in() {
     let creds_json = json!({
         "schema_version": 1,
         "providers": {
-            "anthropic": {
+            "xai": {
                 "access_token": "seeded-access-token",
                 "refresh_token": "seeded-refresh-token",
                 "token_type": "Bearer",
@@ -456,11 +456,11 @@ async fn test_command_resolves_oauth_ref_when_logged_in() {
         .await;
 
     // Build a Config with one anthropic_api provider that resolves
-    // its api key via `oauth://anthropic` and points at the mock URL.
+    // its api key via `oauth://xai` and points at the mock URL.
     let mut providers = BTreeMap::new();
     providers.insert(
         "anthropic_oauth".into(),
-        ProviderEntry::anthropic_api("oauth://anthropic")
+        ProviderEntry::anthropic_api("oauth://xai")
             .with_base_url(mock.uri())
             .with_auth_kind(AnthropicAuthKind::OauthBearer),
     );
@@ -483,7 +483,7 @@ async fn test_command_resolves_oauth_ref_when_logged_in() {
     let result = commands::test::run(config, "default", "Hi.").await;
     assert!(
         result.is_ok(),
-        "test::run should resolve oauth://anthropic via CompositeStore: {result:?}"
+        "test::run should resolve oauth://xai via CompositeStore: {result:?}"
     );
 }
 

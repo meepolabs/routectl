@@ -22,7 +22,10 @@ use serde_json::{Value, json};
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_providers::bedrock::auth::{self, ResolvedCreds};
 use routectl_providers::bedrock::{BedrockCreds, endpoint, signing};
-use routectl_router::{BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry};
+use routectl_router::{
+    BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry,
+    validate_managed_anthropic_credential,
+};
 
 use crate::server::CompositeStore;
 
@@ -181,7 +184,9 @@ struct BedrockTarget {
     user_agent: Option<String>,
 }
 
-/// Resolve the scoped target to a Bedrock Invoke-shape send target.
+/// Resolve the scoped target to a Bedrock Invoke-shape send target. Runs the
+/// managed-credential containment check first, so a refused entry never
+/// reaches secret retrieval.
 fn resolve_target(config: &Config, args: &CaptureArgs) -> Result<BedrockTarget, String> {
     let (provider_name, model_id) = super::resolve::resolve_provider_and_model(
         config,
@@ -192,6 +197,7 @@ fn resolve_target(config: &Config, args: &CaptureArgs) -> Result<BedrockTarget, 
         .providers
         .get(&provider_name)
         .ok_or_else(|| format!("no provider named `{provider_name}` is configured"))?;
+    validate_managed_anthropic_credential(&provider_name, entry).map_err(|e| e.to_string())?;
     match entry {
         ProviderEntry::Bedrock {
             region,
@@ -689,6 +695,54 @@ mod tests {
         let _env = ScopedEnv::set(CAPTURE_ENV, "1");
         let code = run(Path::new("/nonexistent/config.toml"), args(None, None)).await;
         assert_eq!(code, 2, "an unscoped invocation must be refused");
+    }
+
+    // -----------------------------------------------------------------
+    // Managed-credential containment: refusal precedes any retrieval.
+    // -----------------------------------------------------------------
+
+    fn bedrock_config(creds: &str) -> Config {
+        let text = format!(
+            "version = {}\n\
+             [providers.bedrock-probe]\n\
+             kind = \"bedrock\"\n\
+             region = \"us-east-1\"\n\
+             creds = {creds}\n\
+             [models.probe]\n\
+             provider = \"bedrock-probe\"\n\
+             upstream = \"anthropic.claude-probe-v1:0\"\n",
+            routectl_router::CURRENT_CONFIG_VERSION
+        );
+        routectl_router::parse_config(&text).expect("fixture config parses")
+    }
+
+    #[test]
+    fn resolve_target_refuses_a_managed_anthropic_ref_on_a_bedrock_entry() {
+        for uri in ["oauth://anthropic", "oauth://anthropic#seat-b"] {
+            let config =
+                bedrock_config(&format!("{{ kind = \"bearer-key\", key_ref = \"{uri}\" }}"));
+            let err = resolve_target(&config, &args(Some("bedrock-probe"), None))
+                .err()
+                .unwrap_or_else(|| panic!("managed ref {uri} must be refused"));
+            assert!(err.contains("bedrock-probe"), "reason: {err}");
+            assert!(err.contains("managed Anthropic"), "reason: {err}");
+            assert!(
+                !err.contains("seat-b"),
+                "seat label must be withheld: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_target_accepts_static_refs_and_keyless_creds() {
+        for creds in [
+            "{ kind = \"bearer-key\", key_ref = \"env://PROBE_KEY\" }",
+            "{ kind = \"default-chain\" }",
+        ] {
+            let target = resolve_target(&bedrock_config(creds), &args(Some("bedrock-probe"), None))
+                .expect("non-managed creds must resolve");
+            assert_eq!(target.region, "us-east-1");
+        }
     }
 
     // -----------------------------------------------------------------

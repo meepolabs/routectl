@@ -170,8 +170,9 @@ pub use factory::{
     cloudcode_model_warnings, codex_identity_warnings, collect_config_validation,
     per_block_breakpoint_warnings, resolved_codex_version, unread_thinking_budget_warnings,
     validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
-    validate_codex_version, validate_mitm_config, validate_pools,
-    validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
+    validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
+    validate_pools, validate_provider_credential_sources, validate_reasoning_defaults,
+    validate_registry_patterns,
 };
 pub use field_canary::CanaryOutcome;
 pub use field_capability::capability_key_is_field_verdict;

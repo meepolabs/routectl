@@ -1,10 +1,10 @@
 //! Per-kind provider construction from config rows.
 
-use super::validate::validate_base_url_scheme;
 #[cfg(feature = "bedrock")]
 use super::validate::validate_bedrock_allowlists;
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
+use super::validate::{validate_base_url_scheme, validate_managed_anthropic_credential};
 use super::warnings::warn_context_management_needs_preserve;
 use crate::catalog::resolve_effective_row;
 use crate::catalog_overlay::CatalogOverlay;
@@ -232,6 +232,7 @@ async fn build_provider_inner(
     #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
+    validate_managed_anthropic_credential(name, entry)?;
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
@@ -935,6 +936,16 @@ async fn compile_pool(
                 continue;
             }
         };
+        // The credential probe below reads the store, so the managed
+        // Anthropic containment rule must already hold.
+        if validate_managed_anthropic_credential(member, entry).is_err() {
+            omissions.push(PoolMemberOmission {
+                member: member.clone(),
+                provider_kind,
+                reason: PoolOmissionReason::ProviderInitFailed,
+            });
+            continue;
+        }
         // Probe the credential BEFORE building. An `oauth://` provider builds
         // with a LAZY token source (so rotation is picked up per request
         // without a restart), which means a logged-out member would otherwise
@@ -1361,6 +1372,23 @@ pub async fn build_resolved_models_reported(
                 // success-path dedup carried by `bedrock_auth_cache`.
                 if let Some(prior_err) = provider_failed.get(&entry.provider) {
                     failed.push((nickname.clone(), prior_err.clone()));
+                    continue;
+                }
+                // Credential resolution below reads the store ahead of the
+                // per-provider build, so the managed Anthropic containment
+                // rule is enforced here first.
+                if let Err(e) =
+                    validate_managed_anthropic_credential(&entry.provider, provider_entry)
+                {
+                    let msg = e.to_string();
+                    tracing::warn!(
+                        provider = %routectl_core::sanitize_for_log(&entry.provider),
+                        model = %routectl_core::sanitize_for_log(nickname),
+                        error = %msg,
+                        "skipping Bedrock model (credential rejected)",
+                    );
+                    provider_failed.insert(entry.provider.clone(), msg.clone());
+                    failed.push((nickname.clone(), msg));
                     continue;
                 }
                 // Cache the resolved creds per provider name so the

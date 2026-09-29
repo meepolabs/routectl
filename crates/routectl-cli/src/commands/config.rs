@@ -951,3 +951,49 @@ mod oauth_auth_selector_tests {
         assert!(tripped.is_empty(), "{tripped:?}");
     }
 }
+
+#[cfg(test)]
+mod containment_line_tests {
+    use super::{MAX_REPORTED_LINE_CHARS, safe_line, validation_report};
+    use routectl_router::Config;
+
+    /// The containment error is the longest validator message a routine
+    /// misconfiguration produces; the reported line must carry every part of
+    /// it, ending on its final clause rather than a truncation cut.
+    #[test]
+    fn config_check_reports_the_full_containment_error_untruncated() {
+        let toml_text = "[providers.gateway]\n\
+                         kind = \"anthropic-api\"\n\
+                         auth_kind = \"oauth-bearer\"\n\
+                         api_key_ref = \"oauth://anthropic\"\n\
+                         base_url = \"https://gateway.example/v1\"\n";
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        let report = validation_report(&config, Some(toml_text));
+
+        let error = report
+            .errors
+            .iter()
+            .find(|e| e.contains("provider `gateway`") && e.contains("managed Anthropic"))
+            .unwrap_or_else(|| panic!("no containment error: {:?}", report.errors));
+        let line = safe_line(error);
+        assert_eq!(&line, error, "the reported line must not be altered");
+        assert!(
+            error.chars().count() + 64 < MAX_REPORTED_LINE_CHARS,
+            "headroom under the reporting cap: {} chars",
+            error.chars().count()
+        );
+        for part in [
+            "anthropic-api",
+            "credential_source = \"own\"",
+            "no bedrock_mantle",
+            "https://api.anthropic.com",
+            "static env:// or file:// credential",
+            "no override",
+            "base_url and ref are withheld",
+        ] {
+            assert!(line.contains(part), "missing `{part}`: {line}");
+        }
+        assert!(line.ends_with("are withheld"), "{line}");
+    }
+}

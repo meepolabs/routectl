@@ -15797,6 +15797,7 @@ pub fn routectl_router::validate_capability_overrides(&routectl_router::config::
 pub fn routectl_router::validate_class_policy(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_codex_version(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_config_path(&str) -> core::result::Result<routectl_router::PathShape, routectl_router::PathError>
+pub fn routectl_router::validate_managed_anthropic_credential(&str, &routectl_router::ProviderEntry) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_mitm_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_overrides(&alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_pools(&routectl_router::config::Config) -> routectl_core::error::Result<()>

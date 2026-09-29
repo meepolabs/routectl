@@ -3866,3 +3866,227 @@ mod pool_validation_tests {
         assert!(err.contains("oauth://"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod managed_anthropic_credential_tests {
+    //! Containment of the managed Anthropic subscription token: an
+    //! `oauth://anthropic[#label]` reference is accepted only on an
+    //! `anthropic-api` entry (`credential_source = "own"`, no mantle lane)
+    //! whose `base_url` host is exactly `api.anthropic.com` over https.
+
+    use super::{collect_config_validation, validate_managed_anthropic_credential};
+    use crate::config::{Config, CredentialSource, ProviderEntry};
+    use routectl_providers::anthropic_api::AuthKind;
+
+    const REFS: [&str; 2] = ["oauth://anthropic", "oauth://anthropic#seat-secret-label"];
+    const SENTINEL_HOST: &str = "https://gateway.sentinel-host.example/sentinel-path?k=1";
+
+    fn anthropic(api_key_ref: &str, base_url: &str) -> ProviderEntry {
+        ProviderEntry::anthropic_api(api_key_ref)
+            .with_auth_kind(AuthKind::OauthBearer)
+            .with_base_url(base_url)
+    }
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).expect("fixture config parses")
+    }
+
+    fn rejects(entry: &ProviderEntry) -> bool {
+        validate_managed_anthropic_credential("p", entry).is_err()
+    }
+
+    #[test]
+    fn accepts_only_the_exact_https_anthropic_host_for_bare_and_labeled_refs() {
+        let accepted = [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "https://api.anthropic.com/v1",
+            "https://API.Anthropic.com:443",
+        ];
+        let rejected = [
+            "https://api.anthropic.com.evil.example",
+            "https://evil-api.anthropic.com",
+            "https://eu.api.anthropic.com",
+            "https://anthropic.com",
+            "https://api.anthropic.co",
+            "https://api-anthropic.com",
+            "https://apianthropic.com",
+            "https://evil.example/api.anthropic.com",
+            "https://evil.example?h=api.anthropic.com",
+            "https://evil.example#api.anthropic.com",
+            "https://api.anthropic.com@evil.example",
+            "https://evil.example\\@api.anthropic.com",
+            "https://api.anthropic.com.",
+            "http://api.anthropic.com",
+            "http://127.0.0.1:18080",
+            "http://localhost:18080",
+            "https://127.0.0.1",
+            "http://[::1]:18080",
+            "",
+            "not a url",
+        ];
+        for r in REFS {
+            for url in accepted {
+                assert!(!rejects(&anthropic(r, url)), "must accept {url} with {r}");
+            }
+            for url in rejected {
+                assert!(rejects(&anthropic(r, url)), "must reject {url:?} with {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_the_default_base_url_for_bare_and_labeled_refs() {
+        for r in REFS {
+            let entry = ProviderEntry::anthropic_api(r).with_auth_kind(AuthKind::OauthBearer);
+            assert!(!rejects(&entry), "default base_url must be accepted: {r}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_forwarded_credential_source_even_on_the_anthropic_host() {
+        for r in REFS {
+            let entry = ProviderEntry::anthropic_api(r)
+                .with_auth_kind(AuthKind::OauthBearer)
+                .with_credential_source(CredentialSource::Forwarded);
+            assert!(rejects(&entry), "forwarded must reject {r}");
+        }
+    }
+
+    #[test]
+    fn rejects_every_foreign_provider_kind_for_bare_and_labeled_refs() {
+        for r in REFS {
+            assert!(rejects(&ProviderEntry::openai_compat(SENTINEL_HOST, r)));
+            assert!(rejects(&ProviderEntry::openai_compat(
+                "https://api.anthropic.com",
+                r
+            )));
+            #[cfg(feature = "openai-responses")]
+            {
+                assert!(rejects(&ProviderEntry::openai_responses(r)));
+                assert!(rejects(
+                    &ProviderEntry::openai_responses(r)
+                        .with_openai_responses_base_url("https://api.anthropic.com")
+                ));
+            }
+            #[cfg(feature = "gemini")]
+            {
+                assert!(rejects(&ProviderEntry::gemini(r)));
+            }
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn rejects_a_managed_ref_in_a_bedrock_credential_slot_and_on_the_mantle_lane() {
+        let bedrock = parse(
+            "[providers.br]\n\
+             kind = \"bedrock\"\n\
+             region = \"us-east-1\"\n\
+             creds = { kind = \"bearer-key\", key_ref = \"oauth://anthropic\" }\n",
+        );
+        assert!(rejects(&bedrock.providers["br"]));
+
+        let mantle = parse(
+            "[providers.m]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", key_ref = \"oauth://anthropic#x\" } }\n",
+        );
+        assert!(rejects(&mantle.providers["m"]));
+    }
+
+    #[test]
+    fn leaves_static_credentials_and_other_oauth_families_alone() {
+        let cases = [
+            anthropic("env://SOME_KEY", "https://gateway.example/api"),
+            anthropic("file:///tmp/some-key", "http://127.0.0.1:18080"),
+            ProviderEntry::openai_compat(SENTINEL_HOST, "env://SOME_KEY"),
+            ProviderEntry::anthropic_api("oauth://anthropic-a").with_base_url(SENTINEL_HOST),
+            ProviderEntry::anthropic_api("oauth://codex").with_base_url(SENTINEL_HOST),
+        ];
+        for entry in &cases {
+            assert!(!rejects(entry), "must not touch {entry:?}");
+        }
+    }
+
+    #[test]
+    fn config_validation_rejects_a_gateway_and_a_loopback_naming_the_provider_only() {
+        for r in REFS {
+            let config = parse(&format!(
+                "[providers.gw]\n\
+                 kind = \"anthropic-api\"\n\
+                 auth_kind = \"oauth-bearer\"\n\
+                 api_key_ref = \"{r}\"\n\
+                 base_url = \"{SENTINEL_HOST}\"\n\
+                 [providers.lo]\n\
+                 kind = \"anthropic-api\"\n\
+                 auth_kind = \"oauth-bearer\"\n\
+                 api_key_ref = \"{r}\"\n\
+                 base_url = \"http://127.0.0.1:18080\"\n\
+                 [providers.oc]\n\
+                 kind = \"openai-compat\"\n\
+                 base_url = \"{SENTINEL_HOST}\"\n\
+                 api_key_ref = \"{r}\"\n"
+            ));
+
+            let errors = collect_config_validation(&config).errors;
+
+            for name in ["gw", "lo", "oc"] {
+                let hit: Vec<&String> = errors
+                    .iter()
+                    .filter(|e| e.contains(&format!("provider `{name}`")) && e.contains("managed"))
+                    .collect();
+                assert_eq!(hit.len(), 1, "one containment error for {name}: {errors:?}");
+                let msg = hit[0];
+                for leaked in [
+                    "sentinel-host",
+                    "sentinel-path",
+                    "127.0.0.1",
+                    "oauth://anthropic",
+                    "seat-secret-label",
+                ] {
+                    assert!(!msg.contains(leaked), "message leaks {leaked}: {msg}");
+                }
+                assert!(
+                    msg.chars().count() <= 300,
+                    "containment error must fit the reported-line cap: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn config_validation_keeps_the_supported_shapes_valid() {
+        let config = parse(
+            "[providers.managed-default]\n\
+             kind = \"anthropic-api\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [providers.managed-seat]\n\
+             kind = \"anthropic-api\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             api_key_ref = \"oauth://anthropic#seat-b\"\n\
+             [providers.passthrough]\n\
+             kind = \"anthropic-api\"\n\
+             auth_kind = \"api-key\"\n\
+             api_key_ref = \"file:///tmp/passthrough-key\"\n\
+             base_url = \"http://127.0.0.1:18080\"\n\
+             [providers.third-party-gateway]\n\
+             kind = \"anthropic-api\"\n\
+             auth_kind = \"oauth-bearer\"\n\
+             api_key_ref = \"env://GATEWAY_KEY\"\n\
+             base_url = \"https://gateway.example/api\"\n\
+             [providers.responses-oauth]\n\
+             kind = \"openai-responses\"\n\
+             api_key_ref = \"oauth://codex\"\n",
+        );
+
+        let errors = collect_config_validation(&config).errors;
+
+        assert!(
+            errors.is_empty(),
+            "supported shapes must validate: {errors:?}"
+        );
+    }
+}
