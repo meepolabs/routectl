@@ -417,8 +417,9 @@ impl FieldCanaryRegistry {
     }
 
     /// Claim the single in-flight canary slot for `key` at `incarnation`.
-    /// `None` when a canary is already claimed for this identity at
-    /// `incarnation`, and `None` for a SUPERSEDED `incarnation` -- a straggler
+    /// `None` when the identity is not DUE, when a canary is already claimed
+    /// for this identity at `incarnation`, and `None` for a SUPERSEDED
+    /// `incarnation` -- a straggler
     /// from an older lifecycle must not be admitted alongside the live canary of
     /// the current one, which is exactly the second-concurrent-canary the slot
     /// exists to prevent.
@@ -428,6 +429,12 @@ impl FieldCanaryRegistry {
     /// stays sound because release and settlement are both incarnation-scoped
     /// (see [`Self::release_canary_claim`]) -- it can only ever retire its own
     /// incarnation's state, never the live slot that replaced it.
+    ///
+    /// Precondition: the identity is due under THIS lock. A caller's earlier
+    /// `true` from [`Self::tick_cadence`] is only a hint -- between that tick and
+    /// this claim a sibling request can claim, dispatch, and settle, freeing the
+    /// slot with the trip already consumed. Re-checking `due` here is what keeps
+    /// one trip to one canary.
     ///
     /// A successful claim CLEARS the sticky due flag [`Self::tick_cadence`] set:
     /// the claim is the one event that consumes a trip, so a refused claim
@@ -444,7 +451,7 @@ impl FieldCanaryRegistry {
         if Self::admit_incarnation(entry, incarnation, 0) == IncarnationOrder::Stale {
             return None;
         }
-        if entry.canary_claimed {
+        if entry.canary_claimed || !entry.due {
             return None;
         }
         entry.canary_claimed = true;
@@ -455,6 +462,33 @@ impl FieldCanaryRegistry {
             incarnation,
             settled: false,
         })
+    }
+
+    /// Mark `key` due at `incarnation` without moving its cadence countdown,
+    /// under the same incarnation admission a tick uses. Test-only: lets a test
+    /// whose subject is not the cadence reach a claimable state directly.
+    #[cfg(test)]
+    pub(crate) fn mark_due(&self, key: &FieldVerdictKey, incarnation: u64) {
+        let mut states = self.states.lock();
+        let entry = states
+            .entry(key.clone())
+            .or_insert_with(|| CanaryState::fresh(incarnation, 0));
+        if Self::admit_incarnation(entry, incarnation, 0) == IncarnationOrder::Stale {
+            return;
+        }
+        entry.due = true;
+    }
+
+    /// [`Self::mark_due`] then [`Self::claim_canary`]. Test-only. A refusal is
+    /// still decided by the real claim, never by this wrapper.
+    #[cfg(test)]
+    pub(crate) fn claim_due_canary(
+        &self,
+        key: &FieldVerdictKey,
+        incarnation: u64,
+    ) -> Option<CanaryClaimGuard<'_>> {
+        self.mark_due(key, incarnation);
+        self.claim_canary(key, incarnation)
     }
 
     /// Settle a claim taken at `planned_incarnation` as CONFIRMED and move the

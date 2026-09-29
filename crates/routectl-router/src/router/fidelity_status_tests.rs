@@ -266,7 +266,7 @@ fn a_canary_suspended_verdict_reports_the_suspension_rather_than_ineligibility()
     router
         .field_verdicts()
         .canaries()
-        .claim_canary(&key, incarnation)
+        .claim_due_canary(&key, incarnation)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
 

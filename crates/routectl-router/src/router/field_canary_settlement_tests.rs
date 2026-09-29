@@ -1011,7 +1011,7 @@ async fn a_canary_claimed_across_a_reload_stays_visible_to_the_replacement() {
     let claim = router
         .field_verdicts()
         .canaries()
-        .claim_canary(&key, incarnation)
+        .claim_due_canary(&key, incarnation)
         .expect("the slot starts free");
 
     let replacement = router
@@ -1021,7 +1021,7 @@ async fn a_canary_claimed_across_a_reload_stays_visible_to_the_replacement() {
     assert!(
         replacement
             .canaries()
-            .claim_canary(&key, incarnation)
+            .claim_due_canary(&key, incarnation)
             .is_none(),
         "the replacement facade must see the in-flight claim",
     );
@@ -1029,7 +1029,7 @@ async fn a_canary_claimed_across_a_reload_stays_visible_to_the_replacement() {
     assert!(
         replacement
             .canaries()
-            .claim_canary(&key, incarnation)
+            .claim_due_canary(&key, incarnation)
             .is_some(),
         "and see its release",
     );

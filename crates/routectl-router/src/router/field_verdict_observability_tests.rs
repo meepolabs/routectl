@@ -254,7 +254,7 @@ fn field_repair_counters_reports_both_nonzero_alarm_halves() {
         );
     }
     canaries
-        .claim_canary(&disproved_key, 1)
+        .claim_due_canary(&disproved_key, 1)
         .expect("claim admitted")
         .settle(crate::field_canary::CanaryOutcome::Regressed);
     // Identity two: two repaired requests nothing has disproved, so these stay

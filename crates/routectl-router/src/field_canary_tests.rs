@@ -234,16 +234,16 @@ fn claim_canary_admits_exactly_one_slot_at_a_time() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let first = registry.claim_canary(&k, 1);
+    let first = registry.claim_due_canary(&k, 1);
     assert!(first.is_some());
     assert!(
-        registry.claim_canary(&k, 1).is_none(),
+        registry.claim_due_canary(&k, 1).is_none(),
         "a second concurrent claim on the same identity must be refused"
     );
 
     drop(first);
     assert!(
-        registry.claim_canary(&k, 1).is_some(),
+        registry.claim_due_canary(&k, 1).is_some(),
         "dropping the first guard must release the slot for a fresh claim"
     );
 }
@@ -253,7 +253,9 @@ fn dropped_canary_guard_releases_the_claim_without_recording_an_outcome() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let guard = registry.claim_canary(&k, 1).expect("first claim admitted");
+    let guard = registry
+        .claim_due_canary(&k, 1)
+        .expect("first claim admitted");
     drop(guard);
 
     assert!(!registry.snapshot(&k).expect("resident").canary_claimed);
@@ -271,7 +273,7 @@ fn settled_canary_guard_releases_the_claim_and_records_the_outcome() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let guard = registry.claim_canary(&k, 1).expect("claim admitted");
+    let guard = registry.claim_due_canary(&k, 1).expect("claim admitted");
     guard.settle(CanaryOutcome::Confirmed);
 
     let snap = registry.snapshot(&k).expect("resident");
@@ -290,7 +292,7 @@ fn a_stale_settlement_leaves_the_fresh_incarnation_unclaimed_and_unmutated() {
     let k = key("model-a");
     registry.acknowledge_confirmation(&k, 1, 7);
 
-    let guard = registry.claim_canary(&k, 1).expect("claim admitted");
+    let guard = registry.claim_due_canary(&k, 1).expect("claim admitted");
     // The identity moves to a new incarnation while the canary is still
     // in flight -- e.g. the verdict was cleared and re-learned mid-probe.
     registry.acknowledge_confirmation(&k, 2, 1);
@@ -322,7 +324,7 @@ fn explicit_release_matches_the_implicit_drop_path() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let guard = registry.claim_canary(&k, 1).expect("claim admitted");
+    let guard = registry.claim_due_canary(&k, 1).expect("claim admitted");
     guard.release();
 
     let snap = registry.snapshot(&k).expect("resident");
@@ -343,10 +345,14 @@ fn a_stale_guard_drop_cannot_release_a_live_claim_of_a_newer_incarnation() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let stale = registry.claim_canary(&k, 1).expect("stale claim admitted");
+    let stale = registry
+        .claim_due_canary(&k, 1)
+        .expect("stale claim admitted");
     // The identity moves on (a reload re-learned the verdict) and the canary of
     // the new incarnation takes the slot while the stale request is still out.
-    let live = registry.claim_canary(&k, 2).expect("live claim admitted");
+    let live = registry
+        .claim_due_canary(&k, 2)
+        .expect("live claim admitted");
 
     drop(stale);
 
@@ -355,14 +361,14 @@ fn a_stale_guard_drop_cannot_release_a_live_claim_of_a_newer_incarnation() {
         "the live canary still holds the slot after the stale guard drops"
     );
     assert!(
-        registry.claim_canary(&k, 2).is_none(),
+        registry.claim_due_canary(&k, 2).is_none(),
         "so no second canary is admitted for the identity while the live one is in flight"
     );
 
     // And the live guard still owns its own release.
     drop(live);
     assert!(
-        registry.claim_canary(&k, 2).is_some(),
+        registry.claim_due_canary(&k, 2).is_some(),
         "the slot frees once the claim that actually holds it drops"
     );
 }
@@ -374,8 +380,12 @@ fn a_stale_settlement_cannot_release_a_live_claim_of_a_newer_incarnation() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
 
-    let stale = registry.claim_canary(&k, 1).expect("stale claim admitted");
-    let _live = registry.claim_canary(&k, 2).expect("live claim admitted");
+    let stale = registry
+        .claim_due_canary(&k, 1)
+        .expect("stale claim admitted");
+    let _live = registry
+        .claim_due_canary(&k, 2)
+        .expect("live claim admitted");
 
     stale.settle(CanaryOutcome::Regressed);
 
@@ -402,7 +412,7 @@ fn quorum_reseed_guard_is_load_bearing() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
     registry.tick_cadence(&k, 1);
-    let stale_claim = registry.claim_canary(&k, 1).expect("claim admitted");
+    let stale_claim = registry.claim_due_canary(&k, 1).expect("claim admitted");
 
     registry.acknowledge_confirmation(&k, 2, 1);
 
@@ -418,15 +428,18 @@ fn quorum_reseed_guard_is_load_bearing() {
     drop(stale_claim);
 }
 
-/// Mutation check: comment out the claim-refusal branch in `claim_canary`
-/// (`if entry.canary_claimed { return None; }`) and this test goes red,
-/// because a second concurrent claim would then be silently admitted.
+/// Mutation check: drop `entry.canary_claimed ||` from the refusal branch in
+/// `claim_canary` and this test goes red, because a second concurrent claim
+/// would then be silently admitted. The second claim marks the identity due
+/// first, so the refusal can only come from the held slot.
 #[test]
 fn claim_refusal_guard_is_load_bearing() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
-    let _first = registry.claim_canary(&k, 1).expect("first claim admitted");
-    assert!(registry.claim_canary(&k, 1).is_none());
+    let _first = registry
+        .claim_due_canary(&k, 1)
+        .expect("first claim admitted");
+    assert!(registry.claim_due_canary(&k, 1).is_none());
 }
 
 /// Mutation check: drop the `if entry.incarnation == incarnation` guard in
@@ -437,7 +450,7 @@ fn claim_refusal_guard_is_load_bearing() {
 fn stale_settlement_rollback_guard_is_load_bearing() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
-    let guard = registry.claim_canary(&k, 1).expect("claim admitted");
+    let guard = registry.claim_due_canary(&k, 1).expect("claim admitted");
     registry.acknowledge_confirmation(&k, 2, 1);
     guard.settle(CanaryOutcome::Regressed);
     assert_eq!(registry.snapshot(&k).expect("resident").last_outcome, None);
@@ -492,7 +505,9 @@ fn an_unclaimed_due_interval_stays_due_until_a_claim_consumes_it() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
     // A claim held by a canary still in flight, so the trip below cannot claim.
-    let in_flight = registry.claim_canary(&k, 1).expect("first claim admitted");
+    let in_flight = registry
+        .claim_due_canary(&k, 1)
+        .expect("first claim admitted");
 
     // Arrange -- reach the trip.
     for _ in 1..CANARY_INTERVAL {
@@ -537,6 +552,39 @@ fn an_unclaimed_due_interval_stays_due_until_a_claim_consumes_it() {
 }
 
 #[test]
+fn a_stale_due_tick_cannot_claim_after_a_sibling_consumed_and_settled_the_trip() {
+    // The interleaving two concurrent planners can produce: both tick while the
+    // identity is due, one claims and settles before the other reaches its
+    // claim. The settlement frees the slot, so a claim that trusted the
+    // caller's earlier tick would admit a second canary for one trip.
+    // Inconclusive is the settlement a canary's unrelated terminal error takes
+    // (its dropped plan settles that way).
+    let registry = FieldCanaryRegistry::new();
+    let k = key("model-a");
+    registry.seed_from_rebuild(&k, 1, 1, true);
+
+    let b_saw_due = registry.tick_cadence(&k, 1);
+    let a_saw_due = registry.tick_cadence(&k, 1);
+    assert!(
+        b_saw_due && a_saw_due,
+        "premise: both planners observed the trip"
+    );
+    registry
+        .claim_canary(&k, 1)
+        .expect("the first claim consumes the trip")
+        .settle(CanaryOutcome::Inconclusive);
+
+    assert!(
+        registry.claim_canary(&k, 1).is_none(),
+        "the trip was already consumed, so a claim on the stale tick is refused",
+    );
+    assert!(
+        !registry.snapshot(&k).expect("resident").canary_claimed,
+        "and the refusal leaves the slot free",
+    );
+}
+
+#[test]
 fn a_confirmed_settlement_resets_the_cadence_and_the_modified_tally() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
@@ -546,7 +594,7 @@ fn a_confirmed_settlement_resets_the_cadence_and_the_modified_tally() {
         drop(registry.begin_modified_request(&k, 1));
         registry.tick_cadence(&k, 1);
     }
-    let claim = registry.claim_canary(&k, 1).expect("claim admitted");
+    let claim = registry.claim_due_canary(&k, 1).expect("claim admitted");
 
     // Act
     claim.settle(CanaryOutcome::Confirmed);
@@ -580,7 +628,7 @@ fn a_regressed_settlement_transfers_the_modified_tally_into_the_lifetime_total()
     for _ in 0..7 {
         drop(registry.begin_modified_request(&k, 1));
     }
-    let claim = registry.claim_canary(&k, 1).expect("claim admitted");
+    let claim = registry.claim_due_canary(&k, 1).expect("claim admitted");
 
     // Act -- the unrepaired canary SUCCEEDED, so the verdict was wrong and
     // every request repaired since the last confirmation was affected by it.
@@ -612,7 +660,7 @@ fn the_lifetime_disproved_total_is_monotonic_across_incarnations() {
         drop(registry.begin_modified_request(&k, 1));
     }
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
     registry.reset(&k);
@@ -622,7 +670,7 @@ fn the_lifetime_disproved_total_is_monotonic_across_incarnations() {
         drop(registry.begin_modified_request(&k, 2));
     }
     registry
-        .claim_canary(&k, 2)
+        .claim_due_canary(&k, 2)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
 
@@ -641,7 +689,7 @@ fn an_inconclusive_settlement_reschedules_and_leaves_the_tally_alone() {
         drop(registry.begin_modified_request(&k, 1));
         registry.tick_cadence(&k, 1);
     }
-    let claim = registry.claim_canary(&k, 1).expect("claim admitted");
+    let claim = registry.claim_due_canary(&k, 1).expect("claim admitted");
 
     // Act -- an unrelated failure proved nothing either way.
     claim.settle(CanaryOutcome::Inconclusive);
@@ -676,7 +724,7 @@ fn a_stale_regressed_settlement_charges_the_alarm_nothing() {
     // of the OLD one.
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
-    let claim = registry.claim_canary(&k, 1).expect("claim admitted");
+    let claim = registry.claim_due_canary(&k, 1).expect("claim admitted");
     registry.acknowledge_confirmation(&k, 2, 1);
     // The fresh incarnation needs exposure of its OWN for the alarm assertion to
     // be able to fail: any tally raised against the incarnation the reseed
@@ -788,7 +836,7 @@ fn a_suspended_identity_reports_its_suspension_until_its_state_is_dropped() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
     assert!(registry.snapshot(&k).expect("resident").preflight_suspended);
@@ -835,7 +883,7 @@ fn the_confirmation_tally_reset_is_load_bearing() {
         drop(registry.begin_modified_request(&k, 1));
     }
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Confirmed);
     for _ in 0..2 {
@@ -843,7 +891,7 @@ fn the_confirmation_tally_reset_is_load_bearing() {
     }
 
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
 
@@ -870,11 +918,11 @@ fn the_settlement_outcome_routing_is_load_bearing() {
     }
 
     registry
-        .claim_canary(&disproved, 1)
+        .claim_due_canary(&disproved, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
     registry
-        .claim_canary(&inconclusive, 1)
+        .claim_due_canary(&inconclusive, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Inconclusive);
 
@@ -1003,7 +1051,7 @@ fn every_modified_request_is_tallied_exactly_once_under_hostile_concurrency() {
         "every one of 512 concurrent modified requests is tallied exactly once",
     );
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle(CanaryOutcome::Regressed);
     assert_eq!(
@@ -1033,7 +1081,7 @@ fn an_older_tick_cannot_drag_a_carried_identity_backward() {
     registry.acknowledge_confirmation(&k, 1, 4);
     // Burn one tick so the countdown is mid-cycle and a reseed would be visible.
     registry.tick_cadence(&k, 1);
-    let claim = registry.claim_canary(&k, 1).expect("claim admitted");
+    let claim = registry.claim_due_canary(&k, 1).expect("claim admitted");
     claim.settle_confirmed_and_carry(2);
     let carried = registry.snapshot(&k).expect("resident");
 
@@ -1076,7 +1124,9 @@ fn an_older_begin_cannot_erase_a_tally_or_a_live_claim() {
             .begin_modified_request(&k, 2)
             .expect("current lifecycle accounts"),
     );
-    let _live = registry.claim_canary(&k, 2).expect("live claim admitted");
+    let _live = registry
+        .claim_due_canary(&k, 2)
+        .expect("live claim admitted");
 
     let stale = registry.begin_modified_request(&k, 1);
 
@@ -1107,10 +1157,12 @@ fn an_older_claim_cannot_admit_a_second_canary() {
     let registry = FieldCanaryRegistry::new();
     let k = key("model-a");
     registry.acknowledge_confirmation(&k, 2, 1);
-    let _live = registry.claim_canary(&k, 2).expect("live claim admitted");
+    let _live = registry
+        .claim_due_canary(&k, 2)
+        .expect("live claim admitted");
 
     assert!(
-        registry.claim_canary(&k, 1).is_none(),
+        registry.claim_due_canary(&k, 1).is_none(),
         "the superseded claim is refused while the current lifecycle's canary is \
          in flight",
     );
@@ -1205,7 +1257,7 @@ fn the_carry_path_restarts_a_mid_cycle_cadence() {
     );
 
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle_confirmed_and_carry(2);
 
@@ -1253,7 +1305,7 @@ fn a_request_in_flight_across_a_carry_leaves_no_phantom_outstanding() {
     );
 
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle_confirmed_and_carry(2);
 
@@ -1295,7 +1347,7 @@ fn an_abandoned_guard_cannot_decrement_the_new_lifecycles_count() {
         .expect("accounts at the resident incarnation");
 
     registry
-        .claim_canary(&k, 1)
+        .claim_due_canary(&k, 1)
         .expect("claim admitted")
         .settle_confirmed_and_carry(2);
 

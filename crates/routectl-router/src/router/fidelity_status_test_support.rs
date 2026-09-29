@@ -151,6 +151,7 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     }
     // A disproof transfers the seven into the LIFETIME half, then two more are left
     // outstanding -- so the two halves read 2 and 7 rather than any shared number.
+    while !canaries.tick_cadence(&key, 1) {}
     canaries
         .claim_canary(&key, 1)
         .expect("claim admitted")

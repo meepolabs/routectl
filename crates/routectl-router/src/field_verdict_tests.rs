@@ -1029,7 +1029,7 @@ fn a_canary_disproved_identity_is_refused_pre_flight_before_its_clear_lands() {
 
     // Act -- an unrepaired canary succeeded.
     reg.canaries()
-        .claim_canary(
+        .claim_due_canary(
             &k,
             reg.canaries().snapshot(&k).expect("resident").incarnation,
         )
@@ -1074,7 +1074,7 @@ fn a_disproof_that_removed_nothing_keeps_the_identity_suspended() {
     // itself, so it is handed over rather than consumed here.
     let claim = reg
         .canaries()
-        .claim_canary(&k, incarnation)
+        .claim_due_canary(&k, incarnation)
         .expect("claim admitted");
     // Remove the row out from under the disproof, so its own guarded removal
     // finds nothing resident: Applied, but with `value: false`.
@@ -1149,7 +1149,7 @@ fn a_refused_confirmation_preserves_the_affected_request_tally() {
 
     let claim = reg
         .canaries()
-        .claim_canary(&k, incarnation)
+        .claim_due_canary(&k, incarnation)
         .expect("claim admitted");
     // A purge lease on the identity's own key refuses the confirmation's
     // guarded observation: Reserved, so nothing is recorded.
@@ -1185,7 +1185,7 @@ fn a_refused_confirmation_preserves_the_affected_request_tally() {
     // The tally's purpose: a later disproof must charge exactly those requests.
     reg.learned().restore_purge(lease);
     reg.canaries()
-        .claim_canary(&k, incarnation)
+        .claim_due_canary(&k, incarnation)
         .expect("reclaimable after an inconclusive settlement")
         .settle(crate::field_canary::CanaryOutcome::Regressed);
     assert_eq!(
@@ -1211,7 +1211,7 @@ fn a_stale_planned_incarnation_cannot_move_a_newer_lifecycle() {
     let stale_incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
     let claim = reg
         .canaries()
-        .claim_canary(&k, stale_incarnation)
+        .claim_due_canary(&k, stale_incarnation)
         .expect("claim admitted");
 
     // The identity moves to a new lifecycle while this canary is in flight.
@@ -1258,7 +1258,7 @@ fn a_retained_suspension_survives_a_relearn_until_the_state_is_dropped() {
     // is retained against the incarnation it disproved.
     let claim = reg
         .canaries()
-        .claim_canary(&k, disproved_incarnation)
+        .claim_due_canary(&k, disproved_incarnation)
         .expect("claim admitted");
     assert!(
         reg.learned()
@@ -1323,7 +1323,7 @@ fn a_confirmed_canary_leaves_the_identity_pre_flight_eligible() {
     plant_eligible(&reg, &k, t0);
 
     reg.canaries()
-        .claim_canary(
+        .claim_due_canary(
             &k,
             reg.canaries().snapshot(&k).expect("resident").incarnation,
         )
@@ -1344,7 +1344,7 @@ fn an_inconclusive_canary_leaves_the_identity_pre_flight_eligible() {
     plant_eligible(&reg, &k, t0);
 
     reg.canaries()
-        .claim_canary(
+        .claim_due_canary(
             &k,
             reg.canaries().snapshot(&k).expect("resident").incarnation,
         )
@@ -2059,7 +2059,7 @@ fn a_stale_claim_confirms_nothing_and_observes_nothing() {
     let planned = reg.canaries().snapshot(&k).expect("resident").incarnation;
     let claim = reg
         .canaries()
-        .claim_canary(&k, planned)
+        .claim_due_canary(&k, planned)
         .expect("claim admitted");
 
     let before = reg
@@ -2142,7 +2142,7 @@ fn a_stale_disproof_cannot_clear_the_current_lifecycles_verdict() {
     let stale_incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
     let claim = reg
         .canaries()
-        .claim_canary(&k, stale_incarnation)
+        .claim_due_canary(&k, stale_incarnation)
         .expect("claim admitted");
 
     // A request the CURRENT lifecycle repaired, so a wrongly-charged alarm would
@@ -2160,7 +2160,7 @@ fn a_stale_disproof_cannot_clear_the_current_lifecycles_verdict() {
     // `false` whether or not the stale settlement touched it.
     let live_claim = reg
         .canaries()
-        .claim_canary(&k, carried_incarnation)
+        .claim_due_canary(&k, carried_incarnation)
         .expect("the carried lifecycle claims its own slot");
     let alarm_before = reg.canaries().disproved_requests_total();
 
@@ -2204,7 +2204,7 @@ fn a_stale_disproof_cannot_clear_the_current_lifecycles_verdict() {
     );
     assert!(
         reg.canaries()
-            .claim_canary(&k, carried_incarnation)
+            .claim_due_canary(&k, carried_incarnation)
             .is_none(),
         "so a further request for the current lifecycle is still refused the slot",
     );
@@ -2237,7 +2237,7 @@ fn an_owning_disproof_still_suspends_charges_and_clears() {
     );
     let claim = reg
         .canaries()
-        .claim_canary(&k, incarnation)
+        .claim_due_canary(&k, incarnation)
         .expect("claim admitted");
     let alarm_before = reg.canaries().disproved_requests_total();
 
