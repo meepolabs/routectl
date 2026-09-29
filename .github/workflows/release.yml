@@ -107,6 +107,9 @@ env:
   # STATIC likewise keeps an ambient AWS_LC_SYS_STATIC=0 from turning the
   # vendored build into a dynamic library. scripts/check-aws-lc-pin.sh
   # enforces both pins and rejects any other setting of either variable.
+  # A target-suffixed variable the runner itself exports would still
+  # outrank them, so every cargo job runs scripts/assert-aws-lc-env.sh
+  # straight after checkout.
   AWS_LC_SYS_USE_SYSTEM: "0"
   AWS_LC_SYS_STATIC: "1"
   BIN_NAME: routectl
@@ -147,6 +150,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: AWS-LC build environment preflight
+        run: bash scripts/assert-aws-lc-env.sh
 
       # Reject malformed `version` inputs from workflow_dispatch
       # before the value flows into filenames, env vars, and `awk`
@@ -262,6 +267,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: AWS-LC build environment preflight
+        run: bash scripts/assert-aws-lc-env.sh
 
       # Pinned to the same exact channel as rust-toolchain.toml and ci.yml,
       # NOT `stable`. A release artifact built by a toolchain no gate ever

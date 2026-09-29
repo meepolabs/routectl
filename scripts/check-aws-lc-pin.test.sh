@@ -35,6 +35,8 @@ JOBS='jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/assert-aws-lc-env.sh
       - run: cargo build
 '
 
@@ -144,6 +146,61 @@ assert_reject "STATIC pin missing" \
   AWS_LC_SYS_USE_SYSTEM: "0"
 '"$JOBS")" \
     'lacks AWS_LC_SYS_STATIC: "1"'
+
+assert_pass "job that never runs cargo needs no environment preflight" \
+    "$(workflow no-cargo-job "$HEADER$PINNED_ENV$JOBS"'  scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-free lockfile scan
+        run: osv-scanner scan source -r .
+')"
+
+assert_reject "cargo job without the environment preflight" \
+    "$(workflow no-preflight "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo build
+        run: cargo build
+')" \
+    'job build runs cargo with no preceding step: run: bash scripts/assert-aws-lc-env.sh'
+
+assert_reject "second cargo job without the preflight beside a compliant one" \
+    "$(workflow second-job "$HEADER$PINNED_ENV$JOBS"'  audit:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cargo install cargo-audit --locked
+          cargo audit
+')" \
+    'job audit runs cargo with no preceding step'
+
+assert_reject "environment preflight placed after the first cargo step" \
+    "$(workflow late-preflight "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+      - run: bash scripts/assert-aws-lc-env.sh
+      - run: cargo build
+')" \
+    'job build runs cargo with no preceding step'
+
+assert_reject "Rust toolchain setup ahead of the environment preflight" \
+    "$(workflow late-after-toolchain "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@0000000000000000000000000000000000000000 # v1
+      - run: bash scripts/assert-aws-lc-env.sh
+      - run: cargo build
+')" \
+    'job build runs cargo with no preceding step'
 
 assert_reject "workflow file missing" \
     "$tmp/absent.yml" \
