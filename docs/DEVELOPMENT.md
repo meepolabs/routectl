@@ -1230,6 +1230,10 @@ control proving the scan can fail.
 
 - ASCII-only in code, comments, and commit messages. No em-dashes,
   curly quotes, emoji, or arrows. `--`, `->`, straight quotes.
+- A script under `scripts/` that the docs invoke as a command
+  (`scripts/<name>.sh ...`) carries a shebang and the executable bit
+  (`git update-index --chmod=+x`); a library that is only sourced, such
+  as those under `scripts/drivers/lib/`, does not.
 - Keep functions under 50 lines, files under 800.
 - Prefer one file per dialect / one row per quirk. The matrix proves
   the wiring; tight files keep edits surgical.
