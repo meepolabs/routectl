@@ -948,9 +948,9 @@ fn json_object_response_format_survives_and_counts_no_drop() {
 #[test]
 #[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn schema_keyword_drop_bumps_the_counter_once_per_request() {
-    // Arrange -- a pydantic-shaped tool schema whose `additionalProperties`
-    // and `allOf` are constraints Gemini's Schema proto cannot carry, beside a
-    // `type` and `properties` that translate fine.
+    // Arrange -- a pydantic-shaped tool schema whose `additionalProperties` is
+    // a constraint Gemini's Schema proto cannot carry, beside a `type`,
+    // `properties` and a mergeable `allOf` that translate fine.
     use routectl_core::{CustomTool, ToolDef};
     let req = ChatRequest {
         model: "gemini-2.5-pro".into(),
@@ -988,8 +988,8 @@ fn schema_keyword_drop_bumps_the_counter_once_per_request() {
         "the unsupported keywords must not reach the wire: {wire}"
     );
     assert!(
-        wire.contains("INTEGER") && wire.contains("calc"),
-        "the translatable part of the schema must survive: {wire}"
+        wire.contains("INTEGER") && wire.contains("STRING") && wire.contains("calc"),
+        "the translatable part of the schema, allOf branch included, must survive: {wire}"
     );
     assert_eq!(after - before, 1, "one counted drop for the request");
 }
@@ -1050,7 +1050,8 @@ fn gemini_subset_schema_survives_and_counts_no_drop() {
 fn unsupported_format_reports_a_drop() {
     // Arrange
     let (cleaned, dropped) =
-        crate::gemini::schema::clean_schema_reporting(&json!({"type": "string", "format": "uri"}));
+        crate::gemini::schema::clean_schema_alone(&json!({"type": "string", "format": "uri"}))
+            .expect("within the ceilings");
 
     // Assert
     assert!(
@@ -1065,9 +1066,10 @@ fn unsupported_format_reports_a_drop() {
 #[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn supported_format_reports_no_drop() {
     // Arrange
-    let (cleaned, dropped) = crate::gemini::schema::clean_schema_reporting(
+    let (cleaned, dropped) = crate::gemini::schema::clean_schema_alone(
         &json!({"type": "string", "format": "date-time"}),
-    );
+    )
+    .expect("within the ceilings");
 
     // Assert
     assert_eq!(cleaned["format"], "date-time");
@@ -1078,18 +1080,13 @@ fn supported_format_reports_no_drop() {
 #[test]
 #[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn unsupported_keywords_report_a_drop() {
-    for keyword in [
-        "additionalProperties",
-        "allOf",
-        "not",
-        "const",
-        "patternProperties",
-    ] {
+    for keyword in ["additionalProperties", "not", "const", "patternProperties"] {
         // Arrange
         let schema = json!({"type": "object", keyword: json!(false)});
 
         // Act
-        let (cleaned, dropped) = crate::gemini::schema::clean_schema_reporting(&schema);
+        let (cleaned, dropped) =
+            crate::gemini::schema::clean_schema_alone(&schema).expect("within the ceilings");
 
         // Assert
         assert!(cleaned.get(keyword).is_none(), "{keyword} must be stripped");
@@ -1113,7 +1110,8 @@ fn structural_keyword_strips_report_no_drop() {
     });
 
     // Act
-    let (cleaned, dropped) = crate::gemini::schema::clean_schema_reporting(&schema);
+    let (cleaned, dropped) =
+        crate::gemini::schema::clean_schema_alone(&schema).expect("within the ceilings");
 
     // Assert
     assert!(cleaned.get("$schema").is_none());
@@ -1137,7 +1135,8 @@ fn unresolvable_ref_reports_a_drop() {
     let schema = json!({"type": "object", "properties": {"a": {"$ref": "#/$defs/Missing"}}});
 
     // Act
-    let (cleaned, dropped) = crate::gemini::schema::clean_schema_reporting(&schema);
+    let (cleaned, dropped) =
+        crate::gemini::schema::clean_schema_alone(&schema).expect("within the ceilings");
 
     // Assert
     assert!(
@@ -1145,6 +1144,437 @@ fn unresolvable_ref_reports_a_drop() {
         "the unresolvable ref must not reach the wire: {cleaned}"
     );
     assert!(dropped, "a degraded ref loses the caller's nested shape");
+}
+
+/// An `allOf` whose branches disagree cannot be merged into one Gemini schema,
+/// so its contents are dropped and the loss is counted, once per request.
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn all_of_conflict_reports_a_drop() {
+    // Arrange
+    let (cleaned, dropped) = crate::gemini::schema::clean_schema_alone(&json!({
+        "type": "object",
+        "allOf": [{"type": "string"}]
+    }))
+    .expect("within the ceilings");
+
+    // Assert
+    assert!(
+        cleaned.get("allOf").is_none(),
+        "allOf never reaches the wire"
+    );
+    assert_eq!(cleaned["type"], "OBJECT", "the parent's own keys survive");
+    assert!(
+        dropped,
+        "an abandoned allOf loses the branches' constraints"
+    );
+}
+
+/// POSITIVE CONTROL: an `allOf` that merges cleanly loses nothing.
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn mergeable_all_of_reports_no_drop() {
+    // Arrange
+    let (cleaned, dropped) = crate::gemini::schema::clean_schema_alone(&json!({
+        "allOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]
+    }))
+    .expect("within the ceilings");
+
+    // Assert
+    assert_eq!(cleaned["properties"]["a"]["type"], "STRING");
+    assert!(
+        !dropped,
+        "a merged allOf is renormalized, not lost: {cleaned}"
+    );
+}
+
+/// A `required` entry naming no declared property cannot reach Gemini; removing
+/// it means the model is no longer told the field is mandatory.
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn required_naming_a_missing_property_reports_a_drop() {
+    // Arrange
+    let req = tool_request(json!({
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a", "ghost"]
+    }));
+
+    // Act
+    let before = gemini_drop_count("schema_keyword_unsupported");
+    let mut body = Value::Null;
+    let events = routectl_testkit::capture_events(|| body = wire_body(&req));
+    let after = gemini_drop_count("schema_keyword_unsupported");
+
+    // Assert
+    assert_warned(&events, "dropping JSON Schema keywords");
+    let wire = rendered(&body);
+    assert!(
+        !wire.contains("ghost") && wire.contains("\"required\":[\"a\"]"),
+        "the dangling name must be filtered and the valid one kept: {wire}"
+    );
+    assert_eq!(after - before, 1, "one counted drop for the request");
+}
+
+fn tool_request(input_schema: Value) -> ChatRequest {
+    use routectl_core::{CustomTool, ToolDef};
+    ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![make_user("go")].into(),
+        tools: Some(vec![ToolDef::Custom(CustomTool {
+            name: "calc".into(),
+            description: None,
+            input_schema,
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        })]),
+        ..Default::default()
+    }
+}
+
+const CEILING_MARKER: &str = "CallerChosenName";
+
+/// A `$ref` chain whose leaf sits `MAX_SCHEMA_DEPTH + 1` schema levels down
+/// (the root is level one, each def one more). The def names carry
+/// [`CEILING_MARKER`] so a leak into the log is detectable.
+fn over_depth_schema() -> Value {
+    let hops = crate::gemini::schema::MAX_SCHEMA_DEPTH - 1;
+    let mut defs = serde_json::Map::new();
+    for i in 0..hops {
+        defs.insert(
+            format!("{CEILING_MARKER}{i}"),
+            json!({"$ref": format!("#/$defs/{CEILING_MARKER}{}", i + 1)}),
+        );
+    }
+    defs.insert(format!("{CEILING_MARKER}{hops}"), json!({"type": "string"}));
+    json!({"$ref": format!("#/$defs/{CEILING_MARKER}0"), "$defs": Value::Object(defs)})
+}
+
+/// More cleaned nodes than the node ceiling allows, under caller-chosen
+/// property names carrying [`CEILING_MARKER`].
+fn over_node_schema() -> Value {
+    let properties: serde_json::Map<String, Value> = (0..=crate::gemini::schema::MAX_SCHEMA_NODES)
+        .map(|i| (format!("{CEILING_MARKER}{i}"), json!({"type": "string"})))
+        .collect();
+    json!({"type": "object", "properties": Value::Object(properties)})
+}
+
+/// One def carrying `literal_len` bytes of description, referenced from
+/// `sites` properties: few nodes, many emitted bytes. Every name carries
+/// [`CEILING_MARKER`].
+fn shared_literal_schema(literal_len: usize, sites: usize) -> Value {
+    let def = format!("{CEILING_MARKER}Big");
+    let properties: serde_json::Map<String, Value> = (0..sites)
+        .map(|i| {
+            (
+                format!("{CEILING_MARKER}{i}"),
+                json!({"$ref": format!("#/$defs/{def}")}),
+            )
+        })
+        .collect();
+    json!({
+        "type": "object",
+        "properties": Value::Object(properties),
+        "$defs": {def: {"description": "x".repeat(literal_len)}}
+    })
+}
+
+fn assert_ceiling_refusal(
+    outcome: &routectl_core::Result<Value>,
+    events: &[routectl_testkit::CapturedEvent],
+    surface: &str,
+    limit: &str,
+    max: usize,
+) {
+    assert!(
+        matches!(outcome, Err(routectl_core::Error::NormalizeRequest(provider, _)) if provider == "gemini:test"),
+        "an over-ceiling schema must refuse the request, not truncate it: {outcome:?}"
+    );
+    let refusals: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.message.contains("cleaning ceiling"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "exactly one refusal WARN: {events:?}");
+    let warn = refusals[0];
+    assert_eq!(warn.field("provider"), Some("gemini:test"));
+    assert_eq!(warn.field("surface"), Some(surface));
+    assert_eq!(warn.field("limit"), Some(limit));
+    assert_eq!(warn.field("max"), Some(max.to_string().as_str()));
+    let logged = format!("{events:?}");
+    assert!(
+        !logged.contains(CEILING_MARKER),
+        "no caller schema content may reach the log: {logged}"
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn over_depth_tool_schema_refuses_the_request_and_still_flushes_the_tally() {
+    // Arrange -- a first tool that drops a keyword (raising the tally flag),
+    // then a second whose schema is over the depth ceiling.
+    use routectl_core::{CustomTool, ToolDef};
+    let tool = |name: &str, input_schema: Value| {
+        ToolDef::Custom(CustomTool {
+            name: name.into(),
+            description: None,
+            input_schema,
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        })
+    };
+    let req = ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![make_user("go")].into(),
+        tools: Some(vec![
+            tool(
+                "first",
+                json!({"type": "object", "additionalProperties": false}),
+            ),
+            tool("second", over_depth_schema()),
+        ]),
+        ..Default::default()
+    };
+
+    // Act
+    let before = gemini_drop_count("schema_keyword_unsupported");
+    let mut outcome = Ok(Value::Null);
+    let events = routectl_testkit::capture_events(|| outcome = provider_body("gemini:test", &req));
+    let after = gemini_drop_count("schema_keyword_unsupported");
+
+    // Assert
+    assert_ceiling_refusal(
+        &outcome,
+        &events,
+        "tool",
+        "depth",
+        crate::gemini::schema::MAX_SCHEMA_DEPTH,
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "the tally flushes on the refusal arm, counting the drop made before it"
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn over_node_response_format_schema_refuses_the_request() {
+    // Arrange
+    let req = ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![make_user("go")].into(),
+        response_format: Some(json!({
+            "type": "json_schema",
+            "json_schema": {"schema": over_node_schema()}
+        })),
+        ..Default::default()
+    };
+
+    // Act
+    let mut outcome = Ok(Value::Null);
+    let events = routectl_testkit::capture_events(|| outcome = provider_body("gemini:test", &req));
+
+    // Assert
+    assert_ceiling_refusal(
+        &outcome,
+        &events,
+        "response_format",
+        "nodes",
+        crate::gemini::schema::MAX_SCHEMA_NODES,
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn over_byte_tool_schema_refuses_the_request_without_logging_schema_text() {
+    // Arrange -- 5 x 2 MiB emitted from one def, against an 8 MiB ceiling.
+    let req = tool_request(shared_literal_schema(2 * 1024 * 1024, 5));
+
+    // Act
+    let mut outcome = Ok(Value::Null);
+    let events = routectl_testkit::capture_events(|| outcome = provider_body("gemini:test", &req));
+
+    // Assert
+    assert_ceiling_refusal(
+        &outcome,
+        &events,
+        "tool",
+        "bytes",
+        crate::gemini::schema::MAX_SCHEMA_BYTES,
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn shared_literal_schema_under_the_byte_ceiling_is_not_refused() {
+    // Arrange -- same shape as the refusal above, 3 sites instead of 5.
+    let req = tool_request(shared_literal_schema(2 * 1024 * 1024, 3));
+
+    // Act
+    let outcome = provider_body("gemini:test", &req);
+
+    // Assert
+    assert!(
+        outcome.is_ok(),
+        "a schema under the byte ceiling is served: {outcome:?}"
+    );
+}
+
+/// `count` tools, each carrying the same schema.
+fn many_tool_request(count: usize, schema: &Value) -> ChatRequest {
+    use routectl_core::{CustomTool, ToolDef};
+    let tools = (0..count)
+        .map(|i| {
+            ToolDef::Custom(CustomTool {
+                name: format!("tool{i}"),
+                description: None,
+                input_schema: schema.clone(),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })
+        })
+        .collect();
+    ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![make_user("go")].into(),
+        tools: Some(tools),
+        ..Default::default()
+    }
+}
+
+fn described_schema(len: usize) -> Value {
+    json!({"type": "object", "description": "x".repeat(len)})
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn many_tools_each_under_the_ceiling_are_refused_as_a_request_on_nodes() {
+    // Arrange -- 3,500 nodes per tool: each is far under 10,000, three are not.
+    let schema = json!({
+        "type": "object",
+        "properties": (0..3_499)
+            .map(|i| (format!("{CEILING_MARKER}{i}"), json!({"type": "string"})))
+            .collect::<serde_json::Map<_, _>>()
+    });
+    let refused = many_tool_request(3, &schema);
+    let control = many_tool_request(2, &schema);
+
+    // Act
+    let mut outcome = Ok(Value::Null);
+    let events =
+        routectl_testkit::capture_events(|| outcome = provider_body("gemini:test", &refused));
+    let control_outcome = provider_body("gemini:test", &control);
+
+    // Assert
+    assert_ceiling_refusal(
+        &outcome,
+        &events,
+        "tool",
+        "nodes",
+        crate::gemini::schema::MAX_SCHEMA_NODES,
+    );
+    assert!(
+        control_outcome.is_ok(),
+        "two such tools fit the request budget: {control_outcome:?}"
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn many_tools_each_under_the_ceiling_are_refused_as_a_request_on_bytes() {
+    // Arrange -- 3 MiB per tool against an 8 MiB request budget.
+    let schema = described_schema(3 * 1024 * 1024);
+    let refused = many_tool_request(3, &schema);
+    let control = many_tool_request(2, &schema);
+
+    // Act
+    let mut outcome = Ok(Value::Null);
+    let events =
+        routectl_testkit::capture_events(|| outcome = provider_body("gemini:test", &refused));
+    let control_outcome = provider_body("gemini:test", &control);
+
+    // Assert
+    assert_ceiling_refusal(
+        &outcome,
+        &events,
+        "tool",
+        "bytes",
+        crate::gemini::schema::MAX_SCHEMA_BYTES,
+    );
+    assert!(
+        control_outcome.is_ok(),
+        "two such tools fit the request budget: {control_outcome:?}"
+    );
+}
+
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn response_format_and_tools_draw_on_one_budget() {
+    // Arrange -- a 5 MiB tool schema, then a 4 MiB response schema.
+    let with_response = |tool_len: usize, response_len: usize| ChatRequest {
+        response_format: Some(json!({
+            "type": "json_schema",
+            "json_schema": {"schema": described_schema(response_len)}
+        })),
+        ..many_tool_request(1, &described_schema(tool_len))
+    };
+    let refused = with_response(5 * 1024 * 1024, 4 * 1024 * 1024);
+    let control = with_response(3 * 1024 * 1024, 4 * 1024 * 1024);
+
+    // Act
+    let mut outcome = Ok(Value::Null);
+    let events =
+        routectl_testkit::capture_events(|| outcome = provider_body("gemini:test", &refused));
+    let control_outcome = provider_body("gemini:test", &control);
+
+    // Assert
+    assert_ceiling_refusal(
+        &outcome,
+        &events,
+        "response_format",
+        "bytes",
+        crate::gemini::schema::MAX_SCHEMA_BYTES,
+    );
+    assert!(
+        control_outcome.is_ok(),
+        "the same two schemas fit when the tool is smaller: {control_outcome:?}"
+    );
+}
+
+/// POSITIVE CONTROL: a request whose schema sits at the ceilings is not
+/// refused, so the refusals above are tied to the ceiling and not to any
+/// large schema.
+#[test]
+#[serial_test::serial(gemini_schema_keyword_unsupported)]
+fn schema_at_the_ceilings_is_not_refused() {
+    // Arrange
+    let mut at_depth = over_depth_schema();
+    let defs = at_depth["$defs"].as_object_mut().expect("defs");
+    let over_leaf = format!(
+        "{CEILING_MARKER}{}",
+        crate::gemini::schema::MAX_SCHEMA_DEPTH - 1
+    );
+    defs.remove(&over_leaf);
+    let leaf = format!(
+        "{CEILING_MARKER}{}",
+        crate::gemini::schema::MAX_SCHEMA_DEPTH - 2
+    );
+    defs.insert(leaf, json!({"type": "string"}));
+
+    // Act
+    let outcome = provider_body("gemini:test", &tool_request(at_depth));
+
+    // Assert
+    assert!(
+        outcome.is_ok(),
+        "a schema within the ceilings is served: {outcome:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

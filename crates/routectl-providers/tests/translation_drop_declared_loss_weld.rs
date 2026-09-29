@@ -546,7 +546,7 @@ const EXPECTED_UNDECLARED_LOSS_MARKERS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "gemini/schema.rs",
-        "clean_object",
+        "clean_object_unpruned",
         "schema_keyword_unsupported",
         "the schema cleaner is a pure transformer that returns whether a constraint was lost; \
          keeping the log and the counter out of it is what stops a metrics call from inverting \
@@ -554,7 +554,7 @@ const EXPECTED_UNDECLARED_LOSS_MARKERS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "gemini/schema.rs",
-        "clean_object",
+        "clean_object_unpruned",
         "schema_keyword_unsupported",
         "the schema cleaner is a pure transformer that returns whether a constraint was lost; \
          keeping the log and the counter out of it is what stops a metrics call from inverting \
@@ -562,7 +562,23 @@ const EXPECTED_UNDECLARED_LOSS_MARKERS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "gemini/schema.rs",
-        "clean_object",
+        "clean_object_unpruned",
+        "schema_keyword_unsupported",
+        "the schema cleaner is a pure transformer that returns whether a constraint was lost; \
+         keeping the log and the counter out of it is what stops a metrics call from inverting \
+         that module's dependencies, and the egress tally owns both",
+    ),
+    (
+        "gemini/schema.rs",
+        "apply_all_of",
+        "schema_keyword_unsupported",
+        "the schema cleaner is a pure transformer that returns whether a constraint was lost; \
+         keeping the log and the counter out of it is what stops a metrics call from inverting \
+         that module's dependencies, and the egress tally owns both",
+    ),
+    (
+        "gemini/schema.rs",
+        "prune_required",
         "schema_keyword_unsupported",
         "the schema cleaner is a pure transformer that returns whether a constraint was lost; \
          keeping the log and the counter out of it is what stops a metrics call from inverting \
@@ -1256,7 +1272,7 @@ fn every_symbol_with_a_loss_claiming_marker_declares_that_loss() {
     );
 
     // OCCURRENCE-COUNTED, not set-keyed. Three of these keys already cover
-    // several real markers (one `clean_object` class covers three arms), so a set
+    // several real markers (one `clean_object_unpruned` class covers three arms), so a set
     // let a fourth unreviewed marker hide under an existing key -- the exact
     // collapse the sibling registers avoid by counting.
     let mut registered: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();

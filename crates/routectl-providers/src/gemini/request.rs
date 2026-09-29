@@ -25,6 +25,7 @@ use crate::translation_drop_metrics::{
 };
 
 use super::GEMINI_FORMAT;
+use super::schema::SchemaBudget;
 use super::types::{
     Content, FunctionCallPart, FunctionCallingConfig, FunctionDeclaration, FunctionResponsePart,
     GeminiTool, GenerateContentRequest, GenerationConfig, InlineData, Part, SystemInstruction,
@@ -53,7 +54,9 @@ const LANE: &str = super::PROVIDER_KIND;
 ///
 /// Every drop below already emits its own WARN at the arm that performs it,
 /// EXCEPT `schema_keyword_unsupported`: `clean_schema` is a pure function by
-/// contract, so its aggregated WARN is emitted here instead.
+/// contract, so its aggregated WARN is emitted here instead. A schema over the
+/// cleaner's ceilings is a refusal, not a drop: it is neither tallied nor
+/// counted, and the flush still runs on that Err arm.
 #[derive(Default)]
 struct GeminiDropTally {
     cache_control_unsupported: bool,
@@ -85,9 +88,9 @@ impl GeminiDropTally {
         if self.schema_keyword_unsupported {
             tracing::warn!(
                 provider = %provider_id,
-                "gemini: dropping JSON Schema keywords Gemini's Schema proto rejects \
-                 from a tool or response_format schema; the stated constraint does not \
-                 reach the model"
+                "gemini: dropping JSON Schema keywords or entries Gemini's Schema proto \
+                 cannot carry from a tool or response_format schema; the stated \
+                 constraint does not reach the model"
             );
         }
         for (fired, class) in [
@@ -345,8 +348,9 @@ fn build_body(
     );
     let system_instruction = build_system_instruction(req, fingerprint);
     let contents = build_contents(provider_id, req, tally)?;
-    let (tools, tool_config) = build_tools_and_config(provider_id, req, tally);
-    let generation_config = build_generation_config(req, tally);
+    let mut schema_budget = super::schema::SchemaBudget::default();
+    let (tools, tool_config) = build_tools_and_config(provider_id, req, tally, &mut schema_budget)?;
+    let generation_config = build_generation_config(provider_id, req, tally, &mut schema_budget)?;
 
     Ok(GenerateContentRequest {
         contents,
@@ -1069,19 +1073,24 @@ fn build_tools_and_config(
     provider_id: &str,
     req: &ChatRequest,
     tally: &mut GeminiDropTally,
-) -> (Option<Vec<GeminiTool>>, Option<ToolConfig>) {
+    budget: &mut SchemaBudget,
+) -> Result<(Option<Vec<GeminiTool>>, Option<ToolConfig>)> {
     let tool_defs = match &req.tools {
         Some(t) if !t.is_empty() => t,
-        _ => return (None, None),
+        _ => return Ok((None, None)),
     };
 
     let mut declarations: Vec<FunctionDeclaration> = Vec::new();
     for def in tool_defs {
         match def {
             ToolDef::Custom(custom) => {
-                let (parameters, schema_dropped) =
-                    super::schema::clean_schema_reporting(&custom.input_schema);
-                tally.schema_keyword_unsupported |= schema_dropped;
+                let parameters = clean_caller_schema(
+                    provider_id,
+                    SCHEMA_SURFACE_TOOL,
+                    &custom.input_schema,
+                    tally,
+                    budget,
+                )?;
                 declarations.push(FunctionDeclaration {
                     name: custom.name.clone(),
                     description: custom.description.clone(),
@@ -1123,11 +1132,12 @@ fn build_tools_and_config(
                     .get("description")
                     .and_then(Value::as_str)
                     .map(std::string::ToString::to_string);
-                let parameters = func.get("parameters").map(|p| {
-                    let (cleaned, schema_dropped) = super::schema::clean_schema_reporting(p);
-                    tally.schema_keyword_unsupported |= schema_dropped;
-                    cleaned
-                });
+                let parameters = func
+                    .get("parameters")
+                    .map(|p| {
+                        clean_caller_schema(provider_id, SCHEMA_SURFACE_TOOL, p, tally, budget)
+                    })
+                    .transpose()?;
                 declarations.push(FunctionDeclaration {
                     name: name.to_string(),
                     description,
@@ -1157,7 +1167,7 @@ fn build_tools_and_config(
                  (a toolConfig with no functionDeclarations is rejected)"
             );
         }
-        return (None, None);
+        return Ok((None, None));
     }
 
     // Reconcile the choice against the declarations that actually survived.
@@ -1166,7 +1176,45 @@ fn build_tools_and_config(
     let tools = Some(vec![GeminiTool {
         function_declarations: declarations,
     }]);
-    (tools, tool_config)
+    Ok((tools, tool_config))
+}
+
+/// `surface` value of the ceiling-refusal WARN for a tool `parameters` schema.
+const SCHEMA_SURFACE_TOOL: &str = "tool";
+/// `surface` value of the ceiling-refusal WARN for a `responseSchema`.
+const SCHEMA_SURFACE_RESPONSE_FORMAT: &str = "response_format";
+
+/// Clean one caller schema for `surface`, folding the cleaner's loss report
+/// into the request's tally and its spend into the request's `budget`. A
+/// request whose schemas together pass the cleaner's ceilings is refused with
+/// one WARN naming only the ceiling: never the schema, its property names, or
+/// its ref pointers, which are caller content.
+fn clean_caller_schema(
+    provider_id: &str,
+    surface: &'static str,
+    schema: &Value,
+    tally: &mut GeminiDropTally,
+    budget: &mut SchemaBudget,
+) -> Result<Value> {
+    match super::schema::clean_schema_reporting(schema, budget) {
+        Ok((cleaned, schema_dropped)) => {
+            tally.schema_keyword_unsupported |= schema_dropped;
+            Ok(cleaned)
+        }
+        Err(too_large) => {
+            tracing::warn!(
+                provider = %provider_id,
+                surface,
+                limit = too_large.limit,
+                max = too_large.max,
+                "gemini: caller schema exceeds the cleaning ceiling; refusing the request"
+            );
+            Err(routectl_core::Error::normalize_request(
+                provider_id,
+                format!("{surface} {too_large}"),
+            ))
+        }
+    }
 }
 
 fn build_tool_config(
@@ -1250,11 +1298,14 @@ fn build_tool_config(
 const HONORED_SAMPLING_FIELDS: &[&str] = &["seed", "presence_penalty", "frequency_penalty"];
 
 fn build_generation_config(
+    provider_id: &str,
     req: &ChatRequest,
     tally: &mut GeminiDropTally,
-) -> Option<GenerationConfig> {
+    budget: &mut SchemaBudget,
+) -> Result<Option<GenerationConfig>> {
     let thinking_config = build_thinking_config(req, tally);
-    let (response_mime_type, response_schema) = build_response_format(req, tally);
+    let (response_mime_type, response_schema) =
+        build_response_format(provider_id, req, tally, budget)?;
 
     let has_any = req.temperature.is_some()
         || req.top_p.is_some()
@@ -1267,7 +1318,7 @@ fn build_generation_config(
         || response_mime_type.is_some();
 
     if !has_any {
-        return None;
+        return Ok(None);
     }
 
     // topK is unreachable on this egress: it is not in the canonical
@@ -1279,7 +1330,7 @@ fn build_generation_config(
     // Gemini's own reference publishes no range for them on this endpoint,
     // so a local clamp would invent a bound and silently change the
     // caller's sampling. Upstream's rejection is the truthful error.
-    Some(GenerationConfig {
+    Ok(Some(GenerationConfig {
         temperature: req.temperature,
         top_p: req.top_p,
         max_output_tokens: req.max_tokens,
@@ -1290,7 +1341,7 @@ fn build_generation_config(
         response_mime_type,
         response_schema,
         thinking_config,
-    })
+    }))
 }
 
 /// Dynamic-budget sentinel: tells Gemini to size the thinking budget
@@ -1433,12 +1484,14 @@ fn build_thinking_config(req: &ChatRequest, tally: &mut GeminiDropTally) -> Opti
 /// verdict: deletion-blocked pending this lane's own wire evidence.
 /// TRANSLATION-DROP: lane=gemini class=response_format_unrepresentable test=unrecognized_response_format_drop_bumps_the_counter_once_per_request
 fn build_response_format(
+    provider_id: &str,
     req: &ChatRequest,
     tally: &mut GeminiDropTally,
-) -> (Option<String>, Option<Value>) {
+    budget: &mut SchemaBudget,
+) -> Result<(Option<String>, Option<Value>)> {
     let format = match req.response_format.as_ref() {
         Some(f) => f,
-        None => return (None, None),
+        None => return Ok((None, None)),
     };
     let kind = format.get("type").and_then(Value::as_str);
     match kind {
@@ -1447,19 +1500,24 @@ fn build_response_format(
                 .get("json_schema")
                 .and_then(|js| js.get("schema"))
                 .map(|s| {
-                    let (cleaned, schema_dropped) = super::schema::clean_schema_reporting(s);
-                    tally.schema_keyword_unsupported |= schema_dropped;
-                    cleaned
-                });
+                    clean_caller_schema(
+                        provider_id,
+                        SCHEMA_SURFACE_RESPONSE_FORMAT,
+                        s,
+                        tally,
+                        budget,
+                    )
+                })
+                .transpose()?;
             if schema.is_none() {
                 tracing::warn!(
                     "response_format json_schema carries no json_schema.schema; \
                      emitting responseMimeType without responseSchema"
                 );
             }
-            (Some("application/json".to_string()), schema)
+            Ok((Some("application/json".to_string()), schema))
         }
-        Some("json_object") => (Some("application/json".to_string()), None),
+        Some("json_object") => Ok((Some("application/json".to_string()), None)),
         _ => {
             tally.response_format_unrepresentable = true;
             tracing::warn!(
@@ -1467,7 +1525,7 @@ fn build_response_format(
                 "unrecognized response_format shape; dropping structured-output \
                  directive on Gemini egress"
             );
-            (None, None)
+            Ok((None, None))
         }
     }
 }
@@ -3024,8 +3082,9 @@ mod tests {
     #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn response_format_pydantic_shaped_schema_is_cleaned_on_the_wire() {
         // A pydantic-emitted schema carries additionalProperties, $defs and a
-        // $ref to a nested model, plus an allOf wrapper. All must be gone and
-        // the nested shape must survive inlined.
+        // $ref to a nested model, plus an allOf wrapper. The keywords must be
+        // gone from the wire; the nested shape and the wrapped branch must
+        // survive inlined and merged.
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
             messages: vec![make_user("hi")].into(),
@@ -3065,7 +3124,12 @@ mod tests {
         assert_eq!(home["type"], "OBJECT");
         assert!(home.get("additionalProperties").is_none());
         assert_eq!(home["properties"]["city"]["type"], "STRING");
-        assert!(schema["properties"]["note"].get("allOf").is_none());
+        let note = &schema["properties"]["note"];
+        assert!(note.get("allOf").is_none());
+        assert_eq!(
+            note["type"], "STRING",
+            "the allOf branch is merged, not lost"
+        );
         assert_eq!(schema["required"], json!(["home"]));
     }
 

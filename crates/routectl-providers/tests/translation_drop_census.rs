@@ -46,7 +46,7 @@
 //! # Test code is excluded by FILE LIST, never by `#[cfg(test)]` position
 //!
 //! `gemini/schema.rs` declares a test-only HELPER under `#[cfg(test)]` far
-//! above its test module, and five production markers -- including all three
+//! above its test module, and seven production markers -- including all five
 //! `schema_keyword_unsupported` arms -- live BELOW that attribute. A parser
 //! that stopped at the first `#[cfg(test)]` would silently lose them, and
 //! fewer markers on this side means fewer things for every downstream weld to
@@ -95,7 +95,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("gemini/cloudcode.rs", 2),
     ("gemini/mod.rs", 1),
     ("gemini/request.rs", 19),
-    ("gemini/schema.rs", 5),
+    ("gemini/schema.rs", 7),
     ("openai_compat/request.rs", 2),
     ("openai_compat/wire_lift/content.rs", 6),
     ("openai_compat/wire_lift/response_format.rs", 4),
@@ -113,7 +113,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 60;
+const EXPECTED_LANE_MARKERS: usize = 62;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 14;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 47;
 
@@ -413,7 +413,7 @@ fn the_parse_recovers_the_markers_below_a_test_only_helper_attribute() {
             .iter()
             .filter(|m| m.class.as_deref() == Some("schema_keyword_unsupported"))
             .count()
-            >= 3,
+            >= 5,
         "the parse lost the schema-keyword arms below the test-only helper: {below:?}"
     );
     assert!(
