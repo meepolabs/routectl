@@ -8402,6 +8402,10 @@ new section or a second doc.
 - `check-subject-length.sh` -- commit-msg stage gate rejecting a commit
   subject line over the configured character limit
 - `check-subject-length.test.sh` -- self-test for the subject-length gate
+- `check-aws-lc-pin.sh` -- commit-gate and CI check that `ci.yml` and
+  `release.yml` pin `aws-lc-sys` to its vendored, static AWS-LC build in the
+  top-level `env:` and set neither variable anywhere else
+- `check-aws-lc-pin.test.sh` -- self-test for the AWS-LC build-pin check
 - `check-nav-index.sh` -- advisory, non-blocking check that every
   `crates/**/*.rs` (minus `*_tests.rs` sidecars) and every `scripts/**/*.sh`
   appears by path in this file or `DEVELOPMENT.md`; existence only, never

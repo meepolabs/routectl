@@ -192,14 +192,26 @@ rustup check -- a toolchain that IS the pinned version passes however it
 was installed. It runs as the commit gate's first leg and from
 `scripts/fmt-fragments.sh` (which is also invoked standalone); CI's rust
 jobs select their toolchain through the setup action and so do not need
-it, but CI does run its self-test. The self-test also fails if
-`ci.yml` or `release.yml` drops `AWS_LC_SYS_USE_SYSTEM: "0"` from its
-top-level `env:`, the pin that keeps `aws-lc-sys` building its vendored
-AWS-LC instead of adopting one found on the runner:
+it, but CI does run its self-test:
 
 ```bash
 bash scripts/assert-toolchain.sh
 bash scripts/assert-toolchain.test.sh
+```
+
+`scripts/check-aws-lc-pin.sh` guards the other half of the build
+toolchain: it fails unless `ci.yml` and `release.yml` each carry
+`AWS_LC_SYS_USE_SYSTEM: "0"` and `AWS_LC_SYS_STATIC: "1"` in their single
+top-level `env:`, and fails if either variable (or a target-suffixed
+form of it) is set anywhere else in the file -- a job or step `env:`, a
+`$GITHUB_ENV` write, a duplicate key. Those pins keep `aws-lc-sys`
+building its vendored AWS-LC as a static library instead of adopting one
+found on the runner. It runs in the commit gate and in CI, alongside its
+self-test:
+
+```bash
+bash scripts/check-aws-lc-pin.sh
+bash scripts/check-aws-lc-pin.test.sh
 ```
 
 `cargo fmt` walks the module tree, so it never opens a file pulled in by

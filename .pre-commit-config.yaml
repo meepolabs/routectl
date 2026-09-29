@@ -90,6 +90,13 @@ repos:
         always_run: true
         pass_filenames: false
 
+      - id: aws-lc-pin
+        name: AWS-LC build pin in the CI and release workflows
+        entry: bash scripts/check-aws-lc-pin.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
       - id: log-display
         name: production log-sink inventory (one escaping subscriber)
         entry: bash scripts/check-log-display.sh

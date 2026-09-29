@@ -447,7 +447,7 @@ map to `generationConfig.thinkingConfig`:
 
 | Canonical input | `thinkingBudget` |
 |---|---|
-| `reasoning.enabled = false` | `0` with `includeThoughts: false` (Gemini-3: `thinkingLevel: "minimal"` with `includeThoughts: false`) |
+| `reasoning.enabled = false` | (no thinkingConfig emitted -- thinking off) |
 | explicit `reasoning.max_tokens = N` | `N` verbatim |
 | `reasoning.effort = "<level>"` | budget via the effort table (`minimal=512`, `low=1024`, `medium=8192`, `high=24576`, `xhigh=32768`, `max=128000`) |
 | reasoning present, neither set | `-1` (dynamic -- the model picks) |
@@ -455,13 +455,6 @@ map to `generationConfig.thinkingConfig`:
 `includeThoughts` is set to `true` whenever thinking is on and
 `reasoning.exclude` is not `true`, so thought summaries stream back and
 lift into canonical `reasoning` / `reasoning_details[]`.
-
-An explicit `reasoning.enabled = false` is not a guaranteed off switch.
-On pre-Gemini-3 models a zero budget turns thinking off where the model
-allows it (Gemini 2.5 Pro cannot turn it off). Gemini-3 has no off level:
-`minimal` minimises thinking and `includeThoughts: false` hides the
-thought text, but the model still thinks and bills thought tokens, and
-some Gemini-3 models do not accept `minimal` at all.
 
 **thoughtSignature reasoning replay:** Gemini returns an opaque
 `thoughtSignature` on thinking parts. routectl carries it on the

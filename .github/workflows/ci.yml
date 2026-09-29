@@ -21,8 +21,12 @@ env:
   RUST_BACKTRACE: 1
   # Build aws-lc-sys from its vendored AWS-LC source. Unset, its build
   # script adopts any AWS-LC it detects via OPENSSL_DIR or pkg-config, so
-  # runner-image contents could select the crypto backend a build links.
+  # runner-image contents could select the crypto backend a build links;
+  # STATIC likewise keeps an ambient AWS_LC_SYS_STATIC=0 from turning the
+  # vendored build into a dynamic library. scripts/check-aws-lc-pin.sh
+  # enforces both pins and rejects any other setting of either variable.
   AWS_LC_SYS_USE_SYSTEM: "0"
+  AWS_LC_SYS_STATIC: "1"
 
 jobs:
   check:
@@ -315,6 +319,14 @@ jobs:
       # depend on keeps working.
       - name: toolchain preflight self-test
         run: bash scripts/assert-toolchain.test.sh
+
+      # Workflow-file check, so it needs no build: both workflows keep
+      # aws-lc-sys on its vendored, statically linked AWS-LC.
+      - name: AWS-LC build pin
+        run: bash scripts/check-aws-lc-pin.sh
+
+      - name: AWS-LC build pin self-test
+        run: bash scripts/check-aws-lc-pin.test.sh
 
       # The fixture corpus is gitignored, so CI has no fixture to load and
       # a rig regression would otherwise only surface on a contributor's

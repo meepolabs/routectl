@@ -103,8 +103,12 @@ env:
   RUST_BACKTRACE: 1
   # Build aws-lc-sys from its vendored AWS-LC source. Unset, its build
   # script adopts any AWS-LC it detects via OPENSSL_DIR or pkg-config, so
-  # runner-image contents could select the crypto backend a build links.
+  # runner-image contents could select the crypto backend a build links;
+  # STATIC likewise keeps an ambient AWS_LC_SYS_STATIC=0 from turning the
+  # vendored build into a dynamic library. scripts/check-aws-lc-pin.sh
+  # enforces both pins and rejects any other setting of either variable.
   AWS_LC_SYS_USE_SYSTEM: "0"
+  AWS_LC_SYS_STATIC: "1"
   BIN_NAME: routectl
   # Tag-style version string (e.g. "v0.5.0") consumed by every step
   # that derives binary filenames or release-notes lookups. On tag

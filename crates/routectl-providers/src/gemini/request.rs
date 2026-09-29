@@ -1389,34 +1389,6 @@ fn thinking_level_from_effort(effort: &str) -> Option<&'static str> {
     }
 }
 
-/// Lowest `thinkingLevel` Gemini-3 accepts; the level vocabulary has no
-/// off value.
-const THINKING_LEVEL_MINIMAL: &str = "minimal";
-
-/// Budget that asks a pre-Gemini-3 model not to think.
-const THINKING_BUDGET_OFF: i32 = 0;
-
-/// `thinkingConfig` for an explicit `enabled: false`. Omitting the object
-/// instead would let a default-on model think at its default level.
-///
-/// Gemini-3 minimal is NOT zero thinking: the model still thinks, as
-/// little as the level allows, and `includeThoughts: false` only hides the
-/// thought text. Some Gemini-3 models do not list `minimal` among their
-/// accepted levels. On pre-Gemini-3 models a zero budget turns thinking
-/// off where the model permits it; some (2.5 Pro) cannot turn it off.
-fn disabled_thinking_config(model: &str) -> ThinkingConfig {
-    let (thinking_budget, thinking_level) = if uses_thinking_level(model) {
-        (None, Some(THINKING_LEVEL_MINIMAL.to_string()))
-    } else {
-        (Some(THINKING_BUDGET_OFF), None)
-    };
-    ThinkingConfig {
-        thinking_budget,
-        thinking_level,
-        include_thoughts: Some(false),
-    }
-}
-
 /// Map the canonical `reasoning` controls to Gemini's `thinkingConfig`.
 ///
 /// Selects the oneof arm by model generation:
@@ -1424,8 +1396,7 @@ fn disabled_thinking_config(model: &str) -> ThinkingConfig {
 ///   - older     -> `thinkingBudget` (numeric)
 ///
 /// Within each arm:
-///   - `enabled: Some(false)`         -> the lowest the family allows,
-///     with thoughts hidden (see `disabled_thinking_config`)
+///   - `enabled: Some(false)`         -> None (reasoning explicitly off)
 ///   - explicit `max_tokens` (budget) -> budget verbatim / budget-derived level
 ///   - explicit `effort`              -> level via the effort table
 ///   - reasoning present otherwise    -> dynamic budget (-1) / omitted level
@@ -1436,7 +1407,7 @@ fn disabled_thinking_config(model: &str) -> ThinkingConfig {
 fn build_thinking_config(req: &ChatRequest, tally: &mut GeminiDropTally) -> Option<ThinkingConfig> {
     let reasoning = req.reasoning.as_ref()?;
     if reasoning.enabled == Some(false) {
-        return Some(disabled_thinking_config(&req.model));
+        return None;
     }
 
     let include_thoughts = Some(reasoning.exclude != Some(true));
@@ -2872,81 +2843,18 @@ mod tests {
     }
 
     #[test]
-    fn thinking_disabled_sends_zero_budget_without_thoughts_on_pre_gemini3() {
+    fn thinking_disabled_when_reasoning_enabled_false() {
         let req = req_with_reasoning(routectl_core::ReasoningConfig {
             enabled: Some(false),
             ..Default::default()
         });
-
-        let wire = serde_json::to_value(translate("gemini:test", &req).expect("translate"))
-            .expect("serialize");
-
-        assert_eq!(
-            wire["generationConfig"]["thinkingConfig"],
-            json!({"thinkingBudget": 0, "includeThoughts": false})
+        // No other generationConfig knobs set -> the whole block is None.
+        assert!(
+            translate("gemini:test", &req)
+                .expect("translate")
+                .generation_config
+                .is_none()
         );
-    }
-
-    #[test]
-    fn thinking_disabled_sends_minimal_level_without_thoughts_on_gemini3() {
-        let req = req_gen3_reasoning(routectl_core::ReasoningConfig {
-            enabled: Some(false),
-            effort: Some("high".into()),
-            ..Default::default()
-        });
-
-        let wire = serde_json::to_value(translate("gemini:test", &req).expect("translate"))
-            .expect("serialize");
-
-        assert_eq!(
-            wire["generationConfig"]["thinkingConfig"],
-            json!({"thinkingLevel": "minimal", "includeThoughts": false})
-        );
-    }
-
-    #[test]
-    fn thinking_enabled_wire_shape_is_unchanged_on_both_families() {
-        let cases = [
-            (
-                req_with_reasoning(routectl_core::ReasoningConfig {
-                    enabled: Some(true),
-                    ..Default::default()
-                }),
-                json!({"thinkingBudget": -1, "includeThoughts": true}),
-            ),
-            (
-                req_with_reasoning(routectl_core::ReasoningConfig {
-                    effort: Some("low".into()),
-                    ..Default::default()
-                }),
-                json!({"thinkingBudget": 1024, "includeThoughts": true}),
-            ),
-            (
-                req_gen3_reasoning(routectl_core::ReasoningConfig {
-                    enabled: Some(true),
-                    ..Default::default()
-                }),
-                json!({"includeThoughts": true}),
-            ),
-            (
-                req_gen3_reasoning(routectl_core::ReasoningConfig {
-                    effort: Some("medium".into()),
-                    exclude: Some(true),
-                    ..Default::default()
-                }),
-                json!({"thinkingLevel": "medium", "includeThoughts": false}),
-            ),
-        ];
-        for (req, expected) in cases {
-            let wire = serde_json::to_value(translate("gemini:test", &req).expect("translate"))
-                .expect("serialize");
-
-            assert_eq!(
-                wire["generationConfig"]["thinkingConfig"], expected,
-                "model {}",
-                req.model
-            );
-        }
     }
 
     #[test]
