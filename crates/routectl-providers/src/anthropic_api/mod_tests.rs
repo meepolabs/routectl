@@ -586,26 +586,29 @@ fn api_key_path_emits_no_stainless_defaults() {
     }
 }
 
-/// On OauthBearer with `user_agent = None`, the resolved client UA
-/// falls back to the Claude Code SDK default. An operator override
-/// always wins; the ApiKey surface keeps reqwest's default (`None`).
-/// We assert the resolver directly: reqwest applies a client-level
-/// default UA only at send time, not at `RequestBuilder::build()`,
-/// so the value is not observable on a non-executed request.
+/// On OauthBearer against the exact Anthropic host with `user_agent = None`,
+/// the resolved client UA falls back to the Claude Code SDK default. An
+/// operator override always wins; the ApiKey surface keeps reqwest's
+/// default (`None`). We assert the resolver directly: reqwest applies a
+/// client-level default UA only at send time, not at
+/// `RequestBuilder::build()`, so the value is not observable on a
+/// non-executed request (the wire-level check lives in
+/// `mod_identity_host_tests.rs`).
 #[test]
 fn oauth_bearer_user_agent_defaults_to_claude_cli() {
+    const HOST: &str = "https://api.anthropic.com";
     assert_eq!(
-        resolve_user_agent(None, AuthKind::OauthBearer).as_deref(),
+        resolve_user_agent(None, AuthKind::OauthBearer, HOST).as_deref(),
         Some("claude-cli/2.1.169 (external, cli)"),
-        "oauth-bearer with no override must default to the Claude Code SDK UA",
+        "oauth-bearer on the Anthropic host with no override must default to the Claude Code SDK UA",
     );
     assert_eq!(
-        resolve_user_agent(None, AuthKind::ApiKey),
+        resolve_user_agent(None, AuthKind::ApiKey, HOST),
         None,
         "api-key with no override must keep reqwest's default UA",
     );
     assert_eq!(
-        resolve_user_agent(Some("op-ua/9.9"), AuthKind::OauthBearer).as_deref(),
+        resolve_user_agent(Some("op-ua/9.9"), AuthKind::OauthBearer, HOST).as_deref(),
         Some("op-ua/9.9"),
         "operator override must win over the SDK default",
     );
@@ -3488,7 +3491,10 @@ async fn mantle_build_headers_emit_no_claude_code_fingerprint() {
 #[cfg(feature = "bedrock")]
 #[test]
 fn mantle_lane_resolves_no_claude_code_user_agent() {
-    assert_eq!(resolve_user_agent(None, AuthKind::ApiKey), None);
+    assert_eq!(
+        resolve_user_agent(None, AuthKind::ApiKey, "https://api.anthropic.com"),
+        None
+    );
 }
 
 /// `is_mantle` is true exactly when a mantle sub-config is present.

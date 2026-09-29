@@ -341,7 +341,7 @@ pub struct AnthropicApiProvider {
 impl AnthropicApiProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: AnthropicApiConfig) -> Self {
-        let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind);
+        let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind, &cfg.base_url);
         // Both the mantle and first-party lanes use a no-redirect client.
         // Mantle: a signed POST must never be auto-followed across a 3xx,
         // since replaying the SigV4 signature against a different host
@@ -359,12 +359,11 @@ impl AnthropicApiProvider {
         // surface. The minted session_id prefers cfg.session_id (the
         // login-minted value) and falls back to a fresh uuid so a
         // credential without one still presents a stable session.
-        let identity =
-            if cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&cfg.base_url) {
-                Some(cloak::ClaudeCodeIdentity::mint(cfg.session_id.as_deref()))
-            } else {
-                None
-            };
+        let identity = if emits_claude_code_identity(cfg.auth_kind, &cfg.base_url) {
+            Some(cloak::ClaudeCodeIdentity::mint(cfg.session_id.as_deref()))
+        } else {
+            None
+        };
         Self {
             cfg,
             client,
@@ -760,30 +759,21 @@ impl AnthropicApiProvider {
         // entries in `dst` keyed by the same name).
         let mut header_map = reqwest::header::HeaderMap::new();
 
-        // Compiled Claude Code SDK identity defaults. Fire by default on
-        // the OauthBearer path so a zero-config operator emits the
-        // Stainless SDK fingerprint without hand-listing every header.
+        // Minted Claude Code identity: the compiled Stainless SDK header
+        // pack plus the session id and client request id. Emitted only when
+        // the configured base URL is exactly the Anthropic API host, so a
+        // third-party or loopback base never receives the fingerprint.
         // Inserted FIRST so the header_extras loop below OVERRIDES any
-        // matching key (HeaderMap::insert replaces). ApiKey gets no
-        // defaults (it is the raw-API surface, not the SDK client). Note
-        // `anthropic-beta` is NOT among these -- it is composed above.
-        if self.cfg.auth_kind == AuthKind::OauthBearer {
+        // matching key (HeaderMap::insert replaces) and a forwarded client
+        // header overrides after that. ApiKey gets no defaults (it is the
+        // raw-API surface, not the SDK client). Note `anthropic-beta` is
+        // NOT among these -- it is composed above.
+        if emits_claude_code_identity(self.cfg.auth_kind, &self.cfg.base_url) {
             for (k, v) in routectl_core::identity::anthropic::default_claude_code_identity_headers()
             {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
-
-            // Claude Code session identity. These fire only on the
-            // OauthBearer Claude-Code surface AND only when talking to
-            // api.anthropic.com, so a non-Anthropic base (a third-party
-            // /anthropic surface, a proxy) never receives the Claude-Code
-            // session id. Stamped in the same "inserted first" phase as
-            // the identity defaults so an operator `header_extras` entry
-            // still overrides (the apply loop below replaces) and a
-            // forwarded client header overrides after that.
-            if is_anthropic_api_host(&self.cfg.base_url) {
-                self.stamp_claude_code_session_identity(&mut header_map);
-            }
+            self.stamp_claude_code_session_identity(&mut header_map);
         }
 
         // Prefer the router-composed map for non-beta headers; fall
@@ -1221,17 +1211,29 @@ impl AnthropicApiProvider {
     }
 }
 
+/// True when the minted Claude Code identity (Stainless header pack,
+/// default User-Agent, session id, client request id) may be emitted: an
+/// OauthBearer provider whose configured base URL is exactly the Anthropic
+/// API host. The auth kind alone never authorizes it.
+pub(super) fn emits_claude_code_identity(auth_kind: AuthKind, base_url: &str) -> bool {
+    auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(base_url)
+}
+
 /// Resolve the client-level `User-Agent` for an anthropic-api provider.
-/// An operator override always wins. With no override, the OauthBearer
-/// surface falls back to the Claude Code SDK UA so a zero-config
-/// oauth-bearer provider emits the expected client fingerprint; the
-/// ApiKey surface keeps reqwest's default UA (`None`).
-pub(super) fn resolve_user_agent(user_agent: Option<&str>, auth_kind: AuthKind) -> Option<String> {
-    match (user_agent, auth_kind) {
-        (Some(ua), _) => Some(ua.to_string()),
-        (None, AuthKind::OauthBearer) => {
+/// An operator override always wins, on any host. With no override, the
+/// Claude Code SDK UA is used only where the minted identity is emitted
+/// (see [`emits_claude_code_identity`]); every other provider keeps
+/// reqwest's default UA (`None`).
+pub(super) fn resolve_user_agent(
+    user_agent: Option<&str>,
+    auth_kind: AuthKind,
+    base_url: &str,
+) -> Option<String> {
+    match user_agent {
+        Some(ua) => Some(ua.to_string()),
+        None if emits_claude_code_identity(auth_kind, base_url) => {
             Some(routectl_core::identity::anthropic::default_claude_code_user_agent().to_string())
         }
-        (None, AuthKind::ApiKey) => None,
+        None => None,
     }
 }

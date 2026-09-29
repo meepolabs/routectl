@@ -1151,3 +1151,9 @@ mod sse_usage_source_tests;
 #[cfg(test)]
 #[path = "mod_stream_terminal_tests.rs"]
 mod stream_terminal_tests;
+
+// The minted Claude Code identity (Stainless pack, default User-Agent,
+// session id, client request id) is scoped to the exact Anthropic host.
+#[cfg(test)]
+#[path = "mod_identity_host_tests.rs"]
+mod identity_host_tests;

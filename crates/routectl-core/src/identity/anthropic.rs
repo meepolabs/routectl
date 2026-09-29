@@ -313,6 +313,9 @@ fn stainless_os() -> &'static str {
 /// entries (`x-stainless-arch`, `x-stainless-os`). Excludes
 /// `anthropic-beta` (composed separately) and auth headers (injected by
 /// the auth dispatcher).
+///
+/// Emitted by the anthropic-api egress only for an OauthBearer provider whose
+/// configured base URL satisfies [`is_anthropic_api_host`].
 pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("x-app", "cli"),
