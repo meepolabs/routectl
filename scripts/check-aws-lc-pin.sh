@@ -29,13 +29,17 @@
 # The jobs in EXEMPT_JOBS below skip the preflight; each must still exist
 # and must not run cargo.
 #
-# The check is lexical, so it is sound only over YAML written the plain way.
-# By design it therefore rejects, outside comments, quoted strings, and block
-# scalar bodies (where shell text such as `rm -f ./*.sha256` lives), every
-# construct that could hide a key or a step from it: anchors (`&name`),
-# aliases (`*name`), and merge keys (`<<:`) anywhere in the file, and under
-# `jobs:` a bare `-` sequence item, a flow-style (`- {` / `- [`) item, and a
-# quoted key.
+# Scope: this is a drift guard against accidental edits to canonical
+# block-style workflow YAML, not an adversarial YAML parser. It walks lines,
+# so it rejects the constructs it recognizes as hiding a key or step from
+# that walk -- anchors (`&name`), aliases (`*name`), and merge keys (`<<:`)
+# anywhere, and under `jobs:` a bare `-` item, a `- {` / `- [` item, and a
+# quoted key -- skipping comments, quoted strings, and block scalar bodies
+# so shell text such as `rm -f ./*.sha256` is not mistaken for one. Forms it
+# cannot see (flow collections elsewhere, tags, explicit `?` keys,
+# continuation joins) are out of scope: an author able to write them can as
+# easily delete the preflight step. Enforcement against overrides the
+# runner exports is assert-aws-lc-env.sh, at run time.
 #
 # Usage: check-aws-lc-pin.sh [WORKFLOW_FILE...]
 #   With no arguments, checks .github/workflows/ci.yml and release.yml.

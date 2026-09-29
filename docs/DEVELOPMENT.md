@@ -224,6 +224,10 @@ families, suffixed or not and in any case, other than exactly
 never values. Only its self-test, `bash scripts/assert-aws-lc-env.test.sh`,
 runs in the commit gate, since a developer machine may set these variables
 legitimately.
+`check-aws-lc-pin.sh` is a drift guard for accidental edits to plain
+block-style workflow YAML, not an adversarial parser -- YAML forms it cannot
+follow are rejected where it recognizes them and otherwise out of scope, and
+the runtime preflight is what enforces against runner-exported overrides.
 
 `cargo fmt` walks the module tree, so it never opens a file pulled in by
 `include!` -- the fmt gate passes vacuously on those fragments, and this
