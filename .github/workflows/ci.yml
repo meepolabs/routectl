@@ -19,6 +19,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Build aws-lc-sys from its vendored AWS-LC source. Unset, its build
+  # script adopts any AWS-LC it detects via OPENSSL_DIR or pkg-config, so
+  # runner-image contents could select the crypto backend a build links.
+  AWS_LC_SYS_USE_SYSTEM: "0"
 
 jobs:
   check:

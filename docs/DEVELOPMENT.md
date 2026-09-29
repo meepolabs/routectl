@@ -192,7 +192,10 @@ rustup check -- a toolchain that IS the pinned version passes however it
 was installed. It runs as the commit gate's first leg and from
 `scripts/fmt-fragments.sh` (which is also invoked standalone); CI's rust
 jobs select their toolchain through the setup action and so do not need
-it, but CI does run its self-test:
+it, but CI does run its self-test. The self-test also fails if
+`ci.yml` or `release.yml` drops `AWS_LC_SYS_USE_SYSTEM: "0"` from its
+top-level `env:`, the pin that keeps `aws-lc-sys` building its vendored
+AWS-LC instead of adopting one found on the runner:
 
 ```bash
 bash scripts/assert-toolchain.sh

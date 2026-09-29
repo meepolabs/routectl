@@ -16,6 +16,10 @@
 # also asserts on the message the preflight printed, not merely on a non-zero
 # exit.
 #
+# It also pins the other half of the build toolchain that CI and release
+# select: both workflows must build aws-lc-sys from its vendored AWS-LC
+# source rather than let the build script adopt one it finds on the runner.
+#
 # Run it from anywhere:
 #   bash scripts/assert-toolchain.test.sh
 
@@ -145,6 +149,49 @@ for cause in RUSTUP_TOOLCHAIN "rustup override" "first on PATH"; do
         "$PINNED_TOML" 'rustc 1.90.0 (aaaaaaaaa 2025-01-01)' "$MATCHING_RUSTFMT" \
         "$cause"
 done
+
+# Unset, the aws-lc-sys build script links any AWS-LC it detects through
+# OPENSSL_DIR or pkg-config, so the pin must sit in the workflow-level env
+# where every job inherits it; a job-level copy leaves the other jobs open.
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+PIN_LINE='  AWS_LC_SYS_USE_SYSTEM: "0"'
+
+workflow_pins_vendored_awslc() {
+    awk -v want="$PIN_LINE" '
+        /^env:[[:space:]]*$/ { in_env = 1; next }
+        in_env && /^[^[:space:]#]/ { in_env = 0 }
+        in_env && $0 == want { found = 1 }
+        END { exit !found }
+    ' "$1"
+}
+
+for workflow in ci.yml release.yml; do
+    if workflow_pins_vendored_awslc "$REPO_ROOT/.github/workflows/$workflow"; then
+        echo "PASS: $workflow pins the vendored AWS-LC source in its top-level env"
+    else
+        echo "FAIL: $workflow lacks '$PIN_LINE' in its top-level env"
+        fails=$((fails + 1))
+    fi
+done
+
+awslc_tmp="$(mktemp -d)"
+printf 'env:\n  CARGO_TERM_COLOR: always\njobs:\n  build:\n    env:\n      AWS_LC_SYS_USE_SYSTEM: "0"\n' \
+    >"$awslc_tmp/unpinned.yml"
+printf 'env:\n  CARGO_TERM_COLOR: always\n%s\njobs:\n  build:\n    runs-on: x\n' "$PIN_LINE" \
+    >"$awslc_tmp/pinned.yml"
+if workflow_pins_vendored_awslc "$awslc_tmp/pinned.yml"; then
+    echo "PASS: AWS-LC pin check accepts a top-level pin"
+else
+    echo "FAIL: AWS-LC pin check rejected a top-level pin"
+    fails=$((fails + 1))
+fi
+if workflow_pins_vendored_awslc "$awslc_tmp/unpinned.yml"; then
+    echo "FAIL: AWS-LC pin check passed a workflow pinned only at job level"
+    fails=$((fails + 1))
+else
+    echo "PASS: AWS-LC pin check fires on a workflow pinned only at job level"
+fi
+rm -rf "$awslc_tmp"
 
 if [[ "$fails" -ne 0 ]]; then
     echo "assert-toolchain.test.sh: $fails assertion(s) failed" >&2

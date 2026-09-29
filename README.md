@@ -68,6 +68,9 @@ cosign verify-blob \
 sha256sum -c SHA256SUMS
 ```
 
+Release binaries always link the AWS-LC source vendored in `aws-lc-sys`,
+statically; a crypto library on the build runner is never picked up.
+
 </details>
 
 ### From source
