@@ -271,6 +271,13 @@ pub const EFFORT_BETA: &str = "effort-2025-11-24";
 /// two can never drift.
 pub const STRUCTURED_OUTPUTS_BETA: &str = "structured-outputs-2025-12-15";
 
+/// The `anthropic-beta` flag that asks Anthropic to redact thinking text.
+/// In the floor, but mutually exclusive with a body-level
+/// `thinking.display`: with both present Anthropic honours the redaction
+/// and the requested display mode is lost, so the egress drops this flag
+/// whenever the assembled body carries `thinking.display`.
+pub const REDACT_THINKING_BETA: &str = "redact-thinking-2026-02-12";
+
 /// Default `User-Agent` for the OauthBearer surface. Used as the
 /// client-level fallback in `AnthropicApiProvider::new()` when the
 /// operator leaves `user_agent` unset on an oauth-bearer provider.
@@ -353,7 +360,7 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
         "prompt-caching-scope-2026-01-05",
         STRUCTURED_OUTPUTS_BETA,
         "fast-mode-2026-02-01",
-        "redact-thinking-2026-02-12",
+        REDACT_THINKING_BETA,
         "token-efficient-tools-2026-03-28",
     ]
 }

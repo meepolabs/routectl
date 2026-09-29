@@ -674,6 +674,39 @@ pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) {
     betas.push(flag.to_string());
 }
 
+/// Remove `REDACT_THINKING_BETA` from `betas` when `body` carries
+/// `thinking.display`. Anthropic treats the two as mutually exclusive and
+/// lets the redaction win, so shipping both silently discards the display
+/// mode the caller asked for. The body-level directive is the more
+/// specific request, so it is the one that ships.
+///
+/// Must run after every source that can contribute the flag (client
+/// betas, operator betas, the pinned floor). Logs one DEBUG line when it
+/// removes the flag; a body without `thinking.display` is untouched.
+pub(super) fn drop_redact_beta_for_display(
+    provider_id: &str,
+    body: &Value,
+    betas: &mut Vec<String>,
+) {
+    let has_display = body
+        .get("thinking")
+        .and_then(|t| t.get("display"))
+        .is_some();
+    if !has_display {
+        return;
+    }
+    let flag = routectl_core::identity::anthropic::REDACT_THINKING_BETA;
+    let before = betas.len();
+    betas.retain(|b| b != flag);
+    if betas.len() != before {
+        tracing::debug!(
+            provider = %provider_id,
+            dropped_beta = flag,
+            "anthropic-beta flag dropped: body carries thinking.display, which the flag would override"
+        );
+    }
+}
+
 /// Body-field analogue of `union_structured_outputs_beta`: union the flag
 /// into `body.anthropic_beta` when the same body carries
 /// `output_config.format`. Same idempotence contract. Serves the

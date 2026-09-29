@@ -722,6 +722,14 @@ impl AnthropicApiProvider {
             super::extras::union_effort_beta(body, &mut merged_betas);
         }
 
+        // Display-vs-redaction conflict, after every union so the flag is
+        // removed whichever source contributed it. Suppressed on the
+        // forwarded leg: the client's beta set reaches Anthropic verbatim
+        // per the FORWARDING TRANSPARENCY CONTRACT.
+        if !forwarded_leg && let Some(body) = wire_body {
+            super::extras::drop_redact_beta_for_display(&self.cfg.id, body, &mut merged_betas);
+        }
+
         // Snapshot the FINAL composed beta set (post context_management
         // strip, post capability unions) so the decision context reflects
         // what actually egresses, not an intermediate union. Bounded

@@ -1157,3 +1157,7 @@ mod stream_terminal_tests;
 #[cfg(test)]
 #[path = "mod_identity_host_tests.rs"]
 mod identity_host_tests;
+
+#[cfg(test)]
+#[path = "mod_redact_display_tests.rs"]
+mod redact_display_tests;

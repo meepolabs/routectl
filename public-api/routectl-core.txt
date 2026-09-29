@@ -1060,6 +1060,7 @@ pub const routectl_core::identity::anthropic::EFFORT_BETA: &str
 pub const routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA: &str
 pub const routectl_core::identity::anthropic::MINTED_UA_SURFACE: &str
 pub const routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA: &str
+pub const routectl_core::identity::anthropic::REDACT_THINKING_BETA: &str
 pub const routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA: &str
 pub const routectl_core::identity::anthropic::THINKING_TOKEN_COUNT_BETA: &str
 pub fn routectl_core::identity::anthropic::claude_cli_ua_token(&str) -> core::option::Option<&str>

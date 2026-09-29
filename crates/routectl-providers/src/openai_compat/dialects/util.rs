@@ -239,6 +239,12 @@ pub(in crate::openai_compat) fn strip_history_reasoning(
 /// echo-back; the canonical schema uses `reasoning` for OpenRouter
 /// compat, so we rename. Falls back to lowering `reasoning_details`
 /// to a joined text string.
+///
+/// An assistant turn carrying `tool_calls` always leaves with the key: an
+/// empty string when no non-empty reasoning source exists. DeepSeek's
+/// thinking mode rejects a tool-call turn whose `reasoning_content` key is
+/// ABSENT but accepts an explicit empty value. A plain-text assistant turn
+/// with no reasoning still leaves without the key.
 pub(super) fn preserve_history_reasoning_content(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -260,34 +266,51 @@ pub(super) fn preserve_history_reasoning_content(
             m.remove("reasoning");
             continue;
         }
-        if m.contains_key("reasoning_content") {
-            m.remove("reasoning_details");
-            m.remove("reasoning");
-            continue;
-        }
-        // Treat `Value::Null` in `reasoning` as absent so NIM's dual-null
-        // shape doesn't preempt the reasoning_details fallback.
-        if let Some(reasoning) = m.get("reasoning") {
-            if !reasoning.is_null() {
-                if let Some(s) = reasoning.as_str()
-                    && !s.is_empty()
-                {
-                    m.insert("reasoning_content".into(), Value::String(s.to_string()));
-                }
-                m.remove("reasoning");
-                m.remove("reasoning_details");
-                continue;
-            }
-            m.remove("reasoning");
-        }
-        if let Some(details) = m.remove("reasoning_details") {
-            let lowered = lower_reasoning_details_to_text(&details, id);
-            if !lowered.is_empty() {
-                m.insert("reasoning_content".into(), Value::String(lowered));
-            }
+        lift_assistant_reasoning_content(id, m);
+        if !m.contains_key("reasoning_content") && carries_tool_calls(m) {
+            m.insert("reasoning_content".into(), Value::String(String::new()));
         }
     }
     Ok(())
+}
+
+/// Rename or lower one assistant message's reasoning onto
+/// `reasoning_content`, inserting the key only when a non-empty source
+/// exists. Always clears the `reasoning` / `reasoning_details` slots.
+fn lift_assistant_reasoning_content(id: &str, m: &mut serde_json::Map<String, Value>) {
+    if m.contains_key("reasoning_content") {
+        m.remove("reasoning_details");
+        m.remove("reasoning");
+        return;
+    }
+    // Treat `Value::Null` in `reasoning` as absent so NIM's dual-null
+    // shape doesn't preempt the reasoning_details fallback.
+    if let Some(reasoning) = m.get("reasoning") {
+        if !reasoning.is_null() {
+            if let Some(s) = reasoning.as_str()
+                && !s.is_empty()
+            {
+                m.insert("reasoning_content".into(), Value::String(s.to_string()));
+            }
+            m.remove("reasoning");
+            m.remove("reasoning_details");
+            return;
+        }
+        m.remove("reasoning");
+    }
+    if let Some(details) = m.remove("reasoning_details") {
+        let lowered = lower_reasoning_details_to_text(&details, id);
+        if !lowered.is_empty() {
+            m.insert("reasoning_content".into(), Value::String(lowered));
+        }
+    }
+}
+
+/// True when the message carries a non-empty `tool_calls` array.
+fn carries_tool_calls(m: &serde_json::Map<String, Value>) -> bool {
+    m.get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
 }
 
 /// Preserve outgoing assistant reasoning as a structured

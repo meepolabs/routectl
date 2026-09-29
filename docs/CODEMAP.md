@@ -687,7 +687,7 @@ license.
 - `src/anthropic_api/extras.rs` -- thinking-budget composition
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
   reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
-  `reconcile_output_config_effort`,
+  `drop_redact_beta_for_display`, `reconcile_output_config_effort`,
   `strip_thinking_when_tool_choice_forces_use`); the sampling strip
   `normalize_claude_sampling`, which drops `temperature`/`top_p` (keeping
   `stop_sequences`) as the LAST body mutation on the own-OAuth

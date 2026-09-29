@@ -336,4 +336,106 @@ mod tests {
             "effort:none must omit reasoning_effort, not emit a positive level: {body}"
         );
     }
+
+    // ----- history_reasoning on an assistant tool_calls turn -----
+
+    /// A conversation whose assistant turn called a tool and carried no
+    /// reasoning, followed by the tool result.
+    fn reasoningless_tool_call_req() -> ChatRequest {
+        let mut req = user_req("deepseek-v4-flash");
+        let mut msgs = req.messages.to_vec();
+        msgs.push(Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Text(String::new()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![serde_json::json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            })]),
+        });
+        msgs.push(Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text("42".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some("call_1".into()),
+            tool_calls: None,
+        });
+        req.messages = msgs.into();
+        req
+    }
+
+    fn wire_messages(req: &ChatRequest, mode: HistoryReasoning) -> Vec<serde_json::Value> {
+        let body = normalize("test", req, ReasoningDialect::DeepSeek, mode, None, false).unwrap();
+        body["messages"].as_array().expect("messages array").clone()
+    }
+
+    fn assistant_turn(messages: &[serde_json::Value]) -> &serde_json::Value {
+        messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant turn on the wire")
+    }
+
+    #[test]
+    fn preserve_emits_empty_reasoning_content_on_a_reasoningless_tool_call_turn() {
+        let messages = wire_messages(&reasoningless_tool_call_req(), HistoryReasoning::Preserve);
+
+        let assistant = assistant_turn(&messages);
+        assert_eq!(assistant["reasoning_content"], "", "got {assistant}");
+        let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+        assert!(tool.get("reasoning_content").is_none(), "got {tool}");
+    }
+
+    #[test]
+    fn preserve_keeps_real_reasoning_on_a_tool_call_turn() {
+        let mut req = reasoningless_tool_call_req();
+        let mut msgs = req.messages.to_vec();
+        msgs[1].reasoning = Some("look it up".into());
+        req.messages = msgs.into();
+
+        let messages = wire_messages(&req, HistoryReasoning::Preserve);
+
+        assert_eq!(assistant_turn(&messages)["reasoning_content"], "look it up");
+    }
+
+    #[test]
+    fn preserve_leaves_a_plain_reasoningless_assistant_turn_without_the_key() {
+        let mut req = reasoningless_tool_call_req();
+        let mut msgs = req.messages.to_vec();
+        msgs[1].tool_calls = None;
+        msgs[1].content = MessageContent::Text("done".into());
+        msgs.truncate(2);
+        req.messages = msgs.into();
+
+        let messages = wire_messages(&req, HistoryReasoning::Preserve);
+
+        let assistant = assistant_turn(&messages);
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "got {assistant}"
+        );
+    }
+
+    #[test]
+    fn auto_and_strip_emit_no_reasoning_content_on_a_tool_call_turn() {
+        let req = reasoningless_tool_call_req();
+        for mode in [HistoryReasoning::Auto, HistoryReasoning::Strip] {
+            let messages = wire_messages(&req, mode);
+
+            let assistant = assistant_turn(&messages);
+            assert!(
+                assistant.get("reasoning_content").is_none(),
+                "{mode:?} must not gain the key; got {assistant}"
+            );
+            assert!(assistant.get("tool_calls").is_some());
+        }
+    }
 }

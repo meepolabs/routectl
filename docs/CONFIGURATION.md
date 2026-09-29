@@ -775,6 +775,10 @@ routectl also injects a 9-flag model-agnostic floor
 `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`,
 `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28`). The floor
 bypasses this allowlist -- those nine are operator-equivalent pins.
+`redact-thinking-2026-02-12` is removed again, whatever supplied it, when the
+request body carries `thinking.display`: Anthropic lets the redaction win over
+the display mode, so the two never ship together (except on a forwarded
+credential, whose client betas pass through verbatim).
 
 The floor carries ONLY model-agnostic flags. Model-gated ones
 (`context-1m-2025-08-07`, `effort-2025-11-24`,
