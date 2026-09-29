@@ -212,7 +212,7 @@ impl Router {
         };
         tracing::warn!(
             event = "observe",
-            state_key = %state_key,
+            state_key = %routectl_core::sanitize_for_log(state_key),
             capability_key = obs.capability_key,
             provider_kind,
             evidence_class = obs.evidence_class,

@@ -224,7 +224,7 @@ impl Router {
                     continue;
                 }
                 tracing::debug!(
-                    state_key = %entry.state_key,
+                    state_key = %routectl_core::sanitize_for_log(&entry.state_key),
                     capability_key = %entry.feature_key,
                     "override cell changed across reload; lapsed learned negative into a re-probe",
                 );
@@ -786,7 +786,7 @@ impl Router {
                 self.metrics.incr_mask_suppressed();
                 tracing::warn!(
                     event = "suppression",
-                    state_key = %state_key,
+                    state_key = %routectl_core::sanitize_for_log(&state_key),
                     capability_key = %feature_key,
                     "force_supported override contradicted: masked capability still rejected upstream",
                 );
@@ -849,7 +849,7 @@ impl Router {
                     self.metrics.incr_f2_same_chain_suppressed();
                     tracing::warn!(
                         event = "suppression",
-                        state_key = %state_key,
+                        state_key = %routectl_core::sanitize_for_log(&state_key),
                         capability_key = %feature_key,
                         phase = FailurePhase::F2.as_str(),
                         "f2 feature-naming negative suppressed: same-chain f1 already observed for this capability",
@@ -933,7 +933,7 @@ impl Router {
         match upstream_param.as_deref() {
             Some(param) => tracing::warn!(
                 event = "learn",
-                state_key = %state_key,
+                state_key = %routectl_core::sanitize_for_log(&state_key),
                 capability_key = %feature_key,
                 provider_kind,
                 upstream_status,
@@ -947,7 +947,7 @@ impl Router {
             ),
             None => tracing::warn!(
                 event = "learn",
-                state_key = %state_key,
+                state_key = %routectl_core::sanitize_for_log(&state_key),
                 capability_key = %feature_key,
                 provider_kind,
                 upstream_status,
@@ -1020,7 +1020,7 @@ impl Router {
         self.metrics.incr_bedrock_validation_unmatched();
         tracing::warn!(
             event = "bedrock_validation_unmatched",
-            state_key = %target.state_key,
+            state_key = %routectl_core::sanitize_for_log(&target.state_key),
             provider_kind,
             "bedrock validation rejection matched no capability template",
         );
@@ -1068,7 +1068,7 @@ impl Router {
         self.metrics.incr_feature_naming_unmatched();
         tracing::warn!(
             event = "feature_naming_unmatched",
-            state_key = %target.state_key,
+            state_key = %routectl_core::sanitize_for_log(&target.state_key),
             provider_kind,
             "deterministic feature-carrying rejection matched no feature-naming template",
         );

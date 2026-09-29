@@ -243,7 +243,7 @@ impl Router {
                 tracing::debug!(
                     event = "probe_settlement_stale",
                     surface = "count_tokens",
-                    state_key = %admission.state_key,
+                    state_key = %sanitize_for_log(&admission.state_key),
                     capability_key = %admission.feature,
                     attempted_outcome = "other_error",
                     "probe settlement refused: its admission predates the live \
@@ -707,7 +707,7 @@ impl Router {
                             // count_tokens tests guard the regression.
                             tracing::debug!(
                                 provider = provider_name,
-                                state_key = %target.state_key,
+                                state_key = %sanitize_for_log(&target.state_key),
                                 status = 501,
                                 "count_tokens got wire-501 from admitted target; \
                                  treating as capability, not debiting breaker",
@@ -737,7 +737,7 @@ impl Router {
                     let facts = upstream_facts(&e);
                     tracing::info!(
                         event = "count_tokens",
-                        state_key = %target.state_key,
+                        state_key = %sanitize_for_log(&target.state_key),
                         provider = provider_name,
                         status = facts.status.unwrap_or(0),
                         upstream_type = facts.upstream_type.unwrap_or(""),

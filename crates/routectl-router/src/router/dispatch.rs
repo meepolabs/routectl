@@ -101,7 +101,7 @@ pub(super) fn emit_replay_degradation(meta: &DispatchMeta) {
     tracing::warn!(
         action = deg.action,
         target_lane = deg.target_lane.as_str(),
-        state_key = %deg.state_key,
+        state_key = %sanitize_for_log(&deg.state_key),
         source_schemes = %join_schemes(deg.source_schemes.as_slice()),
         reason = deg.reason,
         artifact_count = deg.artifact_count,
@@ -1139,7 +1139,7 @@ impl Router {
                         let facts = upstream_facts(&e);
                         tracing::debug!(
                             provider = provider_name,
-                            state_key = %state_key,
+                            state_key = %sanitize_for_log(state_key),
                             surface = DispatchSurface::Complete.as_str(),
                             attempt = attempts_made,
                             status = ?facts.status,
@@ -1197,7 +1197,7 @@ impl Router {
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                    state_key = %state_key,
+                                    state_key = %sanitize_for_log(state_key),
                                     error = ?e,
                                     "fallback to next",
                                 );
@@ -1205,7 +1205,7 @@ impl Router {
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                    state_key = %state_key,
+                                    state_key = %sanitize_for_log(state_key),
                                     error = ?e,
                                     "chain exhausted; no fallback target available; request will fail",
                                 );

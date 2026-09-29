@@ -254,7 +254,7 @@ impl Router {
                     drop(guards);
                     tracing::debug!(
                         event = "replay_admission_stale",
-                        state_key = %target.provider_name,
+                        state_key = %routectl_core::sanitize_for_log(&target.provider_name),
                         "reasoning-replay admission refused: this router predates the \
                          live capability generation"
                     );

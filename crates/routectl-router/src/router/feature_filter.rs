@@ -203,7 +203,7 @@ impl Router {
             if tail_only {
                 tracing::warn!(
                     event = "route_away",
-                    state_key = %state_key,
+                    state_key = %sanitize_for_log(&state_key),
                     capability_key = %capability_key,
                     source = %source.as_str(),
                     "capability negative routed this target away; request \
@@ -212,7 +212,7 @@ impl Router {
             } else {
                 tracing::info!(
                     event = "route_away",
-                    state_key = %state_key,
+                    state_key = %sanitize_for_log(&state_key),
                     capability_key = %capability_key,
                     source = %source.as_str(),
                     "capability negative de-prioritized this target to the tail",
@@ -405,7 +405,7 @@ impl Router {
                         {
                             tracing::warn!(
                                 event = "strip",
-                                state_key = %target.state_key,
+                                state_key = %sanitize_for_log(&target.state_key),
                                 capability_key = %normalized,
                                 outcome = "probe_bypassed",
                                 "capability_strip_decision",
@@ -566,7 +566,7 @@ impl Router {
         // name.
         tracing::warn!(
             event = "strip",
-            state_key = %target.state_key,
+            state_key = %sanitize_for_log(&target.state_key),
             capability_key = %target.strip_capabilities.join(", "),
             outcome = outcome_token,
             "capability_strip_decision",

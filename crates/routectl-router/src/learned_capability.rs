@@ -1149,7 +1149,7 @@ impl LearnedCapabilityRegistry {
                     entry.in_flight = true;
                     tracing::info!(
                         event = "expire_probe",
-                        state_key = %key.state_key,
+                        state_key = %routectl_core::sanitize_for_log(&key.state_key),
                         capability_key = %key.feature_key,
                         signal_tier = entry.signal.as_str(),
                         "lapsed learned negative admitted for its single re-probe",
@@ -1256,7 +1256,7 @@ impl LearnedCapabilityRegistry {
                 if let Some(entry) = entries.remove(key) {
                     tracing::info!(
                         event = "clear",
-                        state_key = %key.state_key,
+                        state_key = %routectl_core::sanitize_for_log(&key.state_key),
                         capability_key = %key.feature_key,
                         signal_tier = entry.signal.as_str(),
                         "learned-capability negative cleared by successful re-probe",
@@ -2956,7 +2956,7 @@ impl LearnedCapabilityRegistry {
         if let Some(key) = victim {
             tracing::warn!(
                 event = "evict",
-                state_key = %key.state_key,
+                state_key = %routectl_core::sanitize_for_log(&key.state_key),
                 capability_key = %key.feature_key,
                 max_entries = self.max_entries(),
                 "learned-capability registry at capacity; evicted oldest entry",

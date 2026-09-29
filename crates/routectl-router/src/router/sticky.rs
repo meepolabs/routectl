@@ -308,7 +308,7 @@ impl Router {
             crate::seat_pool::SelectionOutcome::Birth { home } => {
                 let member = seats[home].provider_name.clone();
                 tracing::debug!(
-                    state_key = %seats[home].state_key_for(nickname),
+                    state_key = %routectl_core::sanitize_for_log(&seats[home].state_key_for(nickname)),
                     member = %member,
                     "sticky least-loaded birth pick: pinned session to seat"
                 );
@@ -324,7 +324,7 @@ impl Router {
             crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
                 let member = seats[home].provider_name.clone();
                 tracing::debug!(
-                    state_key = %seats[home].state_key_for(nickname),
+                    state_key = %routectl_core::sanitize_for_log(&seats[home].state_key_for(nickname)),
                     member = %member,
                     "sticky least-loaded overflow-repin: migrated session to healthy sibling"
                 );

@@ -1138,6 +1138,57 @@ fn f2_all_gates_pass_mints_a_phase_f2_negative() {
     );
 }
 
+/// A config key past the log-field cap, carrying printable non-ASCII and a
+/// control char -- the shape `sanitize_for_log` must bound and escape.
+fn hostile_state_key() -> String {
+    format!("m1-{}\u{7}{}", "caf\u{e9}".repeat(60), "k".repeat(60))
+}
+
+#[test]
+fn learn_warn_renders_the_state_key_through_the_log_sanitizer() {
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let raw_key = hostile_state_key();
+    assert!(raw_key.chars().count() > 300);
+    let target = DispatchTarget {
+        state_key: raw_key.clone(),
+        ..anthropic_target(&router)
+    };
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    let events = capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    let warns = learn_warns(&events);
+    assert_eq!(warns.len(), 1);
+    assert_eq!(warns[0].field("upstream_param"), None);
+    assert_eq!(
+        warns[0].field("state_key"),
+        Some(routectl_core::sanitize_for_log(&raw_key).as_str())
+    );
+}
+
 #[test]
 fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_pause() {
     // Arrange -- a mint-eligible F1 rejection, plus a hook that runs a sibling

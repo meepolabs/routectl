@@ -1246,7 +1246,7 @@ pub(super) fn emit_field_repair(meta: &DispatchMeta) {
     };
     tracing::warn!(
         action = record.action,
-        state_key = %record.state_key,
+        state_key = %sanitize_for_log(&record.state_key),
         field_path = record.field_path,
         reason = record.reason,
         repair_attempted = record.repair_attempted,

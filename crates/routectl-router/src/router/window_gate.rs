@@ -245,7 +245,7 @@ impl Router {
         if throttle.claim(now_epoch_secs()) {
             tracing::warn!(
                 event = "window_gate_skip",
-                state_key = %report.state_key,
+                state_key = %routectl_core::sanitize_for_log(&report.state_key),
                 model = %routectl_core::sanitize_for_log(&report.nickname),
                 estimated_tokens,
                 corrected_tokens = report.corrected_tokens,

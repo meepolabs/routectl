@@ -604,7 +604,7 @@ fn emit_stale_probe_settlement(probe: &ProbeAdmission, surface: &str, attempted:
     tracing::debug!(
         event = "probe_settlement_stale",
         surface,
-        state_key = %probe.state_key,
+        state_key = %routectl_core::sanitize_for_log(&probe.state_key),
         capability_key = %probe.feature,
         attempted_outcome = attempted,
         "probe settlement refused: its admission predates the live capability generation"
@@ -626,7 +626,7 @@ fn emit_probe_settlement(
 ) {
     tracing::debug!(
         event = "probe_settlement",
-        state_key = %admission.state_key,
+        state_key = %routectl_core::sanitize_for_log(&admission.state_key),
         capability_key = %admission.feature,
         provider_kind = admission.provider_kind,
         surface,

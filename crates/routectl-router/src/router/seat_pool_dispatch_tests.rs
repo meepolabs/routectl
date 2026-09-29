@@ -524,6 +524,42 @@ async fn sticky_pins_on_miss_then_stays_on_session() {
     assert_eq!(second.len(), 3);
 }
 
+#[test]
+fn sticky_birth_log_renders_the_seat_key_through_the_log_sanitizer() {
+    let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+    let nickname = format!("opus-{}", "\u{e9}t\u{e9}".repeat(50));
+    let member = format!("anthropic-\u{1b}[31m-{}", "a".repeat(150));
+    let seats = [SeatTarget {
+        provider_name: member.clone(),
+        provider: Arc::new(SeatProvider {
+            id: member.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        auth_secret_ref: None,
+    }];
+    let raw_key = seats[0].state_key_for(&nickname);
+    assert!(raw_key.chars().count() > 300);
+
+    let events = routectl_testkit::capture_events(|| {
+        router.apply_sticky_outcome(
+            "S",
+            &nickname,
+            &seats,
+            crate::seat_pool::SelectionOutcome::Birth { home: 0 },
+        );
+    });
+
+    let births: Vec<_> = events
+        .iter()
+        .filter(|e| e.message == "sticky least-loaded birth pick: pinned session to seat")
+        .collect();
+    assert_eq!(births.len(), 1);
+    assert_eq!(
+        births[0].field("state_key"),
+        Some(routectl_core::sanitize_for_log(&raw_key).as_str())
+    );
+}
+
 #[tokio::test]
 async fn sticky_keyless_matches_fill_first() {
     // Keyless StickyLeastLoaded routes through seat_order_for_request, so
