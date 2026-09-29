@@ -291,6 +291,80 @@ for var in aws_lc_sys_use_system_x86_64_unknown_linux_gnu AWS_LC_SYS_SYSTEM_DIR 
         "set outside the top-level pin"
 done
 
+PREFLIGHT_JOB_HEAD='jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/assert-aws-lc-env.sh
+'
+
+assert_reject "checkout step written as an alias" \
+    "$(workflow alias-checkout "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: *checkout
+      - run: cargo build
+')" \
+    'YAML anchor or alias is not supported here:       - uses: *checkout'
+
+assert_reject "run command written as an alias" \
+    "$(workflow alias-run "$HEADER$PINNED_ENV$PREFLIGHT_JOB_HEAD"'      - run: *build
+')" \
+    'YAML anchor or alias is not supported here:       - run: *build'
+
+assert_reject "whole step written as an alias" \
+    "$(workflow alias-step "$HEADER$PINNED_ENV$PREFLIGHT_JOB_HEAD"'      - *preflight
+')" \
+    'YAML anchor or alias is not supported here:       - *preflight'
+
+assert_reject "anchor on a step value" \
+    "$(workflow anchor "$HEADER$PINNED_ENV$PREFLIGHT_JOB_HEAD"'      - run: &build cargo build
+')" \
+    'YAML anchor or alias is not supported here:       - run: &build cargo build'
+
+assert_reject "merge key in a step" \
+    "$(workflow merge-key "$HEADER$PINNED_ENV$PREFLIGHT_JOB_HEAD"'      - <<: *base
+        name: build
+')" \
+    'YAML merge key is not supported here'
+
+assert_reject "bare dash sequence item for a step" \
+    "$(workflow bare-dash "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      -
+        uses: actions/checkout@v4
+      - run: bash scripts/assert-aws-lc-env.sh
+      - run: cargo build
+')" \
+    'bare - sequence item is not supported under jobs:'
+
+assert_reject "flow-style step" \
+    "$(workflow flow-step "$HEADER$PINNED_ENV$PREFLIGHT_JOB_HEAD"'      - { run: cargo build }
+')" \
+    'flow-style sequence item is not supported under jobs:'
+
+# The literal "$f" is workflow text under test, not a shell expansion.
+# shellcheck disable=SC2016
+assert_pass "globs, redirects and quoted stars in run bodies and values" \
+    "$(workflow globs "$HEADER$PINNED_ENV$PREFLIGHT_JOB_HEAD"'      - run: cargo build
+      - name: aggregate *.sha256 sidecars
+        run: |
+          for f in *.sha256; do cat "$f" >> SHA256SUMS; done
+          rm -f ./*.sha256
+          echo "done" >&2
+          *) echo glob-case ;;
+      - run: rm -f ./*.sha256 && echo "*alias" >&2
+      - uses: some/action@v1
+        with:
+          files: dist/*
+          pattern: "*.tar.gz"
+          other: '"'"'&not-an-anchor'"'"'
+')"
+
 assert_reject "workflow file missing" \
     "$tmp/absent.yml" \
     'workflow file not found'

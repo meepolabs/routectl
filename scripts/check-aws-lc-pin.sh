@@ -29,6 +29,14 @@
 # The jobs in EXEMPT_JOBS below skip the preflight; each must still exist
 # and must not run cargo.
 #
+# The check is lexical, so it is sound only over YAML written the plain way.
+# By design it therefore rejects, outside comments, quoted strings, and block
+# scalar bodies (where shell text such as `rm -f ./*.sha256` lives), every
+# construct that could hide a key or a step from it: anchors (`&name`),
+# aliases (`*name`), and merge keys (`<<:`) anywhere in the file, and under
+# `jobs:` a bare `-` sequence item, a flow-style (`- {` / `- [`) item, and a
+# quoted key.
+#
 # Usage: check-aws-lc-pin.sh [WORKFLOW_FILE...]
 #   With no arguments, checks .github/workflows/ci.yml and release.yml.
 #
@@ -76,13 +84,52 @@ workflow_findings() {
             preflight_ok = 0; cargo_line = 0; block_step = 0
         }
         BEGIN {
+            block_indent = -1
             n = split(exempt, entries, "\n")
             for (i = 1; i <= n; i++) {
                 split(entries[i], parts, ":")
                 if (parts[1] == wf) exempt_job[parts[2]] = 1
             }
         }
+        function indent_of(s) { match(s, /^ */); return RLENGTH }
+        function unquoted(s) {
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", s)
+            gsub(/\047[^\047]*\047/, "\047\047", s)
+            return s
+        }
+        # Flag YAML constructs the lexical walk cannot follow (see header).
+        function unsupported_findings(node, rest, value) {
+            if (node ~ /^[[:space:]]*(-[[:space:]]+)*[&*]/) {
+                print "line " NR ": YAML anchor or alias is not supported here: " $0
+            }
+            rest = node; sub(/^[[:space:]]*(-[[:space:]]+)*/, "", rest)
+            if (match(rest, /:[[:space:]]+/)) {
+                value = substr(rest, RSTART + RLENGTH)
+                if (value ~ /^(![^[:space:]]*[[:space:]]+)?[&*]/ ||
+                    (value ~ /^[[{]/ && value ~ /([[{,]|:)[[:space:]]*[&*]/)) {
+                    print "line " NR ": YAML anchor or alias is not supported here: " $0
+                }
+            }
+            if (node ~ /(^|[[:space:]{,])<<[[:space:]]*:/) {
+                print "line " NR ": YAML merge key is not supported here: " $0
+            }
+            if (!in_jobs) return
+            if (node ~ /^[[:space:]]*-$/) {
+                print "line " NR ": bare - sequence item is not supported under jobs:"
+            } else if (node ~ /^[[:space:]]*-[[:space:]]+[[{]/) {
+                print "line " NR ": flow-style sequence item is not supported under jobs: " $0
+            } else if (node ~ /^[[:space:]]*(-[[:space:]]+)*["\047]/) {
+                print "line " NR ": quoted key is not supported under jobs: " $0
+            }
+        }
         /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        block_indent >= 0 && indent_of($0) <= block_indent { block_indent = -1 }
+        block_indent < 0 {
+            node = without_comment(unquoted($0))
+            if (/^[^[:space:]]/) in_jobs = ($0 ~ /^jobs:/)
+            unsupported_findings(node)
+            if (node ~ /(:|^[[:space:]]*-)[[:space:]]+[|>][-+0-9]*$/) block_indent = indent_of($0)
+        }
         /^[^[:space:]]/ { close_job(); in_jobs = ($0 ~ /^jobs:/) }
         in_jobs && /^  [A-Za-z0-9_-]+:/ {
             close_job()
