@@ -76,14 +76,16 @@ const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
 /// deliberately (matches `common::isolate_usage_db`'s rationale): the
 /// spawned server outlives the test function and is never awaited to
 /// shutdown, so a scoped `TempDir` guard could delete the path out from
-/// under a still-running MITM cert-generation task.
+/// under a still-running MITM cert-generation task. The first call in each
+/// process reaps the dirs of earlier, dead processes, which bounds what
+/// accumulates. The dir is created here, exclusively, rather than left to the
+/// server: the server's `create_dir_all` tolerates an existing empty dir, and
+/// creating it up front guarantees this process never adopts an existing path.
 fn unique_cert_dir(tag: &str) -> std::path::PathBuf {
+    common::temp_reaper::reap_stale_test_dirs();
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "routectl-mitm-e2e-{}-{tag}-{n}",
-        std::process::id()
-    ))
+    common::temp_reaper::create_mitm_dir(tag, n)
 }
 
 /// `[mitm]` block for a test scenario tagged `scenario` (used only to keep

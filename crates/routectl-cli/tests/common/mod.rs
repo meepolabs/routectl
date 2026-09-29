@@ -11,6 +11,7 @@
 
 pub mod readiness;
 pub mod replay;
+pub mod temp_reaper;
 
 /// A `file://` secret ref that resolves to `value`. Drop-in replacement for
 /// the former `literal:<value>` test fixture now that `literal:` refs are
@@ -50,13 +51,15 @@ pub use routectl_core::test_utils::*;
 /// real `~/.config/routectl/usage.db` (the `UsageConfig` default).
 ///
 /// The base dir is created once per test process (`OnceLock`) under
-/// `$TMPDIR/routectl-usage-test-<pid>` and the per-call filename is made
-/// unique by an atomic counter. The dir is deliberately persistent and
+/// `$TMPDIR/routectl-usage-test-<pid>-<nonce>`, created exclusively so this
+/// process never adopts a path that already exists, and the per-call filename is
+/// made unique by an atomic counter. The dir is deliberately persistent and
 /// leaked rather than guarded by a `tempfile::TempDir`: each server runs
 /// detached for the whole test process and the tests never await its
 /// shutdown, so a scoped guard could drop (and delete the path) while the
-/// writer still holds the open DB handle. A small per-process dir left on
-/// disk is the accepted cost of avoiding that race.
+/// writer still holds the open DB handle. Instead, the first call in each
+/// process reaps the dirs of earlier, dead processes
+/// (`temp_reaper::reap_stale_test_dirs`), which bounds what accumulates.
 #[allow(dead_code)]
 pub fn isolate_usage_db(
     config: std::sync::Arc<routectl_router::Config>,
@@ -68,9 +71,8 @@ pub fn isolate_usage_db(
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let base = BASE.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("routectl-usage-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create per-process usage test dir");
-        dir
+        temp_reaper::reap_stale_test_dirs();
+        temp_reaper::create_usage_dir()
     });
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = base.join(format!("usage-{n}.db"));
