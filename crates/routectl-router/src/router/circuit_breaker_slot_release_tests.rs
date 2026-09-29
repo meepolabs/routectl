@@ -1846,3 +1846,213 @@ async fn stream_health_error_still_debits_breaker() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+// Ownership of the half-open slot is carried from the admission that took it.
+// The interposition below lands in the window between the gate's critical
+// section and the guard being built: a caller admitted through a CLOSED
+// breaker, then the breaker trips and a DIFFERENT caller claims the half-open
+// slot. The first caller never owned that slot, so neither its live guard nor
+// its cancellation may release it.
+
+/// Arrange for the next admission on this thread to be followed, before its
+/// guard is built, by a breaker trip and a second caller claiming the
+/// half-open slot. Returns the shared state so the test can inspect the slot.
+fn interpose_foreign_half_open_claim(
+    router: &Router,
+) -> Arc<parking_lot::Mutex<crate::runtime_state::ProviderState>> {
+    let st = router
+        .state
+        .get("m")
+        .cloned()
+        .expect("per-model state slot exists");
+    let hook_state = Arc::clone(&st);
+    crate::router::runtime_gate::set_after_admission_hook(move || {
+        let mut guard = hook_state.lock();
+        guard.record_failure(Instant::now(), LastOutcome::Http5xx);
+        let foreign = guard.try_dispatch_admitting(Instant::now());
+        assert!(
+            foreign.claimed_half_open,
+            "premise: the interposed caller claims the half-open slot",
+        );
+    });
+    st
+}
+
+async fn assert_cancelled_closed_admission_keeps_foreign_claim<F, Fut>(
+    dispatch: F,
+    calls: impl Fn(&HangUntilClearedProvider) -> usize,
+) where
+    F: FnOnce(Arc<Router>) -> Fut,
+    Fut: std::future::Future,
+{
+    let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let provider = Arc::new(HangUntilClearedProvider::new("p", hang));
+    let router = Arc::new(build_router_with_provider_and_retry(
+        provider.clone() as Arc<dyn Provider>,
+        RetryPolicy::default(),
+    ));
+    assert!(
+        matches!(
+            circuit_phase(&router),
+            crate::runtime_state::CircuitPhase::Closed
+        ),
+        "premise: the caller is admitted through a closed breaker",
+    );
+    let st = interpose_foreign_half_open_claim(&router);
+
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(20), dispatch(Arc::clone(&router))).await;
+    assert!(
+        cancelled.is_err(),
+        "the closed-admission caller must still be awaiting the hung upstream",
+    );
+    assert_eq!(
+        calls(&provider),
+        1,
+        "the caller must have reached the upstream"
+    );
+    assert!(
+        st.lock().half_open_probe_in_flight(),
+        "a caller admitted through a closed breaker must not release a half-open \
+         claim another caller took after its admission",
+    );
+
+    // Positive control: the claim was real and releasable by its owner.
+    st.lock().release_probe_slot();
+    assert!(!st.lock().half_open_probe_in_flight());
+}
+
+#[tokio::test]
+async fn complete_closed_admission_does_not_release_foreign_half_open_claim() {
+    assert_cancelled_closed_admission_keeps_foreign_claim(
+        |router| async move { router.complete(plain_req()).await },
+        |p| p.complete_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stream_closed_admission_does_not_release_foreign_half_open_claim() {
+    assert_cancelled_closed_admission_keeps_foreign_claim(
+        |router| async move { router.stream(plain_req()).await.map(|_| ()) },
+        |p| p.stream_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn count_tokens_closed_admission_does_not_release_foreign_half_open_claim() {
+    assert_cancelled_closed_admission_keeps_foreign_claim(
+        |router| async move { router.count_tokens(plain_req()).await },
+        |p| p.count_tokens_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+// A dispatch admitted through a CLOSED breaker never owned a half-open claim,
+// so a settle arm that frees the slot without a breaker outcome (a 401 refresh
+// that succeeds or fails) must leave a claim another caller took after the
+// breaker tripped. Were it to clear the shared flag, a further caller would be
+// admitted as a second concurrent probe.
+
+async fn assert_closed_admission_settle_keeps_foreign_claim<F, Fut>(
+    refresh_fails: bool,
+    dispatch: F,
+    calls: impl Fn(&Recovering401MultiProvider) -> usize,
+) where
+    F: FnOnce(Arc<Router>) -> Fut,
+    Fut: std::future::Future,
+{
+    let (router, provider) = build_recovering_router_inner(refresh_fails);
+    let router = Arc::new(router);
+    assert!(
+        matches!(
+            circuit_phase(&router),
+            crate::runtime_state::CircuitPhase::Closed
+        ),
+        "premise: the caller is admitted through a closed breaker",
+    );
+    let st = interpose_foreign_half_open_claim(&router);
+
+    let _ = dispatch(Arc::clone(&router)).await;
+
+    assert_eq!(
+        provider.on_auth_failure_calls.load(Ordering::SeqCst),
+        1,
+        "premise: the upstream 401 reached the refresh arm",
+    );
+    assert_eq!(
+        calls(&provider),
+        1,
+        "no second attempt may be admitted while the foreign claim is held",
+    );
+    assert!(
+        st.lock().half_open_probe_in_flight(),
+        "a 401 settle by a closed-admission caller must not release a half-open \
+         claim another caller took after its admission",
+    );
+
+    // Positive control: the claim was real and releasable by its owner.
+    st.lock().release_probe_slot();
+    assert!(!st.lock().half_open_probe_in_flight());
+}
+
+#[tokio::test]
+async fn complete_closed_admission_401_refresh_failure_keeps_foreign_claim() {
+    assert_closed_admission_settle_keeps_foreign_claim(
+        true,
+        |router| async move { router.complete(plain_req()).await },
+        |p| p.complete_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn complete_closed_admission_401_refresh_success_keeps_foreign_claim() {
+    assert_closed_admission_settle_keeps_foreign_claim(
+        false,
+        |router| async move { router.complete(plain_req()).await },
+        |p| p.complete_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stream_closed_admission_401_refresh_failure_keeps_foreign_claim() {
+    assert_closed_admission_settle_keeps_foreign_claim(
+        true,
+        |router| async move { router.stream(plain_req()).await.map(|_| ()) },
+        |p| p.stream_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stream_closed_admission_401_refresh_success_keeps_foreign_claim() {
+    assert_closed_admission_settle_keeps_foreign_claim(
+        false,
+        |router| async move { router.stream(plain_req()).await.map(|_| ()) },
+        |p| p.stream_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn count_tokens_closed_admission_401_refresh_failure_keeps_foreign_claim() {
+    assert_closed_admission_settle_keeps_foreign_claim(
+        true,
+        |router| async move { router.count_tokens(plain_req()).await },
+        |p| p.count_tokens_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn count_tokens_closed_admission_401_refresh_success_keeps_foreign_claim() {
+    assert_closed_admission_settle_keeps_foreign_claim(
+        false,
+        |router| async move { router.count_tokens(plain_req()).await },
+        |p| p.count_tokens_calls.load(Ordering::SeqCst),
+    )
+    .await;
+}

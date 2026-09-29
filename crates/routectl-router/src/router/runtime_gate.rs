@@ -12,6 +12,33 @@ use crate::runtime_state::{AdmissionKind, GateDecision, ProviderState};
 
 use super::Router;
 
+#[cfg(test)]
+type AdmissionHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_ADMISSION: std::cell::RefCell<Option<AdmissionHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` once, on the next admission made by this thread, after the
+/// `ProviderState` critical section has released and before the ownership guard
+/// is built. Lets a test interpose a breaker transition into the window a
+/// re-derived ownership check would be exposed to. Thread-local, so it needs a
+/// current-thread runtime and cannot leak into concurrently running tests.
+#[cfg(test)]
+pub(super) fn set_after_admission_hook(hook: impl FnOnce() + 'static) {
+    AFTER_ADMISSION.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_after_admission_hook() {
+    let hook = AFTER_ADMISSION.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 impl Router {
     /// Trip the circuit breaker for the state slot keyed by `state_key`
     /// (a model nickname or a per-seat `nickname#label`), returning `false`
@@ -42,40 +69,20 @@ impl Router {
         })
     }
 
-    /// Run RPM bucket + circuit breaker. Returns `Some((kind, err))` if
-    /// the gate refuses this dispatch (pretreated as a fallbackable
-    /// status-0 upstream error). The `kind` tag is a stable string
-    /// (`"rate_limit"` or `"circuit_breaker"`) used as a `gate_kind`
-    /// field on the gate-blocked log so operators can filter by reason.
+    /// Run RPM bucket + circuit breaker and discard the ownership token.
+    /// Returns `Some((kind, err))` if the gate refuses this dispatch. The
+    /// `kind` tag is a stable string (`"rate_limit"` or `"circuit_breaker"`).
     ///
-    /// `state_key` is the per-model nickname (v0.6.0) or the provider
-    /// name (legacy / test path); `provider_name_for_err` is always
-    /// the operator-facing provider name and lands in the resulting
-    /// error so callers see WHICH provider was gate-blocked, not the
-    /// internal nickname.
-    ///
-    /// MUTATING, which matters for any caller reaching for it to "just look":
-    /// it charges an RPM token and can claim the half-open probe slot. A caller
-    /// that only wants to OBSERVE breaker phase reads `gate_status_for`
-    /// instead, which is non-mutating; this one is for callers whose subject is
-    /// the admission decision itself.
+    /// MUTATING: it charges an RPM token and can claim the half-open probe
+    /// slot, and it DISARMS the returned guard, so the claim outlives this call
+    /// with nothing left to release it. Test seam only -- every production
+    /// caller uses `admit_dispatch` and carries the guard.
+    #[cfg(test)]
     pub(super) fn gate_check(
         &self,
         state_key: &str,
         provider_name_for_err: &str,
     ) -> Option<(&'static str, Error)> {
-        // Compatible wrapper over the admission API. The ownership token is
-        // DISARMED rather than dropped: these callers keep the claim across
-        // their own walk (a stream holds it until first content) and settle it
-        // through `record_success` / `record_failure` / their own
-        // `probe_slot_guard`, so releasing it here would hand the slot back
-        // while the dispatch is still using it. Correct for them because they
-        // claim and settle inside one synchronous stretch with no window for
-        // another caller to take the slot in between.
-        //
-        // The probe worker DOES have such a window -- its dial is an await
-        // point in a background task -- so it calls `admit_dispatch` and
-        // carries the token instead of re-deriving ownership later.
         let (refusal, mut guard) = self.admit_dispatch(state_key, provider_name_for_err);
         guard.disarm();
         refusal
@@ -146,6 +153,8 @@ impl Router {
             AdmissionKind::ClientDispatch => state.lock().try_dispatch_admitting(now),
             AdmissionKind::BackgroundProbe => state.lock().try_dispatch_probe(now),
         };
+        #[cfg(test)]
+        run_after_admission_hook();
         let guard = if admission.claimed_half_open {
             ProbeSlotGuard::new(Some(state))
         } else {
@@ -199,61 +208,17 @@ impl Router {
             state.lock().force_open(Instant::now(), cooldown);
         }
     }
-
-    /// Release a half-open probe slot this attempt claimed via the gate
-    /// WITHOUT recording success or failure. Used on error paths the
-    /// router explicitly chose NOT to count against the breaker (probe
-    /// fast-fail on 429/529, auth-refresh failure, non-fallbackable
-    /// client error). A no-op when the breaker was not half-open (the
-    /// slot was never claimed).
-    pub(super) fn release_probe_slot(&self, state_key: &str) {
-        if let Some(state) = self.state.get(state_key) {
-            state.lock().release_probe_slot();
-        }
-    }
-
-    /// True when this model's breaker currently holds a half-open probe
-    /// slot in flight. Read immediately after the gate grants a dispatch
-    /// to capture whether THIS dispatch was admitted as the half-open
-    /// probe; the captured value is then carried to the first-chunk Ok
-    /// arm (reading the flag there instead would race a concurrent
-    /// dispatch that claimed or released the slot in between). A no-op
-    /// `false` when the breaker is closed or the model has no state slot.
-    pub(super) fn is_half_open_probe(&self, state_key: &str) -> bool {
-        self.state
-            .get(state_key)
-            .is_some_and(|state| state.lock().half_open_probe_in_flight())
-    }
-
-    /// Build a `ProbeSlotGuard` for a dispatch that just passed the gate.
-    /// Armed iff `state_key` currently holds the half-open probe slot (i.e.
-    /// THIS dispatch was admitted as the probe); inert otherwise. The guard
-    /// releases the slot on drop unless an outcome disarms it -- the
-    /// cancellation-safety backstop for a dropped dispatch future.
-    ///
-    /// The `is_half_open_probe` read and the `state.get().cloned()` below are
-    /// two separate lock acquisitions, but the check is race-free under the
-    /// single-probe invariant: `try_dispatch` admits at most one
-    /// `half_open_in_flight` caller per cooldown, and the current caller has
-    /// not yet settled its slot, so no concurrent caller can clear or re-claim
-    /// it between the two reads.
-    pub(super) fn probe_slot_guard(&self, state_key: &str) -> ProbeSlotGuard {
-        if self.is_half_open_probe(state_key) {
-            ProbeSlotGuard::new(self.state.get(state_key).cloned())
-        } else {
-            ProbeSlotGuard::new(None)
-        }
-    }
 }
 
 /// RAII backstop that releases a half-open circuit-breaker probe slot if the
 /// dispatch future is dropped before any outcome settles it.
 ///
-/// `gate_check` claims the single half-open probe slot
-/// (`half_open_in_flight = true`) BEFORE the dispatch awaits the upstream.
+/// `admit_dispatch` claims the single half-open probe slot
+/// (`half_open_in_flight = true`) BEFORE the dispatch awaits the upstream, and
+/// hands the claim back as this guard.
 /// Every synchronous outcome arm already settles the slot (`record_success` /
-/// `record_failure` / `park_provider` / `release_probe_slot`). The gap this
-/// guards is async CANCELLATION: if the future is dropped while awaiting a
+/// `record_failure` / `park_provider` / [`ProbeSlotGuard::release`]). The gap
+/// this guards is async CANCELLATION: if the future is dropped while awaiting a
 /// hung upstream (client disconnect or client-side timeout), none of those
 /// arms run and the slot stays claimed forever -- every later probe then sees
 /// `CircuitOpen` and the breaker latches open until process restart.
@@ -268,9 +233,13 @@ impl Router {
 /// Every synchronous settle site pairs its outcome call with `disarm()`.
 /// `record_failure` / `record_success` / `park_provider` already clear
 /// `half_open_in_flight` internally, so disarm there only suppresses a
-/// redundant (idempotent, harmless) drop-time release; `release_probe_slot`
-/// sites clear it explicitly. A NEW settle site MUST also call `disarm()`, or
-/// the guard's drop would free a slot a concurrent probe may have re-claimed.
+/// redundant (idempotent, harmless) drop-time release. Sites that settle
+/// WITHOUT a breaker outcome call `release()`, which frees the slot only when
+/// this guard's admission claimed it: the flag is shared, so an unconditional
+/// clear from a dispatch admitted through a closed breaker would erase a claim
+/// a different caller took after the breaker tripped. A NEW settle site MUST
+/// call `disarm()` or `release()`, or the guard's drop would free a slot a
+/// concurrent probe may have re-claimed.
 pub(super) struct ProbeSlotGuard {
     /// `Some` while armed; `None` once an outcome settled the slot or the
     /// dispatch never claimed it.
@@ -285,9 +254,25 @@ impl ProbeSlotGuard {
         Self { state }
     }
 
+    /// Whether this guard still holds the half-open claim its admission took.
+    /// Read before any settle site disarms it.
+    pub(super) const fn owns_slot(&self) -> bool {
+        self.state.is_some()
+    }
+
     /// An outcome has settled the slot; drop must not touch it.
     pub(super) fn disarm(&mut self) {
         self.state = None;
+    }
+
+    /// Settle without recording a breaker outcome (a path the router chose not
+    /// to count against the breaker). Frees the half-open slot only if this
+    /// guard's admission claimed it, then disarms; an inert guard leaves the
+    /// shared flag untouched.
+    pub(super) fn release(&mut self) {
+        if let Some(state) = self.state.take() {
+            state.lock().release_probe_slot();
+        }
     }
 }
 

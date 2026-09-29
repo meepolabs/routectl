@@ -529,33 +529,43 @@ impl Router {
                 // event for THIS provider and move to the next chain
                 // entry -- retrying the same provider would just hit
                 // the gate again.
-                if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
-                    tracing::warn!(
-                        provider = provider_name,
-                        model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                        gate_kind,
-                        error = ?gate_err,
-                        "gate blocked",
-                    );
-                    // Keep the FIRST real error: a synthetic gate error
-                    // (status 0 "circuit breaker open" / RPM) on a later
-                    // chain entry must not overwrite an earlier entry's
-                    // genuine upstream failure, or the client sees the
-                    // synthetic error instead of the real 503/timeout.
-                    if last_err.is_none() {
-                        last_err = Some(gate_err);
+                //
+                // The returned guard OWNS the half-open claim this admission
+                // took (inert for a closed breaker or a refusal), so the
+                // cancellation backstop below is armed from the critical
+                // section that acquired the slot and never from a re-read of
+                // the shared half-open bit.
+                let mut probe_guard = {
+                    let (refusal, guard) = self.admit_dispatch(state_key, provider_name);
+                    if let Some((gate_kind, gate_err)) = refusal {
+                        tracing::warn!(
+                            provider = provider_name,
+                            model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                            gate_kind,
+                            error = ?gate_err,
+                            "gate blocked",
+                        );
+                        // Keep the FIRST real error: a synthetic gate error
+                        // (status 0 "circuit breaker open" / RPM) on a later
+                        // chain entry must not overwrite an earlier entry's
+                        // genuine upstream failure, or the client sees the
+                        // synthetic error instead of the real 503/timeout.
+                        if last_err.is_none() {
+                            last_err = Some(gate_err);
+                        }
+                        if opts.disable_fallbacks {
+                            break 'chain;
+                        }
+                        continue 'chain;
                     }
-                    if opts.disable_fallbacks {
-                        break 'chain;
-                    }
-                    continue 'chain;
-                }
+                    guard
+                };
 
-                // Cancellation backstop (see ProbeSlotGuard): if the gate
-                // admitted THIS dispatch as the half-open probe, free the slot
-                // should the future be dropped before an outcome arm settles
-                // it. Disarmed at each settle below; inert + a no-op otherwise.
-                let mut probe_guard = self.probe_slot_guard(state_key);
+                // `probe_guard` is the cancellation backstop (see
+                // ProbeSlotGuard): if the gate admitted THIS dispatch as the
+                // half-open probe, it frees the slot should the future be
+                // dropped before an outcome arm settles it. Disarmed at each
+                // settle below; inert + a no-op otherwise.
 
                 if attempts_made > 0 && !skip_replay_backoff {
                     let jittered = add_jitter(backoff, policy.jitter_ms);
@@ -776,8 +786,7 @@ impl Router {
                                 status,
                                 req.routectl_internal.inbound_session_key.is_some(),
                             );
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             return Err(e);
                         }
                         // Auth-401 single-flight refresh: when the
@@ -809,22 +818,20 @@ impl Router {
                             // attempt claimed via the gate, or the breaker
                             // stays locked open until restart.
                             if let Err(refresh_err) = provider.on_auth_failure().await {
-                                self.release_probe_slot(state_key);
-                                probe_guard.disarm();
+                                probe_guard.release();
                                 return Err(refresh_err);
                             }
                             // Refresh succeeded. Release the half-open probe
                             // slot this attempt claimed at the gate BEFORE the
                             // `continue` re-enters the loop and re-runs
-                            // `gate_check`. While this caller still holds the
+                            // the gate. While this caller still holds the
                             // slot, the in-loop re-gate's `try_dispatch` sees
                             // `half_open_in_flight` and returns CircuitOpen,
                             // which would leave the breaker locked open until
                             // restart. Releasing here lets the re-gate claim a
                             // fresh slot (the per-attempt accounting the
                             // in-loop gate promises).
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine upstream 401 as last_err
                             // before re-gating. If the re-gate then refuses
                             // (CircuitOpen / RPM), the `last_err.is_none()`
@@ -873,8 +880,7 @@ impl Router {
                             });
                             strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
                             skip_replay_backoff = true;
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine replay-rejection error as
                             // last_err before re-gating the stripped variant.
                             // If the re-gate refuses (CircuitOpen / RPM), the
@@ -938,8 +944,7 @@ impl Router {
                             // retry policy, so it takes no backoff sleep (the
                             // streaming walk has none to skip).
                             skip_replay_backoff = true;
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine rejection as last_err before
                             // re-gating the repaired attempt: if the re-gate
                             // refuses (CircuitOpen / RPM), the
@@ -980,8 +985,7 @@ impl Router {
                             // branch, not a retry policy, so it takes no
                             // backoff sleep.
                             skip_replay_backoff = true;
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine rejection as last_err before
                             // re-gating, so a re-gate refusal (CircuitOpen /
                             // RPM) cannot surface the synthetic status-0 gate
@@ -1023,8 +1027,7 @@ impl Router {
                             // NOT count as a provider fault (that is why
                             // should_fallback is false here), so the slot
                             // must be freed without a breaker debit.
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // A probe fast-fails ACROSS distinct chain targets
                             // (walking an all-Anthropic chain is futile -- every
                             // hop shares the limit), but a rate-limited SEAT does
@@ -1121,8 +1124,7 @@ impl Router {
                             // slot this attempt claimed. A no-op when a
                             // debiting class already routed through
                             // record_failure (which clears the slot).
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             return Err(e);
                         }
                         let can_retry_here = attempts_made < hard_cap
@@ -1185,8 +1187,7 @@ impl Router {
                             // `half_open_in_flight` and return CircuitOpen,
                             // locking the breaker open forever (mirrors the
                             // auth-retry Ok path).
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             continue;
                         }
                         // Done with this provider. Decide fallback vs propagate.
@@ -1215,8 +1216,7 @@ impl Router {
                             // so every settle path frees the slot exactly once.
                             // A debiting class already settled + disarmed above.
                             if !debits {
-                                self.release_probe_slot(state_key);
-                                probe_guard.disarm();
+                                probe_guard.release();
                             }
                             last_err = Some(e);
                             continue 'chain;
@@ -1224,8 +1224,7 @@ impl Router {
                         // Terminal non-fallbackable error. Free any half-open
                         // probe slot this attempt claimed so the breaker is
                         // not left locked open.
-                        self.release_probe_slot(state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         return Err(e);
                     }
                 }
@@ -1487,7 +1486,11 @@ impl Router {
                 // ordinary errors, so the only second iteration is the
                 // auth-recovery retry; the gate runs once per attempt, so
                 // the first attempt is debited exactly once.
-                if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
+                //
+                // The returned guard OWNS the half-open claim this admission
+                // took (see `complete_inner`).
+                let (refusal, mut probe_guard) = self.admit_dispatch(state_key, provider_name);
+                if let Some((gate_kind, gate_err)) = refusal {
                     tracing::warn!(
                         provider = provider_name,
                         model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
@@ -1512,16 +1515,12 @@ impl Router {
                 // Gate granted Allow. Capture NOW whether this dispatch
                 // claimed the half-open probe slot: only a probe's first
                 // CONTENT chunk should close + release the breaker at the Ok
-                // arm below. Reading the flag at first-content time instead
-                // would race a concurrent dispatch.
-                let was_half_open_probe = self.is_half_open_probe(state_key);
-                // Cancellation backstop (see ProbeSlotGuard): free the
-                // half-open probe slot if this future is dropped before an
-                // outcome arm settles it (e.g. consumer disconnect during the
-                // pre-content wait against a hung upstream). Re-reads the same
-                // flag as `was_half_open_probe` above; both reads are
-                // consistent under the single-probe invariant.
-                let mut probe_guard = self.probe_slot_guard(state_key);
+                // arm below. `probe_guard` (the cancellation backstop, see
+                // ProbeSlotGuard) frees the slot if this future is dropped
+                // before an outcome arm settles it (e.g. consumer disconnect
+                // during the pre-content wait against a hung upstream). It has
+                // to be read before any settle site disarms it.
+                let was_half_open_probe = probe_guard.owns_slot();
 
                 // Fidelity WARN at the dispatch point -- see `complete_inner`.
                 Self::warn_dropped_reasoning_dialect(
@@ -1710,8 +1709,7 @@ impl Router {
                                 status,
                                 req.routectl_internal.inbound_session_key.is_some(),
                             );
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             return Err(e);
                         }
                         // Auth-401 single-flight refresh + retry once
@@ -1731,21 +1729,19 @@ impl Router {
                                 "stream 401 pre-content; refreshing auth and retrying once",
                             );
                             if let Err(refresh_err) = provider.on_auth_failure().await {
-                                self.release_probe_slot(state_key);
-                                probe_guard.disarm();
+                                probe_guard.release();
                                 return Err(refresh_err);
                             }
                             // Refresh succeeded. Release the half-open probe
                             // slot this attempt claimed at the gate BEFORE the
                             // `continue` re-enters the loop and re-runs
-                            // `gate_check`. While this caller still holds the
+                            // the gate. While this caller still holds the
                             // slot, the in-loop re-gate's `try_dispatch` sees
                             // `half_open_in_flight` and returns CircuitOpen,
                             // which would leave the breaker locked open until
                             // restart. Releasing here lets the re-gate claim a
                             // fresh slot.
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine upstream 401 as last_err
                             // before re-gating (see `complete_inner`): if the
                             // re-gate refuses, the `last_err.is_none()` guard
@@ -1781,8 +1777,7 @@ impl Router {
                                 learned: false,
                             });
                             strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine replay-rejection error as
                             // last_err before re-gating the stripped variant
                             // (see `complete_inner`): if the re-gate refuses,
@@ -1836,8 +1831,7 @@ impl Router {
                                 .repaired_path()
                                 .expect("a reported repair names the row it dropped");
                             self.note_field_repair(meta, state_key, repaired_path);
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Preserve the genuine rejection as last_err before
                             // re-gating the repaired attempt: if the re-gate
                             // refuses (CircuitOpen / RPM), the
@@ -1878,8 +1872,7 @@ impl Router {
                             // transient upstream condition we deliberately do
                             // NOT count as a provider fault, so free the slot
                             // without a breaker debit.
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             // Fail over to a sibling seat of the SAME pool
                             // before fast-failing (see `complete_inner`): a
                             // rate-limited seat does not mean the pool is out of
@@ -1948,8 +1941,7 @@ impl Router {
                             // slot this attempt claimed. A no-op when a
                             // debiting class already routed through
                             // record_failure (which clears the slot).
-                            self.release_probe_slot(state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             return Err(e);
                         }
                         if do_fallback {
@@ -1985,8 +1977,7 @@ impl Router {
                             // so every settle path frees the slot exactly once.
                             // A debiting class already settled + disarmed above.
                             if !debits {
-                                self.release_probe_slot(state_key);
-                                probe_guard.disarm();
+                                probe_guard.release();
                             }
                             last_err = Some(e);
                             continue 'chain;
@@ -1994,8 +1985,7 @@ impl Router {
                         // Terminal non-fallbackable error. Free any half-open
                         // probe slot this attempt claimed so the breaker is
                         // not left locked open.
-                        self.release_probe_slot(state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         return Err(e);
                     }
                 }

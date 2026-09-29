@@ -440,9 +440,14 @@ impl Router {
             // seat before its upstream is touched (and again on the 401
             // retry), so a capability walk cannot fan across seats to
             // bypass an operator rate limit or an open breaker.
-            if let Some((gate_kind, gate_err)) =
-                self.gate_check(&target.state_key, &target.provider_name)
-            {
+            //
+            // The returned guard OWNS the half-open claim this admission took
+            // (inert for a closed breaker or a refusal); it is the cancellation
+            // backstop (see ProbeSlotGuard) and frees the slot if this future is
+            // dropped before an outcome arm settles it.
+            let (refusal, mut probe_guard) =
+                self.admit_dispatch(&target.state_key, &target.provider_name);
+            if let Some((gate_kind, gate_err)) = refusal {
                 tracing::warn!(
                     provider = %routectl_core::sanitize_for_log(&target.provider_name),
                     model = %routectl_core::sanitize_for_log(model_label),
@@ -452,11 +457,6 @@ impl Router {
                 );
                 return CountSeatOutcome::Terminal(gate_err);
             }
-
-            // Cancellation backstop (see ProbeSlotGuard): free the
-            // half-open probe slot if this future is dropped before an
-            // outcome arm settles it.
-            let mut probe_guard = self.probe_slot_guard(&target.state_key);
 
             // Lazy probe activation at the ADMITTED boundary, the same
             // position and for the same reasons as the two messages walks:
@@ -565,8 +565,7 @@ impl Router {
                             status,
                             req.routectl_internal.inbound_session_key.is_some(),
                         );
-                        self.release_probe_slot(&target.state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         return CountSeatOutcome::Terminal(e);
                     }
                     // Auth-401 single-flight refresh: rotate the token and
@@ -584,12 +583,10 @@ impl Router {
                             "count_tokens 401; refreshing auth and retrying once",
                         );
                         if let Err(refresh_err) = provider.on_auth_failure().await {
-                            self.release_probe_slot(&target.state_key);
-                            probe_guard.disarm();
+                            probe_guard.release();
                             return CountSeatOutcome::Terminal(refresh_err);
                         }
-                        self.release_probe_slot(&target.state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         continue;
                     }
 
@@ -631,8 +628,7 @@ impl Router {
                             learned: false,
                         });
                         strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
-                        self.release_probe_slot(&target.state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         continue;
                     }
 
@@ -677,8 +673,7 @@ impl Router {
                             .repaired_path()
                             .expect("a reported repair names the row it dropped");
                         self.note_field_repair(meta, &target.state_key, repaired_path);
-                        self.release_probe_slot(&target.state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         continue;
                     }
                     // The repair arm declined (already repaired this seat, not
@@ -718,8 +713,7 @@ impl Router {
                                  treating as capability, not debiting breaker",
                             );
                         }
-                        self.release_probe_slot(&target.state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                         return CountSeatOutcome::Capability;
                     }
 
@@ -764,8 +758,7 @@ impl Router {
                         }
                         probe_guard.disarm();
                     } else {
-                        self.release_probe_slot(&target.state_key);
-                        probe_guard.disarm();
+                        probe_guard.release();
                     }
                     return CountSeatOutcome::Terminal(e);
                 }

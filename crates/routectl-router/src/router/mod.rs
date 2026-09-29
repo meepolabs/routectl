@@ -135,7 +135,7 @@ pub struct Router {
     /// every insertion goes through [`Router::register`], which keeps
     /// the parallel `state` map (RPM bucket, circuit breaker) in sync.
     /// A direct insert here would silently disable runtime gating for
-    /// that provider -- see `gate_check`.
+    /// that provider -- see `admit_dispatch`.
     providers: BTreeMap<String, Arc<dyn Provider>>,
     /// Per-model runtime gates keyed by `[models.X]` nickname. Two
     /// models on the same provider get independent breakers + RPM
