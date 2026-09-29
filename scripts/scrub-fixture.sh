@@ -188,6 +188,30 @@ fatal() {
   exit 2
 }
 
+# grep exits 0 on a match, 1 on no match and >=2 on an error (unreadable
+# file, bad pattern). Only 0 and 1 are verdicts: an error is not "clean", so
+# every scanner ends in one of these two helpers and a scan that could not
+# run refuses instead of passing. Call them from the main shell, never inside
+# a command substitution, or the `fatal` only ends the subshell.
+#
+# grep_verdict takes a captured grep status and the scanned file.
+grep_verdict() {
+  case "$1" in
+    0 | 1) return 0 ;;
+    *) fatal "grep failed (status $1) scanning $2" ;;
+  esac
+}
+
+# grep_has answers the yes/no question for a `grep -q`-style scan; the file
+# is the last argument.
+grep_has() {
+  local rc=0
+  grep "$@" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  grep_verdict "$rc" "${!#}"
+  return 1
+}
+
 MODE=""
 LANE_QUERY=""
 declare -a TARGETS=()
@@ -474,6 +498,15 @@ fi
 # Each returns 0 when the class is PRESENT in the file. None of them
 # prints the matched text: the class name is the diagnostic, and echoing
 # the value would copy the leak into a CI log.
+#
+# The three `grep -o` extractors stream into a consumer so a large fixture
+# is not held in memory and the first sensitive match ends the scan. `-a`
+# is required: without it GNU grep treats a file with a NUL byte as binary
+# and prints no matches at all. The consumer's own status is authoritative
+# when it reports a finding -- it may return while grep is still writing, so
+# grep can die of SIGPIPE (141) and that must not read as an error. Only
+# when the consumer found nothing does grep's status decide between clean
+# (0/1) and refuse (>=2). Uses PIPESTATUS, so it needs no bash newer than 3.
 
 # Any `/home/<name>` that is not the neutral placeholder. Candidates are
 # extracted and compared exactly, so `/home/user/x` is accepted while
@@ -488,6 +521,16 @@ fi
 # extraction: a `/home/` followed by any non-ASCII, non-separator byte is
 # a name this class cannot read but must still refuse.
 has_home_prefix() {
+  local -a st=(0 0)
+  grep -aoE '/home/[A-Za-z0-9._-]*' "$1" | consume_home_prefix || st=("${PIPESTATUS[@]}")
+  [ "${st[1]}" -eq 0 ] && return 0
+  grep_verdict "${st[0]}" "$1"
+  # A home directory whose name starts outside ASCII.
+  LC_ALL=C grep_has -qE '/home/[^A-Za-z0-9._/"'"'"'[:space:]-]' "$1" && return 0
+  return 1
+}
+
+consume_home_prefix() {
   local candidate
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
@@ -495,9 +538,7 @@ has_home_prefix() {
       "/home/" | "$PLACEHOLDER_HOME") continue ;;
     esac
     return 0
-  done < <(grep -oE '/home/[A-Za-z0-9._-]*' "$1" || true)
-  # A home directory whose name starts outside ASCII.
-  LC_ALL=C grep -qE '/home/[^A-Za-z0-9._/"'"'"'[:space:]-]' "$1" && return 0
+  done
   return 1
 }
 
@@ -512,6 +553,14 @@ has_home_prefix() {
 # segment is compared against the placeholder's own name exactly, mirroring
 # the plain form's accept rule.
 has_home_prefix_encoded() {
+  local -a st=(0 0)
+  grep -aoE -- '-home-[A-Za-z0-9._]+-' "$1" | consume_home_prefix_encoded || st=("${PIPESTATUS[@]}")
+  [ "${st[1]}" -eq 0 ] && return 0
+  grep_verdict "${st[0]}" "$1"
+  return 1
+}
+
+consume_home_prefix_encoded() {
   local candidate name
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
@@ -521,7 +570,7 @@ has_home_prefix_encoded() {
     [ -n "$name" ] || continue
     [ "$name" = "${PLACEHOLDER_HOME##*/}" ] && continue
     return 0
-  done < <(grep -oE -- '-home-[A-Za-z0-9._]+-' "$1" || true)
+  done
   return 1
 }
 
@@ -546,19 +595,34 @@ LS_SHORT_RE="$LS_MODE_RE"'[[:space:]]+[0-9]+[[:space:]]+[A-Za-z_][A-Za-z0-9_.-]*
 
 # True when any owner or group column in a listing names a non-neutral
 # account. `$1` is the file, `$2` the regex, and the remaining args are the
-# awk field indices to treat as account names.
+# 1-based whitespace-separated field indices to treat as account names.
 has_non_neutral_account() {
   local file="$1" regex="$2"
   shift 2
+  local -a st=(0 0)
+  grep -aoE "$regex" "$file" | consume_non_neutral_account "$@" || st=("${PIPESTATUS[@]}")
+  [ "${st[1]}" -eq 0 ] && return 0
+  grep_verdict "${st[0]}" "$file"
+  return 1
+}
+
+# Fields are split in-process: a subprocess here would run where errexit
+# is suppressed, and a failure would read as an empty account, i.e. clean.
+# An index past the last field yields an empty account and is skipped; the
+# callers' regexes require owner, size (and group for `-l`) columns, so
+# every index they pass exists in any match.
+consume_non_neutral_account() {
   local match idx account
+  local -a fields
   while IFS= read -r match; do
     [ -n "$match" ] || continue
+    read -r -a fields <<<"$match"
     for idx in "$@"; do
-      account="$(printf '%s\n' "$match" | awk -v i="$idx" '{print $i}')"
+      account="${fields[idx - 1]:-}"
       [ -n "$account" ] || continue
       is_neutral_owner "$account" || return 0
     done
-  done < <(grep -oE "$regex" "$file" || true)
+  done
   return 1
 }
 
@@ -584,7 +648,7 @@ has_ls_owner_column() {
 BEARER_RE='bearer[[:space:]]+[A-Za-z0-9._~+/=:-]{16,}'
 
 has_bearer_token() {
-  grep -qiE "$BEARER_RE" "$1"
+  grep_has -qiE "$BEARER_RE" "$1"
 }
 
 # A raw provider credential carrying NO scheme word, which is how one
@@ -597,7 +661,7 @@ has_bearer_token() {
 PROVIDER_KEY_RE='(sk-ant-api03-|sk-ant-oat01-|sk-ant-ort01-|sk-proj-|sk-or-v1-|ghp_|AKIA)[A-Za-z0-9_-]{16,}'
 
 has_provider_key() {
-  grep -qE "$PROVIDER_KEY_RE" "$1"
+  grep_has -qE "$PROVIDER_KEY_RE" "$1"
 }
 
 # Vendor shapes the prefix set above does not carry, each its OWN named
@@ -668,31 +732,31 @@ BEDROCK_API_KEY_RE="$ANCHOR_LEFT"'bedrock-api-key-[A-Za-z0-9_=&-]{20,}'
 AWS_CRED_ASSIGN_RE='(AWS_SECRET_ACCESS_KEY|aws_secret_access_key|AWS_SESSION_TOKEN|aws_session_token)[[:space:]]*[=:][[:space:]]*[A-Za-z0-9/+=_-]{20,}'
 
 has_google_oauth_token() {
-  grep -qE "$GOOGLE_OAUTH_TOKEN_RE" "$1"
+  grep_has -qE "$GOOGLE_OAUTH_TOKEN_RE" "$1"
 }
 
 has_google_api_key() {
-  grep -qE "$GOOGLE_API_KEY_RE" "$1"
+  grep_has -qE "$GOOGLE_API_KEY_RE" "$1"
 }
 
 has_jwt() {
-  grep -qE "$JWT_RE" "$1"
+  grep_has -qE "$JWT_RE" "$1"
 }
 
 has_aws_temp_key_id() {
-  grep -qE "$AWS_TEMP_KEY_ID_RE" "$1"
+  grep_has -qE "$AWS_TEMP_KEY_ID_RE" "$1"
 }
 
 has_nvidia_api_key() {
-  grep -qE "$NVIDIA_API_KEY_RE" "$1"
+  grep_has -qE "$NVIDIA_API_KEY_RE" "$1"
 }
 
 has_bedrock_api_key() {
-  grep -qE "$BEDROCK_API_KEY_RE" "$1"
+  grep_has -qE "$BEDROCK_API_KEY_RE" "$1"
 }
 
 has_aws_cred_assignment() {
-  grep -qE "$AWS_CRED_ASSIGN_RE" "$1"
+  grep_has -qE "$AWS_CRED_ASSIGN_RE" "$1"
 }
 
 # --- provider shape coverage -----------------------------------------
@@ -892,7 +956,7 @@ run_check() {
       local -a gflags=(-q -F)
       case "$flags" in *w*) gflags+=(-w) ;; esac
       case "$flags" in *i*) gflags+=(-i) ;; esac
-      if grep "${gflags[@]}" -e "$value" "$f"; then
+      if grep_has "${gflags[@]}" -e "$value" "$f"; then
         findings+="  $f  $class"$'\n'
       fi
       i=$((i + 1))

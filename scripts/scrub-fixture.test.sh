@@ -70,6 +70,45 @@ expand_home_tokens() {
     printf '%s' "${content//@HOME@/$home}"
 }
 
+# Write a `grep` stand-in at `$1` that exits 2 -- grep's error status --
+# when any argument contains the substring `$2`, and otherwise runs the
+# real grep. The scanners see a file that passed the readability check and
+# then a grep that errors, which is the state a read error mid-scan or a
+# rejected pattern produces; an empty `$2` never faults, so the same shim
+# doubles as the passthrough control. With `$3` = late, the faulting call
+# first runs the real grep to completion (so its matches reach the reader)
+# and only then exits 2: an error after output, which is what a read error
+# mid-stream looks like to a scanner that consumes grep's output as it goes.
+install_grep_shim() {
+    local shim="$1" fault_on="$2" mode="${3:-}" real_grep
+    real_grep="$(command -v grep)"
+    cat >"$shim" <<SHIM
+#!/bin/sh
+fault_on='$fault_on'
+mode='$mode'
+if [ -n "\$fault_on" ]; then
+    for arg in "\$@"; do
+        case "\$arg" in
+            *"\$fault_on"*)
+                [ "\$mode" = late ] || exit 2
+                "$real_grep" "\$@"
+                exit 2
+                ;;
+        esac
+    done
+fi
+exec "$real_grep" "\$@"
+SHIM
+    chmod +x "$shim"
+}
+
+# Write an `awk` stand-in at `$1` that always exits 2, the state a broken or
+# missing awk leaves. The scanner must not depend on awk at all.
+install_failing_awk_shim() {
+    printf '#!/bin/sh\nexit 2\n' >"$1"
+    chmod +x "$1"
+}
+
 # Build a throwaway repo, write `$2` as the fixture file named `$1` inside
 # it, and run the scrub script over the fixture directory in the mode given
 # by `$3` (`--check` or `--write`). Echoes the work directory so a caller
@@ -83,7 +122,7 @@ expand_home_tokens() {
 # `$4` is the seat store to plant, as one of the SEAT_* spellings below.
 # Empty (the default) plants nothing, which is the un-interrogable state.
 run_scrub() {
-    local filename="$1" content="$2" mode="$3" seat="${4:-}"
+    local filename="$1" content="$2" mode="$3" seat="${4:-}" grep_fault="${5:-}" fault_mode="${6:-}" awk_fault="${7:-}"
     local work
     work="$(mktemp -d)"
     local fake_home="$work/home/$FAKE_HOME_NAME"
@@ -91,7 +130,16 @@ run_scrub() {
     printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$FAKE_HOSTNAME" >"$work/stubbin/hostname"
     chmod +x "$work/stubbin/hostname"
     [ -z "$seat" ] || printf '%s' "$seat" >"$work/xdg/routectl/credentials.json"
+    [ -z "$grep_fault" ] || install_grep_shim "$work/stubbin/grep" "$grep_fault" "$fault_mode"
+    [ -z "$awk_fault" ] || install_failing_awk_shim "$work/stubbin/awk"
     expand_home_tokens "$content" "$fake_home" >"$work/repo/fixture/$filename"
+    case "$content" in
+        *@NUL@*)
+            python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().replace(b"@NUL@", b"\0"))' \
+                <"$work/repo/fixture/$filename" >"$work/nul.tmp"
+            mv "$work/nul.tmp" "$work/repo/fixture/$filename"
+            ;;
+    esac
     (
         cd "$work/repo" || exit 2
         git init -q .
@@ -124,6 +172,41 @@ assert_caught() {
         fails=$((fails + 1))
     else
         echo "PASS: caught -- $desc"
+    fi
+    rm -rf "$work"
+}
+
+# A scanner whose grep errors must refuse (exit 2), not read the error as
+# "no match". `$3` is the substring of the scanner's grep arguments that the
+# shim faults on. The SAME fixture is first run through the shim with fault
+# injection off and must pass clean, so a refusal is attributable to the
+# injected error and not to the content or the shim itself. `$4` = late makes
+# the shim fail only after grep has produced its output, and `$5` replaces
+# the default content (so the scanner has matches to stream).
+assert_grep_error_refuses() {
+    local desc="$1" filename="$2" fault_on="$3" fault_mode="${4:-}" content="${5:-}"
+    [ -n "$content" ] || content="$(body_with "an ordinary prose sentence with nothing sensitive")"
+    local out rc work
+    out="$(run_scrub "$filename" "$content" --check "" "__no_such_arg__")"
+    local control_rc="${out%%$'\t'*}"
+    work="${out#*$'\t'}"
+    rm -rf "$work"
+    out="$(run_scrub "$filename" "$content" --check "" "$fault_on" "$fault_mode")"
+    rc="${out%%$'\t'*}"
+    work="${out#*$'\t'}"
+    if [ "$control_rc" != "0" ]; then
+        echo "FAIL: control without the injected grep error was not clean (exit $control_rc) -- $desc"
+        fails=$((fails + 1))
+    elif [ "$rc" != "2" ]; then
+        echo "FAIL: expected exit 2 on a grep error but got $rc -- $desc"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    elif ! grep -q "grep failed" "$work/scrub.log"; then
+        echo "FAIL: refused without naming the grep failure -- $desc"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    else
+        echo "PASS: grep error refuses -- $desc"
     fi
     rm -rf "$work"
 }
@@ -402,6 +485,54 @@ assert_clean "a macOS ls -l@ listing owned by the neutral account is accepted" \
 assert_clean "an ls -o listing owned by the neutral account is accepted" \
     ingress_request.json \
     "$(body_with "-rw-r--r-- 1 user 4096 Aug 25 10:00 config.toml")"
+
+# Field positions, one column at a time: each case has exactly one
+# non-neutral account so a wrong index reads a neutral field and passes.
+assert_caught "an ls -l listing with only the owner (field 3) non-neutral" \
+    ingress_request.json \
+    "$(body_with "-rw-r--r-- 1 $FAKE_HOME_NAME user 4096 Aug 25 10:00 config.toml")" \
+    ls-owner-column
+
+assert_caught "an ls -l listing with only the group (field 4) non-neutral" \
+    ingress_request.json \
+    "$(body_with "-rw-r--r-- 1 user $FAKE_HOME_NAME 4096 Aug 25 10:00 config.toml")" \
+    ls-owner-column
+
+assert_caught "an ls -o listing with a non-neutral owner (field 3)" \
+    ingress_request.json \
+    "$(body_with "-rw-r--r-- 1 $FAKE_HOME_NAME 4096 Aug 25 10:00 config.toml")" \
+    ls-owner-column
+
+assert_clean "an ls -l listing with neutral owner and group is accepted" \
+    ingress_request.json \
+    "$(body_with "-rw-r--r-- 1 user root 4096 Aug 25 10:00 config.toml")"
+
+# Owner extraction must not depend on an external awk: a shim that always
+# exits 2 changes neither the catching nor the accepting verdict.
+assert_with_failing_awk() {
+    local desc="$1" content="$2" expect_rc="$3"
+    local out rc work
+    out="$(run_scrub ingress_request.json "$content" --check "" "" "" failing)"
+    rc="${out%%$'\t'*}"
+    work="${out#*$'\t'}"
+    if [ "$rc" != "$expect_rc" ]; then
+        echo "FAIL: expected exit $expect_rc with a failing awk but got $rc -- $desc"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    else
+        echo "PASS: unaffected by a failing awk -- $desc"
+    fi
+    rm -rf "$work"
+}
+
+assert_with_failing_awk "a non-neutral ls -l owner is still caught" \
+    "$(body_with "-rw-r--r-- 1 $FAKE_HOME_NAME user 4096 Aug 25 10:00 config.toml")" 1
+assert_with_failing_awk "a non-neutral ls -l group is still caught" \
+    "$(body_with "-rw-r--r-- 1 user $FAKE_HOME_NAME 4096 Aug 25 10:00 config.toml")" 1
+assert_with_failing_awk "a non-neutral ls -o owner is still caught" \
+    "$(body_with "-rw-r--r-- 1 $FAKE_HOME_NAME 4096 Aug 25 10:00 config.toml")" 1
+assert_with_failing_awk "a neutral ls -l listing is still accepted" \
+    "$(body_with "-rw-r--r-- 1 user user 4096 Aug 25 10:00 config.toml")" 0
 
 # --- bearer-token ----------------------------------------------------
 assert_caught "an opaque bearer token pasted into a captured body" \
@@ -1337,6 +1468,76 @@ assert_clean "a two-char stored session id does not deny-list that fragment" \
     ingress_request.json \
     "$(body_with "the abbreviation ab appears in ordinary prose")" \
     "$(seat_store_with "ab")"
+
+# --- grep error handling ----------------------------------------------
+# One case per scanner, each faulting on a substring unique to that
+# scanner's own pattern so the other scanners still run and pass.
+assert_grep_error_refuses "the deny-list scan" ingress_request.json "$FAKE_GIT_NAME"
+assert_grep_error_refuses "the home-prefix extraction" ingress_request.json "/home/[A-Za-z"
+assert_grep_error_refuses "the non-ASCII home-prefix check" ingress_request.json "/home/[^"
+assert_grep_error_refuses "the dash-encoded home-prefix extraction" ingress_request.json "-home-["
+assert_grep_error_refuses "the ls owner-column extraction" ingress_request.json "[-dlbcps]"
+assert_grep_error_refuses "the bearer scan" ingress_request.json "bearer[[:space:]]"
+assert_grep_error_refuses "the provider-key scan" ingress_request.json "sk-ant-api03-"
+assert_grep_error_refuses "the google oauth scan" ingress_request.json "ya29"
+assert_grep_error_refuses "the google api key scan" ingress_request.json "AIza"
+assert_grep_error_refuses "the jwt scan" ingress_request.json "eyJ"
+assert_grep_error_refuses "the aws temp key id scan" ingress_request.json "ASIA"
+assert_grep_error_refuses "the nvidia key scan" ingress_request.json "nvapi-"
+assert_grep_error_refuses "the bedrock key scan" ingress_request.json "bedrock-api-key-"
+assert_grep_error_refuses "the aws credential assignment scan" ingress_request.json "AWS_SECRET_ACCESS_KEY"
+
+# An error AFTER grep has streamed output must still refuse: the consumer
+# sees only neutral matches, drains, and grep's own status is the verdict.
+assert_grep_error_refuses "the home-prefix extraction, error after output" ingress_request.json \
+    "/home/[A-Za-z" late "$(body_with "cat /home/user/.config/routectl/config.toml")"
+assert_grep_error_refuses "the dash-encoded extraction, error after output" ingress_request.json \
+    "-home-[" late "$(body_with "session at -home-user-Desktop-build")"
+assert_grep_error_refuses "the ls owner-column extraction, error after output" ingress_request.json \
+    "[-dlbcps]" late "$(body_with "-rw-r--r-- 1 user user 42 Jan 1 00:00 f")"
+
+# --- binary input and streaming ----------------------------------------
+# Without -a, GNU grep -o treats a file holding a NUL byte as binary and
+# prints no matches, so the extraction scanners saw nothing. The no-NUL
+# control proves the same path is refused when grep can read it.
+assert_caught "a third party's home path is refused (control, no NUL byte)" \
+    ingress_request.json \
+    "$(body_with "ls /home/someoneelse/Desktop")" \
+    home-prefix
+assert_caught "a third party's home path is refused when the file holds a NUL byte" \
+    ingress_request.json \
+    "$(body_with "ls /home/someoneelse/Desktop@NUL@tail")" \
+    home-prefix
+assert_caught "a third party's dash-encoded home path is refused when the file holds a NUL byte" \
+    ingress_request.json \
+    "$(body_with "session at -home-someoneelse-Desktop-build@NUL@tail")" \
+    home-prefix-encoded
+assert_caught "a non-neutral ls owner is refused when the file holds a NUL byte" \
+    ingress_request.json \
+    "$(body_with "-rw-r--r-- 1 someoneelse someoneelse 42 Jan 1 00:00 f@NUL@")" \
+    ls-owner-column
+assert_caught "a bearer token (a -q scanner) is still caught when the file holds a NUL byte" \
+    ingress_request.json \
+    "$(body_with "Authorization: Bearer abcdefghijklmnop0123456789@NUL@")" \
+    bearer-token
+
+many_placeholder_paths() {
+    yes '/home/user/x ' | head -n "$1" | tr -d '\n'
+}
+
+# A third-party path after tens of thousands of neutral matches is found.
+assert_caught "a third party's home path after many neutral matches is found" \
+    ingress_request.json \
+    "$(body_with "$(many_placeholder_paths 50000) ls /home/someoneelse/Desktop")" \
+    home-prefix
+
+# The third-party path comes first and megabytes of matches follow, so the
+# consumer returns while grep is still writing and grep dies of SIGPIPE
+# (141). The found verdict must stand: exit 1, never the exit 2 refusal.
+assert_caught "an early match followed by megabytes of matches is a finding, not a grep failure" \
+    ingress_request.json \
+    "$(body_with "ls /home/someoneelse/Desktop $(many_placeholder_paths 300000)")" \
+    home-prefix
 
 if [ "$fails" -gt 0 ]; then
     echo "scrub-fixture self-test: $fails failure(s)" >&2
