@@ -4282,6 +4282,36 @@ that resolves your token under other users' requests. routectl does
 not support or condone gateway usage beyond what the upstream
 provider permits -- see the README "Responsible use" section.
 
+**Managed token host containment.** An `api_key_ref` of
+`oauth://anthropic` or `oauth://anthropic#<label>` is the subscription
+token, and it is accepted only on an `anthropic-api` provider with
+`credential_source = "own"`, no `bedrock_mantle` block, and a `base_url`
+that is omitted or is `https://` on exactly `api.anthropic.com`. Any
+other provider kind, and any other host (a gateway, a passthrough, a
+loopback address, a lookalike or subdomain of the Anthropic host), is
+rejected. Static `env://` and `file://` credentials are not affected, so
+an `anthropic-api` provider on `https://gateway.example/api` with an
+`env://` key, or on `http://127.0.0.1:18080` with a `file://` key, stays
+valid.
+
+- **Symptom.** `routectl serve` refuses to start, and `routectl config
+  check` reports an error, naming the provider (`provider `<name>`: the
+  managed Anthropic credential ...`). The message withholds
+  the `base_url` and the credential ref; read them from your own
+  `config.toml`. On a hot reload the same error makes the reload fail:
+  the daemon logs `config reload failed; keeping previous config` at
+  WARN and keeps serving the previous config. A stored-seat change that
+  rebuilds the router against a config carrying the shape is likewise
+  refused and keeps the previous router.
+- **Fix.** For a gateway or passthrough, give that provider its own
+  static credential (`api_key_ref = "env://VAR"` or `"file:///abs/path"`)
+  issued for that destination. Never copy the subscription token into an
+  env var or file to send it elsewhere. To use the subscription itself,
+  point the provider at the default Anthropic URL (omit `base_url`).
+- **No override.** There is no flag, config key, or loopback exception
+  that relaxes this check; loopback is not treated as local because a
+  loopback port can be a tunnel to another machine.
+
 ### Operator setup checklist
 
 1. Build and run routectl:
@@ -4337,7 +4367,11 @@ provider permits -- see the README "Responsible use" section.
 
    The `oauth://anthropic` ref resolves at request time against the
    credentials store; the `auth_kind = "oauth-bearer"` flag emits
-   `Authorization: Bearer <token>` instead of `x-api-key`.
+   `Authorization: Bearer <token>` instead of `x-api-key`. Against
+   `api.anthropic.com` it also emits the built-in Claude Code identity
+   (stainless header pack, default `user_agent`, session and request ids);
+   against any other host that identity is withheld, and only what you set
+   explicitly in `header_extras` or `user_agent` is sent.
 
    For the claude-code client identity (`user_agent`, forwarded session
    headers, the full stainless header pack) the offered entry is a

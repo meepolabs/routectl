@@ -230,9 +230,11 @@ license.
   (unset = the pinned default, byte-identical to before the knob)
 - `src/identity/anthropic.rs` -- compiled Claude Code SDK (Stainless)
   identity-header defaults (`default_claude_code_identity_headers`,
-  `default_claude_code_user_agent`); consumed by the anthropic-api egress on
-  the OauthBearer path so a zero-config provider emits the Claude Code
-  fingerprint. Also `is_anthropic_api_host(base_url) -> bool`, the shared
+  `default_claude_code_user_agent`); consumed by the anthropic-api egress only
+  when the provider is OauthBearer AND its configured base URL is exactly the
+  Anthropic API host (`emits_claude_code_identity`), so a zero-config provider
+  there emits the Claude Code fingerprint and no other host receives it.
+  Also `is_anthropic_api_host(base_url) -> bool`, the shared
   exact-host predicate (`api.anthropic.com` only,
   credentials/path/query/fragment-smuggle-proof) gating the pure-proxy
   forwarded-credential and forwarded-identity paths in `anthropic_api/mod.rs`,
@@ -572,7 +574,7 @@ license.
   `max_thinking_entry_bytes`, `session_id`, `cloak`, `use_forwarded_bearer`,
   `mantle` (`Option<MantleAuth>`, cfg `bedrock`)) + `AuthKind` (ApiKey /
   OauthBearer) +
-  `AnthropicApiProvider::new`/`resolve_user_agent`/`build_headers`/`cloak_body`/`is_non_cc`/`is_cloak_lane`
+  `AnthropicApiProvider::new`/`emits_claude_code_identity`/`resolve_user_agent`/`build_headers`/`cloak_body`/`is_non_cc`/`is_cloak_lane`
   (`cloak_body` also owns the cloak's classification SPLIT counters, one
   policy action per cloaked request on each of the `is_non_cc` arms, so the
   ratio between them is derivable)
@@ -1053,13 +1055,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `request.rs`'s `tests` module: system-surface fingerprint withhold pins
 - `src/gemini/request_extras_boundary_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: extras-source and `metadata` withhold pins
-- `src/gemini/schema.rs` -- `clean_schema_reporting`: pure JSON-Schema ->
-  Gemini OpenAPI-subset cleaner shared by tool `parameters` and
-  `generationConfig.responseSchema` (oneOf -> anyOf, strip
-  `$schema`/`$ref`/`additionalProperties`, nullable-union lift, numeric-enum
-  coercion, uppercased `type`), recursing nested objects/arrays/combinators;
-  returns a constraint-lost flag alongside the cleaned schema so the egress
-  tally owns the WARN and the counter and this module stays log-free
+- `src/gemini/schema.rs` -- `clean_schema_reporting`, `SchemaBudget`,
+  `SchemaTooLarge`: JSON-Schema -> Gemini OpenAPI-subset cleaner for tool
+  parameters and responseSchema; ceilings and cost model in the module doc
 - `src/gemini/response.rs` -- Gemini response -> canonical `ChatResponse`;
   `translate_usage` maps `cachedContentTokenCount` ->
   `cache_read_input_tokens` and `thoughtsTokenCount` -> `reasoning_tokens`
@@ -1733,6 +1731,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `{bad-request, content-policy, context-window, feature-unsupported}`
   (`ALLOWED_REMAP_TARGETS`) -- a remap may only move a status into a terminal,
   non-retrying class, naming the offending provider/status/target on reject;
+  `validate_managed_anthropic_credential` (public; also called by the factory
+  and the capture harness) confines an `oauth://anthropic` ref;
   `class_token` renders a `ConfigFailureClass` as its kebab-case TOML
   spelling; `collect_config_validation(&Config) -> ConfigValidation` is the
   single ordered invocation of the whole `validate_*` suite (bare-message
@@ -3753,12 +3753,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   is neither lost nor reclassified against a stale baseline, and
   once-per-process holds literally across a reload
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
-  RAII: `gate_check`, the
-  `record_success`/`record_failure`/`record_failure_opened`/`park_provider`/`release_probe_slot`
+  RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
+  half-open ownership guard), the
+  `record_success`/`record_failure`/`record_failure_opened`/`park_provider`
   breaker-accounting methods, `force_open_breaker`/`breaker_open_for`, the
   `ProbeSlotGuard`/`ProbeAdmission`/`LearnedProbeGuard`/`ProbeAdmissionSet`
-  RAII guards (Drop-settles the probe slot on every outcome incl.
-  cancellation), and
+  RAII guards (`ProbeSlotGuard::release`/`owns_slot` free only an owned
+  slot; Drop-settles the probe slot on every outcome incl. cancellation), and
   `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
 - `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`,
   `claim_state_slot`, `state_slot_refusal`
@@ -7936,8 +7937,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils`
   (single source of truth for the canonical scenario builders) plus the
-  cli-only `replay` harness and `readiness` submodules; the builders are
-  enabled via the `test-utils` dev-dependency feature on core
+  cli-only `replay` harness, `readiness`, and `temp_reaper` submodules; the
+  builders are enabled via the `test-utils` dev-dependency feature on core
+- `tests/common/temp_reaper.rs` -- `create_usage_dir`, `create_mitm_dir`,
+  `reap_stale_test_dirs`: exclusive nonce-named test temp dirs and their
+  start-of-run reaper; safety rules in the module doc
+- `tests/temp_reaper.rs` -- reaper unit tests (own binary, helper by path)
 - `tests/common/readiness.rs` -- shared `/health` readiness poll
   (`await_health`, deadline + cadence consts) used by every integration
   binary that boots `serve_on_listener`; readiness is a served response,
