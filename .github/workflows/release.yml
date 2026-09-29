@@ -402,11 +402,11 @@ jobs:
           set -euo pipefail
           cd dist
           : > SHA256SUMS
-          for f in *.sha256; do cat "$f" >> SHA256SUMS; done
+          for f in ./*.sha256; do cat "$f" >> SHA256SUMS; done
           # Per-file .sha256 sidecars are now redundant -- the aggregate
           # SHA256SUMS is the only checksum file in the published
           # release. Remove them so the upload step doesn't ship them.
-          rm -f *.sha256
+          rm -f ./*.sha256
 
       - name: install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
