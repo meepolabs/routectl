@@ -498,9 +498,9 @@ selectable = true                         # default true
 
 **Reserved names.** Model nicknames, pool seats, and provider entries
 share one runtime-state namespace (circuit breaker, rate limit, probes,
-learned capability state), so two rules apply to every `[models]` and
-`[providers]` key, selectable or not, referenced or not. `config check`,
-`serve`, and hot reload all refuse a config that breaks either:
+learned capability state), so the rules below apply to every `[models]`
+and `[providers]` key, selectable or not, referenced or not. `config check`,
+`serve`, and hot reload all refuse a config that breaks any of them:
 
 - `#` is reserved. It separates a pool nickname from its member in a
   seat's state key, so neither a model nickname nor a provider name may
@@ -509,6 +509,9 @@ learned capability state), so two rules apply to every `[models]` and
   A model named after its own provider (`[models.openrouter]` with
   `provider = "openrouter"`, the shape `routectl init` writes) is still
   valid.
+- A provider name is at most 128 bytes (UTF-8). Provider names also key
+  the durable paid-probe budget, so an oversized one is refused rather
+  than stored; the error states the length without echoing the name.
 
 Everything else on `[models.X]` is a per-model behavior knob -- reasoning
 declaration, output caps, header and payload extras, response labels --

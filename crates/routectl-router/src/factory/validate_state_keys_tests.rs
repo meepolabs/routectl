@@ -1,4 +1,4 @@
-use super::validate_state_key_names;
+use super::{MAX_PROVIDER_NAME_BYTES, validate_state_key_names};
 use crate::config::{Config, LEAN_EXAMPLE_CONFIG};
 use crate::factory::collect_config_validation;
 
@@ -209,6 +209,51 @@ fn a_model_nickname_equal_to_a_provider_name_dispatching_through_a_pool_is_refus
             .errors
             .iter()
             .any(|e| e.contains("runtime state")),
+        "the refusal must surface through the collected suite"
+    );
+}
+
+fn provider_named(name: &str) -> Config {
+    parse(&format!(
+        "[providers.\"{name}\"]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n"
+    ))
+}
+
+#[test]
+fn a_provider_name_at_the_byte_ceiling_passes() {
+    // Positive control for the refusal below: same shape, one byte shorter.
+    let config = provider_named(&"p".repeat(MAX_PROVIDER_NAME_BYTES));
+
+    assert!(
+        validate_state_key_names(&config).is_ok(),
+        "{:?}",
+        validate_state_key_names(&config).err()
+    );
+}
+
+#[test]
+fn a_provider_name_over_the_byte_ceiling_is_refused_without_echoing_it() {
+    // Arrange: multi-byte characters, so the ceiling is proven to count
+    // bytes rather than characters.
+    let name = "\u{e9}".repeat(MAX_PROVIDER_NAME_BYTES / 2 + 1);
+    assert!(name.chars().count() <= MAX_PROVIDER_NAME_BYTES);
+    let config = provider_named(&name);
+
+    // Act
+    let err = errors(&config);
+
+    // Assert
+    let ceiling = format!("the maximum is {MAX_PROVIDER_NAME_BYTES}");
+    assert!(err.contains(&ceiling), "{err}");
+    assert!(
+        !err.contains(&name),
+        "the oversized name must not be echoed: {err}"
+    );
+    assert!(
+        collect_config_validation(&config)
+            .errors
+            .iter()
+            .any(|e| e.contains(&ceiling)),
         "the refusal must surface through the collected suite"
     );
 }
