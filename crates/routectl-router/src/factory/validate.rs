@@ -178,6 +178,40 @@ pub(super) fn validate_openai_responses_account_id(
     )))
 }
 
+/// Run [`validate_openai_responses_account_id`] over every
+/// `openai-responses` entry, so `config check`, `serve` startup and hot reload
+/// refuse the same account-id shapes the provider factory refuses. Entries on
+/// the Bedrock mantle lane are skipped here exactly as the factory skips them;
+/// [`validate_provider_openai_mantle`] owns their `account_id_ref` rule.
+///
+/// Parses `api_key_ref` only to classify it as an `oauth://` bearer; no secret
+/// is resolved or read.
+#[cfg(feature = "openai-responses")]
+fn validate_openai_responses_account_ids(config: &Config) -> Result<()> {
+    use routectl_auth::SecretRef;
+
+    for (name, entry) in &config.providers {
+        let ProviderEntry::OpenaiResponses {
+            api_key_ref,
+            account_id_ref,
+            auth_kind,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        #[cfg(feature = "bedrock")]
+        if bedrock_mantle.is_some() {
+            continue;
+        }
+        let bearer_is_oauth = matches!(SecretRef::parse(api_key_ref), Ok(SecretRef::OAuth { .. }));
+        validate_openai_responses_account_id(name, *auth_kind, bearer_is_oauth, account_id_ref)?;
+    }
+    Ok(())
+}
+
 /// Routectl-mandatory body fields: keys routectl writes into every
 /// Bedrock-Invoke body. If `[bedrock] allowed_body_fields` is non-empty
 /// AND missing any of these, the egress drops them on send and the
@@ -1837,6 +1871,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = validate_codex_version(config) {
         errors.push(bare_validation_message(e));
     }
+    #[cfg(feature = "openai-responses")]
+    if let Err(e) = validate_openai_responses_account_ids(config) {
+        errors.push(bare_validation_message(e));
+    }
     if let Err(e) = validate_pools(config) {
         errors.push(bare_validation_message(e));
     }
@@ -1861,3 +1899,7 @@ mod validate_tests;
 #[cfg(test)]
 #[path = "validate_loopback_vectors_tests.rs"]
 mod loopback_vectors_tests;
+
+#[cfg(all(test, feature = "openai-responses"))]
+#[path = "validate_account_id_tests.rs"]
+mod account_id_tests;

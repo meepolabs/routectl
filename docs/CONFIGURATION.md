@@ -4846,6 +4846,13 @@ for routectl to derive the UUID from. `env://` and `file://` refs work
 for both fields. routectl never refreshes a
 static bearer; rotation is the operator's job.
 
+`config check`, `serve` startup, and hot reload all enforce the
+`account_id_ref` rule without reading either secret: a `chatgpt-oauth`
+entry with a static bearer and no `account_id_ref` is refused, and so is
+an `account_id_ref` on `auth_kind = "api-key"`. `config check` does not
+resolve the refs themselves; an env var that is unset or a file that is
+missing still surfaces only when the lane first dispatches.
+
 ### `codex_version` (client-identity override)
 
 The ChatGPT backend rejects a session whose HTTP client identity drifts
