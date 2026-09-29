@@ -58,7 +58,6 @@ impl ReleaseOutcome {
 /// the guard unsettled -- an early return, a `?`, a cancelled future, a
 /// shutdown -- releases the slot on the same terms, so there is no call
 /// site that can forget to.
-#[derive(Debug)]
 pub struct ProbeLease<'a> {
     scheduler: &'a ProbeScheduler,
     key: FieldVerdictKey,
@@ -93,6 +92,22 @@ impl<'a> ProbeLease<'a> {
             lease_seq,
             settled: false,
         }
+    }
+}
+
+/// Hand-written: a derive would recurse into the scheduler and render its
+/// whole job table, and the key and payload carry operator identifiers and
+/// client-supplied beta context. Only closed-set tokens and counters print, and
+/// the scheduler lock is never taken from here.
+impl std::fmt::Debug for ProbeLease<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeLease")
+            .field("validator", &self.validator.as_str())
+            .field("field_path", &self.payload.field_path())
+            .field("generation", &self.generation)
+            .field("lease_seq", &self.lease_seq)
+            .field("settled", &self.settled)
+            .finish_non_exhaustive()
     }
 }
 
@@ -158,6 +173,116 @@ impl Drop for ProbeLease<'_> {
                 self.lease_seq,
                 None,
                 Instant::now(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::super::{ProbePayload, ProbeScheduler, ProbeValidator};
+    use crate::field_verdict::FieldVerdictKey;
+
+    fn sentinel_key(state_key: &str, field_path: &str, provider_kind: &str) -> FieldVerdictKey {
+        FieldVerdictKey::new(state_key, field_path, provider_kind)
+            .expect("a well-formed dotted path mints an identity")
+    }
+
+    fn sentinel_payload(
+        field_path: &'static str,
+        field_value: &str,
+        client_beta: &str,
+        operator_beta: &str,
+    ) -> ProbePayload {
+        ProbePayload::new(
+            field_path,
+            field_value.to_string(),
+            &[client_beta.to_string()],
+            &[operator_beta.to_string()],
+            true,
+        )
+        .expect("sentinel tokens are within the retention bound")
+    }
+
+    #[test]
+    fn lease_debug_renders_identity_tokens_and_no_lane_payloads() {
+        // Arrange: the own lane is activated first, so it is the one leased;
+        // the sibling stays queued in the table behind the scheduler reference.
+        let scheduler = ProbeScheduler::new();
+        let own_key = sentinel_key(
+            "own-state-sentinel#own-seat-sentinel",
+            "ownpathsentinel.leaf",
+            "own-provider-sentinel",
+        );
+        let sibling_key = sentinel_key(
+            "sibling-state-sentinel#sibling-seat-sentinel",
+            "siblingpathsentinel.leaf",
+            "sibling-provider-sentinel",
+        );
+        let own_payload = sentinel_payload(
+            "thinking.enabled.display",
+            "omitted",
+            "own-client-beta-sentinel",
+            "own-operator-beta-sentinel",
+        );
+        let sibling_payload = sentinel_payload(
+            "siblingfieldsentinel.display",
+            "updates",
+            "sibling-client-beta-sentinel",
+            "sibling-operator-beta-sentinel",
+        );
+        scheduler.activate(&own_key, 7, vec![ProbeValidator::CountTokens], own_payload);
+        scheduler.activate(
+            &sibling_key,
+            7,
+            vec![ProbeValidator::CountTokens],
+            sibling_payload,
+        );
+        let lease = scheduler
+            .lease_due(Instant::now())
+            .expect("a queued job is leasable");
+
+        // Act
+        let rendered = format!("{lease:?}");
+
+        // Assert
+        for sentinel in [
+            "own-state-sentinel",
+            "own-seat-sentinel",
+            "ownpathsentinel",
+            "own-provider-sentinel",
+            "own-client-beta-sentinel",
+            "own-operator-beta-sentinel",
+            "omitted",
+            "sibling-state-sentinel",
+            "sibling-seat-sentinel",
+            "siblingpathsentinel",
+            "sibling-provider-sentinel",
+            "siblingfieldsentinel",
+            "sibling-client-beta-sentinel",
+            "sibling-operator-beta-sentinel",
+            "updates",
+            "jobs",
+            "tombstones",
+        ] {
+            assert!(
+                !rendered.contains(sentinel),
+                "lease debug leaked {sentinel:?}: {rendered}"
+            );
+        }
+        for identity in [
+            "ProbeLease",
+            "validator: \"count_tokens\"",
+            "field_path: \"thinking.enabled.display\"",
+            "generation: 7",
+            "lease_seq: 1",
+            "settled: false",
+        ] {
+            assert!(
+                rendered.contains(identity),
+                "lease debug is missing {identity:?}: {rendered}"
             );
         }
     }
