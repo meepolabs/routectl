@@ -108,8 +108,8 @@ env:
   # vendored build into a dynamic library. scripts/check-aws-lc-pin.sh
   # enforces both pins and rejects any other setting of either variable.
   # A target-suffixed variable the runner itself exports would still
-  # outrank them, so every cargo job runs scripts/assert-aws-lc-env.sh
-  # straight after checkout.
+  # outrank them, so every job runs scripts/assert-aws-lc-env.sh straight
+  # after checkout, bar the exemptions check-aws-lc-pin.sh lists.
   AWS_LC_SYS_USE_SYSTEM: "0"
   AWS_LC_SYS_STATIC: "1"
   BIN_NAME: routectl

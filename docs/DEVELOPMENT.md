@@ -215,14 +215,15 @@ bash scripts/check-aws-lc-pin.test.sh
 ```
 
 A pin cannot outrank a target-suffixed variable the runner itself exports,
-so every CI and release job that runs cargo first runs
-`scripts/assert-aws-lc-env.sh`, which fails on any suffixed
+so `scripts/assert-aws-lc-env.sh` runs as the step right after checkout in
+every CI and release job except the few `check-aws-lc-pin.sh` lists as
+exempt with a reason. It fails on any variable of the
 `AWS_LC_SYS_{USE_SYSTEM,STATIC,SYSTEM_DIR,SYSTEM_BINDINGS,NO_PREFIX}`
-variable, on `AWS_LC_SYS_SYSTEM_DIR`, and on either pinned variable at another
-value (names only, never values), and the pin check fails a cargo job that
-lacks that step; only its self-test,
-`bash scripts/assert-aws-lc-env.test.sh`, runs in the commit gate, since a
-developer machine may set these variables legitimately.
+families, suffixed or not and in any case, other than exactly
+`AWS_LC_SYS_USE_SYSTEM=0` and `AWS_LC_SYS_STATIC=1`, and prints names only,
+never values. Only its self-test, `bash scripts/assert-aws-lc-env.test.sh`,
+runs in the commit gate, since a developer machine may set these variables
+legitimately.
 
 `cargo fmt` walks the module tree, so it never opens a file pulled in by
 `include!` -- the fmt gate passes vacuously on those fragments, and this

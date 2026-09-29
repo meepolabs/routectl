@@ -8404,13 +8404,13 @@ new section or a second doc.
 - `check-subject-length.test.sh` -- self-test for the subject-length gate
 - `check-aws-lc-pin.sh` -- commit-gate and CI check that `ci.yml` and
   `release.yml` pin `aws-lc-sys` to its vendored, static AWS-LC build in the
-  top-level `env:`, set neither variable anywhere else, and run
-  `assert-aws-lc-env.sh` ahead of every cargo step
+  top-level `env:`, set no AWS-LC override anywhere else, and run
+  `assert-aws-lc-env.sh` right after checkout in every non-exempt job
 - `check-aws-lc-pin.test.sh` -- self-test for the AWS-LC build-pin check
-- `assert-aws-lc-env.sh` -- CI preflight, first step of every cargo job, that
-  fails when the process environment carries an AWS-LC build override the
-  workflow pin cannot outrank (target-suffixed names, `SYSTEM_DIR`, off-pin
-  values); prints variable names only
+- `assert-aws-lc-env.sh` -- CI preflight, the step after checkout in every
+  non-exempt job, that fails when the process environment carries any AWS-LC
+  build override other than the two exact workflow pins; prints variable
+  names only
 - `assert-aws-lc-env.test.sh` -- self-test for the AWS-LC environment
   preflight
 - `check-nav-index.sh` -- advisory, non-blocking check that every

@@ -18,6 +18,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFLIGHT="$HERE/assert-aws-lc-env.sh"
 
 fails=0
+STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$STUB_DIR"' EXIT
+mkdir "$STUB_DIR/failing" "$STUB_DIR/silent"
+printf '#!/bin/sh\nexit 3\n' >"$STUB_DIR/failing/env"
+printf '#!/bin/sh\nexit 0\n' >"$STUB_DIR/silent/env"
+chmod +x "$STUB_DIR/failing/env" "$STUB_DIR/silent/env"
 
 # A value distinctive enough that finding it in the output can only mean the
 # preflight printed a value.
@@ -125,6 +131,48 @@ assert_reject "lower-case spelling of STATIC" \
 assert_reject "lower-case spelling of a suffixed USE_SYSTEM" \
     aws_lc_sys_use_system_x86_64_pc_windows_msvc \
     "${PINS[@]}" aws_lc_sys_use_system_x86_64_pc_windows_msvc="$CANARY"
+
+assert_reject "unsuffixed SYSTEM_BINDINGS" \
+    AWS_LC_SYS_SYSTEM_BINDINGS \
+    "${PINS[@]}" AWS_LC_SYS_SYSTEM_BINDINGS="$CANARY"
+
+assert_reject "unsuffixed NO_PREFIX" \
+    AWS_LC_SYS_NO_PREFIX \
+    "${PINS[@]}" AWS_LC_SYS_NO_PREFIX="$CANARY"
+
+assert_reject "STATIC value 1 followed by a second line" \
+    AWS_LC_SYS_STATIC \
+    AWS_LC_SYS_USE_SYSTEM=0 AWS_LC_SYS_STATIC="1
+$CANARY"
+
+# A value spanning lines that looks like a further entry: it must neither be
+# reported as a variable of its own nor leak into the output.
+assert_embedded_entry_not_split() {
+    local desc="value carrying a forged AWS-LC entry on its second line" out
+    if out="$(probe "${PINS[@]}" UNRELATED_SETTING="$CANARY
+AWS_LC_SYS_USE_SYSTEM_x=1")" && printf '%s' "$out" | grep -q 'aws-lc-env: PASS'; then
+        if printf '%s' "$out" | grep -q 'AWS_LC_SYS_USE_SYSTEM_x'; then
+            echo "FAIL: forged entry reported or echoed -- $desc"
+            printf '%s\n' "$out"
+            fails=$((fails + 1))
+        else
+            value_leaked "$desc" "$out" || echo "PASS: accepted -- $desc"
+        fi
+    else
+        echo "FAIL: expected PASS -- $desc"
+        printf '%s\n' "$out"
+        fails=$((fails + 1))
+    fi
+}
+assert_embedded_entry_not_split
+
+assert_reject "env -0 failing" \
+    'env -0' \
+    PATH="$STUB_DIR/failing:$PATH"
+
+assert_reject "env -0 succeeding with no entries" \
+    'env -0' \
+    PATH="$STUB_DIR/silent:$PATH"
 
 if [[ "$fails" -ne 0 ]]; then
     echo "assert-aws-lc-env.test.sh: $fails assertion(s) failed" >&2

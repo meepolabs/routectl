@@ -47,6 +47,14 @@ workflow() {
     printf '%s\n' "$path"
 }
 
+# Write $3 to a workflow file named $2 in a fresh directory for case $1, so the
+# checker applies the exemptions listed for that file name; print its path.
+named_workflow() {
+    mkdir -p "$tmp/$1"
+    printf '%s' "$3" >"$tmp/$1/$2"
+    printf '%s\n' "$tmp/$1/$2"
+}
+
 assert_pass() {
     local desc="$1" path="$2" out
     if out="$(bash "$CHECKER" "$path" 2>&1)" && printf '%s' "$out" | grep -q 'aws-lc-pin: PASS'; then
@@ -147,15 +155,6 @@ assert_reject "STATIC pin missing" \
 '"$JOBS")" \
     'lacks AWS_LC_SYS_STATIC: "1"'
 
-assert_pass "job that never runs cargo needs no environment preflight" \
-    "$(workflow no-cargo-job "$HEADER$PINNED_ENV$JOBS"'  scan:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: cargo-free lockfile scan
-        run: osv-scanner scan source -r .
-')"
-
 assert_reject "cargo job without the environment preflight" \
     "$(workflow no-preflight "$HEADER$PINNED_ENV"'jobs:
   build:
@@ -165,7 +164,7 @@ assert_reject "cargo job without the environment preflight" \
       - name: cargo build
         run: cargo build
 ')" \
-    'job build runs cargo with no preceding step: run: bash scripts/assert-aws-lc-env.sh'
+    'job build does not run the preflight as the step right after checkout: bash scripts/assert-aws-lc-env.sh'
 
 assert_reject "second cargo job without the preflight beside a compliant one" \
     "$(workflow second-job "$HEADER$PINNED_ENV$JOBS"'  audit:
@@ -176,7 +175,7 @@ assert_reject "second cargo job without the preflight beside a compliant one" \
           cargo install cargo-audit --locked
           cargo audit
 ')" \
-    'job audit runs cargo with no preceding step'
+    'job audit does not run the preflight as the step right after checkout'
 
 assert_reject "environment preflight placed after the first cargo step" \
     "$(workflow late-preflight "$HEADER$PINNED_ENV"'jobs:
@@ -188,7 +187,7 @@ assert_reject "environment preflight placed after the first cargo step" \
       - run: bash scripts/assert-aws-lc-env.sh
       - run: cargo build
 ')" \
-    'job build runs cargo with no preceding step'
+    'job build does not run the preflight as the step right after checkout'
 
 assert_reject "Rust toolchain setup ahead of the environment preflight" \
     "$(workflow late-after-toolchain "$HEADER$PINNED_ENV"'jobs:
@@ -200,7 +199,97 @@ assert_reject "Rust toolchain setup ahead of the environment preflight" \
       - run: bash scripts/assert-aws-lc-env.sh
       - run: cargo build
 ')" \
-    'job build runs cargo with no preceding step'
+    'job build does not run the preflight as the step right after checkout'
+
+assert_reject "checkout job without the preflight that never runs cargo" \
+    "$(workflow checkout-no-cargo "$HEADER$PINNED_ENV$JOBS"'  scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: osv-scanner scan source -r .
+')" \
+    'job scan does not run the preflight'
+
+assert_pass "job without a checkout that never runs cargo" \
+    "$(workflow no-checkout "$HEADER$PINNED_ENV$JOBS"'  notify:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo done
+')"
+
+assert_reject "job without a checkout that runs cargo" \
+    "$(workflow no-checkout-cargo "$HEADER$PINNED_ENV$JOBS"'  audit:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: cargo install cargo-audit --locked
+')" \
+    'job audit runs cargo without a checkout'
+
+assert_pass "preflight as the first line of a run block" \
+    "$(workflow run-block "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: AWS-LC build environment preflight
+        run: |
+          bash scripts/assert-aws-lc-env.sh
+      - run: cargo build
+')"
+
+assert_reject "run block whose first line is not the preflight" \
+    "$(workflow run-block-late "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cargo fetch
+          bash scripts/assert-aws-lc-env.sh
+      - run: cargo build
+')" \
+    'job build does not run the preflight'
+
+EXEMPT_JOB='  osv-scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: osv-scanner scan source -r .
+'
+
+assert_pass "listed exempt job without the preflight" \
+    "$(named_workflow exempt ci.yml "$HEADER$PINNED_ENV$JOBS$EXEMPT_JOB")"
+
+assert_reject "listed exempt job that runs cargo" \
+    "$(named_workflow exempt-cargo ci.yml "$HEADER$PINNED_ENV$JOBS"'  osv-scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo audit
+')" \
+    'exempt job osv-scan runs cargo'
+
+assert_reject "exemption naming a job the workflow no longer defines" \
+    "$(named_workflow stale-exemption ci.yml "$HEADER$PINNED_ENV$JOBS")" \
+    'exemption names job osv-scan, which this workflow does not define'
+
+# The literal $GITHUB_ENV is the workflow text under test, not a shell expansion.
+# shellcheck disable=SC2016
+for var in aws_lc_sys_use_system_x86_64_unknown_linux_gnu AWS_LC_SYS_SYSTEM_DIR \
+    AWS_LC_SYS_SYSTEM_BINDINGS AWS_LC_SYS_NO_PREFIX; do
+    assert_reject "$var written through GITHUB_ENV" \
+        "$(workflow "github-env-$var" "$HEADER$PINNED_ENV"'jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/assert-aws-lc-env.sh
+      - run: echo "'"$var"'=1" >> "$GITHUB_ENV"
+')" \
+        "set outside the top-level pin"
+done
 
 assert_reject "workflow file missing" \
     "$tmp/absent.yml" \
