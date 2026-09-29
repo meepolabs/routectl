@@ -182,6 +182,85 @@ fn reasoning_absent_summary_defaults_to_auto() {
     assert_eq!(v["reasoning"], json!({"effort": "low", "summary": "auto"}));
 }
 
+/// Serializes the typed request straight to a string. The egress body goes
+/// through `serde_json::to_value` first, whose map silently collapses a
+/// duplicate key, so only the typed serializer can expose one.
+fn translate_to_wire_string(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> String {
+    let r = translate(cfg, req).expect("translate");
+    serde_json::to_string(&r).expect("serialize")
+}
+
+fn req_with_effort_and_summary(summary: Value) -> ChatRequest {
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+    req.provider_extras = Some(json!({"reasoning": {"summary": summary}}));
+    req
+}
+
+#[test]
+fn reasoning_object_summary_serializes_one_summary_key() {
+    // Arrange
+    let req = req_with_effort_and_summary(json!({"mode": "x"}));
+
+    // Act
+    let wire = translate_to_wire_string(&cfg(), &req);
+
+    // Assert: the caller's object rides alone; no "auto" default beside it.
+    assert_eq!(wire.matches("\"summary\"").count(), 1, "wire: {wire}");
+    assert!(wire.contains(r#""summary":{"mode":"x"}"#), "wire: {wire}");
+    assert!(!wire.contains(r#""summary":"auto""#), "wire: {wire}");
+}
+
+#[test]
+fn reasoning_null_summary_serializes_one_null_summary_key() {
+    // Arrange: null is non-string, so it forwards verbatim via the flatten.
+    let req = req_with_effort_and_summary(Value::Null);
+
+    // Act
+    let wire = translate_to_wire_string(&cfg(), &req);
+
+    // Assert
+    assert_eq!(wire.matches("\"summary\"").count(), 1, "wire: {wire}");
+    assert!(wire.contains(r#""summary":null"#), "wire: {wire}");
+}
+
+#[test]
+fn reasoning_string_summary_serializes_one_summary_key() {
+    // Arrange
+    let req = req_with_effort_and_summary(json!("concise"));
+
+    // Act
+    let wire = translate_to_wire_string(&cfg(), &req);
+
+    // Assert
+    assert_eq!(wire.matches("\"summary\"").count(), 1, "wire: {wire}");
+    assert!(wire.contains(r#""summary":"concise""#), "wire: {wire}");
+}
+
+#[test]
+fn reasoning_absent_summary_serializes_one_auto_summary_key() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let wire = translate_to_wire_string(&cfg(), &req);
+
+    // Assert
+    assert_eq!(wire.matches("\"summary\"").count(), 1, "wire: {wire}");
+    assert!(wire.contains(r#""summary":"auto""#), "wire: {wire}");
+}
+
 #[test]
 fn reasoning_summary_only_still_emits_reasoning_object() {
     // Arrange: a summary-only request (no effort/enabled/budget) must still
