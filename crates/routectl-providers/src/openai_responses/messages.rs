@@ -37,12 +37,13 @@
 //! recognized-vs-unrecognized: a recognized part with no carrier fails,
 //! and an unrecognized but well-formed part drops.
 //!
-//! Reasoning replay: a reasoning item is emitted only when it carries a
-//! non-empty `encrypted_content` this lane can validly replay. An item
-//! with an empty signature has nothing to re-inject and its upstream id
-//! is either a no-op or a hard "item not found" rejection, so no
-//! translation path can produce one: every producer returns `Option` and
-//! a final sweep before emission enforces the floor structurally.
+//! Reasoning replay: a reasoning item is emitted when it carries a
+//! non-empty `encrypted_content` this lane can validly replay, or -- from
+//! `reasoning_details` -- when it carries a summary, in which case it
+//! ships with neither an id nor a signature. A signature-less item naming
+//! its upstream id is a hard "item not found" rejection, so no
+//! translation path can produce one: every producer gates its own output
+//! and a final sweep before emission enforces the floor structurally.
 //!
 //! A `redacted_thinking` blob that crossed a dialect with no slot for a
 //! reasoning artifact's id and scheme carries both in a self-describing
@@ -108,6 +109,7 @@ struct ResponsesDropTally {
     reasoning_detail_kind: bool,
     reasoning_format_foreign: bool,
     reasoning_scheme_incompatible: bool,
+    reasoning_text_unsigned: bool,
 }
 
 impl ResponsesDropTally {
@@ -125,6 +127,10 @@ impl ResponsesDropTally {
 
     const fn record_reasoning_scheme_incompatible(&mut self) {
         self.reasoning_scheme_incompatible = true;
+    }
+
+    const fn record_reasoning_text_unsigned(&mut self) {
+        self.reasoning_text_unsigned = true;
     }
 
     /// Bump one process-wide counter per drop class this request hit at
@@ -152,6 +158,9 @@ impl ResponsesDropTally {
         }
         if self.reasoning_scheme_incompatible {
             record_translation_drop(super::LANE, "reasoning_scheme_incompatible");
+        }
+        if self.reasoning_text_unsigned {
+            record_translation_drop(super::LANE, "reasoning_text_unsigned");
         }
     }
 }
@@ -486,23 +495,24 @@ fn translate_assistant_message(
 }
 
 /// Final structural gate on the reasoning items an assistant turn is
-/// about to emit: a Reasoning item whose `encrypted_content` is empty
-/// carries nothing replayable, and re-injecting it by its upstream id is
-/// either a no-op or a hard "item not found" rejection.
+/// about to emit. A Reasoning item survives when it carries a non-empty
+/// `encrypted_content`, or when it carries a summary and names no id. A
+/// signature-less item naming an id is a hard "item not found" rejection,
+/// and a signature-less item with no summary carries nothing.
 ///
-/// Every producer already declines to build such an item. This sweep is
-/// deliberately redundant: it makes the floor a property of the emission
-/// point rather than of each producer, so a future path cannot reintroduce
-/// the hole by forgetting the check at its own site.
+/// Every producer already declines to build a non-surviving item. This
+/// sweep is deliberately redundant: it makes the floor a property of the
+/// emission point rather than of each producer, so a future path cannot
+/// reintroduce the hole by forgetting the check at its own site.
 pub(super) fn retain_replayable_reasoning(items: &mut Vec<ResponseInputItem>) {
-    items.retain(|item| {
-        !matches!(
-            item,
-            ResponseInputItem::Reasoning {
-                encrypted_content,
-                ..
-            } if encrypted_content.is_empty()
-        )
+    items.retain(|item| match item {
+        ResponseInputItem::Reasoning {
+            id,
+            summary,
+            encrypted_content,
+            ..
+        } => !encrypted_content.is_empty() || (id.is_none() && !summary.is_empty()),
+        _ => true,
     });
 }
 
@@ -676,37 +686,43 @@ fn lift_reasoning_details(
     }
 
     let mut empty_encrypted_count: u32 = 0;
+    let mut unsigned_text_count: u32 = 0;
     for key in order {
         let group = groups.remove(&key).expect("recorded in order");
         let encrypted_content = group.encrypted_content.unwrap_or_default();
-        // A reasoning item with empty encrypted_content cannot be
-        // validly replayed: re-injecting it by its upstream id is a
-        // no-op (chatgpt-oauth) or a hard 404 "Item not found"
-        // (api.openai.com). Skip it rather than ship a dangling id.
-        // The upstream item id is a reasoning-replay artifact and must
-        // never reach a log line at any level -- count the skips and
-        // emit a bounded aggregate instead of the id itself.
+        if !encrypted_content.is_empty() {
+            out.push(ResponseInputItem::Reasoning {
+                id: key,
+                summary: group.summary,
+                content: group.content,
+                encrypted_content,
+            });
+            continue;
+        }
+        // No signature: re-injecting the item by its upstream id is a hard
+        // "item not found" rejection, so the id never ships. The upstream
+        // item id is a reasoning-replay artifact and must never reach a log
+        // line at any level -- only bounded counts are logged here.
         //
-        // OPEN, and why this is a fidelity risk rather than an accepted
-        // drop: the skip discards the group's `summary` and `content`
-        // surfaces along with the unreplayable id, and it is SAME-DIALECT
-        // REACHABLE. The Responses ingress attaches an `Encrypted` detail
-        // only when the inbound item carried a non-empty
-        // `encrypted_content`, so a Responses client echoing back a
-        // summary-only reasoning item loses that summary here. Whether an
-        // id-less summary-only `reasoning` item is accepted by either lane
-        // -- which would make forwarding the summary the faithful move --
-        // is UNVERIFIED against a live upstream. Until it is, this arm is
-        // not documented as an acceptable translation drop.
-        // TRANSLATION-DROP: fidelity-risk -- same-dialect reachable: a summary-only reasoning item loses its summary along with the unreplayable id
-        if encrypted_content.is_empty() {
+        // The reasoning text has no verified signature-less carrier: only
+        // the id-less summary shape has been observed accepted upstream, so
+        // shipping `reasoning_text` beside it risks failing the whole
+        // request. Same-dialect reachable: the Responses ingress attaches an
+        // `Encrypted` detail only for a non-empty inbound signature.
+        // TRANSLATION-DROP: lane=openai-responses class=reasoning_text_unsigned test=unsigned_reasoning_text_drops_from_the_wire_and_counts
+        if !group.content.is_empty() {
+            unsigned_text_count += 1;
+            tally.record_reasoning_text_unsigned();
+        }
+        // TRANSLATION-DROP: structural -- a signature-less group with no summary carries nothing replayable but its id, which must not ship
+        if group.summary.is_empty() {
             empty_encrypted_count += 1;
             continue;
         }
         out.push(ResponseInputItem::Reasoning {
-            id: key,
+            id: None,
             summary: group.summary,
-            content: group.content,
+            content: Vec::new(),
             encrypted_content,
         });
     }
@@ -714,6 +730,12 @@ fn lift_reasoning_details(
         tracing::debug!(
             skipped_empty_encrypted = empty_encrypted_count,
             "openai-responses: skipped reasoning replay item(s) with empty encrypted_content"
+        );
+    }
+    if unsigned_text_count > 0 {
+        tracing::debug!(
+            dropped = unsigned_text_count,
+            "openai-responses: dropped reasoning_text from reasoning item(s) with no encrypted_content"
         );
     }
 

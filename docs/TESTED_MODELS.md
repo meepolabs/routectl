@@ -236,8 +236,10 @@ Wire-shape notes for the chatgpt-oauth surface:
   if present; omitted otherwise. The endpoint auto-assigns a cache key
   when the field is absent.
 - **encrypted_content (reasoning replay)**: sent on prior-turn reasoning
-  items when `encrypted_content` is non-empty. Empty string is accepted
-  and treated as no-op.
+  items when `encrypted_content` is non-empty. An item carrying a summary
+  and no signature is accepted when it names no `id` (with or without an
+  empty `encrypted_content`); naming an unpersisted `id` returns 404 "item
+  not found" when `store` is false. Probed 2026-09-29.
 
 | Model | Mode | Status | Notes |
 |---|---|---|---|

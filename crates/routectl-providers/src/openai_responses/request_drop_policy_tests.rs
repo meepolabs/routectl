@@ -399,6 +399,144 @@ fn a_recognized_kind_detail_records_no_unsupported_kind_drop() {
 }
 
 // ---------------------------------------------------------------------------
+// reasoning_text_unsigned
+//
+// A signature-less reasoning group ships as an id-less summary-only item; its
+// `reasoning_text` has no verified carrier on that shape and drops. Same-
+// dialect reachable: the Responses ingress attaches an `Encrypted` detail
+// only for a non-empty inbound signature.
+// ---------------------------------------------------------------------------
+
+/// The one `reasoning` input item the emitted body carries.
+fn sole_wire_reasoning_item(wire: &Value) -> &Value {
+    let items: Vec<&Value> = wire["input"]
+        .as_array()
+        .map(|items| items.iter().filter(|i| i["type"] == "reasoning").collect())
+        .unwrap_or_default();
+    assert_eq!(
+        items.len(),
+        1,
+        "expected exactly one reasoning item: {wire}"
+    );
+    items[0]
+}
+
+#[test]
+#[serial_test::serial(openai_responses_reasoning_text_unsigned)]
+fn unsigned_reasoning_text_drops_from_the_wire_and_counts() {
+    // Arrange: a signature-less group carrying a summary and reasoning text.
+    const UNSIGNED_TEXT: &str = "REASONING_TEXT_WITH_NO_SIGNATURE";
+    let req = req_with(turn_with_reasoning_details(vec![
+        responses_detail(
+            ReasoningDetailKind::Summary,
+            CODEX_OAUTH,
+            json!({"text": "the summary"}),
+        ),
+        responses_detail(
+            ReasoningDetailKind::Text,
+            CODEX_OAUTH,
+            json!({"text": UNSIGNED_TEXT}),
+        ),
+    ]));
+
+    // Act
+    let before = responses_drop_count("reasoning_text_unsigned");
+    let (wire, events) = translate_capturing(&cfg(), &req);
+    let after = responses_drop_count("reasoning_text_unsigned");
+
+    // Assert 1: the drop record fired, counting the one affected item.
+    let record = events
+        .iter()
+        .find(|e| {
+            e.message.contains(
+                "openai-responses: dropped reasoning_text from reasoning item(s) with no encrypted_content",
+            )
+        })
+        .unwrap_or_else(|| panic!("the unsigned-text drop must be observable, got: {events:?}"));
+    assert_eq!(record.field("dropped"), Some("1"), "got: {record:?}");
+
+    // Assert 2: the reasoning text is absent from the emitted wire value.
+    assert!(
+        !wire.to_string().contains(UNSIGNED_TEXT),
+        "unsigned reasoning text must not reach the wire: {wire}"
+    );
+
+    // Assert 3: positive control -- the summary on the same group survived.
+    assert_eq!(
+        sole_wire_reasoning_item(&wire)["summary"],
+        json!([{"type": "summary_text", "text": "the summary"}]),
+        "the summary sharing the group must still ship: {wire}"
+    );
+
+    assert_eq!(
+        after - before,
+        1,
+        "the drop must be counted exactly once for the request"
+    );
+}
+
+#[test]
+#[serial_test::serial(openai_responses_reasoning_text_unsigned)]
+fn signed_reasoning_text_records_no_unsigned_text_drop() {
+    // Arrange: the same text on a group that carries a signature.
+    let req = req_with(turn_with_reasoning_details(vec![
+        responses_detail(
+            ReasoningDetailKind::Text,
+            CODEX_OAUTH,
+            json!({"text": "the chain"}),
+        ),
+        replayable_detail(),
+    ]));
+
+    // Act
+    let before = responses_drop_count("reasoning_text_unsigned");
+    let (wire, events) = translate_capturing(&cfg(), &req);
+    let after = responses_drop_count("reasoning_text_unsigned");
+
+    // Assert
+    assert_eq!(
+        sole_wire_reasoning_item(&wire)["content"],
+        json!([{"type": "reasoning_text", "text": "the chain"}]),
+        "got: {wire}"
+    );
+    assert!(
+        !any_event_message_contains(&events, "dropped reasoning_text"),
+        "a signed group must emit no unsigned-text record, got: {events:?}"
+    );
+    assert_eq!(after, before, "a signed group must not move the counter");
+}
+
+/// A summary-only group ships as the shape the upstream accepts: the
+/// summary, and neither the unreplayable id nor an empty signature.
+#[test]
+#[serial_test::serial(openai_responses_reasoning_text_unsigned)]
+fn unsigned_summary_ships_without_an_id_or_a_signature() {
+    // Arrange: `responses_detail` stamps the upstream id `rs_1`.
+    let req = req_with(turn_with_reasoning_details(vec![responses_detail(
+        ReasoningDetailKind::Summary,
+        CODEX_OAUTH,
+        json!({"text": "the summary"}),
+    )]));
+
+    // Act
+    let before = responses_drop_count("reasoning_text_unsigned");
+    let (wire, _events) = translate_capturing(&cfg(), &req);
+    let after = responses_drop_count("reasoning_text_unsigned");
+
+    // Assert
+    assert_eq!(
+        *sole_wire_reasoning_item(&wire),
+        json!({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "the summary"}]
+        }),
+        "got: {wire}"
+    );
+    assert!(!wire.to_string().contains("rs_1"), "got: {wire}");
+    assert_eq!(after, before, "a summary-only group drops nothing");
+}
+
+// ---------------------------------------------------------------------------
 // image_source_kind_unrepresentable
 //
 // A canonical `Image` part whose `source.type` is neither `base64` nor `url`

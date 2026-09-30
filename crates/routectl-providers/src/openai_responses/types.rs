@@ -118,9 +118,10 @@ pub enum ResponseInput {
 /// emits a top-level `type` discriminant. Maps to the codex
 /// `ResponseItem` typescript union.
 ///
-/// Reasoning replay: `Reasoning` items must carry `encrypted_content`
-/// (possibly empty when no prior signature exists). Codex re-injects
-/// reasoning only when `encrypted_content` is non-empty.
+/// Reasoning replay: a `Reasoning` item either carries a non-empty
+/// `encrypted_content` (and may name its upstream id), or carries only a
+/// summary with neither an id nor a signature on the wire. An item naming
+/// an id it cannot replay is rejected upstream as "item not found".
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseInputItem {
@@ -143,9 +144,10 @@ pub enum ResponseInputItem {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         content: Vec<ReasoningContentItem>,
         /// Echo-back signature for multi-turn reasoning replay. Empty
-        /// string when the canonical Thinking block lacks a signature
-        /// (e.g. fresh first-turn requests); the server treats empty as
-        /// "no prior reasoning to re-inject".
+        /// means "no signature" and is omitted from the wire: a
+        /// summary-only item is accepted without the key, and an empty
+        /// string carries nothing the key's absence does not.
+        #[serde(skip_serializing_if = "String::is_empty")]
         encrypted_content: String,
     },
     FunctionCall {

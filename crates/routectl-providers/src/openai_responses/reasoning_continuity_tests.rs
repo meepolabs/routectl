@@ -214,6 +214,36 @@ fn sweep_leaves_non_reasoning_items_alone() {
     assert!(matches!(items[0], ResponseInputItem::Message { .. }));
 }
 
+fn summary_only(id: Option<&str>) -> ResponseInputItem {
+    ResponseInputItem::Reasoning {
+        id: id.map(str::to_string),
+        summary: vec![super::types::ReasoningSummaryItem::SummaryText {
+            text: "the summary".into(),
+        }],
+        content: Vec::new(),
+        encrypted_content: String::new(),
+    }
+}
+
+/// The sweep keeps the one signature-less shape the upstream accepts -- a
+/// summary with no id -- and still drops a summary that names an id it
+/// cannot replay.
+#[test]
+fn sweep_keeps_an_id_less_summary_and_drops_one_naming_an_id() {
+    // Arrange
+    let mut items = vec![summary_only(Some("rs_dangling")), summary_only(None)];
+
+    // Act
+    retain_replayable_reasoning(&mut items);
+
+    // Assert
+    assert_eq!(
+        reasoning_items(&items),
+        vec![(&None, "")],
+        "only the id-less summary item survives"
+    );
+}
+
 /// The producer itself can no longer build an emptied item: the return
 /// type carries the floor.
 #[test]

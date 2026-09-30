@@ -105,7 +105,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("openai_compat/wire_lift/tool_use.rs", 2),
     ("openai_compat/wire_lift/tools.rs", 1),
     ("openai_responses/extras.rs", 5),
-    ("openai_responses/messages.rs", 9),
+    ("openai_responses/messages.rs", 10),
     ("openai_responses/request.rs", 2),
     ("openai_responses/system.rs", 3),
     ("openai_responses/tools.rs", 4),
@@ -113,18 +113,16 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 61;
+const EXPECTED_LANE_MARKERS: usize = 62;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 14;
-const EXPECTED_STRUCTURAL_MARKERS: usize = 47;
+const EXPECTED_STRUCTURAL_MARKERS: usize = 48;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
 /// a worse defect to be FILED rather than an accepted drop. Pinned by CONTENT
 /// (file plus a phrase from the reason), never by size -- a size pin lets one
-/// entry swap for another with no signal.
-const EXPECTED_FIDELITY_RISK: &[(&str, &str)] = &[(
-    "openai_responses/messages.rs",
-    "a summary-only reasoning item loses its summary",
-)];
+/// entry swap for another with no signal. Pinned as exactly empty: no arm in
+/// the tree carries this verdict today.
+const EXPECTED_FIDELITY_RISK: &[(&str, &str)] = &[];
 
 /// The `unresolved` register, pinned as exactly empty: every marked arm in the
 /// tree carries a verdict today. Pinned rather than left unchecked, so the

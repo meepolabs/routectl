@@ -462,7 +462,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         4,
     ),
     ("openai_responses/extras.rs", "responses_text_format", 4),
-    ("openai_responses/messages.rs", "lift_reasoning_details", 1),
+    ("openai_responses/messages.rs", "lift_reasoning_details", 2),
     ("openai_responses/messages.rs", "translate_image_source", 1),
     ("openai_responses/messages.rs", "translate_other_message", 1),
     (
@@ -628,6 +628,13 @@ const STRUCTURAL_BESIDE_A_LOSS_LOG: &[(&str, &str, &str, &str)] = &[
         "is not a format specification this egress can be said to have dropped",
         "the symbol's loss logs belong to the two counted arms below this one, each carrying its \
          own lane marker",
+    ),
+    (
+        "openai_responses/messages.rs",
+        "lift_reasoning_details",
+        "a signature-less group with no summary carries nothing replayable",
+        "the symbol's loss logs belong to the counted arms above this one; this marker covers \
+         only the id of a group with no summary, which must never ship",
     ),
     (
         "openai_responses/tools.rs",

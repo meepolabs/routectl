@@ -954,7 +954,8 @@ license.
   `ResponsesDropTally` flushed once per request from `build_input` (on the Err
   arm too) counts each deliberate drop class it made
   (`image_source_kind_unrepresentable`, `reasoning_detail_kind_unsupported`,
-  `reasoning_format_foreign`, `reasoning_scheme_incompatible`) exactly once,
+  `reasoning_format_foreign`, `reasoning_scheme_incompatible`,
+  `reasoning_text_unsigned`) exactly once,
   never once per dropped block
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses tool
   shape (`translate_tools`) and `tool_choice` mapping
