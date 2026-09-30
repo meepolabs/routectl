@@ -165,6 +165,14 @@ impl StreamErrorClass {
                     openai_code,
                 }
             }
+            Error::LocalRefusal { .. } => {
+                let local = crate::handlers::ingress_handle::LOCAL_REFUSAL_TYPE.to_string();
+                Self {
+                    anthropic_type: local.clone(),
+                    openai_type: local.clone(),
+                    openai_code: local,
+                }
+            }
             _ => Self {
                 anthropic_type: STREAM_ERROR_TYPE.to_string(),
                 openai_type: STREAM_ERROR_TYPE.to_string(),

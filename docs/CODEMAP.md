@@ -279,8 +279,10 @@ license.
   `ide_version`/`ide_name` metadata) and seeded into
   `GeminiConfig.user_agent` by `new_cloud_code`
 - `src/error.rs` -- `Error` enum
-  (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...)
-  and `Result` alias; `Error::Upstream` carries a structural `retry_after:
+  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Config/NotImplemented/...)
+  and `Result` alias; `Error::LocalRefusal{provider, detail}` is a provider's
+  pre-egress refusal: classified `BadRequest` by variant, carrying no status so
+  no per-provider remap reaches it, and never retried, debited, or learned; `Error::Upstream` carries a structural `retry_after:
   Option<Duration>` (populated only on a rate-limit/overload reset hint) plus
   `upstream_type`/`upstream_code`/`upstream_request_id` diagnostic fields
   (all `Option<Box<str>>` -- kept small so a `const _` assert holds
@@ -4615,7 +4617,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and mtime untouched (adoption is read-only)
 - `tests/cloak_relocation_refusal_fallback.rs` -- a cloak relocation refusal
   on the own-OAuth seat falls back with the pristine canonical request and
-  leaves that seat's breaker closed; a debiting control opens it
+  leaves that seat's breaker closed, also under a status-400 remap to a
+  debiting class with a bad-request retry cap (one attempt, empty capability
+  registry); a debiting control opens it
 - `tests/cross_lane_sampling_strip.rs` -- cross-lane fallback hop onto the
   own-OAuth Anthropic seat: the first hop receives the caller's sampling
   verbatim and fails fallbackably, the OAuth hop ships a sampling-free body
@@ -5953,7 +5957,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   non-matching nonce is treated as seam-absent). `map_error` -> `error_response`
   also echoes an `Error::Upstream.retry_after` reset hint onto a client-facing
   `Retry-After` header (RFC 7231 integer seconds, sub-second hints rounded UP to
-  at least 1s) so a client SDK's own 429/503 backoff keeps the upstream hint
+  at least 1s) so a client SDK's own 429/503 backoff keeps the upstream hint.
+  An `Error::LocalRefusal` renders as a 400 `invalid_request_error` whose
+  envelope and stream terminal match an upstream 400 carrying the same
+  refusal (pinned in `local_refusal_envelope_tests.rs`)
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /

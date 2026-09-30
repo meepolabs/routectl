@@ -1131,8 +1131,25 @@ fn sanitize_stream_error_for_client(e: &Error) -> String {
             Some(detail) => format!("upstream stream error (HTTP {status}): {detail}"),
             None => format!("upstream stream error (HTTP {status})"),
         },
+        Error::LocalRefusal { detail, .. } => {
+            local_refusal_message(detail, "upstream stream error")
+        }
         _ => "upstream stream error".to_string(),
     }
+}
+
+/// The `error.type` a local refusal carries on both envelopes: the one the
+/// upstream would answer a body it cannot accept with.
+pub(crate) const LOCAL_REFUSAL_TYPE: &str = "invalid_request_error";
+
+/// The client message for a local refusal. Shaped exactly as the message an
+/// upstream 400 carrying the same refusal renders, so a client parsing either
+/// reads one sentence; `prefix` is that path's upstream-error lead-in.
+fn local_refusal_message(detail: &str, prefix: &str) -> String {
+    let detail = bound_upstream_detail(&format!(
+        "routectl refused the request before egress: {detail}"
+    ));
+    format!("{prefix} (HTTP 400): {detail}")
 }
 
 fn sse_to_axum(ev: SseEvent) -> Event {
@@ -1309,6 +1326,16 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             );
             "invalid JSON in request body".to_string()
         }
+        // The Display string names the internal provider id, so the client
+        // reads the refusal without it. `detail` names a shape only.
+        Error::LocalRefusal { provider, detail } => {
+            tracing::warn!(
+                provider = %routectl_core::sanitize_for_log(provider),
+                detail = %routectl_core::sanitize_detail_for_log(detail),
+                "local refusal before egress sanitized in HTTP response"
+            );
+            local_refusal_message(detail, "upstream error")
+        }
         // Caller-actionable classes: their Display string carries only
         // caller-derived input, so the verbose message stays. Kept as
         // explicit arms (no wildcard) so a new core Error variant fails
@@ -1335,6 +1362,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             *retry_after,
             upstream_request_id.as_deref(),
         ),
+        Error::LocalRefusal { .. } => (Some(LOCAL_REFUSAL_TYPE), None, None, None),
         _ => (None, None, None, None),
     };
     // Surface the upstream's own `error.param` (the offending request
@@ -1458,6 +1486,7 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         Error::NormalizeRequest(_, _) => (StatusCode::BAD_REQUEST, "bad_request"),
         Error::NormalizeResponse(_, _) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
         Error::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
+        Error::LocalRefusal { .. } => (StatusCode::BAD_REQUEST, "bad_request"),
         Error::Auth(_) => (StatusCode::SERVICE_UNAVAILABLE, "auth_error"),
         Error::Streaming(_) => (StatusCode::BAD_GATEWAY, "streaming_error"),
         Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
@@ -1679,3 +1708,7 @@ mod opening_ledger_exit_tests;
 #[cfg(test)]
 #[path = "opening_accuracy_boundary_tests.rs"]
 mod opening_accuracy_boundary_tests;
+
+#[cfg(test)]
+#[path = "local_refusal_envelope_tests.rs"]
+mod local_refusal_envelope_tests;

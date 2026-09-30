@@ -336,26 +336,26 @@ fn a_text_only_relocation_keeps_its_exact_wire_bytes() {
     );
 }
 
-/// The refusal routes as the upstream's own bad-request answer would: a
-/// classified `BadRequest`, which never retries the seat, never debits its
-/// breaker, and walks to a configured fallback.
+/// The refusal is a local refusal carrying no upstream status, so no
+/// per-provider status remap can reach it; it classifies as `BadRequest` for
+/// the fallback walk.
 #[test]
 #[serial_test::serial(anthropic_api_cloak_policy_actions)]
-fn the_refusal_classifies_as_a_non_debiting_fallbackable_bad_request() {
-    use routectl_core::failure_class::{FailureClass, classify};
+fn the_refusal_is_a_status_free_local_refusal_classified_as_bad_request() {
+    use routectl_core::failure_class::{FailureClass, MatchedBy, classify};
 
     let refusal = cloak_wire(&mut json!({"system": "rules"})).expect_err("no message array");
     let err = refusal.into_error("seat");
 
-    assert_eq!(
-        classify(&err, Some("anthropic-api")).class,
-        FailureClass::BadRequest
-    );
-    let rendered = err.to_string();
     assert!(
-        rendered.contains("routectl refused the request before egress"),
-        "{rendered}"
+        matches!(&err, Error::LocalRefusal { provider, .. } if provider == "seat"),
+        "{err:?}"
     );
+    let classified = classify(&err, Some("anthropic-api"));
+    assert_eq!(classified.class, FailureClass::BadRequest);
+    assert_eq!(classified.matched_by, MatchedBy::Variant);
+    let rendered = err.to_string();
+    assert!(rendered.contains("refused before egress"), "{rendered}");
     assert!(
         !rendered.contains("rules"),
         "no request content in the error: {rendered}"

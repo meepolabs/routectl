@@ -20,6 +20,7 @@ use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Message, MessageContent, Provider, Role, SystemContent,
 };
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
 use routectl_router::runtime_state::CircuitPhase;
 use routectl_router::{
     AliasValue, Config, Dispatched, ProviderEntry, ResolvedModel, RetryPolicy, Router,
@@ -79,11 +80,24 @@ fn oauth_seat() -> Arc<AnthropicApiProvider> {
 }
 
 fn router_with(fallback: Arc<RecordingFallback>) -> Router {
+    router_with_policy(fallback, BTreeMap::new(), RetryPolicy::default())
+}
+
+/// `class_overrides` and `retry` go onto the oauth seat's provider entry and
+/// the router policy as given: built in code rather than loaded, so a remap
+/// target the loader would refuse still reaches the router, as it would for a
+/// library caller.
+fn router_with_policy(
+    fallback: Arc<RecordingFallback>,
+    class_overrides: BTreeMap<u16, ConfigFailureClass>,
+    mut retry: RetryPolicy,
+) -> Router {
     let mut config = Config::default();
     let mut oauth = ProviderEntry::anthropic_api(common::file_ref("k"));
     if let ProviderEntry::AnthropicApi { runtime, .. } = &mut oauth {
         runtime.circuit_failures = Some(1);
         runtime.circuit_cooldown_ms = Some(60_000);
+        runtime.class_overrides = class_overrides;
     }
     config.providers.insert("p-oauth".into(), oauth);
     config.providers.insert(
@@ -94,7 +108,6 @@ fn router_with(fallback: Arc<RecordingFallback>) -> Router {
         "fast".into(),
         AliasValue::Chain(vec!["m-oauth".into(), "m-fallback".into()]),
     );
-    let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
     retry.initial_backoff_ms = 1;
     retry.backoff_multiplier = 1.0;
@@ -208,4 +221,55 @@ async fn a_debiting_failure_on_the_same_seat_opens_its_breaker() {
 
     result.expect("the fallback hop serves the request");
     assert_eq!(oauth_circuit(&router), CircuitPhase::Open);
+}
+
+#[tokio::test]
+async fn a_status_400_override_to_a_debiting_class_cannot_reach_the_refusal() {
+    // A remap of 400 into a retried, debiting class plus a bad-request retry
+    // cap: an Error carrying status 400 would take the server-error row (retry
+    // and debit at threshold one) and the operator's retry cap. The refusal
+    // must take neither, and must teach the capability registry nothing.
+    let fallback = fresh_fallback();
+    let overrides = BTreeMap::from([(400, ConfigFailureClass::ServerError)]);
+    let mut retry = RetryPolicy::default();
+    retry.retry_on_5xx = Some(3);
+    retry.classes.insert(
+        ConfigFailureClass::BadRequest,
+        ClassPolicy {
+            retry: Some(3),
+            fallback: None,
+        },
+    );
+    let router = router_with_policy(Arc::clone(&fallback), overrides, retry);
+    let caller = request(vec![message(Role::System, "turn rules")]);
+
+    let Dispatched { meta, result } = router
+        .complete_with_options(caller.clone(), RouterOptions::new())
+        .await;
+
+    result.expect("the fallback hop serves the request");
+    assert_eq!(
+        meta.attempt_count, 2,
+        "one refused attempt on the seat, one fallback attempt"
+    );
+    assert_eq!(meta.fallback_count, 1, "exactly one fallback hop");
+    assert_eq!(
+        oauth_circuit(&router),
+        CircuitPhase::Closed,
+        "an override must not turn a local refusal into a breaker debit"
+    );
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "a local refusal must not reach capability learning"
+    );
+    let seen = fallback.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&seen[0].system).unwrap(),
+        serde_json::to_value(&caller.system).unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_value(&seen[0].messages).unwrap(),
+        serde_json::to_value(&caller.messages).unwrap(),
+    );
 }

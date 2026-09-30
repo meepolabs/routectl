@@ -56,8 +56,8 @@ fn system_only_request() -> ChatRequest {
 
 fn assert_local_refusal(err: &Error) {
     assert!(
-        matches!(err, Error::Upstream { status: 400, body, .. }
-            if body.contains("cannot be relocated")),
+        matches!(err, Error::LocalRefusal { detail, .. }
+            if detail.contains("cannot be relocated")),
         "expected the relocation refusal, got {err:?}"
     );
 }

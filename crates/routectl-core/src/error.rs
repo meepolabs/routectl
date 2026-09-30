@@ -126,6 +126,24 @@ pub enum Error {
     #[error("validation: {0}")]
     Validation(String),
 
+    /// A provider refused to send a request because this egress has no legal
+    /// representation for it, decided locally before any network I/O.
+    ///
+    /// Routes as a bad request for the fallback decision, and nothing else: it
+    /// carries no upstream status, so no per-provider status remap can
+    /// reclassify it, and the router never retries it on the same seat, never
+    /// debits the seat's health for it, and never learns a capability from it.
+    /// The next target in the chain builds from the untouched canonical
+    /// request. `detail` names the shape only and never carries request
+    /// content. Surfaces as HTTP 400 `invalid_request_error`.
+    #[error("provider `{provider}`: refused before egress: {detail}")]
+    LocalRefusal {
+        /// Provider that refused the request.
+        provider: String,
+        /// Why the request has no legal representation on this egress.
+        detail: String,
+    },
+
     /// A streaming (SSE) transport or framing failure.
     #[error("streaming: {0}")]
     Streaming(String),
@@ -195,6 +213,11 @@ impl fmt::Debug for Error {
             Self::Config(s) => f.debug_tuple("Config").field(s).finish(),
             Self::Internal(s) => f.debug_tuple("Internal").field(s).finish(),
             Self::Validation(s) => f.debug_tuple("Validation").field(s).finish(),
+            Self::LocalRefusal { provider, detail } => f
+                .debug_struct("LocalRefusal")
+                .field("provider", provider)
+                .field("detail", detail)
+                .finish(),
             Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
             Self::NotImplemented(a, b) => {
                 f.debug_tuple("NotImplemented").field(a).field(b).finish()

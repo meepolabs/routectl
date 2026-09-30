@@ -267,9 +267,9 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::CloakPathNonCc,
-        reason: "turns a relocation refusal into the bad-request dispatch error the router routes \
-                 on, so it takes no retry, no breaker debit, and the fallback walk; builds an \
-                 error and never touches the body",
+        reason: "turns a relocation refusal into the local-refusal dispatch error the router \
+                 routes on, so no status remap reaches it and it takes no retry, no breaker debit, \
+                 and the fallback walk; builds an error and never touches the body",
         known_loss: None,
     },
     TierOneRow {
@@ -277,8 +277,8 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::CloakPathAlways,
-        reason: "turns either cloak refusal into its dispatch error: a relocation keeps its \
-                 bad-request shape, an out-of-bounds word list becomes a config error; builds an \
+        reason: "turns either cloak refusal into its dispatch error: a relocation becomes a \
+                 local refusal, an out-of-bounds word list becomes a config error; builds an \
                  error and never touches the body",
         known_loss: None,
     },

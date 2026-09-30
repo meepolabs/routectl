@@ -164,29 +164,15 @@ impl std::fmt::Debug for CloakConfig {
 impl RelocationRefusal {
     /// The refusal as the dispatch error the router routes on.
     ///
-    /// Shaped as the `invalid_request_error` 400 the upstream itself would
-    /// answer a body with no legal landing for the client system with, so it
-    /// takes exactly that routing: no same-seat retry, no breaker debit, and
-    /// the bad-request fallback walk (operator-configurable under
-    /// `[retry.classes.bad-request]`). A local `Validation` error would instead
-    /// classify as unknown, which never falls back. The body names routectl as
-    /// the author so no reader mistakes it for an upstream reply.
+    /// A [`Error::LocalRefusal`]: it falls back like a bad request, and it
+    /// carries no upstream status, so no per-provider status remap can turn it
+    /// into a class that retries the seat, debits its breaker, or teaches the
+    /// capability registry anything. The detail names the shape only.
     pub fn into_error(self, provider_id: &str) -> Error {
-        let body = serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": RELOCATION_REFUSAL_TYPE,
-                "message": format!("routectl refused the request before egress: {}", self.detail),
-            },
-        });
-        Error::upstream_full(
-            provider_id,
-            RELOCATION_REFUSAL_STATUS,
-            body.to_string(),
-            None,
-            Some(RELOCATION_REFUSAL_TYPE.to_string()),
-            None,
-        )
+        Error::LocalRefusal {
+            provider: provider_id.to_string(),
+            detail: self.detail,
+        }
     }
 }
 
@@ -205,7 +191,7 @@ pub enum CloakRefusal {
 
 impl CloakRefusal {
     /// The refusal as the dispatch error the router routes on. A relocation
-    /// refusal keeps its bad-request shape; an out-of-bounds word list is a
+    /// refusal is a local refusal; an out-of-bounds word list is a
     /// provider misconfiguration, so it is a config error, which no retry or
     /// fallback treats as the request's fault. Neither carries request or
     /// configured-word content.
@@ -218,9 +204,6 @@ impl CloakRefusal {
         }
     }
 }
-
-const RELOCATION_REFUSAL_STATUS: u16 = 400;
-const RELOCATION_REFUSAL_TYPE: &str = "invalid_request_error";
 
 /// Result of the OAuth-egress cloak. Carries the per-request reverse map
 /// (upstream renamed name -> original client name) so the caller can

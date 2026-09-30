@@ -556,6 +556,7 @@ pub fn classify_with_attempt(
         ),
         Error::Streaming(_) => by_variant(FailureClass::NetworkError),
         Error::Auth(_) => by_variant(FailureClass::Auth),
+        Error::LocalRefusal { .. } => by_variant(FailureClass::BadRequest),
         _ => by_variant(FailureClass::Unknown),
     }
 }

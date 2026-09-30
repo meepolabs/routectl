@@ -702,6 +702,9 @@ pub routectl_core::error::Error::Config(alloc::string::String)
 pub routectl_core::error::Error::Internal(alloc::string::String)
 pub routectl_core::error::Error::Io(core::io::error::Error)
 pub routectl_core::error::Error::Json(serde_json::error::Error)
+pub routectl_core::error::Error::LocalRefusal
+pub routectl_core::error::Error::LocalRefusal::detail: alloc::string::String
+pub routectl_core::error::Error::LocalRefusal::provider: alloc::string::String
 pub routectl_core::error::Error::NormalizeRequest(alloc::string::String, alloc::string::String)
 pub routectl_core::error::Error::NormalizeResponse(alloc::string::String, alloc::string::String)
 pub routectl_core::error::Error::NotImplemented(alloc::string::String, alloc::string::String)
@@ -3018,6 +3021,9 @@ pub routectl_core::Error::Config(alloc::string::String)
 pub routectl_core::Error::Internal(alloc::string::String)
 pub routectl_core::Error::Io(core::io::error::Error)
 pub routectl_core::Error::Json(serde_json::error::Error)
+pub routectl_core::Error::LocalRefusal
+pub routectl_core::Error::LocalRefusal::detail: alloc::string::String
+pub routectl_core::Error::LocalRefusal::provider: alloc::string::String
 pub routectl_core::Error::NormalizeRequest(alloc::string::String, alloc::string::String)
 pub routectl_core::Error::NormalizeResponse(alloc::string::String, alloc::string::String)
 pub routectl_core::Error::NotImplemented(alloc::string::String, alloc::string::String)
