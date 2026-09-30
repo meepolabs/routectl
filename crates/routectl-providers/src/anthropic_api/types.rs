@@ -501,8 +501,6 @@ pub struct AnthropicUsage {
     pub(crate) cache_creation_input_tokens: Option<u32>,
     #[serde(default)]
     pub(crate) cache_creation: Option<AnthropicCacheCreation>,
-    #[serde(default)]
-    pub(crate) reasoning_tokens: Option<u32>,
     /// Server-side tool invocation counts (e.g. `web_search_requests`).
     /// Pulled out of the flatten-extras catchall so the egress
     /// normalizer can lift it onto the typed canonical
@@ -513,8 +511,33 @@ pub struct AnthropicUsage {
     /// doesn't yet have a typed slot for. Captures `service_tier`
     /// (returned by every Anthropic / Bedrock-Invoke response) and
     /// any future spec additions.
+    ///
+    /// `output_tokens_details` stays here rather than in a typed field:
+    /// the Anthropic ingress renders extras back verbatim, and a typed
+    /// field would remove the object from that response.
     #[serde(flatten)]
     pub(crate) extras: Map<String, Value>,
+}
+
+impl AnthropicUsage {
+    /// `output_tokens_details.thinking_tokens`: the thinking share of
+    /// `output_tokens`, already counted there. `None` when the wire omits
+    /// it, which is what a non-thinking response does.
+    pub(crate) fn thinking_tokens(&self) -> Option<u32> {
+        self.extras
+            .get("output_tokens_details")?
+            .get("thinking_tokens")?
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+    }
+}
+
+/// `usage.output_tokens_details` on a streamed `message_delta`.
+#[derive(Debug, Deserialize)]
+pub struct AnthropicOutputTokensDetails {
+    /// The thinking share of `output_tokens`, already counted there.
+    #[serde(default)]
+    pub(crate) thinking_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -578,6 +601,10 @@ pub struct SseDeltaUsage {
     /// chunk usage's `server_tool_use` field.
     #[serde(default)]
     pub(crate) server_tool_use: Option<Value>,
+    /// Thinking-token breakdown. Reported on `message_delta` only; the
+    /// `message_start` usage never carries it.
+    #[serde(default)]
+    pub(crate) output_tokens_details: Option<AnthropicOutputTokensDetails>,
 }
 
 #[cfg(test)]

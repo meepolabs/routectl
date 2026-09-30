@@ -697,7 +697,10 @@ impl SseState {
                         // captured to merge -- lift the delta value
                         // straight through.
                         server_tool_use: usage.as_ref().and_then(|u| u.server_tool_use.clone()),
-                        ..Default::default()
+                        reasoning_tokens: usage
+                            .as_ref()
+                            .and_then(|u| u.output_tokens_details.as_ref())
+                            .and_then(|d| d.thinking_tokens),
                     })
                 } else {
                     None

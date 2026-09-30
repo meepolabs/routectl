@@ -413,3 +413,71 @@ fn message_delta_without_server_tool_use_leaves_field_none() {
     let usage = chunk.usage.expect("usage");
     assert_eq!(usage.server_tool_use, None);
 }
+
+/// Drive a thinking-less `message_start` and then `delta_usage` on the
+/// closing `message_delta`, returning the closing chunk's usage.
+fn closing_usage(delta_usage: &str) -> routectl_core::schema::UsageDelta {
+    let mut state = SseState::default();
+    let _ = state
+        .parse_event(
+            "test",
+            r#"{
+                "type":"message_start",
+                "message": {
+                    "id":"msg_01","type":"message","role":"assistant",
+                    "content":[],"model":"claude-sonnet-4-5-20250929",
+                    "stop_reason":null,"stop_sequence":null,
+                    "usage": {"input_tokens": 66, "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 0, "output_tokens": 1}
+                }
+            }"#,
+        )
+        .unwrap();
+    let payload = format!(
+        r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn","stop_sequence":null}},"usage":{delta_usage}}}"#
+    );
+    state
+        .parse_event("test", &payload)
+        .unwrap()
+        .expect("closing chunk")
+        .usage
+        .expect("usage")
+}
+
+/// The closing `message_delta.usage` of a thinking stream nests the
+/// thinking share under `output_tokens_details`, and only there.
+#[test]
+fn message_delta_lifts_nested_thinking_tokens_onto_reasoning_tokens() {
+    let usage = closing_usage(
+        r#"{"input_tokens":66,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+            "output_tokens":57,"output_tokens_details":{"thinking_tokens":51}}"#,
+    );
+
+    assert_eq!(usage.reasoning_tokens, Some(51));
+    assert_eq!(
+        usage.completion_tokens,
+        Some(57),
+        "thinking tokens are a subset of output_tokens, never added to it"
+    );
+}
+
+/// A non-thinking stream omits `output_tokens_details`, so the canonical
+/// field stays absent rather than reading as zero.
+#[test]
+fn message_delta_without_thinking_details_leaves_reasoning_tokens_none() {
+    let usage = closing_usage(
+        r#"{"input_tokens":36,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+            "output_tokens":5}"#,
+    );
+
+    assert_eq!(usage.reasoning_tokens, None);
+}
+
+/// A wire-stated zero is reported as zero, not collapsed to absent.
+#[test]
+fn message_delta_with_zero_thinking_tokens_reports_zero() {
+    let usage =
+        closing_usage(r#"{"output_tokens":5,"output_tokens_details":{"thinking_tokens":0}}"#);
+
+    assert_eq!(usage.reasoning_tokens, Some(0));
+}

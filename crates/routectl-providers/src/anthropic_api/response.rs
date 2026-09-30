@@ -237,7 +237,7 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
         prompt_tokens,
         completion_tokens: u.output_tokens,
         total_tokens: prompt_tokens.saturating_add(u.output_tokens),
-        reasoning_tokens: u.reasoning_tokens,
+        reasoning_tokens: u.thinking_tokens(),
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_read_input_tokens: u.cache_read_input_tokens,
         cache_creation: u.cache_creation.as_ref().map(|c| CacheCreation {
@@ -960,3 +960,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "response_thinking_tokens_tests.rs"]
+mod thinking_tokens_tests;
