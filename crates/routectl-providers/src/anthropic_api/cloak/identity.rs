@@ -79,8 +79,9 @@ pub struct RelocationRefusal {
 /// Transactional: the whole landing is planned against the unmodified body
 /// and committed only once it is known to be legal. A refusal -- no message
 /// array, a non-array `messages`, nothing left of the conversation once the
-/// system turns leave it, or carried cache breakpoints the cap/ordering policy
-/// cannot accept -- returns before any mutation.
+/// system turns leave it, or relocated cache breakpoints (the reminder's or a
+/// carried block's) the cap/ordering policy cannot accept -- returns before
+/// any mutation.
 ///
 /// Recognized identity lines in the captured content are excluded (we re-add
 /// our own identity). The transform is egress-only: the response never echoes
@@ -135,14 +136,6 @@ fn plan_relocation(body: &Value, strict_mode: bool) -> Result<RelocationPlan, Re
         cache_breakpoints_collapsed: reminder.is_some() && capture.folded_breakpoints > 1,
         unrepresentable_block_dropped: capture.unrepresentable_block_dropped,
     };
-    // Only a CARRIED block can add a breakpoint the request did not already
-    // count: the reminder carries at most one of the folded markers. Gating the
-    // check on carried markers keeps every text-only relocation's output
-    // exactly as it has always been.
-    let carries_breakpoint = capture
-        .carried
-        .iter()
-        .any(|block| block.get("cache_control").is_some());
     let payload: Vec<Value> = reminder.into_iter().chain(capture.carried).collect();
     if payload.is_empty() {
         return Ok(RelocationPlan {
@@ -150,6 +143,12 @@ fn plan_relocation(body: &Value, strict_mode: bool) -> Result<RelocationPlan, Re
             outcome,
         });
     }
+    // Any relocated marker moves from ahead of every message to the landing
+    // point, which can sit after a history marker it used to precede -- the
+    // reminder's included. A payload with no marker adds nothing to check.
+    let carries_breakpoint = payload
+        .iter()
+        .any(|block| block.get("cache_control").is_some());
     let has_first_user = conversation_has_user_turn(body.get("messages"))?;
     if carries_breakpoint {
         validate_candidate_breakpoints(body, &payload, has_first_user)?;

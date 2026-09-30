@@ -296,6 +296,46 @@ fn a_carried_breakpoint_that_breaks_ttl_order_is_refused_before_egress() {
 
 #[test]
 #[serial_test::serial(anthropic_api_cloak_policy_actions)]
+fn a_reminder_breakpoint_landing_after_a_shorter_ttl_is_refused_before_egress() {
+    // The first user turn follows a 5m assistant marker, so the reminder's 1h
+    // marker lands after it. Text only: no carried block is involved.
+    assert_refused_untouched(
+        json!({
+            "system": [{"type": "text", "text": "r\u{e8}gles", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "messages": [
+                {"role": "assistant", "content": [{"type": "text", "text": "ok", "cache_control": {"type": "ephemeral", "ttl": "5m"}}]},
+                {"role": "user", "content": "hi"},
+            ]
+        }),
+        "1h TTL",
+    );
+}
+
+#[test]
+#[serial_test::serial(anthropic_api_cloak_policy_actions)]
+fn a_reminder_breakpoint_in_ttl_order_after_the_history_marker_relocates() {
+    // Control for the refusal above: the same landing with equal TTLs is legal,
+    // and the two folded markers collapse to the one the reminder carries.
+    let mut body = json!({
+        "system": [
+            {"type": "text", "text": "a", "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+            {"type": "text", "text": "b", "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+        ],
+        "messages": [
+            {"role": "assistant", "content": [{"type": "text", "text": "ok", "cache_control": {"type": "ephemeral", "ttl": "5m"}}]},
+            {"role": "user", "content": "hi"},
+        ]
+    });
+
+    let wire = cloak_wire(&mut body).expect("5m after 5m is legal");
+
+    let user = &wire_messages(&wire)[1];
+    assert_eq!(user["content"][0]["cache_control"]["ttl"], "5m");
+    assert_eq!(wire.matches("\"cache_control\"").count(), 2, "{wire}");
+}
+
+#[test]
+#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_billing_block_is_stripped_rather_than_relocated() {
     let mut body = json!({
         "system": [
