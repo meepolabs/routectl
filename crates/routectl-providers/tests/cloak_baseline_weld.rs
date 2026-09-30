@@ -145,12 +145,13 @@ const TIER_ONE: &[TierOneRow] = &[
         role: Role::Transform,
         gate: Gate::CloakPathNonCc,
         reason: "reduces `system` to the identity line and moves the client's real system content \
-                 into the first user message as a reminder block, so client behavior survives \
-                 without the client fingerprint reaching the classifier",
+                 into the first user message (or one synthetic leading user message) as a \
+                 reminder block plus carried image and document blocks, refusing the request \
+                 before egress when it has nowhere legal to land",
         known_loss: Some(
-            "three counted classes: the whole client prompt when no user message can carry it, \
-             more than one client cache breakpoint collapsing to the last, and a system block \
-             carrying no string text",
+            "two counted classes: more than one client cache breakpoint on folded text \
+             collapsing to the last, and a tool, thinking, or unknown system block a user turn \
+             cannot carry",
         ),
     },
     TierOneRow {
@@ -257,8 +258,18 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::CloakPathAlways,
-        reason: "the single per-request flush point for the cloak's four policy-action classes, \
+        reason: "the single per-request flush point for the cloak's three policy-action classes, \
                  which is what keeps each key at most one record per request",
+        known_loss: None,
+    },
+    TierOneRow {
+        item: "RelocationRefusal::into_error",
+        file: CLOAK_ROOT,
+        role: Role::Support,
+        gate: Gate::CloakPathNonCc,
+        reason: "turns a relocation refusal into the bad-request dispatch error the router routes \
+                 on, so it takes no retry, no breaker debit, and the fallback walk; builds an \
+                 error and never touches the body",
         known_loss: None,
     },
     TierOneRow {

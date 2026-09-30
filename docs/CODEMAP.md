@@ -774,12 +774,19 @@ license.
   `ClaudeCodeIdentity`), the `cloak_oauth_egress` orchestrator, `CloakPolicyTally`
 - `src/anthropic_api/cloak_policy_counter_tests.rs` -- the cloak's telemetry
   pinning set: one counter-delta-plus-log test per policy class, with the
-  lossless, genuine-CC, and operator-switch controls
+  lossless, genuine-CC, refusal, and operator-switch controls
+- `src/anthropic_api/cloak_relocation_wire_tests.rs` -- serialized-wire
+  contract of the client-system relocation: synthetic user turn, local
+  refusals, carried image/document blocks, breakpoint cap/ordering
+- `src/anthropic_api/mod_cloak_refusal_tests.rs` -- a relocation refusal halts
+  complete, stream, and count_tokens before token resolution
 - `src/anthropic_api/cloak/billing.rs` -- strips the Claude Code
   billing/attribution system block unconditionally (`strip_billing_block`)
-- `src/anthropic_api/cloak/identity.rs` -- non-CC client system relocation into
-  a `<system-reminder>` block, identity-only system, minted `metadata.user_id`
-  (`relocate_client_system` -> `RelocationOutcome`, `mint_metadata_user_id`)
+- `src/anthropic_api/cloak/identity.rs` -- transactional non-CC client system
+  relocation: `<system-reminder>` text plus carried image/document blocks into
+  the first (or a synthetic leading) user turn, identity-only system, minted
+  `metadata.user_id` (`relocate_client_system` -> `RelocationOutcome` /
+  `RelocationRefusal`, `mint_metadata_user_id`)
 - `src/anthropic_api/cloak/tool_rename.rs` -- tool-name `mcp__` normalization
   and operator `tool_rename` over the same tool-name paths, recording the
   per-request reverse map (`normalize_tool_names_to_mcp`, `apply_tool_rename`)
@@ -4594,6 +4601,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   over one temp XDG config dir (mint then adopt): the same id reaches the
   egress wire on both boots, and boot 2 leaves the persisted file's content
   and mtime untouched (adoption is read-only)
+- `tests/cloak_relocation_refusal_fallback.rs` -- a cloak relocation refusal
+  on the own-OAuth seat falls back with the pristine canonical request and
+  leaves that seat's breaker closed; a debiting control opens it
 - `tests/cross_lane_sampling_strip.rs` -- cross-lane fallback hop onto the
   own-OAuth Anthropic seat: the first hop receives the caller's sampling
   verbatim and fails fallbackably, the OAuth hop ships a sampling-free body

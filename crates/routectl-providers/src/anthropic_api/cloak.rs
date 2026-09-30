@@ -9,7 +9,8 @@
 //! outgoing body so a non-CC client inherits the same shape: the `system`
 //! field is reduced to the interactive identity line only, the client's
 //! real system content is relocated verbatim into the first user message as
-//! a `<system-reminder>` block (so client behavior is preserved without the
+//! a `<system-reminder>` block (a synthetic leading user message when the
+//! history holds none) (so client behavior is preserved without the
 //! client fingerprint reaching the subscription classifier), and a
 //! corpus-shaped metadata `user_id` is minted. The billing/attribution
 //! block is always stripped (CC or not) so the client fingerprint never
@@ -23,7 +24,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use routectl_core::ChatRequest;
+use routectl_core::{ChatRequest, Error};
 
 mod billing;
 mod identity;
@@ -32,6 +33,7 @@ mod tool_rename;
 mod tool_sort;
 
 use billing::strip_billing_block;
+pub use identity::RelocationRefusal;
 use identity::{mint_metadata_user_id, relocate_client_system};
 use obfuscate::obfuscate_sensitive_words;
 use tool_rename::{apply_tool_rename, normalize_tool_names_to_mcp};
@@ -155,6 +157,38 @@ impl std::fmt::Debug for CloakConfig {
     }
 }
 
+impl RelocationRefusal {
+    /// The refusal as the dispatch error the router routes on.
+    ///
+    /// Shaped as the `invalid_request_error` 400 the upstream itself would
+    /// answer a body with no legal landing for the client system with, so it
+    /// takes exactly that routing: no same-seat retry, no breaker debit, and
+    /// the bad-request fallback walk (operator-configurable under
+    /// `[retry.classes.bad-request]`). A local `Validation` error would instead
+    /// classify as unknown, which never falls back. The body names routectl as
+    /// the author so no reader mistakes it for an upstream reply.
+    pub fn into_error(self, provider_id: &str) -> Error {
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": RELOCATION_REFUSAL_TYPE,
+                "message": format!("routectl refused the request before egress: {}", self.detail),
+            },
+        });
+        Error::upstream_full(
+            provider_id,
+            RELOCATION_REFUSAL_STATUS,
+            body.to_string(),
+            None,
+            Some(RELOCATION_REFUSAL_TYPE.to_string()),
+            None,
+        )
+    }
+}
+
+const RELOCATION_REFUSAL_STATUS: u16 = 400;
+const RELOCATION_REFUSAL_TYPE: &str = "invalid_request_error";
+
 /// Result of the OAuth-egress cloak. Carries the per-request reverse map
 /// (upstream renamed name -> original client name) so the caller can
 /// restore the client's original tool names on the response. The map is
@@ -222,22 +256,20 @@ impl ClaudeCodeIdentity {
 /// mechanical reason the classification split carries none: the census sweeps a
 /// fixed surface list this module is not on, and its file walk refuses a nested
 /// directory rather than descending, so a marker written here is never parsed
-/// and would survive being replaced by nonsense with every weld green. The four
+/// and would survive being replaced by nonsense with every weld green. The three
 /// classes declare themselves in the unswept-policy register instead, each with
 /// its covering test named there.
 #[derive(Debug, Default)]
 struct CloakPolicyTally {
-    system_prompt_discarded: bool,
     cache_breakpoints_collapsed: bool,
-    non_text_block_dropped: bool,
+    unrepresentable_block_dropped: bool,
     tool_sort_stood_down: bool,
 }
 
 impl CloakPolicyTally {
     const fn absorb_relocation(&mut self, outcome: identity::RelocationOutcome) {
-        self.system_prompt_discarded |= outcome.system_prompt_discarded;
         self.cache_breakpoints_collapsed |= outcome.cache_breakpoints_collapsed;
-        self.non_text_block_dropped |= outcome.non_text_block_dropped;
+        self.unrepresentable_block_dropped |= outcome.unrepresentable_block_dropped;
     }
 
     const fn absorb_tool_sort(&mut self, outcome: tool_sort::ToolSortOutcome) {
@@ -248,7 +280,7 @@ impl CloakPolicyTally {
     /// `super::probe_aware_metrics`.
     fn flush(&self, req: &ChatRequest) {
         // A background probe contributes to no numerator on this lane -- see
-        // `super::is_client_traffic`. Checked once for all four
+        // `super::is_client_traffic`. Checked once for all three
         // classes: they are one flush of one request.
         if !super::is_client_traffic(req) {
             return;
@@ -257,22 +289,16 @@ impl CloakPolicyTally {
         // harvest resolves each class to the literal an operator reads in
         // telemetry, and an expression it cannot resolve takes the call out of
         // the census entirely.
-        if self.system_prompt_discarded {
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "cloak_client_system_prompt_discarded",
-            );
-        }
         if self.cache_breakpoints_collapsed {
             crate::translation_drop_metrics::record_translation_policy_action(
                 super::LANE,
                 "cloak_client_cache_breakpoints_collapsed",
             );
         }
-        if self.non_text_block_dropped {
+        if self.unrepresentable_block_dropped {
             crate::translation_drop_metrics::record_translation_policy_action(
                 super::LANE,
-                "cloak_non_text_system_block_dropped",
+                "cloak_unrepresentable_system_block_dropped",
             );
         }
         if self.tool_sort_stood_down {
@@ -290,8 +316,13 @@ impl CloakPolicyTally {
 /// the interactive identity line only, the client's real system content --
 /// from `system` AND from any `role: "system"` turn in `messages[]`, which
 /// is removed from the array -- is relocated into the first user message as
-/// a `<system-reminder>` block (unless `strict_mode` drops it), and a
-/// metadata `user_id` is minted.
+/// a `<system-reminder>` block followed by any carried image/document blocks
+/// (unless `strict_mode` drops it), and a metadata `user_id` is minted.
+///
+/// Errors with a [`RelocationRefusal`] when the relocation has nowhere legal
+/// to land (see `relocate_client_system`). The refusal is returned before any
+/// network I/O and the body must then not be sent; the canonical request is
+/// never touched, so every other target still builds from the original.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
 /// first, then the always-on tool-name normalization (every non-`mcp__`
@@ -306,15 +337,21 @@ pub fn cloak_oauth_egress(
     identity: &ClaudeCodeIdentity,
     is_non_cc: bool,
     config: &CloakConfig,
-) -> CloakResult {
+) -> Result<CloakResult, RelocationRefusal> {
     let mut tally = CloakPolicyTally::default();
     strip_billing_block(body);
     if is_non_cc {
         // `strict_mode` is the operator choosing to DROP the client system
         // rather than relocate it, so the losses past that switch are
         // configured, not chosen on the operator's behalf: the relocation
-        // reports none of its three classes under it.
-        tally.absorb_relocation(relocate_client_system(body, config.strict_mode));
+        // reports none of its classes and refuses nothing under it.
+        let outcome = relocate_client_system(body, config.strict_mode).inspect_err(|refusal| {
+            tracing::warn!(
+                reason = %refusal.detail,
+                "cloak system relocation refused; failing the request before egress"
+            );
+        })?;
+        tally.absorb_relocation(outcome);
         mint_metadata_user_id(body, identity);
     }
     let mut tool_reverse = normalize_tool_names_to_mcp(body);
@@ -336,7 +373,7 @@ pub fn cloak_oauth_egress(
         tally.absorb_tool_sort(sort_custom_tools_by_name(body));
     }
     tally.flush(req);
-    CloakResult { tool_reverse }
+    Ok(CloakResult { tool_reverse })
 }
 
 #[cfg(test)]
@@ -348,3 +385,7 @@ mod tests;
 #[cfg(test)]
 #[path = "cloak_policy_counter_tests.rs"]
 mod policy_counter_tests;
+
+#[cfg(test)]
+#[path = "cloak_relocation_wire_tests.rs"]
+mod relocation_wire_tests;

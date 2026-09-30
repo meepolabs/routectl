@@ -96,7 +96,7 @@ fn relocate_string_system_sets_identity_only_and_moves_to_first_user() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: system is identity-only; first user content[0] is the
     // reminder wrapping the original string, content[1] the original text.
@@ -122,7 +122,7 @@ fn relocate_array_system_joins_blocks_into_one_reminder() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: identity-only system; reminder joins both blocks' text.
     let sys = body["system"].as_array().expect("system is array");
@@ -147,7 +147,7 @@ fn strict_mode_drops_client_system_and_leaves_user_message_unchanged() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, true);
+    let _ = relocate_client_system(&mut body, true).expect("relocates");
 
     // Assert: identity-only system; user message untouched, no reminder.
     let sys = body["system"].as_array().expect("system is array");
@@ -172,7 +172,7 @@ fn relocate_captures_and_removes_a_messages_system_turn() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert
     let msgs = body["messages"].as_array().expect("messages array");
@@ -204,7 +204,7 @@ fn strict_mode_drops_a_messages_system_turn_without_a_reminder() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, true);
+    let _ = relocate_client_system(&mut body, true).expect("relocates");
 
     // Assert
     let msgs = body["messages"].as_array().expect("messages array");
@@ -228,7 +228,7 @@ fn relocate_captures_block_array_content_of_a_messages_system_turn() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert
     let msgs = body["messages"].as_array().expect("messages array");
@@ -250,7 +250,7 @@ fn relocate_preserves_cache_control_on_reminder_block() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: the relocated reminder carries the cache_control.
     let reminder = &body["messages"][0]["content"][0];
@@ -258,39 +258,45 @@ fn relocate_preserves_cache_control_on_reminder_block() {
 }
 
 #[test]
-fn relocate_no_panic_when_no_user_message_present() {
-    // Arrange: only an assistant message -- nowhere to relocate into.
+fn relocate_prepends_a_synthetic_user_turn_to_assistant_only_history() {
+    // Arrange: only an assistant message -- no user turn to relocate into.
     let mut body = json!({
         "system": "client system prompt",
         "messages": [{"role": "assistant", "content": "prior"}]
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
-    // Assert: identity-only system; client body dropped; messages intact.
+    // Assert: identity-only system; one synthetic user turn leads the
+    // history carrying only the reminder; the assistant turn follows intact.
     let sys = body["system"].as_array().expect("system is array");
     assert_eq!(sys.len(), 1);
     assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
-    assert_eq!(body["messages"][0]["content"], "prior");
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": reminder_text("client system prompt")}]},
+            {"role": "assistant", "content": "prior"},
+        ])
+    );
 }
 
 #[test]
-fn relocate_no_panic_when_messages_empty() {
+fn relocate_refuses_an_empty_conversation_and_leaves_the_body_untouched() {
     // Arrange: empty messages array.
     let mut body = json!({
         "system": "client system prompt",
         "messages": []
     });
+    let before = body.clone();
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let refusal = relocate_client_system(&mut body, false).expect_err("nowhere to land");
 
-    // Assert: identity-only system; no reminder anywhere.
-    let sys = body["system"].as_array().expect("system is array");
-    assert_eq!(sys.len(), 1);
-    assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
-    assert!(body["messages"].as_array().unwrap().is_empty());
+    // Assert
+    assert!(refusal.detail.contains("no conversation"), "{refusal:?}");
+    assert_eq!(body, before, "a refused relocation must not touch the body");
 }
 
 #[test]
@@ -302,7 +308,7 @@ fn relocate_identity_only_system_leaves_messages_untouched() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: identity-only system; no reminder added; message intact.
     let sys = body["system"].as_array().expect("system is array");
@@ -323,7 +329,7 @@ fn relocate_excludes_identity_line_from_reminder() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: identity-only system; only the real body relocated (the
     // identity line is not duplicated into the reminder).
@@ -343,7 +349,7 @@ fn relocated_identity_carries_no_cache_control() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: the injected identity block has no cache breakpoint.
     let injected = &body["system"][0];
@@ -360,7 +366,7 @@ fn relocate_non_object_body_is_noop() {
     let before = body.clone();
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: the whole transform is a no-op -- no panic, no reminder
     // insertion, no system rewrite. The body stays the same String.
@@ -368,32 +374,31 @@ fn relocate_non_object_body_is_noop() {
 }
 
 #[test]
-fn relocate_drops_non_text_system_blocks() {
-    // Arrange: a system array with one valid text block and one non-text
-    // block that carries no usable "text" field.
+fn relocate_carries_an_image_system_block_after_the_reminder() {
+    // Arrange: a system array with one text block and one image block.
     let mut body = json!({
         "system": [
             {"type": "text", "text": "real body"},
-            {"type": "image", "source": {"type": "base64", "data": "AAAA"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
         ],
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
-    // Assert: upstream system reduced to identity-only.
+    // Assert: identity-only system; reminder holds only the text, the image
+    // rides verbatim right after it, then the user's own content.
     let sys = body["system"].as_array().expect("system is array");
     assert_eq!(sys.len(), 1);
     assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
-    // The reminder carries the text block and nothing from the non-text
-    // block (which is intentionally dropped -- not valid system content).
-    let reminder = &body["messages"][0]["content"][0];
-    assert_eq!(reminder["text"], reminder_text("real body"));
-    let reminder_str = reminder["text"].as_str().expect("reminder is a string");
-    assert!(
-        !reminder_str.contains("base64") && !reminder_str.contains("AAAA"),
-        "non-text block content must not leak into the reminder: {reminder_str:?}"
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": reminder_text("real body")},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            {"type": "text", "text": "hi"},
+        ])
     );
 }
 
@@ -409,7 +414,7 @@ fn relocate_collapses_multi_block_cache_control_to_last() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: the reminder carries exactly ONE cache_control, equal to the
     // LAST captured block's cache_control (last-wins collapse, which also
@@ -437,7 +442,7 @@ fn relocate_neutralizes_injected_close_tag() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: the emitted reminder carries no stray closing tag in its
     // body -- only the single framing close tag at the very end.
@@ -469,7 +474,7 @@ fn relocate_targets_first_user_message_among_many() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: reminder prepended to user A only.
     assert_eq!(body["messages"][0]["content"], "prior");
@@ -490,7 +495,7 @@ fn relocate_handles_absent_or_null_user_content() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut absent, false);
+    let _ = relocate_client_system(&mut absent, false).expect("relocates");
 
     // Assert: content becomes an array holding only the reminder.
     let content = absent["messages"][0]["content"]
@@ -506,7 +511,7 @@ fn relocate_handles_absent_or_null_user_content() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut null_content, false);
+    let _ = relocate_client_system(&mut null_content, false).expect("relocates");
 
     // Assert: same -- content becomes an array holding only the reminder.
     let content = null_content["messages"][0]["content"]
@@ -525,7 +530,7 @@ fn relocate_handles_whitespace_only_system() {
     });
 
     // Act
-    let _ = relocate_client_system(&mut body, false);
+    let _ = relocate_client_system(&mut body, false).expect("relocates");
 
     // Assert: system is reduced to identity-only (sensible, no panic).
     let sys = body["system"].as_array().expect("system is array");
@@ -644,7 +649,7 @@ fn cloak_non_cc_strips_billing_stamps_identity_and_metadata() {
     });
 
     // Act
-    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default()).expect("cloak applies");
 
     // Assert: billing gone, system is identity-only, the client system is
     // relocated into the first user message, metadata minted.
@@ -679,7 +684,8 @@ fn cloak_genuine_cc_strips_billing_but_does_not_stamp() {
     });
 
     // Act
-    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
+    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default())
+        .expect("cloak applies");
 
     // Assert: billing stripped, but identity NOT stamped, metadata absent,
     // client system retained in `system`, and NO reminder anywhere.
@@ -712,7 +718,8 @@ fn cloak_genuine_cc_leaves_a_messages_system_turn_in_place() {
     });
 
     // Act
-    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
+    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default())
+        .expect("cloak applies");
 
     // Assert
     let msgs = body["messages"].as_array().unwrap();
@@ -1043,7 +1050,8 @@ fn cloak_oauth_egress_returns_reverse_map() {
     let mut body = json!({"tools": [{"name": "mcp_foo"}]});
 
     // Act
-    let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+    let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default())
+        .expect("cloak applies");
 
     // Assert
     assert_eq!(body["tools"][0]["name"], "mcp__foo");
@@ -1133,11 +1141,12 @@ fn default_config_byte_identical_to_base_transforms() {
     // body through the SAME base transforms applied directly (strip +
     // relocate + metadata + tool-name normalization).
     let mut via_config = template.clone();
-    cloak_oauth_egress(&mut via_config, &req, &id, true, &CloakConfig::default());
+    cloak_oauth_egress(&mut via_config, &req, &id, true, &CloakConfig::default())
+        .expect("cloak applies");
 
     let mut via_base = template;
     strip_billing_block(&mut via_base);
-    let _ = relocate_client_system(&mut via_base, false);
+    let _ = relocate_client_system(&mut via_base, false).expect("relocates");
     mint_metadata_user_id(&mut via_base, &id);
     let _ = normalize_tool_names_to_mcp(&mut via_base);
     // The default config also canonicalizes tool order on the non-CC branch;
@@ -1187,7 +1196,8 @@ fn default_config_byte_identical_to_base_transforms_genuine_cc() {
     // (billing strip + tool-name normalize only -- no identity, no
     // user_id mint).
     let mut via_config = template.clone();
-    cloak_oauth_egress(&mut via_config, &req, &id, false, &CloakConfig::default());
+    cloak_oauth_egress(&mut via_config, &req, &id, false, &CloakConfig::default())
+        .expect("cloak applies");
 
     let mut via_base = template;
     strip_billing_block(&mut via_base);
@@ -1234,7 +1244,7 @@ fn tool_rename_applies_to_tools_and_tool_use_and_records_reverse() {
     };
 
     // Act
-    let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg);
+    let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg).expect("cloak applies");
 
     // Assert: forward rename applied on both surfaces.
     assert_eq!(body["tools"][0]["name"], "bar");
@@ -1270,7 +1280,7 @@ fn tool_rename_runs_after_tool_name_normalization() {
         }],
         ..CloakConfig::default()
     };
-    let res_a = cloak_oauth_egress(&mut body_a, &req, &id, false, &cfg_a);
+    let res_a = cloak_oauth_egress(&mut body_a, &req, &id, false, &cfg_a).expect("cloak applies");
     assert_eq!(
         body_a["tools"][0]["name"], "renamed",
         "rename keyed on the normalized name must match"
@@ -1296,7 +1306,7 @@ fn tool_rename_runs_after_tool_name_normalization() {
         }],
         ..CloakConfig::default()
     };
-    cloak_oauth_egress(&mut body_b, &req, &id, false, &cfg_b);
+    cloak_oauth_egress(&mut body_b, &req, &id, false, &cfg_b).expect("cloak applies");
     assert_eq!(
         body_b["tools"][0]["name"], "mcp__x",
         "rename keyed on the pre-normalization name must NOT match"
@@ -1398,7 +1408,7 @@ fn sensitive_words_obfuscation_carries_no_reverse() {
         sensitive_words: vec!["secret".to_string()],
         ..CloakConfig::default()
     };
-    let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg);
+    let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg).expect("cloak applies");
     assert!(
         result.tool_reverse.is_empty(),
         "sensitive-word obfuscation must not add reverse entries"
@@ -1750,7 +1760,7 @@ fn non_cc_default_sorts_tools_by_name() {
     let mut body = json!({
         "tools": [{"name": "zebra"}, {"name": "alpha"}, {"name": "mango"}]
     });
-    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default()).expect("cloak applies");
     assert_eq!(
         tool_names(&body),
         vec!["mcp__alpha", "mcp__mango", "mcp__zebra"]
@@ -1766,7 +1776,8 @@ fn genuine_cc_leaves_tool_order_untouched() {
     let mut body = json!({
         "tools": [{"name": "zebra"}, {"name": "alpha"}]
     });
-    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
+    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default())
+        .expect("cloak applies");
     assert_eq!(tool_names(&body), vec!["mcp__zebra", "mcp__alpha"]);
 }
 
@@ -1782,7 +1793,7 @@ fn knob_off_leaves_tool_order_untouched() {
     let mut body = json!({
         "tools": [{"name": "zebra"}, {"name": "alpha"}]
     });
-    cloak_oauth_egress(&mut body, &req, &id, true, &cfg);
+    cloak_oauth_egress(&mut body, &req, &id, true, &cfg).expect("cloak applies");
     assert_eq!(tool_names(&body), vec!["mcp__zebra", "mcp__alpha"]);
 }
 
@@ -1803,7 +1814,7 @@ fn non_cc_opaque_tool_stands_down_sort() {
             {"name": "alpha"}
         ]
     });
-    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default()).expect("cloak applies");
     // Builtins skip name normalization; the two customs are normalized but
     // NOT reordered (stand-down).
     assert_eq!(
@@ -1822,8 +1833,9 @@ fn non_cc_cloak_is_idempotent_over_tool_sort() {
         "tools": [{"name": "delta"}, {"name": "mcp_beta"}, {"name": "charlie"}]
     });
     let mut once = template.clone();
-    cloak_oauth_egress(&mut once, &req, &id, true, &CloakConfig::default());
+    cloak_oauth_egress(&mut once, &req, &id, true, &CloakConfig::default()).expect("cloak applies");
     let mut twice = once.clone();
-    cloak_oauth_egress(&mut twice, &req, &id, true, &CloakConfig::default());
+    cloak_oauth_egress(&mut twice, &req, &id, true, &CloakConfig::default())
+        .expect("cloak applies");
     assert_eq!(once, twice);
 }

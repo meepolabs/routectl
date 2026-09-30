@@ -1787,7 +1787,7 @@ fn cloak_body_forwarded_leg_is_noop() {
     let mut body = cloak_test_body();
     let before = body.clone();
 
-    let result = provider.cloak_body(&mut body, &req);
+    let result = provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     assert!(
         result.is_none(),
@@ -1936,7 +1936,9 @@ fn body_anthropic_beta_field_absent_on_all_egress_paths() {
         obj.remove("stream");
         obj.remove("anthropic_beta");
     }
-    provider.cloak_body(&mut complete_body, &req);
+    provider
+        .cloak_body(&mut complete_body, &req)
+        .expect("cloak applies");
     assert!(
         complete_body.get("anthropic_beta").is_none(),
         "complete egress body must not carry anthropic_beta",
@@ -1948,7 +1950,9 @@ fn body_anthropic_beta_field_absent_on_all_egress_paths() {
         obj.insert("stream".into(), serde_json::Value::Bool(true));
         obj.remove("anthropic_beta");
     }
-    provider.cloak_body(&mut stream_body, &req);
+    provider
+        .cloak_body(&mut stream_body, &req)
+        .expect("cloak applies");
     assert!(
         stream_body.get("anthropic_beta").is_none(),
         "stream egress body must not carry anthropic_beta",
@@ -1956,7 +1960,7 @@ fn body_anthropic_beta_field_absent_on_all_egress_paths() {
 
     // count_tokens() path: cloak, then reshape through the allowlist.
     let mut ct = normalized.clone();
-    provider.cloak_body(&mut ct, &req);
+    provider.cloak_body(&mut ct, &req).expect("cloak applies");
     let ct_body = build_count_tokens_body(&ct);
     assert!(
         ct_body.get("anthropic_beta").is_none(),
@@ -2007,7 +2011,7 @@ fn cloak_body_non_cc_stamps_identity_and_metadata_and_strips_billing() {
     let req = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
     let mut body = cloak_test_body();
 
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     // System is identity-only.
     let arr = body["system"].as_array().expect("system is array");
@@ -2049,7 +2053,7 @@ fn cloak_body_genuine_cc_strips_billing_only() {
     let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
     let mut body = cloak_test_body();
 
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     // Billing block stripped, leaving only the client system block.
     let arr = body["system"].as_array().expect("system is array");
@@ -2083,7 +2087,7 @@ fn cloak_body_api_key_path_leaves_body_untouched() {
     let mut body = cloak_test_body();
     let before = body.clone();
 
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     assert_eq!(
         body, before,
@@ -2105,7 +2109,7 @@ fn cloak_body_non_anthropic_host_leaves_body_untouched() {
     let mut body = cloak_test_body();
     let before = body.clone();
 
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     assert_eq!(
         body, before,
@@ -2205,7 +2209,7 @@ fn cloak_mode_never_skips_all_transforms() {
     });
     let before = body.clone();
 
-    let result = provider.cloak_body(&mut body, &req);
+    let result = provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     assert!(
         result.is_none(),
@@ -2234,7 +2238,7 @@ fn cloak_mode_always_stamps_identity_even_with_session_header() {
     let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
     let mut body = cloak_test_body();
 
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     // Despite the session header, identity is stamped and metadata minted.
     assert_eq!(
@@ -2258,7 +2262,7 @@ fn cloak_mode_auto_matches_baseline_for_genuine_cc() {
     let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
     let mut body = cloak_test_body();
 
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
 
     // Genuine CC under Auto: only the client block remains, no metadata.
     let arr = body["system"].as_array().expect("system is array");
@@ -3754,7 +3758,7 @@ fn req_with_sampling(temperature: Option<f64>, top_p: Option<f64>) -> ChatReques
 /// need the resulting body.
 fn final_body(provider: &AnthropicApiProvider, req: &ChatRequest) -> Value {
     let mut body = provider.normalize_request(req).expect("normalize");
-    provider.cloak_body(&mut body, req);
+    provider.cloak_body(&mut body, req).expect("cloak applies");
     if provider.is_cloak_lane(req) {
         extras::normalize_claude_sampling(&provider.cfg.id, &mut body);
     }
@@ -3808,7 +3812,9 @@ fn cloak_lane_strips_thinking_clamp_temperature() {
 
     // Precondition: without the strip the assembly emits temperature 1.0.
     let mut assembled = provider.normalize_request(&req).expect("normalize");
-    provider.cloak_body(&mut assembled, &req);
+    provider
+        .cloak_body(&mut assembled, &req)
+        .expect("cloak applies");
     assert_eq!(
         assembled["temperature"],
         serde_json::json!(1.0),
@@ -3841,7 +3847,9 @@ fn provider_extras_cannot_smuggle_sampling_onto_the_cloak_lane() {
     };
 
     let mut pre_strip = provider.normalize_request(&req).expect("normalize");
-    provider.cloak_body(&mut pre_strip, &req);
+    provider
+        .cloak_body(&mut pre_strip, &req)
+        .expect("cloak applies");
     assert!(
         pre_strip.get("temperature").is_none() && pre_strip.get("top_p").is_none(),
         "the managed-key shield must drop extras sampling before the strip; got: {pre_strip}"
@@ -3936,7 +3944,9 @@ fn off_lane_requests_keep_sampling_byte_unchanged() {
             );
             // The un-stripped assembly is the byte baseline.
             let mut expected = provider.normalize_request(&req).expect("normalize");
-            provider.cloak_body(&mut expected, &req);
+            provider
+                .cloak_body(&mut expected, &req)
+                .expect("cloak applies");
             assert!(
                 expected.get(kept_key).is_some(),
                 "{label}: precondition -- the assembly must emit {kept_key}; got: {expected}"
@@ -3990,7 +4000,9 @@ async fn complete_and_stream_both_strip_sampling_on_the_cloak_lane() {
             // `seeded_key` on the assembled body, so its absence below is
             // the strip's doing and not an assembly accident.
             let mut pre_strip = provider.normalize_request(&req).expect("normalize");
-            provider.cloak_body(&mut pre_strip, &req);
+            provider
+                .cloak_body(&mut pre_strip, &req)
+                .expect("cloak applies");
             assert!(
                 pre_strip.get(seeded_key).is_some(),
                 "precondition: the {seeded_key} seed must reach the assembled body; got: {pre_strip}"
@@ -4235,7 +4247,9 @@ fn count_tokens_body_drops_sampling_by_allowlist_without_a_strip_warn() {
 
     let events = routectl_testkit::capture_events(|| {
         let mut normalized = provider.normalize_request(&req).expect("normalize");
-        provider.cloak_body(&mut normalized, &req);
+        provider
+            .cloak_body(&mut normalized, &req)
+            .expect("cloak applies");
         let body = build_count_tokens_body(&normalized);
         assert!(
             body.get("temperature").is_none() && body.get("top_p").is_none(),
@@ -4561,8 +4575,8 @@ fn every_recorder_call_on_this_lane_is_probe_gated() {
     // `request.rs` left a `contains`-based version of this guard green, because
     // the file's other call still named the predicate.
     //
-    // `cloak.rs` gates all four of its calls with ONE early return, which is why
-    // its expected gate count is 1 rather than 4.
+    // `cloak.rs` gates all three of its calls with ONE early return, which is
+    // why its expected gate count is 1 rather than 3.
     //
     // `client.rs` carries ONE MORE gate than it has recorder calls, and that
     // asymmetry is deliberate rather than slack: the same predicate also guards
@@ -4574,7 +4588,7 @@ fn every_recorder_call_on_this_lane_is_probe_gated() {
     for (name, src, expected_calls, expected_gates) in [
         ("request.rs", REQUEST, 2usize, 2usize),
         ("client.rs", CLIENT, 2, 2),
-        ("cloak.rs", CLOAK, 4, 1),
+        ("cloak.rs", CLOAK, 3, 1),
     ] {
         let calls = src.matches("record_translation_lane_seen(").count()
             + src.matches("record_translation_policy_action(").count();
@@ -4627,7 +4641,9 @@ fn a_background_probe_moves_neither_classification_numerator() {
     provider
         .normalize_request(&probe)
         .expect("the probe body must still translate");
-    provider.cloak_body(&mut body, &probe);
+    provider
+        .cloak_body(&mut body, &probe)
+        .expect("cloak applies");
 
     assert_eq!(
         cloak_split_count("cloak_classified_non_cc"),
@@ -4668,13 +4684,17 @@ fn a_background_probe_is_counted_on_neither_classification_arm() {
     let mut probe_non_cc = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
     probe_non_cc.routectl_internal.background_probe = true;
     let mut body = cloak_test_body();
-    provider.cloak_body(&mut body, &probe_non_cc);
+    provider
+        .cloak_body(&mut body, &probe_non_cc)
+        .expect("cloak applies");
 
     // Genuine-CC shape, marked as a probe.
     let mut probe_cc = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sess-1")]);
     probe_cc.routectl_internal.background_probe = true;
     let mut body = cloak_test_body();
-    provider.cloak_body(&mut body, &probe_cc);
+    provider
+        .cloak_body(&mut body, &probe_cc)
+        .expect("cloak applies");
 
     assert_eq!(
         cloak_split_count("cloak_classified_non_cc"),
@@ -4707,12 +4727,16 @@ fn a_background_probe_is_still_cloaked_like_the_traffic_it_probes_for() {
 
     let client = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
     let mut client_body = cloak_test_body();
-    let client_result = provider.cloak_body(&mut client_body, &client);
+    let client_result = provider
+        .cloak_body(&mut client_body, &client)
+        .expect("cloak applies");
 
     let mut probe = client.clone();
     probe.routectl_internal.background_probe = true;
     let mut probe_body = cloak_test_body();
-    let probe_result = provider.cloak_body(&mut probe_body, &probe);
+    let probe_result = provider
+        .cloak_body(&mut probe_body, &probe)
+        .expect("cloak applies");
 
     assert!(
         client_result.is_some() && probe_result.is_some(),
@@ -4744,7 +4768,7 @@ fn a_non_cc_request_counts_the_non_cc_arm() {
     // Act
     let non_cc_before = cloak_split_count("cloak_classified_non_cc");
     let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
     let non_cc_after = cloak_split_count("cloak_classified_non_cc");
     let genuine_after = cloak_split_count("cloak_classified_genuine_cc");
 
@@ -4780,7 +4804,7 @@ fn a_genuine_cc_request_counts_the_genuine_cc_arm() {
     // Act
     let non_cc_before = cloak_split_count("cloak_classified_non_cc");
     let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
-    provider.cloak_body(&mut body, &req);
+    provider.cloak_body(&mut body, &req).expect("cloak applies");
     let non_cc_after = cloak_split_count("cloak_classified_non_cc");
     let genuine_after = cloak_split_count("cloak_classified_genuine_cc");
 
@@ -4819,7 +4843,7 @@ fn a_request_the_cloak_skips_counts_neither_arm() {
     // Act
     let non_cc_before = cloak_split_count("cloak_classified_non_cc");
     let genuine_before = cloak_split_count("cloak_classified_genuine_cc");
-    let result = provider.cloak_body(&mut body, &req);
+    let result = provider.cloak_body(&mut body, &req).expect("cloak applies");
     let non_cc_after = cloak_split_count("cloak_classified_non_cc");
     let genuine_after = cloak_split_count("cloak_classified_genuine_cc");
 

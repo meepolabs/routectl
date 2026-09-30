@@ -1026,7 +1026,10 @@ impl AnthropicApiProvider {
     ///
     /// Returns `Some(CloakResult)` on the cloak path (carrying the
     /// per-request tool-name reverse map) and `None` on every non-cloak
-    /// path (non-OAuth / non-anthropic-host / identity absent).
+    /// path (non-OAuth / non-anthropic-host / identity absent). Errors
+    /// when the client system has nowhere legal to land; complete, stream,
+    /// and count_tokens all propagate it before any network I/O (see
+    /// `RelocationRefusal::into_error` for how it routes).
     ///
     /// Cache-safety invariant: the tool-name normalization here runs
     /// AFTER `normalize_request` and BEFORE serialization and
@@ -1037,25 +1040,27 @@ impl AnthropicApiProvider {
         &self,
         body: &mut Value,
         req: &ChatRequest,
-    ) -> Option<cloak::CloakResult> {
+    ) -> Result<Option<cloak::CloakResult>> {
         // Forwarded (pure-proxy) leg: the egress is a byte-transparent
         // forwarder (see the FORWARDING TRANSPARENCY CONTRACT), so no cloak
         // transform runs and the client's body reaches Anthropic verbatim.
         if self.forwarded_leg(req) {
-            return None;
+            return Ok(None);
         }
         if self.cfg.auth_kind != AuthKind::OauthBearer || !is_anthropic_api_host(&self.cfg.base_url)
         {
-            return None;
+            return Ok(None);
         }
         // `Never` must short-circuit BEFORE `is_non_cc` is consulted: it
         // skips ALL cloak transforms, so the classification is irrelevant
         // here (it exists only for `is_non_cc`'s other callers, which do
         // not early-return on `Never`).
         if self.cfg.cloak.mode == cloak::CloakMode::Never {
-            return None;
+            return Ok(None);
         }
-        let identity = self.identity.as_ref()?;
+        let Some(identity) = self.identity.as_ref() else {
+            return Ok(None);
+        };
         // Trust boundary: the session-id header is client-supplied, so this
         // non-CC signal is advisory, not authoritative. The fail-safe is that
         // a misclassification cannot cause a silent billing leak -- a wrong
@@ -1121,7 +1126,8 @@ impl AnthropicApiProvider {
                 );
             }
         }
-        let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc, &self.cfg.cloak);
+        let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc, &self.cfg.cloak)
+            .map_err(|refusal| refusal.into_error(&self.cfg.id))?;
         // Decision log: provider + non-CC gate + how many tool names were
         // normalized. NEVER logs tool names or message content.
         tracing::info!(
@@ -1130,7 +1136,7 @@ impl AnthropicApiProvider {
             rename_count = result.tool_reverse.len(),
             "anthropic-api cloak applied to outgoing body",
         );
-        Some(result)
+        Ok(Some(result))
     }
 
     /// Parse the `anthropic-ratelimit-unified-*` quota family from an

@@ -1,5 +1,8 @@
 //! Relocates a non-CC client system prompt and mints the metadata user_id.
 
+use routectl_core::cache_control::{
+    self, BreakpointPosition, CacheBreakpointSource, CacheControl, OwnedBreakpoint,
+};
 use serde_json::{Value, json};
 
 use super::ClaudeCodeIdentity;
@@ -38,99 +41,285 @@ pub(super) const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
 #[must_use]
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct RelocationOutcome {
-    /// Captured client system content had nowhere to go: the whole client
-    /// system prompt left the request.
-    pub(super) system_prompt_discarded: bool,
-    /// More than one client cache breakpoint was reduced to the one the
-    /// relocated block carries.
+    /// More than one client cache breakpoint on blocks that fold into the
+    /// reminder was reduced to the one the reminder carries.
     pub(super) cache_breakpoints_collapsed: bool,
-    /// A system block carrying no string `text` was dropped on capture.
-    pub(super) non_text_block_dropped: bool,
+    /// A captured system block whose role or adjacency requirements the user
+    /// turn cannot honor (tool use, tool result, thinking, redacted thinking,
+    /// or an unknown type) was left out of the relocation.
+    pub(super) unrepresentable_block_dropped: bool,
+}
+
+/// Why a relocation was refused. Decided before the body is touched, so a
+/// refused body is exactly the body the caller passed in. `detail` names the
+/// shape only and never carries request content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelocationRefusal {
+    pub detail: String,
 }
 
 /// Reduce a non-CC client's `system` to the interactive identity line only,
-/// relocating the client's real system content into the first user message.
+/// relocating the client's real system content into the conversation.
 ///
 /// The subscription classifier runs a substance check on `system`; a
-/// third-party agent's system prompt fails it wholesale. So the client's
-/// real system content (already billing-stripped) is captured, the `system`
-/// field is replaced with the identity line only, and -- unless
-/// `strict_mode` is set -- the captured content is reattached as a
-/// `<system-reminder>` block at the front of the first user message so the
-/// client's intended behavior is preserved.
+/// third-party agent's system prompt fails it wholesale. So the client's real
+/// system content (already billing-stripped) is captured, the `system` field
+/// is replaced with the identity line only, and -- unless `strict_mode` is set
+/// -- the captured content is reattached at the front of the first user
+/// message: text as one `<system-reminder>` block, then every image and
+/// document block verbatim in capture order. With no user message but a
+/// nonempty remaining history, one synthetic user message carrying the same
+/// payload is prepended instead.
 ///
-/// `role: "system"` entries in `messages[]` are a second carrier of the
-/// same client directives (the anthropic-api egress forwards a
-/// mid-conversation system turn in place), so they are captured and REMOVED
-/// from the array by the same pass and folded into the same reminder block.
-/// Leaving them would let third-party system content reach the upstream
-/// verbatim, defeating the relocation for exactly the content it exists to
-/// relocate.
+/// `role: "system"` entries in `messages[]` are a second carrier of the same
+/// client directives (the anthropic-api egress forwards a mid-conversation
+/// system turn in place), so they are captured and REMOVED from the array by
+/// the same pass and folded into the same payload.
 ///
-/// Recognized identity lines in the captured content are excluded (we
-/// re-add our own identity, so an existing identity line is never
-/// duplicated into the reminder). The transform is egress-only: the
-/// response never echoes `system`, so there is no reverse map.
-pub(super) fn relocate_client_system(body: &mut Value, strict_mode: bool) -> RelocationOutcome {
-    // Run the transform as an all-or-nothing unit: if the body root is not a
-    // JSON object there is no `system` / `messages` to rewrite, so bail before
-    // any partial mutation leaves the body in an inconsistent state.
+/// Transactional: the whole landing is planned against the unmodified body
+/// and committed only once it is known to be legal. A refusal -- no message
+/// array, a non-array `messages`, nothing left of the conversation once the
+/// system turns leave it, or carried cache breakpoints the cap/ordering policy
+/// cannot accept -- returns before any mutation.
+///
+/// Recognized identity lines in the captured content are excluded (we re-add
+/// our own identity). The transform is egress-only: the response never echoes
+/// `system`, so there is no reverse map.
+pub(super) fn relocate_client_system(
+    body: &mut Value,
+    strict_mode: bool,
+) -> Result<RelocationOutcome, RelocationRefusal> {
     if body.as_object().is_none() {
-        return RelocationOutcome::default();
+        return Ok(RelocationOutcome::default());
     }
-    let mut capture = capture_client_system(body.get("system"));
-    capture.absorb(take_system_role_turns(body));
-    set_identity_only_system(body);
+    let plan = plan_relocation(body, strict_mode)?;
+    commit_relocation(body, plan.landing);
+    log_relocation_losses(plan.outcome);
+    Ok(plan.outcome)
+}
 
+/// What the commit lands, decided against the unmodified body.
+enum Landing {
+    /// Nothing to relocate: only the system reduction and the system-turn
+    /// removal run.
+    Nowhere,
+    /// Reminder first, then carried blocks, in capture order. Prepended to the
+    /// first `role: "user"` message, or carried by one synthetic user message
+    /// ahead of the history when there is none.
+    Payload(Vec<Value>),
+}
+
+struct RelocationPlan {
+    landing: Landing,
+    outcome: RelocationOutcome,
+}
+
+/// Decide the full relocation without touching the body.
+///
+/// Under `strict_mode` the operator asked for the client system to be DROPPED
+/// rather than relocated, so nothing lost from here on is a loss routectl took
+/// on the operator's behalf: no class fires, nothing is logged, and no shape
+/// is refused.
+fn plan_relocation(body: &Value, strict_mode: bool) -> Result<RelocationPlan, RelocationRefusal> {
+    let capture = capture_all(body);
     if strict_mode {
-        // The operator asked for the client system to be DROPPED rather than
-        // relocated, so everything lost from here on is a configured choice,
-        // not a loss routectl took on the operator's behalf. None of the three
-        // classes fires and nothing is logged: a counter that moved here would
-        // report the operator's own setting back to them as an incident, and it
-        // would swamp the arms that mean something went wrong.
-        return RelocationOutcome::default();
+        return Ok(RelocationPlan {
+            landing: Landing::Nowhere,
+            outcome: RelocationOutcome::default(),
+        });
     }
-
-    let outcome = match build_reminder_block(&capture.blocks) {
-        // Nothing relocatable was captured, so no prompt was discarded and no
-        // breakpoint was collapsed -- but a non-text block may still have been
-        // dropped on the way here.
-        None => RelocationOutcome {
-            system_prompt_discarded: false,
-            cache_breakpoints_collapsed: false,
-            non_text_block_dropped: capture.non_text_block_dropped,
-        },
-        Some(reminder) => {
-            let inserted = insert_reminder_into_first_user(body, reminder);
-            RelocationOutcome {
-                system_prompt_discarded: !inserted,
-                // Only a REDUCTION counts, and only once the block carrying the
-                // surviving breakpoint actually reached the wire body: a failed
-                // insertion loses the whole prompt, breakpoints included, and
-                // that is the discard class rather than a collapse. Reporting
-                // both would count one loss twice under two labels.
-                cache_breakpoints_collapsed: inserted && capture.breakpoints_seen > 1,
-                non_text_block_dropped: capture.non_text_block_dropped,
-            }
-        }
+    let reminder = build_reminder_block(&capture.texts);
+    let outcome = RelocationOutcome {
+        // Only a REDUCTION counts, and only when a reminder carries the
+        // surviving breakpoint.
+        cache_breakpoints_collapsed: reminder.is_some() && capture.folded_breakpoints > 1,
+        unrepresentable_block_dropped: capture.unrepresentable_block_dropped,
     };
-    log_relocation_losses(outcome);
-    outcome
+    // Only a CARRIED block can add a breakpoint the request did not already
+    // count: the reminder carries at most one of the folded markers. Gating the
+    // check on carried markers keeps every text-only relocation's output
+    // exactly as it has always been.
+    let carries_breakpoint = capture
+        .carried
+        .iter()
+        .any(|block| block.get("cache_control").is_some());
+    let payload: Vec<Value> = reminder.into_iter().chain(capture.carried).collect();
+    if payload.is_empty() {
+        return Ok(RelocationPlan {
+            landing: Landing::Nowhere,
+            outcome,
+        });
+    }
+    let has_first_user = conversation_has_user_turn(body.get("messages"))?;
+    if carries_breakpoint {
+        validate_candidate_breakpoints(body, &payload, has_first_user)?;
+    }
+    Ok(RelocationPlan {
+        landing: Landing::Payload(payload),
+        outcome,
+    })
+}
+
+/// Whether the conversation left once system turns are removed has a user
+/// turn to land on, refusing the shapes with nowhere legal to land.
+fn conversation_has_user_turn(messages: Option<&Value>) -> Result<bool, RelocationRefusal> {
+    let Some(messages) = messages else {
+        return Err(refusal("the request carries no message array"));
+    };
+    let Some(messages) = messages.as_array() else {
+        return Err(refusal("the request's messages field is not an array"));
+    };
+    let mut remaining = messages.iter().filter(|m| !is_role(m, "system")).peekable();
+    if remaining.peek().is_none() {
+        return Err(refusal(
+            "the request carries no conversation once its system content is relocated",
+        ));
+    }
+    Ok(remaining.any(|m| is_role(m, "user")))
+}
+
+fn refusal(detail: &str) -> RelocationRefusal {
+    RelocationRefusal {
+        detail: format!("client system content cannot be relocated: {detail}"),
+    }
+}
+
+fn is_role(message: &Value, role: &str) -> bool {
+    message.get("role").and_then(Value::as_str) == Some(role)
+}
+
+/// Run the existing breakpoint cap/ordering policy over the body the plan
+/// would produce. The payload's markers sit where the commit will put them:
+/// ahead of the first user message's own content, or in the synthetic message
+/// ahead of all history.
+fn validate_candidate_breakpoints(
+    body: &Value,
+    payload: &[Value],
+    has_first_user: bool,
+) -> Result<(), RelocationRefusal> {
+    let candidate = CandidateBreakpoints {
+        body,
+        payload,
+        has_first_user,
+    };
+    cache_control::validate_source(&candidate).map_err(|e| RelocationRefusal {
+        detail: format!("relocated system blocks break the cache breakpoint policy: {e}"),
+    })
+}
+
+struct CandidateBreakpoints<'a> {
+    body: &'a Value,
+    payload: &'a [Value],
+    has_first_user: bool,
+}
+
+impl CacheBreakpointSource for CandidateBreakpoints<'_> {
+    fn cache_breakpoints(&self) -> Vec<OwnedBreakpoint> {
+        let mut out = Vec::new();
+        let tools = self.body.get("tools").and_then(Value::as_array);
+        push_markers(
+            &mut out,
+            BreakpointPosition::Tools,
+            tools.into_iter().flatten(),
+        );
+        if !self.has_first_user {
+            push_markers(&mut out, BreakpointPosition::Messages, self.payload.iter());
+        }
+        let mut payload_pending = self.has_first_user;
+        let messages = self.body.get("messages").and_then(Value::as_array);
+        for message in messages.into_iter().flatten() {
+            if is_role(message, "system") {
+                continue;
+            }
+            if payload_pending && is_role(message, "user") {
+                payload_pending = false;
+                push_markers(&mut out, BreakpointPosition::Messages, self.payload.iter());
+            }
+            let blocks = message.get("content").and_then(Value::as_array);
+            push_markers(
+                &mut out,
+                BreakpointPosition::Messages,
+                blocks.into_iter().flatten(),
+            );
+        }
+        push_markers(
+            &mut out,
+            BreakpointPosition::TopLevel,
+            std::iter::once(self.body),
+        );
+        out
+    }
+}
+
+/// Append the parseable `cache_control` marker of each item. An unparseable
+/// marker counts as no breakpoint, matching the assembled-body walk's
+/// treatment of an opaque tool's marker.
+fn push_markers<'a>(
+    out: &mut Vec<OwnedBreakpoint>,
+    position: BreakpointPosition,
+    items: impl Iterator<Item = &'a Value>,
+) {
+    for item in items {
+        if let Some(control) = item
+            .get("cache_control")
+            .and_then(|cc| serde_json::from_value::<CacheControl>(cc.clone()).ok())
+        {
+            out.push(OwnedBreakpoint::new(position, control));
+        }
+    }
+}
+
+/// Apply a planned relocation. Infallible by construction: every shape the
+/// plan could not land was refused before this runs.
+fn commit_relocation(body: &mut Value, landing: Landing) {
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        messages.retain(|m| !is_role(m, "system"));
+    }
+    set_identity_only_system(body);
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Landing::Payload(payload) = landing else {
+        return;
+    };
+    match messages.iter_mut().find(|m| is_role(m, "user")) {
+        Some(user) => prepend_to_user_content(user, payload),
+        None => messages.insert(0, synthetic_user(payload)),
+    }
+}
+
+fn synthetic_user(payload: Vec<Value>) -> Value {
+    json!({"role": "user", "content": payload})
+}
+
+/// Prepend `payload` to a user message's content, promoting string content to
+/// a text block and creating the array when content is absent or null.
+fn prepend_to_user_content(user: &mut Value, payload: Vec<Value>) {
+    let Some(obj) = user.as_object_mut() else {
+        return;
+    };
+    let content = match obj.remove("content") {
+        Some(Value::Array(blocks)) => payload.into_iter().chain(blocks).collect(),
+        Some(Value::String(text)) => payload
+            .into_iter()
+            .chain(std::iter::once(json!({"type": "text", "text": text})))
+            .collect(),
+        _ => payload,
+    };
+    obj.insert("content".into(), Value::Array(content));
 }
 
 /// Log the losses this pass took, ONCE PER REQUEST each, at the levels their
 /// severity earns.
 ///
-/// Aggregated here rather than logged where each loss is detected: the non-text
-/// arm sits inside a per-block loop over client-supplied content, so a log
-/// there emits one line per block and a request carrying a large block array
-/// turns one policy action into unbounded log volume. The prompt-discard arms
-/// stay at their own exits, which run at most once per request by construction.
+/// Aggregated here rather than logged where each loss is detected: the capture
+/// runs a per-block loop over client-supplied content, so a log there emits one
+/// line per block and a request carrying a large block array turns one policy
+/// action into unbounded log volume.
 fn log_relocation_losses(outcome: RelocationOutcome) {
-    if outcome.non_text_block_dropped {
+    if outcome.unrepresentable_block_dropped {
         tracing::warn!(
-            "cloak system relocation: dropping client system blocks that carry no text content"
+            "cloak system relocation: dropping client system blocks a user turn cannot carry"
         );
     }
     if outcome.cache_breakpoints_collapsed {
@@ -143,26 +332,13 @@ fn log_relocation_losses(outcome: RelocationOutcome) {
     }
 }
 
-/// Remove every `role: "system"` entry from `body["messages"]` and return
-/// its text content for relocation, in array order. Text blocks that are a
-/// recognized identity line are excluded from the capture (the turn is still
-/// removed) for the same reason as in `system`. A turn whose content carries
-/// no text at all is removed with nothing captured: the wire role accepts
-/// only text, so there is nothing to relocate.
-fn take_system_role_turns(body: &mut Value) -> SystemCapture {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return SystemCapture::default();
-    };
-    let mut capture = SystemCapture::default();
-    let mut kept: Vec<Value> = Vec::with_capacity(messages.len());
-    for msg in messages.drain(..) {
-        if msg.get("role").and_then(Value::as_str) != Some("system") {
-            kept.push(msg);
-            continue;
-        }
-        capture.absorb(capture_client_system(msg.get("content")));
+/// Capture the `system` field and every `role: "system"` turn, in that order.
+fn capture_all(body: &Value) -> SystemCapture {
+    let mut capture = capture_client_system(body.get("system"));
+    let turns = body.get("messages").and_then(Value::as_array);
+    for turn in turns.into_iter().flatten().filter(|m| is_role(m, "system")) {
+        capture.absorb(capture_client_system(turn.get("content")));
     }
-    *messages = kept;
     capture
 }
 
@@ -173,35 +349,35 @@ struct CapturedSystemBlock {
     cache_control: Option<Value>,
 }
 
-/// One capture pass's result: the blocks it recovered, whether it dropped a
-/// block it could not carry, and how many client cache breakpoints it SAW.
-/// Paired rather than returned separately so a caller folding several passes
-/// together cannot keep one and lose the others.
+/// One capture pass's result. Paired rather than returned separately so a
+/// caller folding several passes together cannot keep one and lose the others.
 #[derive(Default)]
 struct SystemCapture {
-    blocks: Vec<CapturedSystemBlock>,
-    non_text_block_dropped: bool,
-    /// Breakpoints counted across EVERY client system block, before any
-    /// filtering: a `cache_control` on an identity-line or non-text block is a
-    /// breakpoint the client placed and the relocation does not carry, so
-    /// counting only the retained blocks would under-report the collapse.
-    breakpoints_seen: usize,
+    /// Text folded into the reminder, in capture order.
+    texts: Vec<CapturedSystemBlock>,
+    /// Image and document blocks carried verbatim, in capture order.
+    carried: Vec<Value>,
+    unrepresentable_block_dropped: bool,
+    /// Breakpoints on every block that does NOT ride as itself (text, identity
+    /// line, unrepresentable): a carried block keeps its own marker, so only
+    /// these can collapse into the one the reminder carries.
+    folded_breakpoints: usize,
 }
 
 impl SystemCapture {
     /// Fold another pass's result into this one.
     fn absorb(&mut self, other: Self) {
-        self.blocks.extend(other.blocks);
-        self.non_text_block_dropped |= other.non_text_block_dropped;
-        self.breakpoints_seen += other.breakpoints_seen;
+        self.texts.extend(other.texts);
+        self.carried.extend(other.carried);
+        self.unrepresentable_block_dropped |= other.unrepresentable_block_dropped;
+        self.folded_breakpoints += other.folded_breakpoints;
     }
 }
 
-/// Capture client system content, excluding any block whose trimmed text is
-/// a recognized identity line (we re-add our own identity). Handles the
-/// string form, the array-of-block form, and absence. Shared by the `system`
-/// field and the `role: "system"` message turns, whose content shapes are the
-/// same.
+/// Capture client system content, excluding any block whose trimmed text is a
+/// recognized identity line (we re-add our own identity). Handles the string
+/// form, the array-of-block form, and absence. Shared by the `system` field and
+/// the `role: "system"` message turns, whose content shapes are the same.
 fn capture_client_system(system: Option<&Value>) -> SystemCapture {
     match system {
         Some(Value::String(s)) => {
@@ -209,25 +385,26 @@ fn capture_client_system(system: Option<&Value>) -> SystemCapture {
                 return SystemCapture::default();
             }
             SystemCapture {
-                blocks: vec![CapturedSystemBlock {
+                texts: vec![CapturedSystemBlock {
                     text: s.clone(),
                     cache_control: None,
                 }],
-                non_text_block_dropped: false,
-                // The string form carries no per-block `cache_control` field at
-                // all, so it places no breakpoint.
-                breakpoints_seen: 0,
+                ..SystemCapture::default()
             }
         }
         Some(Value::Array(blocks)) => {
             let mut capture = SystemCapture::default();
             for block in blocks {
-                if block.get("cache_control").is_some() {
-                    capture.breakpoints_seen += 1;
+                let classified = capture_one_system_block(block);
+                if block.get("cache_control").is_some()
+                    && !matches!(classified, CapturedBlock::Carried(_))
+                {
+                    capture.folded_breakpoints += 1;
                 }
-                match capture_one_system_block(block) {
-                    CapturedBlock::Text(captured) => capture.blocks.push(captured),
-                    CapturedBlock::NonTextDropped => capture.non_text_block_dropped = true,
+                match classified {
+                    CapturedBlock::Text(captured) => capture.texts.push(captured),
+                    CapturedBlock::Carried(raw) => capture.carried.push(raw),
+                    CapturedBlock::Unrepresentable => capture.unrepresentable_block_dropped = true,
                     CapturedBlock::IdentityLine => {}
                 }
             }
@@ -244,42 +421,41 @@ fn capture_client_system(system: Option<&Value>) -> SystemCapture {
 
 /// What one system array element contributed to the capture.
 enum CapturedBlock {
-    /// Relocatable text content.
+    /// Text folded into the reminder.
     Text(CapturedSystemBlock),
-    /// A block carrying no string `text`: nothing to relocate, so it is lost.
-    NonTextDropped,
+    /// An image or document block, legal user content with no adjacency
+    /// requirement, carried as itself.
+    Carried(Value),
+    /// A block whose role or adjacency requirements a user turn cannot honor.
+    Unrepresentable,
     /// A recognized identity line, excluded by design because we re-add our
     /// own. Not a loss: the same line goes back on the wire.
     IdentityLine,
 }
 
-/// Classify a single system array element: relocatable text, a recognized
-/// identity line, or a block with no string `text` that the relocation cannot
-/// carry.
+/// Classify a single system array element.
 ///
-/// The live carrier for a non-text block is a forwarded `role: "system"`
-/// message, whose content is a block array that can hold shapes other than
-/// text. The canonical top-level `system` reaches this module as string text or
-/// as text blocks, so it does not feed this arm today.
-///
-/// POLICY ACTION rather than a drop under the drop-vs-policy axis: the block
-/// arrived in a field that accepted it and the upstream would have carried it.
-/// It goes because routectl relocates the client system into a TEXT-ONLY
-/// `<system-reminder>` block and that shape has nowhere to put it.
-///
-/// Reports the classification only; the WARN is emitted once per request by
-/// the caller, because this function runs once per block.
+/// A string `text` decides first, whatever the block's type, so every block the
+/// reminder has always folded keeps folding byte-for-byte. Image and document
+/// blocks are carried raw -- never stringified, never scanned for reminder
+/// delimiters. Anything else (tool use, tool result, thinking, redacted
+/// thinking, an unknown type) is left out and reported: POLICY ACTION rather
+/// than a drop, because the block arrived in a field that accepted it and the
+/// user turn it would have to move into cannot carry it legally.
 fn capture_one_system_block(block: &Value) -> CapturedBlock {
-    let Some(text) = block.get("text").and_then(Value::as_str) else {
-        return CapturedBlock::NonTextDropped;
-    };
-    if RECOGNIZED_IDENTITY_LINES.contains(&text.trim()) {
-        return CapturedBlock::IdentityLine;
+    if let Some(text) = block.get("text").and_then(Value::as_str) {
+        if RECOGNIZED_IDENTITY_LINES.contains(&text.trim()) {
+            return CapturedBlock::IdentityLine;
+        }
+        return CapturedBlock::Text(CapturedSystemBlock {
+            text: text.to_string(),
+            cache_control: block.get("cache_control").cloned(),
+        });
     }
-    CapturedBlock::Text(CapturedSystemBlock {
-        text: text.to_string(),
-        cache_control: block.get("cache_control").cloned(),
-    })
+    match block.get("type").and_then(Value::as_str) {
+        Some("image" | "document") => CapturedBlock::Carried(block.clone()),
+        _ => CapturedBlock::Unrepresentable,
+    }
 }
 
 /// Replace `body["system"]` with the identity-only array (no
@@ -291,9 +467,9 @@ fn set_identity_only_system(body: &mut Value) {
 }
 
 /// Build the `<system-reminder>` text block from the captured client system
-/// content, or `None` when there is nothing to relocate. Multiple captured
-/// blocks' text is joined with a blank line. KNOWN LIMITATION: multiple
-/// client system cache breakpoints collapse to one -- the last captured
+/// text, or `None` when there is no text to relocate. Multiple captured blocks'
+/// text is joined with a blank line. KNOWN LIMITATION: multiple client system
+/// cache breakpoints on folded text collapse to one -- the last captured
 /// `cache_control` (closest to the cache boundary) is carried, the rest are
 /// dropped.
 fn build_reminder_block(captured: &[CapturedSystemBlock]) -> Option<Value> {
@@ -332,64 +508,6 @@ fn neutralize_close_tag(text: &str) -> String {
     }
 }
 
-/// Insert the reminder block at index 0 of the content of the first
-/// `role == "user"` message. Returns false when there is no usable user message
-/// (missing/invalid messages array, or no user role): the identity-only system
-/// still stands and the client body is dropped. Never panics.
-fn insert_reminder_into_first_user(body: &mut Value, reminder: Value) -> bool {
-    // POLICY ACTION, and the most severe of the four: the client's ENTIRE
-    // system prompt leaves the request. The upstream would carry every byte of
-    // it -- routectl moved it out of `system` to keep the client fingerprint
-    // away from the subscription classifier and then found no user message to
-    // reattach it to. Both exits below are ONE class per request: they are the
-    // same total loss reached two ways, and neither shares the class with the
-    // breakpoint collapse, which is a cache-economics loss orders of magnitude
-    // more frequent -- sharing would swamp this signal permanently.
-    //
-    // WARN, unconditionally: this is the whole prompt, and a request that
-    // reaches an upstream without it behaves nothing like the client asked.
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        tracing::warn!(
-            "cloak system relocation: discarding the client system prompt, the outgoing body \
-             carries no message array to relocate it into"
-        );
-        return false;
-    };
-    let Some(user) = messages
-        .iter_mut()
-        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
-    else {
-        tracing::warn!(
-            "cloak system relocation: discarding the client system prompt, the outgoing body \
-             carries no user message to relocate it into"
-        );
-        return false;
-    };
-    // Past the two exits above the reminder always lands, so each arm below
-    // returns success: the content is extended, replaced, or created.
-    match user.get_mut("content") {
-        Some(Value::Array(blocks)) => blocks.insert(0, reminder),
-        Some(content @ Value::String(_)) => {
-            let original = std::mem::replace(content, Value::Null);
-            let Value::String(text) = original else {
-                unreachable!()
-            };
-            *content = Value::Array(vec![reminder, json!({"type": "text", "text": text})]);
-        }
-        // Absent or null content. The selected value is necessarily a JSON
-        // object -- the `find` predicate above read a `role` field out of it,
-        // which only an object carries -- so this conversion cannot fail and a
-        // failure branch here would be unreachable code wearing the shape of a
-        // handled case.
-        _ => {
-            let obj = user
-                .as_object_mut()
-                .expect("the selected message carried a role field, so it is an object");
-            obj.insert("content".into(), Value::Array(vec![reminder]));
-        }
-    }
-    true
-}
 fn identity_block() -> Value {
     json!({"type": "text", "text": INTERACTIVE_IDENTITY_LINE})
 }

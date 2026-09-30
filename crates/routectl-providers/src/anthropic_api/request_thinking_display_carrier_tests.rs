@@ -90,7 +90,8 @@ fn cloak_leaves_the_thinking_object_untouched() {
         &ClaudeCodeIdentity::mint(Some("sess-carrier")),
         true,
         &CloakConfig::default(),
-    );
+    )
+    .expect("cloak applies");
 
     assert_eq!(cloaked["thinking"]["display"], UNMODELED_DISPLAY);
     assert_eq!(

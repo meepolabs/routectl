@@ -209,30 +209,22 @@ const UNSWEPT_POLICY_CLASSES: &[UnsweptPolicyClass] = &[
         test: "a_genuine_cc_request_counts_the_genuine_cc_arm",
     },
     UnsweptPolicyClass {
-        class: "cloak_client_system_prompt_discarded",
-        file: "anthropic_api/cloak.rs",
-        reason: "the cloak relocates the client system out of `system` and finds no user message to \
-         reattach it to, so the whole client prompt leaves the request; the orchestrator owns \
-         the record because the transform that detects it sits in the nested cloak directory \
-         the flat marker sweep refuses to descend into",
-        test: "a_cloaked_body_with_no_user_message_counts_the_discarded_system_prompt",
-    },
-    UnsweptPolicyClass {
         class: "cloak_client_cache_breakpoints_collapsed",
         file: "anthropic_api/cloak.rs",
-        reason: "the relocation joins the captured client system into one block, so more than one \
-         client cache breakpoint reduces to the last; counted from the orchestrator for the \
-         same nested-directory reason, and kept off the whole-prompt class because a \
-         cache-economics loss this frequent would swamp that far rarer signal",
+        reason: "the relocation joins the captured client system text into one block, so more than \
+         one client cache breakpoint on folded blocks reduces to the last; counted from the \
+         orchestrator for the same nested-directory reason",
         test: "two_client_cache_breakpoints_count_one_collapse",
     },
     UnsweptPolicyClass {
-        class: "cloak_non_text_system_block_dropped",
+        class: "cloak_unrepresentable_system_block_dropped",
         file: "anthropic_api/cloak.rs",
-        reason: "a client system block carrying no string text has nothing to relocate into the \
-         text-only reminder, so it is lost; reachable through a forwarded system turn's block \
-         array, and counted from the orchestrator for the same nested-directory reason",
-        test: "a_forwarded_system_turn_with_a_non_text_block_counts_one_drop",
+        reason: "a captured client system block that is neither text, image, nor document (tool \
+         use, tool result, thinking, redacted thinking, or an unknown type) cannot move into a \
+         user turn without breaking its role or adjacency rules, so it is left out; reachable \
+         through a forwarded system turn's block array, and counted from the orchestrator for \
+         the same nested-directory reason",
+        test: "a_forwarded_system_turn_with_unrepresentable_blocks_counts_one_drop",
     },
     UnsweptPolicyClass {
         class: "cloak_tool_sort_stood_down",

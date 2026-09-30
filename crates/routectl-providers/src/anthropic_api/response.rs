@@ -525,7 +525,8 @@ mod tests {
         });
 
         // Act 1: forward cloak.
-        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default())
+            .expect("cloak applies");
 
         // Assert: outgoing body carries the doubled prefix on both surfaces.
         assert_eq!(body["tools"][0]["name"], "mcp__linear_get_issue");
@@ -587,7 +588,8 @@ mod tests {
         });
 
         // Act 1: forward cloak. The bare name is prefixed with mcp__.
-        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default())
+            .expect("cloak applies");
         assert_eq!(body["tools"][0]["name"], "mcp__read_file");
         assert_eq!(body["messages"][0]["content"][0]["name"], "mcp__read_file");
         assert_eq!(

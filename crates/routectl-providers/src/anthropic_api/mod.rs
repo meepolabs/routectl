@@ -183,7 +183,7 @@ impl Provider for AnthropicApiProvider {
         // after normalize_request and before serialize/resign. The returned
         // reverse map restores the client's original tool names on the
         // response below.
-        let cloak_result = self.cloak_body(&mut body, &req);
+        let cloak_result = self.cloak_body(&mut body, &req)?;
 
         // Sampling strip, LAST word on the JSON before the outgoing trace:
         // on the OAuth own-anthropic lane the seat 400s a body carrying
@@ -413,7 +413,7 @@ impl Provider for AnthropicApiProvider {
         // a non-CC client; mcp_ tool-name normalization). The reverse map
         // is threaded into SseState so streamed tool_use names are
         // restored to the client's originals.
-        let cloak_result = self.cloak_body(&mut body, &req);
+        let cloak_result = self.cloak_body(&mut body, &req)?;
 
         // See complete(): strip caller/thinking-forced sampling the OAuth
         // seat rejects, gated on the lane, as the last body mutation before
@@ -696,8 +696,9 @@ impl Provider for AnthropicApiProvider {
         // billing strip, and the mcp_ tool-name normalization apply to the
         // outgoing body. On the forwarded leg cloak_body self-gates to a
         // no-op, so none of these run. count_tokens has no response tool_use
-        // surface to reverse, so the returned reverse map is discarded.
-        self.cloak_body(&mut normalized, &req);
+        // surface to reverse, so the returned reverse map is discarded. A
+        // relocation refusal propagates exactly as on the messages paths.
+        self.cloak_body(&mut normalized, &req)?;
         let body = build_count_tokens_body(&normalized);
 
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
@@ -1161,3 +1162,8 @@ mod identity_host_tests;
 #[cfg(test)]
 #[path = "mod_redact_display_tests.rs"]
 mod redact_display_tests;
+
+// A cloak relocation refusal halts all three dispatch paths before egress.
+#[cfg(test)]
+#[path = "mod_cloak_refusal_tests.rs"]
+mod cloak_refusal_tests;
