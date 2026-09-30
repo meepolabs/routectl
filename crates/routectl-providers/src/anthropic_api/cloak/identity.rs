@@ -78,8 +78,9 @@ pub struct RelocationRefusal {
 ///
 /// Transactional: the whole landing is planned against the unmodified body
 /// and committed only once it is known to be legal. A refusal -- no message
-/// array, a non-array `messages`, nothing left of the conversation once the
-/// system turns leave it, or relocated cache breakpoints (the reminder's or a
+/// array, a non-array `messages`, an entry that is not an object with a
+/// string `role`, nothing left of the conversation once the system turns
+/// leave it, or relocated cache breakpoints (the reminder's or a
 /// carried block's) the cap/ordering policy cannot accept -- returns before
 /// any mutation.
 ///
@@ -168,6 +169,19 @@ fn conversation_has_user_turn(messages: Option<&Value>) -> Result<bool, Relocati
     let Some(messages) = messages.as_array() else {
         return Err(refusal("the request's messages field is not an array"));
     };
+    // An entry with no string role is neither a user turn to land on nor
+    // history a synthetic user turn may lead, so no landing shape is known.
+    if let Some(index) = messages
+        .iter()
+        .position(|m| m.get("role").and_then(Value::as_str).is_none())
+    {
+        return Err(RelocationRefusal {
+            detail: format!(
+                "client system content cannot be relocated: messages[{index}] is not a message \
+                 object with a string role"
+            ),
+        });
+    }
     let mut remaining = messages.iter().filter(|m| !is_role(m, "system")).peekable();
     if remaining.peek().is_none() {
         return Err(refusal(

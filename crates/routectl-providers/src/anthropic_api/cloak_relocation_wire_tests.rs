@@ -116,6 +116,42 @@ fn a_malformed_message_array_is_refused_before_egress() {
 
 #[test]
 #[serial_test::serial(anthropic_api_cloak_policy_actions)]
+fn a_message_entry_without_a_string_role_is_refused_before_egress() {
+    // Each malformed entry sits after an assistant turn (which alone would get
+    // a synthetic user turn) and ahead of a user turn (which alone would be
+    // landed on), so neither landing can hide it.
+    for (index, entry) in [
+        (1, json!(null)),
+        (1, json!(7)),
+        (1, json!({})),
+        (1, json!({"content": "no role"})),
+        (1, json!({"role": 3, "content": "numeric role"})),
+    ] {
+        assert_refused_untouched(
+            json!({
+                "system": "client rules",
+                "messages": [
+                    {"role": "assistant", "content": "prior"},
+                    entry,
+                    {"role": "user", "content": "hi"},
+                ]
+            }),
+            &format!("messages[{index}] is not a message object with a string role"),
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial(anthropic_api_cloak_policy_actions)]
+fn a_lone_malformed_entry_is_refused_rather_than_led_by_a_synthetic_user_turn() {
+    assert_refused_untouched(
+        json!({"system": "x", "messages": [null]}),
+        "messages[0] is not a message object",
+    );
+}
+
+#[test]
+#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn nothing_to_relocate_never_refuses_a_shape() {
     // No client system at all: the relocation lands nothing, so it has no
     // reason to judge the conversation.
