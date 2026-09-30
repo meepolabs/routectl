@@ -170,7 +170,9 @@ pub enum Error {
 }
 
 /// Hand-written `Debug` for [`enum@Error`]. Identical to the derived form
-/// for every variant and every field EXCEPT [`Error::Upstream`]'s `body`:
+/// for every variant and every field EXCEPT [`Error::LocalRefusal`]'s
+/// `detail`, which renders through [`crate::sanitize_detail_for_log`], and
+/// [`Error::Upstream`]'s `body`:
 /// that renders as a `body_excerpt` (capped at [`crate::MAX_LOG_BODY_EXCERPT`]
 /// chars) plus a `body_len` total-byte marker, so a request-fault envelope
 /// carried up to [`crate::MAX_ERROR_BODY_BYTES`] cannot flood a `?e` log
@@ -216,7 +218,7 @@ impl fmt::Debug for Error {
             Self::LocalRefusal { provider, detail } => f
                 .debug_struct("LocalRefusal")
                 .field("provider", provider)
-                .field("detail", detail)
+                .field("detail", &crate::sanitize_detail_for_log(detail))
                 .finish(),
             Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
             Self::NotImplemented(a, b) => {
@@ -437,6 +439,26 @@ mod tests {
         assert!(rendered.contains("body_len: 12"));
         assert!(rendered.contains("upstream_type: Some(\"rate_limit_exceeded\")"));
         assert!(rendered.contains("retry_after: Some("));
+    }
+
+    /// A control char in a local refusal's detail cannot reach a `?e` sink.
+    #[test]
+    fn local_refusal_debug_neutralizes_control_chars_in_detail() {
+        let err = Error::LocalRefusal {
+            provider: "prov".into(),
+            detail: "line1\r\nforged: entry\u{1b}[31m".into(),
+        };
+
+        let rendered = format!("{err:?}");
+
+        assert!(rendered.starts_with("LocalRefusal"), "{rendered}");
+        assert!(rendered.contains("line1"), "{rendered}");
+        for raw in ['\r', '\n', '\u{1b}'] {
+            assert!(!rendered.contains(raw), "raw {raw:?} in: {rendered}");
+        }
+        for escaped in ["\\r", "\\n", "\\u{1b}"] {
+            assert!(!rendered.contains(escaped), "{escaped} in: {rendered}");
+        }
     }
 
     /// Non-`Upstream` variants keep the derived Debug shape (tuple form).

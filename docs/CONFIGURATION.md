@@ -2263,7 +2263,8 @@ On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
 system and message text by inserting a zero-width space after each match's
 first character. Text includes a document block's inline text (a `text`
 source's `data`, a `content` source's text); a base64, URL, or file document
-source is opaque and is not rewritten. Matching is case-insensitive; entries
+source is opaque and is not rewritten. A document block's `title` and
+`context` are not scanned. Matching is case-insensitive; entries
 shorter than two characters are ignored. Default empty (no rewrite).
 
 ```toml

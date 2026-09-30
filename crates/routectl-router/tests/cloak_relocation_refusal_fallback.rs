@@ -14,10 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use routectl_core::error::{Error, Result};
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Message, MessageContent, Provider, Role, SystemContent,
+    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Message, MessageContent,
+    Provider, Role, SystemContent, TokenCount,
 };
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
 use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
@@ -57,7 +59,26 @@ impl Provider for RecordingFallback {
     }
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.seen.lock().expect("seen poisoned").push(req);
-        Err(Error::upstream("p-fallback", 503, "unused"))
+        let chunk = ChatChunk {
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some("ok".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            ..Default::default()
+        };
+        Ok(futures::stream::iter([Ok(chunk)]).boxed())
+    }
+    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        self.seen.lock().expect("seen poisoned").push(req);
+        Ok(TokenCount {
+            input_tokens: 1,
+            ..Default::default()
+        })
     }
 }
 
@@ -90,7 +111,20 @@ fn router_with(fallback: Arc<RecordingFallback>) -> Router {
 fn router_with_policy(
     fallback: Arc<RecordingFallback>,
     class_overrides: BTreeMap<u16, ConfigFailureClass>,
+    retry: RetryPolicy,
+) -> Router {
+    let fallback_entry =
+        ProviderEntry::openai_compat("http://example.invalid", common::file_ref("k"));
+    router_with_entries(fallback, class_overrides, retry, fallback_entry)
+}
+
+/// As [`router_with_policy`], with the fallback seat's provider entry given:
+/// its kind decides whether the count-token walk treats it as capable.
+fn router_with_entries(
+    fallback: Arc<RecordingFallback>,
+    class_overrides: BTreeMap<u16, ConfigFailureClass>,
     mut retry: RetryPolicy,
+    fallback_entry: ProviderEntry,
 ) -> Router {
     let mut config = Config::default();
     let mut oauth = ProviderEntry::anthropic_api(common::file_ref("k"));
@@ -100,10 +134,7 @@ fn router_with_policy(
         runtime.class_overrides = class_overrides;
     }
     config.providers.insert("p-oauth".into(), oauth);
-    config.providers.insert(
-        "p-fallback".into(),
-        ProviderEntry::openai_compat("http://example.invalid", common::file_ref("k")),
-    );
+    config.providers.insert("p-fallback".into(), fallback_entry);
     config.aliases.insert(
         "fast".into(),
         AliasValue::Chain(vec!["m-oauth".into(), "m-fallback".into()]),
@@ -271,5 +302,83 @@ async fn a_status_400_override_to_a_debiting_class_cannot_reach_the_refusal() {
     assert_eq!(
         serde_json::to_value(&seen[0].messages).unwrap(),
         serde_json::to_value(&caller.messages).unwrap(),
+    );
+}
+
+/// A status-400 remap into a debiting class: anything the router saw as an
+/// upstream 400 would open the seat's breaker at threshold one.
+fn debiting_400_override() -> BTreeMap<u16, ConfigFailureClass> {
+    BTreeMap::from([(400, ConfigFailureClass::ServerError)])
+}
+
+#[tokio::test]
+async fn a_refused_relocation_on_the_stream_path_falls_back_with_the_pristine_request() {
+    let fallback = fresh_fallback();
+    let router = router_with_policy(
+        Arc::clone(&fallback),
+        debiting_400_override(),
+        RetryPolicy::default(),
+    );
+    let caller = request(vec![message(Role::System, "turn rules")]);
+
+    let dispatched = router
+        .stream_with_options(caller.clone(), RouterOptions::new())
+        .await;
+
+    assert!(
+        dispatched.result.is_ok(),
+        "the fallback hop serves the stream"
+    );
+    assert_eq!(dispatched.meta.attempt_count, 2, "no same-seat retry");
+    assert_eq!(
+        dispatched.meta.fallback_count, 1,
+        "exactly one fallback hop"
+    );
+    assert_eq!(
+        oauth_circuit(&router),
+        CircuitPhase::Closed,
+        "a local refusal must not debit the seat's breaker"
+    );
+    let seen = fallback.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&seen[0].system).unwrap(),
+        serde_json::to_value(&caller.system).unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_value(&seen[0].messages).unwrap(),
+        serde_json::to_value(&caller.messages).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn a_refused_relocation_on_the_count_token_path_is_terminal_and_non_debiting() {
+    // The count-token walk advances only past capability errors; every other
+    // failure is terminal for the request. The fallback seat is count-capable
+    // here, so a walk past the refusal would reach it.
+    let fallback = fresh_fallback();
+    let router = router_with_entries(
+        Arc::clone(&fallback),
+        debiting_400_override(),
+        RetryPolicy::default(),
+        ProviderEntry::anthropic_api(common::file_ref("k")),
+    );
+    let caller = request(vec![message(Role::System, "turn rules")]);
+
+    let result = router.count_tokens(caller).await;
+
+    assert!(
+        matches!(&result, Err(Error::LocalRefusal { detail, .. })
+            if detail.contains("cannot be relocated")),
+        "expected the local refusal, got {result:?}"
+    );
+    assert!(
+        fallback.seen().is_empty(),
+        "no second target may be attempted"
+    );
+    assert_eq!(
+        oauth_circuit(&router),
+        CircuitPhase::Closed,
+        "a local refusal must not debit the seat's breaker"
     );
 }
