@@ -199,7 +199,8 @@ const TIER_ONE: &[TierOneRow] = &[
                  with a zero-width space, so upstream keyword scanning cannot match them",
         known_loss: Some(
             "privacy hardening only, never confidentiality: the characters still travel \
-             upstream, and a term the folding does not match is left contiguous",
+             upstream, a term the folding does not match is left contiguous, and a base64, \
+             URL, or file document source is opaque and travels unmarked",
         ),
     },
     TierOneRow {

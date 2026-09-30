@@ -141,8 +141,9 @@ pub fn validate_sensitive_words(words: &[String]) -> Result<(), SensitiveWordsBo
 /// match. Matching is case-insensitive and longest-match-first, so a
 /// configured word never shadows a longer configured word that starts at
 /// the same position. Obfuscation is applied to `system` (string and
-/// array-of-text-blocks forms) and `messages[]` content text (string and
-/// array-of-text-blocks forms). The inserted
+/// array-of-blocks forms) and `messages[]` content (string and
+/// array-of-blocks forms): text blocks, and the text a document block
+/// carries inline (see `obfuscate_document_block`). The inserted
 /// zero-width space is invisible to the model, so no reverse mapping is
 /// needed on the response. An empty word list is a byte-identical no-op.
 ///
@@ -314,7 +315,7 @@ fn push_obfuscated(out: &mut String, matched: &str) {
 }
 
 /// Obfuscate sensitive words in `body["system"]` (string form, or an array
-/// of `{type:"text", text:...}` blocks).
+/// of blocks).
 fn obfuscate_system(body: &mut Value, matcher: &SensitiveWordMatcher) {
     match body.get_mut("system") {
         Some(Value::String(s)) => {
@@ -324,7 +325,7 @@ fn obfuscate_system(body: &mut Value, matcher: &SensitiveWordMatcher) {
         }
         Some(Value::Array(blocks)) => {
             for block in blocks.iter_mut() {
-                obfuscate_text_block(block, matcher);
+                obfuscate_content_block(block, matcher);
             }
         }
         _ => {}
@@ -332,7 +333,7 @@ fn obfuscate_system(body: &mut Value, matcher: &SensitiveWordMatcher) {
 }
 
 /// Obfuscate sensitive words in `body["messages"][].content` (string form,
-/// or an array of content blocks; only `{type:"text"}` blocks are touched).
+/// or an array of content blocks).
 fn obfuscate_messages(body: &mut Value, matcher: &SensitiveWordMatcher) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -346,11 +347,22 @@ fn obfuscate_messages(body: &mut Value, matcher: &SensitiveWordMatcher) {
             }
             Some(Value::Array(blocks)) => {
                 for block in blocks.iter_mut() {
-                    obfuscate_text_block(block, matcher);
+                    obfuscate_content_block(block, matcher);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Obfuscate one system or message content block in place: a text block's
+/// `text`, or a document block's inline text. Blocks of any other type are
+/// left untouched.
+fn obfuscate_content_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => obfuscate_text_block(block, matcher),
+        Some("document") => obfuscate_document_block(block, matcher),
+        _ => {}
     }
 }
 
@@ -360,13 +372,49 @@ fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
     if block.get("type").and_then(Value::as_str) != Some("text") {
         return;
     }
-    let Some(text) = block.get("text").and_then(Value::as_str) else {
+    obfuscate_string_field(block, "text", matcher);
+}
+
+/// Obfuscate the text a document block carries inline in its `source`: the
+/// `data` of a `{type:"text"}` source, and a `{type:"content"}` source's
+/// `content`, whether a string or an array (only its text blocks).
+///
+/// A base64, URL, or file source is opaque here -- its bytes are encoded or
+/// fetched upstream -- so a sensitive word inside one travels unmarked. The
+/// block's `title` and `context` are not scanned.
+fn obfuscate_document_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
+    let Some(source) = block.get_mut("source") else {
+        return;
+    };
+    match source.get("type").and_then(Value::as_str) {
+        Some("text") => obfuscate_string_field(source, "data", matcher),
+        Some("content") => match source.get_mut("content") {
+            Some(Value::String(s)) => {
+                if let Some(ob) = matcher.obfuscate(s) {
+                    *s = ob;
+                }
+            }
+            Some(Value::Array(blocks)) => {
+                for inner in blocks.iter_mut() {
+                    obfuscate_text_block(inner, matcher);
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+/// Rewrite the string at `obj[key]` when it holds a match; any other shape,
+/// or no match, leaves the object byte-identical.
+fn obfuscate_string_field(obj: &mut Value, key: &str, matcher: &SensitiveWordMatcher) {
+    let Some(text) = obj.get(key).and_then(Value::as_str) else {
         return;
     };
     if let Some(ob) = matcher.obfuscate(text)
-        && let Some(obj) = block.as_object_mut()
+        && let Some(map) = obj.as_object_mut()
     {
-        obj.insert("text".into(), Value::String(ob));
+        map.insert(key.into(), Value::String(ob));
     }
 }
 
@@ -593,6 +641,70 @@ mod tests {
             let elapsed = time_scan(&words, MAX_BODY_BYTES);
             println!("{label}: {MAX_BODY_BYTES} bytes in {elapsed:?}");
         }
+    }
+
+    #[test]
+    fn inline_document_text_is_obfuscated_and_opaque_sources_are_not() {
+        // Arrange: the sentinel in every document source shape, plus an
+        // uppercase non-ASCII variant so the match is not ASCII-only.
+        let text_doc = |data: &str| {
+            serde_json::json!({"type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": data}})
+        };
+        let mut body = serde_json::json!({
+            "system": [text_doc("see zqxsentinel here")],
+            "messages": [{"role": "user", "content": [
+                text_doc("\u{c9}ZQXSENTINEL"),
+                {"type": "document", "source": {"type": "content", "content": "zqxsentinel"}},
+                {"type": "document", "source": {"type": "content", "content": [
+                    {"type": "text", "text": "zqxsentinel"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "zqxsentinel"}},
+                ]}},
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "zqxsentinel"}},
+                {"type": "document", "source": {"type": "url", "url": "https://example.test/zqxsentinel"}},
+                {"type": "document", "title": "zqxsentinel", "source": {"type": "file", "file_id": "zqxsentinel"}},
+            ]}]
+        });
+        let words = owned(&["zqxsentinel", "\u{e9}zqxsentinel"]);
+
+        // Act
+        obfuscate_sensitive_words(&mut body, &words).expect("within bounds");
+
+        // Assert
+        let marked = "z\u{200B}qxsentinel";
+        assert_eq!(
+            body["system"][0]["source"]["data"],
+            format!("see {marked} here")
+        );
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["source"]["data"], "\u{c9}\u{200B}ZQXSENTINEL");
+        assert_eq!(content[1]["source"]["content"], marked);
+        assert_eq!(content[2]["source"]["content"][0]["text"], marked);
+        assert_eq!(
+            content[2]["source"]["content"][1]["source"]["data"],
+            "zqxsentinel"
+        );
+        assert_eq!(content[3]["source"]["data"], "zqxsentinel");
+        assert_eq!(
+            content[4]["source"]["url"],
+            "https://example.test/zqxsentinel"
+        );
+        assert_eq!(content[5]["title"], "zqxsentinel");
+        assert_eq!(content[5]["source"]["file_id"], "zqxsentinel");
+    }
+
+    #[test]
+    fn a_document_without_a_match_keeps_its_bytes() {
+        // Arrange
+        let mut body = serde_json::json!({"system": [{"type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": ""}}]});
+        let before = body.clone();
+
+        // Act
+        obfuscate_sensitive_words(&mut body, &owned(&["zqxsentinel"])).expect("within bounds");
+
+        // Assert
+        assert_eq!(body, before);
     }
 
     #[test]

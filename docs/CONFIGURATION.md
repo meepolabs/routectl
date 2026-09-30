@@ -2261,8 +2261,10 @@ credential_source = "forwarded"
 On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
 `[providers.X.cloak] sensitive_words` lists terms the cloak breaks up in
 system and message text by inserting a zero-width space after each match's
-first character. Matching is case-insensitive; entries shorter than two
-characters are ignored. Default empty (no rewrite).
+first character. Text includes a document block's inline text (a `text`
+source's `data`, a `content` source's text); a base64, URL, or file document
+source is opaque and is not rewritten. Matching is case-insensitive; entries
+shorter than two characters are ignored. Default empty (no rewrite).
 
 ```toml
 [providers.anthropic-sub.cloak]
