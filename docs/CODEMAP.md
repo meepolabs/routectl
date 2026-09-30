@@ -8161,6 +8161,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/responses_tool_output_file_egress_e2e.rs` -- a tool-result file part
   through the `/v1/chat/completions` ingress reaches the openai-responses
   upstream as `input_file` inside `function_call_output.output`
+- `tests/responses_reasoning_replay_egress_e2e.rs` -- same-dialect reasoning
+  replay through the `/v1/responses` ingress, asserted on the upstream bytes:
+  a signed reasoning item ships byte-for-byte, a summary-only item ships its
+  summary with neither id nor signature
+- `tests/anthropic_thinking_tokens_ledger_e2e.rs` -- Anthropic thinking tokens
+  (`usage.output_tokens_details.thinking_tokens`, buffered and on the closing
+  `message_delta`) reach the usage ledger's `reasoning_tokens` column through
+  a real server and mock anthropic-api upstream; a non-thinking response
+  records none
 - `tests/gemini_ingress_extras_boundary.rs` -- HTTP ingress through the server
   to a mock Gemini upstream: which extras reach the upstream body and logs
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`
