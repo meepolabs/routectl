@@ -17,15 +17,15 @@
 //!
 //! - MALFORMED: the caller asked to send bytes and named none (an
 //!   `image_url` with no url or an empty one, an image source whose
-//!   base64 `data` or `url` is empty, a file part carrying neither
-//!   `file_data` nor `file_id`). There is no valid interpretation at any
+//!   base64 `data` or `url` is empty, a file part carrying none of
+//!   `file_data`, `file_id`, `file_url`). There is no valid interpretation at any
 //!   egress, so the request FAILS with a `normalize_request` error that
 //!   names the offending field and content location. The error never
 //!   echoes a caller-controlled type tag or any raw content value.
 //! - UNREPRESENTABLE: the part is well-formed but this egress has no slot
 //!   for it (a canonical part kind the Responses API does not model, a
-//!   forward-compat part, an unknown image-source kind, a non-text part
-//!   inside a tool result). The request is legitimate and serviceable, so
+//!   forward-compat part, an unknown image-source kind, a tool-result part
+//!   with no tool-output slot). The request is legitimate and serviceable, so
 //!   the part DROPS with a WARN and the rest of the turn still ships;
 //!   hard-failing here would turn working cross-dialect routes into 400s
 //!   and make every new canonical part kind a breaking change at every
@@ -110,6 +110,7 @@ struct ResponsesDropTally {
     reasoning_format_foreign: bool,
     reasoning_scheme_incompatible: bool,
     reasoning_text_unsigned: bool,
+    tool_result_part_unsupported: bool,
 }
 
 impl ResponsesDropTally {
@@ -131,6 +132,10 @@ impl ResponsesDropTally {
 
     const fn record_reasoning_text_unsigned(&mut self) {
         self.reasoning_text_unsigned = true;
+    }
+
+    const fn record_tool_result_part_unsupported(&mut self) {
+        self.tool_result_part_unsupported = true;
     }
 
     /// Bump one process-wide counter per drop class this request hit at
@@ -161,6 +166,9 @@ impl ResponsesDropTally {
         }
         if self.reasoning_text_unsigned {
             record_translation_drop(super::LANE, "reasoning_text_unsigned");
+        }
+        if self.tool_result_part_unsupported {
+            record_translation_drop(super::LANE, "tool_result_part_unsupported");
         }
     }
 }
@@ -207,7 +215,7 @@ fn build_input_tallied(
             Role::System => {}
             Role::User => translate_user_message(id, msg, &mut out, tally)?,
             Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out, tally)?,
-            Role::Tool => translate_tool_message(id, msg, &mut out, tally)?,
+            Role::Tool => translate_tool_message(id, auth_kind, msg, &mut out, tally)?,
             // This function serves callers whose ingress dialect is
             // openai_responses itself as well as callers translating in
             // from other dialects. Unlike Anthropic/Gemini/Converse, the
@@ -782,6 +790,7 @@ struct ReasoningGroup {
 /// policy, so the outcome does not depend on the ingress shape.
 fn translate_tool_message(
     id: &str,
+    auth_kind: AuthKind,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -798,7 +807,7 @@ fn translate_tool_message(
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
         MessageContent::Null => FunctionCallOutputBody::Text(String::new()),
-        MessageContent::Parts(parts) => build_tool_output_body(id, parts, tally)?,
+        MessageContent::Parts(parts) => build_tool_output_body(id, auth_kind, parts, tally)?,
     };
     out.push(ResponseInputItem::FunctionCallOutput { call_id, output });
     Ok(())
@@ -1084,40 +1093,79 @@ pub(super) fn translate_thinking_part(
     })
 }
 
-/// Translate an OpenAI-shape `File` part's nested `file` object into a
-/// `ResponsesContentItem::InputFile`. The nested object carries either
-/// `file_data` (a `data:<mime>;base64,<...>` URI for an inline upload)
-/// or `file_id` (a reference to a previously-uploaded file), plus an
-/// optional `filename`. A part carrying neither is malformed -- it names
-/// no bytes the upstream can act on -- so it fails the request.
-fn translate_file_part(id: &str, file: &serde_json::Value) -> Result<ResponsesContentItem> {
-    let file_data = file
-        .get("file_data")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let file_id = file
-        .get("file_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let filename = file
-        .get("filename")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+/// The carrier fields of a file part, shared by the user-turn `input_file`
+/// and the tool-output `input_file` so both positions read the same fields
+/// and reject the same malformed shape.
+struct FileCarrier {
+    file_data: Option<String>,
+    file_id: Option<String>,
+    file_url: Option<String>,
+    filename: Option<String>,
+}
 
-    if file_data.is_none() && file_id.is_none() {
+/// Read a file part's carrier fields from its object: the nested `file`
+/// object of an OpenAI-shape `File` part, or the flat fields of a native
+/// Responses `input_file` block. `file_data` is a `data:<mime>;base64,<...>`
+/// URI for an inline upload, `file_id` references a previously-uploaded
+/// file, `file_url` names a fetchable file; `filename` is optional. A part
+/// carrying none of the three carriers names no bytes the upstream can act
+/// on, so it fails the request.
+fn file_carrier(id: &str, fields: Option<&serde_json::Map<String, Value>>) -> Result<FileCarrier> {
+    let field = |key: &str| {
+        fields
+            .and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let carrier = FileCarrier {
+        file_data: field("file_data"),
+        file_id: field("file_id"),
+        file_url: field("file_url"),
+        filename: field("filename"),
+    };
+    if carrier.file_data.is_none() && carrier.file_id.is_none() && carrier.file_url.is_none() {
         return Err(Error::normalize_request(
             id,
-            "file content part on a user message has no usable carrier: \
-             file.file_data and file.file_id are both absent or empty",
+            "file content part has no usable carrier: file_data, file_id and \
+             file_url are all absent or empty",
         ));
     }
+    Ok(carrier)
+}
 
+/// Translate an OpenAI-shape `File` part's nested `file` object into a
+/// `ResponsesContentItem::InputFile`.
+fn translate_file_part(id: &str, file: &Value) -> Result<ResponsesContentItem> {
+    let FileCarrier {
+        file_data,
+        file_id,
+        file_url,
+        filename,
+    } = file_carrier(id, file.as_object())?;
     Ok(ResponsesContentItem::InputFile {
         file_data,
         file_id,
+        file_url,
+        filename,
+    })
+}
+
+/// Build a tool-output `input_file` item from a file part's carrier fields.
+fn tool_output_file_item(
+    id: &str,
+    fields: Option<&serde_json::Map<String, Value>>,
+) -> Result<FunctionCallOutputContentItem> {
+    let FileCarrier {
+        file_data,
+        file_id,
+        file_url,
+        filename,
+    } = file_carrier(id, fields)?;
+    Ok(FunctionCallOutputContentItem::InputFile {
+        file_data,
+        file_id,
+        file_url,
         filename,
     })
 }
@@ -1189,26 +1237,21 @@ fn translate_image_source(
     }
 }
 
-/// Build a `FunctionCallOutputBody` from a parts slice. When all parts
-/// are plain text the result collapses to a flat string (codex parity,
-/// most-common path). When any part is non-text (e.g. an image returned
-/// by a visual tool) the result is an Items array. Parts this egress
-/// cannot represent are WARN-dropped and the remaining known parts are
-/// still forwarded; a malformed image part fails the request.
+/// Build a `FunctionCallOutputBody` from a parts slice. When every part is
+/// plain text the result collapses to a flat string (codex parity,
+/// most-common path). Otherwise each part becomes a typed item; a body left
+/// with no item after drops collapses to an empty string, as a null content
+/// does. A malformed image or file part fails the request.
 fn build_tool_output_body(
     id: &str,
+    auth_kind: AuthKind,
     parts: &[ContentPart],
     tally: &mut ResponsesDropTally,
 ) -> Result<FunctionCallOutputBody> {
-    let has_non_text = parts.iter().any(|p| {
-        matches!(
-            p,
-            ContentPart::Known(KnownContentPart::Image { .. } | KnownContentPart::ImageUrl { .. })
-        )
-    });
-
-    if !has_non_text {
-        // Fast path: all text. Concatenate.
+    let all_text = parts
+        .iter()
+        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
+    if all_text {
         let mut buf = String::new();
         for p in parts {
             if let ContentPart::Known(KnownContentPart::Text { text, .. }) = p {
@@ -1216,64 +1259,96 @@ fn build_tool_output_body(
                     buf.push('\n');
                 }
                 buf.push_str(text);
-            } else {
-                tracing::warn!(
-                    provider = id,
-                    part_type = p.type_tag(),
-                    role = "tool",
-                    "dropping unsupported tool result part on Responses egress"
-                );
             }
         }
         return Ok(FunctionCallOutputBody::Text(buf));
     }
 
-    // Mixed path: build typed items array.
     let mut items: Vec<FunctionCallOutputContentItem> = Vec::with_capacity(parts.len());
     for p in parts {
-        match p {
-            ContentPart::Known(KnownContentPart::Text { text, .. }) => {
-                items.push(FunctionCallOutputContentItem::InputText { text: text.clone() });
-            }
-            ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-                if let Some(item) = translate_tool_image_source(id, source, tally)? {
-                    items.push(item);
-                }
-            }
-            ContentPart::Known(KnownContentPart::ImageUrl { image_url, .. }) => {
-                // A url that is absent OR present-but-empty names no
-                // bytes; failing keeps an empty `image_url` off the wire.
-                let Some(url) = image_url
-                    .get("url")
-                    .and_then(|u| u.as_str())
-                    .filter(|s| !s.is_empty())
-                else {
-                    return Err(Error::normalize_request(
-                        id,
-                        "image_url content part in a tool result has no usable url: \
-                         image_url.url is absent or empty",
-                    ));
-                };
-                let detail = image_url
-                    .get("detail")
-                    .and_then(|d| d.as_str())
-                    .map(str::to_string);
-                items.push(FunctionCallOutputContentItem::InputImage {
-                    image_url: url.to_string(),
-                    detail,
-                });
-            }
-            other => {
-                tracing::warn!(
-                    provider = id,
-                    part_type = other.type_tag(),
-                    role = "tool",
-                    "dropping unsupported tool result part on Responses egress"
-                );
-            }
+        if let Some(item) = translate_tool_output_part(id, auth_kind, p, tally)? {
+            items.push(item);
         }
     }
+    if items.is_empty() {
+        return Ok(FunctionCallOutputBody::Text(String::new()));
+    }
     Ok(FunctionCallOutputBody::Items(items))
+}
+
+/// Whether this lane forwards file parts inside a tool output.
+// Bedrock Mantle has no evidence that it accepts `input_file` in a tool output.
+const fn forwards_tool_output_files(auth_kind: AuthKind) -> bool {
+    !matches!(auth_kind, AuthKind::BedrockMantle)
+}
+
+/// Translate one tool-result part into a typed output item, or `Ok(None)`
+/// when the part has no tool-output slot on this lane.
+fn translate_tool_output_part(
+    id: &str,
+    auth_kind: AuthKind,
+    part: &ContentPart,
+    tally: &mut ResponsesDropTally,
+) -> Result<Option<FunctionCallOutputContentItem>> {
+    match part {
+        ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+            Ok(Some(FunctionCallOutputContentItem::InputText {
+                text: text.clone(),
+            }))
+        }
+        ContentPart::Known(KnownContentPart::Image { source, .. }) => {
+            translate_tool_image_source(id, source, tally)
+        }
+        ContentPart::Known(KnownContentPart::ImageUrl { image_url, .. }) => {
+            translate_tool_image_url(id, image_url).map(Some)
+        }
+        ContentPart::Known(KnownContentPart::File { file, .. })
+            if forwards_tool_output_files(auth_kind) =>
+        {
+            tool_output_file_item(id, file.as_object()).map(Some)
+        }
+        ContentPart::Other {
+            type_tag, extras, ..
+        } if type_tag == "input_file" && forwards_tool_output_files(auth_kind) => {
+            tool_output_file_item(id, Some(extras)).map(Some)
+        }
+        // TRANSLATION-DROP: lane=openai-responses class=tool_result_part_unsupported test=tool_result_unsupported_parts_drop_from_the_wire_and_count_once
+        other => {
+            tracing::warn!(
+                provider = id,
+                part_type = %sanitize_for_log(other.type_tag()),
+                role = "tool",
+                "dropping unsupported tool result part on Responses egress"
+            );
+            tally.record_tool_result_part_unsupported();
+            Ok(None)
+        }
+    }
+}
+
+/// Translate an OpenAI-shape `image_url` object inside a tool result. A url
+/// that is absent OR present-but-empty names no bytes; failing keeps an
+/// empty `image_url` off the wire.
+fn translate_tool_image_url(id: &str, image_url: &Value) -> Result<FunctionCallOutputContentItem> {
+    let Some(url) = image_url
+        .get("url")
+        .and_then(|u| u.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image_url content part in a tool result has no usable url: \
+             image_url.url is absent or empty",
+        ));
+    };
+    let detail = image_url
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .map(str::to_string);
+    Ok(FunctionCallOutputContentItem::InputImage {
+        image_url: url.to_string(),
+        detail,
+    })
 }
 
 /// Translate an Anthropic-shape image source inside a tool result to a

@@ -467,6 +467,47 @@ fn function_call_output_item_with_array_output_collapses_text() {
     assert!(matches!(&req.messages[0].content, MessageContent::Text(t) if t == "result"));
 }
 
+#[test]
+fn function_call_output_input_file_parks_as_other_with_its_fields() {
+    // Arrange: a tool output carrying text plus a native input_file block.
+    let body = json!({
+        "model": "m",
+        "input": [
+            {"type": "function_call_output", "call_id": "c1", "output": [
+                {"type": "input_text", "text": "see file"},
+                {"type": "input_file", "filename": "notes.txt",
+                 "file_data": "data:text/plain;base64,S0lURQ==",
+                 "file_url": "https://example.com/notes.txt"}
+            ]}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: the block becomes the forward-compat carrier, `type` lifted
+    // into the tag and every other field kept verbatim in extras.
+    let MessageContent::Parts(parts) = &req.messages[0].content else {
+        panic!("a mixed output stays parts: {:?}", req.messages[0].content);
+    };
+    assert_eq!(parts.len(), 2);
+    let ContentPart::Other {
+        type_tag, extras, ..
+    } = &parts[1]
+    else {
+        panic!("input_file must park as Other: {:?}", parts[1]);
+    };
+    assert_eq!(type_tag, "input_file");
+    assert_eq!(
+        serde_json::Value::Object(extras.clone()),
+        json!({
+            "filename": "notes.txt",
+            "file_data": "data:text/plain;base64,S0lURQ==",
+            "file_url": "https://example.com/notes.txt"
+        })
+    );
+}
+
 // ---------------------------------------------------------------------------
 // reasoning item -> reasoning_details
 // ---------------------------------------------------------------------------

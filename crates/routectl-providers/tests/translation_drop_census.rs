@@ -105,7 +105,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("openai_compat/wire_lift/tool_use.rs", 2),
     ("openai_compat/wire_lift/tools.rs", 1),
     ("openai_responses/extras.rs", 5),
-    ("openai_responses/messages.rs", 10),
+    ("openai_responses/messages.rs", 11),
     ("openai_responses/request.rs", 2),
     ("openai_responses/system.rs", 3),
     ("openai_responses/tools.rs", 4),
@@ -113,7 +113,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 63;
+const EXPECTED_LANE_MARKERS: usize = 64;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 14;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 49;
 
@@ -178,6 +178,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "openai_responses/request_lane_observability_tests.rs",
     "openai_responses/request_system_role_tests.rs",
     "openai_responses/request_test_support.rs",
+    "openai_responses/request_tool_output_tests.rs",
     "openai_responses/request_tests.rs",
     "openai_responses/response_tests.rs",
     "openai_responses/sse_tests.rs",

@@ -348,21 +348,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
         "the forward-compat half of the same user part drop, on the same unclosed chain",
     ),
     (
-        "openai_responses/messages.rs",
-        "build_tool_output_body",
-        "dropping unsupported tool result part",
-        "logs the unsupported tool-result part drop on the all-text fast path; the tool-message \
-         translation that decides it carries no marker of its own yet, which is what keeps this \
-         entry a review moment",
-    ),
-    (
-        "openai_responses/messages.rs",
-        "build_tool_output_body",
-        "dropping unsupported tool result part",
-        "the mixed typed-items path of the same drop, which repeats the message verbatim -- two \
-         occurrences, so the register counts rather than collapsing them to one",
-    ),
-    (
         "openai_responses/mod.rs",
         "complete",
         "output_item.done beyond cap",
@@ -470,6 +455,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("openai_responses/messages.rs", "lift_reasoning_details", 2),
     ("openai_responses/messages.rs", "translate_image_source", 1),
     ("openai_responses/messages.rs", "translate_other_message", 1),
+    (
+        "openai_responses/messages.rs",
+        "translate_tool_output_part",
+        1,
+    ),
     (
         "openai_responses/messages.rs",
         "translate_tool_image_source",

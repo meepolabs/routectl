@@ -936,6 +936,9 @@ license.
   message text -> Responses `instructions` string
 - `src/openai_responses/request_system_role_tests.rs` -- `include!`d into
   `request_tests.rs`: serialized-wire pins for system-message delivery
+- `src/openai_responses/request_tool_output_tests.rs` -- `include!`d into
+  `request_tests.rs`: tool-result file forwarding and the counted
+  `tool_result_part_unsupported` drop
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses
   `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items); gates
   reasoning replay per target lane (family recognition + carry/strip/gray);
@@ -944,20 +947,23 @@ license.
   claim through the same replay ladder; enforces the empty-item floor
   (producers return `Option`, `retain_replayable_reasoning` sweeps before
   emission); also translates `File` content blocks -> `InputFile` items with
-  `file_data` or `file_id`; runs every emitted `call_id` (both
+  `file_data`, `file_id` or `file_url` (one carrier helper serves the user
+  turn and the tool output; `build_tool_output_body` also forwards a native
+  `input_file` block, except on the Bedrock Mantle lane); runs every emitted
+  `call_id` (both
   `function_call` and `function_call_output` sites) through `tool_id` so one
   logical id keeps one wire id and a tool result still correlates; an empty
   correlating id fails the request on BOTH output shapes (a tool-role
   message's `tool_call_id` and a `tool_result` part's `tool_use_id`); content
   parts split into two classes -- a MALFORMED part (names no bytes: absent or
-  empty image url, empty base64 data, a file part with neither carrier) fails
+  empty image url, empty base64 data, a file part with no carrier) fails
   the request, while an UNREPRESENTABLE but well-formed part (no Responses slot,
   forward-compat, unknown image-source kind) drops with a WARN. A
   `ResponsesDropTally` flushed once per request from `build_input` (on the Err
   arm too) counts each deliberate drop class it made
   (`image_source_kind_unrepresentable`, `reasoning_detail_kind_unsupported`,
   `reasoning_format_foreign`, `reasoning_scheme_incompatible`,
-  `reasoning_text_unsigned`) exactly once,
+  `reasoning_text_unsigned`, `tool_result_part_unsupported`) exactly once,
   never once per dropped block
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses tool
   shape (`translate_tools`) and `tool_choice` mapping
@@ -8145,6 +8151,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   openai-compat, anthropic-api, gemini, bedrock-invoke) carrying the caller's
   schema; an unknown tag reaches the responses egress verbatim and drops on the
   gemini, anthropic-api and bedrock-invoke egresses
+- `tests/responses_tool_output_file_egress_e2e.rs` -- a tool-result file part
+  through the `/v1/chat/completions` ingress reaches the openai-responses
+  upstream as `input_file` inside `function_call_output.output`
 - `tests/gemini_ingress_extras_boundary.rs` -- HTTP ingress through the server
   to a mock Gemini upstream: which extras reach the upstream body and logs
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`

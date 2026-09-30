@@ -2615,3 +2615,100 @@ async fn a_stale_same_capability_probe_settlement_books_nothing() {
         "nor refresh the backoff it did not book",
     );
 }
+
+/// A minimal openai-responses provider config (capability subsystem left at
+/// its default: enabled).
+const RESPONSES_P1: &str = r#"
+[providers.p1]
+kind = "openai-responses"
+api_key_ref = "literal:k"
+auth_kind = "api-key"
+"#;
+
+/// A request whose tool answer carries a file, the part an upstream may
+/// reject by its `input_file` wire name. It also carries a `web_search` tool,
+/// so a learnable capability is in the request's feature set and the
+/// membership gate alone cannot keep the registry empty.
+fn req_with_tool_result_file() -> ChatRequest {
+    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
+    let tool_answer = Message {
+        refusal: None,
+        role: Role::Tool,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
+            file: json!({"filename": "notes.txt", "file_data": "data:text/plain;base64,S0lURQ=="}),
+            cache_control: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: Some("call_1".into()),
+        tool_calls: None,
+    };
+    let tool_call = Message {
+        refusal: None,
+        role: Role::Assistant,
+        content: MessageContent::Null,
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: Some(vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"}
+        })]),
+    };
+    ChatRequest {
+        model: "m1".into(),
+        messages: vec![tool_call, tool_answer].into(),
+        tools: Some(vec![ToolDef::Other(json!({"type": "web_search"}))]),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn an_input_file_rejection_on_the_responses_lane_learns_no_capability() {
+    // Arrange: both 400 shapes an upstream could name `input_file` in -- a
+    // plain invalid_request_error, and one carrying a feature-unsupported
+    // code token with `input_file` as its param.
+    let bodies = [
+        (
+            r#"{"error":{"type":"invalid_request_error","code":null,"param":"input[2].output[0]","message":"Invalid value: 'input_file'. Supported values are: 'input_text' and 'input_image'."}}"#,
+            None,
+        ),
+        (
+            r#"{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"input_file","message":"Unsupported value: 'input_file'."}}"#,
+            Some("unsupported_value"),
+        ),
+    ];
+    for (body, code) in bodies {
+        let provider = Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body: body.into(),
+            upstream_type: Some("invalid_request_error".into()),
+            upstream_code: code.map(str::to_string),
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with(RESPONSES_P1, provider.clone());
+
+        // Act
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool_result_file(), RouterOptions::default()),
+        )
+        .await;
+
+        // Assert: the rejection reached dispatch and nothing was learned.
+        assert!(dispatched.result.is_err());
+        assert!(provider.calls.load(Ordering::SeqCst) >= 1);
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "an input_file rejection must not produce a learn event: {body}",
+        );
+        assert!(learn_warns(&events).is_empty());
+        assert!(
+            router.learned_capability_snapshot().is_empty(),
+            "an input_file rejection must not create a registry entry: {body}",
+        );
+    }
+}

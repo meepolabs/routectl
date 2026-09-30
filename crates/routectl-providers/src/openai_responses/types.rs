@@ -164,21 +164,25 @@ pub enum ResponseInputItem {
 /// The `output` field of a `function_call_output` item. When all tool
 /// result parts are plain text the body collapses to a flat string
 /// (codex parity). When any part is non-text (e.g. an image returned by
-/// a visual tool) the body becomes an array of typed content items.
+/// a visual tool, or a file) the body becomes an array of typed content
+/// items.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum FunctionCallOutputBody {
     /// All parts were plain text; concatenated with newlines (most
     /// common case; avoids wrapping overhead for simple tool results).
     Text(String),
-    /// At least one part is non-text; every part is represented as a
+    /// At least one part is non-text; every representable part is a
     /// typed item so the server can handle the mixed payload.
     Items(Vec<FunctionCallOutputContentItem>),
 }
 
-/// One item inside a `FunctionCallOutputBody::Items` array.
+/// One item inside a `FunctionCallOutputBody::Items` array. Kept separate
+/// from [`ResponsesContentItem`]: the two positions admit different item
+/// kinds, and one enum would make every producer track which is legal where.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)] // wire shape: every tool-output item type is an `input_*`
 pub enum FunctionCallOutputContentItem {
     InputText {
         text: String,
@@ -187,6 +191,19 @@ pub enum FunctionCallOutputContentItem {
         image_url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+    },
+    /// File returned by a tool. Same carrier fields as the user-turn
+    /// [`ResponsesContentItem::InputFile`]; at least one of `file_data`,
+    /// `file_id`, `file_url` is present, absent fields are omitted.
+    InputFile {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
     },
 }
 
@@ -213,16 +230,19 @@ pub enum ResponsesContentItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    /// File block on a user message. Carries either inline base64
-    /// (`file_data` as a `data:<mime>;base64,<...>` URI) or a reference
-    /// to a previously-uploaded file (`file_id`), plus an optional
-    /// `filename`. All payload fields are optional except the `type`
-    /// tag; absent fields are omitted so the wire shape stays minimal.
+    /// File block on a user message. Carries inline base64 (`file_data`
+    /// as a `data:<mime>;base64,<...>` URI), a reference to a
+    /// previously-uploaded file (`file_id`), or a fetchable `file_url`,
+    /// plus an optional `filename`. All payload fields are optional except
+    /// the `type` tag; absent fields are omitted so the wire shape stays
+    /// minimal.
     InputFile {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_data: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
     },

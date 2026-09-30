@@ -336,6 +336,7 @@ fn user_forward_compat_part_drops_and_neighbouring_text_still_ships() {
 }
 
 #[test]
+#[serial_test::serial(openai_responses_tool_result_part_unsupported)]
 fn tool_result_unrepresentable_part_drops_and_image_still_ships() {
     // Arrange: a Document part (no Responses slot) beside a valid image
     // inside a tool result.
@@ -351,13 +352,17 @@ fn tool_result_unrepresentable_part_drops_and_image_still_ships() {
     let req = req_with(vec![user_text("shot"), tool_message_parts("call_3", parts)]);
 
     // Act
+    let before = responses_drop_count("tool_result_part_unsupported");
     let v = translate_to_json(&cfg(), &req);
+    let after = responses_drop_count("tool_result_part_unsupported");
 
-    // Assert: only the image survives; the request was not rejected.
+    // Assert: only the image survives; the request was not rejected, and the
+    // Document is counted under the tool-result drop class.
     assert_eq!(
         v["input"][1]["output"],
         json!([{"type": "input_image", "image_url": "https://example.com/shot.png"}])
     );
+    assert_eq!(after - before, 1);
 }
 
 // Same incidental-trigger guard as `user_image_unknown_source_kind_warns_and_drops`.
