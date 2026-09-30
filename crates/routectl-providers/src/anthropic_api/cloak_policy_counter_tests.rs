@@ -232,9 +232,12 @@ fn a_refused_relocation_counts_nothing_and_warns_once_without_content() {
         });
 
         // Assert
-        let refusal = result
+        let CloakRefusal::Relocation(refusal) = result
             .expect("ran")
-            .expect_err("a body with nowhere to land must be refused");
+            .expect_err("a body with nowhere to land must be refused")
+        else {
+            panic!("a default config refuses only relocations");
+        };
         assert!(!refusal.detail.contains(SENTINEL_PROMPT), "{refusal:?}");
         assert_eq!(deltas(before, policy_counts()), [0, 0, 0]);
         assert_eq!(deltas(retired_before, counts_of(RETIRED_CLASSES)), [0, 0]);

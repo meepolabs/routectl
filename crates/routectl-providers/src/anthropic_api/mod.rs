@@ -109,7 +109,10 @@ fn stream_state_for(provider_id: &str, base_url: &str) -> SseState {
 #[cfg(feature = "bedrock")]
 pub use crate::mantle::MantleAuth;
 pub use client::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
-pub use cloak::{CloakConfig, CloakMode, ToolRename};
+pub use cloak::{
+    CloakConfig, CloakMode, MAX_SENSITIVE_WORD_FOLDED_CHARS, MAX_SENSITIVE_WORDS,
+    SensitiveWordsBoundError, ToolRename, validate_sensitive_words,
+};
 /// Which provider kinds read the operator-declared thinking-budget cap.
 /// Re-exported from the module that consumes the field so config
 /// validation can answer "does this model's egress read the knob" without

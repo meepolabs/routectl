@@ -313,6 +313,71 @@ impl<T> typenum::type_operators::Same for routectl_providers::anthropic_api::Clo
 pub type routectl_providers::anthropic_api::CloakMode::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::CloakMode where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::anthropic_api::CloakMode::into_shared(self) -> Shared
+pub enum routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub routectl_providers::anthropic_api::SensitiveWordsBoundError::EntryTooLong
+pub routectl_providers::anthropic_api::SensitiveWordsBoundError::EntryTooLong::folded_chars: usize
+pub routectl_providers::anthropic_api::SensitiveWordsBoundError::EntryTooLong::index: usize
+pub routectl_providers::anthropic_api::SensitiveWordsBoundError::TooManyEntries
+pub routectl_providers::anthropic_api::SensitiveWordsBoundError::TooManyEntries::count: usize
+impl core::clone::Clone for routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::clone(&self) -> routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::cmp::Eq for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::cmp::PartialEq for routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::eq(&self, &routectl_providers::anthropic_api::SensitiveWordsBoundError) -> bool
+impl core::error::Error for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::fmt::Debug for routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::marker::StructuralPartialEq for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::marker::Freeze for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::marker::Send for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::marker::Sync for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::marker::Unpin for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::marker::UnsafeUnpin for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl core::panic::unwind_safe::UnwindSafe for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl<Q, K> equivalent::Equivalent<K> for routectl_providers::anthropic_api::SensitiveWordsBoundError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_providers::anthropic_api::SensitiveWordsBoundError where U: core::convert::From<T>
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_providers::anthropic_api::SensitiveWordsBoundError where U: core::convert::Into<T>
+pub type routectl_providers::anthropic_api::SensitiveWordsBoundError::Error = core::convert::Infallible
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_providers::anthropic_api::SensitiveWordsBoundError where U: core::convert::TryFrom<T>
+pub type routectl_providers::anthropic_api::SensitiveWordsBoundError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: core::clone::Clone
+pub type routectl_providers::anthropic_api::SensitiveWordsBoundError::Owned = T
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::clone_into(&self, &mut T)
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: 'static + ?core::marker::Sized
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: ?core::marker::Sized
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: ?core::marker::Sized
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: core::clone::Clone
+pub unsafe fn routectl_providers::anthropic_api::SensitiveWordsBoundError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: core::clone::Clone
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl<T> outref::AsOut<T> for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: core::marker::Copy
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::anthropic_api::SensitiveWordsBoundError where T: ?core::marker::Sized
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl<T> tracing::instrument::WithSubscriber for routectl_providers::anthropic_api::SensitiveWordsBoundError
+impl<T> typenum::type_operators::Same for routectl_providers::anthropic_api::SensitiveWordsBoundError
+pub type routectl_providers::anthropic_api::SensitiveWordsBoundError::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::SensitiveWordsBoundError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::into_shared(self) -> Shared
 pub struct routectl_providers::anthropic_api::AnthropicApiConfig
 pub routectl_providers::anthropic_api::AnthropicApiConfig::allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::anthropic_version: alloc::string::String
@@ -594,8 +659,11 @@ impl<T> typenum::type_operators::Same for routectl_providers::anthropic_api::Too
 pub type routectl_providers::anthropic_api::ToolRename::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::ToolRename where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::anthropic_api::ToolRename::into_shared(self) -> Shared
+pub const routectl_providers::anthropic_api::MAX_SENSITIVE_WORDS: usize
+pub const routectl_providers::anthropic_api::MAX_SENSITIVE_WORD_FOLDED_CHARS: usize
 pub const routectl_providers::anthropic_api::MAX_THINKING_BUDGET_READER_KINDS: &[&str]
 pub fn routectl_providers::anthropic_api::egress_reads_max_thinking_budget(&str) -> bool
+pub fn routectl_providers::anthropic_api::validate_sensitive_words(&[alloc::string::String]) -> core::result::Result<(), routectl_providers::anthropic_api::SensitiveWordsBoundError>
 pub mod routectl_providers::bedrock
 pub mod routectl_providers::bedrock::auth
 pub enum routectl_providers::bedrock::auth::ResolvedCreds

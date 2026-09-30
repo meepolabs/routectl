@@ -273,6 +273,35 @@ const TIER_ONE: &[TierOneRow] = &[
         known_loss: None,
     },
     TierOneRow {
+        item: "CloakRefusal::into_error",
+        file: CLOAK_ROOT,
+        role: Role::Support,
+        gate: Gate::CloakPathAlways,
+        reason: "turns either cloak refusal into its dispatch error: a relocation keeps its \
+                 bad-request shape, an out-of-bounds word list becomes a config error; builds an \
+                 error and never touches the body",
+        known_loss: None,
+    },
+    TierOneRow {
+        item: "validate_sensitive_words",
+        file: "anthropic_api/cloak/obfuscate.rs",
+        role: Role::Support,
+        gate: Gate::CloakPathAlways,
+        reason: "checks the configured word list against its count and folded-length bounds, \
+                 shared by config validation and the orchestrator's pre-body check; reads config \
+                 only and never touches the body",
+        known_loss: None,
+    },
+    TierOneRow {
+        item: "SensitiveWordsBoundError::fmt",
+        file: "anthropic_api/cloak/obfuscate.rs",
+        role: Role::Support,
+        gate: Gate::ProviderConstruction,
+        reason: "renders a bound refusal as counts and an entry index only, so a configured \
+                 sensitive word cannot reach an error or a log through it",
+        known_loss: None,
+    },
+    TierOneRow {
         item: "CloakConfig::default",
         file: CLOAK_ROOT,
         role: Role::Support,

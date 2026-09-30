@@ -36,6 +36,10 @@ use billing::strip_billing_block;
 pub use identity::RelocationRefusal;
 use identity::{mint_metadata_user_id, relocate_client_system};
 use obfuscate::obfuscate_sensitive_words;
+pub use obfuscate::{
+    MAX_SENSITIVE_WORD_FOLDED_CHARS, MAX_SENSITIVE_WORDS, SensitiveWordsBoundError,
+    validate_sensitive_words,
+};
 use tool_rename::{apply_tool_rename, normalize_tool_names_to_mcp};
 use tool_sort::sort_custom_tools_by_name;
 
@@ -186,6 +190,35 @@ impl RelocationRefusal {
     }
 }
 
+/// Why the cloak refused a request before egress. Either way the body must
+/// not be sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloakRefusal {
+    /// The client system has nowhere legal to land.
+    Relocation(RelocationRefusal),
+    /// The configured `sensitive_words` list is outside its bounds, so the
+    /// terms cannot be marked. Config validation refuses such a list at
+    /// load; this arm is reached only by a caller that built the provider
+    /// without it.
+    SensitiveWords(SensitiveWordsBoundError),
+}
+
+impl CloakRefusal {
+    /// The refusal as the dispatch error the router routes on. A relocation
+    /// refusal keeps its bad-request shape; an out-of-bounds word list is a
+    /// provider misconfiguration, so it is a config error, which no retry or
+    /// fallback treats as the request's fault. Neither carries request or
+    /// configured-word content.
+    pub fn into_error(self, provider_id: &str) -> Error {
+        match self {
+            Self::Relocation(refusal) => refusal.into_error(provider_id),
+            Self::SensitiveWords(bound) => {
+                Error::Config(format!("provider `{provider_id}`: cloak {bound}"))
+            }
+        }
+    }
+}
+
 const RELOCATION_REFUSAL_STATUS: u16 = 400;
 const RELOCATION_REFUSAL_TYPE: &str = "invalid_request_error";
 
@@ -319,10 +352,13 @@ impl CloakPolicyTally {
 /// a `<system-reminder>` block followed by any carried image/document blocks
 /// (unless `strict_mode` drops it), and a metadata `user_id` is minted.
 ///
-/// Errors with a [`RelocationRefusal`] when the relocation has nowhere legal
-/// to land (see `relocate_client_system`). The refusal is returned before any
-/// network I/O and the body must then not be sent; the canonical request is
-/// never touched, so every other target still builds from the original.
+/// Errors with [`CloakRefusal::Relocation`] when the relocation has nowhere
+/// legal to land (see `relocate_client_system`), and with
+/// [`CloakRefusal::SensitiveWords`] when `config.sensitive_words` is outside
+/// its bounds -- checked first, so that refusal leaves the body untouched.
+/// Either refusal is returned before any network I/O and the body must then
+/// not be sent; the canonical request is never touched, so every other
+/// target still builds from the original.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
 /// first, then the always-on tool-name normalization (every non-`mcp__`
@@ -337,7 +373,8 @@ pub fn cloak_oauth_egress(
     identity: &ClaudeCodeIdentity,
     is_non_cc: bool,
     config: &CloakConfig,
-) -> Result<CloakResult, RelocationRefusal> {
+) -> Result<CloakResult, CloakRefusal> {
+    validate_sensitive_words(&config.sensitive_words).map_err(CloakRefusal::SensitiveWords)?;
     let mut tally = CloakPolicyTally::default();
     strip_billing_block(body);
     if is_non_cc {
@@ -345,18 +382,21 @@ pub fn cloak_oauth_egress(
         // rather than relocate it, so the losses past that switch are
         // configured, not chosen on the operator's behalf: the relocation
         // reports none of its classes and refuses nothing under it.
-        let outcome = relocate_client_system(body, config.strict_mode).inspect_err(|refusal| {
-            tracing::warn!(
-                reason = %refusal.detail,
-                "cloak system relocation refused; failing the request before egress"
-            );
-        })?;
+        let outcome = relocate_client_system(body, config.strict_mode)
+            .inspect_err(|refusal| {
+                tracing::warn!(
+                    reason = %refusal.detail,
+                    "cloak system relocation refused; failing the request before egress"
+                );
+            })
+            .map_err(CloakRefusal::Relocation)?;
         tally.absorb_relocation(outcome);
         mint_metadata_user_id(body, identity);
     }
     let mut tool_reverse = normalize_tool_names_to_mcp(body);
     apply_tool_rename(body, &config.tool_rename, &mut tool_reverse);
-    obfuscate_sensitive_words(body, &config.sensitive_words);
+    obfuscate_sensitive_words(body, &config.sensitive_words)
+        .map_err(CloakRefusal::SensitiveWords)?;
     // Tool-array canonicalization: stable-sort `tools[]` by name so a non-CC
     // client that shuffles tool order request-to-request presents a stable
     // cache prefix. Gated on the SAME `is_non_cc` branch the identity rewrite

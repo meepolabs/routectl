@@ -33,6 +33,109 @@ const FINAL_SIGMA: char = '\u{3C2}';
 /// Greek small sigma: the normalized form both sigma variants fold to.
 const NORMAL_SIGMA: char = '\u{3C3}';
 
+// Bounds on the operator's `sensitive_words` list. The scan's worst case is
+// linear in (same-initial word count) x (folded word length) x (request text
+// length): at every text position whose first char matches, each word
+// sharing that first char is walked until it diverges. Request text is
+// client-controlled (tool output, fetched pages, pasted files) up to the
+// ingress body limit, so the two word-side factors are the ones config can
+// cap.
+//
+// Measured configurations: the documented peer example lists two words of
+// 3 and 5 chars ("API", "proxy"); this repo's config tests use two words of
+// 5 and 6 chars; no measured live config sets any. 32 entries x 32 folded
+// chars is 16x the largest observed count and 5x the longest observed word,
+// room for product names and short phrases. 64 x 64 was measured first and
+// refused: 2.75-3.5s per 100 KiB of adversarial text, 5x the cost below.
+//
+// Scan of `a`-only text by `same_initial_words(count, len)` (distinct words
+// of len-1 `a`s plus one distinct char, the costliest shape per bound),
+// release profile, AMD Ryzen 9 9900X (24 threads, load average 4-5):
+//   cargo test -p routectl-providers --release --lib \
+//     cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
+//     -- --ignored --nocapture
+//   100 KiB:  2 x 5: 9.2ms   8 x 16: 109ms   16 x 16: 180ms
+//             16 x 32: 352ms   32 x 16: 359ms   32 x 32 (bounds): 690ms
+//   32 MiB:   "API", "proxy": 670ms   32 x 32 (bounds): 229s
+//
+// The bounds cap the word-side multiplier; they do not make an at-bound,
+// pathological list cheap against a maximum-size body. That needs the
+// operator to configure 32 long words sharing an initial and a common
+// prefix, which no measured config approaches; making that case cheap as
+// well takes a prefix index over the words, not a tighter bound.
+
+/// Most entries `sensitive_words` may hold. Derivation above.
+pub const MAX_SENSITIVE_WORDS: usize = 32;
+
+/// Most chars one `sensitive_words` entry may fold to, after trimming.
+/// Counted on the folded stream the scan walks, not on original chars or
+/// bytes: a char whose lowercase expands (U+0130 folds to two) costs the
+/// scan two steps. Derivation above.
+pub const MAX_SENSITIVE_WORD_FOLDED_CHARS: usize = 32;
+
+/// A `sensitive_words` list outside the bounds. Carries only counts and an
+/// entry index -- never the configured word, which is operator content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveWordsBoundError {
+    /// More than [`MAX_SENSITIVE_WORDS`] entries.
+    TooManyEntries {
+        /// How many entries the list holds.
+        count: usize,
+    },
+    /// An entry folds to more than [`MAX_SENSITIVE_WORD_FOLDED_CHARS`] chars.
+    EntryTooLong {
+        /// The zero-based position of the entry in the list.
+        index: usize,
+        /// How many chars the trimmed entry folds to.
+        folded_chars: usize,
+    },
+}
+
+impl std::fmt::Display for SensitiveWordsBoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyEntries { count } => write!(
+                f,
+                "sensitive_words has {count} entries; at most {MAX_SENSITIVE_WORDS} are allowed"
+            ),
+            Self::EntryTooLong {
+                index,
+                folded_chars,
+            } => write!(
+                f,
+                "sensitive_words[{index}] is {folded_chars} chars after case folding; at most \
+                 {MAX_SENSITIVE_WORD_FOLDED_CHARS} are allowed"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SensitiveWordsBoundError {}
+
+/// Check a `sensitive_words` list against [`MAX_SENSITIVE_WORDS`] and
+/// [`MAX_SENSITIVE_WORD_FOLDED_CHARS`]. Every entry is measured, including
+/// ones the matcher later drops as too short or already marked, so the rule
+/// an operator reads is the rule applied.
+///
+/// # Errors
+///
+/// Returns [`SensitiveWordsBoundError`] for the first bound exceeded.
+pub fn validate_sensitive_words(words: &[String]) -> Result<(), SensitiveWordsBoundError> {
+    if words.len() > MAX_SENSITIVE_WORDS {
+        return Err(SensitiveWordsBoundError::TooManyEntries { count: words.len() });
+    }
+    for (index, word) in words.iter().enumerate() {
+        let folded_chars = word.trim().chars().flat_map(fold_char).count();
+        if folded_chars > MAX_SENSITIVE_WORD_FOLDED_CHARS {
+            return Err(SensitiveWordsBoundError::EntryTooLong {
+                index,
+                folded_chars,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Obfuscate each configured sensitive word in the outgoing body by
 /// inserting a zero-width space (U+200B) after the first character of each
 /// match. Matching is case-insensitive and longest-match-first, so a
@@ -42,19 +145,27 @@ const NORMAL_SIGMA: char = '\u{3C3}';
 /// array-of-text-blocks forms). The inserted
 /// zero-width space is invisible to the model, so no reverse mapping is
 /// needed on the response. An empty word list is a byte-identical no-op.
-pub(super) fn obfuscate_sensitive_words(body: &mut Value, words: &[String]) {
-    let matcher = match SensitiveWordMatcher::build(words) {
-        Some(m) => m,
-        None => return,
+///
+/// A list outside the bounds is refused before the body is touched; the
+/// caller must then not send the body, since the terms would travel
+/// unmarked.
+pub(super) fn obfuscate_sensitive_words(
+    body: &mut Value,
+    words: &[String],
+) -> Result<(), SensitiveWordsBoundError> {
+    let Some(matcher) = SensitiveWordMatcher::build(words)? else {
+        return Ok(());
     };
     obfuscate_system(body, &matcher);
     obfuscate_messages(body, &matcher);
+    Ok(())
 }
 
 /// A normalized, deduplicated, longest-first set of sensitive words for a
 /// case-insensitive scan. Words shorter than `MIN_SENSITIVE_WORD_LEN` chars
 /// or already containing a zero-width space are dropped at build time;
 /// `None` is returned when no valid word remains (the obfuscation no-ops).
+/// A list outside the bounds is refused rather than built.
 struct SensitiveWordMatcher {
     /// Sorted longest-first by folded char count so an overlap prefers the
     /// longest match.
@@ -72,7 +183,8 @@ struct FoldedWord {
 }
 
 impl SensitiveWordMatcher {
-    fn build(words: &[String]) -> Option<Self> {
+    fn build(words: &[String]) -> Result<Option<Self>, SensitiveWordsBoundError> {
+        validate_sensitive_words(words)?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut valid: Vec<FoldedWord> = Vec::new();
         for w in words {
@@ -91,7 +203,7 @@ impl SensitiveWordMatcher {
             }
         }
         if valid.is_empty() {
-            return None;
+            return Ok(None);
         }
         // Sorted longest-first by FOLDED char count so the linear scan in
         // `match_at` returns the longest word anchored at a position: the
@@ -101,7 +213,7 @@ impl SensitiveWordMatcher {
         // count can order two words the opposite way when their foldings
         // expand by different amounts.
         valid.sort_by_key(|w| std::cmp::Reverse(w.folded.chars().count()));
-        Some(Self { words: valid })
+        Ok(Some(Self { words: valid }))
     }
 
     /// Return the obfuscated form of `text`, or `None` when no match was
@@ -264,7 +376,223 @@ mod tests {
 
     fn matcher(words: &[&str]) -> SensitiveWordMatcher {
         let owned: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
-        SensitiveWordMatcher::build(&owned).expect("words are valid")
+        SensitiveWordMatcher::build(&owned)
+            .expect("words are within bounds")
+            .expect("words are valid")
+    }
+
+    /// A word no test text contains, so an error that echoes a configured
+    /// word is caught by searching for it.
+    const SENTINEL: &str = "zqxsentinelword";
+
+    fn owned(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    /// `count` distinct words of `len` folded chars sharing the initial
+    /// `a`: `len - 1` repeated `a`s, then one CJK char per word (which folds
+    /// to itself) so no two words dedupe and each walk diverges only on its
+    /// last char against `a`-only text.
+    fn same_initial_words(count: usize, len: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let last = char::from_u32(0x4E00 + u32::try_from(i).unwrap()).unwrap();
+                format!("{}{last}", "a".repeat(len - 1))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_list_at_both_bounds_is_accepted() {
+        // Arrange
+        let words = same_initial_words(MAX_SENSITIVE_WORDS, MAX_SENSITIVE_WORD_FOLDED_CHARS);
+
+        // Act
+        let result = validate_sensitive_words(&words);
+        let built = SensitiveWordMatcher::build(&words);
+
+        // Assert
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            built.expect("within bounds").map(|m| m.words.len()),
+            Some(MAX_SENSITIVE_WORDS)
+        );
+    }
+
+    #[test]
+    fn one_entry_over_the_count_bound_is_refused() {
+        // Arrange
+        let words = same_initial_words(MAX_SENSITIVE_WORDS + 1, 2);
+
+        // Act
+        let result = validate_sensitive_words(&words);
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(SensitiveWordsBoundError::TooManyEntries {
+                count: MAX_SENSITIVE_WORDS + 1
+            })
+        );
+    }
+
+    #[test]
+    fn one_folded_char_over_the_length_bound_is_refused_with_its_index() {
+        // Arrange
+        let mut words = owned(&["api", "proxy"]);
+        words.push("a".repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS + 1));
+
+        // Act
+        let result = validate_sensitive_words(&words);
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(SensitiveWordsBoundError::EntryTooLong {
+                index: 2,
+                folded_chars: MAX_SENSITIVE_WORD_FOLDED_CHARS + 1
+            })
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_count_toward_the_length_bound() {
+        // Arrange
+        let words = vec![format!(
+            "  {}  ",
+            "a".repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS)
+        )];
+
+        // Act
+        let result = validate_sensitive_words(&words);
+
+        // Assert
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn the_length_bound_counts_folded_chars_not_bytes() {
+        // Arrange: U+03A3 is two UTF-8 bytes and folds to one char, so this
+        // entry is twice the bound in bytes and exactly at it folded.
+        let word = "\u{3A3}".repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS);
+        assert!(word.len() > MAX_SENSITIVE_WORD_FOLDED_CHARS);
+
+        // Act
+        let result = validate_sensitive_words(&[word]);
+
+        // Assert
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn the_length_bound_counts_folded_chars_not_original_chars() {
+        // Arrange: U+0130 folds to two chars, so half the bound in original
+        // chars plus one is over the bound on the stream the scan walks.
+        let original_chars = MAX_SENSITIVE_WORD_FOLDED_CHARS / 2 + 1;
+        let word = "\u{130}".repeat(original_chars);
+
+        // Act
+        let result = validate_sensitive_words(&[word]);
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(SensitiveWordsBoundError::EntryTooLong {
+                index: 0,
+                folded_chars: original_chars * 2
+            })
+        );
+    }
+
+    #[test]
+    fn refusals_name_the_bound_and_never_the_configured_word() {
+        // Arrange
+        let too_long = vec![SENTINEL.repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS)];
+        let too_many: Vec<String> = (0..=MAX_SENSITIVE_WORDS)
+            .map(|i| format!("{SENTINEL}{i}"))
+            .collect();
+
+        // Act
+        let rendered: Vec<String> = [too_long, too_many]
+            .iter()
+            .map(|words| validate_sensitive_words(words).unwrap_err().to_string())
+            .collect();
+
+        // Assert
+        assert!(rendered[0].contains(&MAX_SENSITIVE_WORD_FOLDED_CHARS.to_string()));
+        assert!(rendered[0].contains("sensitive_words[0]"));
+        assert!(rendered[1].contains(&MAX_SENSITIVE_WORDS.to_string()));
+        for message in &rendered {
+            assert!(!message.contains(SENTINEL), "echoes a word: {message}");
+        }
+    }
+
+    #[test]
+    fn the_matcher_refuses_an_over_bound_list() {
+        // Arrange: the list a library caller bypassing config could pass.
+        let too_many = same_initial_words(MAX_SENSITIVE_WORDS + 1, 2);
+        let too_long = vec!["a".repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS + 1)];
+
+        // Act
+        let refused =
+            [too_many, too_long].map(|words| SensitiveWordMatcher::build(&words).is_err());
+
+        // Assert
+        assert_eq!(refused, [true, true]);
+    }
+
+    #[test]
+    fn an_over_bound_list_leaves_the_body_untouched() {
+        // Arrange
+        let mut words = owned(&["secret"]);
+        words.push("a".repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS + 1));
+        let mut body = serde_json::json!({"system": "the secret"});
+        let before = body.clone();
+
+        // Act
+        let result = obfuscate_sensitive_words(&mut body, &words);
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(body, before);
+    }
+
+    /// Time one scan of `bytes` of `a` and assert it found nothing.
+    fn time_scan(words: &[String], bytes: usize) -> std::time::Duration {
+        let matcher = SensitiveWordMatcher::build(words)
+            .expect("within bounds")
+            .expect("valid words");
+        let text = "a".repeat(bytes);
+        let started = std::time::Instant::now();
+        let hit = matcher.obfuscate(&text);
+        let elapsed = started.elapsed();
+        assert!(hit.is_none(), "the adversarial text holds no whole word");
+        elapsed
+    }
+
+    /// Scan cost against `a`-only request text: a grid of same-initial list
+    /// shapes at a 100 KiB sample, then the realistic list and the at-bound
+    /// list at the ingress body limit. Ignored: the at-bound full-body scan
+    /// runs for minutes by construction. Run it in release with the command
+    /// recorded beside the bound constants.
+    #[test]
+    #[ignore = "multi-minute scan cost measurement; run explicitly with --ignored"]
+    fn sensitive_word_scan_cost_at_the_bounds() {
+        const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+        const SAMPLE_BYTES: usize = 100 * 1024;
+        for (count, len) in [(2, 5), (8, 16), (16, 16), (16, 32), (32, 16), (32, 32)] {
+            let elapsed = time_scan(&same_initial_words(count, len), SAMPLE_BYTES);
+            println!("{count} words x {len} chars: {SAMPLE_BYTES} bytes in {elapsed:?}");
+        }
+        let realistic = owned(&["API", "proxy"]);
+        let at_bounds = same_initial_words(MAX_SENSITIVE_WORDS, MAX_SENSITIVE_WORD_FOLDED_CHARS);
+        for (label, words) in [
+            ("realistic API, proxy", realistic),
+            ("at bounds", at_bounds),
+        ] {
+            let elapsed = time_scan(&words, MAX_BODY_BYTES);
+            println!("{label}: {MAX_BODY_BYTES} bytes in {elapsed:?}");
+        }
     }
 
     #[test]

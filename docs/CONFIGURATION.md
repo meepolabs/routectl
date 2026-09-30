@@ -36,7 +36,8 @@ overlays merge, what's reserved.
   [mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane) -
   [mantle OpenAI lanes](#providersxbedrock_mantle----bedrock-mantle-openai-lanes)
 - anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
-  [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
+  [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential) -
+  [cloak sensitive_words](#cloak-sensitive_words-anthropic-api-provider-flag)
 
 **Models and routing**
 - [Model routing (`[aliases]`)](#model-routing-aliases)
@@ -2254,6 +2255,54 @@ credential_source = "forwarded"
   proxy-side failure). See
   [REMOTE-CONTROL.md](REMOTE-CONTROL.md#pure-proxy-mode) for the
   full admission and failure-handling model.
+
+## cloak sensitive_words (anthropic-api provider flag)
+
+On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
+`[providers.X.cloak] sensitive_words` lists terms the cloak breaks up in
+system and message text by inserting a zero-width space after each match's
+first character. Matching is case-insensitive; entries shorter than two
+characters are ignored. Default empty (no rewrite).
+
+```toml
+[providers.anthropic-sub.cloak]
+sensitive_words = ["API", "proxy"]
+```
+
+The list is bounded, because the scan runs on every request against text
+the client controls (tool output, fetched pages, pasted files) up to the
+32 MiB ingress body limit, and its worst case grows with how many words
+share a first letter times how long they are:
+
+- at most **32 entries**;
+- each entry at most **32 characters after case folding** and trimming.
+  The count is of folded characters, not bytes: `"\u03A3"` (two UTF-8
+  bytes) counts as one, while a character whose lowercase form is two
+  characters counts as two.
+
+Derivation: the documented example above (the same two words a comparable
+proxy ships in its example config) and this repo's own config tests use at
+most two entries of at most six characters, and no measured deployment
+sets any. The bounds leave 16x headroom on count and 5x on length. On an
+AMD Ryzen 9 9900X, release build, scanning 32 MiB of text built to match
+every first letter takes 0.67 s with the two-word list; 32 same-initial
+words of 32 characters take about 0.7 s per 100 KiB of such text (229 s
+at 32 MiB). A 64 x 64 list cost five times that and was refused. Reproduce
+with:
+
+```bash
+cargo test -p routectl-providers --release --lib \
+  cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
+  -- --ignored --nocapture
+```
+
+A list over either bound fails `config check`, `serve` startup, and hot
+reload (which logs the failure and keeps the previous config). The error
+names the provider, the bound, and the offending entry's index and folded
+length -- never the word itself, which is operator content. A provider
+built directly as a library, bypassing config validation, refuses each
+cloaked request with a config error before egress instead of sending the
+terms unmarked.
 
 ## Log knobs (`[log]`)
 

@@ -795,7 +795,9 @@ license.
   `is_non_cc && CloakConfig::normalize_tools` (`sort_custom_tools_by_name` -> `ToolSortOutcome`)
 - `src/anthropic_api/cloak/obfuscate.rs` -- zero-width-space obfuscation of
   configured sensitive words in system and message text
-  (`obfuscate_sensitive_words`, `SensitiveWordMatcher`)
+  (`obfuscate_sensitive_words`, `SensitiveWordMatcher`), plus the list's
+  count and folded-length bounds (`validate_sensitive_words`,
+  `MAX_SENSITIVE_WORDS`, `MAX_SENSITIVE_WORD_FOLDED_CHARS`)
 
 ### openai_compat
 
@@ -1735,6 +1737,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   fallback (and its WARN) is gone, unreachable behind the validation rejects
 - `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
   rejection of a non-canonical native `region` / `bedrock_mantle.region`
+- `src/factory/validate_cloak.rs` -- `validate_cloak_sensitive_words`:
+  config-load rejection of a `[providers.X.cloak] sensitive_words` list over
+  its count or folded-length bound
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
   config-load check of `[models]` and `[providers]` names that key runtime state
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation

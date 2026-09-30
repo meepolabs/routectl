@@ -1336,7 +1336,7 @@ fn sensitive_words_obfuscates_system_and_message_text() {
     });
 
     // Act
-    obfuscate_sensitive_words(&mut body, &["secret".to_string()]);
+    obfuscate_sensitive_words(&mut body, &["secret".to_string()]).expect("words are within bounds");
 
     // Assert: a zero-width space lands after the first char of "secret".
     let zws = ZERO_WIDTH_SPACE;
@@ -1365,7 +1365,7 @@ fn sensitive_words_empty_list_is_byte_identical() {
     let without = with_words.clone();
 
     // Act: empty list must be a byte-identical no-op.
-    obfuscate_sensitive_words(&mut with_words, &[]);
+    obfuscate_sensitive_words(&mut with_words, &[]).expect("words are within bounds");
 
     // Assert
     assert_eq!(
@@ -1382,7 +1382,7 @@ fn sensitive_words_case_insensitive_longest_first() {
     let cfg_words = vec!["secret".to_string(), "secretkey".to_string()];
 
     // Act
-    obfuscate_sensitive_words(&mut body, &cfg_words);
+    obfuscate_sensitive_words(&mut body, &cfg_words).expect("words are within bounds");
 
     // Assert: the obfuscation marks after the first char of the WHOLE
     // longest match, preserving the original casing of the remaining
@@ -1415,6 +1415,42 @@ fn sensitive_words_obfuscation_carries_no_reverse() {
     );
 }
 
+#[test]
+fn an_over_bound_word_list_refuses_before_any_transform() {
+    // Arrange: a billing block the always-on strip would otherwise remove,
+    // and a word list one entry over the count bound.
+    let id = identity();
+    let req = ChatRequest::default();
+    let sentinel = "zqxsentinelword";
+    let mut body = json!({
+        "system": [
+            {"type": "text", "text": "x-anthropic-billing-header: v=1; cch=abcde;"},
+            {"type": "text", "text": "rules"},
+        ],
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"name": "bash"}]
+    });
+    let before = body.clone();
+    let cfg = CloakConfig {
+        sensitive_words: (0..=MAX_SENSITIVE_WORDS)
+            .map(|i| format!("{sentinel}{i}"))
+            .collect(),
+        ..CloakConfig::default()
+    };
+
+    // Act
+    let refusal = cloak_oauth_egress(&mut body, &req, &id, true, &cfg)
+        .expect_err("an over-bound list must refuse");
+    let err = refusal.into_error("seat");
+
+    // Assert
+    assert_eq!(body, before, "the refusal must precede every body mutation");
+    assert!(matches!(err, Error::Config(_)), "{err:?}");
+    let rendered = err.to_string();
+    assert!(rendered.contains("sensitive_words"), "{rendered}");
+    assert!(!rendered.contains(sentinel), "echoes a word: {rendered}");
+}
+
 // -- sensitive_words over non-ASCII text -------------------------------
 
 /// Obfuscate `text` as a string `system` and return the resulting string.
@@ -1422,7 +1458,7 @@ fn sensitive_words_obfuscation_carries_no_reverse() {
 /// source stays ASCII-only.
 fn obfuscated_system(text: &str) -> String {
     let mut body = json!({"system": text});
-    obfuscate_sensitive_words(&mut body, &["secret".to_string()]);
+    obfuscate_sensitive_words(&mut body, &["secret".to_string()]).expect("words are within bounds");
     body["system"]
         .as_str()
         .expect("system stays a string")
@@ -1558,7 +1594,7 @@ fn a_term_ending_mid_fold_of_one_char_is_left_untouched() {
     let before = body.clone();
 
     // Act
-    obfuscate_sensitive_words(&mut body, &["anti".to_string()]);
+    obfuscate_sensitive_words(&mut body, &["anti".to_string()]).expect("words are within bounds");
 
     // Assert
     assert_eq!(
@@ -1574,7 +1610,8 @@ fn a_term_spanning_a_whole_expanding_fold_is_obfuscated() {
     let mut body = json!({"system": "the ANT\u{130}s"});
 
     // Act
-    obfuscate_sensitive_words(&mut body, &["anti\u{307}".to_string()]);
+    obfuscate_sensitive_words(&mut body, &["anti\u{307}".to_string()])
+        .expect("words are within bounds");
 
     // Assert
     assert_eq!(
@@ -1603,7 +1640,7 @@ fn non_ascii_text_without_a_match_is_byte_identical() {
     let before = body.clone();
 
     // Act
-    obfuscate_sensitive_words(&mut body, &["secret".to_string()]);
+    obfuscate_sensitive_words(&mut body, &["secret".to_string()]).expect("words are within bounds");
 
     // Assert
     assert_eq!(
@@ -1617,7 +1654,7 @@ fn non_ascii_text_without_a_match_is_byte_identical() {
 /// Obfuscate `text` as a string `system` against one configured `word`.
 fn obfuscated_system_with(text: &str, word: &str) -> String {
     let mut body = json!({"system": text});
-    obfuscate_sensitive_words(&mut body, &[word.to_string()]);
+    obfuscate_sensitive_words(&mut body, &[word.to_string()]).expect("words are within bounds");
     body["system"]
         .as_str()
         .expect("system stays a string")
@@ -1684,7 +1721,8 @@ fn a_match_consuming_one_original_char_is_not_a_rewrite() {
     let before = body.clone();
 
     // Act
-    obfuscate_sensitive_words(&mut body, &["i\u{307}".to_string()]);
+    obfuscate_sensitive_words(&mut body, &["i\u{307}".to_string()])
+        .expect("words are within bounds");
 
     // Assert
     assert_eq!(
@@ -1721,7 +1759,7 @@ fn longest_match_is_keyed_on_folded_length_not_original_length() {
     let mut body = json!({"system": text});
 
     // Act
-    obfuscate_sensitive_words(&mut body, &words);
+    obfuscate_sensitive_words(&mut body, &words).expect("words are within bounds");
 
     // Assert: two whole-word matches, each marked after its first char.
     let out = body["system"].as_str().unwrap();
