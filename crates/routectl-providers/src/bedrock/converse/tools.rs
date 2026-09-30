@@ -331,8 +331,36 @@ fn translate_tool_choice_tallied(
     match tc {
         Value::String(s) => translate_tool_choice_string(id, s, tally),
         Value::Object(map) => translate_tool_choice_object(id, map, tally),
-        _ => None,
+        // TRANSLATION-DROP: structural -- a null tool_choice is the caller declining to set one, so an absent toolChoice carries exactly what they sent
+        Value::Null => None,
+        Value::Bool(_) | Value::Number(_) | Value::Array(_) => {
+            drop_tool_choice_of_unrepresentable_type(id, tc, tally)
+        }
     }
+}
+
+/// A caller-stated `tool_choice` whose JSON type is neither a mode string nor
+/// an object. The Converse `toolChoice` union has only object members, so a
+/// number, boolean, or array has nothing to become -- the same loss the
+/// string and object paths count, whichever JSON type produced it.
+fn drop_tool_choice_of_unrepresentable_type(
+    id: &str,
+    tc: &Value,
+    tally: &mut ToolChoiceDropTally,
+) -> Option<ConverseToolChoice> {
+    let json_type = match tc {
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        _ => "array",
+    };
+    // TRANSLATION-DROP: lane=bedrock-converse class=tool_choice_shape_unrepresentable test=converse_non_object_non_string_tool_choice_counts_once_and_null_counts_nothing
+    tally.record_shape_unrepresentable();
+    tracing::warn!(
+        provider = id,
+        json_type,
+        "tool_choice of a JSON type no Converse member carries; dropping on Converse egress"
+    );
+    None
 }
 
 fn translate_tool_choice_string(
@@ -1190,6 +1218,70 @@ mod tests {
             assert_eq!(shape_drop_count(), before_shape, "{choice} counted a drop");
         }
     }
+    /// Both directions of the split scalar arm. A `null` tool_choice is the
+    /// caller declining to set one: nothing is lost, so nothing warns or
+    /// counts. A number, boolean, or array is a caller-stated tool_choice no
+    /// Converse member carries, and counts once per request on the same class
+    /// the string and object paths use.
+    #[test]
+    #[serial_test::serial(
+        bedrock_converse_tool_choice_name_missing,
+        bedrock_converse_tool_choice_shape_unrepresentable
+    )]
+    fn converse_non_object_non_string_tool_choice_counts_once_and_null_counts_nothing() {
+        // Arrange
+        let before_null = shape_drop_count();
+        let before_null_name = name_drop_count();
+
+        // Act
+        let (null_wire, null_events) = emitted_with_tool_choice(Value::Null);
+
+        // Assert -- null records nothing and still ships the tools.
+        assert_eq!(shape_drop_count(), before_null, "null counted a drop");
+        assert_eq!(name_drop_count(), before_null_name, "null counted a drop");
+        assert!(
+            !null_events.iter().any(|e| e.level == tracing::Level::WARN),
+            "null loses nothing and must not warn; got: {null_events:?}"
+        );
+        assert!(
+            null_wire.to_string().contains("get_weather")
+                && !null_wire.to_string().contains("toolChoice"),
+            "null ships the tools with no toolChoice; emitted: {null_wire}"
+        );
+
+        for (choice, json_type) in [
+            (json!(7), "number"),
+            (json!(true), "bool"),
+            (json!(["auto"]), "array"),
+        ] {
+            // Arrange
+            let before = shape_drop_count();
+
+            // Act
+            let (wire, events) = emitted_with_tool_choice(choice.clone());
+            let after = shape_drop_count();
+
+            // Assert
+            let warn = events
+                .iter()
+                .find(|e| {
+                    e.level == tracing::Level::WARN
+                        && e.message.contains("tool_choice of a JSON type")
+                })
+                .unwrap_or_else(|| panic!("{choice} must warn; got: {events:?}"));
+            assert_eq!(warn.field("json_type"), Some(json_type));
+            assert!(
+                !wire.to_string().contains("toolChoice"),
+                "{choice} must not reach the upstream; emitted: {wire}"
+            );
+            assert!(
+                wire.to_string().contains("get_weather"),
+                "the request's tools must still ship; emitted: {wire}"
+            );
+            assert_eq!(after - before, 1, "{choice} must count exactly once");
+        }
+    }
+
     #[test]
     #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
     fn an_unrepresentable_tool_choice_counts_even_when_no_tool_def_survives() {

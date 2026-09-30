@@ -420,6 +420,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ),
     (
         "bedrock/converse/tools.rs",
+        "drop_tool_choice_of_unrepresentable_type",
+        1,
+    ),
+    (
+        "bedrock/converse/tools.rs",
         "passthrough_converse_tool_choice",
         1,
     ),
