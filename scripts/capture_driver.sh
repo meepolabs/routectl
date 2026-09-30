@@ -417,6 +417,25 @@ ingress_kind_is_known "$EXPECTED_INGRESS" ||
 
 [ $# -ge 1 ] || die "no driver command given (pass it after \`--\`)" 2
 
+# A RELATIVE DRIVER PATH resolves against the directory this script was
+# INVOKED from, not the run workspace. The driver is exec'd with cwd set
+# to the throwaway repo, and a slashed relative name is not PATH-searched,
+# so without this the documented `-- scripts/drivers/<driver>.sh` form
+# names a file that does not exist there and the run dies as a driver
+# failure before any client starts. A bare name (no slash) is left alone:
+# that one IS a PATH lookup, and anchoring it would break `-- true`-style
+# commands.
+case "$1" in
+  /*|'') ;;
+  */*)
+    driver_cmd="$(abspath_lexical "$1")"
+    shift
+    set -- "$driver_cmd" "$@"
+    ;;
+esac
+[ "${1#/}" = "$1" ] || [ -x "$1" ] ||
+  die "driver command '$1' is not an executable file" 2
+
 # An inverted window makes `RANDOM % (MAX - MIN + 1)` a modulo by a
 # non-positive number, which yields a candidate OUTSIDE the window -- so
 # the caller gets a port it did not ask for instead of an error.

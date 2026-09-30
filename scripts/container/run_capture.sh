@@ -22,10 +22,11 @@
 #     --lane anthropic-api --case plain-turn-01 \
 #     -- /workspace/scripts/drivers/claude-code-print.sh
 #
-#   The driver path must be ABSOLUTE (the repo mounts at /workspace in
-#   the cell). The runner cds into the run's throwaway repo before it
-#   execs the driver, and a path containing a slash is not PATH-searched,
-#   so a repo-relative path dies with exit 4 before the client runs.
+#   The repo mounts at /workspace in the cell, which is also the
+#   container's working directory. The runner anchors a relative driver
+#   path to the directory it was invoked from before it cds into the run's
+#   throwaway repo, so the absolute form and `scripts/drivers/...` name the
+#   same file.
 #
 #   --scratch   Host directory the fixture lands in. REQUIRED, and
 #               deliberately so: a fixture carries RAW headers, and a

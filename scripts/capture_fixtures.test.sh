@@ -316,6 +316,15 @@ TRACE
 #   tools-retry   three turns like `tools` but a DIFFERENT tool call, so it
 #                 satisfies the claim while carrying no more history than
 #                 the candidate before it -- a retry, not a later turn
+#   turn          ONE user turn and no tools: a plain first turn, which
+#                 satisfies the `baseline` claim
+#   turn-other    the same one-turn shape with DIFFERENT user text: a second,
+#                 genuine interaction of exactly `turn`'s length
+#   title         the client's session-title side-request as the real
+#                 client sends it: the same one user turn as `turn` plus an
+#                 `output_config` forcing the closed `{title: string}` schema
+#   title-open    `title` with one extra schema property -- a near miss of
+#                 the closed shape, which must NOT be set aside
 #
 # `$5` and `$6` override the model and the traced provider kind, so a
 # candidate can satisfy the claim while differing from the selected one in
@@ -334,6 +343,7 @@ candidate_trace() {
     local t_user='{"role":"user","content":"list the files"}'
     local t_call='{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]}'
     local t_result='{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}'
+    local t_turn='{"role":"user","content":[{"type":"text","text":"Reply with the single word acknowledged."}]}'
     case "$shape" in
         tools)
             body="{\"model\":\"$model\",\"messages\":[$t_user,$t_call,$t_result]}"
@@ -342,6 +352,18 @@ candidate_trace() {
         tools-long)
             body="{\"model\":\"$model\",\"messages\":[$t_user,$t_call,$t_result,{\"role\":\"assistant\",\"content\":\"notes.txt is the only file\"},{\"role\":\"user\",\"content\":\"now read it\"}]}"
             tools_len=16
+            ;;
+        turn)
+            body="{\"model\":\"$model\",\"messages\":[$t_turn]}"
+            ;;
+        turn-other)
+            body="{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Reply with the single word ready.\"}]}]}"
+            ;;
+        title)
+            body="{\"model\":\"$model\",\"output_config\":{\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"],\"type\":\"object\"},\"type\":\"json_schema\"}},\"messages\":[$t_turn]}"
+            ;;
+        title-open)
+            body="{\"model\":\"$model\",\"output_config\":{\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}},\"required\":[\"title\"],\"type\":\"object\"},\"type\":\"json_schema\"}},\"messages\":[$t_turn]}"
             ;;
         tools-retry)
             body="{\"model\":\"$model\",\"messages\":[$t_user,{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_02\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_02\",\"content\":\"notes.txt\"}]}]}"
@@ -2665,6 +2687,82 @@ check "a strict continuation of the selected candidate promotes at exit 0" "0" "
 check "and the FIRST candidate's body is what landed" "3" \
     "$(landed_turn_count "$(captured_of "$work")/anthropic-api/noncont-accept-01")"
 rm -rf "$work"
+
+# CONTROL 4e: the client's SESSION-TITLE side-request is set aside by its
+# closed structured-output shape, and nothing else is.
+#
+# The real client sends the title request concurrently with the main turn,
+# carrying the same single user turn, so both satisfy `baseline` at equal
+# length -- exactly the shape the continuation check refuses as two
+# interactions. Both orders are driven because the two race: a positional
+# rule would pass one leg and fail the other.
+for leg in "title-first:title:turn:$SEL_ID_B" "title-second:turn:title:$SEL_ID_A"; do
+    IFS=: read -r name first second want_id <<<"$leg"
+    set_pins "side-$name-01" abc123 base-url baseline
+    work="$(make_repo)"
+    rc=0
+    rig_run_split "$work" "$(selector_trace "$first" "$second")" --driver-mode || rc=$?
+    clear_pins
+    dir="$(captured_of "$work")/anthropic-api/side-$name-01"
+    check "a title side-request beside the main turn ($name) promotes at exit 0" "0" "$rc"
+    check "the MAIN turn landed, not the title request ($name)" "$want_id" \
+        "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
+    check "the landed body carries no title output schema ($name)" "no" \
+        "$(grep -qF '"output_config"' "$dir/ingress_request.json" 2>/dev/null && echo yes || echo no)"
+    check_log "the selection line counts the title request as a side-request ($name)" \
+        "candidates_redundant=0 candidates_side=1" "$work/rig.out"
+    rm -rf "$work"
+done
+unset name first second want_id
+
+# The set-aside request is never the selection: a trace holding ONLY the
+# title request is a zero landing (retryable), not a fixture of it.
+set_pins side-only-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" title)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a trace holding only the title side-request lands nothing, exit 3" "3" "$rc"
+check_log "the zero landing names the side-request it set aside" \
+    "other than 1 client side-request" "$work/rig.err"
+rm -rf "$work"
+
+# MAIN-REQUEST ACCEPT CONTROL: a lone plain turn is NOT set aside. Without it
+# the positive legs above hold for a classifier that sets aside every
+# request, with the main turn landing only because the selector saw nothing
+# else to refuse.
+set_pins side-main-01 abc123 base-url baseline
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" turn)" \
+    --driver-mode || rc=$?
+clear_pins
+check "a lone main turn promotes at exit 0" "0" "$rc"
+check_log "the lone main turn is not counted as a side-request" \
+    "candidates_side=0" "$work/rig.out"
+rm -rf "$work"
+
+# TWO GENUINE EQUAL-LENGTH INTERACTIONS still fail closed. Same one-turn
+# length, same model and lane, neither carrying the title schema: the
+# classifier must not have become a general "equal length is fine" rule.
+# And a NEAR MISS of the title schema (one extra property) is not the closed
+# shape, so it stays a candidate and is refused the same way.
+for leg in "genuine:turn-other" "near-miss:title-open"; do
+    IFS=: read -r name second <<<"$leg"
+    set_pins "side-$name-01" abc123 base-url baseline
+    work="$(make_repo)"
+    rc=0
+    rig_run_split "$work" "$(selector_trace turn "$second")" --driver-mode || rc=$?
+    clear_pins
+    check "two equal-length interactions ($name) still REFUSE with exit 1" "1" "$rc"
+    check_log "the $name refusal is the continuation refusal" \
+        "A continuation extends the history" "$work/rig.err"
+    check "the $name refusal lands nothing" "no" \
+        "$([ -d "$(captured_of "$work")/anthropic-api/side-$name-01" ] && echo yes || echo no)"
+    rm -rf "$work"
+done
+unset name second
 
 # CONTROL 4d: scrub residue on a REDUNDANT candidate still ABORTS fatally
 # and nothing is promoted. This is the keep-scanning safety property: a

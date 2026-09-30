@@ -1210,6 +1210,47 @@ else
 fi
 rm -rf "$work"
 
+# --- Case 8b: a repo-relative driver path resolves from the invoking dir
+# The documented form is `-- scripts/drivers/<driver>.sh` from the repo
+# root, but the driver is exec'd with cwd set to the run workspace, where
+# that relative path names nothing. The probe is placed at a relative path
+# that exists ONLY under the invoking directory, so a runner that leaves the
+# path unanchored fails the driver step (exit 4) instead of running it.
+work="$(make_work)"
+cp "$work/bin/probe-driver" "$work/repo/scripts/drivers/probe-driver.sh"
+port_r="$(free_port)"
+relative_run() {
+    local driver_path="$1"
+    (
+        cd "$work/repo" || exit 2
+        ROUTECTL_BIN="$work/bin/routectl-stub" \
+        STUB_PID_FILE="$work/stub.pid" \
+        STUB_PORT_FILE="$work/stub.port" \
+        STUB_TRACE_FILE="$work/canned-trace.log" \
+        STUB_LISTENER="$work/bin/listener.py" \
+        PROBE_OUT="$work/probe.txt" \
+        ROUTECTL_DRIVER_PORT_MIN="$port_r" \
+        ROUTECTL_DRIVER_PORT_MAX="$port_r" \
+            bash scripts/capture_driver.sh --lane anthropic-api \
+            --work "$work/runs" --case driver-selftest-08 \
+            --expected-ingress anthropic -- "$driver_path"
+    ) >"$work/runner.log" 2>&1
+}
+rc=0
+relative_run scripts/drivers/probe-driver.sh || rc=$?
+check "a repo-relative driver path runs from the run workspace" "0" "$rc"
+check "the relative driver actually ran" "yes" \
+    "$([ -f "$work/probe.txt" ] && echo yes || echo no)"
+check "the relative driver still runs with cwd in the run workspace" "$work/runs" \
+    "$(dirname "$(dirname "$(probe_get "$work" cwd)")")"
+rm -f "$work/probe.txt"
+rc=0
+relative_run scripts/drivers/no-such-driver.sh || rc=$?
+check "a relative driver path naming no file is a usage error" "2" "$rc"
+check_log "the refusal names the unresolved driver" "is not an executable file" \
+    "$work/runner.log"
+rm -rf "$work"
+
 # --- Case 9: the rig's verdict is MAPPED, not collapsed ---------------
 # A trace holding no completed request and a trace holding a fixture the
 # rig refuses are two different verdicts (retryable vs a defect), and a

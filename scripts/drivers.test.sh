@@ -1922,10 +1922,12 @@ direct_run() {
     local work="$1" driver="$2" base="$3" rc=0
     local run="$work/direct-run" cwd="$work/direct-work"
     rm -rf "$run" "$cwd"
-    mkdir -p "$run" "$cwd"
+    # HOME sits under the run workspace, as the runner places it: the
+    # interactive driver refuses to seed client state into any other HOME.
+    mkdir -p "$run/client-home" "$cwd"
     (
         cd "$work/repo" || exit 2
-        HOME="$work/direct-home" \
+        HOME="$run/client-home" \
         CLIENT_OUT="$work/client.txt" \
         ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
@@ -2105,6 +2107,60 @@ else
     fail "claude-code: the base-url run landed no fixture"
 fi
 kept="$(kept_run "$work")"
+
+# THE CLIENT-HOME SEED. A fresh home stops on onboarding, the placeholder
+# key approval, and the folder-trust screen; the driver pre-answers exactly
+# those three and nothing else. The default placeholder is 21 characters,
+# so its approval entry is its trailing 20 -- the form the client stores. Asserted on the file the client would read,
+# with the key and workspace read back from what the run actually used, so
+# a seed for the wrong key suffix or the wrong directory is a red here.
+seed="$kept/client-home/.claude.json"
+if [ -n "$kept" ] && [ -f "$seed" ]; then
+    seed_verdict="$(python3 - "$seed" "$kept/work" <<'PY'
+import json
+import os
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+workspace = os.path.realpath(sys.argv[2])
+problems = []
+if sorted(state) != ["customApiKeyResponses", "hasCompletedOnboarding", "projects"]:
+    problems.append("keys=" + ",".join(sorted(state)))
+if state.get("hasCompletedOnboarding") is not True:
+    problems.append("onboarding")
+if state.get("customApiKeyResponses") != {"approved": ["outectl-driver-local"], "rejected": []}:
+    problems.append("key-approval")
+if state.get("projects") != {workspace: {"hasTrustDialogAccepted": True}}:
+    problems.append("trust")
+print(" ".join(problems) or "ok")
+PY
+)"
+    check "claude-code: the client home is seeded with only onboarding, key approval, and trust" \
+        "ok" "$seed_verdict"
+    if grep -qE 'oauth|[Aa]ccount|sk-ant-' "$seed"; then
+        fail "claude-code: the client-home seed carries account or credential state"
+    else
+        echo "PASS: claude-code: the client-home seed carries no account or credential state"
+    fi
+else
+    fail "claude-code: the base-url run left no seeded client home at $seed"
+fi
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# A LONG local key is approved by its trailing 20 characters, the form the
+# client stores; the full value would not match and the prompt would return.
+work="$(make_work)"
+canned_trace >"$work/canned-trace.log"
+rc=0
+ROUTECTL_DRIVER_CLIENT_API_KEY="placeholder-prefix-0123456789abcdefghij" \
+    driver_run "$work" claude-code.sh plain-turn-01 || rc=$?
+check "claude-code: a run with a long local key exits 0" "0" "$rc"
+kept="$(kept_run "$work")"
+check "claude-code: a long local key is approved by its trailing 20 characters" \
+    "0123456789abcdefghij" \
+    "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["customApiKeyResponses"]["approved"]))' \
+        "$kept/client-home/.claude.json" 2>/dev/null)"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
 

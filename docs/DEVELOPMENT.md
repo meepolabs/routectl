@@ -1070,12 +1070,12 @@ bash scripts/container/run_capture.sh --scratch /var/tmp/routectl-cell -- \
   -- /workspace/scripts/drivers/claude-code-print.sh
 ```
 
-The driver path is ABSOLUTE here and repo-relative in the host-path example
-above, because the runner `cd`s into the run's throwaway repo before it
-`exec`s the driver: on the host that repo sits beside the checkout the
-relative path still resolves against, while in the cell the repo mounts at
-`/workspace` and a slashed relative path is not PATH-searched, so it dies
-with the runner's driver-failure exit before the client ever runs.
+The runner `cd`s into the run's throwaway repo before it `exec`s the
+driver, so it anchors a slashed relative driver path to the directory it
+was INVOKED from first: `scripts/drivers/...` works from the repo root on
+the host, and from the cell's `/workspace` working directory alike. The
+absolute form above is equivalent; a bare name with no slash is still a
+PATH lookup.
 
 Two `--` separators, and that is deliberate: the wrapper's own flags stop at
 the first one, everything after it is the runner's argv verbatim, and the

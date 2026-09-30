@@ -458,6 +458,16 @@ Fields:
   interactions under one case id is REFUSED: that is what keeps "one case id
   pins one interaction" enforced by something.
 
+  ONE CLIENT SIDE-REQUEST IS SET ASIDE BY SHAPE before the claim is read:
+  the interactive client's session-title request, whose `output_config` is
+  exactly the closed single-field `{title: string}` JSON schema. It carries
+  the same user text as the turn it names and races it, so without the
+  classification it is indistinguishable from a second equal-length
+  interaction and every plain-turn run refuses. It is still scrubbed and
+  `--check`ed, is never selected, and is counted as `candidates_side`. A
+  near-miss of that schema (an extra property, an open object) stays a
+  candidate, and two genuine equal-length interactions still refuse.
+
   PER-REQUEST FACTS MAY SKIP; PER-RUN FACTS ABORT. Two per-request facts
   among the landing gates. The wire pattern is one. LANE RESOLUTION is the
   other: the lane comes from THIS request's traced `provider_kind`, so a

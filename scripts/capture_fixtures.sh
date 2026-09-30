@@ -148,6 +148,14 @@
 #     different interactions under one case id is refused here -- that is
 #     what keeps "one case id pins one interaction" enforced by something.
 #
+#     ONE CLIENT SIDE-REQUEST IS SET ASIDE BY SHAPE before any of that: the
+#     session-title request, whose `output_config` is exactly the closed
+#     single-field `title` JSON schema. It carries the same user text as the
+#     turn it names and races it, so it is otherwise indistinguishable from
+#     a second equal-length interaction. It is still scrubbed and
+#     `--check`ed, is never selected, and is counted as `candidates_side`.
+#     Any near-miss of that schema stays a candidate.
+#
 #     The recorded connection mode is still enforced against the captured
 #     ingress headers: a `front-proxy` fixture whose headers do not carry
 #     the MITM seam header name never transited the seam whatever its
@@ -277,6 +285,20 @@ REDUNDANT_MATCH_RC=91
 # rig's own warning above it.
 LANE_UNRESOLVED_RC=92
 
+# write_fixture's return code for "this candidate is a client SIDE-REQUEST,
+# not a turn of the interaction the case drives". Exactly one shape
+# qualifies: the session-title request, identified by its closed
+# structured-output contract (see is_title_side_request). The client sends
+# it concurrently with the main request and it carries the same user text,
+# so it satisfies a `baseline` claim and has the same turn count -- without
+# this classification the continuation check correctly reads it as a second
+# interaction and refuses every run.
+#
+# Classified by SHAPE, never by position or by content: a positional rule
+# ("the first request") breaks when the two race the other way, and a
+# prompt-text rule reads client wording that changes every release.
+SIDE_REQUEST_RC=93
+
 # Selector accounting, driver mode only. Every completed request in the
 # trace is a CANDIDATE for the run's single case id; the recorded wire
 # pattern decides which one the case means, and the FIRST satisfying
@@ -290,6 +312,7 @@ LANE_UNRESOLVED_RC=92
 CANDIDATES_EXAMINED=0
 CANDIDATES_SKIPPED=0
 CANDIDATES_REDUNDANT=0
+CANDIDATES_SIDE=0
 SELECTED_REQUEST_ID=""
 
 # The staged (not yet promoted) directory of the SELECTED candidate, its
@@ -373,7 +396,7 @@ discard_driver_staging() {
 # A rig log is a CI artifact, and a body is unscrubbed at the point a
 # refusal prints.
 emit_selection_line() {
-  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED candidates_redundant=$CANDIDATES_REDUNDANT ordering_basis=first-ingress-body"
+  echo "capture_fixtures: selection case=$ROUTECTL_FIXTURE_CASE_ID selected_request_id=${SELECTED_REQUEST_ID:-none} candidates_examined=$CANDIDATES_EXAMINED candidates_skipped=$CANDIDATES_SKIPPED candidates_redundant=$CANDIDATES_REDUNDANT candidates_side=$CANDIDATES_SIDE ordering_basis=first-ingress-body"
 }
 
 # Print the header block as usage. Delimited by a sentinel rather than a
@@ -689,6 +712,44 @@ for key in keys:
         print(len(turns))
         sys.exit(0)
 print(0)
+PY
+}
+
+# Is the staged ingress body the client's session-title side-request? 0
+# yes, 1 no (including an absent or unparseable body -- an unreadable body
+# is never exempted from the selector).
+#
+# The test is EXACT equality of the whole `output_config` against the one
+# closed structured-output contract the title request declares: a JSON
+# object with exactly one required string property `title` and no others.
+# Any extra property, a relaxed `additionalProperties`, a different format
+# type, or an extra `output_config` key is NOT this shape and stays a
+# candidate -- a near-miss is safer refused than set aside.
+is_title_side_request() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+TITLE_OUTPUT_CONFIG = {
+    "format": {
+        "type": "json_schema",
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    }
+}
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        body = json.load(handle)
+except (OSError, UnicodeDecodeError, ValueError):
+    sys.exit(1)
+if not isinstance(body, dict):
+    sys.exit(1)
+sys.exit(0 if body.get("output_config") == TITLE_OUTPUT_CONFIG else 1)
 PY
 }
 
@@ -1337,6 +1398,18 @@ META
   # returns 1, which the loop propagates as a rig refusal -- a defect,
   # never retryable.
   if [ "$DRIVER_MODE" = 1 ]; then
+    # A client side-request is set aside BEFORE the claim is read: the title
+    # request satisfies a baseline claim as well as the turn it names, so
+    # letting it reach the selector makes it either the selection or a
+    # non-continuation refusal, and it is neither. It has already passed
+    # the scrub `--check` above, so setting it aside skips no safety gate.
+    if is_title_side_request "$tmp/$INGRESS_BODY_FILE"; then
+      echo "capture_fixtures: $id is the client's session-title side-request" >&2
+      echo "(closed title output schema); not a candidate for case '$ROUTECTL_FIXTURE_CASE_ID'." >&2
+      rm -rf "$tmp"
+      return "$SIDE_REQUEST_RC"
+    fi
+
     # The claimed pattern comes from the recorded pin, never from argv: a
     # flag would let a caller declare a pattern the case does not claim,
     # which is the unverified claim arriving one layer earlier.
@@ -1544,6 +1617,13 @@ while IFS=$'\t' read -r ts id pkind ikind; do
     CANDIDATES_SKIPPED=$((CANDIDATES_SKIPPED + 1))
     continue
   fi
+  # A client SIDE-REQUEST: not a turn of the interaction at all, so it is
+  # neither a skip (it was never measured against the claim) nor redundant
+  # (it witnesses nothing). Counted on its own field.
+  if [ "$DRIVER_MODE" = 1 ] && [ "$write_rc" = "$SIDE_REQUEST_RC" ]; then
+    CANDIDATES_SIDE=$((CANDIDATES_SIDE + 1))
+    continue
+  fi
   # A LATER WITNESS of the shape the selected candidate already proved,
   # verified to be a strict continuation of it. Counted on its own line
   # field rather than as a skip: a reader seeing two skips would conclude
@@ -1671,6 +1751,10 @@ if [ "$DRIVER_MODE" = 1 ] && [ "$captured" -eq 0 ]; then
   if [ "$CANDIDATES_SKIPPED" -gt 0 ]; then
     echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' examined $CANDIDATES_EXAMINED candidate request(s) and none exhibited the wire pattern it claims ('$ROUTECTL_FIXTURE_WIRE_PATTERN'); refusing the run" >&2
     exit 1
+  fi
+  if [ "$CANDIDATES_SIDE" -gt 0 ]; then
+    echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' landed no fixture; the trace at $LOG holds no completed request other than $CANDIDATES_SIDE client side-request(s)" >&2
+    exit 3
   fi
   echo "capture_fixtures: case '$ROUTECTL_FIXTURE_CASE_ID' landed no fixture; the trace at $LOG holds no completed request" >&2
   exit 3

@@ -66,6 +66,47 @@ export DISABLE_TELEMETRY=1
 export DISABLE_ERROR_REPORTING=1
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
+# A fresh client home opens on blocking first-run screens -- theme and
+# onboarding, "use this API key?", and "do you trust this folder?" -- and
+# keystrokes typed into them never reach the prompt, so the run records no
+# dialogue. Seed exactly the three answers those screens persist, in the
+# shape the client itself writes to `$HOME/.claude.json` after answering
+# them by hand: onboarding done, the LOCAL placeholder key approved, and the
+# run workspace trusted. Nothing else: no account, no OAuth state, no
+# settings, and never a real credential.
+#
+# The key is recorded by its trailing 20 characters, which is the form the
+# client stores an approval under; a full-value entry is not matched and
+# the prompt reappears.
+CLIENT_KEY_APPROVAL_SUFFIX_LEN=20
+
+seed_client_home() {
+  case "$HOME" in
+    "$ROUTECTL_DRIVER_RUN"/*) ;;
+    *) driver_die "HOME '$HOME' is not inside the run workspace; refusing to write client state there" 2 ;;
+  esac
+  local workspace key
+  workspace="$(cd "$ROUTECTL_DRIVER_WORK" && pwd -P)"
+  key="$(driver_local_api_key)"
+  if [ "${#key}" -gt "$CLIENT_KEY_APPROVAL_SUFFIX_LEN" ]; then
+    key="${key: -$CLIENT_KEY_APPROVAL_SUFFIX_LEN}"
+  fi
+  python3 - "$HOME/.claude.json" "$workspace" "$key" <<'PY'
+import json
+import sys
+
+path, workspace, key_suffix = sys.argv[1:]
+state = {
+    "hasCompletedOnboarding": True,
+    "customApiKeyResponses": {"approved": [key_suffix], "rejected": []},
+    "projects": {workspace: {"hasTrustDialogAccepted": True}},
+}
+with open(path, "x", encoding="utf-8") as handle:
+    json.dump(state, handle)
+PY
+}
+seed_client_home
+
 argv=("$CLAUDE_BIN" --model "$DRIVER_REQUEST_MODEL")
 
 # EVERY false knob is FORCED off, never left to a default. The client's own
