@@ -125,6 +125,62 @@ fn user_file_with_no_carrier_fails_the_request() {
 }
 
 #[test]
+fn user_file_url_only_forwards_on_the_api_key_and_chatgpt_oauth_lanes() {
+    // Arrange: a url with a non-ASCII path segment, so the carrier is copied
+    // rather than re-encoded.
+    let url = "https://example.test/r\u{e9}sum\u{e9}.pdf";
+    let req = req_with(vec![user_file(json!({"file_url": url}))]);
+
+    for lane in [cfg(), cfg_api_key()] {
+        // Act
+        let v = translate_to_json(&lane, &req);
+
+        // Assert
+        assert_eq!(
+            v["input"][0]["content"],
+            json!([{"type": "input_file", "file_url": url}])
+        );
+    }
+}
+
+#[test]
+fn user_file_url_only_fails_on_the_mantle_lane() {
+    // Arrange
+    let req = req_with(vec![user_file(
+        json!({"file_url": "https://example.test/a.pdf"}),
+    )]);
+
+    // Act
+    let msg = translate_err(&cfg_bedrock_mantle(), &req);
+
+    // Assert: the error names the lane's accepted carriers, never the url.
+    assert!(
+        msg.contains("no carrier this lane accepts"),
+        "message was: {msg}"
+    );
+    assert!(msg.contains("bedrock-mantle"), "message was: {msg}");
+    assert!(!msg.contains("example.test"), "echoes the url: {msg}");
+}
+
+#[test]
+fn user_file_on_the_mantle_lane_keeps_its_bytes_and_leaves_the_url_off() {
+    // Arrange
+    let req = req_with(vec![user_file(json!({
+        "file_data": "data:application/pdf;base64,JVBER",
+        "file_url": "https://example.test/a.pdf"
+    }))]);
+
+    // Act
+    let v = translate_to_json(&cfg_bedrock_mantle(), &req);
+
+    // Assert
+    assert_eq!(
+        v["input"][0]["content"],
+        json!([{"type": "input_file", "file_data": "data:application/pdf;base64,JVBER"}])
+    );
+}
+
+#[test]
 fn user_document_anthropic_shape_still_drops() {
     // Arrange: Anthropic-shape Document part (out of scope for the
     // codex target; remains dropped at parity with the reference).

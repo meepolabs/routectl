@@ -213,7 +213,7 @@ fn build_input_tallied(
             // again as an input item would duplicate it.
             // TRANSLATION-DROP: structural -- system-role text is lifted into `instructions` by the system translation, so an input item would duplicate it
             Role::System => {}
-            Role::User => translate_user_message(id, msg, &mut out, tally)?,
+            Role::User => translate_user_message(id, auth_kind, msg, &mut out, tally)?,
             Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out, tally)?,
             Role::Tool => translate_tool_message(id, auth_kind, msg, &mut out, tally)?,
             // This function serves callers whose ingress dialect is
@@ -229,7 +229,9 @@ fn build_input_tallied(
             // the tag rides to the wire verbatim and the turn's content
             // goes through the same tool-result lift and content build a
             // `Role::User` turn does.
-            Role::Other(tag) => translate_other_message(id, tag, msg, &mut out, tally)?,
+            Role::Other(tag) => {
+                translate_other_message(id, auth_kind, tag, msg, &mut out, tally)?;
+            }
         }
     }
     Ok(out)
@@ -241,6 +243,7 @@ fn build_input_tallied(
 
 fn translate_user_message(
     id: &str,
+    auth_kind: AuthKind,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -254,7 +257,7 @@ fn translate_user_message(
     // function call <id>".
     extract_tool_results(id, &msg.content, out)?;
 
-    let content = build_user_content(id, &msg.content, tally)?;
+    let content = build_user_content(id, auth_kind, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -276,6 +279,7 @@ fn translate_user_message(
 /// since Responses input items share one shape regardless of role tag.
 fn translate_other_message(
     id: &str,
+    auth_kind: AuthKind,
     tag: &str,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
@@ -288,7 +292,7 @@ fn translate_other_message(
     );
     extract_tool_results(id, &msg.content, out)?;
 
-    let content = build_user_content(id, &msg.content, tally)?;
+    let content = build_user_content(id, auth_kind, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -819,6 +823,7 @@ fn translate_tool_message(
 
 fn build_user_content(
     id: &str,
+    auth_kind: AuthKind,
     content: &MessageContent,
     tally: &mut ResponsesDropTally,
 ) -> Result<Vec<ResponsesContentItem>> {
@@ -872,7 +877,7 @@ fn build_user_content(
                         // `extract_tool_results`; skip silently here.
                     }
                     ContentPart::Known(KnownContentPart::File { file, .. }) => {
-                        out.push(translate_file_part(id, file)?);
+                        out.push(translate_file_part(id, auth_kind, file)?);
                     }
                     ContentPart::Known(other) => {
                         tracing::warn!(
@@ -1134,15 +1139,36 @@ fn file_carrier(id: &str, fields: Option<&serde_json::Map<String, Value>>) -> Re
     Ok(carrier)
 }
 
+/// Whether this lane forwards a user-turn file's `file_url` carrier.
+// Bedrock Mantle has no evidence that it fetches an `input_file` by url.
+const fn forwards_user_file_urls(auth_kind: AuthKind) -> bool {
+    !matches!(auth_kind, AuthKind::BedrockMantle)
+}
+
 /// Translate an OpenAI-shape `File` part's nested `file` object into a
-/// `ResponsesContentItem::InputFile`.
-fn translate_file_part(id: &str, file: &Value) -> Result<ResponsesContentItem> {
+/// `ResponsesContentItem::InputFile`. On a lane that does not forward
+/// `file_url`, the url is left off the wire and a part carrying only a url
+/// fails the request, since it names no bytes that lane can act on.
+fn translate_file_part(
+    id: &str,
+    auth_kind: AuthKind,
+    file: &Value,
+) -> Result<ResponsesContentItem> {
     let FileCarrier {
         file_data,
         file_id,
         file_url,
         filename,
     } = file_carrier(id, file.as_object())?;
+    let file_url = file_url.filter(|_| forwards_user_file_urls(auth_kind));
+    if file_data.is_none() && file_id.is_none() && file_url.is_none() {
+        return Err(Error::normalize_request(
+            id,
+            "file content part on a user message has no carrier this lane accepts: \
+             file_data and file_id are both absent or empty, and file_url is not \
+             forwarded on bedrock-mantle",
+        ));
+    }
     Ok(ResponsesContentItem::InputFile {
         file_data,
         file_id,
