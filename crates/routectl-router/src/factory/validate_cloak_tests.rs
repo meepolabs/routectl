@@ -63,18 +63,20 @@ fn one_entry_over_the_count_bound_is_refused_by_the_suite() {
 }
 
 #[test]
-fn an_entry_over_the_folded_length_bound_is_refused_with_its_index() {
+fn an_entry_over_the_folded_length_bound_is_refused_naming_only_the_bound() {
     let mut words = vec!["API".to_string(), "proxy".to_string()];
     words.push("a".repeat(MAX_SENSITIVE_WORD_FOLDED_CHARS + 1));
     let cfg = config_with_words(&words);
 
     let errors = suite_errors(&cfg);
 
-    let cloak: Vec<_> = errors
-        .iter()
-        .filter(|e| e.contains("sensitive_words[2]"))
-        .collect();
+    let expected = format!(
+        "provider `lane`: cloak each sensitive word must fold to at most \
+         {MAX_SENSITIVE_WORD_FOLDED_CHARS} characters"
+    );
+    let cloak: Vec<_> = errors.iter().filter(|e| e.contains("sensitive")).collect();
     assert_eq!(cloak.len(), 1, "{errors:?}");
+    assert!(cloak[0].contains(&expected), "{errors:?}");
 }
 
 #[test]
@@ -101,7 +103,7 @@ fn the_refusal_never_echoes_a_configured_word() {
             .to_string();
         let suite = suite_errors(&cfg).join("\n");
 
-        assert!(msg.contains("sensitive_words"), "{msg}");
+        assert!(msg.contains("sensitive"), "{msg}");
         assert!(!msg.contains(SENTINEL), "echoes a word: {msg}");
         assert!(!suite.contains(SENTINEL), "echoes a word: {suite}");
     }

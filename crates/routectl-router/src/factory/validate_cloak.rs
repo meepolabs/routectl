@@ -10,8 +10,8 @@ use routectl_providers::anthropic_api::validate_sensitive_words;
 /// Reject any provider whose `cloak.sensitive_words` list is outside its
 /// count or folded-length bound, reporting every offending provider. Runs on
 /// every config-validation path via [`super::collect_config_validation`].
-/// The message names the provider, the bound, and the entry index; never
-/// the configured word, which is operator content.
+/// The message names the provider and the bound only; never the configured
+/// word, which is operator content.
 pub(super) fn validate_cloak_sensitive_words(config: &Config) -> Result<()> {
     let refusals: Vec<String> = config
         .providers

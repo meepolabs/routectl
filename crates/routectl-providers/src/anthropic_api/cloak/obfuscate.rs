@@ -74,7 +74,8 @@ pub const MAX_SENSITIVE_WORDS: usize = 32;
 pub const MAX_SENSITIVE_WORD_FOLDED_CHARS: usize = 32;
 
 /// A `sensitive_words` list outside the bounds. Carries only counts and an
-/// entry index -- never the configured word, which is operator content.
+/// entry index -- never the configured word, which is operator content -- and
+/// its `Display` names only the bound that was exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensitiveWordsBoundError {
     /// More than [`MAX_SENSITIVE_WORDS`] entries.
@@ -94,17 +95,13 @@ pub enum SensitiveWordsBoundError {
 impl std::fmt::Display for SensitiveWordsBoundError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooManyEntries { count } => write!(
+            Self::TooManyEntries { .. } => {
+                write!(f, "sensitive_words: at most {MAX_SENSITIVE_WORDS} entries")
+            }
+            Self::EntryTooLong { .. } => write!(
                 f,
-                "sensitive_words has {count} entries; at most {MAX_SENSITIVE_WORDS} are allowed"
-            ),
-            Self::EntryTooLong {
-                index,
-                folded_chars,
-            } => write!(
-                f,
-                "sensitive_words[{index}] is {folded_chars} chars after case folding; at most \
-                 {MAX_SENSITIVE_WORD_FOLDED_CHARS} are allowed"
+                "each sensitive word must fold to at most {MAX_SENSITIVE_WORD_FOLDED_CHARS} \
+                 characters"
             ),
         }
     }
@@ -566,10 +563,18 @@ mod tests {
             .map(|words| validate_sensitive_words(words).unwrap_err().to_string())
             .collect();
 
-        // Assert
-        assert!(rendered[0].contains(&MAX_SENSITIVE_WORD_FOLDED_CHARS.to_string()));
-        assert!(rendered[0].contains("sensitive_words[0]"));
-        assert!(rendered[1].contains(&MAX_SENSITIVE_WORDS.to_string()));
+        // Assert: the exact messages, so a count, index, or length creeping
+        // back in is red.
+        assert_eq!(
+            rendered,
+            [
+                format!(
+                    "each sensitive word must fold to at most {MAX_SENSITIVE_WORD_FOLDED_CHARS} \
+                     characters"
+                ),
+                format!("sensitive_words: at most {MAX_SENSITIVE_WORDS} entries"),
+            ]
+        );
         for message in &rendered {
             assert!(!message.contains(SENTINEL), "echoes a word: {message}");
         }

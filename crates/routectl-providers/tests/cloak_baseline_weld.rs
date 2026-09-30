@@ -298,7 +298,7 @@ const TIER_ONE: &[TierOneRow] = &[
         file: "anthropic_api/cloak/obfuscate.rs",
         role: Role::Support,
         gate: Gate::ProviderConstruction,
-        reason: "renders a bound refusal as counts and an entry index only, so a configured \
+        reason: "renders a bound refusal as the exceeded bound only, so a configured \
                  sensitive word cannot reach an error or a log through it",
         known_loss: None,
     },

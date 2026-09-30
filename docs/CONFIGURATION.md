@@ -2300,8 +2300,9 @@ cargo test -p routectl-providers --release --lib \
 
 A list over either bound fails `config check`, `serve` startup, and hot
 reload (which logs the failure and keeps the previous config). The error
-names the provider, the bound, and the offending entry's index and folded
-length -- never the word itself, which is operator content. A provider
+names the provider and the bound only (`sensitive_words: at most 32
+entries`, or `each sensitive word must fold to at most 32 characters`) --
+never the word itself, which is operator content. A provider
 built directly as a library, bypassing config validation, refuses each
 cloaked request with a config error before egress instead of sending the
 terms unmarked.
