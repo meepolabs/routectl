@@ -21,7 +21,7 @@
 //! advances so the wire fingerprint stays current.
 
 /// Claude Code CLI version routectl mimics in the default User-Agent.
-const CLAUDE_CLI_VERSION: &str = "2.1.169";
+const CLAUDE_CLI_VERSION: &str = "2.1.285";
 
 /// Prefix Claude Code's own `User-Agent` carries ahead of its version:
 /// `claude-cli/<version> (external, <surface>)`. The single source of
@@ -186,10 +186,13 @@ pub fn parse_claude_cli_ua_surface(user_agent: &str) -> Option<&str> {
 }
 
 /// Stainless SDK package version stamped in `x-stainless-package-version`.
-const STAINLESS_PACKAGE_VERSION: &str = "0.94.0";
+const STAINLESS_PACKAGE_VERSION: &str = "0.127.0";
 
 /// Stainless JS runtime version stamped in `x-stainless-runtime-version`.
-const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
+const STAINLESS_RUNTIME_VERSION: &str = "v26.3.0";
+
+/// Request timeout in seconds stamped in `x-stainless-timeout`.
+const STAINLESS_TIMEOUT_SECS: &str = "1800";
 
 /// The inbound header whose PRESENCE identifies a genuine Claude Code client.
 ///
@@ -330,7 +333,7 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
         ("x-stainless-runtime", "node"),
         ("x-stainless-runtime-version", STAINLESS_RUNTIME_VERSION),
         ("x-stainless-package-version", STAINLESS_PACKAGE_VERSION),
-        ("x-stainless-timeout", "600"),
+        ("x-stainless-timeout", STAINLESS_TIMEOUT_SECS),
         ("x-stainless-retry-count", "0"),
         ("x-stainless-arch", stainless_arch()),
         ("x-stainless-os", stainless_os()),
@@ -426,8 +429,8 @@ mod tests {
             Some("2.1.246")
         );
         assert_eq!(
-            parse_claude_cli_version("claude-cli/2.1.169 (external, cli)"),
-            Some("2.1.169")
+            parse_claude_cli_version("claude-cli/2.1.285 (external, cli)"),
+            Some("2.1.285")
         );
         // The whole value may be just the prefix + version, with no
         // trailing platform detail.
@@ -621,7 +624,7 @@ mod tests {
             Some("sdk-cli")
         );
         assert_eq!(
-            parse_claude_cli_ua_surface("claude-cli/2.1.169 (external, cli)"),
+            parse_claude_cli_ua_surface("claude-cli/2.1.285 (external, cli)"),
             Some("cli")
         );
         assert_eq!(
@@ -638,7 +641,7 @@ mod tests {
     fn the_surface_parser_accepts_the_real_shapes_and_tolerates_spacing() {
         for (ua, expected) in [
             ("claude-cli/2.1.246 (external, sdk-cli)", "sdk-cli"),
-            ("claude-cli/2.1.169 (external, cli)", "cli"),
+            ("claude-cli/2.1.285 (external, cli)", "cli"),
             // No space after the comma, and extra padding around it: both
             // are the same self-report.
             ("claude-cli/2.1.246 (external,sdk-cli)", "sdk-cli"),
@@ -925,7 +928,7 @@ mod tests {
             lookup("x-stainless-package-version"),
             Some(STAINLESS_PACKAGE_VERSION)
         );
-        assert_eq!(lookup("x-stainless-timeout"), Some("600"));
+        assert_eq!(lookup("x-stainless-timeout"), Some(STAINLESS_TIMEOUT_SECS));
         assert_eq!(lookup("x-stainless-retry-count"), Some("0"));
     }
 

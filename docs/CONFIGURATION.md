@@ -4775,7 +4775,7 @@ the family, its members suffixed) with the models routed through it.
 
 Drop this into `header_extras` on the OAuth-bearer Anthropic entry (the
 one `routectl login anthropic` wrote) so the upstream sees the same SDK
-fingerprint claude-code 2.1.143 sends from the bundled
+fingerprint claude-code 2.1.285 sends from the bundled
 `@anthropic-ai/sdk`. Written as a sub-table -- a multi-line inline table
 (`{ ... }` spanning lines) is not legal TOML:
 
@@ -4787,10 +4787,10 @@ fingerprint claude-code 2.1.143 sends from the bundled
 "x-stainless-arch"                          = "x64"
 "x-stainless-lang"                          = "js"
 "x-stainless-os"                            = "Linux"
-"x-stainless-package-version"               = "0.94.0"
+"x-stainless-package-version"               = "0.127.0"
 "x-stainless-runtime"                       = "node"
-"x-stainless-runtime-version"               = "v24.3.0"
-"x-stainless-timeout"                       = "600"
+"x-stainless-runtime-version"               = "v26.3.0"
+"x-stainless-timeout"                       = "1800"
 "x-stainless-retry-count"                   = "0"
 ```
 

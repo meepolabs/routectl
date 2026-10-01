@@ -531,7 +531,7 @@ fn oauth_bearer_emits_stainless_defaults_with_empty_extras() {
     );
     assert_eq!(
         outbound_header_value(&provider, &req, "x-stainless-timeout").as_deref(),
-        Some("600"),
+        Some("1800"),
         "x-stainless-timeout default must appear on oauth-bearer",
     );
     // Dynamic entries present and mapped (not raw Rust cfg strings).
@@ -599,7 +599,7 @@ fn oauth_bearer_user_agent_defaults_to_claude_cli() {
     const HOST: &str = "https://api.anthropic.com";
     assert_eq!(
         resolve_user_agent(None, AuthKind::OauthBearer, HOST).as_deref(),
-        Some("claude-cli/2.1.169 (external, cli)"),
+        Some("claude-cli/2.1.285 (external, cli)"),
         "oauth-bearer on the Anthropic host with no override must default to the Claude Code SDK UA",
     );
     assert_eq!(

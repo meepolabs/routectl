@@ -2,9 +2,9 @@
 //! `anthropic-api` driver fixture carries, and its reviewed relation to the
 //! values routectl itself mints.
 //!
-//! WHY A PIN AND NOT A DRIFT GATE. routectl's minted fingerprint sits
-//! behind the client the corpus captured, and it will keep sitting behind
-//! it: the client releases on its own cadence and no commit can fix that.
+//! WHY A PIN AND NOT A DRIFT GATE. routectl's minted fingerprint falls
+//! behind the client between roll-forwards, and it will keep doing so: the
+//! client releases on its own cadence and no commit can fix that.
 //! A test that reddened on any difference would be red most weeks for a
 //! reason nobody in that commit can act on, so it would be muted. What IS
 //! actionable is a NEW observation nobody reviewed. So the observed sets
@@ -224,9 +224,10 @@ fn register() -> Vec<RegisterRow> {
             minted: vec![
                 routectl_core::identity::anthropic::compiled_claude_cli_version().to_string(),
             ],
-            relation: Relation::Diverges,
-            reason: "the corpus client is ahead of the compiled pin; the ingress drift \
-                     warning reports the live gap and rolling the pin is an operator call",
+            relation: Relation::ObservedSpansMinted,
+            reason: "the corpus spans an older SDK-driven 2.1.246 release and the current \
+                     2.1.285 release routectl now mints; a capture of a newer release moves \
+                     this row, and the ingress drift warning reports any live gap",
         },
         RegisterRow {
             dimension: Dimension::UaSurface,
@@ -242,17 +243,18 @@ fn register() -> Vec<RegisterRow> {
             dimension: Dimension::StainlessPackageVersion,
             observed: sorted(OBSERVED_STAINLESS_PACKAGE_VERSIONS),
             minted: minted_header("x-stainless-package-version"),
-            relation: Relation::Diverges,
-            reason: "the SDK version travels with the client release, so it drifts on the \
-                     same cadence as the CLI version above",
+            relation: Relation::ObservedSpansMinted,
+            reason: "the SDK version travels with the client release: the 2.1.246 captures \
+                     carry the older SDK and the 2.1.285 capture carries the one routectl \
+                     now mints, on the same cadence as the CLI version above",
         },
         RegisterRow {
             dimension: Dimension::StainlessRuntimeVersion,
             observed: sorted(OBSERVED_STAINLESS_RUNTIME_VERSIONS),
             minted: minted_header("x-stainless-runtime-version"),
-            relation: Relation::Diverges,
-            reason: "the client's bundled runtime major moved; routectl mints a fixed \
-                     literal and does not read the host runtime",
+            relation: Relation::Matches,
+            reason: "both corpus releases bundle the same runtime, which routectl mints as \
+                     a fixed literal without reading the host runtime",
         },
         RegisterRow {
             dimension: Dimension::ClientBetas,
