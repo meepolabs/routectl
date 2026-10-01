@@ -4454,7 +4454,7 @@ valid.
    kind          = "anthropic-api"
    api_key_ref   = "oauth://anthropic"
    auth_kind     = "oauth-bearer"
-   user_agent    = "claude-cli/2.1.143 (external, cli)"
+   user_agent    = "claude-cli/2.1.285 (external, cli)"
    forward_client_headers = [
        "x-claude-code-session-id",
        "x-claude-code-agent-id",
