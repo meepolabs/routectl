@@ -623,9 +623,9 @@ fn every_committed_driver_fixture_pins_its_ingress_kind_and_wire_pattern() {
 /// major fixture-format bump which under the committed-corpus regime
 /// orphans every contributed cell whose session cannot be re-driven.
 ///
-/// The corpus-wide claim that IS kept about the key is the one that stays
-/// true as the corpus grows: at least one committed fixture still LACKS it,
-/// so the default path stays exercised by real data.
+/// The corpus now records a binary-side version on every fixture, and the
+/// key-absent path is covered by
+/// `the_loader_tolerates_the_binary_client_version_key_either_way`.
 ///
 /// The absent-corpus skip keys on ENTRIES WALKED, not on fixtures LOADED.
 /// Keying on the loaded count would make this test SKIP in exactly the
@@ -668,17 +668,6 @@ fn the_committed_corpus_loads() {
             fixture.name,
         );
     }
-
-    assert!(
-        corpus
-            .fixtures
-            .iter()
-            .any(|fixture| fixture.meta.client.binary_version.is_empty()),
-        "every committed fixture now records a binary-side client version, so the \
-         key-absent default path is no longer exercised by real data; the planted \
-         fixtures still cover it, but a corpus that lost the state should be a review \
-         moment",
-    );
 }
 
 /// The LOADER property the corpus-wide absence assertion was standing in

@@ -75,42 +75,44 @@ const MIN_FIXTURES: usize = 7;
 
 // -- OBSERVED SETS, exact-pinned ------------------------------------------
 //
-// Derived from the committed corpus on 2026-09-12 and pinned as EXACTLY
+// Derived from the committed corpus on 2026-09-30 and pinned as EXACTLY
 // these values. Extend a list here in the same commit that lands a capture
 // carrying a new value, having read what changed.
 
 /// Stable Claude CLI versions the corpus self-reports.
-const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246"];
+const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.285"];
 
 /// `User-Agent` surface tokens the corpus self-reports -- the trailing word
 /// in the `(external, <surface>)` parenthetical. Its own dimension because
 /// pinning the version says NOTHING about the rest of the User-Agent, and a
 /// reader must not mistake a version pin for a full-UA pin.
-const OBSERVED_UA_SURFACES: &[&str] = &["sdk-cli"];
+const OBSERVED_UA_SURFACES: &[&str] = &["cli", "sdk-cli"];
 
 /// `x-stainless-package-version` values the corpus self-reports.
-const OBSERVED_STAINLESS_PACKAGE_VERSIONS: &[&str] = &["0.112.1"];
+const OBSERVED_STAINLESS_PACKAGE_VERSIONS: &[&str] = &["0.112.1", "0.127.0"];
 
 /// `x-stainless-runtime-version` values the corpus self-reports.
 const OBSERVED_STAINLESS_RUNTIME_VERSIONS: &[&str] = &["v26.3.0"];
 
 /// The UNION of every `anthropic-beta` flag the corpus sends. A union, not
-/// a per-fixture set: the corpus carries two distinct beta sets (one
-/// fixture additionally requests a cache-diagnosis flag) and both are
-/// legitimate client behavior, so the pin is over what the client is
-/// capable of sending.
+/// a per-fixture set: the corpus carries several distinct beta sets (see
+/// [`OBSERVED_DISTINCT_BETA_SETS`]) and each is legitimate client
+/// behavior, so the pin is over what the client is capable of sending.
 const OBSERVED_CLIENT_BETAS: &[&str] = &[
     "cache-diagnosis-2026-04-07",
     "claude-code-20250219",
     "context-management-2025-06-27",
     "interleaved-thinking-2025-05-14",
     "prompt-caching-scope-2026-01-05",
+    "redact-thinking-2026-02-12",
     "thinking-token-count-2026-05-13",
 ];
 
 /// Distinct `anthropic-beta` sets the corpus carries. Pinned as a count so
 /// a capture that collapses or splits the populations is a review moment.
-const OBSERVED_DISTINCT_BETA_SETS: usize = 2;
+/// Three: the base set, the base set plus a cache-diagnosis flag, and the
+/// newer release's base set, which also requests redacted thinking.
+const OBSERVED_DISTINCT_BETA_SETS: usize = 3;
 
 /// Reviewed rows the register must hold. Pinned so DELETING a row is a red
 /// build rather than a quietly narrower claim.
@@ -135,6 +137,12 @@ enum Relation {
     /// [`Relation::Diverges`], and conflating them would let a set that
     /// stopped sharing anything keep a verdict claiming it does.
     PartialOverlapByDesign,
+    /// Minted is a non-empty STRICT subset of observed: the corpus spans
+    /// client releases, at least one of which matches what routectl mints
+    /// and at least one of which does not. A corpus that converges to only
+    /// the minted value must move the row to [`Relation::Matches`], and one
+    /// that drops the minted value must move it to [`Relation::Diverges`].
+    ObservedSpansMinted,
 }
 
 /// One reviewed row: a dimension, the values observed, routectl's own
@@ -224,10 +232,11 @@ fn register() -> Vec<RegisterRow> {
             dimension: Dimension::UaSurface,
             observed: sorted(OBSERVED_UA_SURFACES),
             minted: vec![routectl_core::identity::anthropic::MINTED_UA_SURFACE.to_string()],
-            relation: Relation::Diverges,
-            reason: "the corpus client reports the SDK-driven surface while routectl mints \
-                     the plain CLI surface -- a fingerprint difference independent of the \
-                     version, so pinning the version alone would leave it unreviewed",
+            relation: Relation::ObservedSpansMinted,
+            reason: "the 2.1.246 captures report the SDK-driven surface while the 2.1.285 \
+                     capture reports the plain CLI surface routectl mints -- the surface is \
+                     a fingerprint difference independent of the version, so pinning the \
+                     version alone would leave it unreviewed",
         },
         RegisterRow {
             dimension: Dimension::StainlessPackageVersion,
@@ -620,6 +629,25 @@ fn relation_holds(
             }
             Ok(())
         }
+        Relation::ObservedSpansMinted => {
+            if minted.is_empty() {
+                return Err("registered as ObservedSpansMinted but routectl mints nothing".into());
+            }
+            if !minted_only.is_empty() {
+                return Err(format!(
+                    "registered as ObservedSpansMinted but routectl mints values the corpus \
+                     never carries -- if nothing minted is observed that is Diverges. \
+                     minted-only: {minted_only:?}"
+                ));
+            }
+            if client_only.is_empty() {
+                return Err(format!(
+                    "registered as ObservedSpansMinted but every observation is minted -- the \
+                     corpus converged, so the row is Matches (minted: {minted:?})"
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -639,24 +667,36 @@ fn each_verdict_accepts_only_the_shape_it_names() {
         vec!["shared".to_string()],
         vec!["shared".to_string(), "b".to_string()],
     );
+    let superset = (
+        vec!["shared".to_string(), "a".to_string()],
+        vec!["shared".to_string()],
+    );
 
     for (relation, accepted, rejected) in [
         (
             Relation::Matches,
             vec![&same],
-            vec![&disjoint, &overlapping, &subset],
+            vec![&disjoint, &overlapping, &subset, &superset],
         ),
         (
             Relation::Diverges,
             vec![&disjoint],
-            vec![&same, &overlapping, &subset],
+            vec![&same, &overlapping, &subset, &superset],
         ),
         (
             Relation::PartialOverlapByDesign,
             vec![&overlapping],
             // Disjoint belongs to Diverges; a subset has no client-only
             // side; equal sets have neither difference.
-            vec![&same, &disjoint, &subset],
+            vec![&same, &disjoint, &subset, &superset],
+        ),
+        (
+            Relation::ObservedSpansMinted,
+            vec![&superset],
+            // Equal sets converged (Matches); disjoint dropped the minted
+            // value (Diverges); overlapping and subset both mint something
+            // the corpus never carries.
+            vec![&same, &disjoint, &overlapping, &subset],
         ),
     ] {
         for (observed, minted) in accepted {
