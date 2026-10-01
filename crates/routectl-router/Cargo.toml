@@ -82,7 +82,7 @@ dhat = { version = "0.3", optional = true }
 # library is built without it.
 routectl-router = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
-serial_test = "3"
+serial_test = "4"
 wiremock.workspace = true
 routectl-testkit.workspace = true
 criterion = { workspace = true }

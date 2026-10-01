@@ -136,7 +136,7 @@ criterion = { workspace = true }
 # The openai-responses redirect pin selects between the provider's two
 # client-builder branches through the process environment, so those tests
 # serialize against every other env-touching test in this crate.
-serial_test = "3"
+serial_test = "4"
 # Real Rust parser for the cloak baseline weld's item derivation. DEV-only: the
 # shipped library links nothing of it, and the package is already in the
 # lockfile through the proc-macro graph, so this adds no new package. A weld
