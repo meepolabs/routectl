@@ -32,6 +32,7 @@ use super::{DispatchMeta, DispatchTarget, Router};
 use crate::capability_detect::{
     self, CapabilityObservation, DetectorContext, ObservationDirection,
 };
+use crate::feature_keys::ToolChoiceForce;
 use crate::learned_capability::{GenerationOutcome, ObserveOutcome, PositiveOutcome};
 
 /// A single response-evidence observation captured on the terminal
@@ -312,29 +313,14 @@ fn top_level_required(schema: &Value) -> Option<Vec<String>> {
 /// `auto`, `none`, and unknown directives never force. The caller has already
 /// confirmed web search is a requested feature.
 fn forces_web_search(tool_choice: Option<&Value>) -> bool {
-    let Some(tool_choice) = tool_choice else {
-        return false;
-    };
-    match tool_choice {
-        Value::String(s) => matches!(s.as_str(), "required" | "any"),
-        Value::Object(_) => match tool_choice.get("type").and_then(Value::as_str) {
-            Some("any" | "required") => true,
-            Some("tool") => names_web_search(tool_choice.get("name")),
-            Some("function") => {
-                names_web_search(tool_choice.get("function").and_then(|f| f.get("name")))
-            }
-            _ => false,
-        },
-        _ => false,
+    match crate::feature_keys::tool_choice_force(tool_choice) {
+        Some(ToolChoiceForce::AnyTool) => true,
+        // A dated builtin id (`web_search_20250305`) names web search too.
+        Some(ToolChoiceForce::Named(name)) => {
+            crate::feature_keys::strip_date_suffix(name) == WEB_SEARCH
+        }
+        None => false,
     }
-}
-
-/// Whether a `tool_choice` name field names the web-search tool, tolerating a
-/// dated builtin id (`web_search_20250305`).
-fn names_web_search(name: Option<&Value>) -> bool {
-    name.and_then(Value::as_str)
-        .map(crate::feature_keys::strip_date_suffix)
-        == Some(WEB_SEARCH)
 }
 
 /// Whether extended thinking / reasoning was requested. An explicit

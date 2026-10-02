@@ -118,6 +118,47 @@ fn response_format_requests_json(response_format: Option<&Value>) -> bool {
         .is_some_and(|t| matches!(t, "json_schema" | "json_object"))
 }
 
+/// Feature key for a `tool_choice` that forces the model to call a tool.
+pub const FORCED_TOOL_CHOICE: &str = "forced_tool_choice";
+
+/// How a `tool_choice` directive forces tool use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolChoiceForce<'a> {
+    /// Some tool must be called, the model picks which.
+    AnyTool,
+    /// The named tool must be called.
+    Named(&'a str),
+}
+
+/// Classify `tool_choice` by the force it applies, or `None` when it
+/// forces nothing. A bounded, syntactic read across the three dialects the
+/// canonical slot carries verbatim: Anthropic (`{type:any}`,
+/// `{type:tool,name}`), OpenAI (`"required"`, `{type:function,function:{name}}`)
+/// and Converse (`{any:{}}`, `{tool:{name}}`). `auto`, `none`, a named force
+/// with no usable name, and any unrecognized shape force nothing.
+pub fn tool_choice_force(tool_choice: Option<&Value>) -> Option<ToolChoiceForce<'_>> {
+    match tool_choice? {
+        Value::String(s) => {
+            matches!(s.as_str(), "required" | "any").then_some(ToolChoiceForce::AnyTool)
+        }
+        Value::Object(map) => match map.get("type").and_then(Value::as_str) {
+            Some("any" | "required") => Some(ToolChoiceForce::AnyTool),
+            Some("tool") => named_force(map.get("name")),
+            Some("function") => named_force(map.get("function").and_then(|f| f.get("name"))),
+            Some(_) => None,
+            None if map.contains_key("any") => Some(ToolChoiceForce::AnyTool),
+            None => named_force(map.get("tool").and_then(|t| t.get("name"))),
+        },
+        _ => None,
+    }
+}
+
+fn named_force(name: Option<&Value>) -> Option<ToolChoiceForce<'_>> {
+    name.and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(ToolChoiceForce::Named)
+}
+
 /// Strip a trailing `-YYYYMMDD` or `_YYYYMMDD` suffix if present.
 /// Returns the input unchanged when the trailing 9 chars don't match
 /// the date pattern (separator byte + 8 ASCII digits).
@@ -461,6 +502,67 @@ mod tests {
             derive_feature_keys(&[], None, Some(&rf)),
             vec!["structured_output".to_string()]
         );
+    }
+
+    #[test]
+    fn tool_choice_force_classifies_general_forces_in_every_dialect() {
+        // Anthropic `any`, OpenAI `required` (bare and typed), and the
+        // Converse `{any:{}}` union member all force SOME tool.
+        for tc in [
+            json!({"type": "any"}),
+            json!("required"),
+            json!("any"),
+            json!({"type": "required"}),
+            json!({"any": {}}),
+        ] {
+            assert_eq!(
+                tool_choice_force(Some(&tc)),
+                Some(ToolChoiceForce::AnyTool),
+                "tool_choice {tc}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_choice_force_classifies_named_forces_in_every_dialect() {
+        // Anthropic `{type:tool,name}`, OpenAI `{type:function,function:{name}}`,
+        // and Converse `{tool:{name}}` each force the tool they name.
+        for tc in [
+            json!({"type": "tool", "name": "lookup"}),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+            json!({"tool": {"name": "lookup"}}),
+        ] {
+            assert_eq!(
+                tool_choice_force(Some(&tc)),
+                Some(ToolChoiceForce::Named("lookup")),
+                "tool_choice {tc}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_choice_force_is_none_for_auto_none_absent_and_unreadable_shapes() {
+        // Auto and none in every spelling, a named force with no usable name
+        // (no egress can send it as a force), and non-directive JSON all
+        // force nothing.
+        for tc in [
+            json!("auto"),
+            json!("none"),
+            json!({"type": "auto"}),
+            json!({"type": "none"}),
+            json!({"auto": {}}),
+            json!({"type": "tool"}),
+            json!({"type": "tool", "name": ""}),
+            json!({"type": "function", "function": {}}),
+            json!({"tool": {}}),
+            json!({"type": "something_new"}),
+            json!(null),
+            json!(true),
+            json!(["any"]),
+        ] {
+            assert_eq!(tool_choice_force(Some(&tc)), None, "tool_choice {tc}");
+        }
+        assert_eq!(tool_choice_force(None), None);
     }
 
     #[test]

@@ -574,6 +574,48 @@ mod tests {
     }
 
     #[test]
+    fn forced_tool_choice_routes_away_and_is_not_strippable() {
+        assert_eq!(
+            action_for("forced_tool_choice"),
+            CapabilityAction::RouteAway
+        );
+        assert!(!is_strippable("forced_tool_choice"));
+    }
+
+    #[test]
+    fn interceptor_never_modifies_a_forced_tool_choice() {
+        // Arrange: a forced request whose only strip key is the forced
+        // tool_choice itself.
+        for tc in [
+            json!({"type": "any"}),
+            json!({"type": "tool", "name": "lookup"}),
+            json!("required"),
+        ] {
+            let mut req = ChatRequest {
+                model: "m".into(),
+                messages: vec![].into(),
+                tools: Some(vec![other_tool(
+                    json!({"type": "custom", "name": "lookup"}),
+                )]),
+                tool_choice: Some(tc.clone()),
+                ..Default::default()
+            };
+            let before = serde_json::to_value(&req).expect("request serializes");
+
+            // Act
+            let outcome = StripInterceptor.apply(&mut req, &ctx(&["forced_tool_choice"], false));
+
+            // Assert
+            assert!(matches!(outcome, Outcome::Unchanged), "tool_choice {tc}");
+            assert_eq!(
+                serde_json::to_value(&req).expect("request serializes"),
+                before,
+                "tool_choice {tc}"
+            );
+        }
+    }
+
+    #[test]
     fn every_strip_action_key_has_a_transform() {
         // action_for and strip_plan must stay in lockstep: a Strip action
         // with no transform would degrade silently to Unchanged. The

@@ -3141,6 +3141,10 @@ mod has_forwarded_provider_tests;
 mod forwarded_model_transparency_tests;
 
 #[cfg(test)]
+#[path = "forced_tool_choice_tests.rs"]
+mod forced_tool_choice_tests;
+
+#[cfg(test)]
 #[path = "seat_pool_dispatch_tests.rs"]
 mod seat_pool_dispatch_tests;
 

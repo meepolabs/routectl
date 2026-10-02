@@ -2952,6 +2952,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and the end-to-end dispatched bytes), and
   `src/router/field_canary_settlement_tests.rs` (the cadence, the
   three settlements, and the accounting)
+- `src/router/forced_tool_choice_tests.rs` -- forced-`tool_choice` route-away
+  through real dispatches on a two-lane chain, driven by the captured 400s in
+  `tests/fixtures/forced_tool_choice_capture.json`: Bedrock (Converse and
+  Invoke) learns on one rejection, first-party on corroboration, the next
+  forced request skips the lane, an unforced one does not, the directive
+  reaches every lane unchanged, and an `unsupported` override routes away
+  before dispatch
 - `src/router/field_canary_settlement_tests.rs` -- behavioral coverage of the
   re-verification canary through real dispatches, asserting on the mock seats'
   RECORDED REQUEST BODIES rather than on decision records: "restores the field
@@ -3893,7 +3900,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   canonical top-level `response_format` requests json (`json_schema` /
   `json_object`), or any tool is strict (`ToolDef::Custom.strict == Some(true)`
   or `ToolDef::Other` with `"strict": true`);
-  `derive_feature_keys(tools, provider_extras, response_format)` is pure
+  `derive_feature_keys(tools, provider_extras, response_format)` is pure.
+  Also `tool_choice_force` (the one syntactic forced-`tool_choice` predicate,
+  `ToolChoiceForce::{AnyTool, Named}` across the Anthropic / OpenAI / Converse
+  shapes) and the `FORCED_TOOL_CHOICE` key it grounds, which
+  `router::field_repair::request_feature_keys` appends; `forces_web_search`
+  reads the same predicate
 - `src/log_hash.rs` -- `salted_log_hash`: per-process salted hash
   (`OnceLock<RandomState>` + `BuildHasher::hash_one`, no new crate dep) for
   logging a caller-controlled value as a correlation token. Stable within one
@@ -4466,7 +4478,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `<field>: Extra inputs are not permitted`); `BEDROCK_TOKEN_TRANSLATIONS`
   maps the rejected tool type onto the identically-named `derive_feature_keys`
   tool-type key (`advisor` -> `advisor`) -- a rejected wire field name has no
-  row and stays dormant. `pub is_bedrock_validation_exception` also lets the
+  row and stays dormant. When no template matches, `BEDROCK_VALIDATION_PHRASES` is
+  checked by exact equality on the whole message, bare (InvokeModel) or inside
+  one `The model returned the following errors: ` wrapper (Converse); its one
+  row maps the forced-`tool_choice` rejection to `forced_tool_choice`, and the
+  same phrase is an `ANTHROPIC_INFERRED` row for the first-party lane. `pub is_bedrock_validation_exception` also lets the
   learn site flag drift when a real `ValidationException` matched no template.
   A third F2
   FEATURE-NAMING arm handles a `BadRequest` whose nested `error.message` names

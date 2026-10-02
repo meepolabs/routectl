@@ -56,7 +56,7 @@ use routectl_core::capability::{
 use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 
-use crate::feature_keys::strip_date_suffix;
+use crate::feature_keys::{FORCED_TOOL_CHOICE, strip_date_suffix};
 
 /// The openai-compat provider `kind` string. For this family the
 /// `FeatureUnsupported` class carries an `error.code` token rather than a
@@ -153,14 +153,28 @@ impl InferredPhrase {
     }
 }
 
+/// The message a model that refuses a forced `tool_choice` returns, verbatim
+/// and identical on the first-party Messages API and on Bedrock (both
+/// InvokeModel and, inside its wrapper, Converse). It names both forcing
+/// modes at once, so it carries no signal about which one was sent.
+const FORCED_TOOL_CHOICE_REJECTION: &str =
+    "tool_choice: type \"tool\" and \"any\" are not supported for this model.";
+
 /// Anthropic Messages API inferred-rejection phrases. Small by design;
 /// each phrase is grounded in a real captured / documented 400 envelope
 /// (sources cited in the module tests). Unverified capabilities wait.
-const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
-    phrase: "Prefilling assistant messages is not supported for this model.",
-    prefix_anchored: false,
-    capability: PREFILL,
-}];
+const ANTHROPIC_INFERRED: &[InferredPhrase] = &[
+    InferredPhrase {
+        phrase: "Prefilling assistant messages is not supported for this model.",
+        prefix_anchored: false,
+        capability: PREFILL,
+    },
+    InferredPhrase {
+        phrase: FORCED_TOOL_CHOICE_REJECTION,
+        prefix_anchored: false,
+        capability: FORCED_TOOL_CHOICE,
+    },
+];
 
 /// OpenAI Responses inferred-rejection phrases. The content-validating lane
 /// family checks the encrypted-content PREFIX and rejects a blob minted by
@@ -498,6 +512,18 @@ const BEDROCK_VALIDATION_TEMPLATES: &[(&str, &str)] = &[
 /// is not a `derive_feature_keys`-producible key, so it stays dormant.
 const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[("advisor", "advisor")];
 
+/// Whole-message Bedrock `ValidationException` rejections that name a
+/// capability without bracketing a token, so the anchored-template engine
+/// cannot read them. Matched by exact equality after the discriminator gate,
+/// on the bare message (InvokeModel) or on the message inside exactly one
+/// [`BEDROCK_CONVERSE_ERRORS_PREFIX`] wrapper (Converse).
+const BEDROCK_VALIDATION_PHRASES: &[(&str, &str)] =
+    &[(FORCED_TOOL_CHOICE_REJECTION, FORCED_TOOL_CHOICE)];
+
+/// The wrapper Converse puts in front of a model-level validation message
+/// that InvokeModel returns bare.
+const BEDROCK_CONVERSE_ERRORS_PREFIX: &str = "The model returned the following errors: ";
+
 /// The Bedrock `BadRequest` arm: gate on the lifted `ValidationException`
 /// discriminator, then read the flat validation message and run the
 /// anchored-template extraction pipeline. The discriminator gate fires
@@ -517,6 +543,28 @@ fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, Fail
         BEDROCK_VALIDATION_TEMPLATES,
         BEDROCK_TOKEN_TRANSLATIONS,
     )
+    .or_else(|| match_bedrock_validation_phrase(&message))
+}
+
+/// The exact-phrase leg of the Bedrock arm: the trimmed message, with at most
+/// one Converse wrapper removed, must equal a [`BEDROCK_VALIDATION_PHRASES`]
+/// row. The upstream named the refused capability, so a match is
+/// self-identifying [`FailurePhase::F1`] evidence like the template leg.
+fn match_bedrock_validation_phrase(
+    message: &str,
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    let trimmed = message.trim();
+    let unwrapped = trimmed
+        .strip_prefix(BEDROCK_CONVERSE_ERRORS_PREFIX)
+        .unwrap_or(trimmed);
+    let (_, capability) = BEDROCK_VALIDATION_PHRASES
+        .iter()
+        .find(|(phrase, _)| *phrase == unwrapped)?;
+    Some((
+        (*capability).to_string(),
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+    ))
 }
 
 /// Run the anchored-template pipeline over a trimmed validation `message`:
@@ -1691,6 +1739,143 @@ mod tests {
             ),
             None
         );
+    }
+
+    // --- Forced tool_choice rejection: Bedrock exact phrase + first-party row ---
+
+    /// Real captured forced-`tool_choice` 400s from the first-party Messages
+    /// API and from bedrock-runtime (Converse prefixed, InvokeModel bare).
+    const FORCED_TOOL_CHOICE_FIXTURE: &str =
+        include_str!("../tests/fixtures/forced_tool_choice_capture.json");
+
+    fn forced_tool_choice_fixture() -> serde_json::Value {
+        serde_json::from_str(FORCED_TOOL_CHOICE_FIXTURE).expect("valid forced tool_choice fixture")
+    }
+
+    fn fixture_str<'a>(fx: &'a serde_json::Value, path: &[&str]) -> &'a str {
+        path.iter()
+            .fold(fx, |node, key| &node[*key])
+            .as_str()
+            .unwrap_or_else(|| panic!("fixture string at {path:?}"))
+    }
+
+    #[test]
+    fn bedrock_forced_tool_choice_rejection_resolves_on_both_apis() {
+        // Arrange
+        let fx = forced_tool_choice_fixture();
+        let ty = fixture_str(&fx, &["bedrock", "lifted_type"]);
+        for body_key in ["invoke_body", "converse_body"] {
+            let body = fixture_str(&fx, &["bedrock", body_key]);
+            let err = upstream(400, body, Some(ty), None);
+
+            // Act
+            let got = resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest));
+
+            // Assert
+            assert_eq!(
+                got,
+                Some((
+                    "forced_tool_choice".to_string(),
+                    SignalTier::SelfIdentifying,
+                    FailurePhase::F1
+                )),
+                "{body_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn bedrock_forced_tool_choice_rejection_requires_the_lifted_discriminator() {
+        // The phrase alone never unlocks a match: the same captured bodies
+        // without a ValidationException discriminator do not learn.
+        let fx = forced_tool_choice_fixture();
+        for body_key in ["invoke_body", "converse_body"] {
+            let body = fixture_str(&fx, &["bedrock", body_key]);
+            for wrong_type in [None, Some("ThrottlingException")] {
+                let err = upstream(400, body, wrong_type, None);
+                assert_eq!(
+                    resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+                    None,
+                    "{body_key} with type {wrong_type:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bedrock_forced_tool_choice_near_misses_do_not_resolve() {
+        let fx = forced_tool_choice_fixture();
+        let ty = fixture_str(&fx, &["bedrock", "lifted_type"]);
+        let near = fx["near_miss_messages"]
+            .as_object()
+            .expect("near-miss object");
+        for (name, message) in near {
+            let body = flat_validation_body(message.as_str().expect("near-miss message"));
+            let err = upstream(400, &body, Some(ty), None);
+            assert_eq!(
+                resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+                None,
+                "near-miss {name} must not learn"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_forced_tool_choice_rejection_resolves_inferred() {
+        // Arrange: the captured first-party body, classified for real.
+        let fx = forced_tool_choice_fixture();
+        let body = fixture_str(&fx, &["anthropic_api", "body"]);
+        let err = upstream(400, body, Some("invalid_request_error"), None);
+        let classified = classify(&err, Some("anthropic-api"));
+        assert_eq!(classified.class, FailureClass::BadRequest);
+
+        // Act
+        let got = resolve_requested_capability("anthropic-api", &err, &classified);
+
+        // Assert
+        assert_eq!(
+            got,
+            Some((
+                "forced_tool_choice".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F1
+            ))
+        );
+    }
+
+    #[test]
+    fn anthropic_forced_tool_choice_near_misses_do_not_resolve() {
+        // Every near-miss, including the Bedrock Converse wrapper: the
+        // first-party surface never wraps the message, so a wrapped form on
+        // it is an unverified shape.
+        let fx = forced_tool_choice_fixture();
+        let wrapped = fixture_str(&fx, &["bedrock", "converse_body"]);
+        let wrapped_message: serde_json::Value =
+            serde_json::from_str(wrapped).expect("converse body json");
+        let near = fx["near_miss_messages"]
+            .as_object()
+            .expect("near-miss object");
+        let messages = near
+            .iter()
+            .map(|(name, m)| (name.as_str(), m.as_str().expect("near-miss message")))
+            .chain([(
+                "converse_wrapper",
+                wrapped_message["message"]
+                    .as_str()
+                    .expect("wrapped message"),
+            )]);
+        for (name, message) in messages {
+            let body = anthropic_body(message);
+            assert_eq!(
+                resolve_requested_capability(
+                    "anthropic-api",
+                    &upstream(400, &body, None, None),
+                    &cf(FailureClass::BadRequest),
+                ),
+                None,
+                "near-miss {name} must not learn"
+            );
+        }
     }
 
     #[test]

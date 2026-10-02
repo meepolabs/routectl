@@ -3429,6 +3429,15 @@ unsupported = ["web_search"]
 force_supported = ["prompt_caching"]
 ```
 
+Besides the tool-type and well-known keys, the request side derives
+`forced_tool_choice` whenever `tool_choice` forces a tool call (Anthropic
+`any` / a named `tool`, OpenAI `required` / a named `function`, Converse
+`any` / a named `tool`; never `auto` or `none`). Listing it under
+`unsupported` routes forced requests away from that target before dispatch
+while leaving every other request on it. The key always routes away and is
+never stripped: routectl does not remove a forced `tool_choice` to make a
+target accept the request.
+
 ### Dropping ONE learned observation (`routectl capability purge`)
 
 To make the daemon forget one thing it learned -- without pinning

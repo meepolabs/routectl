@@ -1,0 +1,21 @@
+{
+  "note": "Real 400 rejections of a forced tool_choice (2026-10-02). anthropic_api.body is the Messages API response body as captured (request_id dropped), identical for a forced `any` on claude-opus-5-5 and claude-sonnet-5-5. The bedrock messages are verbatim from bedrock-runtime on us.anthropic.claude-opus-5-5: Converse with toolChoice any wraps the message in the model-errors prefix, InvokeModel with a named tool (and with `any`) returns it bare. Both carry the ValidationException discriminator, lifted onto Error::Upstream.upstream_type as the bare name; the bodies are the flat {\"message\":...} shape bedrock-runtime returns. Kept as a data file, never inline .rs literals.",
+  "anthropic_api": {
+    "status": 400,
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tool_choice: type \\\"tool\\\" and \\\"any\\\" are not supported for this model.\"}}"
+  },
+  "bedrock": {
+    "status": 400,
+    "lifted_type": "ValidationException",
+    "invoke_body": "{\"message\":\"tool_choice: type \\\"tool\\\" and \\\"any\\\" are not supported for this model.\"}",
+    "converse_body": "{\"message\":\"The model returned the following errors: tool_choice: type \\\"tool\\\" and \\\"any\\\" are not supported for this model.\"}"
+  },
+  "near_miss_messages": {
+    "missing_period": "tool_choice: type \"tool\" and \"any\" are not supported for this model",
+    "other_mode_named": "tool_choice: type \"auto\" is not supported for this model.",
+    "extra_sentence": "tool_choice: type \"tool\" and \"any\" are not supported for this model. Use auto.",
+    "leading_text": "Error: tool_choice: type \"tool\" and \"any\" are not supported for this model.",
+    "drifted_wrapper": "The model returned the following error: tool_choice: type \"tool\" and \"any\" are not supported for this model.",
+    "doubled_wrapper": "The model returned the following errors: The model returned the following errors: tool_choice: type \"tool\" and \"any\" are not supported for this model."
+  }
+}

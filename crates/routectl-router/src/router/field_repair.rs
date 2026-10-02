@@ -630,8 +630,10 @@ pub(super) fn grounded_field_feature_keys(req: &ChatRequest) -> Vec<String> {
 }
 
 /// The full act-side feature-key vocabulary for `req`: the pure catalog keys
-/// [`crate::feature_keys::derive_feature_keys`] derives, plus the one
-/// grounded field key [`grounded_field_feature_keys`] can mint for it.
+/// [`crate::feature_keys::derive_feature_keys`] derives,
+/// [`crate::feature_keys::FORCED_TOOL_CHOICE`] when `tool_choice` forces a
+/// tool call, plus the one grounded field key [`grounded_field_feature_keys`]
+/// can mint for it.
 ///
 /// This is the widened vocabulary every routing, learn, observe, and count
 /// call site that must treat a catalog capability and a field verdict alike
@@ -645,6 +647,10 @@ pub(super) fn request_feature_keys(req: &ChatRequest) -> Vec<String> {
         req.response_format.as_ref(),
     )
     .into_iter()
+    .chain(
+        crate::feature_keys::tool_choice_force(req.tool_choice.as_ref())
+            .map(|_| crate::feature_keys::FORCED_TOOL_CHOICE.to_string()),
+    )
     .chain(grounded_field_feature_keys(req))
     .collect()
 }

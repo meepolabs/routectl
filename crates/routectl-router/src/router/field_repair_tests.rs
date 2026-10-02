@@ -2011,4 +2011,74 @@ mod grounded_field_feature_keys_tests {
     }
 }
 
+mod forced_tool_choice_key_tests {
+    use super::super::request_feature_keys;
+    use routectl_core::ChatRequest;
+    use serde_json::json;
+
+    const FORCED: &str = "forced_tool_choice";
+
+    fn req_with_tool_choice(tool_choice: Option<serde_json::Value>) -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![].into(),
+            tool_choice,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_forcing_shape_yields_the_forced_tool_choice_key() {
+        for tc in [
+            json!({"type": "any"}),
+            json!({"type": "tool", "name": "lookup"}),
+            json!("required"),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+            json!({"any": {}}),
+            json!({"tool": {"name": "lookup"}}),
+        ] {
+            let req = req_with_tool_choice(Some(tc.clone()));
+
+            let keys = request_feature_keys(&req);
+
+            assert_eq!(keys, vec![FORCED.to_string()], "tool_choice {tc}");
+        }
+    }
+
+    #[test]
+    fn auto_none_and_absent_tool_choice_yield_no_key() {
+        for tc in [
+            Some(json!("auto")),
+            Some(json!("none")),
+            Some(json!({"type": "auto"})),
+            Some(json!({"type": "none"})),
+            Some(json!({"auto": {}})),
+            None,
+        ] {
+            let req = req_with_tool_choice(tc.clone());
+
+            let keys = request_feature_keys(&req);
+
+            assert!(
+                keys.is_empty(),
+                "tool_choice {tc:?} must derive no key: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_forced_key_rides_alongside_the_catalog_keys() {
+        // A forced web search derives both its tool-type key and the forced
+        // key, once each, after the catalog keys.
+        let mut req = req_with_tool_choice(Some(json!({"type": "any"})));
+        req.tools = Some(vec![routectl_core::ToolDef::Other(
+            json!({"type": "web_search_20250305", "name": "web_search"}),
+        )]);
+
+        let keys = request_feature_keys(&req);
+
+        assert_eq!(keys, vec!["web_search".to_string(), FORCED.to_string()]);
+    }
+}
+
 include!("field_repair_parser_tests.rs");
