@@ -683,7 +683,8 @@ An allowlist of `anthropic_beta` flag strings accepted by AWS Bedrock.
 Applied as a post-filter to every Bedrock-destined request: any flag
 NOT in the list is silently dropped before the request goes on the
 wire. Omitting the list (empty = default) puts the filter in
-pass-through mode -- every flag reaches AWS as-is.
+pass-through mode -- every client flag reaches AWS as-is except the
+built-in Bedrock-rejected set below.
 
 Use this to prevent unknown flags (new Anthropic betas not yet
 supported by Bedrock) from causing upstream 400 errors fleet-wide.
@@ -698,6 +699,16 @@ allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
 
 Two flags bypass this filter unconditionally: see
 [the capability-beta carve-out](#allowed_betas-carve-out-the-capability-betas).
+
+Independently of this list, routectl always withholds three client-sent
+flags that AWS rejects on every request (`advanced-tool-use-2025-11-20`,
+`advisor-tool-2026-03-01`, `prompt-caching-scope-2026-01-05`) -- in
+pass-through mode too, and even when `allowed_betas` names them. The
+provider floor,
+[`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor),
+is the only way to send one of them. Each withheld flag is logged at
+`debug` on both `api_shape = "invoke"` and `"converse"`; Converse also
+counts the withhold once per request in the translation-drop metrics.
 
 ### `[bedrock] allowed_body_fields` -- global Bedrock body-field allowlist
 

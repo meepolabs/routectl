@@ -88,7 +88,7 @@ pub(super) fn build_additional_fields(
     // `[providers.X] anthropic_beta` per-provider floor) apply
     // identically to both Invoke and Converse paths. See
     // `super::super::betas` for the full contract.
-    filter_bedrock_betas(&cfg.id, &mut bag, &cfg.anthropic_beta, &cfg.allowed_betas);
+    filter_anthropic_beta(cfg, &mut bag);
 
     // Warn when the operator's allowed_body_fields list would drop a
     // routectl-managed key that carries thinking or effort semantics.
@@ -400,6 +400,21 @@ fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<S
     }
     if !betas.is_empty() {
         bag.insert("anthropic_beta".to_string(), Value::Array(betas));
+    }
+}
+
+/// Apply the shared Bedrock beta filter to the bag and count a withheld
+/// built-in rejected flag once per request, not once per flag.
+fn filter_anthropic_beta(cfg: &BedrockConfig, bag: &mut Map<String, Value>) {
+    // The built-in rejected set is withheld even in pass-through mode: AWS
+    // 400s the whole request on any one of them, so the upstream compels the
+    // loss.
+    // TRANSLATION-DROP: lane=bedrock-converse class=anthropic_beta_rejected_by_bedrock test=bedrock_rejected_beta_withhold_bumps_the_drop_counter_once
+    if filter_bedrock_betas(&cfg.id, bag, &cfg.anthropic_beta, &cfg.allowed_betas) {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "anthropic_beta_rejected_by_bedrock",
+        );
     }
 }
 

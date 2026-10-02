@@ -1237,8 +1237,10 @@ impl<'a> Iterator for NicknameIter<'a> {
 ///
 /// **Empty list = pass-through.** Either field, when empty (or the
 /// entire `[bedrock]` section omitted), disables that filter -- the
-/// upstream sees the assembled value unchanged. This is the
-/// discovery-mode default: bring up routectl, observe actual traffic
+/// upstream sees the assembled value unchanged, except that the
+/// built-in Bedrock-rejected betas are always withheld from client
+/// flags (only a `[providers.X] anthropic_beta` floor sends one). This
+/// is the discovery-mode default: bring up routectl, observe actual traffic
 /// via `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then
 /// populate the list with what you observe.
 ///
@@ -1251,10 +1253,12 @@ impl<'a> Iterator for NicknameIter<'a> {
 pub struct BedrockGlobalConfig {
     /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
     /// entry independently and 400s the request on the first
-    /// unsupported flag. **Empty list = pass-through** (no filtering;
-    /// every flag the ingress lifts in is forwarded). Populate via
-    /// TOML to enable filtering. `examples/bedrock.toml` ships the
-    /// empirical 2026-05-12 baseline.
+    /// unsupported flag. **Empty list = pass-through** for every
+    /// client flag except the built-in Bedrock-rejected set, which is
+    /// withheld in either mode; the per-provider `anthropic_beta` floor
+    /// is the only way to send one of those. Populate via TOML to
+    /// enable filtering. `examples/bedrock.toml` ships the empirical
+    /// 2026-05-12 baseline.
     ///
     /// Per-provider `[providers.X] anthropic_beta` is unrelated and
     /// keeps its existing semantics (operator-asserted floor that is

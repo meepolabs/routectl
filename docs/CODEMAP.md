@@ -1134,7 +1134,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   LAST (after both allowlist filters) so a body shipping
   `output_config.format` never egresses without its gating flag
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
-  body + Converse `additionalModelRequestFields`)
+  body + Converse `additionalModelRequestFields`), plus the built-in
+  `BEDROCK_REJECTED_BETAS` set withheld in both allowlist modes unless the
+  provider floor asserts it
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response
@@ -1241,6 +1243,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   off: no credential source -> `Error::Auth`, env creds -> SigV4 with those
   values, never a panic while the chain builds; isolated because the chain
   reads process-global env
+- `tests/bedrock_rejected_betas.rs` -- Invoke + Converse egress pins for the
+  built-in rejected-beta withhold (both allowlist modes, floor escape hatch,
+  Converse drop counter)
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the
   public credential-resolution / auth-dispatch API (`bedrock::auth::resolve`
   Bearer vs SigV4 variants across regions)

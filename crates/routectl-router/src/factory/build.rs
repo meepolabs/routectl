@@ -74,7 +74,9 @@ pub struct BuildOptions {
     /// Bedrock-accepted `anthropic_beta` flags. Sourced from
     /// `[bedrock] allowed_betas` TOML and applied to every Bedrock
     /// provider. routectl ships no const default; AWS schema drift is
-    /// operator-tracked. Empty list = pass-through (no filter applied).
+    /// operator-tracked. Empty list = pass-through for every client
+    /// flag except the built-in Bedrock-rejected set; the provider
+    /// `anthropic_beta` floor is the only way to send one of those.
     pub bedrock_allowed_betas: Vec<String>,
     /// Bedrock-accepted top-level body fields / Converse extras keys.
     /// Sourced from `[bedrock] allowed_body_fields` TOML. Empty list =

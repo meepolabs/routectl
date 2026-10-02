@@ -88,7 +88,7 @@ use marker::{
 /// surface's total, which is precisely how the test-code cut described above
 /// would have hidden the `gemini/schema.rs` markers.
 const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
-    ("bedrock/converse/extras.rs", 3),
+    ("bedrock/converse/extras.rs", 4),
     ("bedrock/converse/messages.rs", 23),
     ("bedrock/converse/system.rs", 3),
     ("bedrock/converse/tools.rs", 10),
@@ -113,7 +113,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 64;
+const EXPECTED_LANE_MARKERS: usize = 65;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 14;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 49;
 

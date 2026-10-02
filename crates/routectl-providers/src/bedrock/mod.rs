@@ -243,8 +243,9 @@ pub struct BedrockConfig {
     /// `[bedrock] allowed_betas` TOML and cloned onto every Bedrock
     /// provider. routectl ships no const default -- AWS schema drift
     /// is operator-tracked. See `examples/bedrock.toml` for the
-    /// empirical 2026-05-12 baseline. Empty list = pass-through (no
-    /// filter applied), the discovery default.
+    /// empirical 2026-05-12 baseline. Empty list = pass-through, the
+    /// discovery default; the built-in Bedrock-rejected flags are withheld
+    /// in either mode.
     pub allowed_betas: Vec<String>,
     /// Bedrock-accepted top-level body fields. On Invoke this filters
     /// the Anthropic-shape body before send; on Converse it filters
