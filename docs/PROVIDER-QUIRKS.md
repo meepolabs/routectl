@@ -272,7 +272,10 @@ request knob:
   only the request-side attachment is missing.
 - **URL-shape images and non-base64 / `file_id` documents.** Dropped
   with a diagnostic; the JSON Converse wire carries only inline base64
-  bytes. Send images and documents as base64 data URIs.
+  bytes. Send images and documents as base64 data URIs. A `text`-source
+  document with citations enabled is the one exception: it ships its body
+  verbatim as `source.text`, because Converse rejects `source.bytes` on a
+  cited text document. Without citations it still ships as base64 bytes.
 - **`video` / `citationsContent`.** Not modeled as typed blocks, but not
   dropped either: an unmodeled block preserved from a prior response turn
   passes through verbatim as a single-key union and AWS validates it (the

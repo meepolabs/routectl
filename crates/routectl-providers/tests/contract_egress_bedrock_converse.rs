@@ -250,9 +250,10 @@ mod scenario_5_cache_control_positions {
 // wire; the second omits citations entirely and the member must be
 // absent from the emitted document (not `false`, not `null`).
 //
-// The first document's source is `text`, so `source.bytes` records the
-// base64 encoding the wire requires; the second is already `base64` and
-// passes through verbatim. `title` maps to `document.name` through
+// The first document's source is `text` with citations enabled, so it
+// ships as `source.text` carrying the raw body (Converse rejects
+// `source.bytes` on a cited text document); the second is already
+// `base64` and passes through verbatim as `source.bytes`. `title` maps to `document.name` through
 // `sanitize_document_name`, so the emitted names record that scrub
 // (disallowed characters become `-`) rather than the raw titles.
 //

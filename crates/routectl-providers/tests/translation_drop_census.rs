@@ -149,6 +149,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "bedrock/converse/eventstream_tests.rs",
     "bedrock/converse/messages_content_drop_counter_tests.rs",
     "bedrock/converse/messages_document_policy_tests.rs",
+    "bedrock/converse/messages_document_source_tests.rs",
     "bedrock/converse/messages_image_policy_tests.rs",
     "bedrock/converse/messages_other_role_tests.rs",
     "bedrock/converse/messages_reasoning_warn_tests.rs",

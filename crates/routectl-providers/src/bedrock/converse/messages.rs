@@ -1186,19 +1186,14 @@ fn translate_document(
         );
         return Ok(None);
     };
-    // AWS Converse's JSON wire only accepts base64-encoded source bytes.
-    // A canonical text-source document carries a plain UTF-8 body, so we
-    // base64-encode it here -- a valid Anthropic shape would otherwise be
-    // dropped rather than forwarded to the model.
-    let bytes = normalize_document_source_bytes(kind, raw_data);
+    let citations = translate_document_citations(citations, tally);
     let name = sanitize_document_name(title);
     Ok(Some(ConverseContentBlock::Document {
         document: ConverseDocument {
             format,
             name,
-            source: ConverseDocumentSource { bytes },
-            citations: translate_document_citations(citations, tally)
-                .map(|enabled| ConverseCitationsConfig { enabled }),
+            source: document_source(kind, raw_data, citations.is_some()),
+            citations: citations.map(|enabled| ConverseCitationsConfig { enabled }),
         },
     }))
 }
@@ -1366,7 +1361,7 @@ const DOCUMENT_NAME_FALLBACK: &str = "document";
 enum DocumentSourceKind {
     /// Bytes are already base64 and pass through verbatim.
     Base64,
-    /// A plain UTF-8 body that must be base64-encoded for the wire.
+    /// A plain UTF-8 body; see `document_source` for its wire member.
     Text,
 }
 
@@ -1381,19 +1376,33 @@ fn document_source_kind(kind: &str) -> Option<DocumentSourceKind> {
     }
 }
 
-/// Normalize a canonical document source's bytes to the base64 form AWS
-/// Converse's JSON wire requires. `base64` sources pass through verbatim;
-/// `text` sources are base64-encoded (a plain UTF-8 body would otherwise
-/// be rejected). Shared by `translate_document` (request blocks) and both
-/// tool_result document paths so the three cannot drift on encoding.
+/// Pick the AWS `DocumentSource` member for a canonical document source.
+/// Shared by `translate_document` (request blocks) and both tool_result
+/// document paths so the three cannot drift on encoding.
+///
+/// A `text` source with citations enabled ships its body verbatim as
+/// `source.text`: Converse rejects `source.bytes` on a cited text-format
+/// document. Without citations a `text` source is base64-encoded into
+/// `source.bytes`, because a tool-result document rejects `source.text`
+/// in that case. A `base64` source always passes through as
+/// `source.bytes` and is never decoded back to text.
 ///
 /// `data` is expected to be nonempty: every caller rejects or drops an
 /// empty payload before reaching here, because both kinds would otherwise
-/// produce an empty `source.bytes` and ship a document carrying nothing.
-fn normalize_document_source_bytes(kind: DocumentSourceKind, data: &str) -> String {
+/// ship a document carrying nothing.
+fn document_source(
+    kind: DocumentSourceKind,
+    data: &str,
+    citations_enabled: bool,
+) -> ConverseDocumentSource {
     match kind {
-        DocumentSourceKind::Base64 => data.to_string(),
-        DocumentSourceKind::Text => B64_STANDARD.encode(data.as_bytes()),
+        DocumentSourceKind::Base64 => ConverseDocumentSource::Bytes(data.to_string()),
+        DocumentSourceKind::Text if citations_enabled => {
+            ConverseDocumentSource::Text(data.to_string())
+        }
+        DocumentSourceKind::Text => {
+            ConverseDocumentSource::Bytes(B64_STANDARD.encode(data.as_bytes()))
+        }
     }
 }
 
@@ -1710,8 +1719,8 @@ fn image_source_to_tool_result(
 }
 
 /// Translate a canonical Document part (source + title + citations) into
-/// the AWS toolResult `Document` variant. Text sources are base64-encoded
-/// (shared with `translate_document` via `normalize_document_source_bytes`),
+/// the AWS toolResult `Document` variant. The source member is chosen by
+/// `document_source` (shared with `translate_document`),
 /// and the emitted wire value comes from `tool_result_document_value` so
 /// both tool_result paths agree.
 ///
@@ -1770,31 +1779,37 @@ fn document_to_tool_result(
     let Some(format) = media_type_to_document_format(media_type) else {
         return Ok(None);
     };
-    let bytes = normalize_document_source_bytes(kind, data);
     Ok(Some(ConverseToolResultContent::Document {
-        document: tool_result_document_value(format, title, bytes, citations, tally),
+        document: tool_result_document_value(format, title, kind, data, citations, tally),
     }))
 }
 
 /// Assemble the `toolResult.content[].document` wire value shared by both
 /// tool_result document paths -- the canonical Parts path and the raw
 /// Anthropic-shape array path. Both emit the same members as
-/// `ConverseDocument`, and citations lift through the same
+/// `ConverseDocument`, the source member comes from the same
+/// `document_source` choice, and citations lift through the same
 /// `translate_document_citations` mapping the message-content path uses, so
 /// a document behaves identically wherever it appears.
 fn tool_result_document_value(
     format: String,
     title: Option<&str>,
-    bytes: String,
+    kind: DocumentSourceKind,
+    data: &str,
     citations: Option<&Value>,
     tally: &mut CitationsDropTally<'_>,
 ) -> Value {
+    let citations = translate_document_citations(citations, tally);
+    let source = match document_source(kind, data, citations.is_some()) {
+        ConverseDocumentSource::Bytes(bytes) => json!({"bytes": bytes}),
+        ConverseDocumentSource::Text(text) => json!({"text": text}),
+    };
     let mut document = serde_json::json!({
         "format": format,
         "name": sanitize_document_name(title),
-        "source": {"bytes": bytes},
+        "source": source,
     });
-    if let Some(enabled) = translate_document_citations(citations, tally)
+    if let Some(enabled) = citations
         && let Some(map) = document.as_object_mut()
     {
         map.insert(
@@ -2156,8 +2171,8 @@ mod tests {
             .expect("text-source document must produce a Document block");
         assert_eq!(doc.format, "txt", "text/plain maps to the txt format");
         assert_eq!(
-            doc.source.bytes,
-            B64_STANDARD.encode(body.as_bytes()),
+            doc.source,
+            ConverseDocumentSource::Bytes(B64_STANDARD.encode(body.as_bytes())),
             "text-source body must be base64-encoded onto the Converse wire"
         );
     }
@@ -2204,7 +2219,10 @@ mod tests {
             })
             .expect("PDF file part must produce a Document block");
         assert_eq!(doc.format, "pdf");
-        assert_eq!(doc.source.bytes, "JVBERi0xLjQ=");
+        assert_eq!(
+            doc.source,
+            ConverseDocumentSource::Bytes("JVBERi0xLjQ=".into())
+        );
     }
 
     /// A file_id-only reference has no inline bytes the JSON Converse wire

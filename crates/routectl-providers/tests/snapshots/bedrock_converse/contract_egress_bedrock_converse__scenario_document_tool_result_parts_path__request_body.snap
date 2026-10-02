@@ -1,6 +1,5 @@
 ---
 source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
-assertion_line: 336
 expression: body
 ---
 {
@@ -38,7 +37,7 @@ expression: body
                   "format": "txt",
                   "name": "Q3 Report (final)",
                   "source": {
-                    "bytes": "cXVhcnRlcmx5IHJldmVudWUgc3VtbWFyeQ=="
+                    "text": "quarterly revenue summary"
                   }
                 }
               },

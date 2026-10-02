@@ -1,6 +1,5 @@
 ---
 source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
-assertion_line: 414
 expression: body
 ---
 {
@@ -24,7 +23,7 @@ expression: body
                   "format": "md",
                   "name": "Meeting Notes [2026]",
                   "source": {
-                    "bytes": "IyBOb3Rlcw=="
+                    "text": "# Notes"
                   }
                 }
               },

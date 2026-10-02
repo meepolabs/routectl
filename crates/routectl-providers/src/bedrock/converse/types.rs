@@ -247,10 +247,17 @@ pub struct ConverseCitationsConfig {
     pub(crate) enabled: bool,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ConverseDocumentSource {
+/// AWS `DocumentSource`: a single-key union. Converse rejects `bytes` on a
+/// text-format document with citations enabled and rejects `text` on a
+/// tool-result document without them, so the member is chosen per
+/// document rather than fixed.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConverseDocumentSource {
     /// Base64-encoded document bytes.
-    pub(crate) bytes: String,
+    Bytes(String),
+    /// The plain document body, verbatim.
+    Text(String),
 }
 
 #[derive(Debug, Serialize)]
