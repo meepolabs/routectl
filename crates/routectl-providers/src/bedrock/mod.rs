@@ -316,10 +316,9 @@ impl BedrockProvider {
         })
     }
 
-    /// One non-streaming InvokeModel / Converse round trip for `req` as given.
-    async fn complete_once(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let body = self.normalize_request(req)?;
-
+    /// One non-streaming InvokeModel / Converse round trip sending `body`,
+    /// the normalized form of `req`.
+    async fn complete_once(&self, req: &ChatRequest, body: Value) -> Result<ChatResponse> {
         // Trace-level outgoing body for triage. Same gating +
         // sensitivity story as the other two providers -- see
         // `routectl_core::log_safe::trace_outgoing_body`.
@@ -414,15 +413,15 @@ impl BedrockProvider {
         Ok(chat_resp)
     }
 
-    /// One streaming round trip for `req` as given. An upstream error status
-    /// returns `Err` before any stream is built, so a caller sees either a
-    /// rejection or a stream, never bytes followed by a retry.
+    /// One streaming round trip sending `body`, the normalized form of `req`.
+    /// An upstream error status returns `Err` before any stream is built, so
+    /// a caller sees either a rejection or a stream, never bytes followed by
+    /// a retry.
     async fn stream_once(
         &self,
         req: &ChatRequest,
+        body: Value,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        let body = self.normalize_request(req)?;
-
         routectl_core::trace_outgoing_body(
             self.cfg.api_shape.provider_kind_str(),
             &self.cfg.id,
@@ -507,9 +506,9 @@ impl BedrockProvider {
         ))
     }
 
-    /// One CountTokens round trip for `req` as given.
-    async fn count_tokens_once(&self, req: &ChatRequest) -> Result<TokenCount> {
-        let normalized = self.normalize_request(req)?;
+    /// One CountTokens round trip for `normalized`, the normalized form of
+    /// `req`.
+    async fn count_tokens_once(&self, req: &ChatRequest, normalized: Value) -> Result<TokenCount> {
         let body = match self.cfg.api_shape {
             BedrockApiShape::Invoke => count_tokens::invoke_tokens_body(&self.cfg.id, &normalized)?,
             BedrockApiShape::Converse => {
@@ -708,14 +707,18 @@ impl Provider for BedrockProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.with_beta_repair(req, true, |lane, req| Box::pin(lane.complete_once(req)))
-            .await
+        self.with_beta_repair(req, true, |lane, req, body| {
+            Box::pin(lane.complete_once(req, body))
+        })
+        .await
     }
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        self.with_beta_repair(req, true, |lane, req| Box::pin(lane.stream_once(req)))
-            .await
+        self.with_beta_repair(req, true, |lane, req, body| {
+            Box::pin(lane.stream_once(req, body))
+        })
+        .await
     }
 
     /// `POST /model/{modelId}/count-tokens` -- the token count for a
@@ -757,8 +760,8 @@ impl Provider for BedrockProvider {
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
         // A CountTokens-only rejection says nothing about inference, so its
         // repair is never remembered for the lane.
-        self.with_beta_repair(req, false, |lane, req| {
-            Box::pin(lane.count_tokens_once(req))
+        self.with_beta_repair(req, false, |lane, req, body| {
+            Box::pin(lane.count_tokens_once(req, body))
         })
         .await
     }

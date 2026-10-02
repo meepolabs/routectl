@@ -724,8 +724,10 @@ remembered, so it cannot remove a flag from inference. The repair
 applies only to the exact message and only when every named flag came
 from the client; it never removes or withholds an operator-floor flag
 (including a `header_extras`-pinned one). It
-skips a rejection that names no flags (`invalid beta flag`) and never
-retries a second time. The retry is logged at `warn`, with flag names
+skips a rejection that names no flags (`invalid beta flag`), skips one
+naming a flag routectl itself would re-add to the retry (the
+structured-outputs or `thinking.display` `"updates"` beta, which the
+request's own body implies), and never retries a second time. The retry is logged at `warn`, with flag names
 only.
 
 ### `[bedrock] allowed_body_fields` -- global Bedrock body-field allowlist

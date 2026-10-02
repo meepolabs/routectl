@@ -43,7 +43,68 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, sanitize_for_log};
 
-use super::BedrockConfig;
+use super::{BedrockApiShape, BedrockConfig};
+
+/// The `anthropic-beta` flag gating `thinking.display: "updates"`.
+const THINKING_DISPLAY_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
+
+/// The betas `fields` itself requires, in union order: `fields` is the
+/// Invoke body or the Converse `additionalModelRequestFields` bag, as it
+/// ships. Each is implied by a body field rather than opted into by the
+/// client, so [`union_feature_implied_betas`] adds it after every allowlist
+/// filter.
+///
+/// - `thinking.display: "updates"` gates on `thinking-display-updates`
+///   (Converse only).
+/// - `output_config.format` gains `STRUCTURED_OUTPUTS_BETA` on both
+///   carriers. Kept as belt-and-braces: api.anthropic.com accepted the field
+///   with and without the flag on one measured lane; whether AWS rejects an
+///   ungated body is unmeasured.
+pub(super) fn feature_implied_betas(
+    shape: BedrockApiShape,
+    fields: &Map<String, Value>,
+) -> Vec<&'static str> {
+    let mut implied = Vec::new();
+    let display_updates = fields
+        .get("thinking")
+        .and_then(|t| t.get("display"))
+        .and_then(Value::as_str)
+        == Some("updates");
+    if shape == BedrockApiShape::Converse && display_updates {
+        implied.push(THINKING_DISPLAY_UPDATES_BETA);
+    }
+    if fields
+        .get("output_config")
+        .and_then(|oc| oc.get("format"))
+        .is_some()
+    {
+        implied.push(routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA);
+    }
+    implied
+}
+
+/// Union [`feature_implied_betas`] into `fields["anthropic_beta"]`. Must run
+/// after the beta and body-field filters and every strip that can change
+/// the implying fields, so a restrictive allowlist cannot drop a flag the
+/// shipped body needs. Idempotent: a present flag is neither duplicated nor
+/// reordered.
+pub(super) fn union_feature_implied_betas(shape: BedrockApiShape, fields: &mut Map<String, Value>) {
+    let implied = feature_implied_betas(shape, fields);
+    if implied.is_empty() {
+        return;
+    }
+    let betas = fields
+        .entry("anthropic_beta")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(arr) = betas.as_array_mut() else {
+        return;
+    };
+    for flag in implied {
+        if !arr.iter().any(|b| b.as_str() == Some(flag)) {
+            arr.push(Value::from(flag));
+        }
+    }
+}
 
 /// Client-lifted betas AWS Bedrock rejects outright: each one alone 400s the
 /// whole request on every Claude model measured, so forwarding any of them

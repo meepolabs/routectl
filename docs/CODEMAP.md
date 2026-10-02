@@ -706,9 +706,8 @@ license.
   capability-beta unions, each gating its flag on the ASSEMBLED body and
   bypassing `allowed_betas` as a server requirement rather than a
   client-opted beta: structured-outputs (`body_has_output_config_format` +
-  `union_structured_outputs_beta` for the header carrier /
-  `apply_structured_outputs_beta_to_body` for the body carrier, applied by
-  the Bedrock-Invoke egress after its own allowlist filters) keyed on
+  `union_structured_outputs_beta` for the header carrier; the Bedrock body
+  carriers use `bedrock::betas::union_feature_implied_betas`) keyed on
   `output_config.format`, and effort (`body_has_output_config_effort` +
   `union_effort_beta`, own-OAuth lane only) keyed on `output_config.effort`;
   also `MAX_THINKING_BUDGET_READER_KINDS` +
@@ -1138,10 +1137,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
   body + Converse `additionalModelRequestFields`), plus the built-in
   `BEDROCK_REJECTED_BETAS` set withheld in both allowlist modes unless the
-  provider floor asserts it
+  provider floor asserts it, and `feature_implied_betas` /
+  `union_feature_implied_betas`: the single source for the betas both
+  carriers add from body fields (structured-outputs; Converse
+  display-updates)
 - `src/bedrock/beta_repair.rs` -- `with_beta_repair` / `RejectedBetaMemo`:
-  one strip-and-retry for a 400 naming rejected `anthropic-beta` flags, plus
-  the per-lane in-memory set of confirmed flags
+  one strip-and-retry for a 400 naming rejected `anthropic-beta` flags
+  (normalizing each attempt once; refused when a named flag is
+  feature-implied), plus the per-lane in-memory set of confirmed flags
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response

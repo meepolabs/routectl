@@ -19,7 +19,9 @@
 //! recorded. The floor is [`super::betas::operator_floor`]. A flag is repairable only when the
 //! message is the exact envelope, every token is token-shaped, every token was
 //! lifted from the client, and none is an operator-floor flag: the floor is the
-//! operator's explicit override and is never second-guessed here.
+//! operator's explicit override and is never second-guessed here. Nor is a
+//! flag repaired when the body built without it would still carry it, because
+//! the request's own features re-add it.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
@@ -188,19 +190,26 @@ impl BedrockProvider {
     /// flags it rejects, retry once without exactly those flags. With
     /// `remember_on_success`, a successful retry records them for the lane.
     /// A retry failure is returned as is.
+    ///
+    /// Each attempt is normalized exactly once, here, and `send` ships that
+    /// body: normalization records translation telemetry, so a body that is
+    /// never sent must never be built.
     pub(super) async fn with_beta_repair<T>(
         &self,
         req: ChatRequest,
         remember_on_success: bool,
-        send: for<'a> fn(&'a Self, &'a ChatRequest) -> BoxFuture<'a, Result<T>>,
+        send: for<'a> fn(&'a Self, &'a ChatRequest, Value) -> BoxFuture<'a, Result<T>>,
     ) -> Result<T> {
+        use routectl_core::Provider;
         let carrier = self.cfg.api_shape.provider_kind_str();
         let floor = super::betas::operator_floor(&self.cfg, &req);
         let floor = floor.as_slice();
         let req = self
             .rejected_betas
             .strip_remembered(&self.cfg.id, carrier, req, floor);
-        let err = match send(self, &req).await {
+        let body = self.normalize_request(&req)?;
+        let implied = feature_implied_betas_of(self.cfg.api_shape, &body);
+        let err = match send(self, &req, body).await {
             Err(err) => err,
             ok => return ok,
         };
@@ -209,6 +218,15 @@ impl BedrockProvider {
         else {
             return Err(err);
         };
+        if let Some(readded) = flags.iter().find(|flag| implied.contains(&flag.as_str())) {
+            tracing::debug!(
+                provider = %self.cfg.id,
+                carrier,
+                flag = %sanitize_for_log(readded),
+                "bedrock named beta rejection not repairable: the request's own features re-add the flag",
+            );
+            return Err(err);
+        }
         tracing::warn!(
             provider = %self.cfg.id,
             carrier,
@@ -216,7 +234,11 @@ impl BedrockProvider {
             flags = %sanitize_for_log(&flags.join(",")),
             "bedrock rejected named beta flags; retrying once without them",
         );
-        let outcome = send(self, &without_client_betas(req, &flags)).await;
+        let retry = without_client_betas(req, &flags);
+        let outcome = match self.normalize_request(&retry) {
+            Ok(body) => send(self, &retry, body).await,
+            Err(e) => Err(e),
+        };
         if outcome.is_ok() && remember_on_success {
             let added = self.rejected_betas.remember(&flags);
             tracing::debug!(
@@ -236,6 +258,19 @@ impl BedrockProvider {
         }
         outcome
     }
+}
+
+/// The betas the builder unioned into `body` from its own fields. Stripping
+/// client betas changes only `anthropic_beta`, so a retry body implies the
+/// same set: any of these the upstream named would ship again.
+fn feature_implied_betas_of(shape: super::BedrockApiShape, body: &Value) -> Vec<&'static str> {
+    let fields = match shape {
+        super::BedrockApiShape::Invoke => body.as_object(),
+        super::BedrockApiShape::Converse => body["additionalModelRequestFields"].as_object(),
+    };
+    fields.map_or_else(Vec::new, |fields| {
+        super::betas::feature_implied_betas(shape, fields)
+    })
 }
 
 #[cfg(test)]

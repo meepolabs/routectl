@@ -456,11 +456,15 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   ```
 
   See `examples/bedrock.toml` for the empirical 2026-05-12 baseline
-  (16 betas + 16 body fields). Empty list (or omitted [bedrock]
-  section) = pass-through (no filter applied) -- the discovery
-  default for bringing routectl up against a fresh AWS account; use
+  (16 betas + 16 body fields). An empty list (or omitted [bedrock]
+  section) is the discovery default for bringing routectl up against
+  a fresh AWS account; use
   `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
-  fields/flags, then populate the lists.
+  fields/flags, then populate the lists. Empty still filters a few
+  entries: the built-in Bedrock-rejected client betas are withheld,
+  a rejection naming its client betas is repaired once per lane, and
+  `mcp_servers` never ships (see
+  [CONFIGURATION.md](CONFIGURATION.md#bedrock-allowed_betas----global-bedrock-post-filter)).
 
   Filters live in `bedrock/{betas,body_fields}.rs` and apply on both
   Invoke (top-level Anthropic body) and Converse
@@ -470,7 +474,9 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
   Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`
   is unchanged: those flags are always sent and bypass the filter
-  (operator-asserted), independent of the global allowlist.
+  (operator-asserted), independent of the global allowlist. Together
+  with `header_extras`-pinned betas it is the only way to send a
+  built-in Bedrock-rejected flag, and the beta repair never strips it.
 
 - **`ValidationException` 400s are header-discriminated, not
   `__type`-bodied.** AWS docs show request-validation errors as a flat

@@ -18,13 +18,10 @@ use crate::anthropic_api::request::build_thinking;
 use crate::anthropic_api::types::ThinkingConfig;
 use crate::effort::clamp_effort_to_supported;
 
-use super::super::BedrockConfig;
-use super::super::betas::{filter_bedrock_betas, operator_floor};
+use super::super::betas::{filter_bedrock_betas, operator_floor, union_feature_implied_betas};
+use super::super::{BedrockApiShape, BedrockConfig};
 use super::request::ClientFingerprintStripTally;
 use super::types::ConverseToolChoice;
-
-/// The `anthropic-beta` flag gating `thinking.display: "updates"`.
-const THINKING_DISPLAY_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
 
 /// Build the `additionalModelRequestFields` bag. Returns None when no
 /// fields land in the bag (avoids emitting `additionalModelRequestFields:
@@ -143,25 +140,14 @@ pub(super) fn build_additional_fields(
         .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(&mut bag))
         .warn(&cfg.id);
 
-    // The display-updates beta is implied by the final bag, so it unions
-    // here, after every filter and strip that could change what ships.
-    union_thinking_display_updates_beta(&mut bag);
-
-    // Feature-triggered structured-outputs beta union. When the bag carries
-    // `output_config.format`, AWS forwards it to Anthropic which gates it
-    // behind `STRUCTURED_OUTPUTS_BETA`; a Converse request whose `[bedrock]
-    // allowed_betas` omits that flag would otherwise ship the gated field
-    // ungated and 400. The flag is a routectl-derived server requirement
-    // implied by the shipped bag, not a client-opted beta, so it bypasses the
-    // allowlist -- run AFTER `filter_bedrock_betas` and
-    // `filter_bedrock_body_fields` (which could drop `output_config`
-    // entirely). Reuses the same helper as the Bedrock-Invoke lane: the bag's
-    // `output_config.format` + `anthropic_beta` shape matches the Anthropic
-    // body it reads. Feature-triggered and idempotent -- no format means no
-    // flag, an already-present flag is neither duplicated nor reordered. An
-    // empty bag carries no format, so the union never fills one.
+    // The display-updates and structured-outputs betas are implied by the
+    // final bag rather than opted into by the client, so they union here,
+    // after every filter and strip that could change what ships: a
+    // restrictive `allowed_betas` cannot drop them, and a bag whose
+    // `output_config` or `thinking` was removed gains neither. An empty bag
+    // implies nothing, so the union never fills one.
+    union_feature_implied_betas(BedrockApiShape::Converse, &mut bag);
     let mut bag = Value::Object(bag);
-    crate::anthropic_api::request::apply_structured_outputs_beta_to_body(&mut bag);
 
     if let Some(obj) = bag.as_object_mut() {
         super::super::body_fields::drop_unrepresentable_body_fields(
@@ -367,38 +353,6 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
             bag.insert(
                 "output_config".to_string(),
                 serde_json::json!({"effort": effort.into_owned()}),
-            );
-        }
-    }
-}
-
-/// Union `THINKING_DISPLAY_UPDATES_BETA` into the bag's `anthropic_beta`
-/// when the final bag carries `thinking.display: "updates"`, which upstream
-/// gates behind that flag. Like the structured-outputs union it is implied by
-/// the shipped bag rather than opted into by the client, so it runs after the
-/// beta and body-field filters (a restrictive allowlist cannot drop it) and
-/// after the forced-tool thinking strip (no thinking, no flag). Idempotent:
-/// an already-present flag is neither duplicated nor reordered.
-fn union_thinking_display_updates_beta(bag: &mut Map<String, Value>) {
-    let carries_updates = bag
-        .get("thinking")
-        .and_then(|t| t.get("display"))
-        .and_then(Value::as_str)
-        == Some("updates");
-    if !carries_updates {
-        return;
-    }
-    let flag = THINKING_DISPLAY_UPDATES_BETA;
-    match bag.get_mut("anthropic_beta").and_then(Value::as_array_mut) {
-        Some(arr) => {
-            if !arr.iter().any(|b| b.as_str() == Some(flag)) {
-                arr.push(Value::from(flag));
-            }
-        }
-        None => {
-            bag.insert(
-                "anthropic_beta".to_string(),
-                Value::Array(vec![Value::from(flag)]),
             );
         }
     }

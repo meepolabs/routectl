@@ -620,3 +620,202 @@ async fn a_retry_that_draws_another_beta_rejection_is_not_repaired_again() {
         "a failed retry must not teach the lane"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Refusals: a named flag the retry body would still carry
+// ---------------------------------------------------------------------------
+
+const DISPLAY_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
+
+/// The captured Invoke envelope, naming `flag` instead.
+fn naming(flag: &str) -> String {
+    INVOKE_NEVER_ISSUED.replace(NEVER_ISSUED, flag)
+}
+
+/// A thinking request whose display is `updates`, which the Converse body
+/// gates behind its own beta.
+fn display_updates_request(client_betas: &[&str]) -> ChatRequest {
+    let mut req = request(client_betas);
+    req.max_tokens = Some(2048);
+    req.reasoning = Some(routectl_core::ReasoningConfig {
+        effort: Some("medium".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: Some(true),
+    });
+    req.routectl_internal.anthropic_thinking_display = Some("updates".into());
+    req
+}
+
+/// A request whose body carries `output_config.format`, which gains the
+/// structured-outputs beta.
+fn structured_output_request(client_betas: &[&str]) -> ChatRequest {
+    let mut req = request(client_betas);
+    req.response_format = Some(json!({
+        "type": "json_schema",
+        "json_schema": { "name": "widget", "schema": { "type": "object" } },
+    }));
+    req
+}
+
+fn remembered(lane: &Lane) -> Vec<String> {
+    lane.provider
+        .rejected_betas
+        .flags
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// One upstream call, the original rejection surfaced, nothing remembered.
+async fn assert_refused_without_retry(lane: &Lane, req: ChatRequest, message: &str) {
+    // Act
+    let outcome = lane.send_request(Call::Complete, req).await;
+
+    // Assert
+    let err = outcome.expect_err("the rejection is surfaced unrepaired");
+    assert_eq!(upstream_message(&err), message);
+    assert_eq!(
+        lane.wire_betas().len(),
+        1,
+        "a retry that would re-send the named flag must not be made"
+    );
+    assert!(remembered(lane).is_empty(), "nothing may be remembered");
+}
+
+#[tokio::test]
+async fn converse_does_not_retry_when_the_named_flag_is_the_display_updates_beta() {
+    // Arrange
+    let message = converse_wrapped(&naming(DISPLAY_UPDATES_BETA));
+    let lane = Lane::start(
+        BedrockApiShape::Converse,
+        Call::Complete,
+        &[],
+        &[(DISPLAY_UPDATES_BETA, &message)],
+    )
+    .await;
+    let req = display_updates_request(&[KEPT_BETA, DISPLAY_UPDATES_BETA]);
+
+    // Act + Assert
+    assert_refused_without_retry(&lane, req, &message).await;
+}
+
+#[tokio::test]
+async fn invoke_does_not_retry_when_the_named_flag_is_the_structured_outputs_beta() {
+    // Arrange
+    let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+    let message = naming(flag);
+    let lane = Lane::start(
+        BedrockApiShape::Invoke,
+        Call::Complete,
+        &[],
+        &[(flag, &message)],
+    )
+    .await;
+    let req = structured_output_request(&[KEPT_BETA, flag]);
+
+    // Act + Assert
+    assert_refused_without_retry(&lane, req, &message).await;
+}
+
+#[tokio::test]
+async fn a_feature_carrying_request_still_repairs_an_unrelated_named_flag() {
+    // Arrange: the body re-adds the display beta, but AWS named another flag.
+    let lane = Lane::start(
+        BedrockApiShape::Converse,
+        Call::Complete,
+        &[],
+        &[(NEVER_ISSUED, &converse_wrapped(INVOKE_NEVER_ISSUED))],
+    )
+    .await;
+    let req = display_updates_request(&[KEPT_BETA, NEVER_ISSUED]);
+
+    // Act
+    let outcome = lane.send_request(Call::Complete, req).await;
+
+    // Assert
+    outcome.expect("the retry without the named flag succeeds");
+    let sent = lane.wire_betas();
+    assert_eq!(sent.len(), 2, "exactly one retry");
+    assert!(sent[1].iter().any(|b| b == DISPLAY_UPDATES_BETA));
+    assert!(!sent[1].iter().any(|b| b == NEVER_ISSUED));
+    assert_eq!(remembered(&lane), betas(&[NEVER_ISSUED]));
+}
+
+// ---------------------------------------------------------------------------
+// Translation telemetry counts only dispatched bodies
+// ---------------------------------------------------------------------------
+//
+// A Converse normalization of a request carrying a built-in rejected client
+// beta records the `anthropic_beta_rejected_by_bedrock` drop exactly once, so
+// that counter's delta is the number of bodies built. The registry is
+// process-global: every test reaching this class shares the serial guard, and
+// only deltas are read.
+
+const REJECTED_CLIENT_BETA: &str = "advisor-tool-2026-03-01";
+
+fn converse_rejected_beta_drops() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| {
+            e.lane == "bedrock-converse" && e.drop_class == "anthropic_beta_rejected_by_bedrock"
+        })
+        .map_or(0, |e| e.drop_count)
+}
+
+#[tokio::test]
+#[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+async fn a_refused_repair_counts_one_translation_for_its_one_upstream_call() {
+    // Arrange
+    let message = converse_wrapped(&naming(DISPLAY_UPDATES_BETA));
+    let lane = Lane::start(
+        BedrockApiShape::Converse,
+        Call::Complete,
+        &[],
+        &[(DISPLAY_UPDATES_BETA, &message)],
+    )
+    .await;
+    let req = display_updates_request(&[KEPT_BETA, DISPLAY_UPDATES_BETA, REJECTED_CLIENT_BETA]);
+    let before = converse_rejected_beta_drops();
+
+    // Act
+    let outcome = lane.send_request(Call::Complete, req).await;
+
+    // Assert
+    outcome.expect_err("the rejection is surfaced unrepaired");
+    assert_eq!(lane.wire_betas().len(), 1, "precondition: no retry");
+    assert_eq!(
+        converse_rejected_beta_drops() - before,
+        1,
+        "one body was sent, so exactly one translation may be counted"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+async fn a_successful_repair_counts_one_translation_per_upstream_call() {
+    // Arrange
+    let lane = Lane::start(
+        BedrockApiShape::Converse,
+        Call::Complete,
+        &[],
+        &[(NEVER_ISSUED, &converse_wrapped(INVOKE_NEVER_ISSUED))],
+    )
+    .await;
+    let req = display_updates_request(&[KEPT_BETA, NEVER_ISSUED, REJECTED_CLIENT_BETA]);
+    let before = converse_rejected_beta_drops();
+
+    // Act
+    let outcome = lane.send_request(Call::Complete, req).await;
+
+    // Assert
+    outcome.expect("repaired");
+    assert_eq!(lane.wire_betas().len(), 2, "precondition: one retry");
+    assert_eq!(
+        converse_rejected_beta_drops() - before,
+        2,
+        "two bodies were sent, so exactly two translations may be counted"
+    );
+}

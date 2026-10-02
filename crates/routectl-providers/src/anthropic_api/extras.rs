@@ -707,48 +707,6 @@ pub(super) fn drop_redact_beta_for_display(
     }
 }
 
-/// Body-field analogue of `union_structured_outputs_beta`: union the flag
-/// into `body.anthropic_beta` when the same body carries
-/// `output_config.format`. Same idempotence contract. Serves the
-/// body-shape Anthropic egress (Bedrock-Invoke reads betas from the body);
-/// the api.anthropic.com egress strips the field and carries betas on the
-/// `anthropic-beta` header instead.
-///
-/// MUST be applied by the body-shape egress AFTER that egress's own beta
-/// allowlist filter runs. On Bedrock-Invoke a non-empty `[bedrock]
-/// allowed_betas` that omits this flag would otherwise drop it again. Same
-/// standing as the header carrier: a capability signal implied by the
-/// shipped body, not a client-opted beta subject to an allowlist.
-///
-/// See `union_structured_outputs_beta` for the measurement behind keeping
-/// this union rather than a proven hard requirement. On api.anthropic.com
-/// the field was accepted both with and without the beta on the tested
-/// lane; whether AWS Bedrock rejects an ungated body is UNMEASURED, so the
-/// union is retained here too until proven redundant.
-///
-/// Gated on `bedrock`: Bedrock-Invoke is the only egress that reads betas
-/// from the body, so the lean build has no consumer.
-#[cfg(feature = "bedrock")]
-pub fn apply_structured_outputs_beta_to_body(body: &mut Value) {
-    if !body_has_output_config_format(body) {
-        return;
-    }
-    let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    if let Some(arr) = obj.get_mut("anthropic_beta").and_then(Value::as_array_mut) {
-        if !arr.iter().any(|b| b.as_str() == Some(flag)) {
-            arr.push(Value::from(flag));
-        }
-    } else {
-        obj.insert(
-            "anthropic_beta".into(),
-            Value::Array(vec![Value::from(flag)]),
-        );
-    }
-}
-
 /// Late enforcer of the temperature/top_p invariant, the sampling analogue
 /// of `reconcile_output_config_effort`. Assembly forces `temperature = 1.0`
 /// and drops `top_p` whenever thinking is composed (Anthropic forbids

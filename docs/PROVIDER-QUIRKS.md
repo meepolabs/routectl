@@ -245,10 +245,18 @@ allowed_betas       = ["context-1m-2025-08-07"]
 allowed_body_fields = ["anthropic_version", "messages"]
 ```
 
-Empty lists (or omitted `[bedrock]` section) = pass-through (no
-filter applied). Use `ROUTECTL_LOG=routectl_providers::bedrock=trace`
-to capture sent flags/fields when building the lists. See
-`examples/bedrock.toml` for the empirical 2026-05-12 baseline.
+An empty or omitted list is not a bare pass-through. An empty
+`allowed_betas` passes every client beta except the built-in
+Bedrock-rejected set; the operator floor (provider `anthropic_beta`
+plus `header_extras`-pinned betas) is the way to send one of those. A
+rejection that names its client betas is repaired with one retry per
+lane. `mcp_servers` never ships to Bedrock, whatever
+`allowed_body_fields` says. Use
+`ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
+flags/fields when building the lists. See `examples/bedrock.toml` for
+the empirical 2026-05-12 baseline and
+[CONFIGURATION.md](CONFIGURATION.md#bedrock-allowed_betas----global-bedrock-post-filter)
+for the detail.
 
 **RPM bucket semantics for shared Bedrock providers.** Runtime state
 (circuit breaker + RPM token bucket) is keyed by `[models.X]`
