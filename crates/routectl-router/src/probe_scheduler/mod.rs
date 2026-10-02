@@ -88,6 +88,7 @@ use parking_lot::Mutex;
 use crate::field_verdict::FieldVerdictKey;
 
 mod bounds;
+mod debug;
 mod lease;
 mod paid_slot;
 mod payload;
@@ -136,7 +137,6 @@ enum JobPhase {
     BackingOff { due_at: Instant },
 }
 
-#[derive(Debug)]
 struct Job {
     key: FieldVerdictKey,
     generation: u64,
@@ -179,12 +179,12 @@ impl Job {
 /// what makes "one job per lane and capability" and the concurrency
 /// ceiling true under real parallel traffic rather than only on one
 /// thread.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ProbeScheduler {
     inner: Mutex<SchedulerInner>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct SchedulerInner {
     /// Bounded by [`PROBE_QUEUE_DEPTH`], so the linear scans below are
     /// over at most a handful of entries and need no index.

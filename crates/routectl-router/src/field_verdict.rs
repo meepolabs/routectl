@@ -79,11 +79,22 @@ use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
 /// malformed path yields no key rather than a permanent token nobody can
 /// attribute; `provider_kind` rides along because every registry call
 /// normalizes the capability key with it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct FieldVerdictKey {
     state_key: String,
     capability_key: String,
     provider_kind: String,
+}
+
+/// Hand-written: the state key names the operator's provider, model, and seat,
+/// so it never prints.
+impl std::fmt::Debug for FieldVerdictKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldVerdictKey")
+            .field("capability_key", &self.capability_key)
+            .field("provider_kind", &self.provider_kind)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FieldVerdictKey {

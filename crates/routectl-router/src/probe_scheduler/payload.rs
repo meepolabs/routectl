@@ -122,7 +122,7 @@ fn bounded_source(raw: &[String]) -> Option<Vec<String>> {
 /// leaves the table in the same settlement that records the candidate), so the
 /// doubled figure is a ceiling rather than a typical figure -- but it is the
 /// ceiling, and a requeue writes to the candidate half under the same bound.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProbePayload {
     /// The closed-table dotted path under test. A `&'static str` from the
     /// table itself, never upstream text.
@@ -155,6 +155,16 @@ pub struct ProbePayload {
     /// is a correlation identifier a background scheduler has no business
     /// holding across a queueing delay.
     originating_claude_code_session: bool,
+}
+
+/// Hand-written: only the closed-table path prints. The beta sets are
+/// caller-influenced, and the field value is request content.
+impl std::fmt::Debug for ProbePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbePayload")
+            .field("field_path", &self.field_path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProbePayload {
@@ -235,5 +245,50 @@ impl ProbePayload {
     #[must_use]
     pub const fn originating_claude_code_session(&self) -> bool {
         self.originating_claude_code_session
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProbePayload;
+
+    #[test]
+    fn payload_debug_renders_the_field_path_and_no_captured_context() {
+        // Arrange
+        let payload = ProbePayload::new(
+            "thinking.enabled.display",
+            "omitted".to_string(),
+            &["client-beta-sentinel".to_string()],
+            &["operator-beta-sentinel".to_string()],
+            true,
+        )
+        .expect("sentinel tokens are within the retention bound");
+
+        // Act
+        let renderings = [format!("{payload:?}"), format!("{payload:#?}")];
+
+        // Assert
+        for rendered in renderings {
+            for sentinel in [
+                "client-beta-sentinel",
+                "operator-beta-sentinel",
+                "omitted",
+                "client_betas",
+                "operator_betas",
+                "field_value",
+                "originating_claude_code_session",
+            ] {
+                assert!(
+                    !rendered.contains(sentinel),
+                    "payload debug leaked {sentinel:?}: {rendered}"
+                );
+            }
+            for allowed in ["ProbePayload", "field_path", "\"thinking.enabled.display\""] {
+                assert!(
+                    rendered.contains(allowed),
+                    "payload debug is missing {allowed:?}: {rendered}"
+                );
+            }
+        }
     }
 }

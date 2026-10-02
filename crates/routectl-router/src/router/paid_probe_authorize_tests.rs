@@ -385,3 +385,57 @@ include!("paid_probe_generation_tests.rs");
 include!("paid_probe_fairness_tests.rs");
 include!("paid_probe_lifecycle_tests.rs");
 include!("paid_probe_hostile_claim_tests.rs");
+
+#[test]
+fn candidate_debug_renders_no_state_key_or_captured_context() {
+    // Arrange
+    let candidate = PaidProbeCandidate {
+        key: FieldVerdictKey::new(
+            "state-sentinel#seat-sentinel",
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("the grounded path mints an identity"),
+        incarnation: 7,
+        validator: ProbeValidator::PaidCompletion,
+        payload: ProbePayload::new(
+            GROUNDED_PATH,
+            "omitted".to_string(),
+            &["client-beta-sentinel".to_string()],
+            &["operator-beta-sentinel".to_string()],
+            true,
+        )
+        .expect("sentinel tokens are within the retention bound"),
+    };
+
+    // Act
+    let renderings = [format!("{candidate:?}"), format!("{candidate:#?}")];
+
+    // Assert
+    for rendered in renderings {
+        for sentinel in [
+            "state-sentinel",
+            "seat-sentinel",
+            "client-beta-sentinel",
+            "operator-beta-sentinel",
+            "omitted",
+        ] {
+            assert!(
+                !rendered.contains(sentinel),
+                "candidate debug leaked {sentinel:?}: {rendered}"
+            );
+        }
+        for allowed in [
+            "PaidProbeCandidate",
+            "incarnation: 7",
+            "PaidCompletion",
+            "\"anthropic-api\"",
+            GROUNDED_PATH,
+        ] {
+            assert!(
+                rendered.contains(allowed),
+                "candidate debug is missing {allowed:?}: {rendered}"
+            );
+        }
+    }
+}

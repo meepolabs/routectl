@@ -2504,3 +2504,39 @@ fn an_acknowledgment_the_canary_layer_refuses_reports_false_rather_than_a_succes
         "and an accepted acknowledgement does write its own count",
     );
 }
+
+#[test]
+fn key_debug_renders_capability_and_provider_but_never_the_state_key() {
+    // Arrange
+    let k = FieldVerdictKey::new(
+        "state-sentinel#seat-sentinel",
+        "pathsentinel.leaf",
+        "provider-sentinel",
+    )
+    .expect("a well-formed dotted path mints an identity");
+
+    // Act
+    let renderings = [format!("{k:?}"), format!("{k:#?}")];
+
+    // Assert
+    for rendered in renderings {
+        for sentinel in ["state-sentinel", "seat-sentinel", "state_key"] {
+            assert!(
+                !rendered.contains(sentinel),
+                "key debug leaked {sentinel:?}: {rendered}"
+            );
+        }
+        for allowed in [
+            "FieldVerdictKey",
+            "capability_key",
+            "\"field:pathsentinel.leaf\"",
+            "provider_kind",
+            "\"provider-sentinel\"",
+        ] {
+            assert!(
+                rendered.contains(allowed),
+                "key debug is missing {allowed:?}: {rendered}"
+            );
+        }
+    }
+}

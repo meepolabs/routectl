@@ -4306,7 +4306,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   from releasing a live one. Several tests are written as named mutation checks,
   each documenting the edit that turns it red
 - `src/probe_scheduler/mod.rs` -- `ProbeScheduler` over one
-  `Mutex<Vec<Job>>`, plus `Job`/`JobPhase`/`SchedulerInner` and every state
+  `Mutex<SchedulerInner>` (the job table, terminal tombstones, retirement floor,
+  held paid slots, and counters), plus `Job`/`JobPhase` and every state
   transition: activate, lease, settle/release, reschedule, defer, tombstone,
   retire, cancel. `in_flight()` is ONE reading over free leases PLUS held paid
   slots, and `lease_due`, `try_acquire_paid_slot`, and the snapshot all read it,
@@ -4345,6 +4346,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   identity and captured beta context -- from a guard held on a money-spending
   path. It also does not read the count through the scheduler, which would take
   that lock from inside a formatter.
+- `src/probe_scheduler/debug.rs` -- the hand-written, field-less `ProbeScheduler`
+  `Debug` (`ProbeScheduler { .. }`): it renders nothing from the job table and
+  never takes the scheduler lock. `Job` and `SchedulerInner` implement no `Debug`.
 - `src/probe_scheduler/schedule.rs` -- the `SchedulerInner` methods that move one
   job's schedule: `defer_without_charging_attempt` (bounded by
   `PROBE_MAX_DEFERRALS`, evicting without a tombstone), `reschedule_or_abandon`
