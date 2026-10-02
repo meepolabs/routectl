@@ -243,14 +243,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
          bag filter downstream owns the drop",
     ),
     (
-        "bedrock/converse/extras.rs",
-        "insert_thinking",
-        "dropping thinking.display",
-        "the display strip goes because acceptance on this lane is unverified; the arms of this \
-         same request path that carry verdicts own the extras policy actions, and the strip \
-         itself has no deciding arm of its own to mark",
-    ),
-    (
         "bedrock/converse/messages.rs",
         "record",
         "dropping unrecognized document citations value",

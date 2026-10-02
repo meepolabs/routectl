@@ -348,9 +348,8 @@ the `max_body_bytes` cap):
     `display` key stays absent on the wire -- routectl never injects a
     default, since Anthropic's own default is model-dependent. See
     [WIRE-GOTCHAS.md](WIRE-GOTCHAS.md) for the wire-shape quirks under a
-    suppressing value and [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for the
-    Bedrock Converse caveat (the field is stripped, not validated, on
-    that lane).
+    suppressing value and [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for how
+    Bedrock Converse forwards it (including the beta `"updates"` needs).
 - `POST /v1/responses` -- OpenAI Responses API requests (the shape a
   Codex client sends). routectl is stateless, so the Responses
   server-side conversation state is handled deterministically:

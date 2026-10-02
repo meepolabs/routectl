@@ -279,14 +279,17 @@ request knob:
   caller owns the outcome). This is the escape hatch, not a drop.
 - **`promptVariables` / `requestMetadata` / `performanceConfig`.** Not
   exposed; no request surface.
-- **`thinking.display`.** Stripped from the
-  `additionalModelRequestFields` bag with a WARN. Whether Converse's
-  validator accepts the field is unmeasured, so routectl does not risk a
-  400 on every thinking request; reasoning text comes back per the model
-  default. The direct `anthropic-api` shape honors the field and forwards
-  whatever string value the caller sent, so a value from a newer beta
-  vocabulary works there. Grep the WARN `dropping thinking.display` when a
-  caller reports the setting being ignored on a Bedrock alias.
+
+`thinking.display` is supported: the caller's value forwards verbatim in
+the `additionalModelRequestFields` bag on both the `enabled` and the
+`adaptive` thinking shape, and an absent `display` stays absent (the
+upstream default is model-dependent). Converse accepts and honors
+`"summarized"` and `"omitted"` on both shapes. `"updates"` is gated
+upstream behind the `thinking-display-updates-2026-08-18` beta, so routectl
+adds that flag to the bag's `anthropic_beta` whenever the shipped bag
+carries `display: "updates"` -- even when `[bedrock] allowed_betas` omits
+it -- and never when a forcing `tool_choice` has stripped thinking. Any
+other value forwards unchanged with no beta, and upstream rules on it.
 
 **Example provider + model:**
 

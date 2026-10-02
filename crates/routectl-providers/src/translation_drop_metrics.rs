@@ -29,8 +29,6 @@
 //! - The thinking strip when `toolChoice` forces tool use
 //!   (`bedrock/converse/extras.rs`) is a DROP for the same reason: Anthropic
 //!   forbids the pairing, so the upstream compels the loss.
-//! - The `thinking.display` strip is a DROP: it goes because acceptance on
-//!   this lane is unverified, which is a fact about the upstream contract.
 //! - `client_fingerprint_stripped` is a POLICY ACTION. The bag would carry the
 //!   fingerprint and the upstream would accept it; routectl withholds it from
 //!   a third-party upstream on the user's behalf.

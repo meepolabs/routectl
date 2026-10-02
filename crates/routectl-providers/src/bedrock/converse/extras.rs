@@ -11,9 +11,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{
-    ChatRequest, is_canonical_request_key, sanitize_detail_for_log, sanitize_for_log,
-};
+use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 
 use crate::anthropic_api::request::DroppedFormatKeys;
 use crate::anthropic_api::request::build_thinking;
@@ -24,6 +22,9 @@ use super::super::BedrockConfig;
 use super::super::betas::filter_bedrock_betas;
 use super::request::ClientFingerprintStripTally;
 use super::types::ConverseToolChoice;
+
+/// The `anthropic-beta` flag gating `thinking.display: "updates"`.
+const THINKING_DISPLAY_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
 
 /// Build the `additionalModelRequestFields` bag. Returns None when no
 /// fields land in the bag (avoids emitting `additionalModelRequestFields:
@@ -141,6 +142,10 @@ pub(super) fn build_additional_fields(
     dropped_format_keys
         .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(&mut bag))
         .warn(&cfg.id);
+
+    // The display-updates beta is implied by the final bag, so it unions
+    // here, after every filter and strip that could change what ships.
+    union_thinking_display_updates_beta(&mut bag);
 
     // Feature-triggered structured-outputs beta union. When the bag carries
     // `output_config.format`, AWS forwards it to Anthropic which gates it
@@ -336,30 +341,10 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
         return;
     };
     let is_adaptive = matches!(thinking, ThinkingConfig::Adaptive { .. });
-    if let Ok(mut v) = serde_json::to_value(&thinking) {
-        // Bedrock Converse acceptance of `thinking.display` is
-        // UNMEASURED -- no live probe has confirmed the field passes the
-        // additionalModelRequestFields validator. Strip it rather than
-        // risk a 400 on every thinking request that happens to carry an
-        // explicit display. The strip is deliberately positioned on the
-        // serialized value (not the enum) so nothing else in the bag can
-        // pick the key up later.
-        if let Some(stripped) = v.as_object_mut().and_then(|o| o.remove("display")) {
-            // `display` is caller-controlled and of any JSON shape, so it is
-            // rendered through the sanitizer: `?`-Debug escapes control
-            // characters but applies no length cap, letting a multi-kilobyte
-            // client string land in the log line at WARN.
-            let stripped_text = match stripped.as_str() {
-                Some(s) => s.to_string(),
-                None => stripped.to_string(),
-            };
-            tracing::warn!(
-                stripped_display = %sanitize_detail_for_log(&stripped_text),
-                "bedrock-converse: dropping thinking.display; the field's \
-                 acceptance on Converse is unverified. Reasoning text will \
-                 be returned per the model default."
-            );
-        }
+    // `display` rides verbatim on both shapes and an absent one stays absent:
+    // Converse accepted and honored the field on `enabled` and `adaptive`
+    // when measured live, and the upstream default is model-dependent.
+    if let Ok(v) = serde_json::to_value(&thinking) {
         bag.insert("thinking".to_string(), v);
     }
     if is_adaptive {
@@ -382,6 +367,38 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
             bag.insert(
                 "output_config".to_string(),
                 serde_json::json!({"effort": effort.into_owned()}),
+            );
+        }
+    }
+}
+
+/// Union `THINKING_DISPLAY_UPDATES_BETA` into the bag's `anthropic_beta`
+/// when the final bag carries `thinking.display: "updates"`, which upstream
+/// gates behind that flag. Like the structured-outputs union it is implied by
+/// the shipped bag rather than opted into by the client, so it runs after the
+/// beta and body-field filters (a restrictive allowlist cannot drop it) and
+/// after the forced-tool thinking strip (no thinking, no flag). Idempotent:
+/// an already-present flag is neither duplicated nor reordered.
+fn union_thinking_display_updates_beta(bag: &mut Map<String, Value>) {
+    let carries_updates = bag
+        .get("thinking")
+        .and_then(|t| t.get("display"))
+        .and_then(Value::as_str)
+        == Some("updates");
+    if !carries_updates {
+        return;
+    }
+    let flag = THINKING_DISPLAY_UPDATES_BETA;
+    match bag.get_mut("anthropic_beta").and_then(Value::as_array_mut) {
+        Some(arr) => {
+            if !arr.iter().any(|b| b.as_str() == Some(flag)) {
+                arr.push(Value::from(flag));
+            }
+        }
+        None => {
+            bag.insert(
+                "anthropic_beta".to_string(),
+                Value::Array(vec![Value::from(flag)]),
             );
         }
     }
@@ -1143,151 +1160,196 @@ mod tests {
         );
     }
 
-    // -- thinking.display strip ----------------------------------------
+    // -- thinking.display forwarding -----------------------------------
 
-    /// Helper: `req_with_thinking()` plus an explicit display request.
-    fn req_with_thinking_display(exclude: bool) -> ChatRequest {
+    const THINKING_DISPLAY_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
+
+    /// Helper: `req_with_thinking()` with the display string an Anthropic
+    /// ingress captured on the carrier (`None` = the caller sent no display).
+    fn req_with_display(display: Option<&str>) -> ChatRequest {
         let mut req = req_with_thinking();
-        req.reasoning.as_mut().expect("reasoning set").exclude = Some(exclude);
+        req.routectl_internal.anthropic_thinking_display = display.map(str::to_string);
         req
     }
 
-    /// Negative: `display` never reaches the Converse bag, because its
-    /// acceptance on additionalModelRequestFields is unverified.
-    #[traced_test]
+    fn cfg_with_shape(adaptive: bool) -> BedrockConfig {
+        let mut cfg = fake_cfg();
+        cfg.adaptive_thinking = Some(adaptive);
+        cfg
+    }
+
+    fn bag_for(cfg: &BedrockConfig, req: &ChatRequest) -> serde_json::Value {
+        build_additional_fields(cfg, req, None, &mut ClientFingerprintStripTally::default())
+            .expect("thinking fills the bag")
+    }
+
+    fn bag_betas(bag: &serde_json::Value) -> Vec<String> {
+        bag.get("anthropic_beta")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Both thinking shapes, each display state a caller can send: the bag's
+    /// `thinking` object is byte-identical to the direct-Anthropic
+    /// serialization of the same request, so a present display rides
+    /// verbatim and an absent one stays absent (never defaulted). Converse
+    /// accepted and honored `display` on both the `enabled` shape
+    /// (sonnet-4-6, opus-4-6) and the `adaptive` shape when measured live.
     #[test]
-    fn converse_bag_thinking_never_carries_display() {
-        for exclude in [true, false] {
-            // Arrange
-            let cfg = fake_cfg();
-            let req = req_with_thinking_display(exclude);
+    fn converse_bag_forwards_display_verbatim_on_both_thinking_shapes() {
+        for adaptive in [false, true] {
+            for display in [None, Some("summarized"), Some("omitted")] {
+                // Arrange
+                let cfg = cfg_with_shape(adaptive);
+                let req = req_with_display(display);
+                let direct = serde_json::to_value(
+                    crate::anthropic_api::request::build_thinking(&req, adaptive)
+                        .expect("thinking is active"),
+                )
+                .expect("thinking serializes");
 
-            // Act
-            let bag = build_additional_fields(
-                &cfg,
-                &req,
-                None,
-                &mut ClientFingerprintStripTally::default(),
-            )
-            .expect("thinking fills the bag");
+                // Act
+                let bag = bag_for(&cfg, &req);
 
-            // Assert
-            let thinking = bag["thinking"]
-                .as_object()
-                .expect("thinking must be an object");
-            assert!(
-                thinking.get("display").is_none(),
-                "display must be stripped from the Converse bag; got: {bag}"
-            );
-            assert!(
-                thinking.get("type").is_some(),
-                "positive control: the rest of the thinking shape survives"
-            );
+                // Assert
+                let expected_type = if adaptive { "adaptive" } else { "enabled" };
+                assert_eq!(
+                    bag["thinking"]["type"], expected_type,
+                    "precondition: the {expected_type} shape must be the one under test"
+                );
+                assert_eq!(
+                    bag["thinking"], direct,
+                    "Converse must carry the same thinking bytes as the direct path \
+                     (adaptive={adaptive}, display={display:?})"
+                );
+                assert_eq!(
+                    bag["thinking"].get("display").and_then(|d| d.as_str()),
+                    display,
+                    "display must be forwarded verbatim, absent staying absent \
+                     (adaptive={adaptive})"
+                );
+                assert!(
+                    !bag_betas(&bag)
+                        .iter()
+                        .any(|b| b == THINKING_DISPLAY_UPDATES_BETA),
+                    "only `updates` earns the display beta; got: {bag}"
+                );
+            }
         }
-        assert!(
-            logs_contain("dropping thinking.display"),
-            "the strip must WARN so an operator can see the discard"
-        );
     }
 
-    /// Positive control for the strip above: the SAME canonical input on
-    /// the direct-Anthropic path DOES carry `display`, so the negative
-    /// cannot pass vacuously via a build_thinking that never emits it.
+    /// A display value this hub does not model forwards verbatim, without
+    /// gaining the `updates` beta: upstream owns the vocabulary.
     #[test]
-    fn direct_anthropic_path_keeps_display_for_the_same_input() {
-        let req = req_with_thinking_display(true);
-
-        let thinking =
-            crate::anthropic_api::request::build_thinking(&req, false).expect("thinking is active");
-        let body = serde_json::to_value(&thinking).expect("thinking serializes");
-
-        assert_eq!(
-            body["display"], "omitted",
-            "direct Anthropic keeps display; only Converse strips it"
-        );
-    }
-
-    /// Helper: the shape an Anthropic ingress produces for
-    /// `thinking.display: "updates"` -- the unmodeled string on the
-    /// carrier plus the semantic boolean it maps to.
-    fn req_with_updates_display_carrier() -> ChatRequest {
-        let mut req = req_with_thinking_display(true);
-        req.routectl_internal.anthropic_thinking_display = Some("updates".into());
-        req
-    }
-
-    /// The carrier holds a display string this hub does not model, so it
-    /// bypasses the canonical boolean entirely -- the Converse strip must
-    /// still catch it.
-    #[traced_test]
-    #[test]
-    fn converse_bag_thinking_strips_updates_display_carrier() {
+    fn converse_bag_forwards_unknown_display_without_a_beta() {
         // Arrange
         let cfg = fake_cfg();
-        let req = req_with_updates_display_carrier();
+        let req = req_with_display(Some("future-mode"));
 
         // Act
-        let bag = build_additional_fields(
-            &cfg,
-            &req,
-            None,
-            &mut ClientFingerprintStripTally::default(),
-        )
-        .expect("thinking fills the bag");
+        let bag = bag_for(&cfg, &req);
 
         // Assert
-        let thinking = bag["thinking"]
-            .as_object()
-            .expect("thinking must be an object");
+        assert_eq!(bag["thinking"]["display"], "future-mode");
         assert!(
-            thinking.get("display").is_none(),
-            "the carrier's display must be stripped from the Converse bag; got: {bag}"
-        );
-        assert!(
-            thinking.get("type").is_some(),
-            "positive control: the rest of the thinking shape survives"
-        );
-        assert!(
-            logs_contain("dropping thinking.display"),
-            "the strip must WARN so an operator can see the discard"
+            bag.get("anthropic_beta").is_none(),
+            "an unknown display must not manufacture any beta; got: {bag}"
         );
     }
 
-    /// Positive control for the strip above: the SAME canonical input on
-    /// the direct-Anthropic path forwards the carrier string verbatim.
+    /// `updates` is gated behind its own beta. The flag is implied by the
+    /// shipped bag rather than opted into by the client, so a restrictive
+    /// allowlist that omits it cannot drop it.
     #[test]
-    fn direct_anthropic_path_keeps_updates_display_for_the_same_input() {
-        let req = req_with_updates_display_carrier();
+    fn updates_display_unions_its_beta_past_a_restrictive_allowlist() {
+        for adaptive in [false, true] {
+            // Arrange
+            let mut cfg = cfg_with_shape(adaptive);
+            cfg.allowed_betas = vec!["context-1m-2025-08-07".into()];
+            let req = req_with_display(Some("updates"));
 
-        let thinking =
-            crate::anthropic_api::request::build_thinking(&req, false).expect("thinking is active");
-        let body = serde_json::to_value(&thinking).expect("thinking serializes");
+            // Act
+            let bag = bag_for(&cfg, &req);
 
-        assert_eq!(
-            body["display"], "updates",
-            "direct Anthropic forwards the carrier string; only Converse strips it"
-        );
+            // Assert
+            assert_eq!(bag["thinking"]["display"], "updates");
+            assert_eq!(
+                bag_betas(&bag),
+                vec![THINKING_DISPLAY_UPDATES_BETA.to_string()],
+                "the updates beta must ride exactly once (adaptive={adaptive}); got: {bag}"
+            );
+        }
     }
 
-    /// No display requested -> nothing to strip and no WARN.
-    #[traced_test]
+    /// A client that already sent the beta (header-lifted) gets it once,
+    /// in its original position, not a second copy appended by the union.
     #[test]
-    fn converse_bag_without_requested_display_logs_no_strip_warn() {
+    fn updates_display_beta_is_not_duplicated_when_the_client_sent_it() {
+        // Arrange
         let cfg = fake_cfg();
-        let req = req_with_thinking();
+        let mut req = req_with_display(Some("updates"));
+        req.anthropic_beta = vec![
+            THINKING_DISPLAY_UPDATES_BETA.to_string(),
+            "context-1m-2025-08-07".to_string(),
+        ];
 
-        let bag = build_additional_fields(
+        // Act
+        let bag = bag_for(&cfg, &req);
+
+        // Assert
+        assert_eq!(
+            bag_betas(&bag),
+            vec![
+                THINKING_DISPLAY_UPDATES_BETA.to_string(),
+                "context-1m-2025-08-07".to_string(),
+            ],
+            "the client-sent flag must be neither duplicated nor reordered; got: {bag}"
+        );
+    }
+
+    /// When a forcing tool_choice strips thinking, no display ships, so its
+    /// beta must not ship either. The non-forcing control proves the same
+    /// request otherwise gains the flag.
+    #[test]
+    fn updates_display_beta_is_withheld_when_forced_tool_choice_strips_thinking() {
+        // Arrange
+        let cfg = fake_cfg();
+        let req = req_with_display(Some("updates"));
+        let forced = ConverseToolChoice::Any {
+            any: EmptyObject {},
+        };
+
+        // Act
+        let stripped = build_additional_fields(
             &cfg,
             &req,
-            None,
+            Some(&forced),
             &mut ClientFingerprintStripTally::default(),
-        )
-        .expect("thinking fills the bag");
+        );
+        let control = bag_for(&cfg, &req);
 
-        assert!(bag["thinking"].get("display").is_none());
+        // Assert
         assert!(
-            !logs_contain("dropping thinking.display"),
-            "no display requested -> no strip WARN"
+            bag_thinking_absent(&stripped),
+            "precondition: the forcing tool_choice strips thinking; got: {stripped:?}"
+        );
+        let stripped_betas = stripped.as_ref().map(bag_betas).unwrap_or_default();
+        assert!(
+            !stripped_betas
+                .iter()
+                .any(|b| b == THINKING_DISPLAY_UPDATES_BETA),
+            "no thinking on the wire -> no display beta; got: {stripped:?}"
+        );
+        assert!(
+            bag_betas(&control)
+                .iter()
+                .any(|b| b == THINKING_DISPLAY_UPDATES_BETA),
+            "positive control: without the forcing choice the beta rides; got: {control}"
         );
     }
 

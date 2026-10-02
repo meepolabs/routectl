@@ -284,9 +284,9 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   values map onto `exclude = Some(true)` on the way in. An ABSENT display
   stays absent on the wire: the upstream default is model-dependent, so
   emitting an explicit value would override a newer model's own choice.
-  Bedrock Converse acceptance of the field is UNMEASURED, so the
-  Converse egress strips `display` -- value-agnostically -- from the
-  `additionalModelRequestFields` bag with a WARN
+  The Bedrock Converse egress forwards `display` verbatim in the
+  `additionalModelRequestFields` bag too, adding the
+  `thinking-display-updates-2026-08-18` beta for `"updates"`
   (`bedrock/converse/extras.rs::insert_thinking`).
 
 - **Anthropic streaming reasoning replay residual.** The SSE decoder
