@@ -1753,6 +1753,10 @@ mod gemini_cloud_code_factory_tests {
     //! end-to-end against a mock so the `v1internal` surface is exercised),
     //! and that the built config's Debug renders the auth field as
     //! `[REDACTED]` rather than the underlying token source.
+    //!
+    //! The mock-backed cases ride a non-managed `oauth://` provider id: the
+    //! managed Antigravity ref is contained to the Cloud Code hosts and so
+    //! can never reach a loopback mock.
 
     use super::*;
     use crate::config::ProviderEntry;
@@ -1764,6 +1768,8 @@ mod gemini_cloud_code_factory_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const CLOUD_CODE_TOKEN: &str = "ya29.test-bearer-do-not-log";
+    /// An `oauth://` ref outside every managed containment family.
+    const UNMANAGED_OAUTH_REF: &str = "oauth://cloud-code-fixture";
 
     /// `SecretStore` stub that resolves any `oauth://` ref to a static
     /// bearer token. Lets the factory build a real Cloud Code provider
@@ -1791,7 +1797,7 @@ mod gemini_cloud_code_factory_tests {
     }
 
     fn cloud_code_entry(base_url: &str) -> ProviderEntry {
-        match ProviderEntry::gemini("oauth://antigravity")
+        match ProviderEntry::gemini(UNMANAGED_OAUTH_REF)
             .with_gemini_auth_mode(GeminiAuthMode::CloudCode)
         {
             ProviderEntry::Gemini {
@@ -2408,10 +2414,10 @@ mod openai_mantle_factory_tests {
 }
 
 #[cfg(test)]
-mod managed_anthropic_credential_factory_tests {
-    //! The factory enforces the managed Anthropic containment rule on its
-    //! own, before any secret is resolved: direct callers reach it without
-    //! config validation.
+mod managed_credential_factory_tests {
+    //! The factory enforces the managed Anthropic, Codex, and Antigravity
+    //! containment rules on its own, before any secret is resolved: direct
+    //! callers reach it without config validation.
 
     use super::*;
     use crate::config::{Config, ModelEntry, ProviderEntry};
@@ -2548,6 +2554,204 @@ mod managed_anthropic_credential_factory_tests {
         );
         cfg.models
             .insert("m".into(), ModelEntry::new("pool", "claude-opus-4-7"));
+        let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+        let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect_err("a pool with no usable member refuses to build");
+
+        assert!(!err.to_string().contains("sentinel-host"), "{err}");
+    }
+
+    /// Managed Codex and Antigravity refs on a lane their rule rejects. The
+    /// cloud-code entries point at loopback and a gateway; the Responses
+    /// entries cover a foreign host, the api-key surface, and a loopback
+    /// account-id slot.
+    fn rejected_codex_and_antigravity_entries(
+        codex: &str,
+        antigravity: &str,
+    ) -> Vec<(&'static str, ProviderEntry)> {
+        let mut v = vec![
+            (
+                "openai-compat codex",
+                ProviderEntry::openai_compat("https://chatgpt.com/backend-api/codex", codex),
+            ),
+            (
+                "anthropic-api antigravity",
+                ProviderEntry::anthropic_api(antigravity).with_auth_kind(AuthKind::OauthBearer),
+            ),
+        ];
+        #[cfg(feature = "openai-responses")]
+        {
+            use routectl_providers::openai_responses::AuthKind as ResponsesAuthKind;
+            v.push((
+                "responses gateway",
+                ProviderEntry::openai_responses(codex)
+                    .with_openai_responses_base_url(SENTINEL_HOST),
+            ));
+            v.push((
+                "responses loopback",
+                ProviderEntry::openai_responses(codex)
+                    .with_openai_responses_base_url("http://127.0.0.1:18080"),
+            ));
+            v.push((
+                "responses api-key",
+                ProviderEntry::openai_responses(codex)
+                    .with_openai_responses_auth_kind(ResponsesAuthKind::ApiKey),
+            ));
+            v.push((
+                "responses account slot",
+                ProviderEntry::openai_responses("env://OPENAI_JWT")
+                    .with_account_id_ref(codex)
+                    .with_openai_responses_base_url("http://127.0.0.1:18080"),
+            ));
+        }
+        #[cfg(feature = "gemini")]
+        {
+            for (label, base) in [
+                ("cloud-code loopback", "http://127.0.0.1:18080"),
+                ("cloud-code gateway", SENTINEL_HOST),
+            ] {
+                let text = format!(
+                    "[providers.p]\n\
+                     kind = \"gemini\"\n\
+                     auth_mode = \"cloud-code\"\n\
+                     api_key_ref = \"{antigravity}\"\n\
+                     base_url = \"{base}\"\n"
+                );
+                let cfg: Config = toml::from_str(&text).expect("fixture parses");
+                v.push((label, cfg.providers["p"].clone()));
+            }
+            v.push(("gemini api-key", ProviderEntry::gemini(antigravity)));
+            v.push(("gemini codex", ProviderEntry::gemini(codex)));
+        }
+        v
+    }
+
+    #[tokio::test]
+    async fn build_provider_rejects_codex_and_antigravity_before_any_secret_access() {
+        let pairs = [
+            ("oauth://codex", "oauth://antigravity"),
+            (
+                "oauth://codex#secret-seat-label",
+                "oauth://antigravity#secret-seat-label",
+            ),
+        ];
+        for (codex, antigravity) in pairs {
+            for (label, entry) in rejected_codex_and_antigravity_entries(codex, antigravity) {
+                let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+                let err = match build_provider("p", &entry, store).await {
+                    Ok(_) => panic!("{label} must be rejected"),
+                    Err(e) => e.to_string(),
+                };
+
+                assert!(err.contains("provider `p`"), "{label}: {err}");
+                assert!(err.contains("managed"), "{label}: {err}");
+                for leaked in [
+                    "sentinel-host",
+                    "127.0.0.1",
+                    "oauth://codex",
+                    "oauth://antigravity",
+                    "secret-seat-label",
+                ] {
+                    assert!(!err.contains(leaked), "{label} leaks {leaked}: {err}");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[tokio::test]
+    async fn build_provider_still_builds_the_default_cloud_code_managed_shapes() {
+        for base in [
+            None,
+            Some(routectl_providers::gemini::PROD_BASE_URL),
+            Some(routectl_providers::gemini::DAILY_BASE_URL),
+        ] {
+            let pin = base.map_or_else(String::new, |b| format!("base_url = \"{b}\"\n"));
+            let cfg: Config = toml::from_str(&format!(
+                "[providers.p]\n\
+                 kind = \"gemini\"\n\
+                 auth_mode = \"cloud-code\"\n\
+                 api_key_ref = \"oauth://antigravity#seat-b\"\n\
+                 {pin}"
+            ))
+            .expect("fixture parses");
+            let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+
+            let built = build_provider("p", &cfg.providers["p"], store).await;
+
+            assert!(built.is_ok(), "base={base:?}: {:?}", built.err());
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[tokio::test]
+    async fn build_resolved_models_skips_a_loopback_cloud_code_entry_without_touching_the_store() {
+        let mut cfg: Config = toml::from_str(
+            "[providers.cc]\n\
+             kind = \"gemini\"\n\
+             auth_mode = \"cloud-code\"\n\
+             api_key_ref = \"oauth://antigravity#secret-seat-label\"\n\
+             base_url = \"http://127.0.0.1:18080\"\n",
+        )
+        .expect("fixture parses");
+        cfg.models
+            .insert("m".into(), ModelEntry::new("cc", "gemini-3.1-flash-lite"));
+        let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("a rejected provider is skipped, not fatal");
+
+        assert!(built.models.is_empty());
+        assert_eq!(built.failed.len(), 1);
+        assert!(!built.failed[0].1.contains("127.0.0.1"));
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn a_bedrock_model_carrying_a_managed_ref_is_skipped_without_touching_the_store() {
+        for key_ref in ["oauth://codex#secret-seat-label", "oauth://antigravity"] {
+            let mut cfg: Config = toml::from_str(&format!(
+                "[providers.br]\n\
+                 kind = \"bedrock\"\n\
+                 region = \"us-east-1\"\n\
+                 creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n"
+            ))
+            .expect("fixture parses");
+            cfg.models.insert(
+                "m".into(),
+                ModelEntry::new("br", "anthropic.claude-opus-4-7"),
+            );
+            let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
+
+            let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+                .await
+                .expect("a rejected provider is skipped, not fatal");
+
+            assert!(built.models.is_empty(), "{key_ref}");
+            assert_eq!(built.failed.len(), 1, "{key_ref}");
+            assert!(!built.failed[0].1.contains("secret-seat-label"));
+        }
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[tokio::test]
+    async fn a_codex_pool_member_on_a_foreign_host_is_omitted_without_touching_the_store() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "gw".into(),
+            ProviderEntry::openai_responses("oauth://codex")
+                .with_openai_responses_base_url(SENTINEL_HOST),
+        );
+        cfg.pools.insert(
+            "pool".into(),
+            crate::config::PoolEntry::new(vec!["gw".into()]),
+        );
+        cfg.models
+            .insert("m".into(), ModelEntry::new("pool", "gpt-5-codex"));
         let store: Arc<dyn SecretStore> = Arc::new(PanicOnAccessStore);
 
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())

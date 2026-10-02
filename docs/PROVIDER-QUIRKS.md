@@ -565,9 +565,10 @@ any non-`oauth://` ref in this mode.
 `https://daily-cloudcode-pa.googleapis.com` -- consumer (non-GCP-ToS)
 seats are served there, and serving them on production earns a
 permission or quota rejection. Set `base_url` to
-`https://cloudcode-pa.googleapis.com` (or an enterprise mirror) for a
-production seat; an explicit value is forwarded verbatim, never
-rewritten, and `config check` plus startup emit a WARNING when a
+`https://cloudcode-pa.googleapis.com` for a production seat (the managed
+`oauth://antigravity` credential is accepted on no other host, so an
+enterprise mirror is not reachable on this lane); an explicit value is
+forwarded verbatim, never rewritten, and `config check` plus startup emit a WARNING when a
 cloud-code entry pins the production host. There is exactly ONE base for
 the lane and it carries every method -- `generateContent`,
 `loadCodeAssist`, and `onboardUser` -- so a pin can never split

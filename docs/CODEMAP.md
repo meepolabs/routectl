@@ -1782,7 +1782,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`ALLOWED_REMAP_TARGETS`) -- a remap may only move a status into a terminal,
   non-retrying class, naming the offending provider/status/target on reject;
   `validate_managed_anthropic_credential` (public; also called by the factory
-  and the capture harness) confines an `oauth://anthropic` ref;
+  and the capture harness) confines an `oauth://anthropic` ref, and its
+  crate-private siblings confine `oauth://codex` to the ChatGPT backend host
+  and `oauth://antigravity` to the Cloud Code hosts
+  (`validate_managed_oauth_credentials` runs all three, in validation and the
+  factory);
   `class_token` renders a `ConfigFailureClass` as its kebab-case TOML
   spelling; `collect_config_validation(&Config) -> ConfigValidation` is the
   single ordered invocation of the whole `validate_*` suite (bare-message

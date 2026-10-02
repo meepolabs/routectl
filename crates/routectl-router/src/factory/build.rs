@@ -4,7 +4,7 @@
 use super::validate::validate_bedrock_allowlists;
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
-use super::validate::{validate_base_url_scheme, validate_managed_anthropic_credential};
+use super::validate::{validate_base_url_scheme, validate_managed_oauth_credentials};
 use super::warnings::warn_context_management_needs_preserve;
 use crate::catalog::resolve_effective_row;
 use crate::catalog_overlay::CatalogOverlay;
@@ -234,7 +234,7 @@ async fn build_provider_inner(
     #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    validate_managed_anthropic_credential(name, entry)?;
+    validate_managed_oauth_credentials(name, entry)?;
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
@@ -939,8 +939,8 @@ async fn compile_pool(
             }
         };
         // The credential probe below reads the store, so the managed
-        // Anthropic containment rule must already hold.
-        if validate_managed_anthropic_credential(member, entry).is_err() {
+        // credential containment rules must already hold.
+        if validate_managed_oauth_credentials(member, entry).is_err() {
             omissions.push(PoolMemberOmission {
                 member: member.clone(),
                 provider_kind,
@@ -1377,10 +1377,9 @@ pub async fn build_resolved_models_reported(
                     continue;
                 }
                 // Credential resolution below reads the store ahead of the
-                // per-provider build, so the managed Anthropic containment
-                // rule is enforced here first.
-                if let Err(e) =
-                    validate_managed_anthropic_credential(&entry.provider, provider_entry)
+                // per-provider build, so the managed credential containment
+                // rules are enforced here first.
+                if let Err(e) = validate_managed_oauth_credentials(&entry.provider, provider_entry)
                 {
                     let msg = e.to_string();
                     tracing::warn!(
@@ -1824,7 +1823,7 @@ fn scheme_of(uri: &str) -> &'static str {
 /// isn't known at the same time `base_url`'s serde default would
 /// fire.
 #[cfg(feature = "openai-responses")]
-fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
+pub(super) fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
     match auth_kind {
         OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
         OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),

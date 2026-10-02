@@ -1221,8 +1221,14 @@ Fields:
     below and
     [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code).
 
-    `base_url` is the override for the PRODUCTION / enterprise host
-    (`https://cloudcode-pa.googleapis.com`, or an enterprise mirror).
+    `base_url` is the override for the PRODUCTION host
+    (`https://cloudcode-pa.googleapis.com`). The managed
+    `oauth://antigravity` credential is accepted only on the production
+    or daily Cloud Code host over `https://`, and this mode takes no
+    static credential, so an enterprise mirror or a staging host is not
+    reachable on the cloud-code lane (see "Managed token host
+    containment" under
+    [Why route claude-code through routectl](#why-route-claude-code-through-routectl)).
     There is exactly ONE base for the lane, and it moves every Cloud Code
     call together -- `generateContent`, `loadCodeAssist`, and
     `onboardUser` -- so a pin can never split inference onto one host and
@@ -1259,9 +1265,8 @@ kind        = "gemini"
 auth_mode   = "cloud-code"
 api_key_ref = "oauth://antigravity"
 # base_url defaults to the daily cloud-code host in cloud-code mode; omit
-# it unless this seat serves on the production / enterprise host, in which
-# case the one value moves generate, loadCodeAssist and onboardUser
-# together. The Cloud Code project id is auto-resolved and persisted;
+# it unless this seat serves on the production host, in which case the one
+# value moves generate, loadCodeAssist and onboardUser together. The Cloud Code project id is auto-resolved and persisted;
 # set cloud_project_id to the BARE id to skip discovery.
 # cloud_project_id = "my-project-1234"
 
@@ -1287,8 +1292,9 @@ base defaults to the daily Cloud Code host
 served there -- and the Cloud Code project id is auto-resolved (via
 loadCodeAssist, falling back to onboardUser) and cached in the credential
 record, unless `cloud_project_id` names it outright. Pin `base_url` to
-`https://cloudcode-pa.googleapis.com` (or an enterprise mirror) for a
-production seat; that single value carries the whole lane. Treat this
+`https://cloudcode-pa.googleapis.com` for a production seat; that single
+value carries the whole lane, and no other host is accepted for the
+managed credential. Treat this
 lane as EXPERIMENTAL / best-effort -- it is an internal surface with no
 published contract. Vertex AI / Google service-account ADC is still NOT
 implemented; it is reachable later by pointing `base_url` at a Vertex
@@ -4426,6 +4432,28 @@ valid.
 - **No override.** There is no flag, config key, or loopback exception
   that relaxes this check; loopback is not treated as local because a
   loopback port can be a tunnel to another machine.
+
+The managed Codex and Antigravity subscription tokens follow the same
+rule, each pinned to its own first-party lane:
+
+- `oauth://codex` or `oauth://codex#<label>` (in `api_key_ref` or
+  `account_id_ref`) is accepted only on an `openai-responses` provider
+  with `auth_kind = "chatgpt-oauth"`, no `bedrock_mantle` block, and a
+  `base_url` that is omitted or is `https://` on exactly `chatgpt.com`.
+- `oauth://antigravity` or `oauth://antigravity#<label>` is accepted only
+  on a `gemini` provider with `auth_mode = "cloud-code"` and a `base_url`
+  that is omitted or is `https://` on exactly
+  `cloudcode-pa.googleapis.com` or `daily-cloudcode-pa.googleapis.com`.
+
+For both, a `user:pass@` prefix, an explicit non-default port, a trailing
+dot, a lookalike or subdomain host, `http://`, and loopback are all
+rejected. The error names the provider and the rule (`provider `<name>`:
+the managed Codex credential ...` / `... the managed Antigravity
+credential ...`) and withholds the `base_url`, the ref, and the seat
+label; the startup, `config check`, and hot-reload behavior is the same
+as above. A staging shard, mirror, or mock for the Responses lane takes a
+static credential (`api_key_ref = "env://OPENAI_JWT"` plus
+`account_id_ref`), which stays valid on any host. There is no override.
 
 ### Operator setup checklist
 

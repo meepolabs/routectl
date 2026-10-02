@@ -1282,7 +1282,7 @@
             },
             "base_url": {
               "default": null,
-              "description": "Endpoint base URL. None -> factory picks an auth_kind-\nappropriate default. Operators can pin a specific value\nto point at a staging shard, a localhost mock, etc.",
+              "description": "Endpoint base URL. None -> factory picks an auth_kind-\nappropriate default. Operators can pin a specific value\nto point at a staging shard, a localhost mock, etc. A managed\n`oauth://codex` credential is accepted only on\n`https://chatgpt.com` with `auth_kind = \"chatgpt-oauth\"`; a\nstaging shard, mirror, or mock needs a static `env://` or\n`file://` credential.",
               "type": [
                 "string",
                 "null"
@@ -1593,7 +1593,7 @@
             },
             "base_url": {
               "default": "https://generativelanguage.googleapis.com/v1beta",
-              "description": "Endpoint base URL. Default (api-key mode):\n`https://generativelanguage.googleapis.com/v1beta`. In\n`cloud-code` mode the effective default is the daily Cloud Code\nhost `https://daily-cloudcode-pa.googleapis.com`; set this only to\nreach the production host `https://cloudcode-pa.googleapis.com`,\nan enterprise mirror, or a test/staging host. One value carries\nthe whole cloud-code lane -- generateContent, loadCodeAssist, and\nonboardUser all go to it -- and it is forwarded to the provider\nonly when it differs from the api-key default.",
+              "description": "Endpoint base URL. Default (api-key mode):\n`https://generativelanguage.googleapis.com/v1beta`. In\n`cloud-code` mode the effective default is the daily Cloud Code\nhost `https://daily-cloudcode-pa.googleapis.com`; set this only to\nreach the production host `https://cloudcode-pa.googleapis.com`.\nOne value carries the whole cloud-code lane -- generateContent,\nloadCodeAssist, and onboardUser all go to it -- and it is\nforwarded to the provider only when it differs from the api-key\ndefault. The managed `oauth://antigravity` credential is accepted\nonly on the production or daily Cloud Code host over https, and\n`cloud-code` mode accepts no static credential, so an enterprise\nmirror or a test/staging host is not reachable on this lane; an\n`api-key` entry with a static `env://` or `file://` key may point\nat any host.",
               "type": "string"
             },
             "cache_capability": {

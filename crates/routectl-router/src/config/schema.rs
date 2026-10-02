@@ -1676,7 +1676,11 @@ pub enum ProviderEntry {
         account_id_ref: Option<String>,
         /// Endpoint base URL. None -> factory picks an auth_kind-
         /// appropriate default. Operators can pin a specific value
-        /// to point at a staging shard, a localhost mock, etc.
+        /// to point at a staging shard, a localhost mock, etc. A managed
+        /// `oauth://codex` credential is accepted only on
+        /// `https://chatgpt.com` with `auth_kind = "chatgpt-oauth"`; a
+        /// staging shard, mirror, or mock needs a static `env://` or
+        /// `file://` credential.
         #[serde(default)]
         base_url: Option<String>,
         /// Which auth surface to dispatch on. Default
@@ -1808,11 +1812,16 @@ pub enum ProviderEntry {
         /// `https://generativelanguage.googleapis.com/v1beta`. In
         /// `cloud-code` mode the effective default is the daily Cloud Code
         /// host `https://daily-cloudcode-pa.googleapis.com`; set this only to
-        /// reach the production host `https://cloudcode-pa.googleapis.com`,
-        /// an enterprise mirror, or a test/staging host. One value carries
-        /// the whole cloud-code lane -- generateContent, loadCodeAssist, and
-        /// onboardUser all go to it -- and it is forwarded to the provider
-        /// only when it differs from the api-key default.
+        /// reach the production host `https://cloudcode-pa.googleapis.com`.
+        /// One value carries the whole cloud-code lane -- generateContent,
+        /// loadCodeAssist, and onboardUser all go to it -- and it is
+        /// forwarded to the provider only when it differs from the api-key
+        /// default. The managed `oauth://antigravity` credential is accepted
+        /// only on the production or daily Cloud Code host over https, and
+        /// `cloud-code` mode accepts no static credential, so an enterprise
+        /// mirror or a test/staging host is not reachable on this lane; an
+        /// `api-key` entry with a static `env://` or `file://` key may point
+        /// at any host.
         #[serde(default = "default_gemini_base")]
         base_url: String,
         /// Provider-level header extras.
