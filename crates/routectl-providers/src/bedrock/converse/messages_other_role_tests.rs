@@ -19,7 +19,6 @@ fn other_role_turn(tag: &str, text: &str) -> Message {
 fn run_translate(messages: &[Message]) -> (Result<Vec<ConverseMessage>>, Vec<CapturedEvent>) {
     let mut tally = CitationsDropTally::new(TEST_ID);
     let mut reasoning = ReasoningSkipTally::new(TEST_ID);
-    let mut cc_tally = ToolResultCacheControlDropTally::new(TEST_ID);
     let mut content_drops = ContentDropTally::default();
     let mut out = None;
     let events = capture_events(|| {
@@ -28,7 +27,6 @@ fn run_translate(messages: &[Message]) -> (Result<Vec<ConverseMessage>>, Vec<Cap
             messages,
             &mut tally,
             &mut reasoning,
-            &mut cc_tally,
             &mut content_drops,
         ));
     });

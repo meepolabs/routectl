@@ -198,7 +198,15 @@ impl CacheBreakpointSource for crate::ChatRequest {
             }
         }
 
-        // Then messages: each typed `ContentPart` may carry a marker.
+        // Then messages: each typed `ContentPart` may carry a marker,
+        // including the parts of a `Role::Tool` turn. Converse enforces the
+        // same 4-cap on `cachePoint` blocks, so charging every part is
+        // correct there as long as that egress never emits MORE cachePoints
+        // than this walk counts: it emits at most one per charged part, a
+        // tool turn's markers collapse into one sibling after its
+        // `toolResult`, and a dropped block emits none. Markers nested
+        // inside a raw `ToolResult.content` JSON value are not walked here,
+        // so no egress may carry them as a breakpoint either.
         for m in &*self.messages {
             if let crate::MessageContent::Parts(parts) = &m.content {
                 for p in parts {

@@ -1170,8 +1170,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
   messages: `build_messages` per-role dispatch, the three document paths
   (`translate_document`, `document_to_tool_result`, the raw
-  Anthropic-shape array element), image/tool_result carriers. Four
-  per-request drop tallies flush unconditionally from `build_messages` (so the
+  Anthropic-shape array element), image/tool_result carriers; a tool-role
+  turn's part markers collapse into one sibling `cachePoint` after its
+  `toolResult`. Three per-request drop tallies flush unconditionally from
+  `build_messages` (so the
   Err arm counts too); `ReasoningSkipTally::flush` also owns this lane's single
   request-volume denominator
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse

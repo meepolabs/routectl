@@ -383,7 +383,7 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
 const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("bedrock/converse/extras.rs", "insert_operator_extras", 1),
     ("bedrock/converse/extras.rs", "insert_provider_extras", 1),
-    ("bedrock/converse/messages.rs", "flush", 1),
+    ("bedrock/converse/messages.rs", "flush", 3),
     ("bedrock/converse/messages.rs", "translate_document", 2),
     ("bedrock/converse/messages.rs", "translate_image_source", 2),
     ("bedrock/converse/messages.rs", "translate_image_url", 1),
@@ -516,13 +516,6 @@ const EXPECTED_UNDECLARED_LOSS_MARKERS: &[(&str, &str, &str, &str)] = &[
         "emit_reasoning_blocks_converse",
         "reasoning_foreign_format_unsupported",
         "same reasoning skip tally, third flag on the same per-request emitter",
-    ),
-    (
-        "bedrock/converse/messages.rs",
-        "drop_nested_tool_result_cache_control",
-        "tool_result_cache_control",
-        "a one-line arm that only records on the cache-control tally; the tally's emitter owns \
-         both the WARN and the counter",
     ),
     (
         "gemini/request.rs",
