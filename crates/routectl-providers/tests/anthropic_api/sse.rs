@@ -165,11 +165,14 @@ fn sse_tool_use_delta_emits_tool_calls() {
         }
     }
 
-    // Tool delta chunk (chunks[0] is the opening role chunk).
-    let tool_chunk = &chunks[1];
-    let tool_calls = tool_chunk.choices[0].delta.tool_calls.as_ref().unwrap();
-    assert_eq!(tool_calls[0]["function"]["name"], "search");
-    assert_eq!(tool_calls[0]["function"]["arguments"], "{\"q\":\"rust\"}");
+    assert_eq!(
+        assemble_tool_calls(&chunks),
+        vec![(
+            "toolu_01".to_string(),
+            "search".to_string(),
+            "{\"q\":\"rust\"}".to_string()
+        )]
+    );
 
     // Finish reason chunk
     let finish = chunks.last().unwrap();
@@ -317,4 +320,134 @@ fn sse_unknown_events_return_none() {
         .parse_event(pid, r#"{"type":"message_stop"}"#)
         .unwrap();
     assert!(result.is_none());
+}
+
+/// Assemble the canonical tool calls a chunk stream describes the way
+/// every ingress does: group fragments by `index`, keep the last
+/// non-empty id and name, concatenate the argument fragments.
+fn assemble_tool_calls(chunks: &[routectl_core::ChatChunk]) -> Vec<(String, String, String)> {
+    let mut calls: std::collections::BTreeMap<u64, (String, String, String)> =
+        std::collections::BTreeMap::new();
+    for tc in chunks
+        .iter()
+        .flat_map(|c| c.choices.iter())
+        .filter_map(|choice| choice.delta.tool_calls.as_ref())
+        .flatten()
+    {
+        let index = tc["index"].as_u64().expect("tool call carries an index");
+        let entry = calls.entry(index).or_default();
+        if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
+            entry.0 = id.to_string();
+        }
+        if let Some(name) = tc["function"]["name"].as_str().filter(|s| !s.is_empty()) {
+            entry.1 = name.to_string();
+        }
+        if let Some(args) = tc["function"]["arguments"].as_str() {
+            entry.2.push_str(args);
+        }
+    }
+    calls.into_values().collect()
+}
+
+fn parse_all(
+    state: &mut routectl_providers::anthropic_api::sse::SseState,
+    events: &[&str],
+) -> Vec<routectl_core::ChatChunk> {
+    events
+        .iter()
+        .filter_map(|event| state.parse_event("test", event).expect("event parses"))
+        .collect()
+}
+
+/// A tool_use block that opens and closes with no `input_json_delta`
+/// (a zero-argument call relayed by an upstream that omits the empty
+/// delta) still yields its tool call, with empty arguments.
+#[test]
+fn sse_tool_use_without_input_delta_yields_one_call_with_empty_arguments() {
+    use routectl_providers::anthropic_api::sse::SseState;
+
+    // Arrange
+    let mut state = SseState::default();
+    let events = [
+        r#"{"type":"message_start","message":{"id":"msg_zero","model":"claude-opus-4-8","usage":{"input_tokens":20,"output_tokens":0}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_zero","name":"list_agents","input":{}}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}"#,
+    ];
+
+    // Act
+    let chunks = parse_all(&mut state, &events);
+
+    // Assert
+    assert_eq!(
+        assemble_tool_calls(&chunks),
+        vec![(
+            "toolu_zero".to_string(),
+            "list_agents".to_string(),
+            String::new()
+        )]
+    );
+}
+
+/// Input deltas that follow the block opener append to the same call:
+/// one call whose arguments are the exact concatenation of the
+/// fragments, never a second call and never a stray prefix.
+#[test]
+fn sse_tool_use_with_fragmented_input_yields_one_call_with_concatenated_arguments() {
+    use routectl_providers::anthropic_api::sse::SseState;
+
+    // Arrange
+    let mut state = SseState::default();
+    let events = [
+        r#"{"type":"message_start","message":{"id":"msg_frag","model":"claude-opus-4-8","usage":{"input_tokens":20,"output_tokens":0}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_frag","name":"search","input":{}}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":":1}"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+    ];
+
+    // Act
+    let chunks = parse_all(&mut state, &events);
+
+    // Assert
+    assert_eq!(
+        assemble_tool_calls(&chunks),
+        vec![(
+            "toolu_frag".to_string(),
+            "search".to_string(),
+            r#"{"a":1}"#.to_string()
+        )]
+    );
+}
+
+/// The cloak reverse map applies to a zero-argument call too: the call
+/// emitted at block open already carries the client's original name.
+#[test]
+fn sse_zero_argument_tool_use_carries_reversed_name() {
+    use routectl_providers::anthropic_api::sse::SseState;
+
+    // Arrange
+    let mut state = SseState::default();
+    state
+        .tool_reverse
+        .insert("mcp__list_agents".to_string(), "list_agents".to_string());
+    let events = [
+        r#"{"type":"message_start","message":{"id":"msg_rev","model":"claude-opus-4-8","usage":{"input_tokens":20,"output_tokens":0}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_rev","name":"mcp__list_agents","input":{}}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+    ];
+
+    // Act
+    let chunks = parse_all(&mut state, &events);
+
+    // Assert
+    assert_eq!(
+        assemble_tool_calls(&chunks),
+        vec![(
+            "toolu_rev".to_string(),
+            "list_agents".to_string(),
+            String::new()
+        )]
+    );
 }

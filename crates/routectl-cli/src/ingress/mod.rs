@@ -716,3 +716,7 @@ pub trait IngressAdapter: Send + Sync {
 #[cfg(test)]
 #[path = "opening_usage_render_tests.rs"]
 mod opening_usage_render_tests;
+
+#[cfg(test)]
+#[path = "tool_use_two_hop_tests.rs"]
+mod tool_use_two_hop_tests;

@@ -373,6 +373,11 @@ impl SseState {
                             name,
                             call_index: ci,
                         });
+                        // Emit the call at block open: an upstream may close
+                        // a zero-argument tool_use with no input_json_delta
+                        // at all, and the call must not depend on one.
+                        // Empty, not "{}": later fragments append to it.
+                        return Ok(Some(self.make_tool_delta_chunk(String::new())));
                     }
                     SseContentBlockStart::RedactedThinking { data } => {
                         // No per-token deltas follow a redacted_thinking
