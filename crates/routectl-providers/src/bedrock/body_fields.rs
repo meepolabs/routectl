@@ -36,6 +36,11 @@
 //!   Converse those keys live at the AWS top level instead and never
 //!   appear in the bag. The filter surface differs per
 //!   `FilterContext`.
+//!
+//! Independently of the allowlist, `drop_unrepresentable_body_fields`
+//! removes the keys Bedrock rejects on every account (`mcp_servers`) as the
+//! last mutation of each carrier's egress body, so pass-through mode
+//! forwards everything except those.
 
 use serde_json::{Map, Value};
 
@@ -105,6 +110,39 @@ pub(super) fn filter_bedrock_body_fields(
         bag.remove(&key);
     }
 }
+
+/// Body fields Bedrock rejects on both carriers whatever the account's
+/// schema: InvokeModel and Converse `additionalModelRequestFields` both
+/// answer `mcp_servers` with a generic 400 that names no field, so no
+/// allowlist entry can make it representable. Its entries can also carry a
+/// connector credential issued for a remote MCP server, never for AWS.
+const BEDROCK_UNREPRESENTABLE_BODY_FIELDS: &[&str] = &["mcp_servers"];
+
+/// Remove every [`BEDROCK_UNREPRESENTABLE_BODY_FIELDS`] key from `bag`,
+/// regardless of `[bedrock] allowed_body_fields` and of which writer put it
+/// there. Callers run this as the LAST mutation of the egress body so no
+/// later writer can reintroduce a key. Logs the key name only: a value may
+/// hold a credential.
+pub(super) fn drop_unrepresentable_body_fields(
+    provider_id: &str,
+    bag: &mut Map<String, Value>,
+    surface: FilterContext,
+) {
+    for &key in BEDROCK_UNREPRESENTABLE_BODY_FIELDS {
+        if bag.remove(key).is_some() {
+            tracing::debug!(
+                provider = %provider_id,
+                field = key,
+                surface = surface.as_str(),
+                "bedrock cannot represent body field; dropped before egress"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "body_fields_unrepresentable_tests.rs"]
+mod unrepresentable_tests;
 
 #[cfg(test)]
 mod tests {

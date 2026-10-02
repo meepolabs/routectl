@@ -142,10 +142,6 @@ pub(super) fn build_additional_fields(
         .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(&mut bag))
         .warn(&cfg.id);
 
-    if bag.is_empty() {
-        return None;
-    }
-
     // Feature-triggered structured-outputs beta union. When the bag carries
     // `output_config.format`, AWS forwards it to Anthropic which gates it
     // behind `STRUCTURED_OUTPUTS_BETA`; a Converse request whose `[bedrock]
@@ -157,9 +153,21 @@ pub(super) fn build_additional_fields(
     // entirely). Reuses the same helper as the Bedrock-Invoke lane: the bag's
     // `output_config.format` + `anthropic_beta` shape matches the Anthropic
     // body it reads. Feature-triggered and idempotent -- no format means no
-    // flag, an already-present flag is neither duplicated nor reordered.
+    // flag, an already-present flag is neither duplicated nor reordered. An
+    // empty bag carries no format, so the union never fills one.
     let mut bag = Value::Object(bag);
     crate::anthropic_api::request::apply_structured_outputs_beta_to_body(&mut bag);
+
+    if let Some(obj) = bag.as_object_mut() {
+        super::super::body_fields::drop_unrepresentable_body_fields(
+            &cfg.id,
+            obj,
+            super::super::body_fields::FilterContext::ConverseAdditionalFields,
+        );
+        if obj.is_empty() {
+            return None;
+        }
+    }
     Some(bag)
 }
 

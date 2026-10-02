@@ -354,11 +354,11 @@ fn first_party_lanes_really_forward_ingress_metadata() {
 const CREDENTIAL_TELL: &str = "sweep-mcp-tok-4r";
 
 /// Lanes that forward a swept `mcp_servers` entry from either ingress today.
-/// The Gemini source boundary does not cover them; they are recorded here so
-/// the sweep states its reach instead of implying it. Content-pinned in both
-/// directions by
+/// The Gemini source boundary and the Bedrock unrepresentable-field drop do
+/// not cover them; they are recorded here so the sweep states its reach
+/// instead of implying it. Content-pinned in both directions by
 /// [`every_lane_outside_the_credential_boundary_really_forwards_it_today`].
-const CREDENTIAL_FORWARDING_LANES: &[&str] = &["anthropic", "bedrock-converse", "bedrock-invoke"];
+const CREDENTIAL_FORWARDING_LANES: &[&str] = &["anthropic"];
 
 const INGRESS_PROVENANCES: &[RequestProvenance] = &[
     RequestProvenance::AnthropicIngress,

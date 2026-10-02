@@ -731,6 +731,10 @@ allowed_body_fields = ["messages", "anthropic_version", "max_tokens",
   assembled body is malformed. On Converse those keys live at the AWS top
   level and never appear in the filtered
   `additionalModelRequestFields` bag.
+- **`mcp_servers` never ships.** Bedrock rejects it on both carriers, so
+  it is dropped from every Bedrock egress body whatever this list says
+  (empty, or even listing it) and whichever source supplied it; the drop
+  is logged at `debug` by field name only.
 
 Two coherence checks run at startup, reload, and `config check`, both only
 when the list is non-empty:
