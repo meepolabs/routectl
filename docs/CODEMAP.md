@@ -1159,7 +1159,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   orchestrator (camelCase + `additionalModelRequestFields`); owns
   `ClientFingerprintStripTally`, the per-request tally the lane's three
   fingerprint-strip sites share, flushed on both the Ok and the Err arm so one
-  request counts exactly one policy action however many sites stripped
+  request counts exactly one policy action however many sites stripped; runs
+  `anthropic_api::output_schema::inject_additional_properties_false` once on
+  the FINAL `additionalModelRequestFields` bag (after every filter), its bound
+  errors failing the request before any send
 - `src/bedrock/converse/system.rs` -- canonical `system` -> Converse
   `[{text}|{cachePoint}]` block array; two of the lane's fingerprint-strip
   sites (the top-level system field and the Role::System message lift) record

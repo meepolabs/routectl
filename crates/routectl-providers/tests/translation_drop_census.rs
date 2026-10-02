@@ -156,6 +156,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "bedrock/converse/messages_tool_result_cache_control_tests.rs",
     "bedrock/converse/request_tests.rs",
     "bedrock/converse/request_tests_field_translation.rs",
+    "bedrock/converse/request_tests_output_schema.rs",
     "bedrock/converse/request_tests_parity.rs",
     "bedrock/converse/response_history_compat_tests.rs",
     "gemini/cloud_project_id_tests.rs",

@@ -119,7 +119,7 @@ const ITEMS: &str = "items";
 /// routine repair of a mandatory field and carry no operator decision, so
 /// counting them would produce a metric nobody acts on.
 #[derive(Default)]
-pub(super) struct AdditionalPropertiesRepair {
+pub struct AdditionalPropertiesRepair {
     /// Schema paths carrying a present, non-`false` `additionalProperties`.
     /// Bounded at collection time: a schema can hold arbitrarily many, and
     /// an uncapped sample turns one WARN into an unbounded log record.
@@ -141,7 +141,7 @@ impl AdditionalPropertiesRepair {
 
     /// Emit the aggregated WARN, if any non-`false` value was forwarded.
     /// Called exactly once per request by the assembly that ran the repair.
-    pub(super) fn warn(&self, provider: &str) {
+    pub fn warn(&self, provider: &str) {
         if self.forwarded.is_empty() {
             return;
         }
@@ -180,7 +180,7 @@ impl AdditionalPropertiesRepair {
 ///
 /// A body with no `output_config.format.schema`, or a non-object schema, is
 /// left alone and reports nothing.
-pub(super) fn inject_additional_properties_false(
+pub fn inject_additional_properties_false(
     provider: &str,
     body: &mut Map<String, Value>,
 ) -> Result<AdditionalPropertiesRepair> {

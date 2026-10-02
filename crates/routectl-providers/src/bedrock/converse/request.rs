@@ -117,8 +117,9 @@ fn translate_tallied(
     // source of truth for bag composition while toolChoice translation
     // stays in tools.rs.
     let tool_choice = tool_config.as_ref().and_then(|tc| tc.tool_choice.as_ref());
-    let additional_model_request_fields =
+    let mut additional_model_request_fields =
         build_additional_fields(cfg, req, tool_choice, fingerprint);
+    repair_output_schema(cfg, additional_model_request_fields.as_mut())?;
 
     // The sampling clamp must key off whether thinking ACTUALLY survives on
     // the wire, not the provisional build_thinking result: build_additional_fields
@@ -148,6 +149,20 @@ fn translate_tallied(
                 .collect(),
         ),
     })
+}
+
+/// Supply the `additionalProperties: false` Anthropic requires on every object
+/// of `output_config.format.schema`; Bedrock forwards the bag verbatim and does
+/// not fill it in. Runs on the FINAL bag so it sees every `output_config`
+/// writer and never touches one the body-field allowlist already removed. A
+/// schema past the walk's bounds fails the request here, before any send.
+fn repair_output_schema(cfg: &BedrockConfig, bag: Option<&mut Value>) -> Result<()> {
+    let Some(bag) = bag.and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    crate::anthropic_api::output_schema::inject_additional_properties_false(&cfg.id, bag)?
+        .warn(&cfg.id);
+    Ok(())
 }
 
 fn build_inference_config(
@@ -217,3 +232,7 @@ mod tests_field_translation;
 #[cfg(test)]
 #[path = "request_tests_parity.rs"]
 mod tests_parity;
+
+#[cfg(test)]
+#[path = "request_tests_output_schema.rs"]
+mod tests_output_schema;
