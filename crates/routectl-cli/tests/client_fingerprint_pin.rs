@@ -75,12 +75,12 @@ const MIN_FIXTURES: usize = 7;
 
 // -- OBSERVED SETS, exact-pinned ------------------------------------------
 //
-// Derived from the committed corpus on 2026-09-30 and pinned as EXACTLY
+// Derived from the committed corpus on 2026-10-02 and pinned as EXACTLY
 // these values. Extend a list here in the same commit that lands a capture
 // carrying a new value, having read what changed.
 
 /// Stable Claude CLI versions the corpus self-reports.
-const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.285"];
+const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.287"];
 
 /// `User-Agent` surface tokens the corpus self-reports -- the trailing word
 /// in the `(external, <surface>)` parenthetical. Its own dimension because
@@ -93,6 +93,9 @@ const OBSERVED_STAINLESS_PACKAGE_VERSIONS: &[&str] = &["0.112.1", "0.127.0"];
 
 /// `x-stainless-runtime-version` values the corpus self-reports.
 const OBSERVED_STAINLESS_RUNTIME_VERSIONS: &[&str] = &["v26.3.0"];
+
+/// `x-stainless-timeout` values the corpus self-reports, in seconds.
+const OBSERVED_STAINLESS_TIMEOUTS: &[&str] = &["1800", "600"];
 
 /// The UNION of every `anthropic-beta` flag the corpus sends. A union, not
 /// a per-fixture set: the corpus carries several distinct beta sets (see
@@ -116,7 +119,7 @@ const OBSERVED_DISTINCT_BETA_SETS: usize = 3;
 
 /// Reviewed rows the register must hold. Pinned so DELETING a row is a red
 /// build rather than a quietly narrower claim.
-const EXPECTED_REGISTER_ROWS: usize = 5;
+const EXPECTED_REGISTER_ROWS: usize = 6;
 
 /// How an observed dimension relates to the value routectl mints. The
 /// vocabulary is closed: a new relation is a design conversation, not a
@@ -166,6 +169,7 @@ enum Dimension {
     UaSurface,
     StainlessPackageVersion,
     StainlessRuntimeVersion,
+    StainlessTimeout,
     ClientBetas,
 }
 
@@ -176,6 +180,7 @@ impl Dimension {
         Self::UaSurface,
         Self::StainlessPackageVersion,
         Self::StainlessRuntimeVersion,
+        Self::StainlessTimeout,
         Self::ClientBetas,
     ];
 
@@ -185,6 +190,7 @@ impl Dimension {
             Self::UaSurface => "user-agent surface token",
             Self::StainlessPackageVersion => "x-stainless-package-version",
             Self::StainlessRuntimeVersion => "x-stainless-runtime-version",
+            Self::StainlessTimeout => "x-stainless-timeout",
             Self::ClientBetas => "anthropic-beta (client union vs routectl floor)",
         }
     }
@@ -226,7 +232,7 @@ fn register() -> Vec<RegisterRow> {
             ],
             relation: Relation::ObservedSpansMinted,
             reason: "the corpus spans an older SDK-driven 2.1.246 release and the current \
-                     2.1.285 release routectl now mints; a capture of a newer release moves \
+                     2.1.287 release routectl now mints; a capture of a newer release moves \
                      this row, and the ingress drift warning reports any live gap",
         },
         RegisterRow {
@@ -234,7 +240,7 @@ fn register() -> Vec<RegisterRow> {
             observed: sorted(OBSERVED_UA_SURFACES),
             minted: vec![routectl_core::identity::anthropic::MINTED_UA_SURFACE.to_string()],
             relation: Relation::ObservedSpansMinted,
-            reason: "the 2.1.246 captures report the SDK-driven surface while the 2.1.285 \
+            reason: "the 2.1.246 captures report the SDK-driven surface while the 2.1.287 \
                      capture reports the plain CLI surface routectl mints -- the surface is \
                      a fingerprint difference independent of the version, so pinning the \
                      version alone would leave it unreviewed",
@@ -245,7 +251,7 @@ fn register() -> Vec<RegisterRow> {
             minted: minted_header("x-stainless-package-version"),
             relation: Relation::ObservedSpansMinted,
             reason: "the SDK version travels with the client release: the 2.1.246 captures \
-                     carry the older SDK and the 2.1.285 capture carries the one routectl \
+                     carry the older SDK and the 2.1.287 capture carries the one routectl \
                      now mints, on the same cadence as the CLI version above",
         },
         RegisterRow {
@@ -255,6 +261,16 @@ fn register() -> Vec<RegisterRow> {
             relation: Relation::Matches,
             reason: "both corpus releases bundle the same runtime, which routectl mints as \
                      a fixed literal without reading the host runtime",
+        },
+        RegisterRow {
+            dimension: Dimension::StainlessTimeout,
+            observed: sorted(OBSERVED_STAINLESS_TIMEOUTS),
+            minted: minted_header("x-stainless-timeout"),
+            relation: Relation::ObservedSpansMinted,
+            reason: "the header carries the client's configured request timeout, not its \
+                     release: the 2.1.246 captures ran at the client default of 600 seconds, \
+                     and the 2.1.287 capture ran under an 1800-second API_TIMEOUT_MS, the \
+                     value routectl mints",
         },
         RegisterRow {
             dimension: Dimension::ClientBetas,
@@ -282,6 +298,7 @@ struct Observation {
     ua_surface: String,
     stainless_package_version: String,
     stainless_runtime_version: String,
+    stainless_timeout: String,
     betas: BTreeSet<String>,
     has_session_id: bool,
 }
@@ -363,6 +380,7 @@ fn observe(fixture: &Fixture) -> Result<Observation, String> {
         ua_surface,
         stainless_package_version: required_header(headers, &name, "x-stainless-package-version")?,
         stainless_runtime_version: required_header(headers, &name, "x-stainless-runtime-version")?,
+        stainless_timeout: required_header(headers, &name, "x-stainless-timeout")?,
         betas,
         has_session_id: headers
             .iter()
@@ -440,6 +458,10 @@ fn derived_dimensions(observed: &[Observation]) -> BTreeMap<Dimension, Vec<Strin
         into_sorted(observed.iter().map(|o| o.stainless_runtime_version.clone())),
     );
     derived.insert(
+        Dimension::StainlessTimeout,
+        into_sorted(observed.iter().map(|o| o.stainless_timeout.clone())),
+    );
+    derived.insert(
         Dimension::ClientBetas,
         into_sorted(observed.iter().flat_map(|o| o.betas.clone())),
     );
@@ -501,6 +523,11 @@ fn the_corpus_self_reports_exactly_the_pinned_stainless_versions() {
         Dimension::StainlessRuntimeVersion.label(),
         &derived[&Dimension::StainlessRuntimeVersion],
         OBSERVED_STAINLESS_RUNTIME_VERSIONS,
+    );
+    assert_exact_set(
+        Dimension::StainlessTimeout.label(),
+        &derived[&Dimension::StainlessTimeout],
+        OBSERVED_STAINLESS_TIMEOUTS,
     );
 }
 
@@ -775,6 +802,7 @@ fn good_headers() -> Vec<(&'static str, &'static str)> {
         ("x-claude-code-session-id", "sess-1"),
         ("x-stainless-package-version", "0.112.1"),
         ("x-stainless-runtime-version", "v26.3.0"),
+        ("x-stainless-timeout", "600"),
         (
             "anthropic-beta",
             "claude-code-20250219,interleaved-thinking-2025-05-14",
@@ -827,6 +855,7 @@ fn the_positive_control_fixture_observes_on_every_dimension() {
     assert_eq!(observed[0].ua_surface, "sdk-cli");
     assert_eq!(observed[0].stainless_package_version, "0.112.1");
     assert_eq!(observed[0].stainless_runtime_version, "v26.3.0");
+    assert_eq!(observed[0].stainless_timeout, "600");
     assert_eq!(observed[0].betas.len(), 2);
     assert!(observed[0].has_session_id);
 }
@@ -837,6 +866,7 @@ fn an_absent_required_header_is_refused_by_name() {
         "user-agent",
         "x-stainless-package-version",
         "x-stainless-runtime-version",
+        "x-stainless-timeout",
         "anthropic-beta",
     ] {
         let (_tmp, outcome) = observe_planted(&headers_without(name));

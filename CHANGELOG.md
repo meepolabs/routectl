@@ -380,7 +380,7 @@ list with more narrative.
 
 ### Changed
 
-- **The OAuth cloak surface now identifies as Claude Code 2.1.285** (Stainless SDK 0.127.0, runtime v26.3.0, request timeout header 1800); operators pinning `user_agent` are unaffected.
+- **The OAuth cloak surface now identifies as Claude Code 2.1.287** (Stainless SDK 0.127.0, runtime v26.3.0, request timeout header 1800); operators pinning `user_agent` are unaffected.
 
 - **A malformed tool call / tool result transcript is now rejected locally with a 400.** Before any target is selected, every chat completions, messages, responses, and `count_tokens` request is checked so that each tool call is answered by exactly one tool result, matched on its id across every carrier (OpenAI `tool_calls` / `role: "tool"`, Anthropic `tool_use` / `tool_result` blocks, Responses `function_call` / `function_call_output`). A result with no matching call, a result before its call, a result for a call from an earlier closed turn, a duplicate call id or result, and a call left unanswered by the next non-result turn or by the end of the request are all refused. Previously these reached the upstream unrepaired, and most providers rejected them with an error the caller could not trace. The response is the ingress dialect's `invalid_request_error` / `validation_error` envelope, naming the defect class and the offending message index but never a tool id or tool content. The request makes no upstream call, is not retried or failed over, and does not count against provider health. Nothing is synthesized or dropped: a correctly paired transcript is forwarded exactly as before. Parallel calls may be answered in any order; an empty tool id keeps its existing normalization and is not matched.
 

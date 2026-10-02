@@ -4454,7 +4454,7 @@ valid.
    kind          = "anthropic-api"
    api_key_ref   = "oauth://anthropic"
    auth_kind     = "oauth-bearer"
-   user_agent    = "claude-cli/2.1.285 (external, cli)"
+   user_agent    = "claude-cli/2.1.287 (external, cli)"
    forward_client_headers = [
        "x-claude-code-session-id",
        "x-claude-code-agent-id",
@@ -4775,7 +4775,7 @@ the family, its members suffixed) with the models routed through it.
 
 Drop this into `header_extras` on the OAuth-bearer Anthropic entry (the
 one `routectl login anthropic` wrote) so the upstream sees the same SDK
-fingerprint claude-code 2.1.285 sends from the bundled
+fingerprint claude-code 2.1.287 sends from the bundled
 `@anthropic-ai/sdk`. Written as a sub-table -- a multi-line inline table
 (`{ ... }` spanning lines) is not legal TOML:
 

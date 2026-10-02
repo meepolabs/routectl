@@ -21,7 +21,7 @@
 //! advances so the wire fingerprint stays current.
 
 /// Claude Code CLI version routectl mimics in the default User-Agent.
-const CLAUDE_CLI_VERSION: &str = "2.1.285";
+const CLAUDE_CLI_VERSION: &str = "2.1.287";
 
 /// Prefix Claude Code's own `User-Agent` carries ahead of its version:
 /// `claude-cli/<version> (external, <surface>)`. The single source of
@@ -429,8 +429,8 @@ mod tests {
             Some("2.1.246")
         );
         assert_eq!(
-            parse_claude_cli_version("claude-cli/2.1.285 (external, cli)"),
-            Some("2.1.285")
+            parse_claude_cli_version("claude-cli/2.1.287 (external, cli)"),
+            Some("2.1.287")
         );
         // The whole value may be just the prefix + version, with no
         // trailing platform detail.
@@ -624,7 +624,7 @@ mod tests {
             Some("sdk-cli")
         );
         assert_eq!(
-            parse_claude_cli_ua_surface("claude-cli/2.1.285 (external, cli)"),
+            parse_claude_cli_ua_surface("claude-cli/2.1.287 (external, cli)"),
             Some("cli")
         );
         assert_eq!(
@@ -641,7 +641,7 @@ mod tests {
     fn the_surface_parser_accepts_the_real_shapes_and_tolerates_spacing() {
         for (ua, expected) in [
             ("claude-cli/2.1.246 (external, sdk-cli)", "sdk-cli"),
-            ("claude-cli/2.1.285 (external, cli)", "cli"),
+            ("claude-cli/2.1.287 (external, cli)", "cli"),
             // No space after the comma, and extra padding around it: both
             // are the same self-report.
             ("claude-cli/2.1.246 (external,sdk-cli)", "sdk-cli"),
