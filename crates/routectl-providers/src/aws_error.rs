@@ -406,7 +406,7 @@ pub fn classify_client_error_message(status: u16, body: &str) -> String {
     match classify_bedrock_error(status, body) {
         BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
         BedrockErrorClass::Other => routectl_core::sanitize_upstream_body_with_cap(
-            body,
+            &routectl_core::redact_error_body_text(body),
             routectl_core::MAX_LOG_BODY_EXCERPT,
         ),
     }

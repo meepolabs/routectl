@@ -190,6 +190,34 @@ tag is caller-supplied, so the knob applies to it. The split:
 To read the literal of a tag routectl does not recognize yet (the
 forward-compat discovery case), run with the knob off.
 
+Independent of the knob, every traced body has credential-named keys
+redacted at any depth: a key whose lowercased name contains
+`authorization`, `authentication`, `api_key`, `api-key`, `apikey`,
+`private_key`, `private-key`, `privatekey`, `secret`, `password`, or
+`bearer`, or ends in `token` but not `tokens` (e.g.
+`mcp_servers[].authorization_token`, `accessToken`), renders as
+`<redacted len=N>`. Inside a `headers` object the header-trace rule
+also applies, so `Cookie` and `*-Key` headers are redacted too.
+Token-count fields such as `max_tokens`, usage `input_tokens`, and
+`promptTokenCount` stay visible.
+
+Upstream error bodies get the same redaction (credential keys always,
+prompt content when the knob is on) on three log paths: the DEBUG
+`upstream error body` line, each provider's WARN `body_excerpt` field,
+and the bounded `body_excerpt` of an upstream error rendered into
+retry / fallback WARN lines. All three share one test for a JSON body:
+after leading whitespace and an optional byte-order mark it opens with
+`{` or `[`. Such a body of at most 64 KiB that parses is redacted before
+any excerpt is cut, so a long body cannot leave a raw prefix. One that
+is over 64 KiB or does not parse renders on all three paths as
+`(json body, N bytes, not excerpted)`, N being its byte length. Any
+other body is logged as sanitized text.
+
+Not covered: a credential inside a URL query string (e.g. in
+`server_url`), a credential inside the value of a non-credential key
+(e.g. a `"Bearer ..."` string under an arbitrary name), and non-JSON
+upstream error bodies.
+
 Two known residual leaks even with the knob ON:
 - `<redacted len=N>` reveals the char count of the original content.
   Short fixed-vocabulary prompts (e.g. "yes" / "no" tool confirms)

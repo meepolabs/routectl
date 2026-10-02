@@ -1494,6 +1494,79 @@ mod helper_tests {
     }
 
     #[test]
+    fn non_envelope_json_error_credential_never_reaches_warn_or_debug() {
+        // A validation 422 with no top-level `error` echoes the request's
+        // credential inside the first 512 chars and runs past the excerpt
+        // cap, so a truncate-then-redact order would leave a raw prefix.
+        let body = format!(
+            r#"{{"detail":[{{"input":{{"api_key":"SENTINEL-COMPAT-KEY"}},"msg":"{}"}}]}}"#,
+            "m".repeat(700)
+        );
+        let mut err = None;
+        let events = routectl_testkit::capture_events(|| {
+            err = Some(super::map_openai_compat_upstream_error(
+                "prov",
+                422,
+                &HeaderMap::new(),
+                &body,
+                false,
+            ));
+        });
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-compat")
+            })
+            .expect("upstream-failure WARN must fire");
+        let excerpt = warn.field("body_excerpt").expect("body_excerpt field");
+        let debug = format!("{:?}", err.expect("error built"));
+
+        assert!(!excerpt.contains("SENTINEL-COMPAT-KEY"), "{excerpt}");
+        assert!(excerpt.contains("<redacted len="), "{excerpt}");
+        assert!(!debug.contains("SENTINEL-COMPAT-KEY"), "{debug}");
+    }
+
+    #[test]
+    fn oversized_non_envelope_json_error_warns_marker_not_prefix() {
+        // Over the shared error-body ceiling the body is never parsed, so it
+        // cannot be redacted; the WARN excerpt must be the fixed marker
+        // rather than a raw prefix carrying the echoed credential.
+        let body = format!(
+            r#"{{"detail":[{{"input":{{"api_key":"SENTINEL-OVERSIZE-KEY"}},"msg":"{}"}}]}}"#,
+            "m".repeat(70 * 1024)
+        );
+        assert!(body.len() > routectl_core::MAX_ERROR_BODY_BYTES);
+        let mut err = None;
+        let events = routectl_testkit::capture_events(|| {
+            err = Some(super::map_openai_compat_upstream_error(
+                "prov",
+                422,
+                &HeaderMap::new(),
+                &body,
+                false,
+            ));
+        });
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-compat")
+            })
+            .expect("upstream-failure WARN must fire");
+        let excerpt = warn.field("body_excerpt").expect("body_excerpt field");
+        let debug = format!("{:?}", err.expect("error built"));
+
+        let marker = format!("(json body, {} bytes, not excerpted)", body.len());
+        assert_eq!(excerpt, marker);
+        assert!(
+            debug.contains(&format!(
+                "body_excerpt: \"{marker}\", body_len: {}",
+                marker.len()
+            )),
+            "{debug}"
+        );
+    }
+
+    #[test]
     fn excerpt_sanitizes_crlf_and_ansi() {
         let body = "boom\r\n[fake INFO] injected\x1b[31mred";
         let sanitized = routectl_core::extract_upstream_message(body);

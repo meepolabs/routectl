@@ -212,7 +212,8 @@ license.
 - `src/safe_token.rs` -- `is_safe_token`: shape gate for one token lifted
   from an upstream error message
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions),
-  prompt redaction, structural-summary extractor, `[log]`-block override
+  prompt and credential-key redaction (`redact_error_body_text` for upstream
+  error bodies), structural-summary extractor, `[log]`-block override
   seeding
 - `src/test_utils.rs` -- single source of truth for the cross-crate
   contract-test fixture builders (`scenarios::*`, `user_msg`,

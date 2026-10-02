@@ -235,7 +235,32 @@ impl fmt::Debug for Error {
 /// when the body ran longer. Char-count truncation is fine here (the
 /// excerpt is bounded to `MAX_LOG_BODY_EXCERPT` chars, a few KB at most);
 /// the accompanying `body_len` field carries the true byte length.
+///
+/// An upstream error envelope can echo request fields back, so a body that
+/// opens like JSON is redacted the way a traced body is (credential-named
+/// keys and reasoning artifacts always, prompt content under
+/// `ROUTECTL_LOG_REDACT_PROMPTS`) before excerpting. One that cannot be
+/// redacted -- over [`crate::MAX_ERROR_BODY_BYTES`] (never parsed) or not
+/// parseable (e.g. truncated) -- renders as a fixed marker, never a raw
+/// prefix. Any other body is excerpted as-is. The shape test and marker
+/// are shared with [`crate::redact_error_body_text`].
 fn body_debug_excerpt(body: &str) -> String {
+    body_debug_excerpt_with_flag(body, crate::log_safe::redact_enabled())
+}
+
+fn body_debug_excerpt_with_flag(body: &str, redact_prompts: bool) -> String {
+    use crate::log_safe::ErrorJsonBody;
+    match crate::log_safe::read_error_json_body(body) {
+        ErrorJsonBody::NotJson => excerpt_chars(body),
+        ErrorJsonBody::Unreadable(marker) => marker,
+        ErrorJsonBody::Parsed(mut value) => {
+            crate::log_safe::redact_in_place(&mut value, redact_prompts);
+            excerpt_chars(&value.to_string())
+        }
+    }
+}
+
+fn excerpt_chars(body: &str) -> String {
     if body.chars().count() <= crate::MAX_LOG_BODY_EXCERPT {
         return body.to_string();
     }
@@ -439,6 +464,91 @@ mod tests {
         assert!(rendered.contains("body_len: 12"));
         assert!(rendered.contains("upstream_type: Some(\"rate_limit_exceeded\")"));
         assert!(rendered.contains("retry_after: Some("));
+    }
+
+    /// A JSON error envelope echoing a request credential renders without
+    /// it, while the upstream's message and type stay readable.
+    #[test]
+    fn upstream_debug_redacts_credential_echoed_in_json_body() {
+        let body = r#"{"error":{"type":"invalid_request_error","message":"bad mcp server","authorization_token":"SENTINEL-ECHOED-TOKEN"}}"#;
+        let err = Error::upstream("prov", 400, body);
+
+        let rendered = format!("{err:?}");
+
+        assert!(!rendered.contains("SENTINEL-ECHOED-TOKEN"), "{rendered}");
+        assert!(rendered.contains("invalid_request_error"), "{rendered}");
+        assert!(rendered.contains("bad mcp server"), "{rendered}");
+        assert!(rendered.contains("<redacted len=21>"), "{rendered}");
+    }
+
+    /// An oversized JSON body is still capped after redaction, on a char
+    /// boundary.
+    #[test]
+    fn upstream_debug_caps_redacted_json_body() {
+        let message = "\u{e9}".repeat(crate::MAX_LOG_BODY_EXCERPT * 4);
+        let body = format!(r#"{{"error":{{"message":"{message}","api_key":"SENTINEL-KEY"}}}}"#);
+        let err = Error::upstream("prov", 400, body);
+
+        let rendered = format!("{err:?}");
+
+        assert!(!rendered.contains("SENTINEL-KEY"), "{rendered}");
+        assert!(rendered.contains("... [truncated]"), "{rendered}");
+        assert!(rendered.chars().count() < crate::MAX_LOG_BODY_EXCERPT * 2);
+    }
+
+    /// A JSON body over the shared error-body ceiling is never parsed and
+    /// never excerpted raw: a fixed marker stands in.
+    #[test]
+    fn upstream_debug_oversized_json_body_renders_marker() {
+        let filler = "x".repeat(crate::MAX_ERROR_BODY_BYTES);
+        let body = format!(r#"{{"api_key":"SENTINEL-KEY","pad":"{filler}"}}"#);
+        let err = Error::upstream("prov", 400, body.clone());
+
+        let rendered = format!("{err:?}");
+
+        let marker = format!("(json body, {} bytes, not excerpted)", body.len());
+        assert!(rendered.contains(&marker), "{rendered}");
+        assert!(!rendered.contains("SENTINEL-KEY"), "{rendered}");
+        assert!(!rendered.contains("xxxx"), "{rendered}");
+    }
+
+    /// A JSON-looking body that no longer parses (a producer truncated it)
+    /// renders the marker rather than a raw prefix.
+    #[test]
+    fn upstream_debug_unparseable_json_body_renders_marker() {
+        let body = r#"{"detail":[{"input":{"api_key":"SENTINEL-KEY"... [truncated]"#;
+        let err = Error::upstream("prov", 422, body);
+
+        let rendered = format!("{err:?}");
+
+        assert!(rendered.contains("(json body, "), "{rendered}");
+        assert!(!rendered.contains("SENTINEL-KEY"), "{rendered}");
+    }
+
+    /// With prompt redaction on, prompt text an error echoes is redacted in
+    /// the excerpt too; with it off the text stays readable.
+    #[test]
+    fn upstream_debug_excerpt_honors_prompt_redaction_flag() {
+        let body = r#"{"error":{"message":"bad turn"},"echo":{"content":"SENTINEL-PROMPT"}}"#;
+
+        let on = super::body_debug_excerpt_with_flag(body, true);
+        let off = super::body_debug_excerpt_with_flag(body, false);
+
+        assert!(!on.contains("SENTINEL-PROMPT"), "{on}");
+        assert!(on.contains("bad turn"), "{on}");
+        assert!(off.contains("SENTINEL-PROMPT"), "{off}");
+    }
+
+    /// A BOM-prefixed JSON body is still parsed and redacted.
+    #[test]
+    fn upstream_debug_redacts_bom_prefixed_json_body() {
+        let body = "\u{feff}{\"error\":{\"message\":\"bad\"},\"api_key\":\"SENTINEL-BOM\"}";
+        let err = Error::upstream("prov", 400, body);
+
+        let rendered = format!("{err:?}");
+
+        assert!(!rendered.contains("SENTINEL-BOM"), "{rendered}");
+        assert!(rendered.contains("bad"), "{rendered}");
     }
 
     /// A control char in a local refusal's detail cannot reach a `?e` sink.

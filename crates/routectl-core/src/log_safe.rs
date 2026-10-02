@@ -170,7 +170,79 @@ pub fn extract_upstream_message(body_text: &str) -> String {
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
         .and_then(serde_json::Value::as_str)
-        .map_or_else(|| sanitize_upstream_body(body_text), str::to_string)
+        .map_or_else(
+            || sanitize_upstream_body(&redact_error_body_text(body_text)),
+            str::to_string,
+        )
+}
+
+/// Redact an upstream error body before it is excerpted, stored, or
+/// logged. An error body can echo request fields back (a validation error
+/// quoting its `input`, say), so a body that parses as JSON within
+/// [`crate::MAX_ERROR_BODY_BYTES`] goes through the same redaction as a
+/// traced body ([`redact_prompts_in`]: credential-named keys and
+/// reasoning artifacts always, prompt content when
+/// `ROUTECTL_LOG_REDACT_PROMPTS` is on) and is re-serialized. Call it
+/// BEFORE truncating: a truncated prefix no longer parses.
+///
+/// A body that opens like JSON but cannot be redacted (over the cap, or
+/// not parseable) becomes a fixed `(json body, N bytes, not excerpted)`
+/// marker, so no raw prefix of it can be cut into a log field. The marker
+/// opens with none of `<`, `{`, `[`, so no later sanitizer or excerpt
+/// re-labels it. The
+/// classifiers that re-parse a stored body lose nothing: they refuse a
+/// body over the same cap and cannot read an unparseable one either.
+///
+/// Returned unchanged (borrowed): a body that does not open like JSON, and
+/// a JSON body the redaction left untouched, so clean bodies keep their
+/// original formatting.
+pub fn redact_error_body_text(body: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match read_error_json_body(body) {
+        ErrorJsonBody::NotJson => Cow::Borrowed(body),
+        ErrorJsonBody::Unreadable(marker) => Cow::Owned(marker),
+        ErrorJsonBody::Parsed(parsed) => {
+            let mut redacted = parsed.clone();
+            redact_in_place(&mut redacted, redact_enabled());
+            if redacted == parsed {
+                Cow::Borrowed(body)
+            } else {
+                Cow::Owned(redacted.to_string())
+            }
+        }
+    }
+}
+
+/// How an upstream error body reads for log redaction.
+pub(crate) enum ErrorJsonBody {
+    /// Does not open like JSON; excerpt it as text.
+    NotJson,
+    /// Opens like JSON and parsed within the cap.
+    Parsed(serde_json::Value),
+    /// Opens like JSON but is over the cap or unparseable; carries the
+    /// fixed marker to render in its place.
+    Unreadable(String),
+}
+
+/// Classify an upstream error body for log redaction. "Opens like JSON"
+/// means `{` or `[` after leading whitespace and an optional UTF-8 BOM,
+/// which is also stripped before parsing. A body over
+/// [`crate::MAX_ERROR_BODY_BYTES`] is never parsed.
+pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
+    let unbommed = body.trim_start().trim_start_matches('\u{feff}');
+    let trimmed = unbommed.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return ErrorJsonBody::NotJson;
+    }
+    let parsed = (body.len() <= crate::MAX_ERROR_BODY_BYTES)
+        .then(|| serde_json::from_str::<serde_json::Value>(trimmed).ok())
+        .flatten();
+    match parsed {
+        Some(value) => ErrorJsonBody::Parsed(value),
+        None => {
+            ErrorJsonBody::Unreadable(format!("(json body, {} bytes, not excerpted)", body.len()))
+        }
+    }
 }
 
 /// True when `body_text` parses as JSON carrying a top-level `error`
@@ -384,7 +456,7 @@ fn parse_bool_env(v: &str) -> bool {
 /// matching `info`-level startup line in (module-private)
 /// `log_redaction_status`, fired by [`init_log_overrides`], so
 /// operators can confirm the resolved value once at server boot.
-fn redact_enabled() -> bool {
+pub(crate) fn redact_enabled() -> bool {
     static REDACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *REDACT.get_or_init(|| {
         std::env::var("ROUTECTL_LOG_REDACT_PROMPTS")
@@ -482,14 +554,16 @@ fn log_header_trace_status() {
 /// redacted, independent of `ROUTECTL_LOG_REDACT_PROMPTS` -- they are
 /// opaque cryptographic blobs and upstream item ids that must never
 /// reach a trace body at any level (a security constraint, not a
-/// prompt-privacy preference).
+/// prompt-privacy preference). The value of any credential-named key
+/// (`authorization_token`, `authorization`, `api_key`, `*_token`, ...)
+/// is likewise ALWAYS redacted at any depth.
 ///
 /// When `ROUTECTL_LOG_REDACT_PROMPTS=1` is additionally set, the full
 /// walk also replaces known user-content fields with `<redacted len=N>`
 /// placeholders while preserving structural fields (model, tools,
 /// sampling params, finish_reason, usage). When the env var is unset,
-/// only the reasoning-artifact redaction runs and every other field is
-/// returned unchanged.
+/// only the reasoning-artifact and credential-key redaction runs and
+/// every other field is returned unchanged.
 ///
 /// Best-effort redaction: covers the wire shapes used by OpenAI Chat
 /// Completions, Anthropic Messages, and OpenAI Responses (request
@@ -505,28 +579,36 @@ pub fn redact_prompts_in(body: &serde_json::Value) -> serde_json::Value {
 /// tests can pin both branches deterministically.
 ///
 /// `enabled` governs ONLY prompt/content-text redaction. Reasoning
-/// artifacts are redacted in both branches: the full [`redact_value`]
-/// walk covers them (it calls [`redact_reasoning_artifact_fields`] per
-/// object), and the flag-off branch runs the reasoning-only
-/// [`redact_reasoning_artifacts`] walk.
+/// artifacts and credential-named keys are redacted in both branches:
+/// the full [`redact_value`] walk covers them (it calls
+/// [`redact_reasoning_artifact_fields`] and [`redact_credential_fields`]
+/// per object), and the flag-off branch runs the same two helpers via
+/// [`redact_reasoning_artifacts`]. Only the returned clone is modified.
 pub(crate) fn redact_prompts_with_flag(
     body: &serde_json::Value,
     enabled: bool,
 ) -> serde_json::Value {
     let mut v = body.clone();
-    if enabled {
-        redact_value(&mut v);
-    } else {
-        redact_reasoning_artifacts(&mut v);
-    }
+    redact_in_place(&mut v, enabled);
     v
 }
 
-/// Walk `v` and redact reasoning-replay carry artifacts wherever they
-/// appear, leaving every other field untouched. Applied UNCONDITIONALLY
-/// by the body-trace helpers when the prompt-redaction knob is off, so a
-/// reasoning blob, its `data` / `signature` sibling, or an upstream
-/// reasoning item id can never reach a trace body at any level.
+/// In-place form of [`redact_prompts_with_flag`], for callers that already
+/// own a parsed value they will not reuse unredacted.
+pub(crate) fn redact_in_place(v: &mut serde_json::Value, enabled: bool) {
+    if enabled {
+        redact_value(v);
+    } else {
+        redact_reasoning_artifacts(v);
+    }
+}
+
+/// Walk `v` and redact reasoning-replay carry artifacts and
+/// credential-named keys wherever they appear, leaving every other field
+/// untouched. Applied UNCONDITIONALLY by the body-trace helpers when the
+/// prompt-redaction knob is off, so a reasoning blob, its `data` /
+/// `signature` sibling, an upstream reasoning item id, or a connector
+/// credential can never reach a trace body at any level.
 fn redact_reasoning_artifacts(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Array(arr) => {
@@ -536,12 +618,80 @@ fn redact_reasoning_artifacts(v: &mut serde_json::Value) {
         }
         serde_json::Value::Object(map) => {
             redact_reasoning_artifact_fields(map);
+            redact_credential_fields(map);
             for (_, child) in map.iter_mut() {
                 redact_reasoning_artifacts(child);
             }
         }
         _ => {}
     }
+}
+
+/// True if a lowercased body key names a credential-valued field. Fails
+/// closed: any key containing `authorization`, `authentication`,
+/// `api_key`, `api-key`, `apikey`, `private_key`, `private-key`,
+/// `privatekey`, `secret`, `password`, or
+/// `bearer`, or ending in `token` but not `tokens` (`access_token`,
+/// `refresh-token`, `accessToken` lowercased), matches.
+///
+/// Deliberately narrower than [`header_name_looks_credential`]: a bare
+/// `token` substring would swallow `max_tokens`, `budget_tokens`,
+/// `max_output_tokens`, usage counts like `input_tokens`, and Gemini's
+/// `promptTokenCount`, which are the structural fields a body trace exists
+/// to show.
+fn body_key_looks_credential(lc: &str) -> bool {
+    lc.contains("authorization")
+        || lc.contains("authentication")
+        || lc.contains("api_key")
+        || lc.contains("api-key")
+        || lc.contains("apikey")
+        || lc.contains("private_key")
+        || lc.contains("private-key")
+        || lc.contains("privatekey")
+        || lc.contains("secret")
+        || lc.contains("password")
+        || lc.contains("bearer")
+        || (lc.ends_with("token") && !lc.ends_with("tokens"))
+}
+
+/// Redact the value of every credential-named key on a single object map,
+/// in place, independent of `ROUTECTL_LOG_REDACT_PROMPTS`. Covers
+/// connector shapes such as `mcp_servers[].authorization_token` and a
+/// Responses MCP tool's `authorization`. A `headers` object holds HTTP
+/// header names, so its children are judged by the header-trace rule
+/// ([`is_redact_header`]) instead, which also catches `Cookie` and
+/// `*-Key` names the body-key rule would pass.
+///
+/// Key-based only: a credential embedded in a URL query string (for
+/// example inside `server_url`) or inside the value of a non-credential
+/// key is not detected.
+fn redact_credential_fields(map: &mut serde_json::Map<String, serde_json::Value>) {
+    for (key, entry) in map.iter_mut() {
+        let lc = key.to_ascii_lowercase();
+        if body_key_looks_credential(&lc) {
+            redact_credential_value(entry);
+        } else if lc == "headers"
+            && let serde_json::Value::Object(headers) = entry
+        {
+            for (name, value) in headers.iter_mut() {
+                if is_redact_header(name) {
+                    redact_credential_value(value);
+                }
+            }
+        }
+    }
+}
+
+/// A string credential becomes `<redacted len=N>`; any other value
+/// collapses whole, so a structured credential never exposes its inner
+/// fields.
+fn redact_credential_value(entry: &mut serde_json::Value) {
+    *entry = match entry {
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(format!("<redacted len={}>", s.chars().count()))
+        }
+        _ => redacted_object(),
+    };
 }
 
 /// Redact the reasoning-replay carry artifacts on a single object map,
@@ -598,6 +748,7 @@ fn redact_value(v: &mut serde_json::Value) {
             // path, so full redaction is a superset of the unconditional
             // reasoning redaction. Rules live in one shared helper.
             redact_reasoning_artifact_fields(map);
+            redact_credential_fields(map);
             // Whole-object replacements first.
             //
             // Anthropic-shape tool_use parts carry user-supplied tool
@@ -1870,12 +2021,17 @@ pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status:
 /// redaction entry point the trace helpers use -- it ALWAYS strips those
 /// artifacts regardless of the prompt-redaction knob -- before serializing
 /// and capping. serde_json escapes control chars, so the forged-log-line
-/// concern is handled by serialization on this path. Non-JSON bodies fall
+/// concern is handled by serialization on this path. The JSON test is the
+/// shared [`read_error_json_body`] one, so a JSON-looking body that cannot
+/// be redacted renders its fixed marker here too. Non-JSON bodies fall
 /// back to the HTML-collapse + control-char-strip path.
 fn clean_upstream_error_body(body: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(parsed) => truncate_json_for_log(&redact_prompts_in(&parsed), MAX_DEBUG_BODY_BYTES),
-        Err(_) => {
+    match read_error_json_body(body) {
+        ErrorJsonBody::Parsed(parsed) => {
+            truncate_json_for_log(&redact_prompts_in(&parsed), MAX_DEBUG_BODY_BYTES)
+        }
+        ErrorJsonBody::Unreadable(marker) => marker,
+        ErrorJsonBody::NotJson => {
             let collapsed = sanitize_upstream_body_with_cap(body, MAX_DEBUG_BODY_BYTES);
             // Strip control chars (CR, LF, ANSI escapes) that
             // sanitize_upstream_body_with_cap does NOT remove -- it only
@@ -1959,3 +2115,7 @@ pub fn init_log_overrides(
 #[cfg(test)]
 #[path = "log_safe_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "log_safe_credential_tests.rs"]
+mod credential_tests;

@@ -611,7 +611,7 @@ fn build_error_excerpt(body_text: &str) -> String {
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
         .map_or_else(
-            || sanitize_upstream_body(body_text),
+            || sanitize_upstream_body(&routectl_core::redact_error_body_text(body_text)),
             std::string::ToString::to_string,
         )
 }

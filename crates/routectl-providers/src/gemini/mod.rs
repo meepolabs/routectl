@@ -1024,6 +1024,36 @@ mod e2e_tests {
         }
     }
 
+    /// A non-envelope JSON error echoing a credential, longer than the
+    /// excerpt cap, never surfaces it at WARN or in the error's Debug.
+    #[test]
+    fn map_error_non_envelope_json_credential_is_redacted() {
+        let body = format!(
+            r#"{{"detail":{{"input":{{"authorization_token":"SENTINEL-GEMINI-TOKEN"}}}},"msg":"{}"}}"#,
+            "m".repeat(700)
+        );
+        let headers = reqwest::header::HeaderMap::new();
+        let mut err = None;
+        let events = routectl_testkit::capture_events(|| {
+            err = Some(map_gemini_upstream_error(
+                "gemini:test",
+                422,
+                &headers,
+                &body,
+                false,
+            ));
+        });
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN && e.field("context") == Some("gemini"))
+            .expect("upstream-failure WARN must fire");
+        let excerpt = warn.field("body_excerpt").expect("body_excerpt field");
+        let debug = format!("{:?}", err.expect("error built"));
+
+        assert!(!excerpt.contains("SENTINEL-GEMINI-TOKEN"), "{excerpt}");
+        assert!(!debug.contains("SENTINEL-GEMINI-TOKEN"), "{debug}");
+    }
+
     /// On a cap trip the mapper lifts the classifier from the (parseable)
     /// prefix but the client body AND the upstream-failure WARN excerpt both
     /// collapse to the fixed cap message -- the truncated prefix never appears

@@ -213,7 +213,9 @@ pub fn default_tier(load_resp: &Value) -> String {
 /// is only ever set in the Authorization header, never echoed by these
 /// endpoints in a body).
 fn clean_error_body(body: &str) -> String {
-    sanitize_for_log(&sanitize_upstream_body(body))
+    sanitize_for_log(&sanitize_upstream_body(
+        &routectl_core::redact_error_body_text(body),
+    ))
 }
 
 /// Lift the Google Cloud Code error classifier from an onboarding error

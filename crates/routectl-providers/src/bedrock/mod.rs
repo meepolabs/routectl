@@ -1007,7 +1007,7 @@ fn map_error_message(status: u16, prefix: &str, hit_cap: bool) -> String {
         && crate::aws_error::is_carryable_flat_envelope(prefix, routectl_core::MAX_ERROR_BODY_BYTES)
     {
         routectl_core::sanitize_upstream_body_with_byte_cap(
-            prefix,
+            &routectl_core::redact_error_body_text(prefix),
             routectl_core::MAX_ERROR_BODY_BYTES,
         )
     } else {
@@ -1074,7 +1074,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: 
         crate::http_client::body_cap_exceeded_message()
     } else {
         let excerpt = routectl_core::sanitize_upstream_body_with_cap(
-            body,
+            &routectl_core::redact_error_body_text(body),
             routectl_core::MAX_LOG_BODY_EXCERPT,
         );
         sanitize_for_log(&excerpt)
@@ -1723,6 +1723,30 @@ mod tests {
         assert_eq!(w.field("content_length"), Some("Some(1234)"));
         assert_eq!(w.field("body_truncated"), Some("true"));
         assert_eq!(w.field("path"), Some("complete_success_body"));
+    }
+
+    /// A non-envelope JSON error echoing a credential, longer than the
+    /// excerpt cap, never surfaces it in the WARN excerpt or the client
+    /// error's Debug.
+    #[test]
+    fn error_body_credential_redacted_in_warn_and_client_error() {
+        let body = format!(
+            r#"{{"detail":{{"input":{{"secretKey":"SENTINEL-BEDROCK-KEY"}}}},"msg":"{}"}}"#,
+            "m".repeat(700)
+        );
+        let events = routectl_testkit::capture_events(|| {
+            log_bedrock_upstream_error("prov", 400, &body, false);
+        });
+        let err = build_client_error("prov", 400, None, &body, false, None, None);
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("upstream-failure WARN must fire");
+        let excerpt = warn.field("body_excerpt").expect("body_excerpt field");
+        let debug = format!("{err:?}");
+
+        assert!(!excerpt.contains("SENTINEL-BEDROCK-KEY"), "{excerpt}");
+        assert!(!debug.contains("SENTINEL-BEDROCK-KEY"), "{debug}");
     }
 
     /// On a cap trip the upstream-failure WARN (`log_bedrock_upstream_error`)
