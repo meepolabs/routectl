@@ -268,9 +268,10 @@ fn register() -> Vec<RegisterRow> {
             minted: minted_header("x-stainless-timeout"),
             relation: Relation::ObservedSpansMinted,
             reason: "the header carries the client's configured request timeout, not its \
-                     release: the 2.1.246 captures ran at the client default of 600 seconds, \
-                     and the 2.1.287 capture ran under an 1800-second API_TIMEOUT_MS, the \
-                     value routectl mints",
+                     release: the client default is 600 seconds, which the 2.1.246 captures \
+                     carry and routectl mints, while the 2.1.287 capture carries 1800 because \
+                     it ran under a configured API_TIMEOUT_MS -- an operator override, not \
+                     the default, so routectl does not mint it",
         },
         RegisterRow {
             dimension: Dimension::ClientBetas,

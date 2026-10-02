@@ -531,7 +531,7 @@ fn oauth_bearer_emits_stainless_defaults_with_empty_extras() {
     );
     assert_eq!(
         outbound_header_value(&provider, &req, "x-stainless-timeout").as_deref(),
-        Some("1800"),
+        Some("600"),
         "x-stainless-timeout default must appear on oauth-bearer",
     );
     // Dynamic entries present and mapped (not raw Rust cfg strings).

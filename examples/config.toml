@@ -346,7 +346,7 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 # "x-stainless-package-version"               = "0.127.0"
 # "x-stainless-runtime"                       = "node"
 # "x-stainless-runtime-version"               = "v26.3.0"
-# "x-stainless-timeout"                       = "1800"
+# "x-stainless-timeout"                       = "600"
 # "x-stainless-retry-count"                   = "0"
 
 # Models pointing at the POOL, so a later second seat serves them too.

@@ -191,8 +191,10 @@ const STAINLESS_PACKAGE_VERSION: &str = "0.127.0";
 /// Stainless JS runtime version stamped in `x-stainless-runtime-version`.
 const STAINLESS_RUNTIME_VERSION: &str = "v26.3.0";
 
-/// Request timeout in seconds stamped in `x-stainless-timeout`.
-const STAINLESS_TIMEOUT_SECS: &str = "1800";
+/// Request timeout in seconds stamped in `x-stainless-timeout`: the stock
+/// client default. A client run with `API_TIMEOUT_MS` set reports that value
+/// instead, so a capture taken under an override is not evidence for this.
+const STAINLESS_TIMEOUT_SECS: &str = "600";
 
 /// The inbound header whose PRESENCE identifies a genuine Claude Code client.
 ///
@@ -930,6 +932,15 @@ mod tests {
         );
         assert_eq!(lookup("x-stainless-timeout"), Some(STAINLESS_TIMEOUT_SECS));
         assert_eq!(lookup("x-stainless-retry-count"), Some("0"));
+    }
+
+    #[test]
+    fn defaults_mint_stock_client_request_timeout() {
+        let headers = default_claude_code_identity_headers();
+        let timeout = headers
+            .iter()
+            .find_map(|(n, v)| (*n == "x-stainless-timeout").then_some(*v));
+        assert_eq!(timeout, Some("600"));
     }
 
     #[test]
