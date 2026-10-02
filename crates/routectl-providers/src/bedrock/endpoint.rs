@@ -49,29 +49,19 @@ pub(crate) fn is_bedrock_runtime_endpoint(region: &str, endpoint: &reqwest::Url)
 /// Build the InvokeModel URL for `model_id` in `region`. `streaming`
 /// switches between `/invoke` and `/invoke-with-response-stream`.
 pub fn invoke_url(region: &str, model_id: &str, streaming: bool) -> Result<String> {
-    let suffix = if streaming {
-        "invoke-with-response-stream"
-    } else {
-        "invoke"
-    };
-    let encoded = urlencoded(model_id);
     Ok(format!(
-        "{}/model/{encoded}/{suffix}",
-        bedrock_runtime_url(region)?
+        "{}{}",
+        bedrock_runtime_url(region)?,
+        invoke_path(model_id, streaming)
     ))
 }
 
 /// Build the Converse URL for `model_id` in `region`.
 pub fn converse_url(region: &str, model_id: &str, streaming: bool) -> Result<String> {
-    let suffix = if streaming {
-        "converse-stream"
-    } else {
-        "converse"
-    };
-    let encoded = urlencoded(model_id);
     Ok(format!(
-        "{}/model/{encoded}/{suffix}",
-        bedrock_runtime_url(region)?
+        "{}{}",
+        bedrock_runtime_url(region)?,
+        converse_path(model_id, streaming)
     ))
 }
 
@@ -80,11 +70,36 @@ pub fn converse_url(region: &str, model_id: &str, streaming: bool) -> Result<Str
 /// Wire reference:
 /// <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
 pub fn count_tokens_url(region: &str, model_id: &str) -> Result<String> {
-    let encoded = urlencoded(model_id);
     Ok(format!(
-        "{}/model/{encoded}/count-tokens",
-        bedrock_runtime_url(region)?
+        "{}{}",
+        bedrock_runtime_url(region)?,
+        count_tokens_path(model_id)
     ))
+}
+
+/// The InvokeModel path (no origin) for `model_id`.
+pub(crate) fn invoke_path(model_id: &str, streaming: bool) -> String {
+    let suffix = if streaming {
+        "invoke-with-response-stream"
+    } else {
+        "invoke"
+    };
+    format!("/model/{}/{suffix}", urlencoded(model_id))
+}
+
+/// The Converse path (no origin) for `model_id`.
+pub(crate) fn converse_path(model_id: &str, streaming: bool) -> String {
+    let suffix = if streaming {
+        "converse-stream"
+    } else {
+        "converse"
+    };
+    format!("/model/{}/{suffix}", urlencoded(model_id))
+}
+
+/// The CountTokens path (no origin) for `model_id`.
+pub(crate) fn count_tokens_path(model_id: &str) -> String {
+    format!("/model/{}/count-tokens", urlencoded(model_id))
 }
 
 /// Bedrock model ids may contain bracket-suffixed inference profile

@@ -703,11 +703,30 @@ Independently of this list, routectl always withholds three client-sent
 flags that AWS rejects on every request (`advanced-tool-use-2025-11-20`,
 `advisor-tool-2026-03-01`, `prompt-caching-scope-2026-01-05`) -- in
 pass-through mode too, and even when `allowed_betas` names them. The
-provider floor,
-[`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor),
-is the only way to send one of them. Each withheld flag is logged at
+operator floor is the only way to send one of them: the provider's
+[`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor)
+plus any flag pinned through provider or model
+`header_extras["anthropic-beta"]`. Each withheld flag is logged at
 `debug` on both `api_shape = "invoke"` and `"converse"`; Converse also
 counts the withhold once per request in the translation-drop metrics.
+
+For a client flag outside that set, routectl repairs AWS's rejection
+itself, on both carriers and for streaming, non-streaming, and
+token-count calls. Bedrock answers with a `ValidationException` naming
+the flags (``Unexpected value(s) `<flag>`, ... for the `anthropic-beta`
+header. ...``, which Converse prefixes with `The model returned the
+following errors: `). When it does, routectl retries the same request
+once without exactly those flags. If an inference retry succeeds, the
+provider remembers the flags in memory (the 32 most recent per provider,
+cleared on restart) and withholds them from later requests without
+another 400. A token-count call retries the same way but is never
+remembered, so it cannot remove a flag from inference. The repair
+applies only to the exact message and only when every named flag came
+from the client; it never removes or withholds an operator-floor flag
+(including a `header_extras`-pinned one). It
+skips a rejection that names no flags (`invalid beta flag`) and never
+retries a second time. The retry is logged at `warn`, with flag names
+only.
 
 ### `[bedrock] allowed_body_fields` -- global Bedrock body-field allowlist
 

@@ -6,7 +6,7 @@
 
 mod common;
 
-use routectl_core::{ChatRequest, Provider};
+use routectl_core::{ChatRequest, Provider, RoutectlInternal};
 use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth::ResolvedCreds,
 };
@@ -234,4 +234,40 @@ fn converse_request_without_rejected_betas_counts_no_withhold() {
         ])
     );
     assert_eq!(converse_drop_count(), before);
+}
+
+/// The router unions a `header_extras["anthropic-beta"]`-pinned flag into
+/// `anthropic_beta` and records it in `routectl_internal.operator_betas`;
+/// that pin is operator-asserted, so the built-in withhold must spare it.
+fn assert_header_extras_pinned_rejected_beta_is_forwarded(api_shape: BedrockApiShape) {
+    // Arrange
+    let pinned = REJECTED_BETAS[1];
+    let provider = provider(api_shape, Vec::new(), Vec::new());
+    let mut internal = RoutectlInternal::default();
+    internal.operator_betas = vec![pinned.into()];
+    let req = ChatRequest {
+        routectl_internal: internal,
+        ..request_with_client_betas()
+    };
+
+    // Act
+    let body = provider.normalize_request(&req).expect("bedrock normalize");
+
+    // Assert
+    let betas = match api_shape {
+        BedrockApiShape::Invoke => &body["anthropic_beta"],
+        _ => &body["additionalModelRequestFields"]["anthropic_beta"],
+    };
+    assert_eq!(betas, &json!([ACCEPTED_CLIENT_BETA, pinned]));
+}
+
+#[test]
+fn invoke_header_extras_pinned_rejected_beta_is_forwarded() {
+    assert_header_extras_pinned_rejected_beta_is_forwarded(BedrockApiShape::Invoke);
+}
+
+#[test]
+#[serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+fn converse_header_extras_pinned_rejected_beta_is_forwarded() {
+    assert_header_extras_pinned_rejected_beta_is_forwarded(BedrockApiShape::Converse);
 }

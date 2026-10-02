@@ -924,7 +924,7 @@ pub fn routectl_providers::bedrock::BedrockProvider::normalize_request(&self, &r
 pub fn routectl_providers::bedrock::BedrockProvider::normalize_response(&self, serde_json::value::Value) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub fn routectl_providers::bedrock::BedrockProvider::probe<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::provider::ProbeOutcome> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_providers::bedrock::BedrockProvider::stream<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl core::marker::Freeze for routectl_providers::bedrock::BedrockProvider
+impl !core::marker::Freeze for routectl_providers::bedrock::BedrockProvider
 impl core::marker::Send for routectl_providers::bedrock::BedrockProvider
 impl core::marker::Sync for routectl_providers::bedrock::BedrockProvider
 impl core::marker::Unpin for routectl_providers::bedrock::BedrockProvider

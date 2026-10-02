@@ -1322,6 +1322,9 @@ pub fn routectl_core::reasoning_format::is_responses_family(core::option::Option
 pub fn routectl_core::reasoning_format::scheme_of(core::option::Option<&str>) -> routectl_core::reasoning_format::ReplayScheme
 pub mod routectl_core::reasoning_ingest
 pub fn routectl_core::reasoning_ingest::normalize_reasoning_detail_payloads(&mut routectl_core::schema::ChatRequest)
+pub mod routectl_core::safe_token
+pub const routectl_core::safe_token::MAX_SAFE_TOKEN_LEN: usize
+pub fn routectl_core::safe_token::is_safe_token(&str) -> bool
 pub mod routectl_core::schema
 pub enum routectl_core::schema::MessageContent
 pub routectl_core::schema::MessageContent::Null
@@ -5853,6 +5856,7 @@ pub const routectl_core::HDR_MSG_OUTGOING: &str
 pub const routectl_core::HDR_MSG_UPSTREAM: &str
 pub const routectl_core::MAX_ERROR_BODY_BYTES: usize
 pub const routectl_core::MAX_LOG_BODY_EXCERPT: usize
+pub const routectl_core::MAX_SAFE_TOKEN_LEN: usize
 pub const routectl_core::MAX_TRACE_BODY_BYTES: usize
 pub const routectl_core::OPENAI_APIKEY: &str
 pub const routectl_core::OPENAI_RESPONSES_V1: &str
@@ -5908,6 +5912,7 @@ pub fn routectl_core::is_json_error_envelope(&str) -> bool
 pub fn routectl_core::is_known_evidence_class(&str) -> bool
 pub fn routectl_core::is_replayable(routectl_core::reasoning_format::ReplayScheme, routectl_core::reasoning_format::ReplayScheme) -> routectl_core::reasoning_format::Replayability
 pub fn routectl_core::is_responses_family(core::option::Option<&str>) -> bool
+pub fn routectl_core::is_safe_token(&str) -> bool
 pub fn routectl_core::minify_json_whitespace(&str) -> core::option::Option<alloc::string::String>
 pub fn routectl_core::mutable_suffix_start(&routectl_core::schema::ChatRequest) -> core::option::Option<usize>
 pub fn routectl_core::normalize_capability_key(&str, &str) -> alloc::string::String

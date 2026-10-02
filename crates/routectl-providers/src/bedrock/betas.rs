@@ -28,7 +28,10 @@
 //! - Operator-supplied flags from `cfg.anthropic_beta`
 //!   (`[providers.X] anthropic_beta`) pass through unconditionally
 //!   because the operator typed them into TOML -- including any flag in
-//!   [`BEDROCK_REJECTED_BETAS`].
+//!   [`BEDROCK_REJECTED_BETAS`]. A flag pinned through provider or model
+//!   `header_extras["anthropic-beta"]` (`routectl_internal.operator_betas`)
+//!   is likewise exempt from the rejected-set withhold, but stays subject to
+//!   a non-empty `allowed_betas` as before.
 //! - When the allowlist is non-empty and a flag is dropped, the drop
 //!   logs at `tracing::debug!` (not WARN) -- claude-code reliably ships
 //!   a handful of unsupported flags per request, WARN would flood
@@ -38,7 +41,9 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::sanitize_for_log;
+use routectl_core::{ChatRequest, sanitize_for_log};
+
+use super::BedrockConfig;
 
 /// Client-lifted betas AWS Bedrock rejects outright: each one alone 400s the
 /// whole request on every Claude model measured, so forwarding any of them
@@ -49,6 +54,19 @@ pub(super) const BEDROCK_REJECTED_BETAS: &[&str] = &[
     "advisor-tool-2026-03-01",
     "prompt-caching-scope-2026-01-05",
 ];
+
+/// The operator-asserted beta floor for `req` on this lane: the provider
+/// `anthropic_beta` config plus every flag pinned through provider or model
+/// `header_extras["anthropic-beta"]`. Never withheld or repaired.
+pub(super) fn operator_floor(cfg: &BedrockConfig, req: &ChatRequest) -> Vec<String> {
+    let mut floor = cfg.anthropic_beta.clone();
+    for flag in &req.routectl_internal.operator_betas {
+        if !floor.contains(flag) {
+            floor.push(flag.clone());
+        }
+    }
+    floor
+}
 
 /// Filter `bag["anthropic_beta"]` in place against the union of
 /// `allowed_betas` and `cfg_betas` (the operator-asserted extension
@@ -66,6 +84,9 @@ pub(super) const BEDROCK_REJECTED_BETAS: &[&str] = &[
 /// [`BEDROCK_REJECTED_BETAS`] is withheld in either mode unless it is in
 /// `cfg_betas`.
 ///
+/// `pinned_betas` (from [`operator_floor`]) also exempts a flag from the
+/// rejected-set withhold, without bypassing the allowlist.
+///
 /// Returns whether any [`BEDROCK_REJECTED_BETAS`] flag was withheld, so the
 /// caller can count the request once on its own lane.
 #[must_use = "the withheld-rejected-beta signal must be counted or deliberately discarded"]
@@ -73,9 +94,10 @@ pub(super) fn filter_bedrock_betas(
     provider_id: &str,
     bag: &mut Map<String, Value>,
     cfg_betas: &[String],
+    pinned_betas: &[String],
     allowed_betas: &[String],
 ) -> bool {
-    let withheld_rejected = withhold_rejected_betas(provider_id, bag, cfg_betas);
+    let withheld_rejected = withhold_rejected_betas(provider_id, bag, pinned_betas);
 
     // Pass-through mode: empty operator allowlist means routectl is
     // not gating betas. The operator is in discovery mode (capturing
@@ -88,17 +110,16 @@ pub(super) fn filter_bedrock_betas(
     withheld_rejected
 }
 
-/// Remove [`BEDROCK_REJECTED_BETAS`] entries not asserted by the operator
-/// floor, leaving every other entry (order, duplicates, non-strings) as it
+/// Remove [`BEDROCK_REJECTED_BETAS`] entries not in `floor_betas`, leaving every other entry (order, duplicates, non-strings) as it
 /// was so pass-through mode stays verbatim apart from this set.
 fn withhold_rejected_betas(
     provider_id: &str,
     bag: &mut Map<String, Value>,
-    cfg_betas: &[String],
+    floor_betas: &[String],
 ) -> bool {
     let is_withheld = |item: &Value| {
         item.as_str().is_some_and(|flag| {
-            BEDROCK_REJECTED_BETAS.contains(&flag) && !cfg_betas.iter().any(|s| s == flag)
+            BEDROCK_REJECTED_BETAS.contains(&flag) && !floor_betas.iter().any(|s| s == flag)
         })
     };
     let Some(arr) = bag.get("anthropic_beta").and_then(Value::as_array) else {

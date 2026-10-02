@@ -209,6 +209,8 @@ license.
   `InMemoryProjectCache` default impl; lives in core so `routectl-providers`
   avoids the `SecretRef`/`SecretStore` surface (the auth-crate
   `OAuthStoreProjectCache` is the persistent adapter)
+- `src/safe_token.rs` -- `is_safe_token`: shape gate for one token lifted
+  from an upstream error message
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions),
   prompt redaction, structural-summary extractor, `[log]`-block override
   seeding
@@ -1137,6 +1139,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   body + Converse `additionalModelRequestFields`), plus the built-in
   `BEDROCK_REJECTED_BETAS` set withheld in both allowlist modes unless the
   provider floor asserts it
+- `src/bedrock/beta_repair.rs` -- `with_beta_repair` / `RejectedBetaMemo`:
+  one strip-and-retry for a 400 naming rejected `anthropic-beta` flags, plus
+  the per-lane in-memory set of confirmed flags
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response
@@ -4465,7 +4470,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `upstream_error_field`, same `MAX_ERROR_BODY_BYTES` cap) and runs the
   message through an anchored-template engine (`extract_bedrock_capability`):
   each `(prefix, suffix)` template extracts one token that must pass
-  `is_safe_param_token`, normalize via `normalize_capability_key`, and hit a
+  `routectl_core::is_safe_token`, normalize via `normalize_capability_key`, and hit a
   CLOSED translation table for a `SelfIdentifying` signal. The arm gates on
   `is_bedrock_validation_exception` (the lifted, namespace-stripped
   `upstream_type == "ValidationException"`) BEFORE the message read: the

@@ -69,6 +69,7 @@ use crate::aws_error::{
 };
 
 pub mod auth;
+pub(crate) mod beta_repair;
 pub(crate) mod betas;
 pub(crate) mod body_fields;
 pub mod converse;
@@ -280,6 +281,10 @@ pub struct BedrockProvider {
     cfg: BedrockConfig,
     resolved: auth::ResolvedCreds,
     client: reqwest::Client,
+    /// `bedrock-runtime` origin derived from the admitted region; every
+    /// request URL is this plus an [`endpoint`] path.
+    runtime_origin: String,
+    rejected_betas: beta_repair::RejectedBetaMemo,
 }
 
 impl BedrockProvider {
@@ -306,7 +311,298 @@ impl BedrockProvider {
             cfg,
             resolved,
             client,
+            runtime_origin: base_url,
+            rejected_betas: beta_repair::RejectedBetaMemo::default(),
         })
+    }
+
+    /// One non-streaming InvokeModel / Converse round trip for `req` as given.
+    async fn complete_once(&self, req: &ChatRequest) -> Result<ChatResponse> {
+        let body = self.normalize_request(req)?;
+
+        // Trace-level outgoing body for triage. Same gating +
+        // sensitivity story as the other two providers -- see
+        // `routectl_core::log_safe::trace_outgoing_body`.
+        routectl_core::trace_outgoing_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
+        routectl_core::trace_structural_summary(
+            "outgoing",
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
+
+        let url = self.inference_url(false);
+
+        let body_str = serde_json::to_vec(&body)
+            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+
+        let request = self
+            .build_signed_request(body_str, req, &url, "application/json")
+            .await?;
+
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
+        if status >= 400 {
+            // Capture the reset hint from response headers BEFORE
+            // `read_error_body` moves `resp`, gated on rate-limit statuses.
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
+            let upstream_request_id =
+                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
+            let (prefix, hit_cap, upstream_type, upstream_code) =
+                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
+            return Err(build_client_error(
+                &self.cfg.id,
+                status,
+                retry_after,
+                &prefix,
+                hit_cap,
+                upstream_type,
+                upstream_code,
+            )
+            .with_upstream_request_id(upstream_request_id));
+        }
+
+        // Dir 3: upstream response headers, read BEFORE the body read
+        // consumes `resp`. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            resp.headers(),
+        );
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "complete_success_body",
+            );
+        }
+        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        // Trace upstream success body pre-normalize. Distinct
+        // provider_kind per shape so operators can grep
+        // `provider_kind=bedrock-invoke` vs `bedrock-converse`.
+        routectl_core::trace_upstream_success_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &raw_body,
+        );
+        let mut chat_resp = self.normalize_response(raw_body)?;
+        chat_resp.routectl_provider = Some(self.cfg.id.clone());
+        Ok(chat_resp)
+    }
+
+    /// One streaming round trip for `req` as given. An upstream error status
+    /// returns `Err` before any stream is built, so a caller sees either a
+    /// rejection or a stream, never bytes followed by a retry.
+    async fn stream_once(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        let body = self.normalize_request(req)?;
+
+        routectl_core::trace_outgoing_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
+        routectl_core::trace_structural_summary(
+            "outgoing",
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
+
+        let url = self.inference_url(true);
+
+        let body_str = serde_json::to_vec(&body)
+            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+
+        let request = self
+            .build_signed_request(body_str, req, &url, "application/vnd.amazon.eventstream")
+            .await?;
+
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
+        if status >= 400 {
+            // Capture the reset hint from response headers BEFORE
+            // `read_error_body` moves `resp`, gated on rate-limit statuses.
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
+            let upstream_request_id =
+                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
+            let (prefix, hit_cap, upstream_type, upstream_code) =
+                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
+            return Err(build_client_error(
+                &self.cfg.id,
+                status,
+                retry_after,
+                &prefix,
+                hit_cap,
+                upstream_type,
+                upstream_code,
+            )
+            .with_upstream_request_id(upstream_request_id));
+        }
+
+        // Dir 3: upstream response headers, read BEFORE `resp` is moved
+        // into the eventstream byte stream below. The stream path had no
+        // dir-3 capture before; this closes the gap so it matches
+        // complete(). Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            resp.headers(),
+        );
+
+        let provider_id = self.cfg.id.clone();
+        let endpoint = resp.url().clone();
+        let stream = eventstream::response_stream(
+            self.cfg.api_shape,
+            provider_id.clone(),
+            &self.cfg.region,
+            &endpoint,
+            resp.bytes_stream(),
+        );
+        Ok(routectl_core::wrap_stream_with_summary(
+            stream,
+            "upstream",
+            self.cfg.api_shape.provider_kind_str(),
+            provider_id,
+        ))
+    }
+
+    /// One CountTokens round trip for `req` as given.
+    async fn count_tokens_once(&self, req: &ChatRequest) -> Result<TokenCount> {
+        let normalized = self.normalize_request(req)?;
+        let body = match self.cfg.api_shape {
+            BedrockApiShape::Invoke => count_tokens::invoke_tokens_body(&self.cfg.id, &normalized)?,
+            BedrockApiShape::Converse => {
+                count_tokens::converse_tokens_body(&self.cfg.id, &normalized)?
+            }
+        };
+
+        routectl_core::trace_outgoing_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
+
+        let url = format!(
+            "{}{}",
+            self.runtime_origin,
+            endpoint::count_tokens_path(&self.cfg.model_id)
+        );
+        let body_str = serde_json::to_vec(&body)
+            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+        let request = self
+            .build_signed_request(body_str, req, &url, "application/json")
+            .await?;
+
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
+        if status >= 400 {
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
+            let upstream_request_id =
+                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
+            let (prefix, hit_cap, upstream_type, upstream_code) =
+                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
+            let client_error = build_client_error(
+                &self.cfg.id,
+                status,
+                retry_after,
+                &prefix,
+                hit_cap,
+                upstream_type,
+                upstream_code,
+            )
+            .with_upstream_request_id(upstream_request_id);
+            return Err(client_error);
+        }
+
+        crate::header_trace::upstream(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            resp.headers(),
+        );
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "count_tokens_success_body",
+            );
+        }
+        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        routectl_core::trace_upstream_success_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &raw_body,
+        );
+        count_tokens::parse_token_count(&self.cfg.id, &raw_body)
+    }
+
+    /// The InvokeModel or Converse URL for this lane's shape and model.
+    fn inference_url(&self, streaming: bool) -> String {
+        let path = match self.cfg.api_shape {
+            BedrockApiShape::Invoke => endpoint::invoke_path(&self.cfg.model_id, streaming),
+            BedrockApiShape::Converse => endpoint::converse_path(&self.cfg.model_id, streaming),
+        };
+        format!("{}{path}", self.runtime_origin)
     }
 
     /// Build, annotate, and SigV4-sign a Bedrock outbound request.
@@ -412,202 +708,14 @@ impl Provider for BedrockProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        let body = self.normalize_request(&req)?;
-
-        // Trace-level outgoing body for triage. Same gating +
-        // sensitivity story as the other two providers -- see
-        // `routectl_core::log_safe::trace_outgoing_body`.
-        routectl_core::trace_outgoing_body(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &body,
-        );
-        routectl_core::trace_structural_summary(
-            "outgoing",
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &body,
-        );
-
-        let url = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => {
-                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, false)?
-            }
-            BedrockApiShape::Converse => {
-                endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, false)?
-            }
-        };
-
-        let body_str = serde_json::to_vec(&body)
-            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
-
-        let request = self
-            .build_signed_request(body_str, &req, &url, "application/json")
-            .await?;
-
-        let resp = self
-            .client
-            .execute(request)
+        self.with_beta_repair(req, true, |lane, req| Box::pin(lane.complete_once(req)))
             .await
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        if (300..400).contains(&status) {
-            return Err(crate::http_client::redirect_not_followed_error(
-                &self.cfg.id,
-            ));
-        }
-        if status >= 400 {
-            // Capture the reset hint from response headers BEFORE
-            // `read_error_body` moves `resp`, gated on rate-limit statuses.
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
-            let upstream_request_id =
-                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-            let (prefix, hit_cap, upstream_type, upstream_code) =
-                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
-            return Err(build_client_error(
-                &self.cfg.id,
-                status,
-                retry_after,
-                &prefix,
-                hit_cap,
-                upstream_type,
-                upstream_code,
-            )
-            .with_upstream_request_id(upstream_request_id));
-        }
-
-        // Dir 3: upstream response headers, read BEFORE the body read
-        // consumes `resp`. Opt-in via ROUTECTL_TRACE_HEADERS.
-        crate::header_trace::upstream(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            resp.headers(),
-        );
-        let content_length = resp.content_length();
-        let (body_bytes, hit_cap) =
-            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
-                .await
-                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
-        if hit_cap {
-            crate::http_client::warn_body_cap(
-                &self.cfg.id,
-                status,
-                content_length,
-                "complete_success_body",
-            );
-        }
-        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
-        // Trace upstream success body pre-normalize. Distinct
-        // provider_kind per shape so operators can grep
-        // `provider_kind=bedrock-invoke` vs `bedrock-converse`.
-        routectl_core::trace_upstream_success_body(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &raw_body,
-        );
-        let mut chat_resp = self.normalize_response(raw_body)?;
-        chat_resp.routectl_provider = Some(self.cfg.id.clone());
-        Ok(chat_resp)
     }
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        let body = self.normalize_request(&req)?;
-
-        routectl_core::trace_outgoing_body(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &body,
-        );
-        routectl_core::trace_structural_summary(
-            "outgoing",
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &body,
-        );
-
-        let url = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => {
-                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, true)?
-            }
-            BedrockApiShape::Converse => {
-                endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, true)?
-            }
-        };
-
-        let body_str = serde_json::to_vec(&body)
-            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
-
-        let request = self
-            .build_signed_request(body_str, &req, &url, "application/vnd.amazon.eventstream")
-            .await?;
-
-        let resp = self
-            .client
-            .execute(request)
+        self.with_beta_repair(req, true, |lane, req| Box::pin(lane.stream_once(req)))
             .await
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        if (300..400).contains(&status) {
-            return Err(crate::http_client::redirect_not_followed_error(
-                &self.cfg.id,
-            ));
-        }
-        if status >= 400 {
-            // Capture the reset hint from response headers BEFORE
-            // `read_error_body` moves `resp`, gated on rate-limit statuses.
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
-            let upstream_request_id =
-                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-            let (prefix, hit_cap, upstream_type, upstream_code) =
-                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
-            return Err(build_client_error(
-                &self.cfg.id,
-                status,
-                retry_after,
-                &prefix,
-                hit_cap,
-                upstream_type,
-                upstream_code,
-            )
-            .with_upstream_request_id(upstream_request_id));
-        }
-
-        // Dir 3: upstream response headers, read BEFORE `resp` is moved
-        // into the eventstream byte stream below. The stream path had no
-        // dir-3 capture before; this closes the gap so it matches
-        // complete(). Opt-in via ROUTECTL_TRACE_HEADERS.
-        crate::header_trace::upstream(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            resp.headers(),
-        );
-
-        let provider_id = self.cfg.id.clone();
-        let endpoint = resp.url().clone();
-        let stream = eventstream::response_stream(
-            self.cfg.api_shape,
-            provider_id.clone(),
-            &self.cfg.region,
-            &endpoint,
-            resp.bytes_stream(),
-        );
-        Ok(routectl_core::wrap_stream_with_summary(
-            stream,
-            "upstream",
-            self.cfg.api_shape.provider_kind_str(),
-            provider_id,
-        ))
     }
 
     /// `POST /model/{modelId}/count-tokens` -- the token count for a
@@ -647,87 +755,12 @@ impl Provider for BedrockProvider {
     ///   would hide a body-assembly defect behind a silent walk-past.
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        let normalized = self.normalize_request(&req)?;
-        let body = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => count_tokens::invoke_tokens_body(&self.cfg.id, &normalized)?,
-            BedrockApiShape::Converse => {
-                count_tokens::converse_tokens_body(&self.cfg.id, &normalized)?
-            }
-        };
-
-        routectl_core::trace_outgoing_body(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &body,
-        );
-
-        let url = endpoint::count_tokens_url(&self.cfg.region, &self.cfg.model_id)?;
-        let body_str = serde_json::to_vec(&body)
-            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
-        let request = self
-            .build_signed_request(body_str, &req, &url, "application/json")
-            .await?;
-
-        let resp = self
-            .client
-            .execute(request)
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        if (300..400).contains(&status) {
-            return Err(crate::http_client::redirect_not_followed_error(
-                &self.cfg.id,
-            ));
-        }
-        if status >= 400 {
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
-            let upstream_request_id =
-                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-            let (prefix, hit_cap, upstream_type, upstream_code) =
-                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
-            let client_error = build_client_error(
-                &self.cfg.id,
-                status,
-                retry_after,
-                &prefix,
-                hit_cap,
-                upstream_type,
-                upstream_code,
-            )
-            .with_upstream_request_id(upstream_request_id);
-            return Err(client_error);
-        }
-
-        crate::header_trace::upstream(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            resp.headers(),
-        );
-        let content_length = resp.content_length();
-        let (body_bytes, hit_cap) =
-            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
-                .await
-                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
-        if hit_cap {
-            crate::http_client::warn_body_cap(
-                &self.cfg.id,
-                status,
-                content_length,
-                "count_tokens_success_body",
-            );
-        }
-        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
-        routectl_core::trace_upstream_success_body(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            &raw_body,
-        );
-        count_tokens::parse_token_count(&self.cfg.id, &raw_body)
+        // A CountTokens-only rejection says nothing about inference, so its
+        // repair is never remembered for the lane.
+        self.with_beta_repair(req, false, |lane, req| {
+            Box::pin(lane.count_tokens_once(req))
+        })
+        .await
     }
 
     /// Free reachability probe: resolve the AWS credential chain, no

@@ -119,7 +119,13 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // discovery default for operators bringing up routectl against a fresh
     // AWS account. The withheld-rejected signal is discarded: this lane
     // carries no translation counters (see the fingerprint tally above).
-    let _ = filter_bedrock_betas(&cfg.id, obj, &cfg.anthropic_beta, &cfg.allowed_betas);
+    let _ = filter_bedrock_betas(
+        &cfg.id,
+        obj,
+        &cfg.anthropic_beta,
+        &super::betas::operator_floor(cfg, req),
+        &cfg.allowed_betas,
+    );
 
     // Merge any additional model request fields at the top level
     // with the same routectl-managed-keys allow-list as the Anthropic

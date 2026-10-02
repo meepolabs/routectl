@@ -55,6 +55,7 @@ use routectl_core::capability::{
 };
 use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
+use routectl_core::is_safe_token;
 
 use crate::feature_keys::{FORCED_TOOL_CHOICE, strip_date_suffix};
 
@@ -385,7 +386,7 @@ pub fn has_feature_naming_table(provider_kind: &str) -> bool {
 /// Run the feature-naming anchored-template pipeline over a trimmed `message`
 /// (the [`extract_bedrock_capability`] precedent): the first template whose
 /// anchors bracket the message extracts its single token; the token must be
-/// token-shaped ASCII ([`is_safe_param_token`]) or the match fails closed; the
+/// token-shaped ASCII ([`is_safe_token`]) or the match fails closed; the
 /// normalized token must resolve through the closed `translations` set to a
 /// canonical capability. The upstream named the feature explicitly, so a match
 /// is self-identifying evidence at [`FailurePhase::F2`]. Split from the table
@@ -401,7 +402,7 @@ fn extract_feature_naming_capability(
     let token = templates
         .iter()
         .find_map(|&(prefix, suffix)| extract_anchored_token(needle, prefix, suffix))?;
-    if !is_safe_param_token(token) {
+    if !is_safe_token(token) {
         return None;
     }
     let normalized = normalize_capability_key(token, provider_kind);
@@ -440,32 +441,14 @@ fn upstream_error_field(err: &Error, field: &str) -> Option<String> {
     value.get("error")?.get(field)?.as_str().map(str::to_string)
 }
 
-/// Upper bound on a param token surfaced verbatim in an operator log. A
-/// canonical capability param (`web_search`, `response_format`, ...) is far
-/// shorter; this cap only bounds an adversarial or buggy upstream.
-const MAX_PARAM_TOKEN_LEN: usize = 64;
-
-/// True if `param` is safe to surface verbatim in an operator log: a
-/// non-empty, bounded, single-token ASCII string with no whitespace or
-/// control bytes (`is_ascii_graphic` is the printable ASCII range excluding
-/// space). Any canonical capability param the closed-set resolver accepts is
-/// token-shaped by construction, so this gate re-admits every legitimate
-/// value while dropping log-forging content (newlines, control bytes) and
-/// oversized blobs.
-fn is_safe_param_token(param: &str) -> bool {
-    !param.is_empty()
-        && param.len() <= MAX_PARAM_TOKEN_LEN
-        && param.bytes().all(|b| b.is_ascii_graphic())
-}
-
 /// The upstream `error.param` string, for observability enrichment on the
-/// learn event -- emitted ONLY when [`is_safe_param_token`] holds. Shares the
+/// learn event -- emitted ONLY when [`is_safe_token`] holds. Shares the
 /// same over-cap / non-JSON / missing-field guard as the resolver's read;
 /// carries the capability the upstream named, never a request body / message
 /// / prompt. An unsafe (oversized, whitespace/control-laden, or empty) param
 /// yields `None` so the log boundary never trusts the raw upstream field.
 pub fn upstream_param(err: &Error) -> Option<String> {
-    upstream_error_field(err, "param").filter(|param| is_safe_param_token(param))
+    upstream_error_field(err, "param").filter(|param| is_safe_token(param))
 }
 
 /// The `__type` discriminant an AWS Bedrock request-validation 400 carries.
@@ -481,7 +464,7 @@ const BEDROCK_VALIDATION_EXCEPTION_TYPE: &str = routectl_providers::VALIDATION_E
 /// exactly ONE extracted token between the anchors; the whole (trimmed)
 /// message must equal `prefix + token + suffix`, so wording drift, an extra
 /// sentence, or a missing anchor all fail closed. The extracted token must
-/// pass [`is_safe_param_token`], normalize via [`normalize_capability_key`],
+/// pass [`is_safe_token`], normalize via [`normalize_capability_key`],
 /// and hit [`BEDROCK_TOKEN_TRANSLATIONS`].
 ///
 /// Grounded byte-for-byte in captured bedrock-runtime InvokeModel 400
@@ -569,7 +552,7 @@ fn match_bedrock_validation_phrase(
 
 /// Run the anchored-template pipeline over a trimmed validation `message`:
 /// the first template whose anchors bracket the message extracts its single
-/// token; the token must be token-shaped ASCII ([`is_safe_param_token`]) or
+/// token; the token must be token-shaped ASCII ([`is_safe_token`]) or
 /// the match fails closed; the normalized token must resolve through the
 /// closed `translations` set to a canonical capability. Split from the table
 /// consts so tests can drive the engine with provisional shapes without
@@ -584,7 +567,7 @@ fn extract_bedrock_capability(
     let token = templates
         .iter()
         .find_map(|&(prefix, suffix)| extract_anchored_token(needle, prefix, suffix))?;
-    if !is_safe_param_token(token) {
+    if !is_safe_token(token) {
         return None;
     }
     let normalized = normalize_capability_key(token, BEDROCK_KIND);
@@ -662,10 +645,11 @@ mod tests {
     use super::resolve_requested_capability;
     use super::upstream_param;
     use super::{
-        BEDROCK_VALIDATION_EXCEPTION_TYPE, MAX_ERROR_BODY_BYTES, MAX_PARAM_TOKEN_LEN,
-        bedrock_validation_message, extract_bedrock_capability, extract_feature_naming_capability,
+        BEDROCK_VALIDATION_EXCEPTION_TYPE, MAX_ERROR_BODY_BYTES, bedrock_validation_message,
+        extract_bedrock_capability, extract_feature_naming_capability,
         is_bedrock_validation_exception,
     };
+    use routectl_core::MAX_SAFE_TOKEN_LEN;
     use routectl_core::capability::{FailurePhase, SignalTier};
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
@@ -1475,7 +1459,7 @@ mod tests {
         let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
         let translations = fixture_pairs(&fx, "translations", "token", "capability");
         let (prefix, suffix) = templates[0];
-        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_PARAM_TOKEN_LEN + 1));
+        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_SAFE_TOKEN_LEN + 1));
 
         assert_eq!(
             extract_bedrock_capability(&oversized, &templates, &translations),
@@ -1728,7 +1712,7 @@ mod tests {
         let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
         let translations = fixture_pairs(&fx, "translations", "token", "capability");
         let (prefix, suffix) = templates[0];
-        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_PARAM_TOKEN_LEN + 1));
+        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_SAFE_TOKEN_LEN + 1));
 
         assert_eq!(
             extract_feature_naming_capability(

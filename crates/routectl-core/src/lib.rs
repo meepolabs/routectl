@@ -22,6 +22,7 @@ pub mod reasoning_envelope;
 pub mod reasoning_format;
 pub mod reasoning_ingest;
 pub(crate) mod reserved;
+pub mod safe_token;
 pub mod schema;
 pub(crate) mod schema_opaque;
 pub mod system_content;
@@ -76,6 +77,7 @@ pub use reasoning_format::{
 };
 pub use reasoning_ingest::normalize_reasoning_detail_payloads;
 pub use reserved::is_canonical_request_key;
+pub use safe_token::{MAX_SAFE_TOKEN_LEN, is_safe_token};
 pub use schema::{
     CacheCreation, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta,
     ForwardedBearer, Message, MessageContent, Reasoning, ReasoningConfig, ReasoningDetail,

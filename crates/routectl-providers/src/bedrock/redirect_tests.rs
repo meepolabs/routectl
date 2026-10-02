@@ -5,9 +5,9 @@
 //!
 //! Unlike every other credentialed lane, `BedrockConfig` carries no
 //! `base_url`: the endpoint is derived from the region
-//! (`endpoint::bedrock_runtime_url`), so `complete()` cannot be pointed
-//! at a mock server and the two halves of the posture are pinned
-//! separately.
+//! (`endpoint::bedrock_runtime_url`), so no config can point
+//! `complete()` at a mock server and the two halves of the posture are
+//! pinned separately.
 //!
 //!   - The refusal is pinned against the provider's OWN client -- the
 //!     exact `reqwest::Client` a lane-local `Client::builder()`
