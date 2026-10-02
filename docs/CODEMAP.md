@@ -531,6 +531,10 @@ license.
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
   drop and policy-action counters with their snapshot readers, plus the
   crate-internal `ClientFingerprintStripTally`
+- `src/hosted_mcp_tool_egress_tests.rs` -- cross-lane guard: a Responses
+  hosted-MCP tool's credentials reach no anthropic-api, Bedrock Invoke, or
+  Converse body, still ship unchanged to a Responses upstream, and count one
+  anthropic-lane policy action per client request
 - `src/aws_region.rs` -- crate-private canonical AWS region parser behind
   every region-derived endpoint builder and signer; exports only
   `validate_aws_region` / `InvalidAwsRegion` for the router's config-load check
@@ -685,7 +689,10 @@ license.
   per-message before joining); all `pub(crate)` for Bedrock Converse reuse
 - `src/anthropic_api/tools.rs` -- tool + tool_choice translation:
   `translate_tool` (`ToolDef` -> `AnthropicTool`, incl. legacy OpenAI-shape
-  rewrite) + `translate_tool_choice` (OpenAI/Anthropic shape mapping)
+  rewrite) + `translate_tools` (the request's list, withholding OpenAI
+  Responses hosted-MCP tools into `HostedMcpToolWithholdTally`) +
+  `translate_tool_choice` (OpenAI/Anthropic shape mapping; the
+  `_withholding_hosted_mcp` wrapper turns a hosted-MCP choice into `auto`)
 - `src/anthropic_api/messages.rs` -- per-role content-block translation:
   `translate_messages`, `build_assistant_content`, `emit_reasoning_blocks`,
   `build_tool_message`, `normalize_replay_invariants`; owns
@@ -1151,7 +1158,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   parse. No status is mapped to a capability signal (posture recorded at the
   `count_tokens` call site in `src/bedrock/mod.rs`)
 - `src/bedrock/body_fields.rs` -- shared `allowed_body_fields` filter against
-  AWS strict-schema 400s
+  AWS strict-schema 400s, plus `drop_orphan_tool_choice` (Invoke: no
+  `tool_choice` ships once the filter has removed `tools`)
 
 ### bedrock/converse
 

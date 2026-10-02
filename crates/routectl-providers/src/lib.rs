@@ -296,3 +296,13 @@ pub mod gemini;
     feature = "bedrock"
 ))]
 mod streaming_role_parity_tests;
+
+// Cross-lane guard: a Responses hosted-MCP tool and its credentials reach a
+// Responses upstream unchanged and no Anthropic-shaped or Converse body.
+#[cfg(all(
+    test,
+    feature = "openai-responses",
+    feature = "anthropic-api",
+    feature = "bedrock"
+))]
+mod hosted_mcp_tool_egress_tests;

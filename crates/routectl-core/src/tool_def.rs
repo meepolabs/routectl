@@ -47,7 +47,8 @@ pub enum ToolDef {
     Custom(CustomTool),
     /// Forward-compat catchall for any other tool kind (Anthropic
     /// built-in tools, server-side tools, future wire shapes).
-    /// Preserved verbatim through Anthropic / Bedrock-Invoke egresses;
+    /// Preserved verbatim through Anthropic / Bedrock-Invoke egresses
+    /// (except an OpenAI Responses hosted-MCP tool, which they withhold);
     /// OpenAI-compat egresses drop with a warn (or reject under
     /// `strict_translation`).
     Other(Value),

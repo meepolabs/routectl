@@ -235,6 +235,15 @@ const UNSWEPT_POLICY_CLASSES: &[UnsweptPolicyClass] = &[
          reason",
         test: "duplicate_tool_names_count_one_tool_sort_stand_down",
     },
+    UnsweptPolicyClass {
+        class: "hosted_mcp_tool_withheld",
+        file: "anthropic_api/request.rs",
+        reason: "an OpenAI Responses hosted-MCP tool carries the caller's remote-server \
+         credentials and is withheld from the Anthropic-shaped tool list; counted from the \
+         lane's request orchestrator, which sits beside the nested cloak module directory the \
+         flat marker sweep refuses to descend into",
+        test: "an_anthropic_request_carrying_a_hosted_mcp_tool_counts_one_policy_action",
+    },
 ];
 
 #[test]

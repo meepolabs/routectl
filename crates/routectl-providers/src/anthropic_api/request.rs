@@ -23,7 +23,8 @@
 //!   a tool_result block, same as today.
 //! - Tools: ToolDef::Custom -> AnthropicTool::Custom (cache_control,
 //!   defer_loading, strict, optional type_tag); ToolDef::Other ->
-//!   AnthropicTool::Builtin (passthrough Value).
+//!   AnthropicTool::Builtin (passthrough Value), except an OpenAI
+//!   Responses hosted-MCP tool, which is withheld.
 //! - Top-level cache_control and anthropic_beta are set on the body.
 //! - cache_control::validate runs before serialization
 //!   unconditionally (release builds too): it protects direct /
@@ -60,7 +61,10 @@ use super::extras::{
     reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
 };
 use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
-use super::tools::{apply_parallel_tool_use, parallel_tool_calls_extra, translate_tool_choice};
+use super::tools::{
+    apply_parallel_tool_use, parallel_tool_calls_extra,
+    translate_tool_choice_withholding_hosted_mcp, translate_tools,
+};
 
 // Re-exports for callers outside this module. The Bedrock egress reuses
 // the canonical-side Anthropic-shape primitives via
@@ -95,7 +99,22 @@ use super::extras::{effort_ratio, is_routectl_managed_key};
 // system turns. The two system-field surfaces are exclusive in one assembly
 // today -- the lift runs only when no canonical system survives -- but the
 // class is counted per request, not per branch.
+pub(crate) use super::tools::HostedMcpToolWithholdTally;
 pub(crate) use crate::translation_drop_metrics::ClientFingerprintStripTally;
+
+/// Count this request's hosted-MCP tool withhold on the anthropic lane. A
+/// policy action rather than a drop: the tool carries the caller's
+/// remote-server credentials, and routectl withholds it from this upstream
+/// whatever the upstream would make of it. Takes the request so a background
+/// probe records nothing -- see `super::probe_aware_metrics`.
+fn flush_hosted_mcp_tally(hosted_mcp: &HostedMcpToolWithholdTally, req: &ChatRequest) {
+    if hosted_mcp.withheld() && super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_policy_action(
+            super::LANE,
+            "hosted_mcp_tool_withheld",
+        );
+    }
+}
 
 /// Count this request's fingerprint withhold on the anthropic lane. Takes the
 /// request so a background probe records nothing -- see
@@ -541,7 +560,8 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// here: the flush belongs to whoever owns the request's lifetime AND knows
 /// which telemetry lane the request is on, and this function serves two
 /// (anthropic-api through [`normalize`], bedrock-invoke through its own
-/// seam).
+/// seam). `hosted_mcp` is the same shape of caller-owned tally for the
+/// Responses hosted-MCP tools withheld from the translated `tools` list.
 ///
 /// Every other caller wants [`normalize`], which emits before returning.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -557,6 +577,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     terminal_anthropic_host: bool,
     forward_system_turns: bool,
     fingerprint: &mut ClientFingerprintStripTally,
+    hosted_mcp: &mut HostedMcpToolWithholdTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
@@ -720,9 +741,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let tools = if suppress_tools {
         None
     } else {
-        req.tools
-            .as_ref()
-            .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>())
+        req.tools.as_ref().map(|ts| translate_tools(ts, hosted_mcp))
     };
 
     let (temperature, top_p) =
@@ -739,10 +758,16 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let has_wire_tools = tools.as_ref().is_some_and(|t| !t.is_empty());
     let tool_choice = apply_parallel_tool_use(
         id,
-        translate_tool_choice(req.tool_choice.as_ref(), has_tools),
+        translate_tool_choice_withholding_hosted_mcp(
+            req.tool_choice.as_ref(),
+            has_tools,
+            has_wire_tools,
+            hosted_mcp,
+        ),
         parallel,
         has_wire_tools,
     );
+    hosted_mcp.warn(id);
 
     let ar = AnthropicRequest {
         model: req.model.clone(),
@@ -911,6 +936,7 @@ pub(crate) fn normalize(
         crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
     }
     let mut fingerprint = ClientFingerprintStripTally::default();
+    let mut hosted_mcp = HostedMcpToolWithholdTally::default();
     let assembled = normalize_deferring_format_key_warn(
         id,
         req,
@@ -921,6 +947,7 @@ pub(crate) fn normalize(
         terminal_anthropic_host,
         forward_system_turns,
         &mut fingerprint,
+        &mut hosted_mcp,
     );
     // Flushed on BOTH arms and outside every fallible step of the assembly: a
     // request whose entire system IS the fingerprint block assembles to no
@@ -929,6 +956,7 @@ pub(crate) fn normalize(
     // Either shape missing from the numerator reads the action rate low for
     // precisely the requests that withhold the most.
     flush_fingerprint_tally(&fingerprint, req);
+    flush_hosted_mcp_tally(&hosted_mcp, req);
     let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)

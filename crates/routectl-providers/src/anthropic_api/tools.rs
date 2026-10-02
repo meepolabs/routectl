@@ -7,6 +7,10 @@
 //! arriving via `ToolDef::Other` is rewritten to `AnthropicTool::Custom`
 //! (so callers that bypass the OpenAI ingress still get a working body);
 //! anything else passes through verbatim as `AnthropicTool::Builtin`.
+//! `translate_tools` runs that over a request's list after withholding
+//! any OpenAI Responses hosted-MCP tool (`type: "mcp"`), whose
+//! credentials must not reach an Anthropic-shaped upstream; a
+//! `tool_choice` naming one is withheld with it.
 //! `translate_tool_choice` maps OpenAI / Anthropic tool_choice shapes
 //! onto the Anthropic `{type:auto|any|tool}` form. `translate_tool` is
 //! `pub(crate)` so the Bedrock Converse egress can reuse it.
@@ -52,6 +56,99 @@ pub fn translate_tool(td: &ToolDef) -> AnthropicTool {
             }
         }
     }
+}
+
+/// The OpenAI Responses hosted-MCP tool `type`. Anthropic's own connector
+/// types (`mcp_toolset`, the `mcp_servers` body field) are distinct and are
+/// not matched.
+const RESPONSES_HOSTED_MCP_TYPE: &str = "mcp";
+
+fn is_responses_hosted_mcp(td: &ToolDef) -> bool {
+    match td {
+        ToolDef::Other(v) => {
+            v.get("type").and_then(Value::as_str) == Some(RESPONSES_HOSTED_MCP_TYPE)
+        }
+        ToolDef::Custom(_) => false,
+    }
+}
+
+/// Per-request record of the Responses hosted-MCP surfaces withheld from an
+/// Anthropic-shaped body: the tools themselves and a `tool_choice` naming
+/// one. Recorded by [`translate_tools`] and
+/// [`translate_tool_choice_withholding_hosted_mcp`]; [`Self::warn`] emits the
+/// request's one WARN, and only the caller that owns the request's telemetry
+/// lane counts it.
+#[must_use = "a withhold tally counts nothing until its lane flushes it"]
+#[derive(Debug, Default)]
+pub struct HostedMcpToolWithholdTally {
+    tools_withheld: usize,
+    tool_choice_withheld: bool,
+}
+
+impl HostedMcpToolWithholdTally {
+    pub const fn withheld(&self) -> bool {
+        self.tools_withheld > 0 || self.tool_choice_withheld
+    }
+
+    /// One WARN per request, carrying only counts: the label, URL, tool name
+    /// and credentials are never logged.
+    pub(super) fn warn(&self, provider_id: &str) {
+        if !self.withheld() {
+            return;
+        }
+        tracing::warn!(
+            provider = provider_id,
+            tool_type = RESPONSES_HOSTED_MCP_TYPE,
+            count = self.tools_withheld,
+            tool_choice_withheld = self.tool_choice_withheld,
+            "anthropic-shaped egress: Responses hosted-MCP tool withheld (no Anthropic \
+             equivalent; its credentials are not forwarded)",
+        );
+    }
+}
+
+/// Translate the request's tool list for an Anthropic-shaped body.
+///
+/// A Responses hosted-MCP tool carries the caller's remote-server
+/// credentials (`authorization`, `headers`) and has no Anthropic
+/// equivalent, so it is withheld rather than forwarded as a builtin.
+pub(super) fn translate_tools(
+    tools: &[ToolDef],
+    tally: &mut HostedMcpToolWithholdTally,
+) -> Vec<AnthropicTool> {
+    tally.tools_withheld += tools
+        .iter()
+        .filter(|td| is_responses_hosted_mcp(td))
+        .count();
+    tools
+        .iter()
+        .filter(|td| !is_responses_hosted_mcp(td))
+        .map(translate_tool)
+        .collect()
+}
+
+/// [`translate_tool_choice`], except that a Responses hosted-MCP choice
+/// (`{"type":"mcp","server_label":..,"name":..}`) names a tool
+/// [`translate_tools`] withheld. Forwarding it would leak the label and force
+/// a tool the upstream never received, so it becomes `{"type":"auto"}`, or no
+/// `tool_choice` at all when no tool reaches the wire (Anthropic rejects a
+/// `tool_choice` without `tools`).
+pub(super) fn translate_tool_choice_withholding_hosted_mcp(
+    tc: Option<&Value>,
+    has_tools: bool,
+    has_wire_tools: bool,
+    tally: &mut HostedMcpToolWithholdTally,
+) -> Option<Value> {
+    let is_hosted_mcp = tc
+        .and_then(Value::as_object)
+        .and_then(|map| map.get("type"))
+        .and_then(Value::as_str)
+        == Some(RESPONSES_HOSTED_MCP_TYPE);
+    if !is_hosted_mcp {
+        return translate_tool_choice(tc, has_tools);
+    }
+    tally.tool_choice_withheld = true;
+    has_wire_tools.then(|| json!({"type": "auto"}))
 }
 
 fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {

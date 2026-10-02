@@ -111,6 +111,38 @@ pub(super) fn filter_bedrock_body_fields(
     }
 }
 
+/// Remove a `tool_choice` left in `bag` without a non-empty `tools` list.
+///
+/// Anthropic (and Bedrock Invoke, which carries the Anthropic body) rejects
+/// a `tool_choice` with no tools to select. The allowlist filter above drops
+/// keys independently, so an `allowed_body_fields` that keeps `tool_choice`
+/// but not `tools` -- or any path that strips `tools` while a `tool_choice`
+/// remains -- would ship that invalid shape. Run this AFTER the allowlist
+/// filter, on the body that actually ships. Logs the field name only.
+pub(super) fn drop_orphan_tool_choice(
+    provider_id: &str,
+    bag: &mut Map<String, Value>,
+    surface: FilterContext,
+) {
+    if !bag.contains_key("tool_choice") {
+        return;
+    }
+    let has_wire_tools = bag
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|t| !t.is_empty());
+    if has_wire_tools {
+        return;
+    }
+    bag.remove("tool_choice");
+    tracing::debug!(
+        provider = %provider_id,
+        field = "tool_choice",
+        surface = surface.as_str(),
+        "dropping tool_choice with no tools on the wire (upstream rejects the pairing)"
+    );
+}
+
 /// Body fields Bedrock rejects on both carriers whatever the account's
 /// schema: InvokeModel and Converse `additionalModelRequestFields` both
 /// answer `mcp_servers` with a generic 400 that names no field, so no

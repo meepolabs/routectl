@@ -68,6 +68,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // Nothing is lost by dropping it: there is no rate on this lane for
         // the record to feed. Standing this lane up owns that work.
         &mut crate::anthropic_api::request::ClientFingerprintStripTally::default(),
+        // Same reason: the hosted-MCP tool withhold still happens on this
+        // lane's body; only its count has no lane to land on yet.
+        &mut crate::anthropic_api::request::HostedMcpToolWithholdTally::default(),
     )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(
@@ -206,6 +209,16 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         &cfg.id,
         obj,
         &cfg.allowed_body_fields,
+        super::body_fields::FilterContext::InvokeBody,
+    );
+
+    // The allowlist filter drops keys independently, so a list keeping
+    // `tool_choice` but not `tools` would ship a tool_choice with nothing to
+    // select -- which Anthropic (and Invoke, carrying its body) rejects.
+    // Remove an orphaned tool_choice on the body that actually ships.
+    super::body_fields::drop_orphan_tool_choice(
+        &cfg.id,
+        obj,
         super::body_fields::FilterContext::InvokeBody,
     );
 
@@ -595,6 +608,11 @@ fn is_cache_control_eligible_block_type(block_type: &str) -> bool {
 pub fn normalize_response(provider_id: &str, raw: Value) -> Result<ChatResponse> {
     crate::anthropic_api::response::normalize(provider_id, raw)
 }
+
+// An allowlist that drops `tools` never leaves a `tool_choice` behind.
+#[cfg(test)]
+#[path = "invoke_orphan_tool_choice_tests.rs"]
+mod orphan_tool_choice_tests;
 
 #[cfg(test)]
 mod tests {
