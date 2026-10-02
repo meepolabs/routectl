@@ -289,3 +289,177 @@ fn a_booted_daemon_shuts_down_well_inside_the_writer_abandon_deadline() {
          before the usage writer is drained, or the drain waits out its abandon deadline",
     );
 }
+
+/// The shipped example config, verbatim.
+const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.toml");
+
+/// The example's Bedrock provider, which uses the AWS default credential chain.
+const EXAMPLE_BEDROCK_PROVIDER: &str = "bedrock";
+
+/// The example's catch-all alias that routes to a Bedrock-backed model.
+const EXAMPLE_BEDROCK_ALIAS: &str = "claude-sonnet-*";
+
+/// The example config with every `oauth://` provider removed, plus everything
+/// that only reaches the daemon through one: pools with such a member, models
+/// routed at those pools or providers, and alias targets naming those models.
+///
+/// Why not verbatim: an `oauth://` ref resolves against a stored login, and a
+/// hermetic home has none, so router build refuses every pool whose members
+/// are all unreadable when an alias routes at it. Nothing else changes -- the
+/// Bedrock default-chain provider and the aliases reaching it stay exactly as
+/// shipped, which is the startup path under test. Derived from the shipped
+/// file rather than copied so a change to the example reaches this test.
+fn example_config_without_oauth(port: u16) -> String {
+    let mut doc: toml_edit::DocumentMut = EXAMPLE_CONFIG.parse().expect("example config parses");
+    doc["server"]["port"] = toml_edit::value(i64::from(port));
+
+    let providers = doc["providers"].as_table_mut().expect("[providers]");
+    let oauth_providers = keys_where(providers, |entry| {
+        entry
+            .get("api_key_ref")
+            .and_then(toml_edit::Item::as_str)
+            .is_some_and(|r| r.starts_with("oauth://"))
+    });
+    providers.retain(|name, _| !oauth_providers.contains(&name.to_string()));
+
+    let pools = doc["pools"].as_table_mut().expect("[pools]");
+    let dead_pools = keys_where(pools, |entry| {
+        entry["members"]
+            .as_array()
+            .expect("pool members")
+            .iter()
+            .any(|m| {
+                oauth_providers
+                    .iter()
+                    .any(|p| Some(p.as_str()) == m.as_str())
+            })
+    });
+    pools.retain(|name, _| !dead_pools.contains(&name.to_string()));
+
+    let models = doc["models"].as_table_mut().expect("[models]");
+    let dead_models = keys_where(models, |entry| {
+        let provider = entry["provider"].as_str().expect("model provider");
+        oauth_providers
+            .iter()
+            .chain(&dead_pools)
+            .any(|d| d == provider)
+    });
+    models.retain(|name, _| !dead_models.contains(&name.to_string()));
+
+    let is_dead = |v: &toml_edit::Value| dead_models.iter().any(|m| Some(m.as_str()) == v.as_str());
+    let aliases = doc["aliases"].as_table_mut().expect("[aliases]");
+    aliases.retain(|_, target| match target.as_value_mut() {
+        Some(toml_edit::Value::Array(chain)) => {
+            chain.retain(|v| !is_dead(v));
+            !chain.is_empty()
+        }
+        Some(single) => !is_dead(single),
+        None => true,
+    });
+
+    doc.to_string()
+}
+
+/// Names of the entries in `table` whose body satisfies `pred`.
+fn keys_where(table: &toml_edit::Table, pred: impl Fn(&toml_edit::Item) -> bool) -> Vec<String> {
+    table
+        .iter()
+        .filter(|(_, entry)| pred(entry))
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Every `env://VAR` name the config text references.
+fn env_ref_names(config: &str) -> Vec<String> {
+    let mut names: Vec<String> = config
+        .split("\"env://")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// A child `routectl serve` with a CLEARED environment: nothing ambient --
+/// no AWS profile, proxy, token file, or IMDS endpoint -- can satisfy or
+/// redirect startup. Every `env://` ref gets a synthetic value and the AWS
+/// default chain is satisfied by synthetic environment credentials, so router
+/// build completes without any provider request.
+fn hermetic_serve_command(home: &Path, config: &Path, env_refs: &[String]) -> Command {
+    let mut command = Command::new(BIN);
+    command
+        .env_clear()
+        .arg("--config")
+        .arg(config)
+        .arg("serve")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("ROUTECTL_LOG", "error")
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env("AWS_ACCESS_KEY_ID", "AKIDSYNTHETICSMOKE")
+        .env("AWS_SECRET_ACCESS_KEY", "synthetic-smoke-secret")
+        .env("AWS_CONFIG_FILE", home.join(".aws").join("config"))
+        .env(
+            "AWS_SHARED_CREDENTIALS_FILE",
+            home.join(".aws").join("credentials"),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    for name in env_refs {
+        command.env(name, format!("synthetic-{name}"));
+    }
+    command
+}
+
+/// The shipped example config -- with its Bedrock provider building the AWS
+/// default credential chain at router build -- must boot to a serving daemon
+/// and shut down cleanly on SIGTERM, under an environment that carries nothing
+/// but synthetic values.
+#[cfg(unix)]
+#[test]
+fn the_example_config_boots_and_shuts_down_cleanly_in_a_cleared_environment() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    // Arrange
+    let port = free_port();
+    let home = tempfile::tempdir().expect("tempdir");
+    let config_dir = home.path().join(".config").join("routectl");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config dir");
+    let config_path = config_dir.join("config.toml");
+    let config = example_config_without_oauth(port);
+    assert!(
+        config.contains(&format!("[providers.{EXAMPLE_BEDROCK_PROVIDER}]"))
+            && config.contains(r#"kind = "default-chain""#)
+            && config.contains(&format!("\"{EXAMPLE_BEDROCK_ALIAS}\"")),
+        "the derived config must keep the Bedrock default-chain provider and its alias:\n{config}",
+    );
+    std::fs::write(&config_path, &config).expect("write config");
+    let env_refs = env_ref_names(&config);
+    let child = hermetic_serve_command(home.path(), &config_path, &env_refs)
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {BIN} serve on port {port}: {e}"));
+    let mut child = ServeChild { child: Some(child) };
+    await_serving(&mut child, port);
+
+    // Act
+    kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM).expect("SIGTERM the child");
+    let status = child.wait_until(EXIT_DEADLINE);
+
+    // Assert
+    let status = status.unwrap_or_else(|| {
+        panic!("the daemon did not exit within {EXIT_DEADLINE:?} of one SIGTERM")
+    });
+    let stderr = child.stderr();
+    assert!(
+        status.success(),
+        "SIGTERM must exit cleanly, got {status}; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "the daemon must not panic; stderr:\n{stderr}"
+    );
+}

@@ -1236,6 +1236,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   built directly with a host-altering region is refused at construction, and
   each mantle lane present in the feature set sends nothing (no connection,
   auth header, or body) and fails with a config error
+- `tests/bedrock_default_chain_resolve.rs` -- isolated binary pinning
+  `bedrock::auth::resolve(DefaultChain)` under a scrubbed `AWS_*` env with IMDS
+  off: no credential source -> `Error::Auth`, env creds -> SigV4 with those
+  values, never a panic while the chain builds; isolated because the chain
+  reads process-global env
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the
   public credential-resolution / auth-dispatch API (`bedrock::auth::resolve`
   Bearer vs SigV4 variants across regions)
@@ -8037,7 +8042,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   boots `serve_on_listener` against a tempdir-rooted config.toml +
   credentials.json and polls for the live `Router` swap
 - `tests/serve_shutdown.rs` -- real-binary graceful-shutdown integration test;
-  signals and reaps a hermetic child process
+  signals and reaps a hermetic child process; also boots the shipped example
+  config (oauth-backed entries removed) in a cleared env, Bedrock default chain
+  included, to a serving `/health` and a clean SIGTERM exit
 - `src/server/preflight_daemon_tests.rs` -- ASSEMBLED-DAEMON verification (a
   `cfg(test)` sidecar declared from `serve.rs`; see item 4 relocation): a real
   `serve_on_listener` daemon, real HTTP inference traffic over loopback, and the
