@@ -2315,8 +2315,7 @@ sensitive_words = ["API", "proxy"]
 
 The list is bounded, because the scan runs on every request against text
 the client controls (tool output, fetched pages, pasted files) up to the
-32 MiB ingress body limit, and its worst case grows with how many words
-share a first letter times how long they are:
+32 MiB ingress body limit:
 
 - at most **32 entries**;
 - each entry at most **32 characters after case folding** and trimming.
@@ -2327,12 +2326,25 @@ share a first letter times how long they are:
 Derivation: the documented example above (the same two words a comparable
 proxy ships in its example config) and this repo's own config tests use at
 most two entries of at most six characters, and no measured deployment
-sets any. The bounds leave 16x headroom on count and 5x on length. On an
-AMD Ryzen 9 9900X, release build, scanning 32 MiB of text built to match
-every first letter takes 0.67 s with the two-word list; 32 same-initial
-words of 32 characters take about 0.7 s per 100 KiB of such text (229 s
-at 32 MiB). A 64 x 64 list cost five times that and was refused. Reproduce
-with:
+sets any. The bounds leave 16x headroom on count and 5x on length.
+
+The scan is one leftmost-longest pass over the case-folded text, so its
+cost grows with the text length. The one exception is a character whose
+lowercase form is two characters (U+0130): where a word's match would end
+or start inside one, the scan re-reads up to one word length from the next
+character, so text dense in such characters can cost up to the longest
+word's length per character. Measured on an AMD Ryzen 9 9900X, release
+build, 32 MiB of text:
+
+| list | text | time |
+|---|---|---|
+| `["API", "proxy"]` | all `a` | 0.42 s |
+| 32 words of 32 characters sharing a first letter | all `a` | 0.38 s |
+| `a` repeated 2 to 32 times (every position matches) | all `a` | 0.56 s |
+| 32 words nested as prefixes and suffixes of each other | mixed `a` / `b` | 0.52 s |
+| 15 words each ending inside U+0130's lowercase form | all U+0130 | 2.6 s |
+
+Reproduce with:
 
 ```bash
 cargo test -p routectl-providers --release --lib \

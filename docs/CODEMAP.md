@@ -788,6 +788,9 @@ license.
 - `src/anthropic_api/cloak_relocation_wire_tests.rs` -- serialized-wire
   contract of the client-system relocation: synthetic user turn, local
   refusals, carried image/document blocks, breakpoint cap/ordering
+- `src/anthropic_api/cloak_obfuscate_differential_tests.rs` -- the
+  sensitive-word matcher against a per-position reference scan over a seeded
+  corpus (expanding folds, shorter-word fallback, window-edge matches)
 - `src/anthropic_api/mod_cloak_refusal_tests.rs` -- a relocation refusal halts
   complete, stream, and count_tokens before token resolution
 - `src/anthropic_api/cloak/billing.rs` -- strips the Claude Code
@@ -805,7 +808,8 @@ license.
   `is_non_cc && CloakConfig::normalize_tools` (`sort_custom_tools_by_name` -> `ToolSortOutcome`)
 - `src/anthropic_api/cloak/obfuscate.rs` -- zero-width-space obfuscation of
   configured sensitive words in system and message text
-  (`obfuscate_sensitive_words`, `SensitiveWordMatcher`), plus the list's
+  (`obfuscate_sensitive_words`, `SensitiveWordMatcher`: one `aho-corasick`
+  pass over case-folded text in fixed-size windows), plus the list's
   count and folded-length bounds (`validate_sensitive_words`,
   `MAX_SENSITIVE_WORDS`, `MAX_SENSITIVE_WORD_FOLDED_CHARS`)
 

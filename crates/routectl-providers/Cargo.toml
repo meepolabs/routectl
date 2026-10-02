@@ -11,7 +11,7 @@ description = "Provider implementations for routectl."
 [features]
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gemini"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
-"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust"]
+"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust", "dep:aho-corasick"]
 "openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile", "dep:routectl-auth"]
 "gemini" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
@@ -73,6 +73,10 @@ tokio = { workspace = true, optional = true, features = ["sync"] }
 tokio-stream = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
 lru = { workspace = true, optional = true }
+
+# Multi-pattern scan for the cloak's sensitive-word list (anthropic-api).
+# Already in the lockfile through `regex`, so this adds no new package.
+aho-corasick = { version = "1.1", optional = true }
 
 # Persistent Cloudflare cookie jar for the openai-responses
 # (chatgpt-oauth) path. `cookie_store` is the in-memory jar with
