@@ -50,10 +50,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::stream::BoxStream;
+#[cfg(feature = "openai-responses")]
+use routectl_core::Choice;
 use routectl_core::failure_class::{ReplayAttempt, classify_with_attempt};
 use routectl_core::{
-    CODEX_OAUTH, ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent,
-    Provider, ReasoningDetail, ReasoningDetailKind, Result, Role, TokenCount,
+    CODEX_OAUTH, ChatChunk, ChatRequest, ChatResponse, Error, Message, MessageContent, Provider,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, TokenCount,
 };
 use serde_json::json;
 
@@ -140,10 +142,12 @@ impl Provider for AlwaysRejectingLane {
 
 /// A lane that serves the repaired variant, so a walk can be observed
 /// SUCCEEDING through a repair rather than only exhausting its budget.
+#[cfg(feature = "openai-responses")]
 struct RepairingLane {
     calls: AtomicUsize,
 }
 
+#[cfg(feature = "openai-responses")]
 #[async_trait::async_trait]
 impl Provider for RepairingLane {
     fn id(&self) -> &'static str {
@@ -170,12 +174,14 @@ impl Provider for RepairingLane {
     }
 }
 
+#[cfg(feature = "openai-responses")]
 fn carries_artifact(req: &ChatRequest) -> bool {
     req.messages
         .iter()
         .any(|message| !message.reasoning_details.is_empty())
 }
 
+#[cfg(feature = "openai-responses")]
 fn success_response() -> ChatResponse {
     ChatResponse {
         choices: vec![Choice {
@@ -237,6 +243,7 @@ fn req_on(alias: &str) -> ChatRequest {
 /// single-flight key differs per leg -- otherwise the second leg would be
 /// refused its carry by the first leg's in-flight probe and the fixture
 /// would bound the repair count for the wrong reason.
+#[cfg(feature = "openai-responses")]
 fn rejecting_chain(alias: &str) -> (Router, Vec<Arc<AlwaysRejectingLane>>) {
     let mut toml_text = String::new();
     let mut chain: Vec<String> = Vec::with_capacity(CHAIN_TARGETS);
@@ -272,6 +279,7 @@ fn rejecting_chain(alias: &str) -> (Router, Vec<Arc<AlwaysRejectingLane>>) {
 }
 
 /// Total repair re-dispatches observed across every leg of the chain.
+#[cfg(feature = "openai-responses")]
 fn repairs_observed(mocks: &[Arc<AlwaysRejectingLane>]) -> usize {
     mocks.iter().map(|m| m.repairs.load(Ordering::SeqCst)).sum()
 }
@@ -315,6 +323,7 @@ fn capable_rejecting_chain(alias: &str) -> (Router, Vec<Arc<AlwaysRejectingLane>
 }
 
 /// Total upstream touches observed across every leg of the chain.
+#[cfg(feature = "openai-responses")]
 fn calls_observed(mocks: &[Arc<AlwaysRejectingLane>]) -> usize {
     mocks.iter().map(|m| m.calls.load(Ordering::SeqCst)).sum()
 }
@@ -323,6 +332,7 @@ fn calls_observed(mocks: &[Arc<AlwaysRejectingLane>]) -> usize {
 /// walk short (a gate refusal, a lane mismatch, a classifier change) fails
 /// LOUDLY here instead of making every ceiling assertion below pass
 /// vacuously on a chain that never repaired at all.
+#[cfg(feature = "openai-responses")]
 fn assert_fixture_exercised_every_target(mocks: &[Arc<AlwaysRejectingLane>], surface: &str) {
     assert!(
         CHAIN_TARGETS > usize::from(REPAIRS_PER_REQUEST),
@@ -338,6 +348,7 @@ fn assert_fixture_exercised_every_target(mocks: &[Arc<AlwaysRejectingLane>], sur
     }
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn complete_spends_at_most_the_request_ceiling_across_an_n_target_chain() {
     // Arrange -- four repair-eligible targets, one logical request.
@@ -361,6 +372,7 @@ async fn complete_spends_at_most_the_request_ceiling_across_an_n_target_chain() 
     );
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn stream_pre_content_spends_at_most_the_request_ceiling_across_an_n_target_chain() {
     // Arrange
@@ -576,6 +588,7 @@ fn a_budget_threaded_by_reference_is_shared_while_a_fresh_one_per_seat_is_not() 
     );
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn both_messages_walks_agree_on_one_ceiling() {
     // Arrange -- a fresh chain per walk: the ceiling is PER REQUEST, so each
@@ -608,6 +621,7 @@ async fn both_messages_walks_agree_on_one_ceiling() {
     );
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn the_repaired_request_is_the_one_a_messages_walk_dispatches() {
     // Arrange -- a single target that rejects the carried variant and serves

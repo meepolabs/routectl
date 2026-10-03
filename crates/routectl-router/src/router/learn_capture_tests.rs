@@ -2618,6 +2618,7 @@ async fn a_stale_same_capability_probe_settlement_books_nothing() {
 
 /// A minimal openai-responses provider config (capability subsystem left at
 /// its default: enabled).
+#[cfg(feature = "openai-responses")]
 const RESPONSES_P1: &str = r#"
 [providers.p1]
 kind = "openai-responses"
@@ -2629,6 +2630,7 @@ auth_kind = "api-key"
 /// reject by its `input_file` wire name. It also carries a `web_search` tool,
 /// so a learnable capability is in the request's feature set and the
 /// membership gate alone cannot keep the registry empty.
+#[cfg(feature = "openai-responses")]
 fn req_with_tool_result_file() -> ChatRequest {
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
     let tool_answer = Message {
@@ -2666,6 +2668,7 @@ fn req_with_tool_result_file() -> ChatRequest {
     }
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn an_input_file_rejection_on_the_responses_lane_learns_no_capability() {
     // Arrange: both 400 shapes an upstream could name `input_file` in -- a

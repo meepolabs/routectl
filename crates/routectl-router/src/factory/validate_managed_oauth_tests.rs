@@ -3,21 +3,24 @@
 //! an `oauth://antigravity[#label]` reference only the Cloud Code lane, each
 //! on its exact first-party host over https.
 
-use super::{
-    collect_config_validation, validate_managed_antigravity_credential,
-    validate_managed_codex_credential,
-};
-use crate::config::{Config, ProviderEntry};
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
+use super::collect_config_validation;
+use super::{validate_managed_antigravity_credential, validate_managed_codex_credential};
+#[cfg(any(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
+use crate::config::Config;
+use crate::config::ProviderEntry;
 
 const CODEX_REFS: [&str; 2] = ["oauth://codex", "oauth://codex#seat-secret-label"];
 const ANTIGRAVITY_REFS: [&str; 2] = [
     "oauth://antigravity",
     "oauth://antigravity#seat-secret-label",
 ];
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
 const SENTINEL_HOST: &str = "https://gateway.sentinel-host.example/sentinel-path?k=1";
 
 /// Hosts no managed family accepts: loopback, cleartext, smuggles, and
 /// malformed values. Each family's own lookalikes are listed with it.
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
 const SHARED_REJECTED: [&str; 10] = [
     "http://127.0.0.1:18080",
     "http://localhost:18080",
@@ -31,10 +34,12 @@ const SHARED_REJECTED: [&str; 10] = [
     "not a url",
 ];
 
+#[cfg(any(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
 fn parse(text: &str) -> Config {
     toml::from_str(text).expect("fixture config parses")
 }
 
+#[cfg(any(feature = "bedrock", feature = "gemini"))]
 fn only_entry(text: &str) -> ProviderEntry {
     parse(text)
         .providers
@@ -295,6 +300,10 @@ mod antigravity {
 fn rejects_every_foreign_provider_kind_for_both_families() {
     let refs = CODEX_REFS.iter().chain(ANTIGRAVITY_REFS.iter());
     for r in refs {
+        #[cfg_attr(
+            not(any(feature = "bedrock", feature = "openai-responses", feature = "gemini")),
+            allow(unused_mut)
+        )]
         let mut foreign = vec![
             ProviderEntry::openai_compat("https://chatgpt.com/backend-api/codex", *r),
             ProviderEntry::openai_compat("https://cloudcode-pa.googleapis.com", *r),
@@ -332,10 +341,12 @@ fn rejects_every_foreign_provider_kind_for_both_families() {
     }
 }
 
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
 #[test]
 fn config_validation_rejects_foreign_hosts_naming_the_provider_only() {
     let mut text = String::new();
     let mut names = Vec::new();
+    #[cfg(feature = "openai-responses")]
     for (i, r) in CODEX_REFS.iter().enumerate() {
         text.push_str(&format!(
             "[providers.cx-gw{i}]\n\
@@ -350,6 +361,7 @@ fn config_validation_rejects_foreign_hosts_naming_the_provider_only() {
         names.push((format!("cx-gw{i}"), "Codex"));
         names.push((format!("cx-lo{i}"), "Codex"));
     }
+    #[cfg(feature = "gemini")]
     for (i, r) in ANTIGRAVITY_REFS.iter().enumerate() {
         text.push_str(&format!(
             "[providers.ag-gw{i}]\n\
@@ -398,9 +410,12 @@ fn config_validation_rejects_foreign_hosts_naming_the_provider_only() {
 /// The shipped default shapes -- what `routectl login codex` / `routectl
 /// login antigravity` offer and what `examples/config.toml` documents --
 /// stay valid, alongside static credentials on loopback and gateways.
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
 #[test]
 fn config_validation_keeps_the_deployed_default_shapes_valid() {
-    let config = parse(
+    let mut text = String::new();
+    #[cfg(feature = "openai-responses")]
+    text.push_str(
         "[providers.codex-default]\n\
          kind        = \"openai-responses\"\n\
          auth_kind   = \"chatgpt-oauth\"\n\
@@ -409,7 +424,16 @@ fn config_validation_keeps_the_deployed_default_shapes_valid() {
          kind        = \"openai-responses\"\n\
          api_key_ref = \"oauth://codex#seat-b\"\n\
          base_url    = \"https://chatgpt.com/backend-api/codex\"\n\
-         [providers.antigravity-default]\n\
+         [providers.codex-static-mock]\n\
+         kind           = \"openai-responses\"\n\
+         auth_kind      = \"chatgpt-oauth\"\n\
+         api_key_ref    = \"env://OPENAI_JWT\"\n\
+         account_id_ref = \"env://OPENAI_ACCOUNT_ID\"\n\
+         base_url       = \"http://127.0.0.1:18080\"\n",
+    );
+    #[cfg(feature = "gemini")]
+    text.push_str(
+        "[providers.antigravity-default]\n\
          kind        = \"gemini\"\n\
          api_key_ref = \"oauth://antigravity\"\n\
          auth_mode   = \"cloud-code\"\n\
@@ -423,17 +447,12 @@ fn config_validation_keeps_the_deployed_default_shapes_valid() {
          api_key_ref = \"oauth://antigravity\"\n\
          auth_mode   = \"cloud-code\"\n\
          base_url    = \"https://daily-cloudcode-pa.googleapis.com\"\n\
-         [providers.codex-static-mock]\n\
-         kind           = \"openai-responses\"\n\
-         auth_kind      = \"chatgpt-oauth\"\n\
-         api_key_ref    = \"env://OPENAI_JWT\"\n\
-         account_id_ref = \"env://OPENAI_ACCOUNT_ID\"\n\
-         base_url       = \"http://127.0.0.1:18080\"\n\
          [providers.gemini-static-mirror]\n\
          kind        = \"gemini\"\n\
          api_key_ref = \"env://GEMINI_API_KEY\"\n\
          base_url    = \"https://gemini-mirror.example/v1beta\"\n",
     );
+    let config = parse(&text);
 
     let errors = collect_config_validation(&config).errors;
 

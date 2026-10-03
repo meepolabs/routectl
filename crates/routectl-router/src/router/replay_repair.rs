@@ -303,6 +303,7 @@ fn is_portable(format: Option<&str>, lane: ReplayScheme) -> bool {
 }
 
 #[cfg(test)]
+#[cfg(feature = "openai-responses")]
 #[path = "replay_repair_tests.rs"]
 mod replay_repair_tests;
 
@@ -311,5 +312,6 @@ mod replay_repair_tests;
 mod replay_strip_tests;
 
 #[cfg(test)]
+#[cfg(feature = "openai-responses")]
 #[path = "replay_strip_calibration_tests.rs"]
 mod replay_strip_calibration_tests;

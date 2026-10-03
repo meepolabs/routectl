@@ -10,10 +10,10 @@ use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use routectl_core::Result;
-use routectl_core::{
-    CODEX_OAUTH, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReasoningDetail,
-    ReasoningDetailKind, Role,
-};
+#[cfg(feature = "openai-responses")]
+use routectl_core::{CODEX_OAUTH, ReasoningDetail, ReasoningDetailKind, Role};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
+#[cfg(feature = "openai-responses")]
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,12 +21,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// The pinned replay-rejection body (byte-exact, carries no secret),
 /// mirroring `replay_repair_tests`. An openai-responses 400 with this body
 /// classifies as a replay rejection, entering the strip-repair arm.
+#[cfg(feature = "openai-responses")]
 const REPLAY_REJECT_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
 
 /// A distinctive fragment that stands in for the reasoning-artifact blob a
 /// replay-rejection envelope can echo in its variable message tail. It must
 /// NEVER survive into the error handed back through the generic
 /// upstream-error path -- `replay_rejection_body_free` strips it.
+#[cfg(feature = "openai-responses")]
 const BLOB_MARKER: &str = "REASONING_BLOB_MUST_NOT_LEAK";
 
 /// The replay-rejection body with a blob marker appended to the message
@@ -34,6 +36,7 @@ const BLOB_MARKER: &str = "REASONING_BLOB_MUST_NOT_LEAK";
 /// (`encrypted content missing recognized prefix`), so it classifies as a
 /// replay rejection and enters the strip-repair arm, while the marker rides
 /// in the body that `replay_rejection_body_free` must drop.
+#[cfg(feature = "openai-responses")]
 const REPLAY_REJECT_BODY_WITH_BLOB: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`) REASONING_BLOB_MUST_NOT_LEAK","param":null,"type":"invalid_request_error"}}"#;
 
 /// Provider that returns a 401 on complete + stream-open (auth class -- no
@@ -72,10 +75,12 @@ impl Provider for Auth401Provider {
 /// Provider that returns the replay-rejection 400 on complete + stream so
 /// the strip-repair arm fires and `continue`s. `replay_lane = Mantle` +
 /// openai-responses kind are the classifier's gate for the replay class.
+#[cfg(feature = "openai-responses")]
 struct ReplayReject400Provider {
     calls: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "openai-responses")]
 #[async_trait]
 impl Provider for ReplayReject400Provider {
     fn id(&self) -> &'static str {
@@ -104,10 +109,12 @@ impl Provider for ReplayReject400Provider {
 /// carries the blob marker in its message tail, so a re-gate refusal that
 /// preserves the raw error would leak the marker unless it is stored
 /// body-free.
+#[cfg(feature = "openai-responses")]
 struct ReplayRejectBlobProvider {
     calls: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "openai-responses")]
 #[async_trait]
 impl Provider for ReplayRejectBlobProvider {
     fn id(&self) -> &'static str {
@@ -177,6 +184,7 @@ fn rpm1_router(provider: Arc<dyn Provider>) -> Router {
 
 /// Single openai-responses target with `rpm_limit = 1`, so a replay-repair
 /// re-dispatch is RPM-refused on its re-gate.
+#[cfg(feature = "openai-responses")]
 fn rpm1_responses_router(provider: Arc<dyn Provider>) -> Router {
     let toml_text = r#"
 [providers.p1]
@@ -207,6 +215,7 @@ fn plain_req() -> ChatRequest {
 /// A request carrying one reasoning artifact toward the mantle lane, so the
 /// router builds a replay plan and the replay-rejection 400 enters the
 /// strip-repair arm.
+#[cfg(feature = "openai-responses")]
 fn artifact_req() -> ChatRequest {
     let message = routectl_core::Message {
         role: Role::Assistant,
@@ -285,6 +294,7 @@ async fn stream_auth_retry_regate_refusal_surfaces_401_not_rpm_error() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "the re-gate refuses first");
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn complete_replay_repair_regate_refusal_surfaces_upstream_not_rpm_error() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -305,6 +315,7 @@ async fn complete_replay_repair_regate_refusal_surfaces_upstream_not_rpm_error()
     );
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn stream_replay_repair_regate_refusal_surfaces_upstream_not_rpm_error() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -322,6 +333,7 @@ async fn stream_replay_repair_regate_refusal_surfaces_upstream_not_rpm_error() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "the re-gate refuses first");
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn complete_replay_repair_regate_refusal_is_body_free_not_blob() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -345,6 +357,7 @@ async fn complete_replay_repair_regate_refusal_is_body_free_not_blob() {
     );
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn stream_replay_repair_regate_refusal_is_body_free_not_blob() {
     let calls = Arc::new(AtomicUsize::new(0));

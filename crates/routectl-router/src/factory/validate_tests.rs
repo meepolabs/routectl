@@ -3589,24 +3589,8 @@ mod pool_validation_tests {
     }
 
     fn cases() -> Vec<Case> {
-        vec![
-            Case {
-                name: "mixed-kind",
-                config: format!(
-                    "{OAUTH_ACCOUNTS}\
-                     [providers.codex-default]\n\
-                     kind = \"openai-responses\"\n\
-                     api_key_ref = \"oauth://codex\"\n\
-                     [pools.mixed]\n\
-                     members = [\"anthropic-default\", \"codex-default\"]\n"
-                ),
-                expect: &[
-                    "codex-default",
-                    "openai-responses",
-                    "anthropic-api",
-                    "ONE provider kind",
-                ],
-            },
+        #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
+        let mut cases = vec![
             Case {
                 name: "unknown-member",
                 config: format!(
@@ -3698,7 +3682,26 @@ mod pool_validation_tests {
                 },
                 expect: &["exceeds", "32-member cap"],
             },
-        ]
+        ];
+        #[cfg(feature = "openai-responses")]
+        cases.push(Case {
+            name: "mixed-kind",
+            config: format!(
+                "{OAUTH_ACCOUNTS}\
+                 [providers.codex-default]\n\
+                 kind = \"openai-responses\"\n\
+                 api_key_ref = \"oauth://codex\"\n\
+                 [pools.mixed]\n\
+                 members = [\"anthropic-default\", \"codex-default\"]\n"
+            ),
+            expect: &[
+                "codex-default",
+                "openai-responses",
+                "anthropic-api",
+                "ONE provider kind",
+            ],
+        });
+        cases
     }
 
     #[test]
@@ -3720,7 +3723,7 @@ mod pool_validation_tests {
         }
     }
 
-    /// The nine classes must not collapse into one generic message: a
+    /// The rejection classes must not collapse into one generic message: a
     /// distinct error per class is what makes an operator able to act.
     #[test]
     fn each_rejection_class_renders_a_distinct_message() {
@@ -4058,7 +4061,8 @@ mod managed_anthropic_credential_tests {
 
     #[test]
     fn config_validation_keeps_the_supported_shapes_valid() {
-        let config = parse(
+        #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
+        let mut text = String::from(
             "[providers.managed-default]\n\
              kind = \"anthropic-api\"\n\
              auth_kind = \"oauth-bearer\"\n\
@@ -4076,11 +4080,15 @@ mod managed_anthropic_credential_tests {
              kind = \"anthropic-api\"\n\
              auth_kind = \"oauth-bearer\"\n\
              api_key_ref = \"env://GATEWAY_KEY\"\n\
-             base_url = \"https://gateway.example/api\"\n\
-             [providers.responses-oauth]\n\
+             base_url = \"https://gateway.example/api\"\n",
+        );
+        #[cfg(feature = "openai-responses")]
+        text.push_str(
+            "[providers.responses-oauth]\n\
              kind = \"openai-responses\"\n\
              api_key_ref = \"oauth://codex\"\n",
         );
+        let config = parse(&text);
 
         let errors = collect_config_validation(&config).errors;
 

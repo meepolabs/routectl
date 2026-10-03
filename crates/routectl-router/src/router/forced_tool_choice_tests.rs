@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
-use routectl_core::capability::{FailurePhase, SignalTier};
+#[cfg(feature = "bedrock")]
+use routectl_core::capability::FailurePhase;
+use routectl_core::capability::SignalTier;
 use routectl_core::{ChatChunk, ChatResponse, Provider, Result, ToolDef};
 use serde_json::{Value, json};
 

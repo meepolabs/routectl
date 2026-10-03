@@ -277,6 +277,7 @@ async fn an_openai_compat_first_hop_withholds_the_fingerprint_and_keeps_every_sy
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        #[cfg(feature = "bedrock")]
         mantle: None,
     });
     let mut responses_cfg = OpenAiResponsesConfig::new("p-responses", "test-key");

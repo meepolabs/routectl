@@ -425,6 +425,7 @@ fn two_growth_marked_pools_for_one_family_refuse_as_ambiguous() {
 /// A growth-marked pool whose members authenticate against a DIFFERENT
 /// family does not serve this one -- the match is by credential ref, not by
 /// pool name.
+#[cfg(feature = "openai-responses")]
 #[test]
 fn a_growth_marked_pool_of_another_family_is_not_offered() {
     // Arrange

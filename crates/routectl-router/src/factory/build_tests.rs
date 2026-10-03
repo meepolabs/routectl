@@ -2453,6 +2453,10 @@ mod managed_credential_factory_tests {
     }
 
     fn rejected_entries(r: &str) -> Vec<(&'static str, ProviderEntry)> {
+        #[cfg_attr(
+            not(any(feature = "openai-responses", feature = "gemini")),
+            allow(unused_mut)
+        )]
         let mut v = vec![
             (
                 "anthropic-api gateway",
@@ -2571,6 +2575,10 @@ mod managed_credential_factory_tests {
         codex: &str,
         antigravity: &str,
     ) -> Vec<(&'static str, ProviderEntry)> {
+        #[cfg_attr(
+            not(any(feature = "openai-responses", feature = "gemini")),
+            allow(unused_mut)
+        )]
         let mut v = vec![
             (
                 "openai-compat codex",

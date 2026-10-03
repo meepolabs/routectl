@@ -932,6 +932,7 @@ fn carries_managed_oauth_ref(entry: &ProviderEntry, family: &str) -> bool {
 /// host of one of `allowed_bases`. Parsed with the same WHATWG URL parser the
 /// egress uses, so a backslash or `@` smuggle resolves to the host the request
 /// would actually reach. Invalid URLs and URLs with no host return `false`.
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
 fn is_exact_https_host_of(base_url: &str, allowed_bases: &[&str]) -> bool {
     let Ok(url) = url::Url::parse(base_url) else {
         return false;
@@ -1004,6 +1005,7 @@ pub fn validate_managed_anthropic_credential(name: &str, entry: &ProviderEntry) 
 /// `openai-responses`, `auth_kind = "chatgpt-oauth"`, no Bedrock mantle lane,
 /// and an effective `base_url` (the kind default when unset) on exactly the
 /// ChatGPT backend host over https.
+#[cfg_attr(not(feature = "openai-responses"), allow(clippy::missing_const_for_fn))]
 fn is_managed_codex_lane(entry: &ProviderEntry) -> bool {
     #[cfg(feature = "openai-responses")]
     if let ProviderEntry::OpenaiResponses {
@@ -1057,6 +1059,7 @@ pub(super) fn validate_managed_codex_credential(name: &str, entry: &ProviderEntr
 /// `gemini` with `auth_mode = "cloud-code"` and an effective `base_url` (the
 /// daily Cloud Code host when unset) on exactly the production or daily Cloud
 /// Code host over https.
+#[cfg_attr(not(feature = "gemini"), allow(clippy::missing_const_for_fn))]
 fn is_managed_antigravity_lane(entry: &ProviderEntry) -> bool {
     #[cfg(feature = "gemini")]
     if let ProviderEntry::Gemini {

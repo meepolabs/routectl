@@ -10,6 +10,8 @@
 //! own test binary with a SINGLE test that walks the boot -> reload ->
 //! no-op sequence in order.
 
+#![cfg(feature = "openai-responses")]
+
 use std::sync::Arc;
 
 use routectl_auth::{MemoryStore, SecretStore};

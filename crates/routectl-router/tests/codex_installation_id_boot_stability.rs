@@ -10,6 +10,8 @@
 //! `resolved_identity` is a set-once process-global, so this lives in its own
 //! test binary with a SINGLE test that walks boot -> boot in order.
 
+#![cfg(feature = "openai-responses")]
+
 use std::sync::Arc;
 
 use routectl_auth::{MemoryStore, SecretStore};

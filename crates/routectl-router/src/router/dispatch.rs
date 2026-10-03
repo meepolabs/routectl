@@ -3707,6 +3707,7 @@ mod auto_emit_cache_control_tests;
 mod capability_acceptance_tests;
 
 #[cfg(test)]
+#[cfg(feature = "openai-responses")]
 #[path = "replay_degradation_observability_tests.rs"]
 mod replay_degradation_observability_tests;
 

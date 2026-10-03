@@ -79,8 +79,11 @@ dhat = { version = "0.3", optional = true }
 # it cannot see the gated fixture seams at all, and gating them on `cfg(test)`
 # alone would put them out of reach of exactly the tests that need them. Feature
 # unification then enables the feature for test/bench builds only; the release
-# library is built without it.
-routectl-router = { path = ".", features = ["test-utils"] }
+# library is built without it. Default features stay OFF here: otherwise
+# unification would switch the provider features back on for every test/bench
+# build, and a `--no-default-features` test or clippy run would silently build
+# the full provider set instead of the reduced one.
+routectl-router = { path = ".", default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 serial_test = "3"
 wiremock.workspace = true
