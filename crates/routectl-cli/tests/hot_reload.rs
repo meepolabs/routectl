@@ -1,4 +1,4 @@
-//! Integration tests for the file-watch + SIGHUP hot-reload path.
+//! Integration tests for the file-watch hot-reload path.
 //!
 //! Each test boots a server via `serve_on_listener` against a
 //! `tempfile::tempdir`-rooted config.toml and credentials.json so
@@ -671,46 +671,33 @@ async fn concurrent_self_write_no_loop() {
     );
 }
 
-/// SIGHUP combined-path coverage: rewriting `config.toml` and then
-/// sending SIGHUP must surface the new alias. Either path (file-watch
-/// arm OR SIGHUP arm) can satisfy this assertion -- both fan into the
-/// same coordinator and converge on the same Arc swap. SIGHUP-only
-/// isolation lives in the unit test
-/// `server::tests::sighup_listener_emits_paired_reload_requests_in_isolation`,
-/// which drives `run_sighup_listener` against a bare channel with no
-/// watcher in the picture. This integration-level test pins the
-/// end-to-end happy path of the combined arm.
-#[cfg(unix)]
+/// A config rewrite during live serving surfaces the new alias through the
+/// file-watch arm alone. This test sends no signal: a signal sent from inside
+/// the test binary reaches every test in the process. The SIGHUP arm is
+/// covered by the unit test
+/// `server::reload::reload_tests::reload_trigger_fan_out_emits_paired_requests_and_stops_on_shutdown`
+/// (trigger -> paired reload requests) and by `tests/serve_shutdown.rs`, which
+/// signals a child running the shipped binary.
 #[tokio::test]
-async fn sighup_combined_with_file_rewrite_surfaces_new_config() {
-    let (base_url, config_path, _dir) = spawn_watched_server("sighup-pre").await;
+async fn rewrite_during_serving_surfaces_new_config() {
+    let (base_url, config_path, _dir) = spawn_watched_server("rewrite-pre").await;
 
-    // The fs-event arm may also pick this rewrite up; that is by
-    // design (both arms converge on the same coordinator). The
-    // SIGHUP-only contract is covered separately by the unit test
-    // referenced in the doc comment above.
-    let post = config_text_with_alias("sighup-post");
+    let post = config_text_with_alias("rewrite-post");
     write_atomic(&config_path, post.as_bytes());
 
-    // Send SIGHUP to ourselves.
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-    kill(Pid::from_raw(std::process::id() as i32), Signal::SIGHUP).expect("send SIGHUP");
-
     // Assert: the new alias surfaces. The rewrite is re-issued on the
-    // restimulus cadence (identical bytes, idempotent) so the fs arm still
-    // converges if the lone rename above was never delivered -- the combined
-    // arm is what is under test, not one specific arm winning the race.
+    // restimulus cadence (identical bytes, idempotent) because a lone atomic
+    // rename is not reliably delivered to the watcher.
     assert!(
         poll_alias_with_restimulus(
             &base_url,
             &config_path,
             post.as_bytes(),
-            "sighup-post",
+            "rewrite-post",
             RELOAD_WAIT_CEILING,
         )
         .await,
-        "sighup-post alias did not appear within {RELOAD_WAIT_CEILING:?} after SIGHUP"
+        "rewrite-post alias did not appear within {RELOAD_WAIT_CEILING:?} after the rewrite"
     );
 }
 

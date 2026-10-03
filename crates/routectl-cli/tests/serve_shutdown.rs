@@ -1,14 +1,15 @@
-//! The daemon's graceful shutdown, driven against the REAL binary in a CHILD
-//! process.
+//! The daemon's signal handling -- graceful shutdown on SIGTERM and the reload
+//! trigger on SIGHUP -- driven against the REAL binary in a CHILD process.
 //!
-//! WHY A SEPARATE PROCESS. The property under test needs a real SIGTERM, and a
+//! WHY A SEPARATE PROCESS. The properties under test need a real signal, and a
 //! signal is a PROCESS-WIDE fact: sent from inside the unit-test binary it
 //! reaches that binary, where SIGTERM's default disposition terminates every
 //! test running in it -- reported as an exit code with no failing test name.
 //! Working around that from inside (registering a handler, retaining a stream)
 //! means the test must alter the disposition every other test in the process
-//! inherits. Signalling a child instead removes the hazard rather than managing
-//! it: this parent never registers a SIGTERM handler and never touches its own
+//! inherits (SIGHUP's default disposition terminates the process the same way).
+//! Signalling a child instead removes the hazard rather than managing it: this
+//! parent never registers a signal handler and never touches its own
 //! disposition, so nothing here can affect a sibling test.
 //!
 //! WHAT IT PINS. The daemon holds a producer handle to its usage writer through
@@ -21,9 +22,10 @@
 //! CHILD ONLY, so the config, the usage ledger, and the catalog state all
 //! resolve inside it and never touch the developer's real `~/.config/routectl`.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use routectl_router::CURRENT_CONFIG_VERSION as CURRENT;
@@ -50,6 +52,12 @@ const EXIT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the parent waits for the daemon to begin serving.
 const READY_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long the parent waits for the daemon to log a delivered SIGHUP.
+const SIGHUP_LOG_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The line the daemon logs at info level for every SIGHUP it receives.
+const SIGHUP_LOG_LINE: &str = "SIGHUP received; triggering full config + credentials rescan";
 
 /// A child `routectl serve` that is killed and reaped if the test leaves early.
 ///
@@ -107,6 +115,30 @@ impl ServeChild {
             }
         }
         None
+    }
+
+    /// Hand the child's stderr to a reader thread that forwards it line by
+    /// line, so the parent can wait for a specific line under a deadline and
+    /// the pipe is drained continuously however much the child logs. The
+    /// thread ends when the child's stderr closes, which `Drop` guarantees.
+    fn stderr_lines(&mut self) -> mpsc::Receiver<String> {
+        let stderr = self
+            .child
+            .as_mut()
+            .expect("child is live")
+            .stderr
+            .take()
+            .expect("stderr is piped and not yet taken");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { return };
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        rx
     }
 
     /// Whatever the child wrote to stderr, for a failure message.
@@ -287,6 +319,52 @@ fn a_booted_daemon_shuts_down_well_inside_the_writer_abandon_deadline() {
         elapsed < SHUTDOWN_BUDGET,
         "shutdown took {elapsed:?}: the Router's accounting adapter must be released \
          before the usage writer is drained, or the drain waits out its abandon deadline",
+    );
+}
+
+/// A real daemon must receive SIGHUP through its installed handler and log
+/// the reload trigger, rather than taking the default disposition and dying.
+///
+/// The fan-out from a trigger to reload requests is pinned in-process by the
+/// reload unit tests; this pins the remaining piece only a real signal can:
+/// the handler is installed by the time the daemon serves, and a delivery
+/// reaches the fan-out loop in the shipped binary.
+#[cfg(unix)]
+#[test]
+fn a_serving_daemon_logs_the_reload_trigger_on_sighup() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    // Arrange: a hermetic daemon logging at info, serving.
+    let port = free_port();
+    let (home, config_path) = hermetic_home(port);
+    let mut command = serve_command(home.path(), &config_path);
+    command.env("ROUTECTL_LOG", "info").env("NO_COLOR", "1");
+    let child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {BIN} serve on port {port}: {e}"));
+    let mut child = ServeChild { child: Some(child) };
+    let lines = child.stderr_lines();
+    await_serving(&mut child, port);
+
+    // Act: exactly one SIGHUP, to the CHILD's pid.
+    kill(Pid::from_raw(child.id() as i32), Signal::SIGHUP).expect("SIGHUP the child");
+
+    // Assert. Every exit path drops `child`, which kills and reaps it.
+    let until = Instant::now() + SIGHUP_LOG_DEADLINE;
+    let mut seen = Vec::new();
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        match lines.recv_timeout(left) {
+            Ok(line) if line.contains(SIGHUP_LOG_LINE) => return,
+            Ok(line) => seen.push(line),
+            Err(_) => break,
+        }
+    }
+    let status = child.wait_until(Duration::ZERO);
+    panic!(
+        "the daemon did not log {SIGHUP_LOG_LINE:?} within {SIGHUP_LOG_DEADLINE:?} of one \
+         SIGHUP (exit status: {status:?}); stderr:\n{}",
+        seen.join("\n"),
     );
 }
 

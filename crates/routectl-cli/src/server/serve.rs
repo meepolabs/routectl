@@ -1052,7 +1052,7 @@ async fn injected_shutdown_or_signal(injected: Option<tokio::sync::oneshot::Rece
 
 /// Future that resolves on the first SIGTERM or SIGINT. SIGHUP is
 /// deliberately NOT handled here -- it remains the config-reload
-/// trigger (`run_sighup_listener`). On non-Unix targets only Ctrl-C
+/// trigger (`fan_out_reload_triggers`). On non-Unix targets only Ctrl-C
 /// (SIGINT-equivalent) is available, so the SIGTERM arm is cfg-gated
 /// out there.
 async fn shutdown_signal() {

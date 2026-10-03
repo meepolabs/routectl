@@ -5704,8 +5704,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   paths from `mod.rs`
 - `src/server/reload.rs` -- config/credential/seat reload + activation
   coordinator, owning the `spawn_blocking` hot-reload boundary.
-  `spawn_reload_pipeline` wires the file-watch task + SIGHUP listener
-  (`run_sighup_listener`, cfg(unix)) + `run_reload_coordinator`, which drains
+  `spawn_reload_pipeline` wires the file-watch task + SIGHUP trigger
+  (`register_sighup` installs the handler before serving; the generic
+  `fan_out_reload_triggers` loop forwards each delivery, cfg(unix)) +
+  `run_reload_coordinator`, which drains
   a `ReloadRequest` channel and fans each into `handle_config_reload` (re-read
   config.toml + overlay via `read_parse_validate_config` off a
   `spawn_blocking` worker, rebuild the live `Router` behind `ArcSwap`, carry
@@ -8119,11 +8121,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/common/replay/sse_diff.rs` -- SSE event-sequence parser
   (`parse_sse_events`, `SseEventCmp`) and pairwise-equality comparator
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
-- `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests;
+- `tests/hot_reload.rs` -- file-watch hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +
   credentials.json and polls for the live `Router` swap
-- `tests/serve_shutdown.rs` -- real-binary graceful-shutdown integration test;
-  signals and reaps a hermetic child process; also boots the shipped example
+- `tests/serve_shutdown.rs` -- real-binary signal integration tests (graceful
+  SIGTERM shutdown, SIGHUP reload-trigger log line); signals and reaps a
+  hermetic child process; also boots the shipped example
   config (oauth-backed entries removed) in a cleared env, Bedrock default chain
   included, to a serving `/health` and a clean SIGTERM exit
 - `src/server/preflight_daemon_tests.rs` -- ASSEMBLED-DAEMON verification (a

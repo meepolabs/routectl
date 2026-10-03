@@ -445,8 +445,17 @@ fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
         stream_first_byte_timeout_ms: Some(TIMEOUT_MS),
         ..RetryPolicy::default()
     };
+    // Endless for as long as the test waits; once it gives up, the stream ends
+    // so a regressed guard loop terminates instead of spinning a stranded
+    // thread for the rest of the test binary's life.
+    let abandoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stream_abandoned = Arc::clone(&abandoned);
     let provider = FixedStream::from_stream(
-        futures::stream::repeat_with(|| Ok(stamped_empty_reasoning())).boxed(),
+        futures::stream::repeat_with(|| Ok(stamped_empty_reasoning()))
+            .take_while(move |_| {
+                futures::future::ready(!stream_abandoned.load(std::sync::atomic::Ordering::Relaxed))
+            })
+            .boxed(),
     );
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -466,9 +475,10 @@ fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
         ));
         let _ = tx.send(outcome.map(|_| ()));
     });
-    let outcome = rx
-        .recv_timeout(wall_limit)
-        .expect("the guard returns instead of spinning past the first-content timeout");
+    let outcome = rx.recv_timeout(wall_limit);
+    abandoned.store(true, std::sync::atomic::Ordering::Relaxed);
+    let outcome =
+        outcome.expect("the guard returns instead of spinning past the first-content timeout");
 
     match outcome {
         Err(Error::Upstream {

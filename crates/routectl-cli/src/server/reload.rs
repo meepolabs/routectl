@@ -94,13 +94,16 @@ pub(super) fn spawn_reload_pipeline(
         }
     }
 
+    // Registered here rather than inside the spawned task so the handler is
+    // in place before the daemon starts serving: a SIGHUP that lands before
+    // registration takes the default disposition and terminates the process.
     #[cfg(unix)]
-    {
-        let sighup_tx = reload_tx.clone();
-        let sighup_shutdown = shutdown_rx.clone();
-        handles.push(tokio::spawn(async move {
-            run_sighup_listener(sighup_tx, sighup_shutdown).await;
-        }));
+    if let Some(sighup) = register_sighup() {
+        handles.push(tokio::spawn(fan_out_reload_triggers(
+            sighup,
+            reload_tx.clone(),
+            shutdown_rx.clone(),
+        )));
     }
     // Drop the original sender so the coordinator's `recv()` returns
     // None when every clone is closed. (cfg(unix) clones above keep
@@ -128,31 +131,41 @@ pub(super) fn spawn_reload_pipeline(
     handles
 }
 
-/// Listen for `SIGHUP` and fan each delivery into the reload channel
-/// as a paired (Config + Credentials) full-rescan request. Sends are
-/// best-effort: a closed coordinator (post-shutdown) silently drops.
+/// Install the `SIGHUP` handler and expose each delivery as a `()` item.
+/// Returns `None` (after a warning) when the handler cannot be installed,
+/// leaving reload-via-signal disabled.
 #[cfg(unix)]
-pub(super) async fn run_sighup_listener(
-    tx: mpsc::Sender<ReloadRequest>,
-    mut shutdown: watch::Receiver<()>,
-) {
+fn register_sighup() -> Option<impl futures::Stream<Item = ()> + Unpin + Send + 'static> {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let mut sig = match signal(SignalKind::hangup()) {
-        Ok(s) => s,
+    match signal(SignalKind::hangup()) {
+        Ok(mut sig) => Some(futures::stream::poll_fn(move |cx| sig.poll_recv(cx))),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "failed to install SIGHUP handler; reload-via-signal disabled",
             );
-            return;
+            None
         }
-    };
+    }
+}
+
+/// Fan each `SIGHUP` delivery from `triggers` into the reload channel as a
+/// paired (Config + Credentials) full-rescan request. Returns when the
+/// trigger stream ends or `shutdown` fires. Sends are best-effort: a closed
+/// coordinator (post-shutdown) silently drops.
+#[cfg(unix)]
+pub(super) async fn fan_out_reload_triggers(
+    mut triggers: impl futures::Stream<Item = ()> + Unpin,
+    tx: mpsc::Sender<ReloadRequest>,
+    mut shutdown: watch::Receiver<()>,
+) {
+    use futures::StreamExt as _;
 
     loop {
         tokio::select! {
             _ = shutdown.changed() => return,
-            received = sig.recv() => {
+            received = triggers.next() => {
                 if received.is_none() {
                     return;
                 }

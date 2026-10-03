@@ -15,51 +15,52 @@ fn never_shutdown() -> watch::Receiver<()> {
     rx
 }
 
-/// SIGHUP-only delivery: drive `run_sighup_listener` directly with no
-/// filesystem watcher in the picture. Sending SIGHUP to ourselves
-/// must produce exactly one `Config` followed by one `Credentials`
-/// `ReloadRequest` on the channel. A regression that breaks the
-/// signal -> mpsc fan-out (registration error, dropped sender, fused
-/// recv) cannot pass this test because no other path can emit those
-/// requests in this fixture. Pairs with the integration-level
-/// combined-path test in `tests/hot_reload.rs`.
+/// Trigger fan-out in isolation: drive `fan_out_reload_triggers` from an
+/// in-process channel standing in for the SIGHUP stream, with no signal, no
+/// file watcher, and no coordinator. One trigger must produce exactly one
+/// `Config` followed by one `Credentials` `ReloadRequest`, and a shutdown must
+/// end the loop even while the trigger stream stays open. The real OS-signal
+/// registration is covered against the shipped binary in
+/// `tests/serve_shutdown.rs`.
 #[cfg(unix)]
 #[tokio::test]
-#[serial_test::serial]
-async fn sighup_listener_emits_paired_reload_requests_in_isolation() {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-    use std::time::Duration;
+async fn reload_trigger_fan_out_emits_paired_requests_and_stops_on_shutdown() {
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
-    // Arrange: pure SIGHUP -> channel rig. No file watcher, no
-    // server, no reload coordinator.
+    // Arrange
+    let (trigger_tx, trigger_rx) = mpsc::channel::<()>(1);
+    let triggers = tokio_stream::wrappers::ReceiverStream::new(trigger_rx);
     let (tx, mut rx) = mpsc::channel::<file_watch::ReloadRequest>(8);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(());
-    tokio::spawn(run_sighup_listener(tx, shutdown_rx));
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let fan_out = tokio::spawn(fan_out_reload_triggers(triggers, tx, shutdown_rx));
 
-    // Yield until the spawned listener has installed its handler.
-    // tokio::signal::unix::signal registers synchronously, but the
-    // task needs to enter its select! loop before a signal landing
-    // in the same instant is observable.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Act: deliver SIGHUP to ourselves.
-    kill(Pid::from_raw(std::process::id() as i32), Signal::SIGHUP).expect("kill(SIGHUP) to self");
-
-    // Assert: one Config then one Credentials, in that order. A
-    // 2s timeout is generous for the OS notify -> tokio signal
-    // futex hop on a loaded CI runner.
-    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+    // Act
+    trigger_tx
+        .send(())
         .await
-        .expect("first reload request must arrive within 2s")
-        .expect("channel must not close while listener is alive");
-    let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .expect("fan-out holds the trigger receiver");
+    let first = tokio::time::timeout(DEADLINE, rx.recv())
         .await
-        .expect("second reload request must arrive within 2s")
-        .expect("channel must not close while listener is alive");
+        .expect("a trigger must forward a first request");
+    let second = tokio::time::timeout(DEADLINE, rx.recv())
+        .await
+        .expect("a trigger must forward a second request");
+    shutdown_tx
+        .send(())
+        .expect("fan-out holds the shutdown receiver");
+    let stopped = tokio::time::timeout(DEADLINE, fan_out).await;
 
-    assert_eq!(first, file_watch::ReloadRequest::Config);
-    assert_eq!(second, file_watch::ReloadRequest::Credentials);
+    // Assert
+    assert_eq!(first, Some(file_watch::ReloadRequest::Config));
+    assert_eq!(second, Some(file_watch::ReloadRequest::Credentials));
+    stopped
+        .expect("shutdown must end the fan-out loop while triggers stay open")
+        .expect("fan-out task must not panic");
+    assert!(
+        rx.recv().await.is_none(),
+        "one trigger must produce exactly two requests"
+    );
+    drop(trigger_tx);
 }
 
 // ---- Credentials reload: seat-set-change Router rebuild gate ----
