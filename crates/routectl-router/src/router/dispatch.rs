@@ -43,7 +43,7 @@ use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::overlays::apply_layered_overlays;
-use super::precontent::precontent_summary;
+use super::precontent::{is_empty_reasoning_only, precontent_summary};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
@@ -3072,11 +3072,16 @@ fn wrap_with_breaker_accounting(
     Box::pin(s)
 }
 
-/// Upper bound on the content-free leading chunks buffered while waiting
-/// for the first content-bearing one. A healthy stream opens with at most
-/// a handful of metadata chunks (a role delta, an id/model stamp); a stream
-/// that exceeds this before emitting content is treated as a pre-content
-/// failure rather than buffering unboundedly.
+/// Upper bound on the content-free leading chunks that are NOT
+/// empty-reasoning-only (see `is_empty_reasoning_only`), counted while
+/// waiting for the first content-bearing one. A healthy stream opens with
+/// at most a handful of metadata chunks (a role delta, an id/model stamp);
+/// a stream that exceeds this before emitting content is treated as a
+/// pre-content failure rather than buffering unboundedly. Empty-reasoning
+/// chunks are not counted, and each consecutive run of them is buffered as
+/// its first chunk only, so the buffer holds at most twice this many
+/// entries; `stream_first_byte_timeout_ms` bounds a stream that never
+/// sends anything else.
 const MAX_PRECONTENT_CHUNKS: usize = 8;
 
 /// True when `chunk` carries client-visible generated content: non-empty
@@ -3174,6 +3179,7 @@ async fn try_stream_with_first_content(
         // metadata) until the first content-bearing one. Bounded: a
         // stream that never produces content must not buffer forever.
         let mut buffered: Vec<ChatChunk> = Vec::new();
+        let mut counted = 0usize;
         loop {
             match upstream.next().await {
                 Some(Ok(chunk)) if is_content_bearing(&chunk) => {
@@ -3185,8 +3191,13 @@ async fn try_stream_with_first_content(
                         .chain(upstream);
                     return Ok(merged.boxed());
                 }
+                Some(Ok(chunk)) if is_empty_reasoning_only(&chunk) => {
+                    if !buffered.last().is_some_and(is_empty_reasoning_only) {
+                        buffered.push(chunk);
+                    }
+                }
                 Some(Ok(chunk)) => {
-                    if buffered.len() >= MAX_PRECONTENT_CHUNKS {
+                    if counted >= MAX_PRECONTENT_CHUNKS {
                         // Buffer overflow before any content: a
                         // pre-content failure. Discard the buffer (nothing
                         // reached the client) and fall over. Fallbackable
@@ -3197,6 +3208,7 @@ async fn try_stream_with_first_content(
                              content-free chunks before any content (buffered: {summary})",
                         )));
                     }
+                    counted += 1;
                     buffered.push(chunk);
                 }
                 Some(Err(e)) => return Err(e),

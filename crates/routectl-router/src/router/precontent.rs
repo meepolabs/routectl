@@ -35,8 +35,29 @@ pub(super) fn precontent_kind(chunk: &ChatChunk) -> &'static str {
     }
 }
 
+/// True when every choice of `chunk` carries only an empty reasoning string
+/// and the chunk carries nothing else besides its id/model stamps. A long
+/// thinking block streams many of these before its first typed detail;
+/// they show the upstream is alive and are not metadata.
+pub(super) fn is_empty_reasoning_only(chunk: &ChatChunk) -> bool {
+    chunk.usage.is_none()
+        && chunk.upstream_meta.is_none()
+        && chunk.opaque_events.is_empty()
+        && !chunk.choices.is_empty()
+        && chunk.choices.iter().all(|choice| {
+            let delta = &choice.delta;
+            choice.finish_reason.is_none()
+                && choice.matched_stop_sequence.is_none()
+                && delta.role.is_none()
+                && delta.content.is_none()
+                && delta.reasoning.as_deref() == Some("")
+                && delta.reasoning_details.is_empty()
+                && delta.tool_calls.is_none()
+        })
+}
+
 /// Ordered run-length summary of the kinds of `chunks`, e.g.
-/// `role, empty_reasoning x7, finish`; `none` when there are no chunks.
+/// `role, empty_reasoning, usage x2, finish`; `none` when there are no chunks.
 pub(super) fn precontent_summary<'a>(chunks: impl IntoIterator<Item = &'a ChatChunk>) -> String {
     let mut runs: Vec<(&'static str, usize)> = Vec::new();
     for kind in chunks.into_iter().map(precontent_kind) {
