@@ -641,3 +641,38 @@ jobs:
       # edit here. Exits non-zero on a finding.
       - name: scan lockfiles
         run: osv-scanner scan source -r .
+
+  # The single check branch protection requires. Listing each job (and
+  # each matrix leg) as its own required check would break every time a
+  # leg is added or renamed; this job depends on all of them instead and
+  # fails unless every one succeeded. `if: always()` makes it report when
+  # a dependency failed or was skipped -- otherwise it would be skipped
+  # itself, and a skipped required check reads as passing. Adding a job
+  # to this workflow means adding it to `needs` here.
+  required:
+    name: required
+    runs-on: ubuntu-22.04
+    if: always()
+    needs:
+      - check
+      - reduced-features
+      - msrv
+      - test
+      - release-build
+      - audit
+      - deny
+      - internal-ids
+      - public-api
+      - osv-scan
+    steps:
+      - name: every required job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          echo "dependency results: $RESULTS"
+          if printf '%s' "$RESULTS" | grep -Eq '"(failure|cancelled|skipped)"'; then
+            echo "required: at least one job did not succeed" >&2
+            exit 1
+          fi
+          printf '%s' "$RESULTS" | grep -q '"success"' || { echo "required: no results" >&2; exit 1; }
