@@ -89,6 +89,7 @@ fn a_wire_stated_zero_is_reported_as_zero() {
 
 /// Bedrock Invoke speaks the Messages wire and parses through the same
 /// normalizer, so it gets the same lift.
+#[cfg(feature = "bedrock")]
 #[test]
 fn bedrock_invoke_lifts_the_same_nested_field() {
     // Act

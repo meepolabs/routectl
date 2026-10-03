@@ -11,11 +11,12 @@ use routectl_core::identity::anthropic::{
     REDACT_THINKING_BETA, default_claude_code_anthropic_betas,
 };
 use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role, StaticToken};
-use tracing_test::traced_test;
+use routectl_testkit::CapturedEvent;
 
 const OAUTH_HOST: &str = "https://api.anthropic.com";
 const API_KEY_HOST: &str = "http://127.0.0.1:18080";
 const DROP_LOG_FIELD: &str = "dropped_beta";
+const CONTROL_PROVIDER_ID: &str = "redact-display-control";
 
 fn cfg(base_url: &str, auth_kind: AuthKind, use_forwarded_bearer: bool) -> AnthropicApiConfig {
     AnthropicApiConfig {
@@ -89,6 +90,15 @@ fn has(betas: &[String], flag: &str) -> bool {
     betas.iter().any(|b| b == flag)
 }
 
+/// Captured events that report dropping the redact beta for `provider_id`.
+fn redact_drops<'a>(events: &'a [CapturedEvent], provider_id: &str) -> Vec<&'a CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.field(DROP_LOG_FIELD) == Some(REDACT_THINKING_BETA))
+        .filter(|e| e.field("provider") == Some(provider_id))
+        .collect()
+}
+
 #[test]
 fn display_drops_the_floor_redact_beta_on_the_oauth_lane() {
     let provider = AnthropicApiProvider::new(cfg(OAUTH_HOST, AuthKind::OauthBearer, false));
@@ -126,39 +136,54 @@ fn no_display_keeps_the_floor_redact_beta_on_the_oauth_lane() {
     );
 }
 
-#[traced_test]
 #[test]
 fn display_drops_a_client_sent_redact_beta_and_logs_once() {
     let provider = AnthropicApiProvider::new(cfg(API_KEY_HOST, AuthKind::ApiKey, false));
     let req = thinking_req(Some("omitted"), &[REDACT_THINKING_BETA, "client-only-beta"]);
 
-    let (body, betas) = compose(&provider, &req);
+    let mut composed = None;
+    let events = routectl_testkit::capture_events(|| composed = Some(compose(&provider, &req)));
+    let (body, betas) = composed.expect("compose ran inside the capture");
 
     assert_eq!(body["thinking"]["display"], "omitted");
     assert_eq!(betas, vec!["client-only-beta".to_string()]);
-    logs_assert(|lines: &[&str]| {
-        let hits = lines
-            .iter()
-            .filter(|l| l.contains(DROP_LOG_FIELD) && l.contains(REDACT_THINKING_BETA))
-            .count();
-        if hits == 1 {
-            Ok(())
-        } else {
-            Err(format!("expected exactly one drop line, found {hits}"))
-        }
-    });
+    let drops = redact_drops(&events, &provider.cfg.id);
+    assert_eq!(
+        drops.len(),
+        1,
+        "expected exactly one redact-beta drop event; captured {events:?}"
+    );
 }
 
-#[traced_test]
 #[test]
 fn no_display_keeps_a_client_sent_redact_beta_and_logs_nothing() {
     let provider = AnthropicApiProvider::new(cfg(API_KEY_HOST, AuthKind::ApiKey, false));
     let req = thinking_req(None, &[REDACT_THINKING_BETA]);
+    let control = AnthropicApiProvider::new(AnthropicApiConfig {
+        id: CONTROL_PROVIDER_ID.into(),
+        ..cfg(API_KEY_HOST, AuthKind::ApiKey, false)
+    });
+    let control_req = thinking_req(Some("omitted"), &[REDACT_THINKING_BETA]);
 
-    let (_body, betas) = compose(&provider, &req);
+    let mut composed = None;
+    let events = routectl_testkit::capture_events(|| {
+        composed = Some(compose(&provider, &req));
+        compose(&control, &control_req);
+    });
+    let (_body, betas) = composed.expect("compose ran inside the capture");
 
     assert_eq!(betas, vec![REDACT_THINKING_BETA.to_string()]);
-    assert!(!logs_contain(DROP_LOG_FIELD));
+    // The display-carrying control compose proves the capture saw the drop
+    // callsite, so the zero count below is not an artifact of a dead capture.
+    assert_eq!(
+        redact_drops(&events, CONTROL_PROVIDER_ID).len(),
+        1,
+        "control compose must log its drop; captured {events:?}"
+    );
+    assert!(
+        redact_drops(&events, &provider.cfg.id).is_empty(),
+        "no display must log no drop; captured {events:?}"
+    );
 }
 
 #[test]

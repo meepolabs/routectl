@@ -76,13 +76,16 @@ jobs:
 
   # The all-features clippy leg above cannot see a lane's own reduced build:
   # feature unification means a workspace build always has every gate on, so
-  # dead code behind a narrower feature set and lints that only fire without
-  # the default features stay invisible. One leg per lane that has a feature
-  # gate. CI only, deliberately not the pre-commit hook -- the hook is
-  # already minutes long cold, and these legs each pay a fresh feature-set
-  # compile.
+  # dead code behind a narrower feature set, lints that only fire without
+  # the default features, and tests that only compile or fail there stay
+  # invisible. One leg per lane that has a feature gate; each leg lints and
+  # then tests the same args, so the lane's feature set is resolved once.
+  # routectl-providers rejects a zero-provider build at compile time, so
+  # every providers lane names at least one provider feature. CI only,
+  # deliberately not the pre-commit hook -- the hook is already minutes long
+  # cold, and these legs each pay a fresh feature-set compile.
   reduced-features:
-    name: clippy (reduced features)
+    name: reduced features (clippy + test)
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -90,12 +93,18 @@ jobs:
         include:
           - name: router (no default features)
             args: -p routectl-router --no-default-features
+          - name: providers (anthropic-api only)
+            args: -p routectl-providers --no-default-features --features anthropic-api
+          - name: providers (openai-compat only)
+            args: -p routectl-providers --no-default-features --features openai-compat
           - name: providers (gemini only)
             args: -p routectl-providers --no-default-features --features gemini
           - name: providers (openai-responses only)
             args: -p routectl-providers --no-default-features --features openai-responses
           - name: providers (bedrock only)
             args: -p routectl-providers --no-default-features --features bedrock
+          - name: auth (no default features)
+            args: -p routectl-auth --no-default-features
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: AWS-LC build environment preflight
@@ -108,6 +117,12 @@ jobs:
 
       - name: cargo clippy -- ${{ matrix.name }}
         run: cargo clippy ${{ matrix.args }} --all-targets -- -D warnings
+
+      # Plain debug profile, not the release-semantics test profile the main
+      # suite runs under: these legs are where `debug_assert!` checks stay
+      # exercised in CI, since the main suite compiles them out.
+      - name: cargo test -- ${{ matrix.name }}
+        run: cargo test ${{ matrix.args }}
 
   msrv:
     name: msrv check (1.95.0)

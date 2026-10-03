@@ -6,6 +6,11 @@
 //! Each test is gated to the feature that owns its type, so the suite
 //! stays green under `--no-default-features` builds that omit a provider.
 
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 fn assert_renders(schema: schemars::Schema) {
     // A generated schema is an object at the root; serializing it is the
     // operation the schema artifact pipeline performs, so exercise it.
