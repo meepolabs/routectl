@@ -60,7 +60,7 @@ fd-lock = { version = "4", optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 uuid.workspace = true
-serial_test = "3"
+serial_test = "4"
 wiremock.workspace = true
 http.workspace = true
 bytes.workspace = true
