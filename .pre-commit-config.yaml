@@ -212,9 +212,16 @@ repos:
       # blocked roughly one commit in two while it was a commit-stage leg.
       # A flaky check on a path where a human is waiting costs more than it
       # catches; CI runs it serially with nobody blocked.
+      #
+      # The command itself lives in scripts/test-gate.sh (`pre-push`), the
+      # one place every gate command is defined. It builds with the
+      # `test-release` profile: release correctness semantics (opt-level,
+      # no debug assertions, no overflow checks) without the thin-LTO,
+      # single-codegen-unit and panic=abort build cost of the shipped
+      # release profile.
       - id: cargo-test-workspace
-        name: cargo test --workspace --release (pre-push)
-        entry: cargo test --workspace --release -- --skip egress_replay_all --skip ingress_replay_all
+        name: cargo test --workspace --profile test-release (pre-push)
+        entry: bash scripts/test-gate.sh pre-push
         language: system
         stages: [pre-push]
         always_run: true

@@ -190,6 +190,29 @@ inherits = "release"
 debug = 1
 strip = false
 
+[profile.test-release]
+# Test gates (`--profile test-release`, see scripts/test-gate.sh) run with the
+# release profile's correctness semantics -- opt-level, debug-assertions off,
+# overflow-checks off are all inherited unchanged -- so tests exercise the
+# arithmetic and assertion behavior that ships. Only build-cost and
+# diagnostics settings differ:
+#   lto = false          link-time optimization is a large per-binary link
+#                        cost multiplied across every test binary.
+#   codegen-units = 16   parallel codegen; codegen-units = 1 serializes it.
+#   strip = false        keep symbols so test panics print readable
+#                        backtraces.
+#   panic = "unwind"     the test harness always unwinds, so an inherited
+#                        "abort" makes cargo compile the dependency graph
+#                        twice (abort for the binary integration tests
+#                        launch, unwind for the tests themselves).
+# The built-in [profile.test] is deliberately left alone: plain `cargo test`
+# stays the fast debug default for local work and IDEs.
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+panic = "unwind"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # All 6 workspace crates are internal (publish = false). The CI gate runs

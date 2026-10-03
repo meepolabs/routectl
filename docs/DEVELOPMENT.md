@@ -7,16 +7,28 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Verification gate
 
+Test commands build with the `test-release` profile (workspace
+`Cargo.toml`). It inherits the shipped release profile's correctness
+semantics unchanged -- opt-level, debug assertions off, overflow checks
+off -- and differs only in build cost and diagnostics: no LTO, 16 codegen
+units, symbols kept for readable backtraces, and `panic = "unwind"` (the
+test harness unwinds, so an inherited abort would build the dependency
+graph twice). Plain `cargo test` is still the fast debug build for local
+iteration. The exact gate commands live in
+[`scripts/test-gate.sh`](../scripts/test-gate.sh); run it with no
+arguments to list them (`bash scripts/test-gate.sh pre-push` reproduces
+the pre-push gate).
+
 Every change must keep all of the following green:
 
 ```bash
 # Unit + integration tests across the whole workspace.
-cargo test --workspace --features bedrock --release
+cargo test --workspace --features bedrock --profile test-release
 
 # Some context-management integration tests are gated on
 # `#[cfg(feature = "test-utils")]` to keep the production API surface
 # clean. To include them:
-cargo test --workspace --features bedrock,test-utils --release
+cargo test --workspace --features bedrock,test-utils --profile test-release
 
 # The two catalog-codegen tests -- the selectors/snapshot flag weld and
 # the `catalog_baked.rs` drift guard -- are `#[cfg(feature =
@@ -44,7 +56,7 @@ cargo test -p routectl-router --features gen-catalog --lib
 # are present run. Match the per-provider PASS rows against the baseline
 # in docs/TESTED_MODELS.md -- a missing key SKIPS that provider's tests
 # rather than failing them.
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix -- --nocapture --test-threads=1
 
 # Lean build for downstream library consumers who don't want the
@@ -87,8 +99,8 @@ Safe and live commands, side by side:
 
 | | Command | Provider calls |
 |---|---|---|
-| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --release` | never, regardless of environment, as long as neither `--ignored` nor `--include-ignored` is passed |
-| Live gate (explicit, costs money) | `cargo test -p routectl-cli --features live-integration --release --test live_matrix [--test live_anthropic_oauth]` | yes, for every provider whose credential is set |
+| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --profile test-release` | never, regardless of environment, as long as neither `--ignored` nor `--include-ignored` is passed |
+| Live gate (explicit, costs money) | `cargo test -p routectl-cli --features live-integration --profile test-release --test live_matrix [--test live_anthropic_oauth]` | yes, for every provider whose credential is set |
 
 The safe rows stay safe only while they select no live target. Adding a
 `--test` that names a live target, or a `--test` glob that matches one,
@@ -306,7 +318,7 @@ bash scripts/fmt-fragments.sh
 
    ```bash
    ROUTECTL_LOG=routectl_providers=debug cargo test -p routectl-cli \
-     --features live-integration --release --test live_matrix \
+     --features live-integration --profile test-release --test live_matrix \
      <test_name> -- --nocapture --test-threads=1
    ```
 
@@ -484,8 +496,8 @@ day-to-day capture flow.
 5. **Run the replay tests against the local corpus:**
 
    ```
-   cargo test -p routectl-cli --release --test replay_egress -- --nocapture
-   cargo test -p routectl-cli --release --test replay_ingress -- --nocapture
+   cargo test -p routectl-cli --profile test-release --test replay_egress -- --nocapture
+   cargo test -p routectl-cli --profile test-release --test replay_ingress -- --nocapture
    ```
 
    `--nocapture` surfaces the `[replay_*]` summary plus per-fixture
@@ -503,7 +515,7 @@ day-to-day capture flow.
    conservation, which re-runs no routectl code at all:
 
    ```
-   cargo test -p routectl-cli --release --test conservation -- --nocapture
+   cargo test -p routectl-cli --profile test-release --test conservation -- --nocapture
    ```
 
    It compares each fixture's captured ingress body against its captured
