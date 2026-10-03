@@ -414,8 +414,8 @@ list with more narrative.
   several overlapping times; a new job builds the shipped release binary and
   smoke-tests its startup, `/health`, and SIGTERM exit; and a `debug lanes`
   job lints and tests every workspace crate on the plain debug profile --
-  reduced feature sets for the crates that have them, default features for
-  the rest -- so `debug_assert!` and overflow checks still run in CI. A
+  default features for every crate, plus reduced feature sets for the
+  crates that have them -- so `debug_assert!` and overflow checks still run in CI. A
   single `required` job succeeds only when every other job did, so branch
   protection can require that one check instead of one per job and leg.
 
