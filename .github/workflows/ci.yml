@@ -448,27 +448,25 @@ jobs:
       - name: AWS-LC build environment preflight
         run: bash scripts/assert-aws-lc-env.sh
 
-      # The ONLY place this check runs unconditionally. Locally it is a
-      # commit-gate leg that blocks where cargo-public-api and the pinned
-      # nightly happen to be installed and warns where they are not -- so a
-      # surface change authored on a machine without that toolchain reached
-      # the branch with nothing catching it. Needing a pinned nightly is
-      # exactly why it belongs here: CI pays that bootstrap once and
-      # reproducibly instead of every contributor paying it or silently
-      # skipping.
+      # The ONLY place this check runs as a gate. It is not a commit hook:
+      # it needs cargo-public-api plus a pinned nightly, and a hook that
+      # skips where that toolchain is absent lets a surface change authored
+      # without it reach the branch with nothing catching it. CI pays that
+      # bootstrap once and reproducibly instead of every contributor paying
+      # it or silently skipping. Contributors can still run the script on
+      # demand (docs/DEVELOPMENT.md).
       #
-      # Both pins are READ from where they already live rather than
-      # duplicated -- the nightly out of the script that selects it, the
-      # tool version out of the availability probe's own install hint. A
-      # second copy here would drift from the local leg and the two would
-      # disagree about what the surface even is.
+      # Both pins are READ from the script rather than duplicated -- the
+      # nightly from PUBLIC_API_NIGHTLY, the tool version from its bootstrap
+      # install line. A second copy here would drift from the script and the
+      # two would disagree about what the surface even is.
       - name: read the pinned toolchain and tool version
         id: pins
         run: |
           set -euo pipefail
           nightly="$(grep -oE '^PUBLIC_API_NIGHTLY=.*' scripts/public-api.sh | cut -d= -f2)"
           version="$(grep -oE 'cargo-public-api --version [0-9]+\.[0-9]+\.[0-9]+' \
-            scripts/public-api-if-available.sh | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+            scripts/public-api.sh | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
           # Fail closed: an empty pin would silently install a floating
           # nightly or the latest tool, and the surface listing is only
           # reproducible because both are fixed.

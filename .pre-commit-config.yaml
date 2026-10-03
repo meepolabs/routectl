@@ -1,6 +1,7 @@
 # Local commit gate. Mirrors .github/workflows/ci.yml job "fmt + clippy +
-# check", plus two local-only legs CI does not run (public-api baseline
-# drift, rustdoc lints).
+# check", plus a local-only rustdoc-lint leg CI does not run. The
+# public-api baseline check is not a hook: it needs a pinned nightly, so
+# CI is where it runs (see docs/DEVELOPMENT.md to run it on demand).
 #
 # WHY pre-commit rather than a hand-rolled hook script: pre-commit stashes
 # unstaged changes and runs every hook against the STAGED tree. The
@@ -69,7 +70,7 @@ repos:
   # Every leg below is `always_run` + `pass_filenames: false`. They are
   # whole-workspace gates, and several read inputs no file filter would
   # match: the log-sink inventory reads every Cargo manifest,
-  # the public-api leg diffs against public-api/*.txt, and each cargo leg
+  # and each cargo leg
   # can be broken by a Cargo manifest or a lint config rather than by a
   # `.rs` file. A `types: [rust]` filter would green those commits.
   - repo: local
@@ -150,17 +151,6 @@ repos:
       - id: cargo-check-lean-providers
         name: cargo check (lean providers build)
         entry: cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
-        language: system
-        always_run: true
-        pass_filenames: false
-
-      # Local-only leg; CI does not run this. Blocks wherever the tooling is
-      # present and warns (never fails) where it is absent, so a pinned
-      # nightly is not forced onto every contributor machine. The
-      # availability probe lives in the script, not here.
-      - id: public-api-baseline
-        name: cargo-public-api baseline check (skipped when tooling absent)
-        entry: bash scripts/public-api-if-available.sh
         language: system
         always_run: true
         pass_filenames: false

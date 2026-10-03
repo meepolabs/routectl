@@ -144,11 +144,7 @@ log-sink inventory (the escaping formatter is the only production
 subscriber),
 `cargo fmt --check`, a separate leg that runs rustfmt on `include!`d
 fragments `cargo fmt` never opens, `cargo clippy`, a lean
-providers-only `cargo check`, a public-api-baseline check that skips
-with a warning instead of blocking when `cargo-public-api` or its
-pinned nightly isn't installed (CI runs the same check
-unconditionally, so the local leg is an early warning rather than the
-guarantee), and `cargo doc` with rustdoc
+providers-only `cargo check`, and `cargo doc` with rustdoc
 lints denied. The `commit-msg` stage applies the same identifier scan to
 the commit message, plus a subject-line length check.
 
@@ -167,6 +163,17 @@ already too late -- it is in history and needs rotating. The test suite
 is authoritative about a branch, not about one commit, so it sits at
 pre-push. Everything with no local counterpart -- the advisory and
 licence scans, the public-API baseline -- is authoritative in CI.
+
+The public-API baseline check is not a hook because it needs
+`cargo-public-api` and a pinned nightly (bootstrap lines and the pin are
+at the top of [`scripts/public-api.sh`](../scripts/public-api.sh)). To
+check locally on demand, or to regenerate a baseline after an intended
+surface change (see [`public-api/POLICY.md`](../public-api/POLICY.md)):
+
+```bash
+bash scripts/public-api.sh --check all        # or: --check <crate>
+bash scripts/public-api.sh generate <crate>   # or: generate all
+```
 
 One thing the pre-push stage does NOT do: it does not prevent a
 non-bisectable individual commit. It runs against the branch tip, so a

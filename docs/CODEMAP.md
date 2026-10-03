@@ -8514,8 +8514,8 @@ new section or a second doc.
 - `promote_fixture.test.sh` -- self-test for the promotion script
 - `public-api.sh` -- public-API drift gate: diffs each library crate's
   cargo-public-api surface against its checked-in baseline (`generate`,
-  `--check` per crate or `all`); CI runs it unconditionally, locally it is
-  a commit-gate leg where the tooling is installed
+  `--check` per crate or `all`); CI runs it unconditionally, locally it
+  runs on demand (not a commit hook)
 - `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
   over `cargo test -- --list` output, for auditing a test-consolidation
   change by exact test name; informational, gates nothing
