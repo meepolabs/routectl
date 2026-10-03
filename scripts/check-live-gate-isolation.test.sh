@@ -11,7 +11,9 @@
 #   - the source scan resolves from the repo root, whatever the cwd;
 #   - the standard-gate leg runs the gate registry's workspace-all-features
 #     subcommand, and that subcommand keeps the all-features selection and
-#     the --offline / --no-fail-fast flags the namespaced leg depends on.
+#     the --offline / --no-fail-fast flags the namespaced leg depends on;
+#   - each live leg's cargo selection is that subcommand's, narrowed only by
+#     --test, so the live legs reuse the standard gate's build.
 #
 # Every "passes" assertion has a control proving the same assertion fails
 # on a copy of the checker planted with the defect.
@@ -232,6 +234,53 @@ elif [[ "$(missing_gate_flags "$TMP/test-gate-online.sh")" == "--offline" ]]; th
     pass "control: a registry command without --offline is caught"
 else
     fail "control: dropped --offline not caught"
+fi
+
+# --- live leg selection ----------------------------------------------------
+
+# The registry's workspace-all-features cargo arguments, up to the harness
+# separator.
+registry_selection() {
+    awk '/^    workspace-all-features\)$/ { on = 1; next }
+        on && /^        ;;$/ { exit }
+        on { print }' "$1" | tr -d '\\\n' | tr -s ' ' |
+        sed -n 's/^ *run \(cargo test .*\) -- .*$/\1/p'
+}
+# A checker's live_command cargo arguments, up to its --test.
+live_selection() {
+    awk '/^live_command\(\) \{$/ { on = 1; next }
+        on && /^}$/ { exit }
+        on { print }' "$1" | tr '\n' ' ' | tr -s ' ' |
+        sed -n 's/^ *LIVE_COMMAND=(\(cargo test .*\) --test .*$/\1/p'
+}
+# Prints the mismatch, or nothing when the live legs select what the
+# standard gate builds.
+live_selection_mismatch() {
+    local want got
+    want="$(registry_selection "$GATE_REGISTRY")"
+    got="$(live_selection "$1")"
+    if [[ -z "$want" || -z "$got" ]]; then
+        echo "unreadable: registry='$want' live='$got'"
+    elif [[ "$got" != "$want" ]]; then
+        echo "live='$got' registry='$want'"
+    fi
+}
+
+gone="$(live_selection_mismatch "$CHECKER")"
+if [[ -z "$gone" ]]; then
+    pass "live legs select the standard gate's build, narrowed by --test"
+else
+    fail "live leg selection differs from the standard gate: $gone"
+fi
+
+if m="$(mutant live-narrow 's|LIVE_COMMAND=(cargo test --workspace --all-features|LIVE_COMMAND=(cargo test -p routectl-cli --features live-integration|')"; then
+    if [[ -n "$(live_selection_mismatch "$m")" ]]; then
+        pass "control: a live leg selecting another feature set is caught"
+    else
+        fail "control: a live leg selecting another feature set passed"
+    fi
+else
+    fail "could not build the live-narrow mutant"
 fi
 
 if ((fails)); then

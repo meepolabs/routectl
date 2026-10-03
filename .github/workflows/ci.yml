@@ -147,16 +147,17 @@ jobs:
       # `scripts/test-gate.sh workspace-all-features` (the all-features
       # workspace suite on the test-release profile) runs in a network
       # namespace whose recorder captures every packet to a non-loopback
-      # address or to the resolver. All features is a superset of every
-      # other workspace test set: the default-features tests all compile in
-      # too, and so do the routectl-router catalog-codegen tests behind
-      # gen-catalog -- the selectors/snapshot flag welds and the
-      # catalog_baked.rs drift guards -- which compile out of every narrower
-      # build. Zero attempts is
-      # the pass condition; each live target, named explicitly under the
-      # same variables, is a positive control that must attempt -- inside
-      # the namespace, so nothing leaves the runner. --require-netns: on CI a
-      # missing namespace is a failure, not a skip.
+      # address or to the resolver. The all-features run contains every test
+      # of the default-features run and of the routectl-router gen-catalog
+      # lib run (the catalog-codegen tests: the selectors/snapshot flag welds
+      # and the catalog_baked.rs drift guards), as their test inventories
+      # show. Tests that compile only with a feature off, such as the
+      # routectl-router cfg(not(feature = "gemini")) cases, are not in it;
+      # the reduced-features job compiles and lints those but does not run
+      # them. Zero attempts is the pass condition; each live target, named
+      # explicitly under the same variables, is a positive control that must
+      # attempt -- inside the namespace, so nothing leaves the runner.
+      # --require-netns: on CI a missing namespace is a failure, not a skip.
       - name: standard test gate makes no network attempt
         timeout-minutes: 90
         run: bash scripts/check-live-gate-isolation.sh --require-netns
@@ -270,9 +271,13 @@ jobs:
 
           "$bin" --config "$config" serve < /dev/null &
           serve_pid=$!
+          # Until serve is reaped, any exit kills it; once reaped, the pid
+          # may be reused, so the trap is cleared before the verdict.
+          trap 'kill -KILL "$serve_pid" 2>/dev/null || true' EXIT
           served=0
-          for _ in $(seq 1 150); do
-            if curl -fsS --max-time 2 "http://127.0.0.1:$port/health"; then
+          health_deadline=$((SECONDS + 60))
+          while [ "$SECONDS" -lt "$health_deadline" ]; do
+            if curl -fsS --max-time 1 "http://127.0.0.1:$port/health"; then
               served=1
               break
             fi
@@ -281,8 +286,11 @@ jobs:
           done
           echo
           if [ "$served" -ne 1 ]; then
-            echo "smoke: serve never answered /health on port $port" >&2
-            kill -KILL "$serve_pid" 2>/dev/null || true
+            if kill -0 "$serve_pid" 2>/dev/null; then
+              echo "smoke: serve never answered /health on port $port within 60s" >&2
+            else
+              echo "smoke: serve exited before answering /health on port $port" >&2
+            fi
             exit 1
           fi
 
@@ -293,11 +301,11 @@ jobs:
           done
           if kill -0 "$serve_pid" 2>/dev/null; then
             echo "smoke: serve did not exit within 10s of SIGTERM" >&2
-            kill -KILL "$serve_pid"
             exit 1
           fi
           rc=0
           wait "$serve_pid" || rc=$?
+          trap - EXIT
           if [ "$rc" -ne 0 ]; then
             echo "smoke: serve exited $rc after SIGTERM" >&2
             exit 1

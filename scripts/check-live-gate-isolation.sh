@@ -106,9 +106,13 @@ LIVE_TARGETS=(live_matrix live_anthropic_oauth)
 # The standard gate runs through the gate-command registry, so this check and
 # every other caller of that subcommand run the same command.
 STANDARD_GATE=(bash "$HERE/test-gate.sh" workspace-all-features)
-# Same profile as the standard gate, so each live leg reuses its build.
+# The standard gate's selection (--workspace --all-features, which includes
+# live-integration, on the same profile) narrowed by --test, so each live leg
+# resolves the same feature set and reuses that build: it compiles only its
+# own test target, which the standard gate never builds (`test = false`),
+# instead of every crate again under another feature set.
 live_command() {
-    LIVE_COMMAND=(cargo test -p routectl-cli --features live-integration --profile test-release
+    LIVE_COMMAND=(cargo test --workspace --all-features --profile test-release
         --offline --no-fail-fast --test "$1" -- --test-threads=1)
 }
 PROXY_VARS=(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy)
