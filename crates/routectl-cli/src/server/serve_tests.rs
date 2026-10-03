@@ -158,18 +158,40 @@ async fn resolve_listener_tokens_accepts_non_empty_token() {
 
 // ---- Graceful shutdown: bounded in-flight drain (OPS-08) ----
 
-/// Sending SIGTERM to ourselves must trigger the graceful shutdown
-/// path so `serve_on_listener` returns cleanly within a short bound,
-/// proving the signal -> drain -> serve-return wiring. tokio's
-/// registered SIGTERM handler intercepts the signal, so the test
-/// process is not killed. There are no in-flight requests, so the
-/// drain completes immediately (well under `DRAIN_DEADLINE`).
-#[cfg(unix)]
+/// Boot a daemon on `listener` whose graceful shutdown is driven by the returned
+/// sender rather than by a signal to this process. A signal would reach every
+/// daemon every concurrent test in this binary has booted, and one sent before the
+/// daemon registers its handler is lost; the oneshot is per-daemon and holds a
+/// send made before the daemon reaches its serve loop.
+fn spawn_with_shutdown_trigger(
+    config: Arc<Config>,
+    listener: TcpListener,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let (trigger, shutdown) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_on_listener_with_injected_router(
+        config,
+        Arc::new(CatalogOverlay::default()),
+        listener,
+        None,
+        None,
+        DaemonTestSeams {
+            shutdown: Some(shutdown),
+            ..DaemonTestSeams::default()
+        },
+    ));
+    (trigger, server)
+}
+
+/// The shutdown trigger must start the graceful shutdown path so serve returns
+/// cleanly within a short bound, proving the trigger -> drain -> serve-return
+/// wiring. There are no in-flight requests, so the drain completes immediately
+/// (well under `DRAIN_DEADLINE`). The OS-signal half of this wiring is pinned
+/// against the real binary in `tests/serve_shutdown.rs`.
 #[tokio::test]
-#[serial_test::serial]
-async fn sigterm_triggers_graceful_shutdown_and_serve_returns() {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
+async fn shutdown_trigger_starts_graceful_shutdown_and_serve_returns() {
     use std::time::Duration;
 
     // Arrange: bind an ephemeral loopback port and start the server.
@@ -178,22 +200,20 @@ async fn sigterm_triggers_graceful_shutdown_and_serve_returns() {
         .expect("bind ephemeral loopback port");
     let mut config = Config::default();
     let _usage_dir = isolate_usage_db(&mut config);
-    let config = Arc::new(config);
-    let server = tokio::spawn(async move { serve_on_listener(config, listener, None).await });
+    let (trigger, server) = spawn_with_shutdown_trigger(Arc::new(config), listener);
 
-    // Let the server install its signal handler and enter serve.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Act: request shutdown. No readiness wait is needed: the oneshot holds the
+    // send until the daemon reaches its serve loop.
+    trigger
+        .send(())
+        .expect("the daemon holds the shutdown receiver");
 
-    // Act: deliver SIGTERM to ourselves.
-    kill(Pid::from_raw(std::process::id() as i32), Signal::SIGTERM).expect("kill(SIGTERM) to self");
-
-    // Assert: serve_on_listener returns Ok within a short bound. A
-    // 5s ceiling is generous for an idle drain yet far below
-    // DRAIN_DEADLINE, so a hang here is a real regression, not the
-    // deadline doing its job.
+    // Assert: serve returns Ok within a short bound. A 5s ceiling is generous
+    // for an idle drain yet far below DRAIN_DEADLINE, so a hang here is a real
+    // regression, not the deadline doing its job.
     let outcome = tokio::time::timeout(Duration::from_secs(5), server)
         .await
-        .expect("serve_on_listener must return within 5s of SIGTERM")
+        .expect("serve must return within 5s of the shutdown trigger")
         .expect("server task must not panic");
     assert!(
         outcome.is_ok(),
@@ -206,14 +226,10 @@ async fn sigterm_triggers_graceful_shutdown_and_serve_returns() {
 /// server down -- routectl's own HTTP listener still starts and serves,
 /// just without the MITM front. This pins the documented "degraded, not
 /// down" reliability promise: a fatal-MITM regression would make
-/// `serve_on_listener` return `Err` within milliseconds instead of
-/// serving until shutdown.
-#[cfg(unix)]
+/// serve return `Err` within milliseconds instead of serving until
+/// shutdown.
 #[tokio::test]
-#[serial_test::serial]
 async fn mitm_start_failure_degrades_and_server_keeps_serving() {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
     use routectl_router::MitmConfig;
     use std::time::Duration;
 
@@ -224,6 +240,10 @@ async fn mitm_start_failure_degrades_and_server_keeps_serving() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral loopback port");
+    let health_url = format!(
+        "http://{}/health",
+        listener.local_addr().expect("read bound address")
+    );
     let bad_cert_dir = tempfile::NamedTempFile::new().expect("temp file to stand in for cert_dir");
     let mut config = Config::default();
     let _usage_dir = isolate_usage_db(&mut config);
@@ -234,23 +254,30 @@ async fn mitm_start_failure_degrades_and_server_keeps_serving() {
         mitm_host: "api.anthropic.com".into(),
         tested_cc_version: None,
     });
-    let config = Arc::new(config);
-    let server = tokio::spawn(async move { serve_on_listener(config, listener, None).await });
+    let (trigger, server) = spawn_with_shutdown_trigger(Arc::new(config), listener);
 
-    // Let the server install its signal handler and pass the MITM arm.
-    // The degradation itself is proven by the final assertion: a
-    // regression that made a MITM start failure fatal resolves the task
-    // with Err, which the Ok check below rejects.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Act: one request past the failed MITM start, then graceful shutdown. The
+    // listener is already bound, so the request queues in its backlog until the
+    // daemon accepts it; no readiness poll is needed. A daemon that gave up on the
+    // MITM failure drops the listener instead, and the request fails.
+    let health = tokio::time::timeout(Duration::from_secs(5), reqwest::get(&health_url))
+        .await
+        .expect("the degraded daemon must answer /health within 5s")
+        .expect("the degraded daemon must accept the connection");
+    trigger
+        .send(())
+        .expect("the daemon holds the shutdown receiver");
 
-    // Act: graceful shutdown.
-    kill(Pid::from_raw(std::process::id() as i32), Signal::SIGTERM).expect("kill(SIGTERM) to self");
-
-    // Assert: serve returned Ok -- it served normally without the MITM
-    // front and shut down cleanly.
+    // Assert: the daemon served without the MITM front, and serve returned Ok
+    // -- it shut down cleanly rather than failing on the MITM error.
+    assert!(
+        health.status().is_success(),
+        "the degraded daemon must serve /health: {}",
+        health.status()
+    );
     let outcome = tokio::time::timeout(Duration::from_secs(5), server)
         .await
-        .expect("degraded serve must return within 5s of SIGTERM")
+        .expect("degraded serve must return within 5s of the shutdown trigger")
         .expect("server task must not panic");
     assert!(
         outcome.is_ok(),

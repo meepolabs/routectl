@@ -258,6 +258,20 @@ pub(crate) struct DaemonTestSeams {
         Option<tokio::sync::oneshot::Sender<Arc<super::confirmation_advance::ConfirmationTracker>>>,
     /// Observation and failure-injection hooks for this daemon's status surface.
     pub(crate) status_hooks: crate::handlers::status::test_hooks::StatusTestHooks,
+    /// Starts the graceful shutdown in place of SIGTERM/SIGINT.
+    ///
+    /// When present the daemon waits on THIS and installs no OS signal handler at
+    /// all. A signal is a process-wide fact: sent from inside the test binary it
+    /// reaches every daemon every concurrent test has booted, and one sent before
+    /// the daemon's own handler is registered is absorbed by whichever earlier
+    /// handler tokio already installed, so the daemon under test never sees it.
+    /// A oneshot is per-daemon and level-triggered: a send before the daemon
+    /// reaches its serve loop is held, not lost. A dropped sender also counts as
+    /// the trigger, so a test that loses its sender cannot leave a daemon running.
+    ///
+    /// The real signal path is covered against the real binary in a child process
+    /// (`tests/serve_shutdown.rs`).
+    pub(crate) shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// `serve_on_listener_with_secrets` with the built ROUTER injectable.
@@ -381,6 +395,7 @@ async fn serve_inner(
         usage_observer,
         confirmation_observer,
         status_hooks,
+        shutdown,
     } = seams;
     #[cfg(test)]
     let router = match injected_router {
@@ -775,7 +790,11 @@ async fn serve_inner(
         });
     }
 
-    let serve_result = serve_with_bounded_drain(listener, app).await;
+    #[cfg(test)]
+    let shutdown = injected_shutdown_or_signal(shutdown);
+    #[cfg(not(test))]
+    let shutdown = shutdown_signal();
+    let serve_result = serve_with_bounded_drain(listener, app, shutdown).await;
 
     // Graceful-shutdown ordering matters for a clean usage drain. The
     // writer thread exits only when its mpsc channel closes, i.e. when
@@ -945,15 +964,21 @@ pub(super) const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from
 /// drain (serve returns) or the deadline elapsing (drain abandoned).
 /// `watch` (level-triggered) is used over `Notify` (edge-triggered) so
 /// the deadline watcher cannot miss the edge by subscribing late.
-async fn serve_with_bounded_drain(listener: TcpListener, app: AxumRouter) -> Result<()> {
+///
+/// `shutdown` is the trigger: `shutdown_signal()` in every non-test build.
+async fn serve_with_bounded_drain(
+    listener: TcpListener,
+    app: AxumRouter,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let (signal_tx, mut signal_rx) = watch::channel(false);
 
-    // Owns the OS signal wait. Flips the watch channel on the first
+    // Owns the shutdown wait. Flips the watch channel on the first
     // SIGTERM/SIGINT, then exits; the watch value stays `true` for any
     // late subscriber (the deadline watcher).
     let mut shutdown_rx = signal_tx.subscribe();
     let signal_task = tokio::spawn(async move {
-        shutdown_signal().await;
+        shutdown.await;
         tracing::info!("shutdown signal received (SIGTERM/SIGINT); draining in-flight requests");
         let _ = signal_tx.send(true);
     });
@@ -1006,6 +1031,23 @@ pub(super) async fn drain_deadline_watcher(signal_rx: &mut watch::Receiver<bool>
         }
     }
     tokio::time::sleep(DRAIN_DEADLINE).await;
+}
+
+/// The test build's shutdown trigger: the injected one when a test supplied it,
+/// otherwise the real signal wait exactly as production runs it.
+///
+/// An injected trigger REPLACES the signal wait rather than racing it, so a daemon
+/// booted with one registers no process-wide signal handler. See
+/// `DaemonTestSeams::shutdown`.
+#[cfg(test)]
+async fn injected_shutdown_or_signal(injected: Option<tokio::sync::oneshot::Receiver<()>>) {
+    match injected {
+        // `Err` is a dropped sender, which is a trigger too.
+        Some(trigger) => {
+            let _ = trigger.await;
+        }
+        None => shutdown_signal().await,
+    }
 }
 
 /// Future that resolves on the first SIGTERM or SIGINT. SIGHUP is

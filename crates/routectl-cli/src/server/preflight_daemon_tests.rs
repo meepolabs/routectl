@@ -373,6 +373,7 @@ async fn spawn_daemon_full(
                 usage_observer: Some(usage_tx),
                 confirmation_observer: Some(confirm_tx),
                 status_hooks,
+                shutdown: None,
             },
         )
         .await
