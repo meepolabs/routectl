@@ -1239,7 +1239,8 @@ impl<'a> Iterator for NicknameIter<'a> {
 /// entire `[bedrock]` section omitted), disables that filter -- the
 /// upstream sees the assembled value unchanged, except that the
 /// built-in Bedrock-rejected betas are always withheld from client
-/// flags (only a `[providers.X] anthropic_beta` floor sends one). This
+/// flags (only the operator floor sends one) and `mcp_servers` is never
+/// forwarded. This
 /// is the discovery-mode default: bring up routectl, observe actual traffic
 /// via `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then
 /// populate the list with what you observe.
@@ -1254,9 +1255,12 @@ pub struct BedrockGlobalConfig {
     /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
     /// entry independently and 400s the request on the first
     /// unsupported flag. **Empty list = pass-through** for every
-    /// client flag except the built-in Bedrock-rejected set, which is
-    /// withheld in either mode; the per-provider `anthropic_beta` floor
-    /// is the only way to send one of those. Populate via TOML to
+    /// client flag except the built-in Bedrock-rejected set
+    /// (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
+    /// `prompt-caching-scope-2026-01-05`), which is withheld in either
+    /// mode and even when listed; the operator floor (`[providers.X]
+    /// anthropic_beta` plus `header_extras`-pinned betas) is the only way
+    /// to send one of those. Populate via TOML to
     /// enable filtering. `examples/bedrock.toml` ships the empirical
     /// 2026-05-12 baseline.
     ///
@@ -1271,8 +1275,9 @@ pub struct BedrockGlobalConfig {
     /// any unrecognized field with `"Extra inputs are not permitted"`,
     /// so the Anthropic ingress's forward-compat sweep needs filtering
     /// on the Bedrock egress when this list is non-empty. **Empty
-    /// list = pass-through** (no filtering; every key in the assembled
-    /// body / bag is forwarded).
+    /// list = pass-through** (no allowlist filtering; the assembled body /
+    /// bag is forwarded except `mcp_servers`, which Bedrock rejects on both
+    /// carriers and is never forwarded, whatever this list says).
     ///
     /// When non-empty, must include the routectl-mandatory keys
     /// (`messages`, `anthropic_version`, `max_tokens`) for requests

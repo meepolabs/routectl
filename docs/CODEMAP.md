@@ -357,6 +357,9 @@ license.
   `CodexIdentity` and the free-function wrappers (`codex_user_agent`,
   `default_identity_headers`) serve that identity's derived values; isolated
   binary because the resolved slot is a set-once process-global
+- `tests/body_trace_redacts_credentials.rs` -- emit-path coverage that the
+  ingress / outgoing body traces drop a connector credential while keeping the
+  body structure; isolated binary so prompt redaction stays pinned OFF
 - `tests/header_trace_emit_disabled.rs` -- emit-path coverage for the four
   header-trace emitters with tracing OFF; isolated test binary so
   `header_trace_enabled()` freezes to false in its own process
@@ -1142,10 +1145,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   unrepresentable-key scrub and the `additionalProperties: false` repair) on
   the post-`additional_model_request_fields` body via
   `DeferredOutputConfigDiagnostics::rescanning`, since that merge is a
-  post-normalize write path that can replace `output_config` wholesale, and
-  applies the structured-outputs body-beta union
-  LAST (after both allowlist filters) so a body shipping
-  `output_config.format` never egresses without its gating flag
+  post-normalize write path that can replace `output_config` wholesale.
+  Order after the allowlist filters: `drop_orphan_tool_choice`, the
+  `output_config` rescan, `union_feature_implied_betas` (so a body shipping
+  `output_config.format` never egresses without its gating flag), then
+  `drop_unrepresentable_body_fields` as the last mutation
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
   body + Converse `additionalModelRequestFields`), plus the built-in
   `BEDROCK_REJECTED_BETAS` set withheld in both allowlist modes unless the
@@ -1163,8 +1167,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   parse. No status is mapped to a capability signal (posture recorded at the
   `count_tokens` call site in `src/bedrock/mod.rs`)
 - `src/bedrock/body_fields.rs` -- shared `allowed_body_fields` filter against
-  AWS strict-schema 400s, plus `drop_orphan_tool_choice` (Invoke: no
-  `tool_choice` ships once the filter has removed `tools`)
+  AWS strict-schema 400s, plus `drop_orphan_tool_choice` (removes a
+  `tool_choice` the allowlist left without `tools`) and
+  `drop_unrepresentable_body_fields` (`mcp_servers` never forwarded on either
+  carrier; each carrier's last mutation)
 
 ### bedrock/converse
 
@@ -1184,6 +1190,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `anthropic_api::output_schema::inject_additional_properties_false` once on
   the FINAL `additionalModelRequestFields` bag (after every filter), its bound
   errors failing the request before any send
+- `src/bedrock/converse/request_tests_output_schema.rs` -- `#[path]` test
+  module of `request.rs`: whole-`normalize_request` pins for the
+  `additionalProperties: false` repair on the shipped
+  `output_config.format.schema`
 - `src/bedrock/converse/system.rs` -- canonical `system` -> Converse
   `[{text}|{cachePoint}]` block array; two of the lane's fingerprint-strip
   sites (the top-level system field and the Role::System message lift) record
@@ -1202,7 +1212,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   when the translated transcript carries a `toolResult` but no tools survive;
   drops non-custom (Anthropic builtin) tools with a counted verdict
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
-  (thinking, anthropic_beta, cache_control, output_config);
+  (thinking, anthropic_beta, cache_control, output_config); `thinking.display`
+  rides verbatim, and display `updates` gains its beta through the shared
+  `union_feature_implied_betas`; a withheld built-in rejected beta counts once
+  per request as `anthropic_beta_rejected_by_bedrock` on the drop counter;
   `ProviderExtrasPolicyActions` and `OperatorExtrasPolicyActions` count the
   managed-key override refusals once per request each, on the POLICY-ACTION
   counter rather than the drop counter (the bag could carry every one of those

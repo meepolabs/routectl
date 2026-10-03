@@ -82,6 +82,8 @@ pub(crate) use super::system::translate_system;
 // client-fingerprinting block to a third-party upstream whenever both are
 // present.
 pub(crate) use super::system::lift_legacy_system_stripped;
+// Only the Bedrock Converse egress consumes this re-export.
+#[cfg(feature = "bedrock")]
 pub(crate) use super::tools::translate_tool;
 
 // `effort_ratio` and `is_routectl_managed_key` are surfaced only for the
