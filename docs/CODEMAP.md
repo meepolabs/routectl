@@ -2537,7 +2537,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `try_stream_with_first_content` (buffers
   content-free leading chunks -- a `delta.role` opener, id/model metadata --
   until the first content-bearing chunk per `is_content_bearing`, so the
-  fallback boundary is first CONTENT, not stream-open) wrap each
+  fallback boundary is first CONTENT, not stream-open; its overflow and
+  closed-before-content errors append `precontent::precontent_summary` of
+  the buffered kinds) wrap each
   attempt; `policy_for` + `compose_attempt_policy` resolve the per-attempt
   policy. Failure-class routing threads
   `routectl_core::failure_class::classify` through every error arm:
@@ -3811,6 +3813,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   verdict is deliberately NOT a plan field. The
   placement CALL (`apply_auto_cache_placement`) stays in the dispatch
   module
+- `src/router/precontent.rs` -- content-free labels for chunks the
+  streaming pre-content guard buffers: `precontent_kind` (role >
+  empty_text > empty_reasoning > finish > usage > upstream_meta >
+  empty_choices > other) and `precontent_summary` (ordered run-length
+  list, e.g. `role, empty_reasoning x7, finish`) appended to the guard's
+  errors; pinned in `src/router/precontent_guard_tests.rs`
 - `src/router/prefix_rewrite.rs` -- the pure prefix-rewrite detector:
   `fingerprint_prefix` (FNV-1a over system + tools + `messages[0..len-1]`,
   newest turn EXCLUDED because it grows every turn by construction, reusing

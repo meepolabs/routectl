@@ -43,6 +43,7 @@ use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::overlays::apply_layered_overlays;
+use super::precontent::precontent_summary;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
@@ -3190,9 +3191,10 @@ async fn try_stream_with_first_content(
                         // pre-content failure. Discard the buffer (nothing
                         // reached the client) and fall over. Fallbackable
                         // per `should_fallback`; the breaker records it.
+                        let summary = precontent_summary(buffered.iter().chain([&chunk]));
                         return Err(Error::Streaming(format!(
                             "{provider_name} emitted more than {MAX_PRECONTENT_CHUNKS} \
-                             content-free chunks before any content",
+                             content-free chunks before any content (buffered: {summary})",
                         )));
                     }
                     buffered.push(chunk);
@@ -3209,8 +3211,10 @@ async fn try_stream_with_first_content(
                 // a successful completion to both the client and the
                 // router's health accounting.
                 None => {
+                    let summary = precontent_summary(&buffered);
                     return Err(Error::Streaming(format!(
-                        "{provider_name} stream closed before any content arrived",
+                        "{provider_name} stream closed before any content arrived \
+                         (buffered: {summary})",
                     )));
                 }
             }
@@ -3637,6 +3641,10 @@ mod bedrock_class_remap_tests;
 #[cfg(test)]
 #[path = "content_commit_boundary_tests.rs"]
 mod content_commit_boundary_tests;
+
+#[cfg(test)]
+#[path = "precontent_guard_tests.rs"]
+mod precontent_guard_tests;
 
 #[cfg(test)]
 #[path = "context_reduction_dispatch_tests.rs"]

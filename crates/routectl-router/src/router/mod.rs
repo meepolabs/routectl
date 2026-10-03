@@ -47,6 +47,7 @@ mod paid_probe_authorize;
 mod paid_probe_dial;
 mod paid_probe_ledger;
 mod paid_probe_profile;
+mod precontent;
 mod prefix_rewrite;
 mod probe_failure_class;
 mod probe_lifecycle;
