@@ -250,13 +250,13 @@ task it serves.
 # environment (also true with --all-features). Not with --ignored or
 # --include-ignored: those select an ignored router live smoke that calls
 # the provider named by ROUTECTL_LIVE_BASE_URL / ROUTECTL_LIVE_API_KEY.
-cargo test --workspace --release
+bash scripts/test-gate.sh pre-push
 
 # Live integration: calls real providers (explicit opt-in; skips
 # per-provider when its env key is absent). The live targets are
 # live_matrix and live_anthropic_oauth; any --test that names or globs
 # one with live-integration enabled is a live command.
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix -- --nocapture --test-threads=1
 ```
 

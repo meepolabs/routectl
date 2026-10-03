@@ -21,7 +21,7 @@ export NIM_API_KEY=nvapi-...
 export AWS_BEARER_TOKEN_BEDROCK=...
 export AWS_REGION=us-east-1
 
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix -- --nocapture --test-threads=1
 ```
 
@@ -210,7 +210,7 @@ export OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' <your-codex-CLI-auth-store
 
 Run the openai-responses matrix:
 ```bash
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix openai_responses -- --nocapture --test-threads=1
 ```
 
@@ -263,7 +263,7 @@ export GEMINI_API_KEY=...   # Google AI Studio API key
 
 Run the Gemini matrix:
 ```bash
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix gemini -- --nocapture --test-threads=1
 ```
 
@@ -312,14 +312,14 @@ export GEMINI_OAUTH_ACCESS_TOKEN="$(jq -r '.providers.antigravity.access_token' 
 
 Run the Cloud Code Gemini matrix:
 ```bash
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix oauth_antigravity -- --nocapture --test-threads=1
 ```
 
 The servable-set sweep below is `#[ignore]`d -- it burns one live call per
 id, so it runs on demand only, never as part of the matrix above:
 ```bash
-cargo test -p routectl-cli --features live-integration --release \
+cargo test -p routectl-cli --features live-integration --profile test-release \
   --test live_matrix -- --ignored \
   --exact oauth_antigravity::oauth_antigravity_servable_set_sweep \
   --nocapture --test-threads=1
