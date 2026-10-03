@@ -155,6 +155,10 @@ tokio-test = "0.4"
 # extra feature.
 criterion = { version = "0.7", default-features = false }
 
+[profile.dev]
+# Full debuginfo costs many GB per target dir; line tables keep file:line backtraces.
+debug = "line-tables-only"
+
 [profile.release]
 strip = true
 lto = "thin"
