@@ -2538,7 +2538,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   content-free leading chunks -- a `delta.role` opener, id/model metadata --
   until the first content-bearing chunk per `is_content_bearing`, so the
   fallback boundary is first CONTENT, not stream-open; chunks matching
-  `precontent::is_empty_reasoning_only` do not count toward the cap and
+  `precontent::is_empty_reasoning_only` do not count toward the cap (the
+  loop yields to the runtime after each, so the first-content timeout
+  still fires on an always-ready stream) and
   each consecutive run is buffered as one; its overflow and
   closed-before-content errors append `precontent::precontent_summary` of
   the buffered kinds) wrap each
@@ -3817,7 +3819,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   module
 - `src/router/precontent.rs` -- content-free labels for chunks the
   streaming pre-content guard buffers: `is_empty_reasoning_only` (the
-  uncounted thinking-liveness shape), `precontent_kind` (role >
+  uncounted single-choice thinking-liveness shape), `precontent_kind` (role >
   empty_text > empty_reasoning > finish > usage > upstream_meta >
   empty_choices > other) and `precontent_summary` (ordered run-length
   list, e.g. `role, empty_reasoning, usage x2, finish`) appended to the guard's

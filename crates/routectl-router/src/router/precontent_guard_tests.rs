@@ -9,16 +9,20 @@ use routectl_core::{
     UpstreamMeta, UsageDelta,
 };
 
-/// A provider whose single `stream()` call yields `chunks` in order, then
-/// ends.
+/// A provider whose single `stream()` call returns a preset stream.
 struct FixedStream {
-    chunks: parking_lot::Mutex<Option<Vec<ChatChunk>>>,
+    stream: parking_lot::Mutex<Option<BoxStream<'static, Result<ChatChunk>>>>,
 }
 
 impl FixedStream {
+    /// Yields `chunks` in order, then ends.
     fn provider(chunks: Vec<ChatChunk>) -> Arc<dyn Provider> {
+        Self::from_stream(futures::stream::iter(chunks.into_iter().map(Ok)).boxed())
+    }
+
+    fn from_stream(stream: BoxStream<'static, Result<ChatChunk>>) -> Arc<dyn Provider> {
         Arc::new(Self {
-            chunks: parking_lot::Mutex::new(Some(chunks)),
+            stream: parking_lot::Mutex::new(Some(stream)),
         })
     }
 }
@@ -38,8 +42,7 @@ impl Provider for FixedStream {
         unreachable!("streaming tests only")
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        let chunks = self.chunks.lock().take().expect("stream() called once");
-        Ok(futures::stream::iter(chunks.into_iter().map(Ok)).boxed())
+        Ok(self.stream.lock().take().expect("stream() called once"))
     }
     async fn on_auth_failure(&self) -> Result<()> {
         Ok(())
@@ -410,6 +413,15 @@ async fn empty_reasoning_with_any_other_field_counts_toward_the_cap() {
             }),
         ),
         ("empty choices", with(|c| c.choices.clear())),
+        (
+            "two empty-reasoning choices",
+            with(|c| {
+                let mut second = empty_reasoning().choices.remove(0);
+                second.index = 1;
+                c.choices.push(second);
+            }),
+        ),
+        ("single choice at index 1", with(|c| c.choices[0].index = 1)),
     ];
 
     for (name, chunk) in rows {
@@ -422,5 +434,57 @@ async fn empty_reasoning_with_any_other_field_counts_toward_the_cap() {
             msg.starts_with("p1 emitted more than 8 content-free chunks"),
             "{name}: {msg}"
         );
+    }
+}
+
+#[test]
+fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
+    const TIMEOUT_MS: u64 = 50;
+    let wall_limit = Duration::from_secs(10);
+    let policy = RetryPolicy {
+        stream_first_byte_timeout_ms: Some(TIMEOUT_MS),
+        ..RetryPolicy::default()
+    };
+    let provider = FixedStream::from_stream(
+        futures::stream::repeat_with(|| Ok(stamped_empty_reasoning())).boxed(),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // A guard loop that never yields would starve every timer on its own
+    // runtime, so the wall-clock limit is enforced from a separate thread.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let outcome = rt.block_on(try_stream_with_first_content(
+            "p1",
+            "wire-1",
+            provider,
+            ChatRequest::default(),
+            &policy,
+        ));
+        let _ = tx.send(outcome.map(|_| ()));
+    });
+    let outcome = rx
+        .recv_timeout(wall_limit)
+        .expect("the guard returns instead of spinning past the first-content timeout");
+
+    match outcome {
+        Err(Error::Upstream {
+            provider,
+            status: 0,
+            body,
+            ..
+        }) => {
+            assert_eq!(provider, "p1");
+            assert!(
+                body.starts_with(&format!(
+                    "stream first-content timeout after {TIMEOUT_MS}ms"
+                )),
+                "{body}"
+            );
+        }
+        other => panic!("expected the first-content timeout, got {other:?}"),
     }
 }

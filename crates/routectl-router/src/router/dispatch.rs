@@ -3195,6 +3195,10 @@ async fn try_stream_with_first_content(
                     if !buffered.last().is_some_and(is_empty_reasoning_only) {
                         buffered.push(chunk);
                     }
+                    // Uncounted chunks leave the loop unbounded: an upstream
+                    // that is always ready would never return Pending, and the
+                    // first-content timeout around this future could not fire.
+                    tokio::task::consume_budget().await;
                 }
                 Some(Ok(chunk)) => {
                     if counted >= MAX_PRECONTENT_CHUNKS {

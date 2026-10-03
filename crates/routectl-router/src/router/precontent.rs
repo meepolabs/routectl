@@ -35,25 +35,28 @@ pub(super) fn precontent_kind(chunk: &ChatChunk) -> &'static str {
     }
 }
 
-/// True when every choice of `chunk` carries only an empty reasoning string
-/// and the chunk carries nothing else besides its id/model stamps. A long
-/// thinking block streams many of these before its first typed detail;
-/// they show the upstream is alive and are not metadata.
+/// True when `chunk` has exactly one choice, at index 0, carrying only an
+/// empty reasoning string, and the chunk carries nothing else besides its
+/// id/model stamps. A long thinking block streams many of these before its
+/// first typed detail; they show the upstream is alive and are not
+/// metadata. Multi-choice chunks never match, so each choice keeps its own
+/// buffered entry for replay.
 pub(super) fn is_empty_reasoning_only(chunk: &ChatChunk) -> bool {
+    let [choice] = chunk.choices.as_slice() else {
+        return false;
+    };
+    let delta = &choice.delta;
     chunk.usage.is_none()
         && chunk.upstream_meta.is_none()
         && chunk.opaque_events.is_empty()
-        && !chunk.choices.is_empty()
-        && chunk.choices.iter().all(|choice| {
-            let delta = &choice.delta;
-            choice.finish_reason.is_none()
-                && choice.matched_stop_sequence.is_none()
-                && delta.role.is_none()
-                && delta.content.is_none()
-                && delta.reasoning.as_deref() == Some("")
-                && delta.reasoning_details.is_empty()
-                && delta.tool_calls.is_none()
-        })
+        && choice.index == 0
+        && choice.finish_reason.is_none()
+        && choice.matched_stop_sequence.is_none()
+        && delta.role.is_none()
+        && delta.content.is_none()
+        && delta.reasoning.as_deref() == Some("")
+        && delta.reasoning_details.is_empty()
+        && delta.tool_calls.is_none()
 }
 
 /// Ordered run-length summary of the kinds of `chunks`, e.g.
