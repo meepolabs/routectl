@@ -24,7 +24,7 @@
 // Run:
 //   OPENAI_OAUTH_ACCESS_TOKEN="$(jq -r '.providers.codex.access_token' \
 //     ~/.config/routectl/credentials.json)" \
-//   cargo test -p routectl-cli --features live-integration --release \
+//   cargo test -p routectl-cli --features live-integration --profile test-release \
 //     --test live_matrix oauth_codex -- --nocapture --test-threads=1
 
 use super::*;

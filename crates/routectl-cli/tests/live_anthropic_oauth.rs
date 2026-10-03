@@ -7,7 +7,7 @@
 //!
 //! Run with:
 //!
-//!   cargo test -p routectl-cli --features live-integration --release \
+//!   cargo test -p routectl-cli --features live-integration --profile test-release \
 //!     --test live_anthropic_oauth -- --nocapture
 //!
 //! This target is `test = false` in Cargo.toml, so only a `--test` that

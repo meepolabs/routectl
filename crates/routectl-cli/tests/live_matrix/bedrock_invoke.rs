@@ -9,7 +9,7 @@ use super::*;
 // `AWS_REGION`. Skips cleanly when either is unset.
 //
 // Run:
-//   cargo test -p routectl-cli --features live-integration,bedrock --release \
+//   cargo test -p routectl-cli --features live-integration,bedrock --profile test-release \
 //     --test live_matrix bedrock -- --nocapture --test-threads=1
 //
 // Cross-region inference profiles (`us.`-prefixed) are used because they

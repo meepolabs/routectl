@@ -121,7 +121,7 @@ libc = "0.2"
 # AWS_BEARER_TOKEN_BEDROCK, etc.). The feature alone runs nothing: the live
 # targets are `test = false` (see the [[test]] entries below), so they run
 # only when a `--test` names or globs them. Run with:
-#   cargo test -p routectl-cli --features live-integration --release \
+#   cargo test -p routectl-cli --features live-integration --profile test-release \
 #     --test live_matrix -- --nocapture --test-threads=1
 live-integration = []
 # Bench-only: swaps the perf bench global allocator to dhat's heap

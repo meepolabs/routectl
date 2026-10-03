@@ -14,7 +14,7 @@ use super::*;
 // Run:
 //   OPENAI_BEARER_KEY="$(jq -r '.openai.access' <your-codex-CLI-auth-store>)" \
 //   OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' <your-codex-CLI-auth-store>)" \
-//   cargo test -p routectl-cli --features live-integration --release \
+//   cargo test -p routectl-cli --features live-integration --profile test-release \
 //     --test live_matrix openai_responses -- --nocapture --test-threads=1
 //
 // Skips cleanly when either env var is absent.

@@ -16,7 +16,7 @@
 //!
 //! Run with:
 //!
-//!   cargo test -p routectl-cli --features live-integration --release \
+//!   cargo test -p routectl-cli --features live-integration --profile test-release \
 //!     --test live_matrix -- --nocapture --test-threads=1
 //!
 //! This target is `test = false` in Cargo.toml: it runs only when a

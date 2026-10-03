@@ -10,7 +10,7 @@ use super::*;
 // equivalent canonical output to the Invoke adapter for the same model.
 //
 // Run:
-//   cargo test -p routectl-cli --features live-integration,bedrock --release \
+//   cargo test -p routectl-cli --features live-integration,bedrock --profile test-release \
 //     --test live_matrix bedrock_converse -- --nocapture --test-threads=1
 //
 // Requires AWS_BEARER_TOKEN_BEDROCK and (optionally) AWS_REGION in env.

@@ -23,7 +23,7 @@
 //   RESPONSES_LIVE_TARGET=gpt-4.1-mini \
 //   RESPONSES_LIVE_BASE_URL=https://api.openai.com/v1 \
 //   RESPONSES_LIVE_API_KEY="$OPENAI_API_KEY" \
-//     cargo test -p routectl-cli --features live-integration --release \
+//     cargo test -p routectl-cli --features live-integration --profile test-release \
 //       --test live_matrix responses_ingress -- --nocapture --test-threads=1
 
 use super::*;

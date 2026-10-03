@@ -14,7 +14,10 @@ off -- and differs only in build cost and diagnostics: no LTO, 16 codegen
 units, symbols kept for readable backtraces, and `panic = "unwind"` (the
 test harness unwinds, so an inherited abort would build the dependency
 graph twice). Plain `cargo test` is still the fast debug build for local
-iteration. The exact gate commands live in
+iteration. Because the profile compiles out `debug_assert!` and overflow
+checks, CI's `debug lanes` job runs clippy and `cargo test` per crate on
+the plain debug profile -- every workspace crate has at least one leg, and
+crates with feature gates also get reduced-feature legs. The exact gate commands live in
 [`scripts/test-gate.sh`](../scripts/test-gate.sh); run it with no
 arguments to list them (`bash scripts/test-gate.sh pre-push` reproduces
 the pre-push gate).

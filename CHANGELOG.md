@@ -389,16 +389,35 @@ list with more narrative.
 - **A malformed tool call / tool result transcript is now rejected locally with a 400.** Before any target is selected, every chat completions, messages, responses, and `count_tokens` request is checked so that each tool call is answered by exactly one tool result, matched on its id across every carrier (OpenAI `tool_calls` / `role: "tool"`, Anthropic `tool_use` / `tool_result` blocks, Responses `function_call` / `function_call_output`). A result with no matching call, a result before its call, a result for a call from an earlier closed turn, a duplicate call id or result, and a call left unanswered by the next non-result turn or by the end of the request are all refused. Previously these reached the upstream unrepaired, and most providers rejected them with an error the caller could not trace. The response is the ingress dialect's `invalid_request_error` / `validation_error` envelope, naming the defect class and the offending message index but never a tool id or tool content. The request makes no upstream call, is not retried or failed over, and does not count against provider health. Nothing is synthesized or dropped: a correctly paired transcript is forwarded exactly as before. Parallel calls may be answered in any order; an empty tool id keeps its existing normalization and is not matched.
 
 - **The minted Claude Code identity is scoped to the exact Anthropic API host.** The compiled Stainless header pack, the default Claude Code `User-Agent`, and the session and client request ids are emitted only when an `oauth-bearer` anthropic-api provider's configured base URL is exactly `api.anthropic.com`; the auth kind alone no longer authorizes them, so loopback, lookalike, and third-party bases receive none of it. Explicit `header_extras` and `user_agent` values still reach every host, and the forwarded-client leg is unchanged.
-- **The `gen-catalog` test leg now runs in both automated gates.** The two
-  catalog-codegen tests -- the selectors/snapshot `output_ambiguous` flag weld
-  and the `catalog_baked.rs` byte-for-byte drift guard -- are
+- **The `gen-catalog` tests now run in CI.** The two catalog-codegen tests --
+  the selectors/snapshot `output_ambiguous` flag weld and the
+  `catalog_baked.rs` byte-for-byte drift guard -- are
   `#[cfg(feature = "gen-catalog")]`, and no gate enabled that feature for
   tests, so a stale baked catalog or a flag that no longer matched the vendored
-  snapshots could reach a release unnoticed. CI's test job and the pre-commit
-  hook each gained one leg (`cargo test -p routectl-router --features
-  gen-catalog --lib`). Incremental cost is ~2s in CI, where the workspace test
-  step has already warmed the release profile, and ~5s in the hook, which runs
-  it in debug to reuse the all-features clippy leg's artifacts.
+  snapshots could reach a release unnoticed. CI's all-features workspace run
+  (`bash scripts/test-gate.sh workspace-all-features`) enables the feature and
+  so runs both; there is no separate leg for them. No local hook runs them:
+  the commit stage carries no test legs and the pre-push suite builds default
+  features. Run `cargo test -p routectl-router --features gen-catalog --lib`
+  locally after touching the catalog or the vendored snapshots.
+
+- **Contributor gates are faster and CI reports one check.** Tests build with
+  a new `test-release` profile, which keeps the shipped release profile's
+  correctness semantics (opt-level, debug assertions and overflow checks off)
+  but drops thin LTO, the single codegen unit, symbol stripping and
+  `panic = "abort"`; `scripts/test-gate.sh` is the one place the gate
+  commands are defined. The pre-push hook runs the default-features
+  workspace suite on that profile and is correspondingly faster. The
+  public-API baseline check is no longer a commit hook: it runs in CI and on
+  demand (`bash scripts/public-api.sh --check all`). CI runs the workspace
+  suite once (all features, inside the network-isolation check) instead of
+  several overlapping times; a new job builds the shipped release binary and
+  smoke-tests its startup, `/health`, and SIGTERM exit; and a `debug lanes`
+  job lints and tests every workspace crate on the plain debug profile --
+  reduced feature sets for the crates that have them, default features for
+  the rest -- so `debug_assert!` and overflow checks still run in CI. A
+  single `required` job succeeds only when every other job did, so branch
+  protection can require that one check instead of one per job and leg.
 
 - **`routectl init`, the capability probe's cost confirmation, and `provider add`'s post-add probe offer now DECLINE on a non-interactive stdin instead of waiting for an answer.** The same class as the egress-defining confirmation above, on the remaining prompt surfaces: the `init` wizard's questions (scaffold-vs-wizard, offer selection, model id, default route, the write ack, and the credential-capture choice), the `proceed with the probe?` confirmation `routectl probe --capabilities` asks after printing its cost estimate, and the `run a capability probe against this provider now?` offer `routectl provider add` asks after a successful add. All three read stdin unconditionally, so a caller whose stdin was an open-but-silent pipe blocked at the prompt indefinitely. With no terminal on stdin each prompt now declines immediately without reading, printing the question (or, for the two probe offers, the cost estimate) so a scripted caller sees exactly what was declined, and naming the non-interactive flag: `routectl init --yes`, `routectl probe --capabilities --yes`, and `routectl provider add --probe`/`--no-probe`. A declined `init` writes nothing and still prints its actionable next steps; a declined probe offer dispatches no calls. All exit 0. A run with a closed stdin already declined and is unaffected, as is any interactive or explicit-flag run.
 - **`routectl doctor` now reports the config validator suite's ADVISORY findings, not just its errors.** The config section consumed the error half only, so a warning `routectl config check` printed -- an `oauth://` reference missing its `auth_kind` selector, a `class_overrides` remap that masks an outage, an empty `[retry.classes.<c>]` block, a per-block-breakpoint or codex-identity advisory -- was invisible in a doctor run, which reported "config passes the static validator suite" on a config the checker had flagged. Each advisory is now its own WARN finding, control-char-filtered through the same render seam as the errors, and the single PASS finding requires both halves empty. Exit codes are unchanged: only FAIL findings move the exit code, so a warnings-only config still exits 0. The doctor report `schema_version` (and the `/status/doctor` panel version that mirrors it) is 8.
@@ -475,6 +494,13 @@ list with more narrative.
   after which cache reads stabilize.
 
 ### Fixed
+
+- **A SIGHUP during daemon startup no longer terminates the daemon.** The
+  SIGHUP reload handler was installed by a background task after startup had
+  begun, so a SIGHUP that arrived before that task ran -- for example from a
+  supervisor reloading as the daemon came up -- took the default signal
+  action and killed the process. The handler is now installed before the
+  daemon starts serving.
 
 - **A long thinking stream no longer falls over before its first content.** A thinking block can stream many empty reasoning deltas before its first reasoning detail, and each one counted toward the 8-chunk pre-content limit, so a healthy upstream was abandoned for a fallback. A single-choice chunk carrying only an empty reasoning string no longer counts toward the limit, and a consecutive run of them is held and replayed as a single chunk. Every other content-free chunk still counts, the commit boundary is unchanged, and `stream_first_byte_timeout_ms` still bounds a stream that never sends content.
 - **A stream that gives up before first content now says what it received.** When an upstream sends more than 8 content-free chunks before any content, or closes having sent only content-free chunks, the fallback error now ends with an ordered, run-length summary of the kinds it buffered, e.g. `(buffered: role, empty_reasoning, usage x2, finish)`. The kinds are `role`, `empty_text`, `empty_reasoning`, `finish`, `usage`, `upstream_meta`, `empty_choices` and `other`; no text, ids or token counts are included. The limit, the commit boundary and fallback behavior are unchanged.

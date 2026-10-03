@@ -26,7 +26,7 @@
 //! lives in `routectl-router` (so `routectl-core`, a leaf crate, cannot see
 //! it) and because a router-side test would run under
 //! `--no-default-features`, where that vocabulary shrinks to two entries
-//! while the reduced-feature CI legs run clippy/check only.
+//! and the full set this weld needs is no longer compiled in.
 
 use regex::Regex;
 use std::collections::BTreeSet;

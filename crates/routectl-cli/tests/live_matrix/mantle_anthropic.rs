@@ -16,7 +16,7 @@ use super::*;
 // (defaults to `us-east-1`). Skips cleanly when the key is unset.
 //
 // Run:
-//   cargo test -p routectl-cli --features live-integration,bedrock --release \
+//   cargo test -p routectl-cli --features live-integration,bedrock --profile test-release \
 //     --test live_matrix mantle -- --nocapture --test-threads=1
 //
 // The model id needs the `anthropic.` VENDOR prefix and the PUBLIC name --

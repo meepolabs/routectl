@@ -20,7 +20,7 @@ use super::*;
 //
 // Run:
 //   GEMINI_API_KEY=... cargo test -p routectl-cli \
-//     --features live-integration --release \
+//     --features live-integration --profile test-release \
 //     --test live_matrix gemini -- --nocapture --test-threads=1
 
 const GEMINI_MODELS: &[&str] = &["gemini-2.5-flash", "gemini-2.5-pro"];

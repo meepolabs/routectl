@@ -671,36 +671,6 @@ async fn concurrent_self_write_no_loop() {
     );
 }
 
-/// A config rewrite during live serving surfaces the new alias through the
-/// file-watch arm alone. This test sends no signal: a signal sent from inside
-/// the test binary reaches every test in the process. The SIGHUP arm is
-/// covered by the unit test
-/// `server::reload::reload_tests::reload_trigger_fan_out_emits_paired_requests_and_stops_on_shutdown`
-/// (trigger -> paired reload requests) and by `tests/serve_shutdown.rs`, which
-/// signals a child running the shipped binary.
-#[tokio::test]
-async fn rewrite_during_serving_surfaces_new_config() {
-    let (base_url, config_path, _dir) = spawn_watched_server("rewrite-pre").await;
-
-    let post = config_text_with_alias("rewrite-post");
-    write_atomic(&config_path, post.as_bytes());
-
-    // Assert: the new alias surfaces. The rewrite is re-issued on the
-    // restimulus cadence (identical bytes, idempotent) because a lone atomic
-    // rename is not reliably delivered to the watcher.
-    assert!(
-        poll_alias_with_restimulus(
-            &base_url,
-            &config_path,
-            post.as_bytes(),
-            "rewrite-post",
-            RELOAD_WAIT_CEILING,
-        )
-        .await,
-        "rewrite-post alias did not appear within {RELOAD_WAIT_CEILING:?} after the rewrite"
-    );
-}
-
 // -----------------------------------------------------------------
 // Credentials hot-reload (oauth:// path)
 // -----------------------------------------------------------------

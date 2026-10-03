@@ -74,23 +74,49 @@ jobs:
           RUSTDOCFLAGS: -D rustdoc::all
         run: cargo doc --workspace --all-features --no-deps
 
-  # The all-features clippy leg above cannot see a lane's own reduced build:
-  # feature unification means a workspace build always has every gate on, so
-  # dead code behind a narrower feature set, lints that only fire without
-  # the default features, and tests that only compile or fail there stay
-  # invisible. One leg per lane that has a feature gate; each leg lints and
-  # then tests the same args, so the lane's feature set is resolved once.
-  # routectl-providers rejects a zero-provider build at compile time, so
-  # every providers lane names at least one provider feature. CI only,
-  # deliberately not the pre-commit hook -- the hook is already minutes long
-  # cold, and these legs each pay a fresh feature-set compile.
-  reduced-features:
-    name: reduced features (clippy + test)
+  # Per-crate legs on the plain debug profile, for two purposes.
+  #
+  # Reduced feature sets. The all-features clippy leg above cannot see a
+  # lane's own reduced build: feature unification means a workspace build
+  # always has every gate on, so dead code behind a narrower feature set,
+  # lints that only fire without the default features, and tests that only
+  # compile or fail there stay invisible. One leg per lane that has a
+  # feature gate. routectl-providers rejects a zero-provider build at
+  # compile time, so every providers lane names at least one provider
+  # feature.
+  #
+  # Debug-assertion and overflow coverage. The workspace suite in the test
+  # job runs on the test-release profile, which compiles out `debug_assert!`
+  # and overflow checks, so these legs are the only CI run with both on.
+  # Every workspace crate has a default-features leg here, so an assertion
+  # behind a default feature is exercised; crates with feature gates also
+  # get reduced legs.
+  #
+  # Each leg lints and then tests the same args, so its feature set is
+  # resolved once. CI only, deliberately not the pre-commit hook -- the hook
+  # is already minutes long cold, and these legs each pay a fresh
+  # feature-set compile.
+  debug-lanes:
+    name: debug lanes (clippy + test)
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
+          - name: core (default features)
+            args: -p routectl-core
+          - name: usage (default features)
+            args: -p routectl-usage
+          - name: testkit (default features)
+            args: -p routectl-testkit
+          - name: cli (default features)
+            args: -p routectl-cli
+          - name: router (default features)
+            args: -p routectl-router
+          - name: providers (default features)
+            args: -p routectl-providers
+          - name: auth (default features)
+            args: -p routectl-auth
           - name: router (no default features)
             args: -p routectl-router --no-default-features
           - name: providers (anthropic-api only)
@@ -119,8 +145,8 @@ jobs:
         run: cargo clippy ${{ matrix.args }} --all-targets -- -D warnings
 
       # Plain debug profile, not the release-semantics test profile the main
-      # suite runs under: these legs are where `debug_assert!` checks stay
-      # exercised in CI, since the main suite compiles them out.
+      # suite runs under: these legs are where `debug_assert!` and overflow
+      # checks stay exercised in CI, since the main suite compiles them out.
       - name: cargo test -- ${{ matrix.name }}
         run: cargo test ${{ matrix.args }}
 
@@ -168,10 +194,11 @@ jobs:
       # and the catalog_baked.rs drift guards), as their test inventories
       # show. Tests that compile only with a feature off, such as the
       # routectl-router cfg(not(feature = "gemini")) cases, are not in it;
-      # the reduced-features job compiles and lints those but does not run
-      # them. Zero attempts is the pass condition; each live target, named
-      # explicitly under the same variables, is a positive control that must
-      # attempt -- inside the namespace, so nothing leaves the runner.
+      # the debug-lanes job lints and runs those, outside the namespace and
+      # without the planted credentials. Zero attempts is the pass
+      # condition; each live target, named explicitly under the same
+      # variables, is a positive control that must attempt -- inside the
+      # namespace, so nothing leaves the runner.
       # --require-netns: on CI a missing namespace is a failure, not a skip.
       - name: standard test gate makes no network attempt
         timeout-minutes: 90
@@ -655,7 +682,7 @@ jobs:
     if: always()
     needs:
       - check
-      - reduced-features
+      - debug-lanes
       - msrv
       - test
       - release-build

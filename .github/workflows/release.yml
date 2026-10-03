@@ -130,13 +130,15 @@ jobs:
     # time -- a hung test must not block the pipeline indefinitely.
     #
     # RAISED from 20 on measurement. The old cap could no longer clear a
-    # HEALTHY run: on the same commit, ci.yml's `cargo test --workspace
-    # --release` -- the identical command on the identical runner class,
-    # uncapped -- took 27m22s on its own and passed. This job runs that
-    # same suite after a 2m19s clippy, so 20m could not have been enough
-    # whatever the suite did. The last two runs to clear this job took
-    # 13m36s and 14m38s, both in June, already within 6 minutes of the
-    # cap; the suite has grown since.
+    # HEALTHY run: on the same commit, ci.yml's then-current `cargo test
+    # --workspace --release` -- the identical command on the identical
+    # runner class, uncapped -- took 27m22s on its own and passed. ci.yml
+    # has since moved to the test-release profile, so it no longer runs
+    # this command and its timings are no longer a measure of this job.
+    # This job runs that same suite after a 2m19s clippy, so 20m could not
+    # have been enough whatever the suite did. The last two runs to clear
+    # this job took 13m36s and 14m38s, both in June, already within 6
+    # minutes of the cap; the suite has grown since.
     #
     # The cap still exists to stop a HUNG test, which is
     # minutes-versus-forever, so a larger number costs nothing against

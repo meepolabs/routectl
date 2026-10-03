@@ -28,7 +28,7 @@
 // Run:
 //   GEMINI_OAUTH_ACCESS_TOKEN="$(jq -r '.providers.antigravity.access_token' \
 //     ~/.config/routectl/credentials.json)" \
-//   cargo test -p routectl-cli --features live-integration --release \
+//   cargo test -p routectl-cli --features live-integration --profile test-release \
 //     --test live_matrix oauth_antigravity -- --nocapture --test-threads=1
 
 use super::*;
@@ -761,7 +761,7 @@ async fn oauth_antigravity_claude_thinking_budget_reaches_upstream() {
 /// catalog; run it deliberately when a fresh snapshot is needed:
 ///
 ///   GEMINI_OAUTH_ACCESS_TOKEN=... cargo test -p routectl-cli \
-///     --features live-integration --release --test live_matrix -- \
+///     --features live-integration --profile test-release --test live_matrix -- \
 ///     --ignored --exact oauth_antigravity::oauth_antigravity_servable_set_sweep \
 ///     --nocapture --test-threads=1
 #[ignore = "live: one call per servable id; see docs/DEVELOPMENT.md \"Explicit runs\""]
