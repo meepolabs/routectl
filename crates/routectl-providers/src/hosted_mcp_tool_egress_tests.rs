@@ -13,7 +13,9 @@
 //! SERIAL GUARD: every test here that sends a hosted-MCP tool through the
 //! anthropic-api lane bumps `(anthropic, hosted_mcp_tool_withheld)`, so all of
 //! them carry `anthropic_hosted_mcp_tool_withheld`, including the ones that do
-//! not read the counter.
+//! not read the counter. A test that also sends the tool through Bedrock
+//! Converse bumps `(bedrock-converse, builtin_tool_unrepresentable)` and owes
+//! `bedrock_converse_builtin_tool_unrepresentable` as well.
 
 use serde_json::{Value, json};
 
@@ -141,7 +143,10 @@ fn assert_no_mcp_value(lane: &str, body: &str) {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
+#[serial_test::serial(
+    anthropic_hosted_mcp_tool_withheld,
+    bedrock_converse_builtin_tool_unrepresentable
+)]
 fn a_hosted_mcp_tool_never_reaches_an_anthropic_shaped_body_and_the_function_tool_survives() {
     // Arrange
     let req = mcp_and_function_request();

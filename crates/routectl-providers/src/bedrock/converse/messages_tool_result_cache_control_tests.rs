@@ -256,7 +256,12 @@ fn a_fallback_wrapped_marked_part_anchors_on_the_tool_result_not_in_its_payload(
 /// The only drop arm on a Role::Tool-adjacent turn is the plain user path:
 /// a dropped marked block must not leave a cachePoint behind, even when it
 /// coalesces into the same wire message as a carried tool-result marker.
+///
+/// Guarded on the image_url drop class it reaches incidentally: the dropped
+/// block bumps the process-global counter, which would otherwise land inside
+/// another test's before/after window for that class.
 #[test]
+#[serial_test::serial(bedrock_converse_image_url_unrepresentable)]
 fn a_dropped_marked_block_beside_a_tool_result_leaves_no_orphan_cache_point() {
     // Arrange -- the image_url drops on Converse; the tool turn and the user
     // turn coalesce into one wire user message.
