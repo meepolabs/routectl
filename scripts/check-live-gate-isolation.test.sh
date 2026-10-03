@@ -8,7 +8,10 @@
 #   - a deadline raised past the budget makes the checker refuse to run;
 #   - the fixed credential names are always planted, whatever the source
 #     scan finds, and dropping one is caught;
-#   - the source scan resolves from the repo root, whatever the cwd.
+#   - the source scan resolves from the repo root, whatever the cwd;
+#   - the standard-gate leg runs the gate registry's workspace-all-features
+#     subcommand, and that subcommand keeps the all-features selection and
+#     the --offline / --no-fail-fast flags the namespaced leg depends on.
 #
 # Every "passes" assertion has a control proving the same assertion fails
 # on a copy of the checker planted with the defect.
@@ -21,11 +24,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 CHECKER="$HERE/check-live-gate-isolation.sh"
+GATE_REGISTRY="$HERE/test-gate.sh"
 WORKFLOW="$REPO_ROOT/.github/workflows/ci.yml"
 STEP_NAME="standard test gate makes no network attempt"
-# Minutes the test job needs besides the isolation step: setup, the release
-# workspace test before it (about 37 minutes on recent runs), and the steps
-# after it (about 6).
+# Minutes the test job keeps beyond the isolation step. That step is the
+# job's only workspace build and test run; besides it the job has only setup
+# and the conservation step, which reuses its build, so this is headroom for
+# a cold cache and a slow runner rather than a measured cost.
 OTHER_STEPS_MINUTES=60
 
 # The provider and router-smoke credential names that must be planted even
@@ -173,6 +178,60 @@ if m="$(mutant relative 's|"\$REPO_ROOT"/crates/routectl-cli/tests/|crates/route
     fi
 else
     fail "could not build the cwd-relative mutant"
+fi
+
+# --- standard gate source ---------------------------------------------------
+
+# shellcheck disable=SC2016 # matches the literal "$HERE" in the checker source
+REGISTRY_GATE_LINE='STANDARD_GATE=(bash "$HERE/test-gate.sh" workspace-all-features)'
+runs_registry_gate() { grep -qxF "$REGISTRY_GATE_LINE" "$1"; }
+
+if runs_registry_gate "$CHECKER"; then
+    pass "standard-gate leg runs test-gate.sh workspace-all-features"
+else
+    fail "standard-gate leg does not run test-gate.sh workspace-all-features"
+fi
+
+if m="$(mutant inline-gate 's|^STANDARD_GATE=.*|STANDARD_GATE=(cargo test --workspace --all-features --offline --no-fail-fast)|')"; then
+    if runs_registry_gate "$m"; then
+        fail "control: an inline standard-gate command still passed the registry check"
+    else
+        pass "control: an inline standard-gate command is caught"
+    fi
+else
+    fail "could not build the inline-gate mutant"
+fi
+
+# Prints each flag the namespaced leg needs that a registry copy's
+# workspace-all-features command lacks.
+missing_gate_flags() {
+    local body flag
+    body="$(awk '/^    workspace-all-features\)$/ { on = 1; next }
+        on && /^        ;;$/ { exit }
+        on { print }' "$1" | tr -d '\\\n')"
+    if [[ "$body" != *"run cargo test --workspace"* ]]; then
+        echo "<no cargo test --workspace command>"
+        return
+    fi
+    for flag in --all-features "--profile test-release" --offline --no-fail-fast; do
+        [[ "$body" == *" $flag "* ]] || echo "$flag"
+    done
+}
+
+gone="$(missing_gate_flags "$GATE_REGISTRY")"
+if [[ -z "$gone" ]]; then
+    pass "test-gate.sh workspace-all-features carries every flag the namespaced leg needs"
+else
+    fail "test-gate.sh workspace-all-features lacks: $(tr '\n' ' ' <<<"$gone")"
+fi
+
+sed -e '/^    workspace-all-features)$/,/^        ;;$/s/ --offline//' "$GATE_REGISTRY" >"$TMP/test-gate-online.sh"
+if cmp -s "$GATE_REGISTRY" "$TMP/test-gate-online.sh"; then
+    fail "could not build the dropped --offline registry mutant"
+elif [[ "$(missing_gate_flags "$TMP/test-gate-online.sh")" == "--offline" ]]; then
+    pass "control: a registry command without --offline is caught"
+else
+    fail "control: dropped --offline not caught"
 fi
 
 if ((fails)); then

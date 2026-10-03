@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Gate-command registry: the single source for the exact cargo commands the
-# repo's test gates run. The pre-push hook calls it, CI is meant to call it,
-# and docs/DEVELOPMENT.md points at it, so the commands cannot drift apart
+# repo's test gates run. The pre-push hook and CI call it (CI's all-features
+# run goes through scripts/check-live-gate-isolation.sh), and
+# docs/DEVELOPMENT.md points at it, so the commands cannot drift apart
 # across those places. Each subcommand prints the command it runs, then runs
 # it from the repo root. Logic beyond the command itself stays in the
 # dedicated scripts.
@@ -19,6 +20,10 @@
 #   test-gate.sh workspace-all-features [HARNESS_ARGS...]
 #       cargo test --workspace --all-features --profile test-release
 #         --offline --no-fail-fast
+#       The standard gate scripts/check-live-gate-isolation.sh runs inside
+#       a network namespace. Both flags after the profile are load-bearing
+#       there: dependencies are fetched before the namespace exists, and
+#       one failing test binary must not stop later ones from running.
 #   test-gate.sh release-build
 #       cargo build --locked --release -p routectl-cli
 #       Accepts no extra arguments.

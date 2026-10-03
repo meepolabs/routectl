@@ -33,8 +33,9 @@
 #      each one, or the check could not see such an attempt at all. The same
 #      leg connects to the canary and to every host daemon socket present
 #      outside (Docker, D-Bus, resolver, nscd, SSH agent); each MUST fail.
-#   2. standard gate    -- `cargo test --workspace --all-features`; MUST
-#      pass and log nothing.
+#   2. standard gate    -- `scripts/test-gate.sh workspace-all-features`, the
+#      all-features workspace suite on the `test-release` profile; MUST pass
+#      and log nothing.
 #   3. live controls    -- each live target named explicitly, one leg per
 #      target, under the same planted variables; EACH MUST log at least one
 #      attempt, proving the planted values make that target dial out. Their
@@ -102,10 +103,13 @@ FIXED_PLANTED_NAMES=(
     ROUTECTL_LIVE_API_KEY
 )
 LIVE_TARGETS=(live_matrix live_anthropic_oauth)
-STANDARD_GATE=(cargo test --workspace --all-features --offline --no-fail-fast)
+# The standard gate runs through the gate-command registry, so this check and
+# every other caller of that subcommand run the same command.
+STANDARD_GATE=(bash "$HERE/test-gate.sh" workspace-all-features)
+# Same profile as the standard gate, so each live leg reuses its build.
 live_command() {
-    LIVE_COMMAND=(cargo test -p routectl-cli --features live-integration --offline --no-fail-fast
-        --test "$1" -- --test-threads=1)
+    LIVE_COMMAND=(cargo test -p routectl-cli --features live-integration --profile test-release
+        --offline --no-fail-fast --test "$1" -- --test-threads=1)
 }
 PROXY_VARS=(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy)
 HOST_SOCKET_VARS=(SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DOCKER_HOST)

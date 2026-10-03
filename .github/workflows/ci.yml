@@ -126,8 +126,9 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-22.04
-    # Recent runs spend about 45 minutes outside the network-isolation step,
-    # which is bounded at 90 by its own timeout and per-leg deadlines;
+    # The workspace suite runs once, inside the network-isolation step, which
+    # is bounded at 90 by its own timeout and per-leg deadlines. Outside it are
+    # only setup and the conservation step, which reuses that step's build;
     # scripts/check-live-gate-isolation.test.sh keeps this at least 60
     # minutes above that step and the script's deadlines inside it.
     timeout-minutes: 170
@@ -140,29 +141,25 @@ jobs:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: cargo test --workspace
-        run: cargo test --workspace --release
-
-      # The standard gate under hostile conditions: every credential
-      # variable the live provider tests read is planted with a synthetic
-      # value, then `cargo test --workspace --all-features` runs in a
-      # network namespace whose recorder captures every packet to a
-      # non-loopback address or to the resolver. Zero attempts is the pass
-      # condition; each live target, named explicitly under the same
-      # variables, is a positive control that must attempt -- inside the
-      # namespace, so nothing leaves the runner. --require-netns: on CI a
+      # The standard gate under hostile conditions, and the job's only run of
+      # the workspace suite: every credential variable the live provider
+      # tests read is planted with a synthetic value, then
+      # `scripts/test-gate.sh workspace-all-features` (the all-features
+      # workspace suite on the test-release profile) runs in a network
+      # namespace whose recorder captures every packet to a non-loopback
+      # address or to the resolver. All features is a superset of every
+      # other workspace test set: the default-features tests all compile in
+      # too, and so do the routectl-router catalog-codegen tests behind
+      # gen-catalog -- the selectors/snapshot flag welds and the
+      # catalog_baked.rs drift guards -- which compile out of every narrower
+      # build. Zero attempts is
+      # the pass condition; each live target, named explicitly under the
+      # same variables, is a positive control that must attempt -- inside
+      # the namespace, so nothing leaves the runner. --require-netns: on CI a
       # missing namespace is a failure, not a skip.
       - name: standard test gate makes no network attempt
         timeout-minutes: 90
         run: bash scripts/check-live-gate-isolation.sh --require-netns
-
-      # The workspace leg above builds routectl-router without gen-catalog, so
-      # the two tests behind that feature -- the selectors/snapshot flag weld
-      # and the catalog_baked.rs drift guard -- compile out of every other job
-      # and would otherwise run only by hand. --release to reuse the profile
-      # the step above already warmed.
-      - name: cargo test (router, gen-catalog feature)
-        run: cargo test -p routectl-router --features gen-catalog --release --lib
 
       # The wire-conservation leg, run for its VERDICT: the driver corpus is
       # tracked, so every checkout adjudicates it and a Fail verdict already
@@ -188,13 +185,19 @@ jobs:
       # middle of a matched line, failing this step over a formatting race;
       # and pipefail with the tee, without which cargo's exit status is lost
       # to the pipe and the verdict stops gating anything.
+      #
+      # The selection is the isolation step's (--workspace --all-features
+      # --profile test-release) narrowed by --test, so cargo reuses that
+      # step's conservation binary instead of building another feature set.
+      # The extra features change nothing the harness runs: they only add
+      # test seams, the gen-catalog codegen, and the live and dhat targets.
       - name: wire conservation (verdict on the committed corpus)
         run: |
           set -e
           set -o pipefail
           log="$RUNNER_TEMP/conservation.log"
-          cargo test -p routectl-cli --release --test conservation \
-            -- --nocapture --test-threads=1 2>&1 | tee "$log"
+          cargo test --workspace --all-features --profile test-release \
+            --test conservation -- --nocapture --test-threads=1 2>&1 | tee "$log"
 
           block="$RUNNER_TEMP/conservation-committed-corpus.log"
           awk '/^test conservation_over_both_fixture_roots \.\.\./ { inblock = 1 }
@@ -220,6 +223,86 @@ jobs:
             echo "coverage is decorative green." >&2
             exit 1
           fi
+
+  # The only per-PR check of the shipped profile. Every test leg builds with
+  # test-release (no LTO, unwind, symbols kept), so a failure that only thin
+  # LTO, codegen-units = 1, panic = "abort" or strip produces -- a link
+  # error, a binary that dies at startup -- would otherwise surface first
+  # in the release workflow. The smoke needs no network and no credential:
+  # HOME and XDG_CONFIG_HOME point at a fresh temp dir, `config check`
+  # validates the shipped example config (its unresolved credential
+  # references are warnings, not errors), and `serve` boots on a
+  # credential-free config bound to a free loopback port, must answer
+  # /health, then must exit 0 on SIGTERM.
+  release-build:
+    name: release binary build + startup smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: AWS-LC build environment preflight
+        run: bash scripts/assert-aws-lc-env.sh
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo build --release (routectl-cli)
+        run: bash scripts/test-gate.sh release-build
+
+      - name: startup smoke on the release binary
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/release/routectl"
+          smoke_home="$(mktemp -d)"
+          export HOME="$smoke_home" XDG_CONFIG_HOME="$smoke_home/.config"
+          unset ROUTECTL_CONFIG
+
+          "$bin" --version
+          "$bin" --config examples/config.toml config check
+
+          version="$("$bin" config example | sed -n 's/^version = \([0-9][0-9]*\)$/\1/p')"
+          [ -n "$version" ] || { echo "smoke: no schema version in config example" >&2; exit 1; }
+          port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          config="$smoke_home/serve.toml"
+          printf 'version = %s\n[server]\nhost = "127.0.0.1"\nport = %s\n' "$version" "$port" > "$config"
+
+          "$bin" --config "$config" serve < /dev/null &
+          serve_pid=$!
+          served=0
+          for _ in $(seq 1 150); do
+            if curl -fsS --max-time 2 "http://127.0.0.1:$port/health"; then
+              served=1
+              break
+            fi
+            kill -0 "$serve_pid" 2>/dev/null || break
+            sleep 0.2
+          done
+          echo
+          if [ "$served" -ne 1 ]; then
+            echo "smoke: serve never answered /health on port $port" >&2
+            kill -KILL "$serve_pid" 2>/dev/null || true
+            exit 1
+          fi
+
+          kill -TERM "$serve_pid"
+          for _ in $(seq 1 100); do
+            kill -0 "$serve_pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$serve_pid" 2>/dev/null; then
+            echo "smoke: serve did not exit within 10s of SIGTERM" >&2
+            kill -KILL "$serve_pid"
+            exit 1
+          fi
+          rc=0
+          wait "$serve_pid" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "smoke: serve exited $rc after SIGTERM" >&2
+            exit 1
+          fi
+          echo "smoke: release binary started, served /health, and shut down cleanly"
 
   audit:
     name: cargo audit

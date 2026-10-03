@@ -8526,7 +8526,8 @@ new section or a second doc.
   runs on demand (not a commit hook)
 - `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
   over `cargo test -- --list` output, for auditing a test-consolidation
-  change by exact test name; informational, gates nothing
+  or gate-command change by exact test name (cargo selection and doctest
+  inclusion set by environment variable); informational, gates nothing
 - `stray-build-dirs.sh` -- reports (never deletes) stray cargo
   build-scratch directories outside the normal `target/` tree, including
   ones nested inside it or sitting outside the git repo entirely
@@ -8569,8 +8570,9 @@ new section or a second doc.
   row wording or freshness
 - `check-nav-index.test.sh` -- self-test for the navigation-index check
 - `check-live-gate-isolation.sh` -- hostile-environment check proving the
-  standard all-features gate makes zero network attempts under planted
-  credentials inside private network and mount namespaces
+  standard all-features gate (`test-gate.sh workspace-all-features`) makes
+  zero network attempts under planted credentials inside private network
+  and mount namespaces; CI's only workspace test run
 - `check-live-gate-isolation.test.sh` -- self-test for that check's static
   contract: deadline budget vs the CI step timeout, the fixed planted
   credential names, and run-from-anywhere source resolution

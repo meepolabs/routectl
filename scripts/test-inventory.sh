@@ -20,8 +20,18 @@
 # flags). `diff` prints fully-qualified names (<binary>::<test path>) that
 # are in the before set but not the after set (REMOVED) and vice versa
 # (ADDED); it exits 0 only when both sets are empty, 1 otherwise. Doctests
-# are intentionally excluded from the inventory (they are not part of the
+# are excluded from the inventory by default (they are not part of the
 # consolidation surface).
+#
+# Parameters, both environment variables, so a gate-command change can be
+# audited too (the same tests under a different feature set or profile):
+#   INVENTORY_CARGO_ARGS  the cargo selection, word-split, placed before
+#                         `-- --list` (default: --workspace --features
+#                         bedrock --release). Example:
+#                         "--workspace --all-features --profile test-release"
+#   INVENTORY_DOCTESTS=1  keep doctests, one doctests-<crate>.txt per crate;
+#                         pair it with `--doc` in INVENTORY_CARGO_ARGS for a
+#                         doctest-only inventory.
 #
 # Toolchain: the workspace rust-toolchain.toml pin governs. RUSTUP_TOOLCHAIN
 # is deliberately left unset so the pinned stable is selected through the
@@ -48,7 +58,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RAW_LOG_NAME="list-raw.log"
 SUMMARY_NAME="SUMMARY.txt"
-FEATURE_FLAGS="--workspace --features bedrock --release"
+FEATURE_FLAGS="${INVENTORY_CARGO_ARGS:---workspace --features bedrock --release}"
+INCLUDE_DOCTESTS="${INVENTORY_DOCTESTS:-0}"
+read -ra CARGO_SELECTION <<<"$FEATURE_FLAGS"
 
 # Strip cargo's trailing content hash from a test-binary artifact basename
 # so "routectl_core-1a2b3c4d5e6f7a8b" becomes the stable label
@@ -82,23 +94,24 @@ dump() {
     (
         cd "$REPO_ROOT"
         CARGO_TARGET_DIR="$target_dir" \
-            cargo test --workspace --features bedrock --release -- --list
+            cargo test "${CARGO_SELECTION[@]}" -- --list
     ) >"$raw" 2>&1 </dev/null
 
     parse_dump "$raw" "$outdir"
 }
 
 # Parse the interleaved `cargo test -- --list` log into per-binary files.
-# A "Running ... (<artifact>)" line opens a binary section; a "Doc-tests"
-# line closes attribution (doctests are dropped); a line ending in ": test"
-# inside an open section is a test name.
+# A "Running ... (<artifact>)" line opens a binary section; a "Doc-tests
+# <crate>" line closes attribution (doctests are dropped) or, with
+# INVENTORY_DOCTESTS=1, opens a doctests-<crate> section; a line ending in
+# ": test" inside an open section is a test name.
 parse_dump() {
     local raw="$1"
     local outdir="$2"
     local current="" line name label
     local -A seen=()
     local re_running='Running[[:space:]].*\(([^)]+)\)'
-    local re_doctests='^[[:space:]]*Doc-tests[[:space:]]'
+    local re_doctests='^[[:space:]]*Doc-tests[[:space:]]+([^[:space:]]+)'
 
     while IFS= read -r line; do
         if [[ "$line" =~ $re_running ]]; then
@@ -110,6 +123,14 @@ parse_dump() {
             fi
         elif [[ "$line" =~ $re_doctests ]]; then
             current=""
+            if [[ "$INCLUDE_DOCTESTS" == 1 ]]; then
+                label="doctests-${BASH_REMATCH[1]}"
+                current="$label"
+                if [[ -z "${seen[$label]:-}" ]]; then
+                    : >"$outdir/$label.txt"
+                    seen[$label]=1
+                fi
+            fi
         elif [[ -n "$current" && "$line" == *": test" ]]; then
             name="${line%: test}"
             printf '%s\n' "$name" >>"$outdir/$current.txt"
@@ -138,6 +159,7 @@ parse_dump() {
         echo "test inventory summary"
         echo "git HEAD: $head_sha"
         echo "feature flags: $FEATURE_FLAGS"
+        echo "doctests included: $INCLUDE_DOCTESTS"
         echo "binaries: ${#seen[@]}"
         echo "total named tests: $total"
         echo

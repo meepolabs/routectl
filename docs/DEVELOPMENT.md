@@ -30,11 +30,12 @@ cargo test --workspace --features bedrock --profile test-release
 # clean. To include them:
 cargo test --workspace --features bedrock,test-utils --profile test-release
 
-# The two catalog-codegen tests -- the selectors/snapshot flag weld and
-# the `catalog_baked.rs` drift guard -- are `#[cfg(feature =
+# The catalog-codegen tests -- the selectors/snapshot flag welds and
+# the `catalog_baked.rs` drift guards -- are `#[cfg(feature =
 # "gen-catalog")]`, so they compile out of every command above. This leg
-# is what runs them; CI runs it too. It is NOT in the local commit gate,
-# which carries no test legs.
+# is what runs them locally; CI runs them inside its all-features
+# workspace run (`bash scripts/test-gate.sh workspace-all-features`). Neither
+# is in the local commit gate, which carries no test legs.
 cargo test -p routectl-router --features gen-catalog --lib
 
 # Live matrix against real providers. It makes provider calls and spends
