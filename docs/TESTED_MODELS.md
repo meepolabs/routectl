@@ -320,7 +320,8 @@ The servable-set sweep below is `#[ignore]`d -- it burns one live call per
 id, so it runs on demand only, never as part of the matrix above:
 ```bash
 cargo test -p routectl-cli --features live-integration --release \
-  --test live_matrix -- --ignored oauth_antigravity_servable_set_sweep \
+  --test live_matrix -- --ignored \
+  --exact oauth_antigravity::oauth_antigravity_servable_set_sweep \
   --nocapture --test-threads=1
 ```
 

@@ -49,9 +49,9 @@ const NORMAL_SIGMA: char = '\u{3C3}';
 // room for product names and short phrases.
 //
 // Release profile, AMD Ryzen 9 9900X (24 threads, load average 1-2):
-//   cargo test -p routectl-providers --release --lib \
-//     cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
-//     -- --ignored --nocapture
+//   cargo test -p routectl-providers --release --lib -- --ignored --exact \
+//     anthropic_api::cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
+//     --nocapture
 //   100 KiB, `a`-only text, `same_initial_words`: every shape 1.1-1.2ms
 //   32 MiB:  "API", "proxy" on `a`s: 422ms
 //            32 x 32 same-initial words on `a`s (bounds): 378ms
@@ -819,7 +819,7 @@ mod tests {
     /// meaningful only in release. Run it with the command recorded beside
     /// the bound constants.
     #[test]
-    #[ignore = "scan cost measurement; run explicitly in release with --ignored"]
+    #[ignore = "scan cost measurement, release only; see docs/DEVELOPMENT.md \"Explicit runs\""]
     fn sensitive_word_scan_cost_at_the_bounds() {
         const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
         const SAMPLE_BYTES: usize = 100 * 1024;

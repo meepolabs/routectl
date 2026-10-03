@@ -1504,12 +1504,12 @@ mod tests {
     /// Run it with:
     ///
     /// ```text
-    /// cargo test -p routectl-cli --release \
+    /// cargo test -p routectl-cli --release --lib -- --ignored --exact \
     ///   handlers::status::usage::tests::a_million_row_ledger_answers_inside_the_budget \
-    ///   -- --ignored --nocapture
+    ///   --nocapture
     /// ```
     #[test]
-    #[ignore = "seeds a 1M-row ledger; run explicitly with --ignored"]
+    #[ignore = "seeds a 1M-row ledger; see docs/DEVELOPMENT.md \"Explicit runs\""]
     fn a_million_row_ledger_answers_inside_the_budget() {
         const ROWS: usize = 1_000_000;
         let dir = TempDir::new().unwrap();

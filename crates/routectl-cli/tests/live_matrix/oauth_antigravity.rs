@@ -761,10 +761,10 @@ async fn oauth_antigravity_claude_thinking_budget_reaches_upstream() {
 /// catalog; run it deliberately when a fresh snapshot is needed:
 ///
 ///   GEMINI_OAUTH_ACCESS_TOKEN=... cargo test -p routectl-cli \
-///     --features live-integration --release --test live_matrix \
-///     oauth_antigravity_servable_set_sweep -- --ignored --nocapture \
-///     --test-threads=1
-#[ignore = "sweeps the whole servable set; burns one live call per id"]
+///     --features live-integration --release --test live_matrix -- \
+///     --ignored --exact oauth_antigravity::oauth_antigravity_servable_set_sweep \
+///     --nocapture --test-threads=1
+#[ignore = "live: one call per servable id; see docs/DEVELOPMENT.md \"Explicit runs\""]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauth_antigravity_servable_set_sweep() {
     let Some(router) = build_router_or_skip(SERVABLE_MODELS).await else {

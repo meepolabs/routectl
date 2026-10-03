@@ -124,6 +124,22 @@ commands above.
 The live matrix is slow (~30s) and costs cents per run. Use it as a
 final gate, not a tight inner loop.
 
+## Explicit runs (never in the default gate)
+
+Every `#[ignore]`d test in the workspace is listed here, with the one
+command that runs it by exact name. None is wired into CI: the live
+rows spend money and the measurement rows need a quiet, stable machine.
+Never run a broad `--ignored` / `--include-ignored` sweep -- it would
+mix live calls and multi-minute benchmarks into one run.
+
+| Test | What it costs | Command | When to run it |
+|---|---|---|---|
+| `oauth_antigravity_servable_set_sweep` | Live: one Cloud Code call per servable model id, on a quota-metered seat. Needs `GEMINI_OAUTH_ACCESS_TOKEN` | `cargo test -p routectl-cli --features live-integration --release --test live_matrix -- --ignored --exact oauth_antigravity::oauth_antigravity_servable_set_sweep --nocapture --test-threads=1` | Refreshing the servable-set snapshot in `docs/TESTED_MODELS.md`, or after bumping the pinned IDE version |
+| `live_openai_unsupported_parameter_is_learned` | Live: real calls to the openai-compat provider at `ROUTECTL_LIVE_BASE_URL` (needs `ROUTECTL_LIVE_API_KEY`); panics when either is unset | `cargo test -p routectl-router --test learned_capability_loop -- --ignored --exact real_envelope::live_openai_unsupported_parameter_is_learned --nocapture` | After changing the learned-capability resolver or the upstream 400 parsing it relies on |
+| `sensitive_word_scan_cost_at_the_bounds` | Release build plus several seconds of scanning a 32 MiB body; numbers are only meaningful in release on an idle machine | `cargo test -p routectl-providers --release --lib -- --ignored --exact anthropic_api::cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds --nocapture` | After changing the cloak sensitive-word scan or its config bounds; record results beside the bound constants |
+| `a_million_row_ledger_answers_inside_the_budget` | Seeds a 1M-row usage ledger: minutes of disk I/O | `cargo test -p routectl-cli --release --lib -- --ignored --exact handlers::status::usage::tests::a_million_row_ledger_answers_inside_the_budget --nocapture` | After changing the `/status/usage` panel collection or its read budget |
+| `the_large_ledger_read_cost_curve` | Seeds a multi-million-row ledger: several minutes and hundreds of MB on disk. Set `TMPDIR` to real storage (a tmpfs `/tmp` flatters every number) | `TMPDIR=/var/tmp cargo test -p routectl-cli --release --lib -- --ignored --exact handlers::status::usage::read_budget_bench_tests::the_large_ledger_read_cost_curve --nocapture` | Before changing either status read budget, or after changing the usage query / index shape |
+
 ## Commit gate (one-time setup)
 
 The local commit gate is a [pre-commit](https://pre-commit.com) config,

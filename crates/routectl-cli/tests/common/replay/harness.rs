@@ -13,7 +13,7 @@
 //! providers; see the cross-reference comments in the egress / ingress
 //! match arms).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
@@ -26,7 +26,7 @@ use routectl_router::ResolvedModel;
 use serde_json::Value;
 
 use super::json_diff::{Divergence, DivergenceKind, diff_all};
-use super::loader::Fixture;
+use super::loader::{Fixture, discover_fixtures};
 
 /// LIVE-BOX fixture root: bodies captured from a real routectl session
 /// by `scripts/capture_fixtures.sh`. Per-contributor, gitignored, and
@@ -34,9 +34,9 @@ use super::loader::Fixture;
 /// model outputs, so a comparison over this root may never become a
 /// commit gate, and the corpus may never be committed.
 ///
-/// `discover_fixtures` returns an empty vector when the directory is
-/// empty, which keeps the replay tests passing on a fresh checkout
-/// before any fixtures have been captured.
+/// An ABSENT root is the fresh-checkout state and the drivers skip it by
+/// name; a PRESENT root must load and assert at least one fixture (see
+/// [`load_local_corpus`] and [`ReplayTally::assert_verdict`]).
 pub fn local_root() -> PathBuf {
     fixtures_dir().join("captured")
 }
@@ -98,6 +98,88 @@ pub fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
 pub enum FixtureOutcome {
     Asserted,
     Skipped(String),
+}
+
+/// Load the live-box corpus at `root` for the driver test `test_name`.
+///
+/// `None` when the root does not exist: a fresh checkout has no private
+/// corpus, so the driver prints one stable named SKIP line and returns.
+/// A root that EXISTS is a contributor's corpus and must yield at least
+/// one loadable fixture; loading none is a broken corpus (or a loader
+/// regression), never a pass, so it panics.
+pub fn load_local_corpus(test_name: &str, root: &Path) -> Option<Vec<Fixture>> {
+    if !root.exists() {
+        eprintln!(
+            "SKIP {test_name}: private replay corpus not present at {}",
+            root.display(),
+        );
+        return None;
+    }
+    let corpus = discover_fixtures(root)
+        .unwrap_or_else(|e| panic!("failed to discover fixtures under {}: {e}", root.display()));
+    assert!(
+        !corpus.fixtures.is_empty(),
+        "{test_name}: replay corpus at {} is present but loaded 0 fixtures \
+         ({} unloadable); remove the directory or recapture",
+        root.display(),
+        corpus.skipped,
+    );
+    Some(corpus.fixtures)
+}
+
+/// Per-run tally of fixture outcomes, shared by both drivers so the
+/// verdict rules cannot drift between them.
+#[derive(Debug, Default)]
+pub struct ReplayTally {
+    pub asserted: usize,
+    pub skipped: usize,
+    pub failures: Vec<String>,
+}
+
+impl ReplayTally {
+    /// Fold one fixture's outcome into the tally, logging a skip with its
+    /// reason under the driver's `[log_tag]`.
+    pub fn record(
+        &mut self,
+        log_tag: &str,
+        fixture_name: &str,
+        outcome: Result<FixtureOutcome, String>,
+    ) {
+        match outcome {
+            Ok(FixtureOutcome::Asserted) => self.asserted += 1,
+            Ok(FixtureOutcome::Skipped(reason)) => {
+                eprintln!("[{log_tag}] skipping fixture `{fixture_name}`: {reason}");
+                self.skipped += 1;
+            }
+            Err(msg) => self
+                .failures
+                .push(format!("fixture `{fixture_name}`: {msg}")),
+        }
+    }
+
+    /// Print the run summary and fail on any per-fixture failure, or on a
+    /// loaded corpus of which not one fixture was asserted: a run where
+    /// every fixture skipped compared nothing and must not read as green.
+    pub fn assert_verdict(&self, test_name: &str, log_tag: &str, loaded: usize) {
+        eprintln!(
+            "[{log_tag}] {loaded} fixture(s): {} asserted, {} skipped, {} failed",
+            self.asserted,
+            self.skipped,
+            self.failures.len(),
+        );
+        assert!(
+            self.failures.is_empty(),
+            "{} {log_tag} failure(s):\n  - {}",
+            self.failures.len(),
+            self.failures.join("\n  - "),
+        );
+        assert!(
+            self.asserted > 0,
+            "{test_name}: {loaded} fixture(s) loaded but 0 asserted ({} skipped); \
+             a run that compares nothing is not a pass",
+            self.skipped,
+        );
+    }
 }
 
 /// Model substrings whose replay needs an overlay value that NOTHING in
@@ -531,5 +613,79 @@ mod tests {
 
         assert_eq!(local_root().parent(), Some(fixtures.as_path()));
         assert_eq!(driver_root().parent(), Some(fixtures.as_path()));
+    }
+
+    #[test]
+    fn absent_local_corpus_is_a_named_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let loaded = load_local_corpus("some_replay_all", &tmp.path().join("captured"));
+
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "is present but loaded 0 fixtures")]
+    fn present_but_empty_local_corpus_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        load_local_corpus("some_replay_all", tmp.path());
+    }
+
+    #[test]
+    #[should_panic(expected = "is present but loaded 0 fixtures")]
+    fn present_corpus_of_only_unloadable_entries_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("broken");
+        super::super::plant::plant_fixture(&dir);
+        std::fs::remove_file(dir.join(super::super::loader::META_JSON)).unwrap();
+
+        load_local_corpus("some_replay_all", tmp.path());
+    }
+
+    /// Plants a corpus whose every fixture is on an enrichment-dependent
+    /// model, so each one skips through the real skip predicate.
+    fn tally_all_skipping_corpus() -> (usize, ReplayTally) {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut meta = super::super::plant::current_meta();
+            meta["model"] = serde_json::json!("deepseek-chat");
+            super::super::plant::write_required_files(&dir, &meta);
+        }
+        let fixtures = load_local_corpus("some_replay_all", tmp.path()).unwrap();
+        let mut tally = ReplayTally::default();
+        for fixture in &fixtures {
+            let reason = enrichment_skip_reason(fixture).expect("planted model skips");
+            tally.record("test", &fixture.name, Ok(FixtureOutcome::Skipped(reason)));
+        }
+        (fixtures.len(), tally)
+    }
+
+    #[test]
+    #[should_panic(expected = "2 fixture(s) loaded but 0 asserted (2 skipped)")]
+    fn loaded_corpus_with_every_fixture_skipped_fails() {
+        let (loaded, tally) = tally_all_skipping_corpus();
+
+        tally.assert_verdict("some_replay_all", "test", loaded);
+    }
+
+    #[test]
+    fn one_asserted_fixture_passes_the_verdict() {
+        let (loaded, mut tally) = tally_all_skipping_corpus();
+        tally.record("test", "c", Ok(FixtureOutcome::Asserted));
+
+        tally.assert_verdict("some_replay_all", "test", loaded + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "1 test failure(s)")]
+    fn a_failed_fixture_fails_the_verdict() {
+        let mut tally = ReplayTally::default();
+        tally.record("test", "a", Ok(FixtureOutcome::Asserted));
+        tally.record("test", "b", Err("mismatch".into()));
+
+        tally.assert_verdict("some_replay_all", "test", 2);
     }
 }

@@ -120,11 +120,12 @@ async fn real_envelope_response_format_400_learns_structured_output_and_routes_a
 // the canonical `structured_output` key the request derives, and the capture
 // membership gate admits it because the request carried that capability:
 //   ROUTECTL_LIVE_BASE_URL=... ROUTECTL_LIVE_API_KEY=... \
-//     cargo test -p routectl-router --test learned_capability_loop -- --ignored
+//     cargo test -p routectl-router --test learned_capability_loop -- --ignored \
+//       --exact real_envelope::live_openai_unsupported_parameter_is_learned
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live network: requires ROUTECTL_LIVE_BASE_URL + ROUTECTL_LIVE_API_KEY"]
+#[ignore = "live: needs ROUTECTL_LIVE_BASE_URL + ROUTECTL_LIVE_API_KEY; see docs/DEVELOPMENT.md \"Explicit runs\""]
 async fn live_openai_unsupported_parameter_is_learned() {
     let (Ok(base_url), Ok(api_key)) = (
         std::env::var("ROUTECTL_LIVE_BASE_URL"),

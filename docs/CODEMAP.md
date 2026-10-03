@@ -8095,7 +8095,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `parse_enriched_canonical`), the per-model enrichment rebuild
   (`with_replay_enrichment`, `enrichment_skip_reason`), and the
   value-bounded failure reporter (`bounded_body_diff`,
-  `diverges_only_in_messages`)
+  `diverges_only_in_messages`), and the live-box run verdict
+  (`load_local_corpus`: absent root is a named SKIP, present-but-empty
+  panics; `ReplayTally`: zero asserted fixtures panics)
 - `tests/common/replay/lane.rs` -- derived lane class (`lane_class`,
   `resolve_egress`) and the wire-conservation exception table
   (`all_exceptions`, `unexplained`, `unexplained_for_fixture`,
@@ -8277,7 +8279,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the on-disk `outgoing_request.json` (anthropic / openai-compat /
   openai-responses). Failures report path + kind + value SHAPE only; a fixture
   whose divergences are all inside `messages[]` skips pending the system-turn
-  lift normalizer
+  lift normalizer. Absent corpus prints `SKIP egress_replay_all: ...`; a
+  present corpus that loads or asserts zero fixtures fails
 - `tests/conservation.rs` -- wire-conservation driver over BOTH fixture
   roots: adjudicates each fixture's captured ingress body against its
   captured outgoing body (no code re-runs; both files came from one real
@@ -8297,7 +8300,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `complete()`, renders the canonical `ChatResponse` via
   `AnthropicIngress::render_response`, and asserts it matches the captured
   egress response structurally (`meta.ingress_kind`-dispatched request leg,
-  Anthropic-only render leg, non-stream scope)
+  Anthropic-only render leg, non-stream scope). Absent corpus prints
+  `SKIP ingress_replay_all: ...`; a present corpus that loads or asserts zero
+  fixtures fails
 - `tests/replay_harness.rs` -- unit coverage over hand-built fixtures for the
   replay harness's three decisions: the `meta.ingress_kind` adapter lookup
   (identity round-trip against `IngressAdapter::id()`, fail-closed on an

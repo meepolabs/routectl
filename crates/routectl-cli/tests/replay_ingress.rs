@@ -32,9 +32,11 @@
 //! whose enrichment cannot be reconstructed is bypassed -- see the
 //! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
-//! Zero exercisable fixtures is acceptable: the captured/ corpus is
-//! per-contributor and gitignored, so a fresh checkout (or one with
-//! only out-of-scope captures) passes silently with a single info log.
+//! The captured/ corpus is per-contributor and gitignored. An absent
+//! root prints one `SKIP ingress_replay_all: ...` line and passes; a
+//! present root that loads no fixture, or asserts none (for example one
+//! holding only out-of-scope captures), fails -- a run that compared
+//! nothing is never reported green.
 
 mod common;
 
@@ -54,8 +56,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
-    Fixture, FixtureOutcome, bounded_body_diff, discover_fixtures, enrichment_skip_reason,
-    local_root, parse_enriched_canonical, unpinned_ingress_skip_reason,
+    Fixture, FixtureOutcome, ReplayTally, bounded_body_diff, enrichment_skip_reason,
+    load_local_corpus, local_root, parse_enriched_canonical, unpinned_ingress_skip_reason,
 };
 
 /// Description of which path + content-type the egress provider hits
@@ -239,52 +241,13 @@ async fn run_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 async fn ingress_replay_all() {
     // The LIVE-BOX root, named explicitly: this driver is report-only
     // and must never gate, because these bodies are real prompts.
-    let root = local_root();
-    if !root.exists() {
-        eprintln!(
-            "[replay_ingress] local captured/ root `{}` not present; nothing to assert.",
-            root.display(),
-        );
+    let Some(fixtures) = load_local_corpus("ingress_replay_all", &local_root()) else {
         return;
-    }
-    let fixtures = match discover_fixtures(&root) {
-        Ok(corpus) => corpus.fixtures,
-        Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
-    if fixtures.is_empty() {
-        eprintln!("[replay_ingress] 0 fixtures in captured/; nothing to assert.");
-        return;
-    }
 
-    let mut failures: Vec<String> = Vec::new();
-    let mut asserted = 0usize;
-    let mut skipped = 0usize;
+    let mut tally = ReplayTally::default();
     for fixture in &fixtures {
-        match run_fixture(fixture).await {
-            Ok(FixtureOutcome::Asserted) => asserted += 1,
-            Ok(FixtureOutcome::Skipped(reason)) => {
-                eprintln!(
-                    "[replay_ingress] skipping fixture `{}`: {reason}",
-                    fixture.name,
-                );
-                skipped += 1;
-            }
-            Err(msg) => failures.push(format!("fixture `{}`: {msg}", fixture.name)),
-        }
+        tally.record("replay_ingress", &fixture.name, run_fixture(fixture).await);
     }
-
-    eprintln!(
-        "[replay_ingress] {} fixture(s): {} asserted, {} skipped, {} failed",
-        fixtures.len(),
-        asserted,
-        skipped,
-        failures.len(),
-    );
-
-    assert!(
-        failures.is_empty(),
-        "{} ingress replay failure(s):\n  - {}",
-        failures.len(),
-        failures.join("\n  - "),
-    )
+    tally.assert_verdict("ingress_replay_all", "replay_ingress", fixtures.len());
 }

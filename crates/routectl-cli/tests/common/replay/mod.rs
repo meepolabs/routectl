@@ -62,11 +62,11 @@ pub use gated_lanes::{
     read_gated_lanes, read_gated_lanes_at,
 };
 pub use harness::{
-    ADAPTIVE_THINKING_MODELS, ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, bounded_body_diff,
-    divergence_count, diverges_only_in_messages, driver_root, enrichment_skip_reason,
-    headers_from_pairs, ingress_for_kind, local_root, parse_enriched_canonical,
-    replay_resolved_model, system_turn_lift_skip_reason, unpinned_ingress_skip_reason,
-    with_replay_enrichment,
+    ADAPTIVE_THINKING_MODELS, ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, ReplayTally,
+    bounded_body_diff, divergence_count, diverges_only_in_messages, driver_root,
+    enrichment_skip_reason, headers_from_pairs, ingress_for_kind, load_local_corpus, local_root,
+    parse_enriched_canonical, replay_resolved_model, system_turn_lift_skip_reason,
+    unpinned_ingress_skip_reason, with_replay_enrichment,
 };
 pub use json_diff::{
     DEFAULT_HEADER_ALLOW_SKIP, Divergence, DivergenceKind, assert_headers_equal,

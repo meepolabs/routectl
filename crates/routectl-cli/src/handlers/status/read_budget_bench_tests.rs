@@ -241,12 +241,12 @@ fn report_concurrent(
 /// flatter every number:
 ///
 /// ```text
-/// TMPDIR=/var/tmp cargo test -p routectl-cli --release \
+/// TMPDIR=/var/tmp cargo test -p routectl-cli --release --lib -- --ignored --exact \
 ///   handlers::status::usage::read_budget_bench_tests::the_large_ledger_read_cost_curve \
-///   -- --ignored --nocapture
+///   --nocapture
 /// ```
 #[test]
-#[ignore = "seeds a multi-million-row ledger; run explicitly with --ignored"]
+#[ignore = "seeds a multi-million-row ledger; see docs/DEVELOPMENT.md \"Explicit runs\""]
 fn the_large_ledger_read_cost_curve() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");

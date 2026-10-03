@@ -20,9 +20,10 @@
 //! whose enrichment cannot be reconstructed is bypassed -- see the
 //! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
-//! Zero fixtures is acceptable: the captured/ corpus is per-contributor
-//! and gitignored, so a fresh checkout (or a checkout that has not yet
-//! captured anything) passes silently with a single info log.
+//! The captured/ corpus is per-contributor and gitignored. An absent
+//! root prints one `SKIP egress_replay_all: ...` line and passes; a
+//! present root that loads no fixture, or asserts none, fails -- a run
+//! that compared nothing is never reported green.
 
 mod common;
 
@@ -38,9 +39,9 @@ use routectl_providers::openai_compat::{
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 use common::replay::{
-    Fixture, FixtureOutcome, bounded_body_diff, discover_fixtures, divergence_count,
-    diverges_only_in_messages, enrichment_skip_reason, local_root, parse_enriched_canonical,
-    system_turn_lift_skip_reason, unpinned_ingress_skip_reason,
+    Fixture, FixtureOutcome, ReplayTally, bounded_body_diff, divergence_count,
+    diverges_only_in_messages, enrichment_skip_reason, load_local_corpus, local_root,
+    parse_enriched_canonical, system_turn_lift_skip_reason, unpinned_ingress_skip_reason,
 };
 
 fn anthropic_api_provider() -> AnthropicApiProvider {
@@ -192,52 +193,17 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 fn egress_replay_all() {
     // The LIVE-BOX root, named explicitly: this driver is report-only
     // and must never gate, because these bodies are real prompts.
-    let root = local_root();
-    if !root.exists() {
-        eprintln!(
-            "[replay_egress] local captured/ root `{}` not present; nothing to assert.",
-            root.display(),
-        );
+    let Some(fixtures) = load_local_corpus("egress_replay_all", &local_root()) else {
         return;
-    }
-    let fixtures = match discover_fixtures(&root) {
-        Ok(corpus) => corpus.fixtures,
-        Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
-    if fixtures.is_empty() {
-        eprintln!("[replay_egress] 0 fixtures in captured/; nothing to assert.");
-        return;
-    }
 
-    let mut failures: Vec<String> = Vec::new();
-    let mut asserted = 0usize;
-    let mut skipped = 0usize;
+    let mut tally = ReplayTally::default();
     for fixture in &fixtures {
-        match run_egress_assertion(fixture) {
-            Ok(FixtureOutcome::Asserted) => asserted += 1,
-            Ok(FixtureOutcome::Skipped(reason)) => {
-                eprintln!(
-                    "[replay_egress] skipping fixture `{}`: {reason}",
-                    fixture.name,
-                );
-                skipped += 1;
-            }
-            Err(msg) => failures.push(format!("fixture `{}`: {msg}", fixture.name)),
-        }
+        tally.record(
+            "replay_egress",
+            &fixture.name,
+            run_egress_assertion(fixture),
+        );
     }
-
-    eprintln!(
-        "[replay_egress] {} fixture(s): {} asserted, {} skipped, {} failed",
-        fixtures.len(),
-        asserted,
-        skipped,
-        failures.len(),
-    );
-
-    assert!(
-        failures.is_empty(),
-        "{} egress replay failure(s):\n  - {}",
-        failures.len(),
-        failures.join("\n  - "),
-    )
+    tally.assert_verdict("egress_replay_all", "replay_egress", fixtures.len());
 }

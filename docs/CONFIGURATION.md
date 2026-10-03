@@ -2347,9 +2347,9 @@ build, 32 MiB of text:
 Reproduce with:
 
 ```bash
-cargo test -p routectl-providers --release --lib \
-  cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
-  -- --ignored --nocapture
+cargo test -p routectl-providers --release --lib -- --ignored --exact \
+  anthropic_api::cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
+  --nocapture
 ```
 
 A list over either bound fails `config check`, `serve` startup, and hot
