@@ -29,12 +29,12 @@ regexes = [
   '''^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$''',
 ]
 
-# Anchor patterns to repo root with `^` so a stray nested path
-# (e.g. submodule, backup dir) with the same name doesn't auto-bypass
-# scanning. EVERY directory pattern below MUST be anchored.
+# Anchor every pattern: directories at the repo root with `^`, the
+# lockfile at a path-segment start and end so `Cargo.lock.bak` or
+# `xCargo.lock` is not bypassed. EVERY pattern below MUST be anchored.
 paths = [
-  # Lockfile (file extension anchors effectively without `^`).
-  '''Cargo\.lock''',
+  # Lockfile, at the root or in any workspace directory.
+  '''(?:^|/)Cargo\.lock$''',
 
   # Rust build artifact -- ANCHORED.
   '''^target/''',
@@ -47,15 +47,9 @@ paths = [
   '''^crates/routectl-cli/tests/fixtures/captured/''',
 ]
 
-# .env.example by name -- it's a template; should never contain real
-# values. Same discipline applies to .env.test: even test-scoped
-# credentials are credentials. Use clearly fake placeholder values
-# (e.g. `test-key-not-real`) in BOTH files. If a real value ever
-# appears, that's the bug we want to surface, not allow.
-files = [
-  '''^\.env\.example$''',
-  '''^\.env\.test$''',
-]
+# .env.example and .env.test are deliberately NOT allowlisted: even
+# test-scoped credentials are credentials. Use clearly fake placeholder
+# values (e.g. `test-key-not-real`) in both files.
 
 # ---------------------------------------------------------------------------
 # Custom rules
