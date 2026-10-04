@@ -22,25 +22,33 @@
 /// (`#[path = "..._tests.rs"] mod tests;`) are that case: their bodies are not
 /// in this file's text at all.
 ///
+/// Openers inside a `//` comment tail (line, doc, or inner-doc) are prose, not
+/// modules, and are ignored for both the count and the cut.
+///
 /// # Panics
 ///
-/// If `src` contains MORE than one `mod tests {`. The cut would then be
-/// ambiguous, and picking either occurrence silently changes how much of the
-/// file the caller's guard actually covers. Fail loudly instead: the author of
-/// the second module is the right person to decide what the guard should scan.
+/// If `src` contains MORE than one `mod tests {` outside comments. The cut would
+/// then be ambiguous, and picking either occurrence silently changes how much of
+/// the file the caller's guard actually covers. Fail loudly instead: the author
+/// of the second module is the right person to decide what the guard should scan.
 #[cfg(test)]
 pub(super) fn production_source(src: &str) -> &str {
-    let occurrences = src.matches("mod tests {").count();
-    assert!(
-        occurrences <= 1,
-        "a self-scanning guard's source has {occurrences} `mod tests {{` openers, so the \
-         production cut is ambiguous and the scanned region would silently shrink; decide \
-         explicitly what the guard must cover"
-    );
-    match src.find("mod tests {") {
-        Some(idx) => &src[..idx],
-        None => src,
+    const OPENER: &str = "mod tests {";
+    let mut openers = Vec::new();
+    let mut line_start = 0;
+    for line in src.split_inclusive('\n') {
+        let code = line.find("//").map_or(line, |idx| &line[..idx]);
+        openers.extend(code.match_indices(OPENER).map(|(idx, _)| line_start + idx));
+        line_start += line.len();
     }
+    assert!(
+        openers.len() <= 1,
+        "a self-scanning guard's source has {} `mod tests {{` openers outside comments, so \
+         the production cut is ambiguous and the scanned region would silently shrink; decide \
+         explicitly what the guard must cover",
+        openers.len()
+    );
+    openers.first().map_or(src, |&idx| &src[..idx])
 }
 
 #[cfg(test)]
@@ -77,6 +85,45 @@ fn production_below_the_first_cut() {}
 #[cfg(test)]
 mod tests {
     fn b() {}
+}
+";
+        let _ = production_source(src);
+    }
+
+    #[test]
+    fn ignores_an_opener_spelled_in_a_comment() {
+        let src = "\
+//! Cuts at the `mod tests {` opener.
+fn production() {} // not a `mod tests {` either
+/// Mentions `mod tests {` in prose.
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+}
+";
+        let expected = "\
+//! Cuts at the `mod tests {` opener.
+fn production() {} // not a `mod tests {` either
+/// Mentions `mod tests {` in prose.
+#[cfg(test)]
+";
+        assert_eq!(production_source(src), expected);
+    }
+
+    #[test]
+    fn returns_the_whole_source_when_the_only_opener_is_in_a_comment() {
+        let src = "// mod tests { is prose\nfn production() {}\n";
+        assert_eq!(production_source(src), src);
+    }
+
+    #[test]
+    #[should_panic(expected = "production cut is ambiguous")]
+    fn panics_on_a_second_module_even_when_a_comment_also_names_the_opener() {
+        let src = "\
+// mod tests { prose
+mod tests {
+}
+mod tests {
 }
 ";
         let _ = production_source(src);
