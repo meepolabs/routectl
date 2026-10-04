@@ -1838,6 +1838,36 @@ assert_symlinked_tmpdir() {
 }
 assert_symlinked_tmpdir
 
+# The anchor boundary, pinned both ways at its edge: with TMPDIR itself a
+# link, a target directly under it is trusted and scans, while a link one
+# level below it -- the first component inside the tree -- is refused.
+# `$2` is the target relative to the linked TMPDIR; `$3` the expected exit.
+assert_tmpdir_anchor_boundary() {
+    local label="$1" rel="$2" expect_rc="$3" work rc=0
+    work="$(mktemp -d)"
+    mkdir -p "$work/real-tmp/fixture" "$work/home/$FAKE_HOME_NAME" "$work/elsewhere/case"
+    ln -s real-tmp "$work/tmp-link"
+    printf '%s' "$(body_with "an ordinary prose sentence")" >"$work/real-tmp/fixture/ingress_request.json"
+    printf '%s' "$(body_with "an ordinary prose sentence")" >"$work/elsewhere/case/ingress_request.json"
+    ln -s "$work/elsewhere" "$work/real-tmp/linked"
+    (cd / && TMPDIR="$work/tmp-link" HOME="$work/home/$FAKE_HOME_NAME" \
+        bash "$SCRUB" --check "$work/tmp-link/$rel") >"$work/scrub.log" 2>&1 || rc=$?
+    if [ "$rc" != "$expect_rc" ]; then
+        echo "FAIL: $label exited $rc, expected $expect_rc -- $rel"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    elif [ "$expect_rc" = "2" ] && ! grep -qF "symlink component at $work/tmp-link/linked" "$work/scrub.log"; then
+        echo "FAIL: $label was refused without naming the linked component -- $rel"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    else
+        echo "PASS: $label -- $rel (exit $rc)"
+    fi
+    rm -rf "$work"
+}
+assert_tmpdir_anchor_boundary "a target directly under a symlinked TMPDIR scans" fixture 0
+assert_tmpdir_anchor_boundary "a link one level below a symlinked TMPDIR is refused" linked/case 2
+
 
 # --- inherited git environment ------------------------------------------
 # The whole suite is re-run with GIT_DIR and GIT_INDEX_FILE aimed at a decoy

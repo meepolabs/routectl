@@ -468,12 +468,17 @@ fi
 # component is tested with `-L` as the kernel walks it, so a dangling link
 # and a link reached through `..` are both seen.
 #
-# The walk starts at a trusted ANCHOR, and the anchor's own ancestry is not
-# walked. Rejecting every symlink up to `/` would refuse a repo or a temp
-# dir that sits behind a system or user symlink (`/tmp` on some systems, a
-# symlinked TMPDIR or home), which is where every caller and self-test
-# lives; those links are the caller's environment, not content of the tree
-# being scrubbed. The anchor is:
+# Threat model: the links this gate refuses are links INSIDE the tree being
+# scrubbed -- fixture content, which may come from a capture or a contributor
+# and can aim `--write` at files the caller never named. The links it trusts
+# are those in the ANCHOR (below) and its ancestry: the working directory,
+# the repo root and `${TMPDIR:-/tmp}` are the invoking caller's own
+# environment, as are any links in them (`/tmp` on some systems, a symlinked
+# home or TMPDIR). Trusting them grants nothing: the same caller picks the
+# target path outright, so a caller who sets TMPDIR to a link could as well
+# name the link's destination directly. The walk therefore starts at the
+# anchor and tests every component after it, so a link one level below a
+# trusted TMPDIR is still refused. The anchor is:
 #   - the working directory, for a relative target;
 #   - for an absolute target, the longest of the logical working directory,
 #     the logical repo root holding this script, and `${TMPDIR:-/tmp}` that
