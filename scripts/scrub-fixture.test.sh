@@ -109,6 +109,15 @@ install_failing_awk_shim() {
     chmod +x "$1"
 }
 
+# Write a `find` stand-in at `$1` that prints the real find's output and then
+# exits 1, the status find reports when it could not read part of a tree.
+install_failing_find_shim() {
+    local real_find
+    real_find="$(command -v find)"
+    printf '#!/bin/sh\n"%s" "$@"\nexit 1\n' "$real_find" >"$1"
+    chmod +x "$1"
+}
+
 # Build a throwaway repo, write `$2` as the fixture file named `$1` inside
 # it, and run the scrub script over the fixture directory in the mode given
 # by `$3` (`--check` or `--write`). Echoes the work directory so a caller
@@ -122,7 +131,7 @@ install_failing_awk_shim() {
 # `$4` is the seat store to plant, as one of the SEAT_* spellings below.
 # Empty (the default) plants nothing, which is the un-interrogable state.
 run_scrub() {
-    local filename="$1" content="$2" mode="$3" seat="${4:-}" grep_fault="${5:-}" fault_mode="${6:-}" awk_fault="${7:-}"
+    local filename="$1" content="$2" mode="$3" seat="${4:-}" grep_fault="${5:-}" fault_mode="${6:-}" awk_fault="${7:-}" find_fault="${8:-}"
     local work
     work="$(mktemp -d)"
     local fake_home="$work/home/$FAKE_HOME_NAME"
@@ -132,6 +141,7 @@ run_scrub() {
     [ -z "$seat" ] || printf '%s' "$seat" >"$work/xdg/routectl/credentials.json"
     [ -z "$grep_fault" ] || install_grep_shim "$work/stubbin/grep" "$grep_fault" "$fault_mode"
     [ -z "$awk_fault" ] || install_failing_awk_shim "$work/stubbin/awk"
+    [ -z "$find_fault" ] || install_failing_find_shim "$work/stubbin/find"
     expand_home_tokens "$content" "$fake_home" >"$work/repo/fixture/$filename"
     case "$content" in
         *@NUL@*)
@@ -1538,6 +1548,87 @@ assert_caught "an early match followed by megabytes of matches is a finding, not
     ingress_request.json \
     "$(body_with "ls /home/someoneelse/Desktop $(many_placeholder_paths 300000)")" \
     home-prefix
+# --- enumeration -----------------------------------------------------
+# A find that errors partway through must refuse: the files it did list are
+# clean, so a gate that read "listed and clean" would pass a tree it never
+# fully saw. The control runs the same fixture without the shim.
+assert_find_error_refuses() {
+    local desc="$1" out rc work control_rc
+    out="$(run_scrub ingress_request.json "$(body_with "an ordinary prose sentence")" --check)"
+    control_rc="${out%%$'\t'*}"
+    rm -rf "${out#*$'\t'}"
+    out="$(run_scrub ingress_request.json "$(body_with "an ordinary prose sentence")" --check "" "" "" "" failing)"
+    rc="${out%%$'\t'*}"
+    work="${out#*$'\t'}"
+    if [ "$control_rc" != "0" ]; then
+        echo "FAIL: control without the failing find was not clean (exit $control_rc) -- $desc"
+        fails=$((fails + 1))
+    elif [ "$rc" != "2" ] || ! grep -q "find failed" "$work/scrub.log"; then
+        echo "FAIL: expected exit 2 naming the find failure but got $rc -- $desc"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    else
+        echo "PASS: find error refuses -- $desc"
+    fi
+    rm -rf "$work"
+}
+
+assert_find_error_refuses "a find that exits non-zero after listing files"
+
+# A newline inside a filename is one file, not two bogus paths that fail the
+# readability check. The content carries a leak so the single file is also
+# proven to be scanned, and the scanned count is pinned.
+assert_scanned_as_one_file() {
+    local desc="$1" filename="$2" content="$3" expect_rc="$4" expect_log="$5"
+    local out rc work
+    out="$(run_scrub "$filename" "$content" --check)"
+    rc="${out%%$'\t'*}"
+    work="${out#*$'\t'}"
+    if [ "$rc" = "$expect_rc" ] && grep -q "$expect_log" "$work/scrub.log"; then
+        echo "PASS: one file -- $desc"
+    else
+        echo "FAIL: expected exit $expect_rc with '$expect_log' but got $rc -- $desc"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    fi
+    rm -rf "$work"
+}
+
+assert_scanned_as_one_file "a newline-bearing filename holding clean content" \
+    $'ingress\nrequest.json' \
+    "$(body_with "an ordinary prose sentence")" 0 "PASS 1 file(s) clean"
+assert_scanned_as_one_file "a newline-bearing filename holding a leak is scanned" \
+    $'ingress\nrequest.json' \
+    "$(body_with "cat @HOME@/.config/routectl/config.toml")" 1 "home-path"
+
+# --- scratch-task-id / scratch-worktree-path --------------------------
+# The id shapes are assembled at run time so this file does not itself carry
+# a literal the repo's internal-id scan would reject.
+task_id() { printf '%s.f%s.%s' "$1" "$2" "$3"; }
+
+assert_caught "a board-shaped task id in a captured body" \
+    ingress_request.json \
+    "$(body_with "see tasks/doing/$(task_id alpha-beta 3 01).md")" \
+    scratch-task-id
+assert_caught "a board-shaped task id at the start of a line" \
+    ingress_request.json \
+    "$(body_with "$(task_id alpha 12 07)")" \
+    scratch-task-id
+assert_caught "a per-branch worktree path in a captured body" \
+    ingress_request.json \
+    "$(body_with "cd /srv/repo/.claude/worktrees/feature-branch && cargo test")" \
+    scratch-worktree-path
+
+assert_clean "a version-like dotted number is accepted" \
+    ingress_request.json \
+    "$(body_with "released as v1.5.2 and model claude-3.5.10")"
+assert_clean "a task-id-like token with a three-digit tail is accepted" \
+    ingress_request.json \
+    "$(body_with "$(task_id alpha 3 012) is not a board id")"
+assert_clean "prose naming the worktrees directory without a branch is accepted" \
+    ingress_request.json \
+    "$(body_with "a worktree under \`.claude/worktrees/\` of the same repository")"
+
 
 if [ "$fails" -gt 0 ]; then
     echo "scrub-fixture self-test: $fails failure(s)" >&2

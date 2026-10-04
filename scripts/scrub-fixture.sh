@@ -470,24 +470,31 @@ validate_targets() {
   done
 }
 
+# Fills FILES in the current shell. `find` runs in a process substitution so
+# NUL-delimited names survive; its status is collected with `wait`, because a
+# subtree it could not read would otherwise be skipped and the scan would pass
+# on the rest.
+declare -a FILES=()
 collect_files() {
-  local t
+  local t find_rc
+  local -a found
   for t in "${TARGETS[@]}"; do
     if [ -d "$t" ]; then
-      find "$t" -type f -print
+      found=()
+      mapfile -d '' -t found < <(find "$t" -type f -print0)
+      find_rc=0
+      wait "$!" || find_rc=$?
+      [ "$find_rc" -eq 0 ] || fatal "find failed (status $find_rc) enumerating: $t"
+      FILES+=("${found[@]}")
     else
-      printf '%s\n' "$t"
+      FILES+=("$t")
     fi
   done
 }
 
-declare -a FILES=()
 if [ "$MODE" != "lane-known" ]; then
   validate_targets
-
-  while IFS= read -r f; do
-    [ -n "$f" ] && FILES+=("$f")
-  done < <(collect_files)
+  collect_files
 
   # A directory target holding no files at all would otherwise scan nothing
   # and print PASS.
@@ -731,6 +738,21 @@ BEDROCK_API_KEY_RE="$ANCHOR_LEFT"'bedrock-api-key-[A-Za-z0-9_=&-]{20,}'
 # and the "variable is unset" prose, which carry the name but no value.
 AWS_CRED_ASSIGN_RE='(AWS_SECRET_ACCESS_KEY|aws_secret_access_key|AWS_SESSION_TOKEN|aws_session_token)[[:space:]]*[=:][[:space:]]*[A-Za-z0-9/+=_-]{20,}'
 
+# Scratch-location tells: a board-shaped task id (`<slug>.f<n>.<nn>`) and the
+# per-branch worktree directory a capture ran from. Both name the operator's
+# planning or checkout layout rather than anything the fixture is about, so a
+# capture that echoes one is refused.
+SCRATCH_TASK_ID_RE="$ANCHOR_LEFT"'[a-z][a-z0-9-]*\.f[0-9]+\.[0-9]{2}([^0-9A-Za-z]|$)'
+SCRATCH_WORKTREE_RE='\.claude/worktrees/[A-Za-z0-9_][A-Za-z0-9_.-]*'
+
+has_scratch_task_id() {
+  grep_has -qE "$SCRATCH_TASK_ID_RE" "$1"
+}
+
+has_scratch_worktree() {
+  grep_has -qE "$SCRATCH_WORKTREE_RE" "$1"
+}
+
 has_google_oauth_token() {
   grep_has -qE "$GOOGLE_OAUTH_TOKEN_RE" "$1"
 }
@@ -973,6 +995,8 @@ run_check() {
     has_nvidia_api_key "$f" && findings+="  $f  nvidia-api-key"$'\n'
     has_bedrock_api_key "$f" && findings+="  $f  bedrock-api-key"$'\n'
     has_aws_cred_assignment "$f" && findings+="  $f  aws-credential-assignment"$'\n'
+    has_scratch_task_id "$f" && findings+="  $f  scratch-task-id"$'\n'
+    has_scratch_worktree "$f" && findings+="  $f  scratch-worktree-path"$'\n'
     case "$f" in
       *.headers.json)
         local hrc=0 hclasses hclass
