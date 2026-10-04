@@ -448,19 +448,34 @@ jobs:
 
       # The commit-gate leg again, so a commit made without the hooks is
       # still held to it: no new source file without a navigation-doc row,
-      # no stale allowlist entry, and no allowlist line the base lacks. The
-      # base is the merge base with the PR target, or the pushed commit's
-      # parent on a push.
+      # no stale allowlist entry, and no allowlist line the base lacks. On a
+      # PR the base is the merge base with the target. On a push it is the
+      # pre-push tip ("before"), so growth in any commit of a multi-commit
+      # push is caught, not only in the last one; the job's full-history
+      # checkout lets it resolve. When "before" is all zeros (branch
+      # creation) or is not in the local history (a force push can leave it
+      # unreachable), the base falls back to HEAD's parent; when HEAD has no
+      # parent either, only the growth check is skipped, with a warning; gaps
+      # and stale entries are still enforced.
       - name: navigation-doc index (enforced)
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
+          base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             base="$(git merge-base HEAD "origin/$PR_BASE_REF")"
+          elif [ -n "$(printf '%s' "$PUSH_BEFORE" | tr -d 0)" ] &&
+            git rev-parse --verify --quiet "$PUSH_BEFORE^{commit}" >/dev/null; then
+            base="$PUSH_BEFORE"
+          elif base="$(git rev-parse --verify --quiet 'HEAD^1^{commit}')"; then
+            echo "::warning::push base '${PUSH_BEFORE:-<unset>}' is zero or not in local history; comparing the allowlist against HEAD's parent only"
           else
-            base="$(git rev-parse HEAD^)"
+            echo "::warning::HEAD has no parent and the push base is unusable; SKIPPING the allowlist growth check"
+            bash scripts/check-nav-index.sh --enforce
+            exit 0
           fi
           NAV_INDEX_BASE="$base" bash scripts/check-nav-index.sh --enforce
 

@@ -36,7 +36,7 @@
 # --enforce mode an entry absent from the base revision's allowlist fails
 # too, so the list cannot grow. The base is HEAD (the commit gate's case)
 # unless NAV_INDEX_BASE=<rev> names another; CI passes the merge base or
-# the pushed commit's parent. The growth check is skipped outside a git
+# the pre-push tip. The growth check is skipped outside a git
 # work tree, when HEAD does not resolve yet, and when the base has no
 # allowlist (the commit that introduces it); an explicit NAV_INDEX_BASE
 # that does not resolve is an error. The list must stay sorted and
