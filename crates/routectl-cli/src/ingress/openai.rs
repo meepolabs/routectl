@@ -1516,6 +1516,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unknown_top_level_key_reaches_the_openai_compat_wire_verbatim() {
+        // Arrange
+        let unknown = json!({"mode": "fast", "weights": [1, 2, 3], "nested": {"on": true}});
+        let body = json!({
+            "model": "gpt-4o",
+            "future_field": unknown,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let wire = openai_compat_egress_body(body);
+
+        // Assert
+        assert_eq!(wire.get("future_field"), Some(&unknown), "wire: {wire}");
+    }
+
     /// `instructions` is a real Responses-dialect field, deliberately NOT
     /// admitted as a Chat system-prompt alias: honoring it would make a
     /// Responses body posted here silently half-work (system lifted,
