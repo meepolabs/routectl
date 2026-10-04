@@ -4,8 +4,9 @@
 //! and produces a [`PrefixReductionCandidate`] the existing
 //! [`crate::cost_gate::evaluate`] can price. It is ADVISORY-ONLY: nothing here
 //! mutates a live request or touches the dispatch path. [`apply_trim_plan`]
-//! returns a CLONE with the trim applied -- used by tests now and a later live
-//! increment.
+//! returns a CLONE with the trim applied; it computes the trimmed prefix the
+//! shadow-misfire monitor fingerprints, and no path sends a trimmed request
+//! upstream.
 //!
 //! THE CUT RULE (deterministic, FRONT-ANCHORED, quality-guarded):
 //! the trimmer elides bulky OLD tool content by PLACEHOLDER SUBSTITUTION (the
@@ -129,7 +130,7 @@ pub struct ElisionMark {
     pub replacement: Option<String>,
 }
 
-/// A proposed steady-state trim. Immutable; [`apply_trim_plan`] clones and
+/// A proposed steady-state trim. Immutable; `apply_trim_plan` clones and
 /// applies it without mutating the source request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SteadyStateTrimPlan {

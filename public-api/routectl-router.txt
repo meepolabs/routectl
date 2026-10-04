@@ -15703,7 +15703,6 @@ pub fn routectl_router::acting_field_verdicts(&[routectl_router::LearnedRegistry
 pub fn routectl_router::apply_catalog_overlay(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, &routectl_router::config::Config, &routectl_router::CatalogOverlay) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>
 pub fn routectl_router::apply_config_transforms(&mut toml_edit::document::DocumentMut, u32) -> core::result::Result<alloc::vec::Vec<routectl_router::StepOutcome>, routectl_router::Refusal>
 pub fn routectl_router::apply_seat_pool_move(&mut toml_edit::document::DocumentMut, &routectl_router::SeatPoolMove)
-pub fn routectl_router::apply_trim_plan(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimPlan) -> routectl_core::schema::ChatRequest
 pub fn routectl_router::baked_row_map() -> alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CatalogRow>
 pub fn routectl_router::baked_shrink_counts() -> routectl_router::ShrinkCounts
 pub fn routectl_router::baked_table_rows() -> alloc::vec::Vec<routectl_router::catalog::BakedPricingRow>
