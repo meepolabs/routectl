@@ -173,7 +173,9 @@ scan (its `rev` pins the binary, in lockstep with `GITLEAKS_VERSION` in
 `.github/workflows/gitleaks.yml`), an internal-identifier scan and its
 self-test, a
 log-sink inventory (the escaping formatter is the only production
-subscriber),
+subscriber), a navigation-doc check that fails on a new source file with
+no row in `docs/CODEMAP.md` or this file (pre-existing gaps are listed in
+`scripts/check-nav-index.allowlist`, which only shrinks) and its self-test,
 `cargo fmt --check`, a separate leg that runs rustfmt on `include!`d
 fragments `cargo fmt` never opens, `cargo clippy`, a lean
 providers-only `cargo check`, and `cargo doc` with rustdoc

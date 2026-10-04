@@ -8558,11 +8558,16 @@ new section or a second doc.
   names only
 - `assert-aws-lc-env.test.sh` -- self-test for the AWS-LC environment
   preflight
-- `check-nav-index.sh` -- advisory, non-blocking check that every
-  `crates/**/*.rs` (minus `*_tests.rs` sidecars) and every `scripts/**/*.sh`
-  appears by path in this file or `DEVELOPMENT.md`; existence only, never
-  row wording or freshness
-- `check-nav-index.test.sh` -- self-test for the navigation-index check
+- `check-nav-index.sh` -- check that every `crates/**/*.rs` (minus
+  `*_tests.rs` sidecars) and every `scripts/**/*.sh` appears by path in this
+  file or `DEVELOPMENT.md`; existence only, never row wording or freshness.
+  The bare run is the advisory full report; `--enforce` is the commit-stage
+  leg, failing only on a gap outside `check-nav-index.allowlist` or a stale
+  allowlist entry
+- `check-nav-index.allowlist` -- the pre-existing gaps `--enforce` tolerates;
+  sorted, one path per line, only ever shrinks
+- `check-nav-index.test.sh` -- self-test for the navigation-index check,
+  both modes, with new-file and stale-entry failing controls
 - `check-live-gate-isolation.sh` -- hostile-environment check proving the
   standard all-features gate (`test-gate.sh workspace-all-features`) makes
   zero network attempts under planted credentials inside private network

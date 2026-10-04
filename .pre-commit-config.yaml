@@ -114,6 +114,25 @@ repos:
         always_run: true
         pass_filenames: false
 
+      # Fails only on a source file with no navigation-doc row that is not
+      # in scripts/check-nav-index.allowlist, or on a stale allowlist entry.
+      # A doc edit alone can make an entry stale, so this cannot be filtered
+      # to new files either. The full gap report stays advisory: run the
+      # script without --enforce.
+      - id: nav-index
+        name: navigation-doc row for every new source file
+        entry: bash scripts/check-nav-index.sh --enforce
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: nav-index-self-test
+        name: navigation-doc check self-test
+        entry: bash scripts/check-nav-index.test.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
       - id: cargo-fmt
         name: cargo fmt --check
         entry: cargo fmt --all -- --check

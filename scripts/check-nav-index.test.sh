@@ -9,6 +9,12 @@
 # checker call FAILS once the file it covers is planted unindexed, so a
 # checker that only ever reports clean cannot slip through unnoticed.
 #
+# The --enforce cases plant their own allowlist beside the copied checker
+# and also assert the failure MESSAGE, so each control is attributed to
+# the rule it covers: a new-file control that went red only because the
+# allowlist was unreadable, or a stale-entry control that went red only
+# because of an unrelated gap, would otherwise read as a pass.
+#
 # Run it from anywhere:
 #   bash scripts/check-nav-index.test.sh
 
@@ -19,12 +25,22 @@ CHECKER="$HERE/check-nav-index.sh"
 
 fails=0
 
+# Under the commit hook git exports GIT_DIR, GIT_INDEX_FILE and friends for
+# the repo being committed. Left set, the throwaway repos' `git init` and
+# `git add` below would write into THAT repo's config and index instead of
+# their own, so every repo-local git variable is cleared for the whole run.
+read -r -d '' -a git_local_env < <(git rev-parse --local-env-vars)
+unset "${git_local_env[@]}"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CEILING_DIRECTORIES="${TMPDIR:-/tmp}"
+
 # Build a throwaway repo with docs/CODEMAP.md and docs/DEVELOPMENT.md
 # holding the given bodies, run the checker inside it, and return its
-# exit code plus captured stderr via the named refs.
+# exit code plus captured stderr via the named refs. Any further
+# arguments are passed to the checker.
 run_checker() {
     local codemap_body="$1" development_body="$2" extra_setup="$3"
     local -n rc_ref="$4" err_ref="$5"
+    shift 5
     local tmp
     tmp="$(mktemp -d)"
     (
@@ -37,7 +53,7 @@ run_checker() {
     )
     local errfile
     errfile="$(mktemp)"
-    (cd "$tmp" && bash scripts/check-nav-index.sh) 2>"$errfile"
+    (cd "$tmp" && bash scripts/check-nav-index.sh "$@") 2>"$errfile"
     # shellcheck disable=SC2034  # nameref writes back to the caller's var
     rc_ref=$?
     # shellcheck disable=SC2034  # nameref writes back to the caller's var
@@ -47,8 +63,9 @@ run_checker() {
 
 assert_exit() {
     local desc="$1" expected_rc="$2" codemap_body="$3" development_body="$4" extra_setup="$5"
+    shift 5
     local rc err
-    run_checker "$codemap_body" "$development_body" "$extra_setup" rc err
+    run_checker "$codemap_body" "$development_body" "$extra_setup" rc err "$@"
     if [[ "$rc" -eq "$expected_rc" ]]; then
         echo "PASS: $desc"
     else
@@ -148,6 +165,118 @@ assert_exit "script named only in a README one level up still fails" 1 \
     "mkdir -p scripts/tool
      : >scripts/tool/helper.sh
      echo 'helper.sh -- the helper' >scripts/README.md"
+
+# Run the checker with --enforce and assert both its exit code and that
+# its stderr carries the given fixed string (empty: no message expected).
+assert_enforce() {
+    local desc="$1" expected_rc="$2" expected_msg="$3" codemap_body="$4" development_body="$5" extra_setup="$6"
+    local rc err
+    run_checker "$codemap_body" "$development_body" "$extra_setup" rc err --enforce
+    if [[ "$rc" -ne "$expected_rc" ]]; then
+        echo "FAIL: $desc -- expected exit $expected_rc, got $rc" >&2
+        echo "$err" >&2
+        fails=$((fails + 1))
+    elif [[ -n "$expected_msg" ]] && ! grep -qF -- "$expected_msg" <<<"$err"; then
+        echo "FAIL: $desc -- exit $rc as expected, but stderr lacks '$expected_msg'" >&2
+        echo "$err" >&2
+        fails=$((fails + 1))
+    else
+        echo "PASS: $desc"
+    fi
+}
+
+# --- --enforce: an allowlisted gap passes; a new unindexed file fails ---
+
+ENFORCE_CODEMAP="## demo-crate
+
+- \`src/lib.rs\` -- crate root"
+ENFORCE_ALLOWLIST="printf '# header comment\\n\\ncrates/demo-crate/src/old_gap.rs\\n' >scripts/check-nav-index.allowlist"
+
+assert_enforce "--enforce passes when every gap is allowlisted" 0 "" \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     $ENFORCE_ALLOWLIST"
+
+assert_exit "the report mode still fails on that allowlisted gap" 1 \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     $ENFORCE_ALLOWLIST"
+
+assert_enforce "--enforce fails on a new unindexed file outside the allowlist" 1 \
+    "  crates/demo-crate/src/new_file.rs" \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     : >crates/demo-crate/src/new_file.rs
+     $ENFORCE_ALLOWLIST"
+
+assert_enforce "--enforce fails on a new unindexed script outside the allowlist" 1 \
+    "  scripts/orphan.sh" \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     : >scripts/orphan.sh
+     $ENFORCE_ALLOWLIST"
+
+# --- --enforce inside a git work tree: an untracked file is not judged
+# --- until it is staged (paired control on the same file) ---
+
+ENFORCE_GIT_BASE="mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     $ENFORCE_ALLOWLIST
+     git init -q . && git add -A
+     : >crates/demo-crate/src/scratch.rs"
+
+assert_enforce "--enforce ignores an untracked unindexed file in a git tree" 0 "" \
+    "$ENFORCE_CODEMAP" "" "$ENFORCE_GIT_BASE"
+
+assert_enforce "--enforce fails once that same file is staged" 1 \
+    "  crates/demo-crate/src/scratch.rs" \
+    "$ENFORCE_CODEMAP" "" \
+    "$ENFORCE_GIT_BASE
+     git add crates/demo-crate/src/scratch.rs"
+
+# --- --enforce: the allowlist only shrinks ---
+
+assert_enforce "--enforce fails on an allowlisted file that gained a row" 1 \
+    "now indexed; remove from the allowlist" \
+    "$ENFORCE_CODEMAP
+- \`src/old_gap.rs\` -- now documented" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     $ENFORCE_ALLOWLIST"
+
+assert_enforce "--enforce fails on an allowlisted file that no longer exists" 1 \
+    "file no longer exists; remove from the allowlist" \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     $ENFORCE_ALLOWLIST"
+
+assert_enforce "--enforce fails on an unsorted allowlist" 1 \
+    "is not sorted and duplicate-free" \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     : >crates/demo-crate/src/a_gap.rs
+     printf 'crates/demo-crate/src/old_gap.rs\\ncrates/demo-crate/src/a_gap.rs\\n' >scripts/check-nav-index.allowlist"
+
+assert_enforce "--enforce refuses a missing allowlist rather than passing" 2 \
+    "allowlist not readable" \
+    "$ENFORCE_CODEMAP" "" \
+    "mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs"
+
+assert_exit "an unknown argument is a usage error" 2 "" "" "" --bogus
 
 if [[ "$fails" -ne 0 ]]; then
     echo "check-nav-index self-test: $fails failure(s)" >&2
