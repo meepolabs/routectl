@@ -32,6 +32,14 @@ gen-catalog = []
 # would be a fabricated status report, and the type is `#[non_exhaustive]`
 # precisely so no foreign crate can assemble one.
 "test-utils" = []
+# Compiles the live learned-capability smoke, which calls the real
+# openai-compat provider named by ROUTECTL_LIVE_BASE_URL /
+# ROUTECTL_LIVE_API_KEY. The feature alone runs nothing: the target is
+# `test = false` (see the [[test]] entry below), so it runs only when a
+# `--test` names or globs it. Run with:
+#   cargo test -p routectl-router --features live-integration \
+#     --test live_learned_capability -- --nocapture
+live-integration = []
 # Bench-only: swaps the perf bench global allocator to dhat's heap
 # profiler (see benches/dispatch_clone.rs). Never a default feature;
 # enabled via `--features routectl-router/dhat` by
@@ -108,6 +116,23 @@ tracing-subscriber.workspace = true
 # (the item/expr AST) would be compiled for nothing.
 syn = { version = "2", default-features = false, features = ["parsing"] }
 proc-macro2 = "1"
+
+# Live provider smoke. It panics when its credential variables are absent,
+# and an ambient credential would turn any `cargo test` that enables
+# `live-integration` (`--all-features` included) into real provider
+# traffic. `test = false` removes it from every implicit selection --
+# plain, `--workspace`, `--all-features`, `--all-targets`, `--tests`, with
+# or without `--ignored` / `--include-ignored` -- and it runs only when a
+# `--test` names it or a `--test` glob matches it (`'live*'` or `'*'` is
+# live). `required-features` turns naming it without the feature into an
+# error instead of an empty binary. Being unselected also hides it from
+# `clippy --all-targets`, so the lint gates run a separate clippy that
+# names it. scripts/check-live-gate-isolation.sh verifies all of this end
+# to end.
+[[test]]
+name = "live_learned_capability"
+test = false
+required-features = ["live-integration"]
 
 # ChatRequest::clone() cost on the dispatch hot path. `harness = false`:
 # the bench owns `main` to install the allocation-counting allocator.

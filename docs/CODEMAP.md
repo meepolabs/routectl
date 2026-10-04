@@ -4671,6 +4671,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   wiring of the scenario submodules under `tests/learned_capability_loop/`
   (`real_envelope`, `learn_and_decay`, `never_learn`, `learned_tail`,
   `streaming`); one binary
+- `tests/live_learned_capability.rs` -- live-network smoke of that loop
+  against the real openai-compat provider at `ROUTECTL_LIVE_BASE_URL`;
+  `test = false` behind `live-integration`, so it runs only when named
 - `tests/delta_config.rs` -- pins the delta-config contract through real TOML
   loads: a sparse `[retry.classes.<class>]` single-leaf override inherits
   every other baked default via `resolved_class`; Vec fields replace whole;
@@ -8580,6 +8583,7 @@ new section or a second doc.
   and mount namespaces; CI's only workspace test run
 - `check-live-gate-isolation.test.sh` -- self-test for that check's static
   contract: deadline budget vs the CI step timeout, the fixed planted
-  credential names, and run-from-anywhere source resolution
+  credential names, run-from-anywhere source resolution, and its live-target
+  list matching every live `test = false` target in the crate manifests
 - `net-oracle.py` -- the loopback packet-capture attempt recorder (plus DNS
   responder) that check runs inside the namespace

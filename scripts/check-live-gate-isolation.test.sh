@@ -8,7 +8,11 @@
 #   - a deadline raised past the budget makes the checker refuse to run;
 #   - the fixed credential names are always planted, whatever the source
 #     scan finds, and dropping one is caught;
-#   - the source scan resolves from the repo root, whatever the cwd;
+#   - the source scan resolves from the repo root, whatever the cwd, and
+#     covers the router crate's live sources as well as the cli's;
+#   - LIVE_TARGETS names exactly the workspace's `test = false` targets
+#     gated on `live-integration`, so every live target gets a positive
+#     control leg;
 #   - the standard-gate leg runs the gate registry's workspace-all-features
 #     subcommand, and that subcommand keeps the all-features selection and
 #     the --offline / --no-fail-fast flags the namespaced leg depends on;
@@ -35,8 +39,8 @@ STEP_NAME="standard test gate makes no network attempt"
 # a cold cache and a slow runner rather than a measured cost.
 OTHER_STEPS_MINUTES=60
 
-# The provider and router-smoke credential names that must be planted even
-# if no live source mentions them.
+# The provider credential names that must be planted even if no live
+# source mentions them.
 EXPECTED_FIXED=(
     ANTHROPIC_API_KEY
     OPENAI_API_KEY
@@ -46,11 +50,12 @@ EXPECTED_FIXED=(
     AWS_SESSION_TOKEN
     AWS_BEARER_TOKEN_BEDROCK
     AWS_REGION
-    ROUTECTL_LIVE_BASE_URL
-    ROUTECTL_LIVE_API_KEY
 )
-# A name only the live sources carry, so its presence proves the scan ran.
+# A name only the cli live sources carry, so its presence proves the scan ran.
 SOURCE_ONLY_NAME=OPENROUTER_API_KEY
+# The names only the router live smoke carries, so their presence proves the
+# scan reached the router crate.
+ROUTER_ONLY_NAMES=(ROUTECTL_LIVE_BASE_URL ROUTECTL_LIVE_API_KEY)
 
 fails=0
 pass() { echo "PASS: $*"; }
@@ -66,9 +71,10 @@ trap 'rm -rf "$TMP"' EXIT
 # the given sed expression. Prints the copy's checker path.
 mutant() {
     local name="$1" expr="$2" root="$TMP/$1"
-    mkdir -p "$root/scripts" "$root/crates/routectl-cli/tests/live_matrix"
+    mkdir -p "$root/scripts" "$root/crates/routectl-cli/tests/live_matrix" "$root/crates/routectl-router/tests"
     cp "$REPO_ROOT"/crates/routectl-cli/tests/live_*.rs "$root/crates/routectl-cli/tests/"
     cp "$REPO_ROOT"/crates/routectl-cli/tests/live_matrix/*.rs "$root/crates/routectl-cli/tests/live_matrix/"
+    cp "$REPO_ROOT"/crates/routectl-router/tests/live_*.rs "$root/crates/routectl-router/tests/"
     sed -e "$expr" "$CHECKER" >"$root/scripts/check-live-gate-isolation.sh"
     if cmp -s "$CHECKER" "$root/scripts/check-live-gate-isolation.sh"; then
         echo "mutation '$name' changed nothing" >&2
@@ -137,9 +143,10 @@ missing_fixed() {
 # Sparse copy: live sources carrying one unrelated SCREAMING_SNAKE literal,
 # so only the fixed list can supply the expected names.
 root="$TMP/sparse"
-mkdir -p "$root/scripts" "$root/crates/routectl-cli/tests/live_matrix"
+mkdir -p "$root/scripts" "$root/crates/routectl-cli/tests/live_matrix" "$root/crates/routectl-router/tests"
 printf 'const K: &str = "SPARSE_ONLY_NAME";\n' >"$root/crates/routectl-cli/tests/live_x.rs"
 printf '\n' >"$root/crates/routectl-cli/tests/live_matrix/empty.rs"
+printf '\n' >"$root/crates/routectl-router/tests/live_x.rs"
 cp "$CHECKER" "$root/scripts/check-live-gate-isolation.sh"
 gone="$(missing_fixed "$root/scripts/check-live-gate-isolation.sh")"
 if [[ -z "$gone" ]]; then
@@ -148,12 +155,12 @@ else
     fail "fixed names not planted: $(tr '\n' ' ' <<<"$gone")"
 fi
 
-if m="$(mutant dropname '/^FIXED_PLANTED_NAMES=(/,/^)/{/^    ROUTECTL_LIVE_API_KEY$/d}')"; then
+if m="$(mutant dropname '/^FIXED_PLANTED_NAMES=(/,/^)/{/^    ANTHROPIC_API_KEY$/d}')"; then
     gone="$(missing_fixed "$m")"
-    if [[ "$gone" == "ROUTECTL_LIVE_API_KEY" ]]; then
+    if [[ "$gone" == "ANTHROPIC_API_KEY" ]]; then
         pass "control: removing a fixed name is caught"
     else
-        fail "control: dropped ROUTECTL_LIVE_API_KEY not caught (missing: ${gone:-none})"
+        fail "control: dropped ANTHROPIC_API_KEY not caught (missing: ${gone:-none})"
     fi
 else
     fail "could not build the dropped-name mutant"
@@ -180,6 +187,84 @@ if m="$(mutant relative 's|"\$REPO_ROOT"/crates/routectl-cli/tests/|crates/route
     fi
 else
     fail "could not build the cwd-relative mutant"
+fi
+
+# Prints the router-only names a checker's planted set lacks.
+missing_router_names() {
+    local names name
+    names="$(bash "$1" --self-check 2>/dev/null | tail -n +2)"
+    for name in "${ROUTER_ONLY_NAMES[@]}"; do
+        grep -qx "$name" <<<"$names" || echo "$name"
+    done
+}
+
+gone="$(missing_router_names "$CHECKER")"
+if [[ -z "$gone" ]]; then
+    pass "source scan plants the router live smoke's variables"
+else
+    fail "router live smoke variables not planted: $(tr '\n' ' ' <<<"$gone")"
+fi
+
+# shellcheck disable=SC2016 # the sed pattern matches a literal $REPO_ROOT
+if m="$(mutant no-router-scan '\|^    "\$REPO_ROOT"/crates/routectl-router/tests/live_\*\.rs$|d')"; then
+    if [[ -n "$(missing_router_names "$m")" ]]; then
+        pass "control: a scan without the router live sources is caught"
+    else
+        fail "control: a scan without the router live sources still planted their variables"
+    fi
+else
+    fail "could not build the no-router-scan mutant"
+fi
+
+# --- live targets ------------------------------------------------------------
+
+# Every `[[test]]` in a workspace crate manifest that is `test = false` and
+# requires `live-integration`, sorted.
+manifest_live_targets() {
+    awk '
+        function flush() {
+            if (in_test && name != "" && off && live) print name
+            in_test = 0; name = ""; off = 0; live = 0
+        }
+        /^\[/ { flush() }
+        /^\[\[test\]\]$/ { in_test = 1; next }
+        in_test && /^name *= */ { name = $0; sub(/^name *= *"/, "", name); sub(/".*$/, "", name) }
+        in_test && /^test *= *false *$/ { off = 1 }
+        in_test && /^required-features *=.*"live-integration"/ { live = 1 }
+        END { flush() }' "$REPO_ROOT"/crates/*/Cargo.toml | sort -u
+}
+# A checker's LIVE_TARGETS, sorted.
+checker_live_targets() {
+    sed -n 's/^LIVE_TARGETS=(\(.*\))$/\1/p' "$1" | tr ' ' '\n' | sed '/^$/d' | sort -u
+}
+# Prints the mismatch, or nothing when the checker's LIVE_TARGETS is the
+# manifests' live-target set.
+live_targets_mismatch() {
+    local want got
+    want="$(manifest_live_targets)"
+    got="$(checker_live_targets "$1")"
+    if [[ -z "$want" || -z "$got" ]]; then
+        echo "unreadable: manifests='$want' checker='$got'"
+    elif [[ "$got" != "$want" ]]; then
+        echo "checker='$(tr '\n' ' ' <<<"$got")' manifests='$(tr '\n' ' ' <<<"$want")'"
+    fi
+}
+
+gone="$(live_targets_mismatch "$CHECKER")"
+if [[ -z "$gone" ]]; then
+    pass "LIVE_TARGETS is every live-integration test = false target: $(manifest_live_targets | tr '\n' ' ')"
+else
+    fail "LIVE_TARGETS differs from the manifests' live targets: $gone"
+fi
+
+if m="$(mutant drop-target '/^LIVE_TARGETS=(/s/ live_learned_capability)$/)/')"; then
+    if [[ -n "$(live_targets_mismatch "$m")" ]]; then
+        pass "control: a live target missing from LIVE_TARGETS is caught"
+    else
+        fail "control: a live target missing from LIVE_TARGETS passed"
+    fi
+else
+    fail "could not build the drop-target mutant"
 fi
 
 # --- standard gate source ---------------------------------------------------

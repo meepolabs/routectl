@@ -60,7 +60,7 @@ jobs:
       # from `--all-targets` -- even when `--test` names them in the same
       # invocation -- so they get their own lint step.
       - name: cargo clippy (live provider test targets)
-        run: cargo clippy -p routectl-cli --all-features --test live_matrix --test live_anthropic_oauth -- -D warnings
+        run: cargo clippy -p routectl-cli -p routectl-router --all-features --test live_matrix --test live_anthropic_oauth --test live_learned_capability -- -D warnings
 
       - name: cargo check (lean providers build, no aws-* deps)
         run: cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api

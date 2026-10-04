@@ -42,8 +42,8 @@ cargo test --workspace --features bedrock,test-utils --profile test-release
 cargo test -p routectl-router --features gen-catalog --lib
 
 # Live matrix against real providers. It makes provider calls and spends
-# real money. The live targets (`live_matrix`, `live_anthropic_oauth`) are
-# `test = false`, so no command above -- nor `--all-features`,
+# real money. The live targets (`live_matrix`, `live_anthropic_oauth`, and
+# routectl-router's `live_learned_capability`) are `test = false`, so no command above -- nor `--all-features`,
 # `--all-targets`, or `--tests` -- builds or runs them, whatever
 # credentials the shell carries. Any invocation that enables
 # `live-integration` AND selects a live target explicitly IS live: a
@@ -91,11 +91,12 @@ RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
 # positive controls it runs each live target by name under the same
 # variables and requires each to attempt. CI runs it with --require-netns;
 # locally it skips by name where unprivileged user namespaces are
-# unavailable. It does not pass --ignored, so it does not cover the
-# ignored router smoke described below.
+# unavailable. It does not pass --ignored or --include-ignored.
 bash scripts/check-live-gate-isolation.sh
 # Its static contract (deadline budget vs the CI step timeout, the fixed
-# credential names, run-from-anywhere source resolution), no namespace:
+# credential names, run-from-anywhere source resolution, LIVE_TARGETS
+# matching every live `test = false` target in the crate manifests), no
+# namespace:
 bash scripts/check-live-gate-isolation.test.sh
 ```
 
@@ -103,20 +104,19 @@ Safe and live commands, side by side:
 
 | | Command | Provider calls |
 |---|---|---|
-| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --profile test-release` | never, regardless of environment, as long as neither `--ignored` nor `--include-ignored` is passed |
+| Standard gate (CI, pre-push, local) | `cargo test --workspace [--all-features] --profile test-release` | never, regardless of environment |
 | Live gate (explicit, costs money) | `cargo test -p routectl-cli --features live-integration --profile test-release --test live_matrix [--test live_anthropic_oauth]` | yes, for every provider whose credential is set |
+| Router live smoke (explicit, costs money) | `cargo test -p routectl-router --features live-integration --test live_learned_capability` | yes; panics when `ROUTECTL_LIVE_BASE_URL` or `ROUTECTL_LIVE_API_KEY` is unset |
 
 The safe rows stay safe only while they select no live target. Adding a
 `--test` that names a live target, or a `--test` glob that matches one,
 to a command with `live-integration` enabled makes it a live command.
 
-`--ignored` / `--include-ignored` are also live: they select the
-ignored router smoke `live_openai_unsupported_parameter_is_learned`
-(`routectl-router`, `learned_capability_loop` target), which calls the
-real provider at `ROUTECTL_LIVE_BASE_URL` whenever `ROUTECTL_LIVE_BASE_URL`
-and `ROUTECTL_LIVE_API_KEY` are set. That smoke is outside the `test = false`
-boundary, so the no-provider-call guarantee holds only for commands that
-pass neither flag.
+Every live test sits in a `test = false` target, so `--ignored` /
+`--include-ignored` on a safe row select no live test; they do add the
+multi-minute measurement rows under "Explicit runs" below. The isolation
+check does not pass those flags, so that half rests on where the live
+tests live, not on a network observation.
 
 The workspace has seven crates: `routectl-core`, `routectl-auth`,
 `routectl-providers`, `routectl-router`, `routectl-usage` (SQLite
@@ -130,8 +130,9 @@ final gate, not a tight inner loop.
 
 ## Explicit runs (never in the default gate)
 
-Every `#[ignore]`d test in the workspace is listed here, with the one
-command that runs it by exact name. None is wired into CI: the live
+Every `#[ignore]`d test in the workspace is listed here, plus the
+router live smoke (a `test = false` target rather than an ignored test),
+with the one command that runs it by exact name. None is wired into CI: the live
 rows spend money and the measurement rows need a quiet, stable machine.
 Never run a broad `--ignored` / `--include-ignored` sweep -- it would
 mix live calls and multi-minute benchmarks into one run.
@@ -139,7 +140,7 @@ mix live calls and multi-minute benchmarks into one run.
 | Test | What it costs | Command | When to run it |
 |---|---|---|---|
 | `oauth_antigravity_servable_set_sweep` | Live: one Cloud Code call per servable model id, on a quota-metered seat. Needs `GEMINI_OAUTH_ACCESS_TOKEN` | `cargo test -p routectl-cli --features live-integration --profile test-release --test live_matrix -- --ignored --exact oauth_antigravity::oauth_antigravity_servable_set_sweep --nocapture --test-threads=1` | Refreshing the servable-set snapshot in `docs/TESTED_MODELS.md`, or after bumping the pinned IDE version |
-| `live_openai_unsupported_parameter_is_learned` | Live: real calls to the openai-compat provider at `ROUTECTL_LIVE_BASE_URL` (needs `ROUTECTL_LIVE_API_KEY`); panics when either is unset | `cargo test -p routectl-router --test learned_capability_loop -- --ignored --exact real_envelope::live_openai_unsupported_parameter_is_learned --nocapture` | After changing the learned-capability resolver or the upstream 400 parsing it relies on |
+| `live_openai_unsupported_parameter_is_learned` | Live: real calls to the openai-compat provider at `ROUTECTL_LIVE_BASE_URL` (needs `ROUTECTL_LIVE_API_KEY`); panics when either is unset | `cargo test -p routectl-router --features live-integration --test live_learned_capability -- --exact live_openai_unsupported_parameter_is_learned --nocapture` | After changing the learned-capability resolver or the upstream 400 parsing it relies on |
 | `sensitive_word_scan_cost_at_the_bounds` | Release build plus several seconds of scanning a 32 MiB body; numbers are only meaningful in release on an idle machine | `cargo test -p routectl-providers --release --lib -- --ignored --exact anthropic_api::cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds --nocapture` | After changing the cloak sensitive-word scan or its config bounds; record results beside the bound constants |
 | `a_million_row_ledger_answers_inside_the_budget` | Seeds a 1M-row usage ledger: minutes of disk I/O | `cargo test -p routectl-cli --release --lib -- --ignored --exact handlers::status::usage::tests::a_million_row_ledger_answers_inside_the_budget --nocapture` | After changing the `/status/usage` panel collection or its read budget |
 | `the_large_ledger_read_cost_curve` | Seeds a multi-million-row ledger: several minutes and hundreds of MB on disk. Set `TMPDIR` to real storage (a tmpfs `/tmp` flatters every number) | `TMPDIR=/var/tmp cargo test -p routectl-cli --release --lib -- --ignored --exact handlers::status::usage::read_budget_bench_tests::the_large_ledger_read_cost_curve --nocapture` | Before changing either status read budget, or after changing the usage query / index shape |

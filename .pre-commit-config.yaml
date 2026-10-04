@@ -162,7 +162,7 @@ repos:
       # invocation -- so they get their own lint hook.
       - id: cargo-clippy-live-targets
         name: cargo clippy (live provider test targets)
-        entry: cargo clippy -p routectl-cli --all-features --test live_matrix --test live_anthropic_oauth -- -D warnings
+        entry: cargo clippy -p routectl-cli -p routectl-router --all-features --test live_matrix --test live_anthropic_oauth --test live_learned_capability -- -D warnings
         language: system
         always_run: true
         pass_filenames: false

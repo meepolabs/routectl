@@ -1,7 +1,8 @@
-//! The headline real-envelope route-away proof plus the live-network smoke
-//! variant: an openai-compat upstream rejects a structured-output request the
-//! egress lifts to a top-level `response_format`, and the router learns the
-//! canonical `structured_output` negative and routes away.
+//! The headline real-envelope route-away proof: an openai-compat upstream
+//! rejects a structured-output request the egress lifts to a top-level
+//! `response_format`, and the router learns the canonical `structured_output`
+//! negative and routes away. Its live-network counterpart is the
+//! `live_learned_capability` target.
 
 use super::*;
 
@@ -109,65 +110,4 @@ async fn real_envelope_response_format_400_learns_structured_output_and_routes_a
         "A must NOT be re-dialed: the learned negative routed away from it",
     );
     assert_eq!(hits(&b).await, 2);
-}
-
-// ---------------------------------------------------------------------------
-// Live-network smoke variant (ignored in CI). Run with a real openai-compat
-// base URL + key that rejects a structured-output request with a 400 whose
-// `/error/param` is `response_format` -- the surface that actually SURVIVES
-// egress (a built-in tool the egress drops never crosses the wire, so no real
-// upstream could reject it). The resolver translates `response_format` onto
-// the canonical `structured_output` key the request derives, and the capture
-// membership gate admits it because the request carried that capability:
-//   ROUTECTL_LIVE_BASE_URL=... ROUTECTL_LIVE_API_KEY=... \
-//     cargo test -p routectl-router --test learned_capability_loop -- --ignored \
-//       --exact real_envelope::live_openai_unsupported_parameter_is_learned
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[ignore = "live: needs ROUTECTL_LIVE_BASE_URL + ROUTECTL_LIVE_API_KEY; see docs/DEVELOPMENT.md \"Explicit runs\""]
-async fn live_openai_unsupported_parameter_is_learned() {
-    let (Ok(base_url), Ok(api_key)) = (
-        std::env::var("ROUTECTL_LIVE_BASE_URL"),
-        std::env::var("ROUTECTL_LIVE_API_KEY"),
-    ) else {
-        panic!("set ROUTECTL_LIVE_BASE_URL and ROUTECTL_LIVE_API_KEY to run the live smoke");
-    };
-
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        "live".to_string(),
-        ProviderEntry::openai_compat(&base_url, common::file_ref(&api_key)),
-    );
-    let mut models = BTreeMap::new();
-    models.insert("m_live".to_string(), ModelEntry::new("live", "gpt-4o-mini"));
-    let mut aliases = BTreeMap::new();
-    aliases.insert("live".to_string(), AliasValue::Single("m_live".to_string()));
-
-    let mut cfg = Config {
-        providers,
-        models,
-        aliases,
-        retry: fast_retry(),
-        ..Config::default()
-    };
-    cfg.capability.enabled = true;
-    cfg.capability.decay_hours = 48;
-
-    let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-    let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
-        .await
-        .expect("build_resolved_models");
-    assert!(failed.is_empty(), "provider build failures: {failed:?}");
-    let mut router = Router::new(Arc::new(cfg));
-    router.install_resolved_models(resolved);
-
-    let d = router
-        .complete_with_options(req_with_structured_output("live"), RouterOptions::default())
-        .await;
-    assert!(
-        !d.meta.learned_capabilities.is_empty(),
-        "a real upstream unsupported-parameter 400 must produce a learn event: {:?}",
-        d.result,
-    );
 }

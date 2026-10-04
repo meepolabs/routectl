@@ -30,18 +30,15 @@ can read them in order. Each test prints a PASS/FAIL row per model with
 latency, content preview, and reasoning-shape signals (`rd=N` is the
 number of `reasoning_details[]` entries; `fmt=...` is the format tag).
 
-The live test targets (`live_matrix` and `live_anthropic_oauth`) are
-`test = false` and require the `live-integration` feature, so implicit
+The live test targets (`live_matrix` and `live_anthropic_oauth`, plus
+routectl-router's `live_learned_capability`) are `test = false` and
+require their crate's `live-integration` feature, so implicit
 target selection -- `--workspace`, `--all-features`, `--all-targets`,
 `--tests` -- never builds or runs them, even with every credential
 variable set; `scripts/check-live-gate-isolation.sh` verifies that in a
 network namespace. Explicit selection is live: a `--test` naming a live
 target, or a `--test` glob that matches one (`'live*'`, `'*'`), runs it
-whenever `live-integration` is enabled. Separately, `--ignored` and
-`--include-ignored` select the ignored router smoke in
-`routectl-router`'s `learned_capability_loop` target, which calls a real
-provider when `ROUTECTL_LIVE_BASE_URL` and `ROUTECTL_LIVE_API_KEY` are set;
-the isolation check does not pass those flags and does not cover it.
+whenever `live-integration` is enabled.
 
 ## Coverage philosophy
 

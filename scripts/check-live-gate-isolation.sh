@@ -86,10 +86,10 @@ SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 LIVE_SOURCES=(
     "$REPO_ROOT"/crates/routectl-cli/tests/live_*.rs
     "$REPO_ROOT"/crates/routectl-cli/tests/live_matrix/*.rs
+    "$REPO_ROOT"/crates/routectl-router/tests/live_*.rs
 )
 # Credential variables planted whatever the source scan finds: the product's
-# provider credentials (config `env://` conventions and the AWS chain) and
-# the router live smoke's variables, which live outside LIVE_SOURCES.
+# provider credentials (config `env://` conventions and the AWS chain).
 FIXED_PLANTED_NAMES=(
     ANTHROPIC_API_KEY
     OPENAI_API_KEY
@@ -99,10 +99,10 @@ FIXED_PLANTED_NAMES=(
     AWS_SESSION_TOKEN
     AWS_BEARER_TOKEN_BEDROCK
     AWS_REGION
-    ROUTECTL_LIVE_BASE_URL
-    ROUTECTL_LIVE_API_KEY
 )
-LIVE_TARGETS=(live_matrix live_anthropic_oauth)
+# Every `test = false` target gated on `live-integration`, in any crate;
+# check-live-gate-isolation.test.sh ties this list to the manifests.
+LIVE_TARGETS=(live_matrix live_anthropic_oauth live_learned_capability)
 # The standard gate runs through the gate-command registry, so this check and
 # every other caller of that subcommand run the same command.
 STANDARD_GATE=(bash "$HERE/test-gate.sh" workspace-all-features)
@@ -134,7 +134,7 @@ STEP_BUDGET=5400
 FETCH_DEADLINE=300
 CONTROL_DEADLINE=120
 STANDARD_DEADLINE=3000
-LIVE_DEADLINE=750
+LIVE_DEADLINE=450
 # `timeout --kill-after` grace for every bounded command.
 KILL_AFTER=10
 # Inside a leg: recorder start-up, residual-process kill, recorder stop.
