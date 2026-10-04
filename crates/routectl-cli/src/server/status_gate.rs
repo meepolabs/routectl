@@ -1263,7 +1263,7 @@ mod tests {
         .unwrap();
 
         let router = Router::new(Arc::new(Config::default()));
-        let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
         // all, so all four panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
@@ -1346,7 +1346,7 @@ mod tests {
         .unwrap();
 
         let router = Router::new(Arc::new(Config::default()));
-        let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
         // all, so all four panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());

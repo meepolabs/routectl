@@ -127,18 +127,18 @@ pub struct AppState {
 
 impl AppState {
     /// Test-only constructor: wraps `router` with a usage handle backed
-    /// by a writer pointed at an isolated in-tempdir DB, so handler unit
-    /// tests that build `AppState` directly never touch the real
+    /// by a writer pointed at an isolated test DB, so handler unit tests
+    /// that build `AppState` directly never touch the real
     /// `~/.config/routectl/usage.db`. The owning `UsageWriter` is
     /// detached (dropped) -- the handle stays usable (it accepts-and-drops
     /// once the channel closes), which is all a non-usage handler test
-    /// needs. Returns the `TempDir` guard; keep it alive for the test.
+    /// needs. The detached writer opens its DB after this returns, so the
+    /// dir is a reaped per-process one rather than a scoped guard.
     #[cfg(test)]
-    pub fn for_test(router: Arc<ArcSwap<Router>>) -> (Arc<Self>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("usage tempdir");
-        let (usage, _writer) =
-            UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, false);
-        (Self::for_test_with_usage(router, usage), dir)
+    pub fn for_test(router: Arc<ArcSwap<Router>>) -> Arc<Self> {
+        let dir = crate::test_usage_dir::usage_dir();
+        let (usage, _writer) = UsageWriter::start(dir.join("usage.db"), CHANNEL_CAPACITY, 0, false);
+        Self::for_test_with_usage(router, usage)
     }
 
     /// Test-only constructor over a caller-owned usage handle, for a test

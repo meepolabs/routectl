@@ -7341,6 +7341,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift`. Decides only -- it emits nothing itself
+- `src/test_usage_dir.rs` -- `usage_dir()` (`cfg(test)`): a fresh usage-ledger
+  dir under the testkit temp reaper's per-process dir, for fixtures whose
+  writer thread may open the DB after the test's own scope has ended
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion
   against an alias or model nickname
 - `src/commands/prompt_size.rs` -- `routectl prompt-size --alias <X> --request

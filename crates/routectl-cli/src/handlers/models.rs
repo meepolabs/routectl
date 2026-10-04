@@ -496,8 +496,7 @@ mod tests {
             ..Default::default()
         });
         let router = Router::new(config);
-        let (state, _usage_dir) =
-            AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)));
+        let state = AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)));
 
         let body = json_body_of(list_models(State(state), HeaderMap::new()).await).await;
         assert_eq!(body["object"], "list");
@@ -696,8 +695,7 @@ mod tests {
             ..Default::default()
         });
         let router = Router::new(config);
-        let (state, _usage_dir) =
-            AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)));
+        let state = AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)));
 
         // Seam header present but no captured bearer -- must never attempt
         // a network call, and must return the local list unchanged.

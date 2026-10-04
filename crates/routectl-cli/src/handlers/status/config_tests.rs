@@ -45,10 +45,7 @@ fn router_with(config: Config, overlay: CatalogOverlay) -> Router {
 
 fn test_state() -> Arc<StatusState> {
     let router = router_with(Config::default(), CatalogOverlay::default());
-    // The config panel reads only the live router (config plus the overlay
-    // retained on it), never the usage ledger or the overlay file, so the
-    // temp dir may drop immediately.
-    let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     Arc::new(StatusState::from_app(
         &app,
         Some(PathBuf::from("/nonexistent/config.toml")),
@@ -521,7 +518,7 @@ upstream = "claude-opus-4-8"
     )
     .expect("valid overlay");
     let router = router_with(config, accepted);
-    let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
 
     // Act
@@ -566,7 +563,7 @@ fn a_reload_after_the_daemon_read_skews_the_age_and_never_the_counts() {
     let router_swap = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
         Config::default(),
     ))));
-    let (app, _dir) = AppState::for_test(router_swap.clone());
+    let app = AppState::for_test(router_swap.clone());
     let state = StatusState::from_app(&app, None, DaemonMeta::for_test());
     let pinned_daemon = DaemonMetaSnapshot {
         listen_addr: "127.0.0.1:9000".to_string(),

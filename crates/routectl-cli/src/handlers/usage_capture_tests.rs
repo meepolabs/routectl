@@ -26,17 +26,18 @@ use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 /// A throwaway usage handle for guard construction. The tests assert on
 /// the in-memory `record` before `finalize`, so the writer is never
 /// drained -- it only has to exist so `UsageCapture::new` has a handle.
-/// Returns the `TempDir` so the caller holds it to drop-at-scope-end;
-/// these tests never touch the DB file, only the in-memory record.
-fn dummy_handle() -> (UsageHandle, UsageWriter, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("usage tempdir");
-    let db_path = dir.path().join("usage.db");
+/// The dir is a reaped per-process one rather than a scoped guard: a test
+/// that drops the writer without draining it would otherwise race the writer
+/// thread's open, which recreates a removed parent dir.
+fn dummy_handle() -> (UsageHandle, UsageWriter, std::path::PathBuf) {
+    let dir = crate::test_usage_dir::usage_dir();
+    let db_path = dir.join("usage.db");
     let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0, true);
     (handle, writer, dir)
 }
 
 /// A `UsageCapture` over a minimal draft, ready for `observe_*` calls.
-fn capture() -> (UsageCapture, UsageWriter, tempfile::TempDir) {
+fn capture() -> (UsageCapture, UsageWriter, std::path::PathBuf) {
     let req = routectl_core::ChatRequest {
         model: "m".to_string(),
         messages: vec![Message {
@@ -446,7 +447,7 @@ async fn a_zero_prompt_total_persists_neither_half_of_a_populated_pair() {
 
 /// A `UsageCapture` plus the handle (so tests can poll the persisted
 /// counter) and the writer (so tests can drain it to disk on shutdown).
-fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, tempfile::TempDir) {
+fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, std::path::PathBuf) {
     let req = routectl_core::ChatRequest {
         model: "m".to_string(),
         messages: vec![Message {
@@ -1362,7 +1363,7 @@ fn observe_error_stores_none_when_class_has_no_token() {
 async fn disconnect_drop_emits_single_row_with_null_resolved_class() {
     // Arrange: a live capture that never finalizes explicitly.
     let (cap, handle, writer, dir) = capture_with_handle();
-    let path = dir.path().join("usage.db");
+    let path = dir.join("usage.db");
 
     // Act: drop without finalize -- the Drop guard finalizes the abnormal
     // exit as ClientDisconnect. observe_error never ran, so resolved_class

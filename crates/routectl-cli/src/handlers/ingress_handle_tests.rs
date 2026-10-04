@@ -60,28 +60,26 @@ impl ClosingUpstream {
     }
 }
 
-/// A tempdir-backed usage writer + handle for capture tests. Holding the
-/// `TempDir` keeps the DB path alive; `flush_and_read` drains the writer
-/// and reads the single emitted row back so tests can assert the per-
-/// outcome matrix against the persisted record (the real contract).
+/// A usage writer + handle for capture tests over a reaped per-process dir
+/// (a rig dropped without `flush_and_read` leaves its writer thread opening
+/// the DB after the test returns). `flush_and_read` drains the writer and
+/// reads the single emitted row back so tests can assert the per-outcome
+/// matrix against the persisted record (the real contract).
 struct CaptureRig {
     handle: Option<UsageHandle>,
     writer: Option<UsageWriter>,
     db_path: std::path::PathBuf,
-    _dir: tempfile::TempDir,
 }
 
 impl CaptureRig {
     fn new() -> Self {
-        let dir = tempfile::tempdir().expect("usage tempdir");
-        let db_path = dir.path().join("usage.db");
+        let db_path = crate::test_usage_dir::usage_dir().join("usage.db");
         // retention_days=0 (no prune), enabled=true so try_send accepts.
         let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
         Self {
             handle: Some(handle),
             writer: Some(writer),
             db_path,
-            _dir: dir,
         }
     }
 
@@ -4607,7 +4605,7 @@ async fn ingress_handle_rejects_forwarded_token_missing_end_to_end() {
     // never reach the rejection this test proves.
     let router = k_test_router();
     let swap = Arc::new(arc_swap::ArcSwap::from(router));
-    let (state, _dir) = AppState::for_test(swap);
+    let state = AppState::for_test(swap);
     let headers = admission_headers(Some(&state.mitm_seam_nonce), None, Some("sess-e2e"));
     // Admission runs before body parse, so the body is never inspected on the
     // rejection path.
@@ -4643,7 +4641,7 @@ async fn ingress_handle_admits_a_spoofed_seam_header_end_to_end() {
 
     let router = k_test_router();
     let swap = Arc::new(arc_swap::ArcSwap::from(router));
-    let (state, _dir) = AppState::for_test(swap);
+    let state = AppState::for_test(swap);
     let mut headers = admission_headers(None, None, None);
     headers.insert(
         axum::http::HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
@@ -4992,7 +4990,7 @@ mod pre_change_ingress_contract {
     /// Small cap so an oversized body is a few KB, not tens of MB.
     const REJECT_BODY_LIMIT: usize = 1024;
 
-    fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+    fn test_state() -> Arc<AppState> {
         let swap = Arc::new(arc_swap::ArcSwap::from(super::k_test_router()));
         AppState::for_test(swap)
     }
@@ -5097,7 +5095,7 @@ mod pre_change_ingress_contract {
     #[tokio::test]
     async fn messages_rejection_contract_pins_status_and_envelope() {
         // JSON syntax error -> 400 + Anthropic envelope.
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_messages(state),
             post_req("/v1/messages", Some("application/json"), "{ not valid json"),
@@ -5106,7 +5104,7 @@ mod pre_change_ingress_contract {
         assert_anthropic_reject(status, &body, StatusCode::BAD_REQUEST);
 
         // Wrong content-type -> 415.
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_messages(state),
             post_req("/v1/messages", Some("text/plain"), "{}"),
@@ -5115,7 +5113,7 @@ mod pre_change_ingress_contract {
         assert_anthropic_reject(status, &body, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
         // Oversized body -> 413 (DefaultBodyLimit layer).
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_messages(state),
             post_req("/v1/messages", Some("application/json"), oversized_body()),
@@ -5127,7 +5125,7 @@ mod pre_change_ingress_contract {
     #[tokio::test]
     async fn chat_completions_rejection_contract_pins_status_and_envelope() {
         // JSON syntax error -> 400 + OpenAI envelope.
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_chat_completions(state),
             post_req(
@@ -5140,7 +5138,7 @@ mod pre_change_ingress_contract {
         assert_openai_reject(status, &body, StatusCode::BAD_REQUEST, "bad_request");
 
         // Wrong content-type -> 415.
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_chat_completions(state),
             post_req("/v1/chat/completions", Some("text/plain"), "{}"),
@@ -5154,7 +5152,7 @@ mod pre_change_ingress_contract {
         );
 
         // Oversized body -> 413 (DefaultBodyLimit layer).
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_chat_completions(state),
             post_req(
@@ -5175,7 +5173,7 @@ mod pre_change_ingress_contract {
     #[tokio::test]
     async fn responses_rejection_contract_pins_status_and_envelope() {
         // JSON syntax error -> 400 + OpenAI envelope.
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_responses(state),
             post_req(
@@ -5188,7 +5186,7 @@ mod pre_change_ingress_contract {
         assert_openai_reject(status, &body, StatusCode::BAD_REQUEST, "bad_request");
 
         // Wrong content-type -> 415.
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_responses(state),
             post_req("/v1/responses", Some("text/plain"), "{}"),
@@ -5202,7 +5200,7 @@ mod pre_change_ingress_contract {
         );
 
         // Oversized body -> 413 (DefaultBodyLimit layer).
-        let (state, _dir) = test_state();
+        let state = test_state();
         let (status, body) = drive(
             app_for_responses(state),
             post_req("/v1/responses", Some("application/json"), oversized_body()),
@@ -5285,7 +5283,7 @@ mod cc_pin_drift_observation {
     const DRIFTED_VERSION: &str = "99.9.9";
     const OTHER_DRIFTED_VERSION: &str = "99.9.8";
 
-    fn state() -> (Arc<AppState>, tempfile::TempDir) {
+    fn state() -> Arc<AppState> {
         let swap = Arc::new(arc_swap::ArcSwap::from(super::k_test_router()));
         AppState::for_test(swap)
     }
@@ -5316,7 +5314,7 @@ mod cc_pin_drift_observation {
 
     #[tokio::test]
     async fn the_non_streaming_funnel_observes_a_drifted_client_version() {
-        let (state, _dir) = state();
+        let state = state();
 
         let _resp = ingress_handle(
             Arc::clone(&state),
@@ -5335,7 +5333,7 @@ mod cc_pin_drift_observation {
 
     #[tokio::test]
     async fn the_streaming_funnel_observes_through_the_same_call_site() {
-        let (state, _dir) = state();
+        let state = state();
 
         let _resp = ingress_handle(
             Arc::clone(&state),
@@ -5354,7 +5352,7 @@ mod cc_pin_drift_observation {
 
     #[tokio::test]
     async fn a_request_with_no_user_agent_records_nothing() {
-        let (state, _dir) = state();
+        let state = state();
 
         let _resp = ingress_handle(
             Arc::clone(&state),
@@ -5373,7 +5371,7 @@ mod cc_pin_drift_observation {
 
     #[tokio::test]
     async fn a_body_that_never_parsed_records_nothing() {
-        let (state, _dir) = state();
+        let state = state();
         let malformed: Result<Bytes, axum::extract::rejection::BytesRejection> =
             Ok(Bytes::from_static(b"{ not valid json"));
 
@@ -5395,7 +5393,7 @@ mod cc_pin_drift_observation {
 
     #[tokio::test]
     async fn alternating_client_versions_each_record_once() {
-        let (state, _dir) = state();
+        let state = state();
 
         for version in [
             DRIFTED_VERSION,
@@ -5426,7 +5424,7 @@ mod cc_pin_drift_observation {
     /// guard hangs off `AppState`, which outlives the swap.
     #[tokio::test]
     async fn a_router_hot_swap_does_not_reset_the_observation_record() {
-        let (state, _dir) = state();
+        let state = state();
         let _resp = ingress_handle(
             Arc::clone(&state),
             request_headers(Some(&ua_for(DRIFTED_VERSION))),
@@ -5448,8 +5446,8 @@ mod cc_pin_drift_observation {
     /// observations can never satisfy or defeat another's.
     #[tokio::test]
     async fn each_app_state_owns_an_independent_guard() {
-        let (first, _first_dir) = state();
-        let (second, _second_dir) = state();
+        let first = state();
+        let second = state();
 
         let _resp = ingress_handle(
             Arc::clone(&first),

@@ -18,7 +18,7 @@ fn the_no_config_branch_still_emits_the_fidelity_snapshot() {
     let router = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
         Config::default(),
     ))));
-    let (app, _dir) = AppState::for_test(router);
+    let app = AppState::for_test(router);
     // No config path: the branch under test.
     let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
 
@@ -64,7 +64,7 @@ use tower::ServiceExt;
 
 fn state_with_config(config_path: Option<PathBuf>) -> Arc<StatusState> {
     let router = Router::new(Arc::new(Config::default()));
-    let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     Arc::new(StatusState::from_app(
         &app,
         config_path,

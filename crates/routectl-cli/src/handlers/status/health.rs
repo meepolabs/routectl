@@ -302,7 +302,7 @@ mod tests {
 
     fn test_state() -> Arc<StatusState> {
         let router = Router::new(Arc::new(Config::default()));
-        let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()))
     }
 

@@ -421,7 +421,7 @@ pub(super) fn oauth_seat(base: &str, prefix: &str, name: &str) -> ProviderEntry 
 
 /// A daemon state over `router`, published once so a later republication
 /// draws a strictly newer generation.
-pub(super) fn daemon(router: Router) -> (Arc<AppState>, tempfile::TempDir) {
+pub(super) fn daemon(router: Router) -> Arc<AppState> {
     router.publish_probe_incarnation();
     AppState::for_test(Arc::new(ArcSwap::from_pointee(router)))
 }
@@ -757,7 +757,7 @@ pub(super) fn turn_three() -> Vec<Value> {
 }
 
 /// A single-lane Anthropic router at `/anth`.
-pub(super) async fn anthropic_daemon(upstream: &Upstream) -> (Arc<AppState>, tempfile::TempDir) {
+pub(super) async fn anthropic_daemon(upstream: &Upstream) -> Arc<AppState> {
     daemon(
         build(config(
             vec![("anth", anthropic_provider(upstream.base(), "/anth"))],
@@ -777,7 +777,7 @@ pub(super) fn translated_config(base: &str, upstream_model: &str) -> routectl_ro
 }
 
 /// A single translated (openai-compat) lane at `/compat`.
-pub(super) async fn translated_daemon(upstream: &Upstream) -> (Arc<AppState>, tempfile::TempDir) {
+pub(super) async fn translated_daemon(upstream: &Upstream) -> Arc<AppState> {
     daemon(build(translated_config(upstream.base(), "glm-4.6")).await)
 }
 

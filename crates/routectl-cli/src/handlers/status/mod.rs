@@ -499,10 +499,7 @@ mod tests {
 
     fn test_state() -> Arc<StatusState> {
         let router = Router::new(Arc::new(Config::default()));
-        let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-        // No panel opens the ledger in the skeleton, so the temp dir may drop
-        // immediately -- `usage_db_path` is only read when a real source is
-        // wired.
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()))
     }
 
@@ -831,7 +828,7 @@ mod tests {
         .unwrap();
 
         let router = Router::new(Arc::new(Config::default()));
-        let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         // Point usage at an absent ledger so ONLY the usage panel sheds.
         status.usage_db_path = dir.path().join("absent-usage.db");

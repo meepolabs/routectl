@@ -29,7 +29,7 @@ use crate::server::AppState;
 
 const REJECT_BODY_LIMIT: usize = 1024;
 
-fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+fn test_state() -> Arc<AppState> {
     let router = Arc::new(routectl_router::Router::new(Arc::new(
         routectl_router::Config::default(),
     )));
@@ -95,7 +95,7 @@ fn assert_anthropic_reject(status: StatusCode, body: &Value, expected: StatusCod
 #[tokio::test]
 async fn count_tokens_rejection_contract_pins_status_and_envelope() {
     // JSON syntax error -> 400 + Anthropic envelope.
-    let (state, _dir) = test_state();
+    let state = test_state();
     let (status, body) = drive(
         state,
         post_req(Some("application/json"), "{ not valid json"),
@@ -104,12 +104,12 @@ async fn count_tokens_rejection_contract_pins_status_and_envelope() {
     assert_anthropic_reject(status, &body, StatusCode::BAD_REQUEST);
 
     // Wrong content-type -> 415.
-    let (state, _dir) = test_state();
+    let state = test_state();
     let (status, body) = drive(state, post_req(Some("text/plain"), "{}")).await;
     assert_anthropic_reject(status, &body, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
     // Oversized body -> 413 (DefaultBodyLimit layer).
-    let (state, _dir) = test_state();
+    let state = test_state();
     let (status, body) = drive(state, post_req(Some("application/json"), oversized_body())).await;
     assert_anthropic_reject(status, &body, StatusCode::PAYLOAD_TOO_LARGE);
 }
@@ -137,7 +137,7 @@ fn count_tokens_preserves_unknown_top_level_field_into_provider_extras() {
 /// context sizing traffic produces no signal at all.
 #[tokio::test]
 async fn count_tokens_observes_a_drifted_client_version_before_dispatch() {
-    let (state, _dir) = test_state();
+    let state = test_state();
     let mut req = post_req(
         Some("application/json"),
         r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
@@ -164,7 +164,7 @@ async fn count_tokens_observes_a_drifted_client_version_before_dispatch() {
 /// upstream being reachable.
 #[tokio::test]
 async fn count_tokens_records_the_observation_independently_of_dispatch_outcome() {
-    let (state, _dir) = test_state();
+    let state = test_state();
     let mut req = post_req(
         Some("application/json"),
         r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
@@ -191,7 +191,7 @@ async fn count_tokens_records_the_observation_independently_of_dispatch_outcome(
 /// cannot even be parsed contributes no version record.
 #[tokio::test]
 async fn count_tokens_does_not_observe_when_the_body_never_parsed() {
-    let (state, _dir) = test_state();
+    let state = test_state();
     let mut req = post_req(Some("application/json"), "{ not valid json");
     req.headers_mut().insert(
         axum::http::header::USER_AGENT,

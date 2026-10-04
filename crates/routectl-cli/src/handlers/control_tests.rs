@@ -17,7 +17,6 @@ use routectl_router::{
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 use std::future::Future;
 use std::time::Instant;
-use tempfile::TempDir;
 use tower::ServiceExt;
 
 /// The route path this module serves, spelled once for the fixtures.
@@ -63,7 +62,6 @@ struct Fixture {
     usage: routectl_usage::UsageHandle,
     writer: UsageWriter,
     ledger: std::path::PathBuf,
-    _dir: TempDir,
 }
 
 impl Fixture {
@@ -78,7 +76,6 @@ impl Fixture {
         usage: routectl_usage::UsageHandle,
         writer: UsageWriter,
         ledger: std::path::PathBuf,
-        dir: TempDir,
     ) -> Self {
         let router = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
             config_with_model(),
@@ -108,24 +105,17 @@ impl Fixture {
             usage,
             writer,
             ledger,
-            _dir: dir,
         }
     }
 
     /// A fixture whose writer channel is CLOSED: every admission fails, so the
     /// purge can never reach a durable commit.
     fn with_closed_writer() -> Self {
-        let dir = TempDir::new().expect("tempdir");
-        let ledger = dir.path().join("usage.db");
+        let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
         // A real writer is started and immediately shut down so the fixture owns
         // one, but the handle the route uses is the genuinely-closed one.
         let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
-        Self::with_usage(
-            routectl_usage::handle_with_closed_channel(),
-            writer,
-            ledger,
-            dir,
-        )
+        Self::with_usage(routectl_usage::handle_with_closed_channel(), writer, ledger)
     }
 
     /// A fixture over a channel the TEST owns, plus that receiver. Nothing
@@ -138,12 +128,11 @@ impl Fixture {
         Self,
         tokio::sync::mpsc::Receiver<routectl_usage::WriterMessage>,
     ) {
-        let dir = TempDir::new().expect("tempdir");
-        let ledger = dir.path().join("usage.db");
+        let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
         let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
         let (tx, rx) = tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(capacity);
         (
-            Self::with_usage(routectl_usage::handle_over_channel(tx), writer, ledger, dir),
+            Self::with_usage(routectl_usage::handle_over_channel(tx), writer, ledger),
             rx,
         )
     }
@@ -155,10 +144,9 @@ impl Fixture {
     /// the enabled gate -- so a settlement assertion against it would pass
     /// whether or not the route persisted anything.
     fn new() -> Self {
-        let dir = TempDir::new().expect("tempdir");
-        let ledger = dir.path().join("usage.db");
+        let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
         let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
-        Self::with_usage(usage, writer, ledger, dir)
+        Self::with_usage(usage, writer, ledger)
     }
 
     /// Flush the writer and count the persisted `cleared` rows. Consumes the
@@ -205,11 +193,10 @@ impl Fixture {
     /// mode-based trick would not survive a test run as root, and this one is a
     /// property of the path itself.
     fn with_unwritable_ledger() -> Self {
-        let dir = TempDir::new().expect("tempdir");
-        let ledger = dir.path().join("not-a-db");
+        let ledger = crate::test_usage_dir::usage_dir().join("not-a-db");
         std::fs::create_dir(&ledger).expect("create the blocking directory");
         let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
-        Self::with_usage(usage, writer, ledger, dir)
+        Self::with_usage(usage, writer, ledger)
     }
 
     /// Occupy every slot of an owned channel so the next admission finds none

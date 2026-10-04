@@ -816,7 +816,7 @@ async fn declared_auth_gated_routes_challenge_unauthenticated_requests() {
     // Arrange: the production router with a non-empty token set on a
     // loopback bind (so `status_requires_auth` holds too).
     let router = routectl_router::Router::new(Arc::new(Config::default()));
-    let (state, _usage_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let bound: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let token_set = Arc::new(TokenSet::new(vec!["secret".to_string()]));
     let app = build_axum_router(
@@ -885,7 +885,7 @@ async fn token_less_loopback_serves_auth_gated_routes_without_credentials() {
 
     // Arrange
     let router = routectl_router::Router::new(Arc::new(Config::default()));
-    let (state, _usage_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let bound: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let app = build_axum_router(
         state,

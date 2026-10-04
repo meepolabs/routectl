@@ -22,7 +22,7 @@ async fn a_translated_second_turn_opens_on_the_anchor() {
         "",
         Script::sse(openai_stream(Some(ACTUAL))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let first = body(&turn_one());
     let second = body(&turn_two());
 
@@ -56,7 +56,7 @@ async fn the_anchor_is_the_cache_inclusive_terminal_total_and_serves_the_warm_pa
         "",
         Script::sse(anthropic_stream(Some(OPENER), Some(TERMINAL))),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
     let first = body(&turn_one());
     let second = body(&turn_two());
 
@@ -87,7 +87,7 @@ async fn compaction_and_a_same_length_rewrite_miss_the_anchor() {
         "",
         Script::sse(openai_stream(Some(ACTUAL))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let anchored = body(&turn_two());
     anthropic_turn(&state, &anchored).await;
     let compacted = body(&[text("user", "Summary of the earlier conversation.")]);
@@ -132,7 +132,7 @@ async fn a_reused_session_id_and_another_requested_model_open_cold() {
         "",
         Script::sse(openai_stream(Some(ACTUAL))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     anthropic_turn(&state, &body(&turn_one())).await;
     let subagent = body(&[
         text("user", "You are a subagent. Search for tests."),
@@ -160,7 +160,7 @@ async fn a_hot_reload_keeps_the_store_but_a_new_generation_or_upstream_opens_col
         "",
         Script::sse(openai_stream(Some(ACTUAL))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let first = body(&turn_one());
     let second = body(&turn_two());
     let third = body(&turn_three());
@@ -205,7 +205,7 @@ async fn a_fresh_daemon_starts_cold() {
         "",
         Script::sse(openai_stream(Some(ACTUAL))),
     );
-    let (old, _old_dir) = translated_daemon(&upstream).await;
+    let old = translated_daemon(&upstream).await;
     anthropic_turn(&old, &body(&turn_one())).await;
     assert_eq!(
         old.context_anchors.len(),
@@ -214,7 +214,7 @@ async fn a_fresh_daemon_starts_cold() {
     );
 
     // Act
-    let (fresh, _fresh_dir) = translated_daemon(&upstream).await;
+    let fresh = translated_daemon(&upstream).await;
     let second = body(&turn_two());
     let turn = anthropic_turn(&fresh, &second).await;
 
@@ -248,7 +248,7 @@ async fn a_seat_rotation_within_one_pool_keeps_the_anchor() {
         routectl_router::config::PoolEntry::new(vec!["seat-a".into(), "seat-b".into()])
             .with_seat_selection(routectl_router::config::SeatSelection::RoundRobin),
     );
-    let (state, _dir) = daemon(build(pooled).await);
+    let state = daemon(build(pooled).await);
     let first = body(&turn_one());
     let second = body(&turn_two());
 
@@ -294,7 +294,7 @@ async fn a_calibrated_cold_opening_and_an_uncorrected_anchor() {
             routectl_router::estimate_total_tokens(&canonical(&first)),
         )
         .expect("positive control: the lane has a factor");
-    let (state, _dir) = daemon(router);
+    let state = daemon(router);
     let second = body(&turn_two());
 
     // Act
@@ -320,7 +320,7 @@ async fn non_ascii_and_a_large_image_and_tool_result_anchor_like_any_turn() {
         "",
         Script::sse(openai_stream(Some(ACTUAL))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let image = "iVBORw0KGgo".repeat(40_000);
     let big_result = "\u{65e5}\u{672c}\u{8a9e} line of output\n".repeat(20_000);
     let history = vec![
@@ -362,7 +362,7 @@ async fn a_turn_without_terminal_usage_publishes_no_anchor() {
         "",
         Script::sse(openai_stream(None)),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
 
     anthropic_turn(&state, &body(&turn_one())).await;
 
@@ -377,7 +377,7 @@ async fn a_mid_stream_error_publishes_no_anchor() {
         "",
         Script::sse(anthropic_start(Some(OPENER)) + &anthropic_content() + &anthropic_overloaded()),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
 
     let turn = anthropic_turn(&state, &body(&turn_one())).await;
 
@@ -403,7 +403,7 @@ async fn a_client_that_hangs_up_mid_stream_publishes_no_anchor() {
             anthropic_end(Some(TERMINAL)),
         ),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
     let bytes = axum::body::Bytes::from(serde_json::to_vec(&body(&turn_one())).unwrap());
 
     // Act: read the first body piece, then hang up.
@@ -449,7 +449,7 @@ async fn an_older_overlapping_turn_finishing_last_does_not_replace_the_newer_anc
         "",
         Script::sse(openai_stream(Some(NEW_ACTUAL))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let older = body(&[text("user", "overlap-old question")]);
     let newer = body(&turn_one());
 
@@ -487,7 +487,7 @@ async fn interim_usage_then_a_clean_end_publishes_no_anchor_until_terminal_usage
         "",
         Script::sse(openai_interim_only_stream(INTERIM)),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let first = body(&turn_one());
     let second = body(&turn_two());
     let third = body(&turn_three());
@@ -538,7 +538,7 @@ async fn a_compatible_proxy_output_only_close_stays_cold_but_its_explicit_close_
             anthropic_start(Some(OPENER)) + &anthropic_content() + &anthropic_end_output_only(),
         ),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
     let first = body(&turn_one());
     let second = body(&turn_two());
     let third = body(&turn_three());
@@ -587,7 +587,7 @@ async fn a_losing_attempts_terminal_input_never_anchors() {
         "",
         Script::sse(anthropic_stream(None, Some(InputUsage::plain(WINNER)))),
     );
-    let (state, _dir) = daemon(
+    let state = daemon(
         build(config(
             vec![
                 ("a", anthropic_provider(upstream.base(), "/a")),
@@ -628,7 +628,7 @@ async fn a_close_reporting_a_cache_read_without_raw_input_does_not_anchor() {
         "",
         Script::sse(raw_zero + &anthropic_content() + partial_end),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
 
     // Act
     let turn = anthropic_turn(&state, &body(&turn_one())).await;

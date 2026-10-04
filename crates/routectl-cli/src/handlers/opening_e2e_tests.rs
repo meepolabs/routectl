@@ -53,7 +53,7 @@ async fn a_fast_winner_opens_with_its_exact_upstream_usage() {
         "",
         Script::sse(anthropic_stream(Some(OPENER), Some(TERMINAL))),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
     let request = body(&turn_one());
 
     // Act
@@ -93,7 +93,7 @@ async fn a_slow_dispatch_flushes_one_estimated_opening_at_the_grace_and_corrects
         "",
         Script::sse(anthropic_stream(Some(OPENER), Some(TERMINAL))).with_head_delay(PAST_GRACE),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
     let request = body(&turn_one());
 
     // Act
@@ -126,7 +126,7 @@ async fn an_upstream_opener_seen_before_the_grace_does_not_open_a_stream_whose_c
             anthropic_rest(Some(TERMINAL)),
         ),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
     let request = body(&turn_one());
 
     // Act
@@ -150,7 +150,7 @@ async fn a_fast_http_error_stays_an_http_error() {
                     "error": {"type": "overloaded_error", "message": "busy"}}),
         ),
     );
-    let (state, _dir) = daemon(
+    let state = daemon(
         build(config(
             vec![("anth", anthropic_provider(upstream.base(), "/anth"))],
             &[("opus", "anth", "claude-opus-4-7")],
@@ -197,7 +197,7 @@ async fn a_failed_pre_content_attempt_never_leaks_its_opener_into_the_fallback()
         "",
         Script::sse(anthropic_stream(Some(WINNER), Some(WINNER))),
     );
-    let (state, _dir) = daemon(
+    let state = daemon(
         build(config(
             vec![
                 ("a", anthropic_provider(upstream.base(), "/a")),
@@ -237,7 +237,7 @@ async fn a_failed_opener_does_not_leak_into_a_translated_fallback() {
         "",
         Script::sse(openai_stream(Some(900))),
     );
-    let (state, _dir) = daemon(
+    let state = daemon(
         build(config(
             vec![
                 ("a", anthropic_provider(upstream.base(), "/a")),
@@ -273,7 +273,7 @@ async fn openai_and_responses_streams_do_no_anchor_work() {
         "",
         Script::sse(openai_stream(Some(700))),
     );
-    let (state, _dir) = translated_daemon(&upstream).await;
+    let state = translated_daemon(&upstream).await;
     let mut headers = session_headers(None);
     headers.insert(
         "x-session-id",
@@ -317,7 +317,7 @@ async fn a_non_streaming_request_is_unaffected() {
             "usage": {"input_tokens": 5, "output_tokens": 1}
         })),
     );
-    let (state, _dir) = anthropic_daemon(&upstream).await;
+    let state = anthropic_daemon(&upstream).await;
 
     let turn = send(
         &state,

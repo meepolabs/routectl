@@ -481,9 +481,7 @@ mod tests {
     /// Build a `StatusState` whose usage-ledger path is `db_path`.
     fn state_with_ledger(db_path: PathBuf) -> Arc<StatusState> {
         let router = Router::new(Arc::new(Config::default()));
-        // The writer's tempdir is unused here (the status panel never touches
-        // the writer handle); let it drop.
-        let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
         status.usage_db_path = db_path;
         Arc::new(status)

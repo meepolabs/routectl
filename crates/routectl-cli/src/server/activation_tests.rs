@@ -414,8 +414,12 @@ async fn failed_config_reload_keeps_previous_activation() {
     // before any overlay / XDG read, so no environment isolation needed).
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(&cfg_path, b"<<<not valid toml>>>").unwrap();
-    let (usage, _writer) =
-        UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, false);
+    let (usage, _writer) = UsageWriter::start(
+        crate::test_usage_dir::usage_dir().join("usage.db"),
+        CHANNEL_CAPACITY,
+        0,
+        false,
+    );
 
     // Drive the coordinator (not the handler) so the config-reload
     // recompute guard is the code under test. One Config request, then the
