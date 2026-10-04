@@ -502,8 +502,8 @@ fn summarize_divergence(divergence: &Divergence) -> String {
 /// Compare two bodies and return a bounded failure summary, or `None`
 /// when they agree structurally.
 ///
-/// Deliberately NOT `assert_json_equal_structural`: that renders both
-/// sides in full via `Display`, which is what leaked whole prompt bodies
+/// Deliberately NOT `assert_json_equal_structural_verbose`: that renders both
+/// sides in full via `render_verbose`, which is what leaked whole prompt bodies
 /// into the log. This drives the same `diff_all` walk and formats the
 /// result under the caps above. The path and kind survive intact -- they
 /// are the diagnostic and carry no payload.

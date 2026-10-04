@@ -94,7 +94,7 @@
 //! Captured bodies are real prompt traffic. Failure text reports the
 //! fixture name, the divergence PATH, and the divergence KIND -- never a
 //! value, never a subtree. A raw [`Divergence`] is never printed: its
-//! `Display` renders both sides in full, so one membership divergence on
+//! `render_verbose` renders both sides in full, so one membership divergence on
 //! `messages` would dump a whole prompt. Value shape, where it helps, comes
 //! from [`bounded_body_diff`], which caps both the number of divergences
 //! shown and what each may echo.
@@ -548,7 +548,7 @@ fn static_ingress_token(token: &str) -> Option<&'static str> {
 
 /// Render the unexplained subset as KIND + PATH only, capped.
 ///
-/// Never a value and never a `Divergence`'s own `Display`: paths and kinds
+/// Never a value and never a `Divergence`'s `render_verbose`: paths and kinds
 /// are the diagnostic and carry no payload, whereas a membership
 /// divergence's value is the whole subtree on the side that has it.
 fn bounded_paths(divergences: &[&Divergence]) -> String {
@@ -1063,7 +1063,7 @@ mod tests {
 
     /// The failure text names paths and kinds and echoes no prompt-bearing
     /// value. A membership divergence on `messages` renders the whole
-    /// subtree through `Divergence`'s own `Display`, which is exactly what
+    /// subtree through `Divergence::render_verbose`, which is exactly what
     /// this harness must never print.
     #[test]
     fn failure_text_reports_paths_and_kinds_without_echoing_content() {

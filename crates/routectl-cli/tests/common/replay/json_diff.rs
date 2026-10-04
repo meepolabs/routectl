@@ -17,10 +17,9 @@ use super::DiffMessage;
 /// [`DivergenceKind::Removed`] fills only `expected`, and
 /// [`DivergenceKind::Changed`] fills both.
 ///
-/// [`Display`](std::fmt::Display) renders the one-line form the
-/// comparator's own failure messages use, so a consumer that reports
-/// unexplained divergences never hand-rolls a second match over
-/// [`DivergenceKind`].
+/// There is deliberately no `Display`: both sides render in full, so a
+/// corpus-facing caller must select [`Divergence::render_verbose`] by
+/// name. Bounded reporting lives in `bounded_body_diff`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Divergence {
     pub path: String,
@@ -29,9 +28,12 @@ pub struct Divergence {
     pub expected: Option<Value>,
 }
 
-impl std::fmt::Display for Divergence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format_divergence(self).0)
+impl Divergence {
+    /// The one-line form the comparator's own failure messages use, with
+    /// both sides rendered in FULL. Unbounded: never route captured-body
+    /// divergences through this.
+    pub fn render_verbose(&self) -> String {
+        format_divergence(self).0
     }
 }
 
@@ -157,7 +159,7 @@ pub fn diff_all(actual: &Value, expected: &Value, ignore_paths: &[&str]) -> Vec<
 /// divergence [`diff_all`] finds. Semantics and path syntax are
 /// [`diff_all`]'s; this is only a different presentation of the same
 /// walk.
-pub fn assert_json_equal_structural(
+pub fn assert_json_equal_structural_verbose(
     actual: &Value,
     expected: &Value,
     ignore_paths: &[&str],
@@ -396,21 +398,21 @@ mod tests {
     #[test]
     fn json_equal_passes_on_identical() {
         let v = json!({"a": 1, "b": [1, 2, 3]});
-        assert!(assert_json_equal_structural(&v, &v, &[]).is_ok());
+        assert!(assert_json_equal_structural_verbose(&v, &v, &[]).is_ok());
     }
 
     #[test]
     fn json_equal_passes_on_object_key_reorder() {
         let a = json!({"a": 1, "b": 2});
         let e = json!({"b": 2, "a": 1});
-        assert!(assert_json_equal_structural(&a, &e, &[]).is_ok());
+        assert!(assert_json_equal_structural_verbose(&a, &e, &[]).is_ok());
     }
 
     #[test]
     fn json_equal_fails_on_key_mismatch() {
         let a = json!({"a": 1});
         let e = json!({"b": 1});
-        let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("key mismatch"), "got: {msg}");
     }
@@ -419,7 +421,7 @@ mod tests {
     fn json_equal_fails_on_value_mismatch() {
         let a = json!({"a": 1});
         let e = json!({"a": 2});
-        let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("value mismatch"), "got: {msg}");
         assert!(msg.contains("at a:"), "got: {msg}");
@@ -429,7 +431,7 @@ mod tests {
     fn json_equal_fails_on_array_order_mismatch() {
         let a = json!([1, 2, 3]);
         let e = json!([3, 2, 1]);
-        let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("value mismatch"), "got: {msg}");
     }
@@ -438,7 +440,7 @@ mod tests {
     fn json_equal_skips_ignored_path() {
         let a = json!({"id": "abc", "data": 1});
         let e = json!({"id": "xyz", "data": 1});
-        assert!(assert_json_equal_structural(&a, &e, &["id"]).is_ok());
+        assert!(assert_json_equal_structural_verbose(&a, &e, &["id"]).is_ok());
     }
 
     #[test]
@@ -449,11 +451,11 @@ mod tests {
         // comparator must not flag the asymmetric membership.
         let a = json!({"model": "x", "anthropic_beta": ["foo"]});
         let e = json!({"model": "x"});
-        assert!(assert_json_equal_structural(&a, &e, &["anthropic_beta"]).is_ok());
+        assert!(assert_json_equal_structural_verbose(&a, &e, &["anthropic_beta"]).is_ok());
 
         let a = json!({"model": "x"});
         let e = json!({"model": "x", "stream": true});
-        assert!(assert_json_equal_structural(&a, &e, &["stream"]).is_ok());
+        assert!(assert_json_equal_structural_verbose(&a, &e, &["stream"]).is_ok());
     }
 
     #[test]
@@ -461,7 +463,7 @@ mod tests {
         // Sanity: an ignored path must not silence ALL key mismatches.
         let a = json!({"model": "x", "extra": 1});
         let e = json!({"model": "x"});
-        let err = assert_json_equal_structural(&a, &e, &["stream"]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &["stream"]).unwrap_err();
         assert!(err.to_string().contains("key mismatch"), "got: {err}");
     }
 
@@ -469,7 +471,7 @@ mod tests {
     fn json_equal_recurses_nested_structural() {
         let a = json!({"outer": {"inner": [{"x": 1}, {"x": 2}]}});
         let e = json!({"outer": {"inner": [{"x": 1}, {"x": 99}]}});
-        let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("outer.inner[1].x"), "got: {msg}");
     }
@@ -478,7 +480,7 @@ mod tests {
     fn json_equal_fails_on_array_length_mismatch_naming_the_surplus_index() {
         let a = json!({"messages": [1, 2]});
         let e = json!({"messages": [1]});
-        let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("element mismatch"), "got: {msg}");
         assert!(msg.contains("messages[1]"), "got: {msg}");
@@ -488,7 +490,7 @@ mod tests {
     fn json_equal_reports_only_the_first_of_several_divergences() {
         let a = json!({"one": 1, "two": 2});
         let e = json!({"one": 9, "two": 8});
-        let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
+        let err = assert_json_equal_structural_verbose(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("at one:"), "got: {msg}");
         assert!(!msg.contains("at two:"), "got: {msg}");
@@ -682,16 +684,16 @@ mod tests {
     }
 
     #[test]
-    fn divergence_display_matches_the_comparator_failure_message() {
+    fn divergence_render_verbose_matches_the_comparator_failure_message() {
         let a = json!({"model": "x"});
         let e = json!({"model": "y"});
         let divergence = diff_all(&a, &e, &[]).remove(0);
 
-        let rendered = divergence.to_string();
+        let rendered = divergence.render_verbose();
 
         assert_eq!(
             rendered,
-            assert_json_equal_structural(&a, &e, &[])
+            assert_json_equal_structural_verbose(&a, &e, &[])
                 .unwrap_err()
                 .to_string()
         );

@@ -5,7 +5,7 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use super::{DiffMessage, assert_json_equal_structural};
+use super::{DiffMessage, assert_json_equal_structural_verbose};
 
 /// Error returned by [`parse_sse_events`]. Identifies the offending
 /// event index so failures point at the bad frame.
@@ -92,7 +92,7 @@ fn parse_sse_block(block: &str, event_index: usize) -> Result<Option<SseEventCmp
 }
 
 /// Compare two SSE byte streams pairwise. Event names must match in
-/// order; `data:` payloads are compared via [`assert_json_equal_structural`]
+/// order; `data:` payloads are compared via [`assert_json_equal_structural_verbose`]
 /// with no ignore paths. The diff message names the first mismatched
 /// event index.
 pub fn assert_sse_equal(actual: &[u8], expected: &[u8]) -> Result<(), DiffMessage> {
@@ -114,7 +114,9 @@ pub fn assert_sse_equal(actual: &[u8], expected: &[u8]) -> Result<(), DiffMessag
                 i, av.event, ev.event
             )));
         }
-        if let Err(diff) = assert_json_equal_structural(&av.data_parsed, &ev.data_parsed, &[]) {
+        if let Err(diff) =
+            assert_json_equal_structural_verbose(&av.data_parsed, &ev.data_parsed, &[])
+        {
             return Err(DiffMessage(format!(
                 "sse data mismatch at index {i}: {diff}"
             )));

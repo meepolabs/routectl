@@ -70,7 +70,7 @@ pub use harness::{
 };
 pub use json_diff::{
     DEFAULT_HEADER_ALLOW_SKIP, Divergence, DivergenceKind, assert_headers_equal,
-    assert_json_equal_structural, diff_all,
+    assert_json_equal_structural_verbose, diff_all,
 };
 pub use lane::{
     ANTHROPIC_FIDELITY_LANE, BEDROCK_API_SHAPES, Dialect, EGRESS_KINDS, EgressLane, Exception,

@@ -529,6 +529,43 @@ fn body_diff_shows_short_scalar_values_in_full() {
     );
 }
 
+/// On an allowlisted identifier path the length cap is the only gate: an
+/// over-cap value must report length only with NO prefix, while a short
+/// identifier on the same path (control) still renders verbatim, so the
+/// elision follows the cap rather than the path.
+#[test]
+fn body_diff_elides_an_over_cap_identifier_with_no_prefix_and_keeps_a_short_one() {
+    // Arrange: the over-cap value's distinguishing lead is inside the
+    // first 48 chars, so any prefix-style cap would echo it.
+    let over_cap = format!("LEADING-MARKER-{}", "y".repeat(200));
+    let over = json!({"model": over_cap});
+    let short = json!({"model": "sonnet"});
+    let other = json!({"model": "claude-sonnet-4-5"});
+
+    // Act
+    let elided = bounded_body_diff(&over, &other, &[]).expect("differing bodies report");
+    let control = bounded_body_diff(&short, &other, &[]).expect("differing bodies report");
+
+    // Assert
+    assert!(elided.contains("model"), "path preserved: {elided}");
+    assert!(
+        elided.contains("value mismatch"),
+        "kind preserved: {elided}"
+    );
+    assert!(
+        elided.contains("elided"),
+        "over-cap value not marked: {elided}"
+    );
+    assert!(
+        !elided.contains("LEADING-MARKER"),
+        "a prefix of the over-cap value leaked: {elided}"
+    );
+    assert!(
+        control.contains("\"sonnet\"") && control.contains("claude-sonnet-4-5"),
+        "a short identifier must render in full: {control}"
+    );
+}
+
 /// A large divergence set reports its true count while enumerating only
 /// the leading few, so a body-wide misalignment cannot produce an
 /// unbounded message.

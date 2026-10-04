@@ -127,7 +127,7 @@ Current inline captures:
   request content and no artifact bytes.
 
 For the loader and structural comparators (`load_fixture`,
-`assert_json_equal_structural`, `assert_sse_equal`, ...) see
+`assert_json_equal_structural_verbose`, `assert_sse_equal`, ...) see
 `crates/routectl-cli/tests/common/replay/` -- the entry point is
 `mod.rs`, with `loader.rs`, `json_diff.rs`, `sse_diff.rs`,
 `gated_lanes.rs`, `lane.rs`, `conservation.rs`, and `harness.rs` as
@@ -597,7 +597,7 @@ Fields:
   drivers (stream-body replay is deferred -- the capture rig does
   not yet write stream bodies). `assert_sse_equal` exists as harness
   scaffolding for future stream replay and has no driver caller today;
-  the exercised non-stream path uses `assert_json_equal_structural`.
+  the exercised non-stream path uses `assert_json_equal_structural_verbose`.
 - `model` -- post-alias provider model id from the trace. Used by the
   replay drivers to apply the corpus scope filter described below.
 - `routectl_version` -- workspace package version stamped by
