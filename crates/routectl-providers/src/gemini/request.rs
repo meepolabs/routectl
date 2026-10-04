@@ -1777,10 +1777,14 @@ fn mime_from_filename(filename: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
     use routectl_core::{CacheControl, ChatRequest, Message, MessageContent, Role};
     use routectl_core::{SystemBlock, SystemContent};
     use serde_json::json;
     use tracing_test::traced_test;
+
+    const SAMPLING_CONTROL_PROVIDER: &str = "gemini:sampling-control";
+    const CACHE_CONTROL_PROVIDER: &str = "gemini:cache-control";
 
     fn make_user(text: &str) -> Message {
         Message {
@@ -3284,7 +3288,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     fn all_seven_sampling_knobs_split_between_wire_and_one_warn() {
         let mut req = base_req();
         req.n = Some(3);
@@ -3295,8 +3298,12 @@ mod tests {
         req.presence_penalty = Some(1.75);
         req.frequency_penalty = Some(-0.5);
 
-        let r = translate("gemini:test", &req).expect("translate");
-        let body = serde_json::to_value(&r).unwrap();
+        let mut translated = None;
+        let events = routectl_testkit::capture_events(|| {
+            translated = Some(translate("gemini:test", &req).expect("translate"));
+        });
+        let body =
+            serde_json::to_value(translated.expect("translate ran inside the capture")).unwrap();
         let gc = body
             .get("generationConfig")
             .and_then(Value::as_object)
@@ -3326,15 +3333,16 @@ mod tests {
         }
 
         // One WARN, naming exactly the four dropped knobs and no value.
-        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
-        assert!(logs_contain("\"n\""));
-        assert!(logs_contain("logprobs"));
-        assert!(logs_contain("top_logprobs"));
-        assert!(logs_contain("logit_bias"));
-        assert!(!logs_contain("\"seed\""));
-        assert!(!logs_contain("presence_penalty"));
-        assert!(!logs_contain("frequency_penalty"));
-        assert!(!logs_contain("-100"));
+        let warn = sole_sampling_warn(&events, "gemini:test");
+        assert_eq!(
+            warn.field("dropped_fields"),
+            Some(r#"["n", "logprobs", "top_logprobs", "logit_bias"]"#)
+        );
+        assert_eq!(warn.field("dropped_count"), Some("4"));
+        assert!(
+            !format!("{warn:?}").contains("-100"),
+            "no caller value may be logged: {warn:?}"
+        );
     }
 
     #[test]
@@ -3381,26 +3389,44 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     fn no_sampling_warn_when_only_translated_knobs_set() {
         let mut req = base_req();
         req.seed = Some(42);
         req.presence_penalty = Some(0.5);
         req.frequency_penalty = Some(0.5);
+        let mut control = base_req();
+        control.n = Some(3);
 
-        let _ = translate("gemini:test", &req).expect("translate");
+        let events = routectl_testkit::capture_events(|| {
+            let _ = translate("gemini:test", &req).expect("translate");
+            let _ = translate(SAMPLING_CONTROL_PROVIDER, &control).expect("translate");
+        });
 
-        assert!(!logs_contain("sampling fields dropped"));
+        // The control's dropped `n` proves the capture saw the callsite.
+        sole_sampling_warn(&events, SAMPLING_CONTROL_PROVIDER);
+        assert!(
+            sampling_drops(&events, "gemini:test").is_empty(),
+            "no dropped knob must mean no sampling WARN; captured {events:?}"
+        );
     }
 
     #[test]
-    #[traced_test]
     fn no_sampling_warn_when_no_sampling_field_set() {
         let req = base_req();
+        let mut control = base_req();
+        control.n = Some(3);
 
-        let _ = translate("gemini:test", &req).expect("translate");
+        let events = routectl_testkit::capture_events(|| {
+            let _ = translate("gemini:test", &req).expect("translate");
+            let _ = translate(SAMPLING_CONTROL_PROVIDER, &control).expect("translate");
+        });
 
-        assert!(!logs_contain("sampling fields dropped"));
+        // The control's dropped `n` proves the capture saw the callsite.
+        sole_sampling_warn(&events, SAMPLING_CONTROL_PROVIDER);
+        assert!(
+            sampling_drops(&events, "gemini:test").is_empty(),
+            "no dropped knob must mean no sampling WARN; captured {events:?}"
+        );
     }
 
     #[test]
@@ -3588,20 +3614,38 @@ mod tests {
         );
     }
 
-    #[traced_test]
     #[test]
     #[serial_test::serial(gemini_cache_control_unsupported)]
     fn no_warn_for_clean_request() {
-        // Arrange: no cache_control -> no diagnostic.
+        // Arrange: no cache_control -> no diagnostic. The marked control
+        // proves the capture would have seen the diagnostic.
         let req = base_req();
+        let mut control = base_req();
+        control.cache_control = Some(CacheControl::ephemeral_5m());
 
         // Act
-        let _ = translate("gemini:test", &req).expect("translate ok");
+        let events = routectl_testkit::capture_events(|| {
+            let _ = translate("gemini:test", &req).expect("translate ok");
+            let _ = translate(CACHE_CONTROL_PROVIDER, &control).expect("translate ok");
+        });
 
         // Assert
-        assert!(
-            !logs_contain("cache_control dropped"),
-            "no drop diagnostic without a cache_control marker"
+        let drops = |provider: &str| {
+            events
+                .iter()
+                .filter(|e| e.message.contains("cache_control dropped"))
+                .filter(|e| e.field("provider") == Some(provider))
+                .count()
+        };
+        assert_eq!(
+            drops(CACHE_CONTROL_PROVIDER),
+            1,
+            "the marked control must log its drop; captured {events:?}"
+        );
+        assert_eq!(
+            drops("gemini:test"),
+            0,
+            "no drop diagnostic without a cache_control marker; captured {events:?}"
         );
     }
 

@@ -1695,29 +1695,53 @@ mod tests {
     /// normalizer, so the shared sampling leak-guard fires here too --
     /// attributed to the Bedrock provider id.
     #[test]
-    #[tracing_test::traced_test]
     fn sampling_fields_warn_once_naming_dropped_fields() {
+        use crate::sampling_drop_guard::test_support::sole_sampling_warn;
+
         let cfg = fake_cfg();
         let mut req = user_req();
         req.seed = Some(42);
         req.top_logprobs = Some(5);
 
-        let body = normalize_request(&cfg, &req).unwrap();
+        let mut body = None;
+        let events = routectl_testkit::capture_events(|| {
+            body = Some(normalize_request(&cfg, &req).unwrap())
+        });
+        let body = body.expect("normalize ran inside the capture");
 
         assert!(body.get("seed").is_none(), "got: {body}");
-        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
-        assert!(logs_contain("top_logprobs"));
+        let warn = sole_sampling_warn(&events, &cfg.id);
+        assert_eq!(
+            warn.field("dropped_fields"),
+            Some(r#"["seed", "top_logprobs"]"#)
+        );
+        assert_eq!(warn.field("dropped_count"), Some("2"));
     }
 
     #[test]
-    #[tracing_test::traced_test]
     fn no_sampling_warn_when_no_sampling_field_set() {
+        use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
+
         let cfg = fake_cfg();
         let req = user_req();
+        let control_cfg = BedrockConfig {
+            id: "bedrock:sampling-control".into(),
+            ..fake_cfg()
+        };
+        let mut control = user_req();
+        control.n = Some(3);
 
-        let _ = normalize_request(&cfg, &req).unwrap();
+        let events = routectl_testkit::capture_events(|| {
+            let _ = normalize_request(&cfg, &req).unwrap();
+            let _ = normalize_request(&control_cfg, &control).unwrap();
+        });
 
-        assert!(!logs_contain("sampling fields dropped"));
+        // The control's dropped `n` proves the capture saw the callsite.
+        sole_sampling_warn(&events, &control_cfg.id);
+        assert!(
+            sampling_drops(&events, &cfg.id).is_empty(),
+            "no sampling field must mean no sampling WARN; captured {events:?}"
+        );
     }
 
     /// Both sources of the unrepresentable `output_config.format` keys are

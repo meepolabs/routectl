@@ -2815,9 +2815,8 @@ async fn forwarded_bearer_none_still_calls_cfg_auth() {
 /// The resolver must never log the forwarded token. Drive the forwarded
 /// path under a log capture and assert the token string is absent from
 /// every emitted event -- a regression guard against a future debug log
-/// in the resolver. Uses a current-thread runtime so the test stays on
-/// the crate's established `#[traced_test] #[test]` shape.
-#[traced_test]
+/// in the resolver. Uses a current-thread runtime so the resolver runs on
+/// the capturing thread.
 #[test]
 fn resolve_forwarded_bearer_does_not_log_token() {
     let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
@@ -2831,14 +2830,28 @@ fn resolve_forwarded_bearer_does_not_log_token() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("build current-thread runtime");
-    let token = rt
-        .block_on(provider.resolve_effective_token(&req))
+    let mut token = None;
+    let events = routectl_testkit::capture_events(|| {
+        token = Some(rt.block_on(provider.resolve_effective_token(&req)));
+        // Capture-is-live control: an emission this capture must observe.
+        provider.log_system_role_turns_on_4xx(400, 1, false);
+    });
+    let token = token
+        .expect("resolver ran inside the capture")
         .expect("forwarded token resolves");
     assert_eq!(token, secret);
 
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.field("system_role_turn_count") == Some("1"))
+            .count(),
+        1,
+        "the control emission must be captured; captured {events:?}"
+    );
     assert!(
-        !logs_contain(secret),
-        "the forwarded token must never be logged by the resolver"
+        events.iter().all(|e| !format!("{e:?}").contains(secret)),
+        "the forwarded token must never be logged by the resolver; captured {events:?}"
     );
 }
 
@@ -3123,7 +3136,6 @@ fn beta_decision_effort_body_sets_both_effort_booleans() {
 /// round-trip) and assert the beta-context fields land on the emitted
 /// event, so a beta-caused 400 recurrence is diagnosable without
 /// enabling header tracing.
-#[traced_test]
 #[test]
 fn log_beta_decision_on_4xx_emits_beta_context_fields() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -3141,23 +3153,38 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
         body_has_effort: true,
     };
 
-    provider.log_beta_decision_on_4xx(400, &decision, "invalid_request_error: bad beta");
+    let events = routectl_testkit::capture_events(|| {
+        provider.log_beta_decision_on_4xx(400, &decision, "invalid_request_error: bad beta");
+    });
 
-    assert!(logs_contain(
-        "anthropic-api oauth 4xx beta decision context"
-    ));
-    assert!(logs_contain("status=400"));
-    assert!(logs_contain("is_non_cc=true"));
-    assert!(logs_contain("has_oauth_beta=true"));
-    assert!(logs_contain("has_context_1m_beta=true"));
-    assert!(logs_contain("has_context_management_beta=false"));
-    assert!(logs_contain("has_mid_conversation_system_beta=true"));
-    assert!(logs_contain("has_advisor_tool_beta=false"));
-    assert!(logs_contain("has_thinking_token_count_beta=false"));
-    assert!(logs_contain("has_effort_beta=true"));
-    assert!(logs_contain("body_has_effort=true"));
+    let matches: Vec<_> = events
+        .iter()
+        .filter(|e| e.message == "anthropic-api oauth 4xx beta decision context")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one beta decision event; captured {events:?}"
+    );
+    let event = matches[0];
+    assert_eq!(event.level, tracing::Level::WARN);
+    for (name, value) in [
+        ("status", "400"),
+        ("is_non_cc", "true"),
+        ("has_oauth_beta", "true"),
+        ("has_context_1m_beta", "true"),
+        ("has_context_management_beta", "false"),
+        ("has_mid_conversation_system_beta", "true"),
+        ("has_advisor_tool_beta", "false"),
+        ("has_thinking_token_count_beta", "false"),
+        ("has_effort_beta", "true"),
+        ("body_has_effort", "true"),
+    ] {
+        assert_eq!(event.field(name), Some(value), "field {name}: {event:?}");
+    }
 
-    // Bounded booleans only: no beta wire string may reach the log.
+    // Bounded booleans only: no beta wire string may reach the log. The
+    // decision event above is the capture-is-live control for this scan.
     for flag in [
         routectl_core::identity::anthropic::CONTEXT_1M_BETA,
         routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA,
@@ -3166,8 +3193,8 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
         routectl_core::identity::anthropic::EFFORT_BETA,
     ] {
         assert!(
-            !logs_contain(flag),
-            "raw beta string {flag} must never be logged"
+            events.iter().all(|e| !format!("{e:?}").contains(flag)),
+            "raw beta string {flag} must never be logged; captured {events:?}"
         );
     }
 }
@@ -3202,16 +3229,29 @@ fn log_system_role_turns_on_4xx_reports_an_absent_beta_as_false() {
 
 /// Two gates, both required: a 4xx with no system turns and a success with
 /// system turns are each silent.
-#[traced_test]
 #[test]
 fn log_system_role_turns_on_4xx_is_silent_without_both_conditions() {
     let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
 
-    provider.log_system_role_turns_on_4xx(400, 0, true);
-    provider.log_system_role_turns_on_4xx(200, 3, true);
-    provider.log_system_role_turns_on_4xx(500, 3, true);
+    let events = routectl_testkit::capture_events(|| {
+        provider.log_system_role_turns_on_4xx(400, 0, true);
+        provider.log_system_role_turns_on_4xx(200, 3, true);
+        provider.log_system_role_turns_on_4xx(500, 3, true);
+        // Capture-is-live control: both conditions hold, so this one logs.
+        provider.log_system_role_turns_on_4xx(404, 7, true);
+    });
 
-    assert!(!logs_contain("system_role_turn_count"));
+    let logged: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("system_role_turn_count").is_some())
+        .collect();
+    assert_eq!(
+        logged.len(),
+        1,
+        "only the control call may log; captured {events:?}"
+    );
+    assert_eq!(logged[0].field("status"), Some("404"));
+    assert_eq!(logged[0].field("system_role_turn_count"), Some("7"));
 }
 
 /// The count reads the assembled wire body's `messages[]`, so it reflects

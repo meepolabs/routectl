@@ -1048,8 +1048,10 @@ mod reasoning_leak_guard_tests {
 #[cfg(test)]
 mod sampling_leak_guard_tests {
     use super::normalize;
+    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
-    use tracing_test::traced_test;
+
+    const CONTROL_PROVIDER: &str = "anthropic:sampling-control";
 
     fn user_req() -> ChatRequest {
         ChatRequest {
@@ -1071,7 +1073,6 @@ mod sampling_leak_guard_tests {
     }
 
     #[test]
-    #[traced_test]
     fn sampling_fields_warn_once_naming_dropped_fields() {
         let mut req = user_req();
         req.n = Some(3);
@@ -1082,34 +1083,56 @@ mod sampling_leak_guard_tests {
         req.presence_penalty = Some(0.5);
         req.frequency_penalty = Some(0.25);
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
+        let mut body = None;
+        let events = routectl_testkit::capture_events(|| {
+            body = Some(
+                normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap(),
+            );
+        });
+        let body = body.expect("normalize ran inside the capture");
 
         assert!(body.get("n").is_none());
         assert!(body.get("logprobs").is_none());
-        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
         // This egress honors none of the seven, so the WARN names all of
         // them -- unaffected by any other egress gaining a translation.
-        for name in [
-            "\"n\"",
-            "\"seed\"",
-            "logprobs",
-            "top_logprobs",
-            "logit_bias",
-            "presence_penalty",
-            "frequency_penalty",
-        ] {
-            assert!(logs_contain(name), "WARN must name {name}");
-        }
+        let warn = sole_sampling_warn(&events, "anthropic:test");
+        assert_eq!(
+            warn.field("dropped_fields"),
+            Some(
+                r#"["n", "seed", "logprobs", "top_logprobs", "logit_bias", "presence_penalty", "frequency_penalty"]"#
+            )
+        );
+        assert_eq!(warn.field("dropped_count"), Some("7"));
     }
 
     #[test]
-    #[traced_test]
     fn no_sampling_warn_when_no_sampling_field_set() {
         let req = user_req();
+        let mut control = user_req();
+        control.n = Some(3);
 
-        let _ = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
+        let events = routectl_testkit::capture_events(|| {
+            let _ =
+                normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
+            let _ = normalize(
+                CONTROL_PROVIDER,
+                &control,
+                false,
+                &[],
+                false,
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+        });
 
-        assert!(!logs_contain("sampling fields dropped"));
+        // The control's dropped `n` proves the capture saw the callsite.
+        sole_sampling_warn(&events, CONTROL_PROVIDER);
+        assert!(
+            sampling_drops(&events, "anthropic:test").is_empty(),
+            "no sampling field must mean no sampling WARN; captured {events:?}"
+        );
     }
 }
 
@@ -1117,8 +1140,32 @@ mod sampling_leak_guard_tests {
 mod response_format_tests {
     use super::normalize;
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use routectl_testkit::CapturedEvent;
     use serde_json::json;
-    use tracing_test::traced_test;
+
+    const FORMAT_CONTROL_PROVIDER: &str = "anthropic:format-control";
+
+    /// Captured dropped-format-key events attributed to `provider`, at any
+    /// level, so an absence check also catches a downgraded emission.
+    fn format_key_drops<'a>(events: &'a [CapturedEvent], provider: &str) -> Vec<&'a CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| e.field("event") == Some(super::OUTPUT_FORMAT_KEY_DROP_EVENT))
+            .filter(|e| e.field("provider") == Some(provider))
+            .collect()
+    }
+
+    /// The single WARN-level dropped-format-key event for `provider`.
+    fn sole_format_key_drop<'a>(events: &'a [CapturedEvent], provider: &str) -> &'a CapturedEvent {
+        let drops = format_key_drops(events, provider);
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected exactly one dropped-format-key event for {provider}; captured {events:?}"
+        );
+        assert_eq!(drops[0].level, tracing::Level::WARN, "{:?}", drops[0]);
+        drops[0]
+    }
 
     /// The exact member set Anthropic's `output_config.format` accepts for a
     /// json_schema directive. Asserted as a SET rather than snapshotted: an
@@ -1240,7 +1287,6 @@ mod response_format_tests {
     }
 
     #[test]
-    #[traced_test]
     fn one_warn_per_normalization_names_no_caller_value() {
         let req = user_req(Some(json!({
             "type": "json_schema",
@@ -1251,45 +1297,61 @@ mod response_format_tests {
             }
         })));
 
-        let _ = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
-
-        logs_assert(|lines: &[&str]| {
-            let matches: Vec<&&str> = lines
-                .iter()
-                .filter(|l| l.contains(super::OUTPUT_FORMAT_KEY_DROP_EVENT))
-                .collect();
-            let warns = matches.iter().filter(|l| l.contains("WARN")).count();
-            if matches.len() == 1 && warns == 1 {
-                return Ok(());
-            }
-            Err(format!(
-                "expected exactly one WARN for the dropped format keys; got \
-                 {} line(s), {warns} at WARN: {matches:?}",
-                matches.len()
-            ))
+        let events = routectl_testkit::capture_events(|| {
+            let _ =
+                normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
         });
-        assert!(logs_contain("dropped_name=true"));
-        assert!(logs_contain("dropped_strict=true"));
+
+        let warn = sole_format_key_drop(&events, "anthropic:test");
+        assert_eq!(warn.field("dropped_name"), Some("true"));
+        assert_eq!(warn.field("dropped_strict"), Some("true"));
         assert!(
-            !logs_contain("secret-widget-name"),
-            "the caller-controlled schema name must never be logged"
+            events
+                .iter()
+                .all(|e| !format!("{e:?}").contains("secret-widget-name")),
+            "the caller-controlled schema name must never be logged; captured {events:?}"
         );
     }
 
     /// The drop diagnostic is feature-triggered: a conforming directive that
     /// carries neither key produces no WARN.
     #[test]
-    #[traced_test]
     fn no_warn_when_neither_key_present() {
         let req = user_req(Some(json!({
             "type": "json_schema",
             "json_schema": {"schema": {"type": "object"}}
         })));
+        let control = user_req(Some(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "w", "schema": {"type": "object"}}
+        })));
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap();
+        let mut body = None;
+        let events = routectl_testkit::capture_events(|| {
+            body = Some(
+                normalize("anthropic:test", &req, false, &[], false, None, false, true).unwrap(),
+            );
+            let _ = normalize(
+                FORMAT_CONTROL_PROVIDER,
+                &control,
+                false,
+                &[],
+                false,
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+        });
+        let body = body.expect("normalize ran inside the capture");
 
         assert_json_schema_format_members(&body["output_config"]["format"]);
-        assert!(!logs_contain(super::OUTPUT_FORMAT_KEY_DROP_EVENT));
+        // The control's dropped `name` proves the capture saw the callsite.
+        sole_format_key_drop(&events, FORMAT_CONTROL_PROVIDER);
+        assert!(
+            format_key_drops(&events, "anthropic:test").is_empty(),
+            "a directive with neither key must not warn; captured {events:?}"
+        );
     }
 
     #[test]

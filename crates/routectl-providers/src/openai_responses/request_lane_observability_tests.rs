@@ -365,19 +365,40 @@ fn warn_fires_for_top_level_marker_and_wire_is_unchanged() {
     assert!(hinted_wire.get("cache_control").is_none());
 }
 
-#[traced_test]
+// Carries the `cache_control_unsupported` serial guard because its marked
+// control request bumps that process-global counter.
 #[test]
+#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn no_warn_for_clean_request() {
-    // Arrange
+    // Arrange: the marked control proves the capture would see the
+    // diagnostic. The WARN carries no provider field, so each request runs
+    // in its own capture.
     let req = req_with(vec![user_text("hi")]);
+    let mut control = req_with(vec![user_text("hi")]);
+    control.cache_control = Some(CacheControl::ephemeral_5m());
+    let drops = |r: &ChatRequest| {
+        let events = routectl_testkit::capture_events(|| {
+            let _ = translate(&cfg(), r).expect("translate");
+        });
+        let count = events
+            .iter()
+            .filter(|e| e.message.contains("cache_control dropped"))
+            .count();
+        (count, events)
+    };
 
     // Act
-    let _ = translate(&cfg(), &req).expect("translate");
+    let (control_count, control_events) = drops(&control);
+    let (count, events) = drops(&req);
 
     // Assert: a request with no caller markers emits no drop diagnostic.
-    assert!(
-        !logs_contain("cache_control dropped"),
-        "no drop diagnostic should fire when no caller marker is present"
+    assert_eq!(
+        control_count, 1,
+        "the marked control must log its drop once; captured {control_events:?}"
+    );
+    assert_eq!(
+        count, 0,
+        "no drop diagnostic should fire when no caller marker is present; captured {events:?}"
     );
 }
 
@@ -390,9 +411,10 @@ fn no_warn_for_clean_request() {
 // is OBSERVABLE (one WARN naming the fields) and silent when unset.
 // ---------------------------------------------------------------------------
 
-#[traced_test]
 #[test]
 fn sampling_fields_warn_once_naming_dropped_fields() {
+    use crate::sampling_drop_guard::test_support::sole_sampling_warn;
+
     // Arrange
     let mut req = req_with(vec![user_text("hi")]);
     req.n = Some(3);
@@ -404,36 +426,46 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
     req.frequency_penalty = Some(0.7);
 
     // Act
-    let wire = translate_to_json(&cfg(), &req);
+    let mut wire = None;
+    let events = routectl_testkit::capture_events(|| wire = Some(translate_to_json(&cfg(), &req)));
+    let wire = wire.expect("translate ran inside the capture");
 
     // Assert
-    logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
     // This egress honors none of the seven, so the WARN names all of them --
     // unaffected by any other egress gaining a translation.
-    for name in [
-        "\"n\"",
-        "\"seed\"",
-        "logprobs",
-        "top_logprobs",
-        "logit_bias",
-        "presence_penalty",
-        "frequency_penalty",
-    ] {
-        assert!(logs_contain(name), "WARN must name {name}");
-    }
+    let warn = sole_sampling_warn(&events, &cfg().id);
+    assert_eq!(
+        warn.field("dropped_fields"),
+        Some(
+            r#"["n", "seed", "logprobs", "top_logprobs", "logit_bias", "presence_penalty", "frequency_penalty"]"#
+        )
+    );
+    assert_eq!(warn.field("dropped_count"), Some("7"));
     assert!(wire.get("n").is_none(), "got: {wire}");
     assert!(wire.get("frequency_penalty").is_none(), "got: {wire}");
 }
 
-#[traced_test]
 #[test]
 fn no_sampling_warn_when_no_sampling_field_set() {
+    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
+
     // Arrange
     let req = req_with(vec![user_text("hi")]);
+    let mut control_cfg = cfg();
+    control_cfg.id = "openai-responses:sampling-control".into();
+    let mut control = req_with(vec![user_text("hi")]);
+    control.n = Some(3);
 
     // Act
-    let _ = translate(&cfg(), &req).expect("translate");
+    let events = routectl_testkit::capture_events(|| {
+        let _ = translate(&cfg(), &req).expect("translate");
+        let _ = translate(&control_cfg, &control).expect("translate");
+    });
 
-    // Assert
-    assert!(!logs_contain("sampling fields dropped"));
+    // Assert: the control's dropped `n` proves the capture saw the callsite.
+    sole_sampling_warn(&events, &control_cfg.id);
+    assert!(
+        sampling_drops(&events, &cfg().id).is_empty(),
+        "no sampling field must mean no sampling WARN; captured {events:?}"
+    );
 }

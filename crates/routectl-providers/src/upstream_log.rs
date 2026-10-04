@@ -63,6 +63,7 @@ pub fn warn_upstream_failure(
 #[cfg(test)]
 mod tests {
     use super::warn_upstream_failure;
+    use routectl_testkit::CapturedEvent;
     use tracing_test::traced_test;
 
     #[derive(Debug)]
@@ -70,48 +71,84 @@ mod tests {
         ApiKey,
     }
 
-    #[traced_test]
+    fn with_message<'a>(events: &'a [CapturedEvent], message: &str) -> Vec<&'a CapturedEvent> {
+        events.iter().filter(|e| e.message == message).collect()
+    }
+
     #[test]
     fn auth_status_with_auth_kind_logs_plain_enum_not_option() {
         // Arrange + Act: a 401 with an auth_kind present.
-        warn_upstream_failure(
-            "anthropic:p",
-            401,
-            Some(&FakeAuthKind::ApiKey),
-            "denied",
-            "anthropic",
-        );
+        let events = routectl_testkit::capture_events(|| {
+            warn_upstream_failure(
+                "anthropic:p",
+                401,
+                Some(&FakeAuthKind::ApiKey),
+                "denied",
+                "anthropic",
+            );
+        });
 
         // Assert: the auth-failed message fires and the field carries the
-        // plain unwrapped enum (`auth_kind=ApiKey`), NOT the Debug of the
-        // Option (`Some(ApiKey)`).
-        assert!(logs_contain("upstream auth failed"));
-        assert!(logs_contain("auth_kind=ApiKey"));
-        assert!(!logs_contain("Some(ApiKey)"));
+        // plain unwrapped enum (`ApiKey`), NOT the Debug of the Option
+        // (`Some(ApiKey)`).
+        let auth = with_message(&events, "upstream auth failed");
+        assert_eq!(auth.len(), 1, "captured {events:?}");
+        assert_eq!(auth[0].field("auth_kind"), Some("ApiKey"));
     }
 
-    #[traced_test]
     #[test]
     fn auth_status_without_key_omits_field() {
-        // Arrange + Act: a 403 from a provider that carries no AuthKind.
-        warn_upstream_failure("openai-compat:p", 403, None, "denied", "openai-compat");
+        // Arrange + Act: a 403 from a provider that carries no AuthKind,
+        // beside a control that does carry one.
+        let events = routectl_testkit::capture_events(|| {
+            warn_upstream_failure("openai-compat:p", 403, None, "denied", "openai-compat");
+            warn_upstream_failure(
+                "anthropic:control",
+                403,
+                Some(&FakeAuthKind::ApiKey),
+                "denied",
+                "anthropic",
+            );
+        });
 
-        // Assert: the auth-failed message fires but no auth_kind field is
-        // emitted at all. (Match the `auth_kind=` field token, not a bare
-        // substring -- tracing-test's buffer also holds the span/test name.)
-        assert!(logs_contain("upstream auth failed"));
-        assert!(!logs_contain("auth_kind="));
+        // Assert: the control proves the capture records the field when
+        // present; the keyless event carries no auth_kind field at all.
+        let auth = with_message(&events, "upstream auth failed");
+        assert_eq!(auth.len(), 2, "captured {events:?}");
+        let control = auth
+            .iter()
+            .find(|e| e.field("provider") == Some("anthropic:control"))
+            .expect("control event captured");
+        assert_eq!(control.field("auth_kind"), Some("ApiKey"));
+        let keyless = auth
+            .iter()
+            .find(|e| e.field("provider") == Some("openai-compat:p"))
+            .expect("keyless event captured");
+        assert_eq!(keyless.field("auth_kind"), None, "{keyless:?}");
     }
 
-    #[traced_test]
     #[test]
     fn non_auth_status_emits_generic_error_message() {
-        // Arrange + Act: a 500 carries no auth_kind.
-        warn_upstream_failure("openai-compat:p", 500, None, "boom", "openai-compat");
+        // Arrange + Act: a 500 carries no auth_kind; a 401 control proves
+        // the capture would see the auth message.
+        let events = routectl_testkit::capture_events(|| {
+            warn_upstream_failure("openai-compat:p", 500, None, "boom", "openai-compat");
+            warn_upstream_failure(
+                "openai-compat:control",
+                401,
+                None,
+                "denied",
+                "openai-compat",
+            );
+        });
 
         // Assert: the generic error message fires, NOT the auth one.
-        assert!(logs_contain("upstream error"));
-        assert!(!logs_contain("upstream auth failed"));
+        let errors = with_message(&events, "upstream error");
+        assert_eq!(errors.len(), 1, "captured {events:?}");
+        assert_eq!(errors[0].field("provider"), Some("openai-compat:p"));
+        let auth = with_message(&events, "upstream auth failed");
+        assert_eq!(auth.len(), 1, "captured {events:?}");
+        assert_eq!(auth[0].field("provider"), Some("openai-compat:control"));
     }
 
     #[traced_test]

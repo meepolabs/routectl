@@ -9,6 +9,7 @@
 
 use super::super::normalize_request;
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
+use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
 use routectl_core::cache_control::CacheControl;
 use routectl_core::system_content::SystemBlock;
 use routectl_core::{
@@ -16,7 +17,6 @@ use routectl_core::{
     ReasoningConfig, Role, SystemContent, ToolDef,
 };
 use serde_json::json;
-use tracing_test::traced_test;
 
 fn fake_cfg() -> BedrockConfig {
     BedrockConfig {
@@ -973,7 +973,6 @@ fn other_content_part_with_cache_control_emits_sibling_cache_point() {
 /// A preserved `Other` must NOT fire the old drop WARN, and MUST log the
 /// passthrough at debug level. Pins the log-level change so a future edit
 /// that re-drops Other is caught.
-#[traced_test]
 #[test]
 fn preserved_other_logs_passthrough_not_drop() {
     use serde_json::Map;
@@ -1000,15 +999,30 @@ fn preserved_other_logs_passthrough_not_drop() {
         ..Default::default()
     };
 
-    let _ = normalize_request(&cfg, &req).unwrap();
+    let events = routectl_testkit::capture_events(|| {
+        let _ = normalize_request(&cfg, &req).unwrap();
+    });
 
-    assert!(
-        !logs_contain("dropping unknown ContentPart::Other"),
-        "a preserved Other must not fire the drop WARN"
+    // The passthrough line is the capture-is-live control for the absence
+    // check: the same translation emits it.
+    let passthrough: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.message == "passing ContentPart::Other through Converse egress as single-key union"
+        })
+        .collect();
+    assert_eq!(
+        passthrough.len(),
+        1,
+        "a preserved Other must log the passthrough once; captured {events:?}"
     );
+    assert_eq!(passthrough[0].level, tracing::Level::DEBUG);
+    assert_eq!(passthrough[0].field("type_tag"), Some("video"));
     assert!(
-        logs_contain("passing ContentPart::Other through Converse egress as single-key union"),
-        "a preserved Other must log the passthrough at debug level"
+        !events
+            .iter()
+            .any(|e| e.message.contains("dropping unknown ContentPart::Other")),
+        "a preserved Other must not fire the drop WARN; captured {events:?}"
     );
 }
 
@@ -1252,7 +1266,6 @@ fn keeps_temperature_when_top_p_unset() {
 /// A request carrying canonical sampling knobs the Converse envelope
 /// cannot model emits one WARN naming them, and the body ships none of
 /// them.
-#[traced_test]
 #[test]
 fn sampling_fields_warn_once_naming_dropped_fields() {
     // Arrange
@@ -1272,29 +1285,28 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
     };
 
     // Act
-    let body = normalize_request(&cfg, &req).unwrap();
+    let mut body = None;
+    let events = routectl_testkit::capture_events(|| {
+        body = Some(normalize_request(&cfg, &req).unwrap());
+    });
+    let body = body.expect("normalize ran inside the capture");
 
     // Assert
     assert!(body.get("n").is_none(), "got {body}");
-    logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
     // This egress honors none of the seven, so the WARN names all of them --
     // unaffected by any other egress gaining a translation.
-    for name in [
-        "\"n\"",
-        "\"seed\"",
-        "logprobs",
-        "top_logprobs",
-        "logit_bias",
-        "presence_penalty",
-        "frequency_penalty",
-    ] {
-        assert!(logs_contain(name), "WARN must name {name}");
-    }
+    let warn = sole_sampling_warn(&events, &cfg.id);
+    assert_eq!(
+        warn.field("dropped_fields"),
+        Some(
+            r#"["n", "seed", "logprobs", "top_logprobs", "logit_bias", "presence_penalty", "frequency_penalty"]"#
+        )
+    );
+    assert_eq!(warn.field("dropped_count"), Some("7"));
 }
 
 /// The sampling WARN stays silent when the request carries none of the
 /// seven knobs.
-#[traced_test]
 #[test]
 fn no_sampling_warn_when_no_sampling_field_set() {
     // Arrange
@@ -1305,10 +1317,25 @@ fn no_sampling_warn_when_no_sampling_field_set() {
         max_tokens: Some(256),
         ..Default::default()
     };
+    let control_cfg = BedrockConfig {
+        id: "bedrock:sampling-control".into(),
+        ..fake_cfg()
+    };
+    let control = ChatRequest {
+        n: Some(3),
+        ..req.clone()
+    };
 
     // Act
-    let _ = normalize_request(&cfg, &req).unwrap();
+    let events = routectl_testkit::capture_events(|| {
+        let _ = normalize_request(&cfg, &req).unwrap();
+        let _ = normalize_request(&control_cfg, &control).unwrap();
+    });
 
-    // Assert
-    assert!(!logs_contain("sampling fields dropped"));
+    // Assert: the control's dropped `n` proves the capture saw the callsite.
+    sole_sampling_warn(&events, &control_cfg.id);
+    assert!(
+        sampling_drops(&events, &cfg.id).is_empty(),
+        "no sampling field must mean no sampling WARN; captured {events:?}"
+    );
 }

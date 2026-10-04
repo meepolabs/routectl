@@ -667,26 +667,51 @@ mod tests {
 
     /// No top-level cache_control means no WARN -- the common path stays
     /// quiet.
-    #[traced_test]
     #[test]
     fn no_top_level_cache_control_does_not_warn() {
-        // Arrange: req_with_thinking carries no cache_control.
+        // Arrange: req_with_thinking carries no cache_control; the control
+        // carries one, proving the capture would see the WARN.
         let cfg = fake_cfg();
         let req = req_with_thinking();
+        let mut control = req_with_thinking();
+        control.cache_control = Some(routectl_core::cache_control::CacheControl::ephemeral_1h());
 
-        // Act
-        let _ = build_additional_fields(
-            &cfg,
-            &req,
-            None,
-            &mut ClientFingerprintStripTally::default(),
-        );
+        // Act: the WARN carries no provider field, so the two assemblies run
+        // in separate captures and the control's count is pinned alongside.
+        let assemble = |r: &ChatRequest| {
+            routectl_testkit::capture_events(|| {
+                let _ = build_additional_fields(
+                    &cfg,
+                    r,
+                    None,
+                    &mut ClientFingerprintStripTally::default(),
+                );
+            })
+        };
+        let control_events = assemble(&control);
+        let events = assemble(&req);
 
         // Assert
-        assert!(
-            !logs_contain("top-level cache_control on Converse path does not produce caching"),
-            "WARN must not fire when no top-level cache_control is present"
+        assert_eq!(
+            converse_cache_control_warns(&control_events),
+            1,
+            "the marked control must warn once; captured {control_events:?}"
         );
+        assert_eq!(
+            converse_cache_control_warns(&events),
+            0,
+            "WARN must not fire when no top-level cache_control is present; captured {events:?}"
+        );
+    }
+
+    fn converse_cache_control_warns(events: &[routectl_testkit::CapturedEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                e.message
+                    .contains("top-level cache_control on Converse path does not produce caching")
+            })
+            .count()
     }
 
     /// Operator-deliberate `metadata` set via
@@ -1067,7 +1092,6 @@ mod tests {
     /// Anthropic egress -- one WARN per bag assembly, naming which keys were
     /// omitted and never the caller's schema name.
     #[test]
-    #[traced_test]
     fn bag_assembly_warns_once_for_the_dropped_format_keys() {
         use serde_json::json;
 
@@ -1082,13 +1106,16 @@ mod tests {
             }
         }));
 
-        let bag = build_additional_fields(
-            &cfg,
-            &req,
-            None,
-            &mut ClientFingerprintStripTally::default(),
-        )
-        .expect("bag should be present");
+        let mut bag = None;
+        let events = routectl_testkit::capture_events(|| {
+            bag = build_additional_fields(
+                &cfg,
+                &req,
+                None,
+                &mut ClientFingerprintStripTally::default(),
+            );
+        });
+        let bag = bag.expect("bag should be present");
 
         let fmt = bag["output_config"]["format"]
             .as_object()
@@ -1097,26 +1124,28 @@ mod tests {
             fmt.get("name").is_none() && fmt.get("strict").is_none(),
             "neither key may reach the Converse bag; got: {bag}"
         );
-        logs_assert(|lines: &[&str]| {
-            let matches: Vec<&&str> = lines
-                .iter()
-                .filter(|l| l.contains("output_config_format_keys_dropped"))
-                .collect();
-            let warns = matches.iter().filter(|l| l.contains("WARN")).count();
-            if matches.len() == 1 && warns == 1 {
-                return Ok(());
-            }
-            Err(format!(
-                "expected exactly one WARN for the dropped format keys; got \
-                 {} line(s), {warns} at WARN: {matches:?}",
-                matches.len()
-            ))
-        });
-        assert!(logs_contain("dropped_name=true"));
-        assert!(logs_contain("dropped_strict=true"));
+        let drops: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.field("event")
+                    == Some(crate::anthropic_api::request::OUTPUT_FORMAT_KEY_DROP_EVENT)
+            })
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected exactly one dropped-format-key event; captured {events:?}"
+        );
+        assert_eq!(drops[0].level, tracing::Level::WARN, "{:?}", drops[0]);
+        assert_eq!(drops[0].field("provider"), Some(cfg.id.as_str()));
+        assert_eq!(drops[0].field("dropped_name"), Some("true"));
+        assert_eq!(drops[0].field("dropped_strict"), Some("true"));
+        // The drop event above is the capture-is-live control for this scan.
         assert!(
-            !logs_contain("secret-widget-name"),
-            "the caller-controlled schema name must never be logged"
+            events
+                .iter()
+                .all(|e| !format!("{e:?}").contains("secret-widget-name")),
+            "the caller-controlled schema name must never be logged; captured {events:?}"
         );
     }
 
