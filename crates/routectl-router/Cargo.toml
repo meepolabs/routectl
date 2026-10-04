@@ -85,7 +85,7 @@ dhat = { version = "0.3", optional = true }
 # the full provider set instead of the reduced one.
 routectl-router = { path = ".", default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
-serial_test = "3"
+serial_test = "4"
 wiremock.workspace = true
 routectl-testkit.workspace = true
 criterion = { workspace = true }
