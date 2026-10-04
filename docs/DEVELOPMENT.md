@@ -10,8 +10,9 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 Test commands build with the `test-release` profile (workspace
 `Cargo.toml`). It inherits the shipped release profile's correctness
 semantics unchanged -- opt-level, debug assertions off, overflow checks
-off -- and differs only in build cost and diagnostics: no LTO, 16 codegen
-units, symbols kept for readable backtraces, and `panic = "unwind"` (the
+off -- and differs only in build cost and diagnostics: no LTO, 8 codegen
+units, std debuginfo stripped to save disk (symbols and the panic's
+file:line location still print), and `panic = "unwind"` (the
 test harness unwinds, so an inherited abort would build the dependency
 graph twice). Plain `cargo test` is still the fast debug build for local
 iteration. Because the profile compiles out `debug_assert!` and overflow

@@ -198,9 +198,13 @@ strip = false
 # diagnostics settings differ:
 #   lto = false          link-time optimization is a large per-binary link
 #                        cost multiplied across every test binary.
-#   codegen-units = 16   parallel codegen; codegen-units = 1 serializes it.
-#   strip = false        keep symbols so test panics print readable
-#                        backtraces.
+#   codegen-units = 8    parallel codegen; codegen-units = 1 serializes it.
+#   strip = "debuginfo"  the inherited `debug = 0` emits no debuginfo for
+#                        crates cargo compiles, so the only debuginfo left is
+#                        the precompiled std's, linked into every test
+#                        binary; stripping it saves disk. Symbols
+#                        are kept, so backtrace frames still print names, and
+#                        a test panic still prints its file:line location.
 #   panic = "unwind"     the test harness always unwinds, so an inherited
 #                        "abort" makes cargo compile the dependency graph
 #                        twice (abort for the binary integration tests
@@ -209,8 +213,8 @@ strip = false
 # stays the fast debug default for local work and IDEs.
 inherits = "release"
 lto = false
-codegen-units = 16
-strip = false
+codegen-units = 8
+strip = "debuginfo"
 panic = "unwind"
 
 [workspace.lints.rust]
