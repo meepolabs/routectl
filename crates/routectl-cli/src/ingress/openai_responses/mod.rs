@@ -13,12 +13,16 @@
 //! flattens that union back into canonical `messages[]` plus a
 //! `system` lifted from the top-level `instructions` field.
 //!
-//! Statefulness contract (see `parse.rs`): routectl is stateless. A
-//! request carrying `previous_response_id` is rejected with a 4xx
-//! because it relies on server-side conversation state routectl never
-//! holds; answering anyway would be a silent wrong answer. A request
-//! carrying `store: true` is accepted -- the current turn is
-//! self-contained -- but the persistence is ignored with a WARN.
+//! Statefulness contract (see `parse.rs` + `store.rs`): the server
+//! wiring (`ResponsesIngress::with_store`) resolves
+//! `previous_response_id` against a bounded in-memory response store
+//! and persists `store: true` turns into it, matching the official
+//! API's server-side conversation semantics (full-context replay, not
+//! last-output-only). The store is process-local: a restart starts
+//! cold and a chain to a pre-restart id fails with a clear 400. A
+//! storeless build (`Default` -- library consumers, unit tests) keeps
+//! the historical stateless contract: chaining is a hard 400 and
+//! `store: true` warns that nothing was kept.
 //!
 //! Layout: this file holds the adapter surface, request parsing, and the
 //! statefulness contract. `render.rs` holds the non-streaming renderer
@@ -40,13 +44,38 @@ mod parse;
 #[path = "parse_tests.rs"]
 mod parse_tests;
 mod render;
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod store_tests;
+mod store;
 mod stream;
+
+pub use store::ResponsesStore;
+
+use std::sync::Arc;
 
 use parse::translate_request;
 
 /// OpenAI Responses ingress adapter.
+///
+/// When built with `with_store` (the server wiring), the adapter
+/// resolves `previous_response_id` against the bounded response store
+/// and persists `store: true` turns into it. The `Default` (storeless)
+/// form keeps the historical stateless contract: chaining fails with a
+/// clear 400 and `store: true` warns that nothing was kept -- the shape
+/// library consumers and unit tests use.
 #[derive(Debug, Default)]
-pub struct ResponsesIngress;
+pub struct ResponsesIngress {
+    store: Option<Arc<ResponsesStore>>,
+}
+
+impl ResponsesIngress {
+    pub fn with_store(store: Arc<ResponsesStore>) -> Self {
+        Self {
+            store: Some(store),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Streaming state
@@ -72,7 +101,7 @@ pub struct ResponsesIngress;
 /// ingress buffers `tool_blocks` and flushes them at the terminal
 /// chunk). Item boundaries are synthesized: a new kind supersedes and
 /// closes the prior open item; everything left open flushes at EOS.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResponsesStreamState {
     /// Have we emitted the opening `response.created` event yet? Set on
     /// the first chunk.
@@ -87,6 +116,17 @@ pub struct ResponsesStreamState {
     sequence_number: u64,
     /// Next `output_index` to allocate for a new output item.
     next_output_index: u64,
+    /// Counter for minted item ids (`msg_N`); official item ids are
+    /// per-response sequential. The egress forwards upstream item ids
+    /// when the upstream assigns them (reasoning items on the chatgpt
+    /// lane always carry one), so this mints only what the upstream
+    /// left id-less.
+    next_item_id: u64,
+    /// The minted id of the most recent open message item, patched
+    /// into the completed body's message item so a client replaying
+    /// the completed output sees the same id the stream events
+    /// carried.
+    last_message_id: Option<String>,
     /// The single currently-open text/reasoning output item, if any.
     /// Tool calls are buffered separately in `tool_buffers` and flushed
     /// together, so they do not occupy this slot.
@@ -125,6 +165,42 @@ pub struct ResponsesStreamState {
     /// Accumulated reasoning details (summary / text / encrypted),
     /// replayed into the completed body's `reasoning` items.
     reasoning_accumulator: Vec<routectl_core::ReasoningDetail>,
+    /// The canonical request this stream serves, seeded by the adapter's
+    /// `new_stream_state`. Drives the request-parameter echo on the
+    /// `response.created` / `response.completed` bodies and the
+    /// store-insert context at terminal flush. `None` in tests that
+    /// build the state directly.
+    req: Option<Arc<routectl_core::ChatRequest>>,
+    /// The response store to persist a `store: true` turn into at
+    /// terminal flush. `None` (storeless adapter / tests) -> no write.
+    store: Option<Arc<ResponsesStore>>,
+}
+
+/// Manual `Default` because `Arc<ChatRequest>` has no `Default`: a
+/// default state carries no request and no store.
+impl Default for ResponsesStreamState {
+    fn default() -> Self {
+        Self {
+            started: false,
+            finished: false,
+            sequence_number: 0,
+            next_output_index: 0,
+            next_item_id: 0,
+            last_message_id: None,
+            open: None,
+            tool_buffers: Vec::new(),
+            response_id: None,
+            response_model: None,
+            created_at: 0,
+            pending_finish_reason: None,
+            pending_usage: None,
+            text_accumulator: String::new(),
+            current_text: String::new(),
+            reasoning_accumulator: Vec::new(),
+            req: None,
+            store: None,
+        }
+    }
 }
 
 /// One open Responses output item, tagged with the canonical channel
@@ -135,7 +211,12 @@ enum OpenOutputItem {
     /// message-level `output_index` and the `content_index` of its
     /// single text part are tracked so deltas and the closing
     /// `output_text.done` / `content_part.done` carry the right indices.
-    Text { output_index: u64 },
+    Text {
+        output_index: u64,
+        /// Minted item id (`msg_N`), carried on every event for this
+        /// item and patched into the completed body.
+        message_id: String,
+    },
     /// A `reasoning` item streaming summary / text deltas. `detail_id`
     /// groups emitted details (matching the non-stream renderer's
     /// id-grouping); the
@@ -197,15 +278,38 @@ impl IngressAdapter for ResponsesIngress {
         // Companion structural summary -- one TRACE line of stable,
         // prompt-content-free fields for the smart-heartbeat validator.
         routectl_core::trace_structural_summary("ingress", "ingress", "openai-responses", &body);
-        translate_request(headers, body)
+        translate_request(headers, body, self.store.as_deref())
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        crate::ingress::render_value_to_bytes(self.id(), render::render_responses_response(resp)?)
+        self.render_response_with_request(&routectl_core::ChatRequest::default(), resp)
     }
 
-    fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
-        Box::new(ResponsesStreamState::default())
+    fn render_response_with_request(
+        &self,
+        req: &routectl_core::ChatRequest,
+        resp: ChatResponse,
+    ) -> Result<bytes::Bytes> {
+        let wire = render::render_responses_response(req, resp)?;
+        // Persist a `store: true` turn so a later
+        // `previous_response_id` / `GET /v1/responses/{id}` resolves.
+        // The context is the canonical request's own messages (prior
+        // turns + this turn's input, no output).
+        if req.routectl_internal.responses_store
+            && let Some(store) = self.store.as_ref()
+            && let Some(id) = wire.get("id").and_then(Value::as_str)
+        {
+            store.insert(id.to_string(), wire.clone(), req.messages.to_vec());
+        }
+        crate::ingress::render_value_to_bytes(self.id(), wire)
+    }
+
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
+        Box::new(ResponsesStreamState {
+            req: Some(ctx.req.clone()),
+            store: self.store.clone(),
+            ..Default::default()
+        })
     }
 
     fn render_chunk(

@@ -153,8 +153,8 @@ fn responses_first_events_are_unchanged_by_the_opening_carrier() {
     assert_parsed_opener_carries_opening_usage(&chunks);
 
     // Act
-    let with = render_all(&ResponsesIngress, chunks.clone());
-    let without = render_all(&ResponsesIngress, without_carrier(&chunks));
+    let with = render_all(&ResponsesIngress::default(), chunks.clone());
+    let without = render_all(&ResponsesIngress::default(), without_carrier(&chunks));
 
     // Assert
     assert_eq!(comparable(&with), comparable(&without));
@@ -178,7 +178,7 @@ fn responses_reports_exact_usage_only_on_completion() {
     let chunks = parsed_chunks();
 
     // Act
-    let frames = render_all(&ResponsesIngress, chunks);
+    let frames = render_all(&ResponsesIngress::default(), chunks);
 
     // Assert
     let all: Vec<&SseEvent> = frames.iter().flatten().collect();

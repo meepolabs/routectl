@@ -53,7 +53,7 @@ fn response_with(message: Message, finish_reason: Option<&str>) -> ChatResponse 
 }
 
 fn render(message: Message, finish_reason: Option<&str>) -> Value {
-    render_responses_response(response_with(message, finish_reason)).unwrap()
+    render_responses_response(&Default::default(), response_with(message, finish_reason)).unwrap()
 }
 
 fn text_part(text: &str) -> ContentPart {
@@ -169,7 +169,7 @@ fn no_choices_response_emits_empty_output() {
     };
 
     // Act
-    let v = render_responses_response(resp).unwrap();
+    let v = render_responses_response(&Default::default(), resp).unwrap();
 
     // Assert
     assert_eq!(v["status"], "completed");
@@ -784,7 +784,7 @@ fn usage_renders_input_output_total_tokens() {
     });
 
     // Act
-    let v = render_responses_response(resp).unwrap();
+    let v = render_responses_response(&Default::default(), resp).unwrap();
 
     // Assert
     assert_eq!(v["usage"]["input_tokens"], 100);
@@ -809,7 +809,7 @@ fn usage_emits_cached_and_reasoning_token_sub_details() {
     });
 
     // Act
-    let v = render_responses_response(resp).unwrap();
+    let v = render_responses_response(&Default::default(), resp).unwrap();
 
     // Assert
     assert_eq!(v["usage"]["input_tokens_details"]["cached_tokens"], 40);
@@ -831,7 +831,7 @@ fn usage_omits_detail_sub_objects_when_sources_absent() {
     });
 
     // Act
-    let v = render_responses_response(resp).unwrap();
+    let v = render_responses_response(&Default::default(), resp).unwrap();
 
     // Assert: no empty detail objects on the wire.
     assert!(v["usage"].get("input_tokens_details").is_none());

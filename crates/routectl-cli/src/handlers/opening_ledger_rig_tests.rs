@@ -91,6 +91,7 @@ pub(super) fn metered_turn(
         ctx: StreamRequestContext {
             input_tokens_estimate: meter.raw_tokens(),
             model: req.model.clone(),
+            req: Default::default(),
         },
         meter: Some(meter),
     };

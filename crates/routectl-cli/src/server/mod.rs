@@ -123,6 +123,11 @@ pub struct AppState {
     /// generation of the Router that served it. In memory only: a restart
     /// starts cold.
     pub context_anchors: Arc<crate::ingress::anthropic::context_anchor::ContextAnchorStore>,
+    /// Bounded store backing the Responses ingress's
+    /// `previous_response_id` chaining and `GET /v1/responses/{id}`
+    /// retrieval. A SIBLING of `router`: a config hot-reload keeps the
+    /// store; only a process restart starts cold. In memory only.
+    pub responses_store: Arc<crate::ingress::openai_responses::ResponsesStore>,
 }
 
 impl AppState {
@@ -154,6 +159,7 @@ impl AppState {
             purge_settlements: Arc::new(purge_settlement::SettlementTracker::new().0),
             confirmation_advances: Arc::new(confirmation_advance::ConfirmationTracker::new()),
             context_anchors: Arc::default(),
+            responses_store: Arc::default(),
         })
     }
 }

@@ -530,6 +530,15 @@ pub struct RoutectlInternal {
     /// `None` for every other ingress, for library consumers, and when the
     /// inbound request carried no `thinking.display`.
     pub anthropic_thinking_display: Option<String>,
+
+    /// Whether the originating Responses-API request asked the server to
+    /// persist the response (`store`, spec default `true`). Read by the
+    /// Responses ingress render/stream paths only: a `store: true` turn
+    /// is written into the ingress's bounded response store so a later
+    /// `previous_response_id` chain (or `GET /v1/responses/{id}`)
+    /// resolves. Inbound-request data, not a per-model knob; `false`
+    /// (the `Default`) for every other ingress and library consumers.
+    pub responses_store: bool,
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and
