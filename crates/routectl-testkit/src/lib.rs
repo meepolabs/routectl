@@ -39,6 +39,11 @@ pub mod redirect_pin;
 mod scoped_env;
 pub use scoped_env::ScopedEnv;
 
+mod secret_file;
+pub use secret_file::secret_file_ref;
+
+pub mod temp_reaper;
+
 /// One captured `tracing` event: its level, target (module path), the
 /// special `message` field, and every other structured field rendered
 /// to a string.

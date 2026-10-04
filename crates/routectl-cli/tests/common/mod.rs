@@ -1,5 +1,6 @@
-//! Thin re-export of the shared contract-test fixture builders, plus the
-//! cli-only `replay` harness and `readiness` polling submodules.
+//! Thin re-export of the shared contract-test fixture builders and the
+//! testkit secret-ref helper, plus the cli-only `replay` harness and
+//! `readiness` polling submodules.
 //!
 //! The single source of truth for the canonical-request /
 //! canonical-response builders lives in `routectl_core::test_utils`
@@ -11,34 +12,11 @@
 
 pub mod readiness;
 pub mod replay;
-pub mod temp_reaper;
 
-/// A `file://` secret ref that resolves to `value`. Drop-in replacement for
-/// the former `literal:<value>` test fixture now that `literal:` refs are
-/// rejected; the resolved value is preserved exactly. The backing 0600 temp
-/// file is leaked for the test process so the path stays valid (race-free,
-/// unlike mutating a shared env var).
-#[allow(dead_code)]
-pub fn file_ref(value: &str) -> String {
-    use std::io::Write;
-    use std::sync::Mutex;
-    use tempfile::NamedTempFile;
-
-    static KEEP_ALIVE: Mutex<Vec<NamedTempFile>> = Mutex::new(Vec::new());
-
-    let mut f = NamedTempFile::new().expect("create test secret file");
-    f.write_all(value.as_bytes()).expect("write test secret");
-    f.flush().expect("flush test secret");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600))
-            .expect("chmod 600");
-    }
-    let uri = format!("file://{}", f.path().display());
-    KEEP_ALIVE.lock().expect("KEEP_ALIVE poisoned").push(f);
-    uri
-}
+/// A `file://` secret ref that resolves to `value`; see
+/// `routectl_testkit::secret_file_ref`.
+#[allow(unused_imports)]
+pub use routectl_testkit::secret_file_ref as file_ref;
 
 // Not every test binary uses the scenario builders (e.g. the replay
 // binaries touch only `common::replay`); the glob re-export is dead in
@@ -59,7 +37,7 @@ pub use routectl_core::test_utils::*;
 /// shutdown, so a scoped guard could drop (and delete the path) while the
 /// writer still holds the open DB handle. Instead, the first call in each
 /// process reaps the dirs of earlier, dead processes
-/// (`temp_reaper::reap_stale_test_dirs`), which bounds what accumulates.
+/// (`routectl_testkit::temp_reaper`), which bounds what accumulates.
 #[allow(dead_code)]
 pub fn isolate_usage_db(
     config: std::sync::Arc<routectl_router::Config>,
@@ -71,8 +49,8 @@ pub fn isolate_usage_db(
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let base = BASE.get_or_init(|| {
-        temp_reaper::reap_stale_test_dirs();
-        temp_reaper::create_usage_dir()
+        routectl_testkit::temp_reaper::reap_stale_test_dirs();
+        routectl_testkit::temp_reaper::create_usage_dir()
     });
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = base.join(format!("usage-{n}.db"));

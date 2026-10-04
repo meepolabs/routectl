@@ -2970,9 +2970,12 @@ dependencies = [
 name = "routectl-testkit"
 version = "0.9.0"
 dependencies = [
+ "nix",
  "routectl-core",
  "serde_json",
+ "tempfile",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 

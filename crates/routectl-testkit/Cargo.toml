@@ -16,6 +16,14 @@ tracing.workspace = true
 # (not dev-) dependency: this crate IS the dev-dependency of everything
 # that consumes it, and its public API hands back `MockServer`s.
 wiremock.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+# `temp_reaper` probes whether a dir's owning pid is still live.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["signal"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

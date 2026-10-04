@@ -8055,13 +8055,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 ### Tests
 
 - `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils`
-  (single source of truth for the canonical scenario builders) plus the
-  cli-only `replay` harness, `readiness`, and `temp_reaper` submodules; the
-  builders are enabled via the `test-utils` dev-dependency feature on core
-- `tests/common/temp_reaper.rs` -- `create_usage_dir`, `create_mitm_dir`,
-  `reap_stale_test_dirs`: exclusive nonce-named test temp dirs and their
-  start-of-run reaper; safety rules in the module doc
-- `tests/temp_reaper.rs` -- reaper unit tests (own binary, helper by path)
+  (single source of truth for the canonical scenario builders) and the
+  testkit `file_ref` secret helper, plus the cli-only `replay` harness and
+  `readiness` submodules; the builders are enabled via the `test-utils`
+  dev-dependency feature on core
 - `tests/common/readiness.rs` -- shared `/health` readiness poll
   (`await_health`, deadline + cadence consts) used by every integration
   binary that boots `serve_on_listener`; readiness is a served response,
@@ -8448,6 +8445,11 @@ Dev-dependency crate: shared test doubles and harnesses every other crate's
   request fixtures for the perf benches: the canonical `ChatRequest` plus raw
   wire bytes in both ingress dialects, seeded pseudo-random so two runs are
   byte-identical
+- `src/temp_reaper.rs` -- `create_usage_dir`, `create_mitm_dir`,
+  `reap_stale_test_dirs`: exclusive nonce-named per-process test temp dirs
+  and their start-of-run reaper; safety rules in the module doc
+- `src/secret_file.rs` -- `secret_file_ref`, a `file://` ref to an
+  owner-only file in this process's reapable secret dir
 
 ## scripts/ -- the capture container path and fixture promotion
 

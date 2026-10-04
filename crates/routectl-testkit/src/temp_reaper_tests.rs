@@ -1,18 +1,10 @@
-//! Unit coverage for the shared test-temp-dir reaper. Lives in its own test
-//! binary (including the helper by path) so the cases run once rather than
-//! once per binary that pulls in `common`.
-
-#![cfg(unix)]
-
-#[path = "common/temp_reaper.rs"]
-mod temp_reaper;
-
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, SystemTime};
 
-use temp_reaper::{
-    GRACE, create_exclusive_dir, mitm_dir_name, random_nonce, reap_in, usage_dir_name,
+use super::{
+    GRACE, create_exclusive_dir, mitm_dir_name, random_nonce, reap_in, secret_dir_name,
+    usage_dir_name,
 };
 
 const NONCE_A: &str = "00000000000000aa";
@@ -55,6 +47,10 @@ fn usage_name(pid: u32, nonce: &str) -> String {
     format!("routectl-usage-test-{pid}-{nonce}")
 }
 
+fn secret_name(pid: u32, nonce: &str) -> String {
+    format!("routectl-secret-test-{pid}-{nonce}")
+}
+
 fn mitm_name(pid: u32, nonce: &str, tag: &str, n: u32) -> String {
     format!("routectl-mitm-e2e-{pid}-{nonce}-{tag}-{n}")
 }
@@ -64,11 +60,13 @@ fn removes_dead_pid_dirs_older_than_grace() {
     let root = tempfile::tempdir().unwrap();
     let pid = dead_pid();
     let usage = make_dir(root.path(), &usage_name(pid, NONCE_A), OLD);
+    let secret = make_dir(root.path(), &secret_name(pid, NONCE_A), OLD);
     let mitm = make_dir(root.path(), &mitm_name(pid, NONCE_A, "tag", 3), OLD);
 
     reap_in(root.path(), GRACE);
 
     assert!(!usage.exists(), "dead-pid usage dir must be removed");
+    assert!(!secret.exists(), "dead-pid secret dir must be removed");
     assert!(!mitm.exists(), "dead-pid mitm dir must be removed");
 }
 
@@ -77,6 +75,8 @@ fn keeps_dir_of_live_pid_and_of_own_pid() {
     let root = tempfile::tempdir().unwrap();
     let child = live_child();
     let live = make_dir(root.path(), &usage_name(child.id(), NONCE_A), OLD);
+    let live_secret = make_dir(root.path(), &secret_name(child.id(), NONCE_A), OLD);
+    let own_secret = make_dir(root.path(), &secret_name(std::process::id(), NONCE_B), OLD);
     let own_usage = make_dir(root.path(), &usage_name(std::process::id(), NONCE_B), OLD);
     let own_mitm = make_dir(
         root.path(),
@@ -88,6 +88,10 @@ fn keeps_dir_of_live_pid_and_of_own_pid() {
     stop(child);
 
     assert!(live.exists(), "a live pid's dir must survive");
+    assert!(
+        live_secret.exists() && own_secret.exists(),
+        "a live pid's secret dir must survive"
+    );
     assert!(
         own_usage.exists() && own_mitm.exists(),
         "the reaper's own pid is live, so its dirs survive whatever the nonce"
@@ -113,6 +117,7 @@ fn keeps_legacy_nonce_less_names_of_a_dead_pid() {
     let pid = dead_pid();
     let legacy: Vec<PathBuf> = [
         format!("routectl-usage-test-{pid}"),
+        format!("routectl-secret-test-{pid}"),
         format!("routectl-mitm-e2e-{pid}-tag-3"),
         format!("routectl-mitm-e2e-{pid}-old-0"),
     ]
@@ -142,6 +147,8 @@ fn keeps_names_that_do_not_match_strictly() {
         "routectl-usage-test-".to_string(),
         format!("routectl-usage-test-{pid}-extra"),
         format!("routectl-usage-test-{pid}x"),
+        format!("routectl-secret-test-{pid}-extra"),
+        format!("routectl-secret-test-{pid}x-{NONCE_A}"),
         format!("routectl-mitm-e2e-{pid}"),
         "routectl-mitm-e2e-abc-1".to_string(),
         "routectl-mitm-e2e--1".to_string(),
@@ -204,6 +211,10 @@ fn produced_names_are_reapable_by_the_reaper() {
         format!("routectl-usage-test-{pid}-{nonce}")
     );
     assert_eq!(
+        secret_dir_name(&nonce),
+        format!("routectl-secret-test-{pid}-{nonce}")
+    );
+    assert_eq!(
         mitm_dir_name(&nonce, "tag", 7),
         format!("routectl-mitm-e2e-{pid}-{nonce}-tag-7")
     );
@@ -217,6 +228,11 @@ fn produced_names_are_reapable_by_the_reaper() {
         &usage_dir_name(&nonce).replacen(&pid.to_string(), &dead.to_string(), 1),
         OLD,
     );
+    let secret = make_dir(
+        root.path(),
+        &secret_dir_name(&nonce).replacen(&pid.to_string(), &dead.to_string(), 1),
+        OLD,
+    );
     let mitm = make_dir(
         root.path(),
         &mitm_dir_name(&nonce, "tag", 7).replacen(&pid.to_string(), &dead.to_string(), 1),
@@ -225,7 +241,7 @@ fn produced_names_are_reapable_by_the_reaper() {
 
     reap_in(root.path(), GRACE);
 
-    assert!(!usage.exists() && !mitm.exists());
+    assert!(!usage.exists() && !secret.exists() && !mitm.exists());
 }
 
 #[test]

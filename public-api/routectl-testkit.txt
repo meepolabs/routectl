@@ -203,6 +203,10 @@ impl<T> core::convert::From<T> for routectl_testkit::redirect_pin::CrossHostRedi
 pub fn routectl_testkit::redirect_pin::CrossHostRedirect::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_testkit::redirect_pin::CrossHostRedirect
 impl<T> tracing::instrument::WithSubscriber for routectl_testkit::redirect_pin::CrossHostRedirect
+pub mod routectl_testkit::temp_reaper
+pub fn routectl_testkit::temp_reaper::create_mitm_dir(&str, u64) -> std::path::PathBuf
+pub fn routectl_testkit::temp_reaper::create_usage_dir() -> std::path::PathBuf
+pub fn routectl_testkit::temp_reaper::reap_stale_test_dirs()
 pub struct routectl_testkit::CapturedEvent
 pub routectl_testkit::CapturedEvent::fields: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_testkit::CapturedEvent::level: tracing_core::metadata::Level
@@ -278,4 +282,5 @@ impl<T> tracing::instrument::Instrument for routectl_testkit::ScopedEnv
 impl<T> tracing::instrument::WithSubscriber for routectl_testkit::ScopedEnv
 pub fn routectl_testkit::capture_events<F: core::ops::function::FnOnce()>(F) -> alloc::vec::Vec<routectl_testkit::CapturedEvent>
 pub async fn routectl_testkit::capture_lines<F: core::future::future::Future>(F) -> (<F as core::future::future::Future>::Output, alloc::vec::Vec<alloc::string::String>)
+pub fn routectl_testkit::secret_file_ref(&str) -> alloc::string::String
 pub async fn routectl_testkit::with_capture<F: core::future::future::Future>(F) -> (<F as core::future::future::Future>::Output, alloc::vec::Vec<routectl_testkit::CapturedEvent>)

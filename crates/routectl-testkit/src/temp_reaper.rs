@@ -1,16 +1,18 @@
-//! Best-effort reaper for the per-process temp dirs the cli integration
-//! tests deliberately leave behind (`routectl-usage-test-<pid>-<nonce>` and
+//! Best-effort reaper for the per-process temp dirs test suites
+//! deliberately leave behind (`routectl-usage-test-<pid>-<nonce>`,
+//! `routectl-secret-test-<pid>-<nonce>` and
 //! `routectl-mitm-e2e-<pid>-<nonce>-<tag>-<n>`).
 //!
-//! Those dirs cannot be scope-guarded (a detached server outlives its test),
-//! so the ceiling is enforced at the NEXT test-process start instead: a dir
-//! is removed only when its owning pid is no longer live AND the dir is older
-//! than [`GRACE`]. Non-unix builds cannot probe liveness and reap nothing.
+//! Those dirs cannot be scope-guarded (a detached server outlives its test,
+//! and a secret file must stay resolvable for the whole test process), so the
+//! ceiling is enforced at the NEXT test-process start instead: a dir is
+//! removed only when its owning pid is no longer live AND the dir is older
+//! than `GRACE`. Non-unix builds cannot probe liveness and reap nothing.
 //!
 //! Liveness is checked and the dir removed in separate steps, so the safety
 //! argument rests on how producers create dirs, not on the reaper's timing:
 //!
-//! - Producers create their leaf dir exclusively ([`create_exclusive_dir`]):
+//! - Producers create their leaf dir exclusively (`create_exclusive_dir`):
 //!   creation fails with `AlreadyExists` rather than adopting a path that is
 //!   already there, and a fresh nonce is drawn for the retry.
 //! - A path the reaper lists therefore either was created by the process
@@ -24,7 +26,7 @@
 //!   a reused-pid process drawing the identical 64-bit nonce (and tag and
 //!   counter) inside the first reaper's check-to-remove window; that is
 //!   accepted as negligible, not excluded.
-//! - [`GRACE`] additionally keeps any dir younger than itself.
+//! - `GRACE` additionally keeps any dir younger than itself.
 //!
 //! Only names in the current nonce format are ever reaped. Nonce-less names
 //! (produced by older checkouts, whose producers may still be running under a
@@ -37,6 +39,7 @@ use std::sync::Once;
 use std::time::{Duration, SystemTime};
 
 const USAGE_PREFIX: &str = "routectl-usage-test-";
+const SECRET_PREFIX: &str = "routectl-secret-test-";
 const MITM_PREFIX: &str = "routectl-mitm-e2e-";
 
 const NONCE_HEX_LEN: usize = 16;
@@ -44,11 +47,10 @@ const NONCE_HEX_LEN: usize = 16;
 /// Nonce redraws before [`create_exclusive_dir`] gives up.
 const MAX_CREATE_ATTEMPTS: usize = 8;
 
-pub const GRACE: Duration = Duration::from_mins(10);
+const GRACE: Duration = Duration::from_mins(10);
 
 /// Random 64-bit hex nonce.
-#[allow(dead_code)]
-pub fn random_nonce() -> String {
+fn random_nonce() -> String {
     format!(
         "{:0width$x}",
         uuid::Uuid::new_v4().as_u64_pair().0,
@@ -57,23 +59,31 @@ pub fn random_nonce() -> String {
 }
 
 /// Name of a usage-db dir owned by this process.
-pub fn usage_dir_name(nonce: &str) -> String {
+fn usage_dir_name(nonce: &str) -> String {
     format!("{USAGE_PREFIX}{}-{nonce}", std::process::id())
 }
 
+/// Name of a secret-file dir owned by this process.
+fn secret_dir_name(nonce: &str) -> String {
+    format!("{SECRET_PREFIX}{}-{nonce}", std::process::id())
+}
+
 /// Name of a mitm cert dir owned by this process for scenario `tag`.
-pub fn mitm_dir_name(nonce: &str, tag: &str, n: u64) -> String {
+fn mitm_dir_name(nonce: &str, tag: &str, n: u64) -> String {
     format!("{MITM_PREFIX}{}-{nonce}-{tag}-{n}", std::process::id())
 }
 
 /// Create a fresh usage-db dir under the system temp dir.
-#[allow(dead_code)]
 pub fn create_usage_dir() -> PathBuf {
     create_exclusive_dir(&std::env::temp_dir(), random_nonce, usage_dir_name)
 }
 
+/// Create a fresh secret-file dir under the system temp dir.
+pub(crate) fn create_secret_dir() -> PathBuf {
+    create_exclusive_dir(&std::env::temp_dir(), random_nonce, secret_dir_name)
+}
+
 /// Create a fresh mitm cert dir under the system temp dir.
-#[allow(dead_code)]
 pub fn create_mitm_dir(tag: &str, n: u64) -> PathBuf {
     create_exclusive_dir(&std::env::temp_dir(), random_nonce, |nonce| {
         mitm_dir_name(nonce, tag, n)
@@ -84,7 +94,7 @@ pub fn create_mitm_dir(tag: &str, n: u64) -> PathBuf {
 /// existing path), drawing a new nonce from `next_nonce` on `AlreadyExists`.
 /// `root` must already exist. Panics after [`MAX_CREATE_ATTEMPTS`] collisions
 /// or on any other error.
-pub fn create_exclusive_dir(
+fn create_exclusive_dir(
     root: &Path,
     mut next_nonce: impl FnMut() -> String,
     name_for: impl Fn(&str) -> String,
@@ -104,7 +114,6 @@ pub fn create_exclusive_dir(
 }
 
 /// Reap stale dirs under the system temp dir, once per test process.
-#[allow(dead_code)]
 pub fn reap_stale_test_dirs() {
     static REAPED: Once = Once::new();
     REAPED.call_once(|| reap_in(&std::env::temp_dir(), GRACE));
@@ -113,7 +122,7 @@ pub fn reap_stale_test_dirs() {
 /// Remove dead-pid, past-grace test dirs directly under `root`. Never
 /// panics; a removal that fails (e.g. another test process reaped it first)
 /// is ignored.
-pub fn reap_in(root: &Path, grace: Duration) {
+pub(crate) fn reap_in(root: &Path, grace: Duration) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -130,10 +139,13 @@ pub fn reap_in(root: &Path, grace: Duration) {
 }
 
 /// The pid encoded in a producer's dir name, or `None` for any other name
-/// (including nonce-less names from older producers). Usage dirs are
-/// `<pid>-<16 hex nonce>`; mitm dirs are `<pid>-<16 hex nonce>-<tag>-<n>`.
+/// (including nonce-less names from older producers). Usage and secret dirs
+/// are `<pid>-<16 hex nonce>`; mitm dirs are `<pid>-<16 hex nonce>-<tag>-<n>`.
 fn owner_pid(name: &str) -> Option<u32> {
-    let digits = if let Some(tail) = name.strip_prefix(USAGE_PREFIX) {
+    let pid_nonce_tail = name
+        .strip_prefix(USAGE_PREFIX)
+        .or_else(|| name.strip_prefix(SECRET_PREFIX));
+    let digits = if let Some(tail) = pid_nonce_tail {
         let (pid, nonce) = tail.split_once('-')?;
         if !is_nonce(nonce) {
             return None;
@@ -191,3 +203,7 @@ fn pid_is_live(pid: u32) -> bool {
 fn pid_is_live(_pid: u32) -> bool {
     true
 }
+
+#[cfg(all(test, unix))]
+#[path = "temp_reaper_tests.rs"]
+mod tests;

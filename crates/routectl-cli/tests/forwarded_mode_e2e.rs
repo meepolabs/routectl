@@ -82,10 +82,10 @@ const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
 /// server: the server's `create_dir_all` tolerates an existing empty dir, and
 /// creating it up front guarantees this process never adopts an existing path.
 fn unique_cert_dir(tag: &str) -> std::path::PathBuf {
-    common::temp_reaper::reap_stale_test_dirs();
+    routectl_testkit::temp_reaper::reap_stale_test_dirs();
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    common::temp_reaper::create_mitm_dir(tag, n)
+    routectl_testkit::temp_reaper::create_mitm_dir(tag, n)
 }
 
 /// `[mitm]` block for a test scenario tagged `scenario` (used only to keep
