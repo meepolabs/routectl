@@ -292,8 +292,9 @@ pub const CREATE_TS_START_INDEX: &str =
 ///
 /// RETAINED, unused: superseded by the unified `capability_events` ledger
 /// (`CREATE_CAPABILITY_EVENTS_TABLE`). Nothing reads or writes this table any
-/// more; it survives as append-only history on databases that predate the
-/// ledger. It is kept (no DROP migration) because dropping it needs a schema
+/// more; whatever rows the migration ladder leaves stay untouched (the
+/// v9 -> v10 step empties it on databases that old). It is kept (no DROP
+/// migration) because dropping it needs a schema
 /// bump, and a newer schema version makes an older binary refuse the database.
 ///
 /// One append-only row per confirmed learned-capability observation. This

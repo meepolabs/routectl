@@ -495,8 +495,10 @@ list with more narrative.
 - **Internal:** the unused write path into the legacy
   `capability_learn_events` table is removed from `routectl-usage`
   (`CapabilityLearnEvent`, `UsageHandle::try_send_learn_event`, and the
-  three learn-event counters). The table itself stays, with any rows it
-  already holds; the schema version is unchanged -- no behavior change.
+  three learn-event counters). The table and its migrations stay, so a
+  database keeps whatever rows the migration ladder already left in it
+  (the historical v9 -> v10 step empties it on databases that old); the
+  schema version is unchanged -- no behavior change.
 
 ### Fixed
 
