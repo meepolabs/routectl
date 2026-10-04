@@ -1569,7 +1569,8 @@ fn message_start_uses_req_model_when_chunk_carries_no_model() {
     let mut s = new_state(&StreamRequestContext {
         model: "claude-opus-4-7".to_string(),
         input_tokens_estimate: 0,
-    });
+        req: Default::default(),
+        });
     let chunk = ChatChunk {
         id: "msg_01".into(),
         model: String::new(),
@@ -1615,7 +1616,8 @@ fn message_start_carries_input_token_estimate_with_zero_output() {
     let mut s = new_state(&StreamRequestContext {
         model: "claude-opus-4-7".to_string(),
         input_tokens_estimate: 137,
-    });
+        req: Default::default(),
+        });
 
     // Act: render the first chunk, which triggers message_start.
     let events = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();

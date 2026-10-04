@@ -612,6 +612,21 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     } else {
         "response.completed"
     };
+    // Persist a `store: true` turn into the bounded store so a later
+    // `previous_response_id` chain (or GET retrieve) resolves against
+    // the full conversation. The context is the seeded request's own
+    // canonical messages (prior turns + this turn's input, no output).
+    if status != "failed"
+        && let Some(req) = state.req.as_deref()
+        && req.routectl_internal.responses_store
+        && let Some(store) = state.store.as_ref()
+    {
+        store.insert(
+            response_id(state),
+            body.clone(),
+            req.messages.to_vec(),
+        );
+    }
     push_response_event(state, &mut events, event_name, body);
     state.finished = true;
     events
@@ -622,7 +637,11 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 /// matches the non-stream render byte-for-byte.
 fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
     let resp = accumulated_response(state);
-    let rendered = render_responses_response(resp).unwrap_or_else(|_| json!({"output": []}));
+    let rendered = render_responses_response(
+        state.req.as_deref().unwrap_or(&routectl_core::ChatRequest::default()),
+        resp,
+    )
+    .unwrap_or_else(|_| json!({"output": []}));
     rendered
         .get("output")
         .and_then(Value::as_array)
@@ -758,6 +777,40 @@ fn response_skeleton(
             "usage".into(),
             super::render::render_usage(&usage_from_delta(&u)),
         );
+    }
+    // Request-parameter echo (same fields the non-stream render echoes):
+    // the skeleton reads the seeded request so every event's embedded
+    // response object matches the official envelope's shape.
+    if let Some(req) = state.req.as_deref() {
+        obj.insert(
+            "store".into(),
+            json!(req.routectl_internal.responses_store),
+        );
+        obj.insert("parallel_tool_calls".into(), json!(true));
+        obj.insert(
+            "tool_choice".into(),
+            req.tool_choice.clone().unwrap_or_else(|| json!("auto")),
+        );
+        obj.insert(
+            "tools".into(),
+            Value::Array(
+                req.tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(super::render::echo_tool_def).collect())
+                    .unwrap_or_default(),
+            ),
+        );
+        obj.insert("temperature".into(), json!(req.temperature));
+        obj.insert("top_p".into(), json!(req.top_p));
+        obj.insert(
+            "instructions".into(),
+            json!(req.system.as_ref().map(|s| s.flatten()).unwrap_or_default()),
+        );
+        if let Some(r) = req.reasoning.as_ref()
+            && let Some(effort) = r.effort.as_ref()
+        {
+            obj.insert("reasoning".into(), json!({"effort": effort, "summary": "auto"}));
+        }
     }
     Value::Object(obj)
 }

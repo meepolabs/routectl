@@ -720,7 +720,7 @@ fn completed_body_output_matches_non_stream_render_for_text() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let non_stream_output = render_responses_response(resp).unwrap()["output"].clone();
+    let non_stream_output = render_responses_response(&Default::default(), resp).unwrap()["output"].clone();
 
     // Assert: byte-for-byte identical output[].
     assert_eq!(streamed_output, non_stream_output);

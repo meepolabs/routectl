@@ -79,7 +79,11 @@ const HANDLED_TOP_LEVEL_FIELDS: &[&str] = &[
     "previous_response_id",
 ];
 
-pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+pub(super) fn translate_request(
+    headers: &HeaderMap,
+    body: Value,
+    store: Option<&super::store::ResponsesStore>,
+) -> Result<ChatRequest> {
     let mut obj = match body {
         Value::Object(map) => map,
         _ => {
@@ -89,15 +93,41 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         }
     };
 
-    // Statefulness contract: reject server-side conversation state before
-    // doing any other work. previous_response_id means the client omitted
-    // prior context expecting the server to resolve it -- routectl never
-    // holds that state, so answering would be a silent wrong answer.
-    reject_previous_response_id(&obj)?;
-    // store:true is accepted (the turn is self-contained) but the
-    // persistence intent is ignored; warn so the operator knows
-    // retrieval-by-id won't work against a stateless proxy.
-    warn_on_store(&obj);
+    // Statefulness: a `previous_response_id` resolves against the
+    // bounded response store when the adapter carries one (server
+    // wiring). Resolution replays the FULL stored conversation context
+    // plus the prior response's own output items before this turn's
+    // input -- matching the official API's server-side semantics.
+    // Storeless (library) builds keep the historical contract: a clear
+    // 400 instead of a silent wrong answer.
+    let mut prev_entry: Option<(Value, Vec<routectl_core::Message>)> = None;
+    if let Some(prev_id) = obj
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    {
+        let Some(store) = store else {
+            return Err(Error::Validation(
+                "openai-responses ingress: previous_response_id requires a response store; \
+                 this adapter was built stateless. Send the full conversation each turn."
+                    .into(),
+            ));
+        };
+        let entry = store.get_full(&prev_id).ok_or_else(|| {
+            Error::Validation(format!(
+                "openai-responses ingress: previous_response_id `{prev_id}` not found \
+                 (unknown id, evicted from the bounded store, or the daemon restarted)"
+            ))
+        })?;
+        prev_entry = Some(entry);
+    }
+    // store: spec default true. Honored when the store is wired;
+    // storeless builds warn that nothing was kept.
+    if obj.get("store").and_then(Value::as_bool) == Some(true) && store.is_none() {
+        warn_on_store(&obj);
+    }
 
     // model (overridden by the alias header when present).
     let model = obj
@@ -132,6 +162,29 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         }
         None => Vec::new(),
     };
+
+    // Chain resolution AFTER the turn's own input parsed: stored
+    // context first (prior turns), then the prior response's own
+    // output items, then this turn's fresh input. `build_messages`
+    // walked the input into `req.messages` above; the stored replay
+    // PREPENDS to it so canonical message order is conversation order.
+    if let Some((stored_response, stored_context)) = prev_entry {
+        let mut replayed = stored_context;
+        append_stored_output_items(&mut replayed, &stored_response);
+        let mut full = replayed;
+        full.extend(req.messages.iter().cloned());
+        req.messages = full.into();
+    }
+
+    // The Responses `store` flag: spec default is `true`. Read BEFORE the
+    // sweep strips the key (it is in the handled set, never forwarded).
+    // Rides `routectl_internal` (transport-internal, skip-serialized) so
+    // the render/stream paths can honor it without forwarding the flag
+    // to any upstream.
+    req.routectl_internal.responses_store = obj
+        .get("store")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     // Lift in-array system/developer messages into req.system so loose
     // Role::System entries do not reach mutual-exclusion egresses.
@@ -247,25 +300,6 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
 // ---------------------------------------------------------------------------
 // Statefulness contract
 // ---------------------------------------------------------------------------
-
-/// Reject a request carrying a non-null `previous_response_id`. routectl
-/// is stateless: it never persists prior turns, so it cannot resolve a
-/// reference to one. Returning the prior context's continuation anyway
-/// would be a silent wrong answer, so this is a hard 400.
-fn reject_previous_response_id(obj: &Map<String, Value>) -> Result<()> {
-    let present = obj
-        .get("previous_response_id")
-        .is_some_and(|v| !v.is_null());
-    if !present {
-        return Ok(());
-    }
-    Err(Error::Validation(
-        "openai-responses ingress: routectl is stateless and does not support server-side \
-         conversation state (previous_response_id). Configure the client to send the full \
-         conversation input each turn (disable store / unset previous_response_id)."
-            .into(),
-    ))
-}
 
 /// Warn when the client asked the server to persist the response
 /// (`store: true`) without a `previous_response_id`. The current turn is
@@ -980,6 +1014,33 @@ fn text_without_format(text: Value) -> Option<Map<String, Value>> {
 /// persistence intent routectl never honors. Mirrors the openai /
 /// anthropic ingress forward-compat sweep so a new Responses field
 /// reaches the egress without a code edit.
+/// Append the prior response's own `output[]` items onto canonical
+/// messages during `previous_response_id` chain resolution. Stored
+/// outputs carry the same shapes the ingress parses for input items
+/// (message / reasoning / function_call); function_call_output can
+/// never appear in an output. Uses the same per-item builders the input
+/// walk uses so replay cannot drift from a fresh client replay of the
+/// same shapes.
+fn append_stored_output_items(messages: &mut Vec<routectl_core::Message>, stored: &Value) {
+    let Some(items) = stored.get("output").and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        match item.get("type").and_then(Value::as_str).unwrap_or("") {
+            "message" => push_message_item(messages, item),
+            "" if item.get("role").is_some() => push_message_item(messages, item),
+            "function_call" => attach_function_call(messages, item),
+            "reasoning" => attach_reasoning(messages, item),
+            other => {
+                tracing::debug!(
+                    item_kind = %routectl_core::sanitize_for_log(other),
+                    "openai-responses ingress: skipping unmodeled stored output item on chain replay"
+                );
+            }
+        }
+    }
+}
+
 fn sweep_extras(obj: Map<String, Value>) -> Map<String, Value> {
     let mut extras = Map::new();
     for (k, v) in obj {

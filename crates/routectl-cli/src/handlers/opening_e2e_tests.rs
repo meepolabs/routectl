@@ -285,7 +285,7 @@ async fn openai_and_responses_streams_do_no_anchor_work() {
 
     // Act
     let chat_turn = send(&state, OpenAiIngress, headers.clone(), &chat).await;
-    let responses_turn = send(&state, ResponsesIngress, headers, &responses).await;
+    let responses_turn = send(&state, ResponsesIngress::default(), headers, &responses).await;
 
     // Assert: both streamed successfully, and neither reserved or published.
     assert_eq!(chat_turn.status, StatusCode::OK, "{}", chat_turn.raw);

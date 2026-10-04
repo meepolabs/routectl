@@ -18,19 +18,19 @@ use serde_json::json;
 // ---------------------------------------------------------------------------
 
 fn parse(body: serde_json::Value) -> ChatRequest {
-    ResponsesIngress
+    ResponsesIngress::default()
         .parse_request_value(&HeaderMap::new(), body)
         .expect("request should parse")
 }
 
 fn parse_with_headers(headers: &HeaderMap, body: serde_json::Value) -> ChatRequest {
-    ResponsesIngress
+    ResponsesIngress::default()
         .parse_request_value(headers, body)
         .expect("request should parse")
 }
 
 fn parse_err(body: serde_json::Value) -> Error {
-    ResponsesIngress
+    ResponsesIngress::default()
         .parse_request_value(&HeaderMap::new(), body)
         .expect_err("request should be rejected")
 }
@@ -1738,7 +1738,7 @@ fn non_object_body_returns_validation_error() {
     let body = json!("not an object");
 
     // Act
-    let err = ResponsesIngress
+    let err = ResponsesIngress::default()
         .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
 
@@ -2188,7 +2188,7 @@ fn store_true_with_previous_response_id_returns_400_not_warn() {
     });
 
     // Act
-    let err = ResponsesIngress
+    let err = ResponsesIngress::default()
         .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
 
@@ -2239,7 +2239,7 @@ fn render_response_emits_response_envelope() {
     let resp = ChatResponse::default();
 
     // Act
-    let v = ResponsesIngress.render_response_value(resp).unwrap();
+    let v = ResponsesIngress::default().render_response_value(resp).unwrap();
 
     // Assert
     assert_eq!(v["object"], "response");
@@ -2254,10 +2254,10 @@ fn render_chunk_emits_response_created_on_first_chunk() {
     // stream_tests.rs.
     // Arrange
     let chunk = ChatChunk::default();
-    let mut state = ResponsesIngress.new_stream_state(&StreamRequestContext::default());
+    let mut state = ResponsesIngress::default().new_stream_state(&StreamRequestContext::default());
 
     // Act
-    let events = ResponsesIngress
+    let events = ResponsesIngress::default()
         .render_chunk(chunk, state.as_mut())
         .expect("render_chunk should succeed");
 

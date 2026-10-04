@@ -500,6 +500,10 @@ async fn complete_response<A: IngressAdapter>(
     // this same value the usage ledger's `session_id` column was seeded
     // from (`build_usage_draft`) -- one derivation, read twice.
     let session_key = req.routectl_internal.inbound_session_key.clone();
+    // Capture the canonical request BEFORE dispatch moves `req`: the
+    // Responses adapter's request-echo render + store insert need the
+    // producing context at render time.
+    let req_ctx = Arc::new(req.clone());
     let dispatched = router.complete_with_options(req, opts).await;
     capture.observe_meta(
         &dispatched.meta,
@@ -529,7 +533,7 @@ async fn complete_response<A: IngressAdapter>(
             // Non-streaming first byte == the response being ready.
             capture.mark_first_byte();
             capture.observe_response(&resp);
-            match adapter.render_response(resp) {
+            match adapter.render_response_with_request(&req_ctx, resp) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body, so
@@ -611,6 +615,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
             OpeningMeter::raw_tokens,
         ),
         model: req.model.clone(),
+        req: Arc::new(req.clone()),
     };
     let turn = StreamTurn {
         session_key,
