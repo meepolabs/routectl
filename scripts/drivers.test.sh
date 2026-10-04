@@ -44,6 +44,10 @@ INGRESS_KINDS="$DRIVERS/lib/ingress_kinds.sh"
 CLIENT_VERSION="$DRIVERS/lib/client_version.py"
 CLASSIFICATION="$DRIVERS/lib/wire_pattern_classification.tsv"
 
+# shellcheck source=scripts/drivers/lib/structural_shape.sh
+. "$DRIVERS/lib/structural_shape.sh"
+EMITTER_SRC="$(structural_emitter_source "$ROOT")"
+
 DRIVER_FILES=(
     "$DRIVERS/claude-code.sh"
     "$DRIVERS/claude-code-print.sh"
@@ -414,6 +418,70 @@ stage() {
     [ -n "$body" ] && printf '%s' "$body" >"$dir/ingress_request.json"
     printf '%s\n' "$dir"
 }
+
+# --- canned structural lines are welded to the emitter ------------------
+# Every self-test's canned structural line is checked by
+# structural_shape.sh against a shape it derives from the emitter's own
+# field list. The derivation is a reading of Rust source, so it is welded
+# here to what the emitter really wrote: every line of every committed
+# driver capture must have exactly the derived shape.
+if [ -n "$EMITTER_SRC" ]; then
+    emitter_shape="$(emitter_structural_shape "$EMITTER_SRC")"
+    check "the emitter field list parses to a shape with no unread field" "0" \
+        "$(printf '%s\n' "$emitter_shape" | grep -c 'UNPARSED:')"
+    captured_lines=0
+    captured_mismatches=0
+    for captured in "$ROOT"/crates/routectl-cli/tests/fixtures/driver/*/*/structural.txt; do
+        [ -f "$captured" ] || continue
+        while IFS= read -r line; do
+            captured_lines=$((captured_lines + 1))
+            if [ "$(structural_line_shape "$line")" != "$emitter_shape" ]; then
+                captured_mismatches=$((captured_mismatches + 1))
+                echo "  shape mismatch in $captured: $(structural_line_shape "$line")"
+            fi
+        done <"$captured"
+    done
+    check "the committed corpus carries structural lines to weld against" "1" \
+        "$([ "$captured_lines" -gt 0 ] && echo 1 || echo 0)"
+    check "every committed capture's structural line has the derived shape" "0" \
+        "$captured_mismatches"
+    unset emitter_shape captured captured_lines captured_mismatches line
+else
+    echo "PASS: no crates tree in this checkout; the structural-shape weld is not asserted"
+fi
+
+# The drift check must refuse what it exists to catch. Each row is one way
+# a hand-written replica has drifted or could: a quoted empty value the
+# emitter never writes, a bare dialect token, a dropped field, a renamed
+# one, and fields out of order. The accept row is s_line itself, which is
+# also a replica and so is held to the same check.
+assert_structural_replica "s_line is a faithful baseline replica" \
+    "$(s_line ingress 0 disabled 0)" baseline "$VERIFIER" "$EMITTER_SRC" ||
+    fails=$((fails + 1))
+if [ -n "$EMITTER_SRC" ]; then
+    while IFS='|' read -r drift_label drift_sed; do
+        if structural_line_drift "$(s_line ingress 0 disabled 0 | sed "$drift_sed")" \
+            - "$VERIFIER" "$EMITTER_SRC" >/dev/null; then
+            fail "the drift check accepted a replica with $drift_label"
+        else
+            echo "PASS: the drift check refuses a replica with $drift_label"
+        fi
+    done <<'ROWS'
+a quoted empty value|s/output_config_effort= /output_config_effort="" /
+an unquoted dialect id|s/id="anthropic"/id=anthropic/
+a dropped field|s/messages_len=1 //
+a renamed field|s/tools_len=/tool_count=/
+two fields swapped|s/max_tokens=32000 thinking_shape=disabled/thinking_shape=disabled max_tokens=32000/
+ROWS
+    unset drift_label drift_sed
+fi
+# A line faithful in shape but not exhibiting its claim is refused too.
+if structural_line_drift "$(s_line ingress 16 disabled 0)" baseline \
+    "$VERIFIER" "$EMITTER_SRC" >/dev/null; then
+    fail "the drift check accepted a replica that contradicts its claimed pattern"
+else
+    echo "PASS: the drift check refuses a replica that contradicts its claimed pattern"
+fi
 
 # --- baseline: accept legs, then one leg per clause ---------------------
 
@@ -1391,6 +1459,29 @@ canned_trace_mcp_tools() {
 canned_trace_cache_breakpoints() {
     canned_trace | sed 's/cache_control_count=0/cache_control_count=2/'
 }
+
+# Every canned trace above is a hand-written replica of the emitter's
+# structural lines, so each is checked against the emitter's field shape
+# and, where it stands for a structural-line pattern, against that
+# pattern's predicate. The body-census traces claim nothing a structural
+# line decides, so their lines are checked for shape alone.
+replica_fails=0
+assert_trace_replicas "canned_trace replica" baseline "$VERIFIER" "$EMITTER_SRC" \
+    < <(canned_trace) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_thinking replica" thinking "$VERIFIER" "$EMITTER_SRC" \
+    < <(canned_trace_thinking) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_cache_breakpoints replica" cache-breakpoints \
+    "$VERIFIER" "$EMITTER_SRC" \
+    < <(canned_trace_cache_breakpoints) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_tools replica" - "$VERIFIER" "$EMITTER_SRC" \
+    < <(canned_trace_tools) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_mcp_tools replica" - "$VERIFIER" "$EMITTER_SRC" \
+    < <(canned_trace_mcp_tools) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_openai_responses_tools replica" - "$VERIFIER" \
+    "$EMITTER_SRC" \
+    < <(canned_trace_openai_responses_tools) || replica_fails=$((replica_fails + $?))
+fails=$((fails + replica_fails))
+unset replica_fails
 
 # The MITM seam header name, read out of the rig rather than restated so
 # the two spellings cannot drift. The rig refuses to promote a front-proxy

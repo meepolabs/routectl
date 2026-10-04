@@ -50,6 +50,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 WRAPPER="$HERE/run_capture.sh"
 
+# shellcheck source=scripts/drivers/lib/structural_shape.sh
+. "$REPO_ROOT/scripts/drivers/lib/structural_shape.sh"
+
 IMAGE="routectl-capture:default"
 
 # Scratch parent on REAL disk outside the repo. Outside because the
@@ -401,6 +404,16 @@ TRACE
 canned_trace_no_completion() {
     canned_trace | grep -vF 'upstream success body' | grep -vF 'egress response body'
 }
+
+# The canned trace is a hand-written replica of the emitter's structural
+# lines, and the replica here once drifted into a quoted-empty spelling
+# the emitter never writes. It is checked against the emitter's field
+# shape and, on its ingress line, against the `baseline` pattern the
+# wrapper's case claims.
+assert_trace_replicas "canned_trace replica" baseline \
+    "$REPO_ROOT/scripts/drivers/lib/verify_pattern.py" \
+    "$(structural_emitter_source "$REPO_ROOT")" < <(canned_trace) ||
+    fails=$((fails + $?))
 
 # ---------------------------------------------------------------------
 # Invoking the wrapper

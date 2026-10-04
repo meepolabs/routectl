@@ -33,6 +33,9 @@ CONFINE="$HERE/drivers/lib/confine.sh"
 VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
 INGRESS_KINDS="$HERE/drivers/lib/ingress_kinds.sh"
 
+# shellcheck source=scripts/drivers/lib/structural_shape.sh
+. "$HERE/drivers/lib/structural_shape.sh"
+
 # The dialects the script accepts as an expected-ingress pin, read out of
 # the shared library rather than restated: a restated list would pass this
 # suite while the script refused the value a real promotion passes.
@@ -163,6 +166,12 @@ SEAM_HEADER="$(sed -n 's/^MITM_SEAM_HEADER="\(.*\)"$/\1/p' "$PROMOTE")"
 baseline_structural_line() {
     printf 'structural summary direction="ingress" kind="ingress" id="anthropic" model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=1 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n'
 }
+
+# That line is a hand-written replica of the emitter's, so it is checked
+# against the emitter's field shape and the predicate it is named for.
+assert_structural_replica "baseline_structural_line is a faithful baseline replica" \
+    "$(baseline_structural_line)" baseline "$VERIFY_PATTERN" \
+    "$(structural_emitter_source "$HERE/..")" || fails=$((fails + 1))
 
 # Write a fixture the landing gates ACCEPT: a `baseline` structural line,
 # an ingress body, ingress headers with no seam header, and a meta.json

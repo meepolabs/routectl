@@ -37,6 +37,11 @@ RIG="$HERE/capture_fixtures.sh"
 SCRUB="$HERE/scrub-fixture.sh"
 LANE_CONFIG="$HERE/drivers/config/anthropic-api.toml"
 INGRESS_KINDS="$HERE/drivers/lib/ingress_kinds.sh"
+VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
+
+# shellcheck source=scripts/drivers/lib/structural_shape.sh
+. "$HERE/drivers/lib/structural_shape.sh"
+EMITTER_SRC="$(structural_emitter_source "$HERE/..")"
 
 fails=0
 
@@ -181,6 +186,23 @@ canned_trace_no_candidate_matches() {
             sed "s/0000000000d1/0000000000e$i/g; s/2026-08-25/2026-08-2$((25 + i))/g"
     done
 }
+
+# The canned traces above are hand-written replicas of the emitter's
+# structural lines. Each is checked against the emitter's field shape and,
+# on its ingress line, against the pattern it stands for. The two-request
+# trace is two copies of `canned_trace`, so it needs no row of its own;
+# the half-structural trace is the same lines minus one, checked through
+# its source.
+replica_fails=0
+assert_trace_replicas "canned_trace replica" baseline "$VERIFY_PATTERN" "$EMITTER_SRC" \
+    < <(canned_trace) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_cache_breakpoints replica" cache-breakpoints \
+    "$VERIFY_PATTERN" "$EMITTER_SRC" \
+    < <(canned_trace_cache_breakpoints) || replica_fails=$((replica_fails + $?))
+assert_trace_replicas "canned_trace_no_completion replica" baseline "$VERIFY_PATTERN" \
+    "$EMITTER_SRC" < <(canned_trace_no_completion) || replica_fails=$((replica_fails + $?))
+fails=$((fails + replica_fails))
+unset replica_fails
 
 # The python listener, shared by the stub daemon and by the case that
 # OCCUPIES a port. Answers only `/health`; anything else 404s, because a

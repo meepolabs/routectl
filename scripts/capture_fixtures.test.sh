@@ -41,6 +41,10 @@ mapfile -t KNOWN_INGRESS_KINDS < <(
 )
 CLIENT_VERSION="$HERE/drivers/lib/client_version.py"
 
+# shellcheck source=scripts/drivers/lib/structural_shape.sh
+. "$HERE/drivers/lib/structural_shape.sh"
+EMITTER_SRC="$(structural_emitter_source "$HERE/..")"
+
 fails=0
 
 # One synthetic trace covering a NON-STREAM request: ingress body,
@@ -673,6 +677,36 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "FAIL: python3 not found; this self-test cannot verify JSON output"
     exit 1
 fi
+
+# --- the canned structural lines are faithful replicas -----------------
+# Every driver trace here is built on `structural_line`, a hand-written
+# replica of the emitter's structural summary. Each trace is checked
+# against the emitter's field shape and, on its ingress line, against the
+# pattern it stands for; the tool-loop and selector candidates claim a
+# body-census pattern a structural line cannot decide, so they are held to
+# shape alone. A drifted replica would otherwise keep every case below
+# green while the rig's predicates read a line no capture produces.
+replica_fails=0
+assert_trace_replicas "trace_driver replica" baseline "$VERIFY_PATTERN" "$EMITTER_SRC" \
+    < <(trace_driver 019eab77-0000-4000-8000-0000000000f0) ||
+    replica_fails=$((replica_fails + $?))
+assert_trace_replicas "trace_driver_stream replica" baseline "$VERIFY_PATTERN" \
+    "$EMITTER_SRC" < <(trace_driver_stream 019eab77-0000-4000-8000-0000000000f0) ||
+    replica_fails=$((replica_fails + $?))
+assert_trace_replicas "trace_driver_not_baseline replica" thinking "$VERIFY_PATTERN" \
+    "$EMITTER_SRC" < <(trace_driver_not_baseline 019eab77-0000-4000-8000-0000000000f0) ||
+    replica_fails=$((replica_fails + $?))
+assert_trace_replicas "trace_driver_tools replica" - "$VERIFY_PATTERN" "$EMITTER_SRC" \
+    < <(trace_driver_tools 019eab77-0000-4000-8000-0000000000f0) ||
+    replica_fails=$((replica_fails + $?))
+assert_trace_replicas "candidate_trace replica" baseline "$VERIFY_PATTERN" "$EMITTER_SRC" \
+    < <(candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_A" baseline) ||
+    replica_fails=$((replica_fails + $?))
+assert_trace_replicas "candidate_trace tools replica" - "$VERIFY_PATTERN" "$EMITTER_SRC" \
+    < <(candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_B" tools) ||
+    replica_fails=$((replica_fails + $?))
+fails=$((fails + replica_fails))
+unset replica_fails
 
 # --- Case 1: a complete non-stream capture ---------------------------
 # The traced provider_kind is `anthropic` (the routectl-providers

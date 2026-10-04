@@ -8503,6 +8503,10 @@ new section or a second doc.
 - `drivers/lib/resolve_bin.sh` -- sourced binary-resolution helper
   (`resolve_bin`); the one copy the credential probe and its self-test share, so
   a probe and the test that checks it cannot resolve different binaries
+- `drivers/lib/structural_shape.sh` -- sourced drift check for the shell
+  self-tests' hand-written structural summary lines (`structural_line_drift`,
+  `assert_structural_replica`, `assert_trace_replicas`): field shape derived
+  from `log_safe.rs`'s emitter, plus the claimed pattern via `verify_pattern.py`
 - `drivers/profiles/README.md` -- the client-profile seam, committed with ZERO
   profiles: the closed-set and `key=value` rules, the forbidden keys, and the
   ordering constraint `driver_load_client_profile` enforces (a profile loads
