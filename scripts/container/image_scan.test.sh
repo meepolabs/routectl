@@ -356,9 +356,10 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     check "no credential class in any layer of the committed image" \
         "" "$COMMITTED_FINDINGS"
 else
-    skip "committed image scan -- $IMAGE is not built locally, so no layer of it"
-    skip "  was scanned for a credential. Build it with scripts/container/build.sh."
-    skip "  The positive control below still runs."
+    skip "committed image scan -- NO IMAGE WAS SCANNED: $IMAGE is not present on"
+    skip "  this host, so no layer of it was checked for a credential. A green run"
+    skip "  here covers only the positive control below. Scan the image where it is"
+    skip "  built: bash scripts/container/build.sh && bash scripts/container/image_scan.test.sh"
 fi
 
 # --- the deliberately-dirty positive control ------------------------
