@@ -184,7 +184,7 @@ jobs:
       # moved during the audit that produced this change. Passing the
       # version here also keeps it legible in the workflow instead of
       # encoded in a ref name.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
@@ -283,7 +283,7 @@ jobs:
       # Action SHA-pinned with the version as an explicit input, per the
       # reasoning at the validate job's toolchain step.
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: 1.95.0
           targets: ${{ matrix.target }}
