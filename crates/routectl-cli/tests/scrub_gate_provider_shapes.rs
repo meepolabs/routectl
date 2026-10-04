@@ -572,3 +572,157 @@ fn the_path_allowlist_is_exactly_the_reviewed_set() {
          here."
     );
 }
+
+/// The whole reviewed allowlist surface, as gitleaks reads it. `paths` is
+/// only one way to switch scanning off: a global `regexes` entry such as
+/// `.*` (or a `stopwords` / `commits` entry, or a changed `regexTarget`)
+/// exempts every finding everywhere without touching a path, so the pin
+/// covers every key of the global table, not just `paths`.
+const EXPECTED_GLOBAL_ALLOWLIST: &str = r#"
+description = "Build outputs and lockfiles -- not source"
+regexTarget = "secret"
+regexes = [
+  '''^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$''',
+]
+paths = [
+  '''(?:^|/)Cargo\.lock$''',
+  '''^target/''',
+  '''^crates/routectl-cli/tests/fixtures/captured/''',
+]
+"#;
+
+fn read_gitleaks_config() -> String {
+    let config = repo_root().join(GITLEAKS_CONFIG);
+    std::fs::read_to_string(&config)
+        .unwrap_or_else(|err| panic!("read {} ({err})", config.display()))
+}
+
+/// Every way `source` departs from the reviewed allowlist surface: the
+/// global `[allowlist]` table must equal [`EXPECTED_GLOBAL_ALLOWLIST`]
+/// exactly, and neither `[[allowlists]]` nor any rule-scoped allowlist may
+/// exist. Empty means no drift.
+fn allowlist_surface_drift(source: &str) -> Vec<String> {
+    let document: toml::Table = toml::from_str(source)
+        .unwrap_or_else(|err| panic!("{GITLEAKS_CONFIG} must be valid TOML ({err})"));
+    let expected = toml::Value::Table(
+        toml::from_str(EXPECTED_GLOBAL_ALLOWLIST)
+            .expect("the expected allowlist literal is valid TOML"),
+    );
+    let mut drift = Vec::new();
+    match document.get("allowlist") {
+        Some(actual) if *actual == expected => {}
+        actual => drift.push(format!("[allowlist] is {actual:?}, expected {expected:?}")),
+    }
+    if let Some(plural) = document.get("allowlists") {
+        drift.push(format!("[[allowlists]] must not exist; found {plural:?}"));
+    }
+    let rules = document
+        .get("rules")
+        .and_then(toml::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    for rule in rules {
+        for key in ["allowlist", "allowlists"] {
+            if let Some(scoped) = rule.get(key) {
+                let id = rule.get("id").and_then(toml::Value::as_str).unwrap_or("?");
+                drift.push(format!("rule {id:?} carries a `{key}`: {scoped:?}"));
+            }
+        }
+    }
+    drift
+}
+
+/// The exact allowlist surface, every key, so a catch-all regex or a new
+/// allowlist table is a review moment rather than a silent exemption.
+#[test]
+fn the_allowlist_surface_is_exactly_the_reviewed_set() {
+    let drift = allowlist_surface_drift(&read_gitleaks_config());
+
+    assert!(
+        drift.is_empty(),
+        "the allowlist surface of {GITLEAKS_CONFIG} drifted from the reviewed set: \
+         {drift:#?}. Every allowlist entry disables secret scanning somewhere; \
+         confirm the change is intended, then update EXPECTED_GLOBAL_ALLOWLIST."
+    );
+}
+
+/// POSITIVE CONTROL for the pin above: the real config with one catch-all
+/// regex added, and separately with a rule-scoped allowlist, must each be
+/// reported. Otherwise "no drift" could come from a comparison that never
+/// fires.
+#[test]
+fn the_allowlist_surface_pin_rejects_a_catch_all_regex_and_a_rule_allowlist() {
+    let source = read_gitleaks_config();
+    let catch_all = source.replacen("regexes = [\n", "regexes = [\n  '''.*''',\n", 1);
+    assert_ne!(
+        catch_all, source,
+        "the planted regex must land in the config"
+    );
+    let rule_scoped = format!("{source}\n[[rules.allowlists]]\nregexes = ['''.*''']\n");
+
+    let catch_all_drift = allowlist_surface_drift(&catch_all);
+    let rule_scoped_drift = allowlist_surface_drift(&rule_scoped);
+
+    assert_eq!(catch_all_drift.len(), 1, "got: {catch_all_drift:#?}");
+    assert!(catch_all_drift[0].starts_with("[allowlist]"));
+    assert_eq!(rule_scoped_drift.len(), 1, "got: {rule_scoped_drift:#?}");
+    assert!(rule_scoped_drift[0].contains("allowlists"));
+}
+
+/// Repo-relative paths of every file under the driver corpus.
+fn driver_corpus_files() -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|err| panic!("read {} ({err})", dir.display()));
+        for entry in entries {
+            let path = entry.expect("readable dir entry").path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                let relative = path.strip_prefix(root).expect("walk stays under the repo");
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let root = repo_root();
+    let mut out = Vec::new();
+    walk(&root, &root.join(fixture_root("driver")), &mut out);
+    out.sort();
+    out
+}
+
+/// The lockfile entry is deliberately not root-anchored: it exempts a file
+/// named `Cargo.lock` at any depth, the driver corpus included. A probe path
+/// cannot rule that out, so the real corpus tree is checked instead: no file
+/// in it may be one the allowlist exempts.
+#[test]
+fn no_driver_corpus_file_is_exempt_from_secret_scanning() {
+    let paths = allowlist_paths();
+    let corpus_lockfile = format!(
+        "{}anthropic-api/plain-turn-01/Cargo.lock",
+        fixture_root("driver")
+    );
+    let files = driver_corpus_files();
+
+    let exempt: Vec<&String> = files
+        .iter()
+        .filter(|file| !entries_matching(&paths, file).is_empty())
+        .collect();
+
+    assert_eq!(
+        entries_matching(&paths, &corpus_lockfile),
+        vec![r"(?:^|/)Cargo\.lock$".to_string()],
+        "control: a lockfile-named file inside the corpus IS exempt, which is why \
+         the real corpus files are checked below"
+    );
+    assert!(
+        files.iter().any(|f| f.ends_with("/meta.json")),
+        "control: the corpus walk must find the committed fixtures; got {} files",
+        files.len()
+    );
+    assert!(
+        exempt.is_empty(),
+        "these driver corpus files are exempt from secret scanning by `[allowlist] \
+         paths` in {GITLEAKS_CONFIG}: {exempt:?}. Rename or remove them; the corpus \
+         is public and gitleaks is its commit-time backstop."
+    );
+}

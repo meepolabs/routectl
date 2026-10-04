@@ -25,5 +25,9 @@ nix = { version = "0.31", features = ["signal"] }
 [dev-dependencies]
 tempfile = "3"
 
+# The owner-only secret-dir test sets a permissive umask.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.31", features = ["signal", "fs"] }
+
 [lints]
 workspace = true

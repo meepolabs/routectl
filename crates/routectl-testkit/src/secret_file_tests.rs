@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{secret_file_ref, write_owner_only};
-use crate::temp_reaper::reap_in;
+use crate::temp_reaper::{create_secret_dir, reap_in};
 
 fn path_of(uri: &str) -> &Path {
     Path::new(uri.strip_prefix("file://").expect("file:// ref"))
@@ -50,6 +50,24 @@ fn ref_file_is_owner_only() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o077, 0, "mode {mode:o} must deny group and other");
+}
+
+/// The secret dir is created owner-only regardless of umask: under a
+/// permissive `0002` a plain `create_dir` would yield `0775`. The umask is
+/// process-global, so it is restored before any assertion can unwind.
+#[cfg(unix)]
+#[test]
+fn secret_dir_is_owner_only_under_a_permissive_umask() {
+    use nix::sys::stat::{Mode, umask};
+    use std::os::unix::fs::PermissionsExt;
+
+    let previous = umask(Mode::from_bits_truncate(0o002));
+    let created = create_secret_dir();
+    umask(previous);
+
+    let mode = std::fs::metadata(&created).unwrap().permissions().mode();
+    std::fs::remove_dir(&created).unwrap();
+    assert_eq!(mode & 0o777, 0o700, "secret dir mode {mode:o} must be 0700");
 }
 
 /// The dir a real ref lives in is reaped once renamed onto a dead pid, and

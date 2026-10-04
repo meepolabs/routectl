@@ -468,6 +468,17 @@ fn summarize_value(value: Option<&Value>, allow_verbatim: bool) -> String {
     }
 }
 
+/// Both sides of a divergence, value-bounded under the same caps the
+/// failure summary uses: `(actual, expected)`. Also backs
+/// `Divergence`'s `Debug`, so `{:?}` is bounded too.
+pub(super) fn summarize_sides(divergence: &Divergence) -> (String, String) {
+    let verbatim = is_verbatim_safe_path(&divergence.path);
+    (
+        summarize_value(divergence.actual(), verbatim),
+        summarize_value(divergence.expected(), verbatim),
+    )
+}
+
 /// One-line, value-bounded rendering of a divergence: full path, full
 /// kind, summarized sides.
 fn summarize_divergence(divergence: &Divergence) -> String {
@@ -481,21 +492,17 @@ fn summarize_divergence(divergence: &Divergence) -> String {
     } else {
         &divergence.path
     };
-    let verbatim = is_verbatim_safe_path(&divergence.path);
+    let (actual, expected) = summarize_sides(divergence);
     match divergence.kind {
-        DivergenceKind::Changed => format!(
-            "value mismatch at {path}: actual={}, expected={}",
-            summarize_value(divergence.actual.as_ref(), verbatim),
-            summarize_value(divergence.expected.as_ref(), verbatim)
-        ),
-        DivergenceKind::Added => format!(
-            "{noun} at {path}: present in actual only, actual={}",
-            summarize_value(divergence.actual.as_ref(), verbatim)
-        ),
-        DivergenceKind::Removed => format!(
-            "{noun} at {path}: present in expected only, expected={}",
-            summarize_value(divergence.expected.as_ref(), verbatim)
-        ),
+        DivergenceKind::Changed => {
+            format!("value mismatch at {path}: actual={actual}, expected={expected}")
+        }
+        DivergenceKind::Added => {
+            format!("{noun} at {path}: present in actual only, actual={actual}")
+        }
+        DivergenceKind::Removed => {
+            format!("{noun} at {path}: present in expected only, expected={expected}")
+        }
     }
 }
 

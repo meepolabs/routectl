@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use super::DiffMessage;
+use super::harness::summarize_sides;
 
 /// One structural difference between an actual and an expected JSON
 /// value, located by the dot/bracket `path` convention documented on
@@ -17,23 +18,61 @@ use super::DiffMessage;
 /// [`DivergenceKind::Removed`] fills only `expected`, and
 /// [`DivergenceKind::Changed`] fills both.
 ///
-/// There is deliberately no `Display`: both sides render in full, so a
-/// corpus-facing caller must select [`Divergence::render_verbose`] by
-/// name. Bounded reporting lives in `bounded_body_diff`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// There is deliberately no `Display`, and `Debug` is value-bounded (it
+/// renders each side through the same summarizer `bounded_body_diff`
+/// uses), so `{:?}` on a captured-body divergence cannot dump a prompt.
+/// [`Divergence::render_verbose`] is the only full-value rendering, and a
+/// caller must select it by name.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Divergence {
     pub path: String,
     pub kind: DivergenceKind,
-    pub actual: Option<Value>,
-    pub expected: Option<Value>,
+    actual: Option<Value>,
+    expected: Option<Value>,
 }
 
 impl Divergence {
+    pub fn new(
+        path: impl Into<String>,
+        kind: DivergenceKind,
+        actual: Option<Value>,
+        expected: Option<Value>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            actual,
+            expected,
+        }
+    }
+
+    /// The actual-side value, when that side has one.
+    pub const fn actual(&self) -> Option<&Value> {
+        self.actual.as_ref()
+    }
+
+    /// The expected-side value, when that side has one.
+    pub const fn expected(&self) -> Option<&Value> {
+        self.expected.as_ref()
+    }
+
     /// The one-line form the comparator's own failure messages use, with
     /// both sides rendered in FULL. Unbounded: never route captured-body
     /// divergences through this.
     pub fn render_verbose(&self) -> String {
         format_divergence(self).0
+    }
+}
+
+impl std::fmt::Debug for Divergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (actual, expected) = summarize_sides(self);
+        f.debug_struct("Divergence")
+            .field("path", &self.path)
+            .field("kind", &self.kind)
+            .field("actual", &format_args!("{actual}"))
+            .field("expected", &format_args!("{expected}"))
+            .finish()
     }
 }
 
@@ -571,12 +610,12 @@ mod tests {
             vec!["messages[0].role", "messages[1].role"]
         );
         assert_eq!(
-            at(&divergences, "messages[0].role").actual,
-            Some(json!("user"))
+            at(&divergences, "messages[0].role").actual(),
+            Some(&json!("user"))
         );
         assert_eq!(
-            at(&divergences, "messages[0].role").expected,
-            Some(json!("system"))
+            at(&divergences, "messages[0].role").expected(),
+            Some(&json!("system"))
         );
     }
 
@@ -594,8 +633,8 @@ mod tests {
         );
         let surplus = at(&divergences, "messages[1]");
         assert_eq!(surplus.kind, DivergenceKind::Added);
-        assert_eq!(surplus.actual, Some(json!({"role": "assistant"})));
-        assert_eq!(surplus.expected, None);
+        assert_eq!(surplus.actual(), Some(&json!({"role": "assistant"})));
+        assert_eq!(surplus.expected(), None);
     }
 
     #[test]
@@ -608,8 +647,8 @@ mod tests {
         assert_eq!(divergences.len(), 1, "got: {divergences:?}");
         let missing = at(&divergences, "[1]");
         assert_eq!(missing.kind, DivergenceKind::Removed);
-        assert_eq!(missing.actual, None);
-        assert_eq!(missing.expected, Some(json!(2)));
+        assert_eq!(missing.actual(), None);
+        assert_eq!(missing.expected(), Some(&json!(2)));
     }
 
     #[test]
@@ -622,12 +661,12 @@ mod tests {
         assert_eq!(divergences.len(), 2, "got: {divergences:?}");
         let added = at(&divergences, "only_actual");
         assert_eq!(added.kind, DivergenceKind::Added);
-        assert_eq!(added.actual, Some(json!("from-actual")));
-        assert_eq!(added.expected, None);
+        assert_eq!(added.actual(), Some(&json!("from-actual")));
+        assert_eq!(added.expected(), None);
         let removed = at(&divergences, "only_expected");
         assert_eq!(removed.kind, DivergenceKind::Removed);
-        assert_eq!(removed.actual, None);
-        assert_eq!(removed.expected, Some(json!("from-expected")));
+        assert_eq!(removed.actual(), None);
+        assert_eq!(removed.expected(), Some(&json!("from-expected")));
     }
 
     #[test]

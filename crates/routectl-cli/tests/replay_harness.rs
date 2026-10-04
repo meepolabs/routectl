@@ -21,9 +21,10 @@ use tempfile::tempdir;
 
 use common::replay::{
     ADAPTIVE_THINKING_MODELS, ENRICHMENT_DEPENDENT_MODELS, FIXTURE_SCHEMA_VERSION, Fixture,
-    bounded_body_diff, divergence_count, diverges_only_in_messages, enrichment_skip_reason,
-    headers_from_pairs, ingress_for_kind, load_fixture, parse_enriched_canonical,
-    replay_resolved_model, system_turn_lift_skip_reason, with_replay_enrichment,
+    bounded_body_diff, diff_all, divergence_count, diverges_only_in_messages,
+    enrichment_skip_reason, headers_from_pairs, ingress_for_kind, load_fixture,
+    parse_enriched_canonical, replay_resolved_model, system_turn_lift_skip_reason,
+    with_replay_enrichment,
 };
 
 // ---------------------------------------------------------------------------
@@ -532,7 +533,9 @@ fn body_diff_shows_short_scalar_values_in_full() {
 /// On an allowlisted identifier path the length cap is the only gate: an
 /// over-cap value must report length only with NO prefix, while a short
 /// identifier on the same path (control) still renders verbatim, so the
-/// elision follows the cap rather than the path.
+/// elision follows the cap rather than the path. A raw `Divergence`'s
+/// `Debug` is held to the same cap, while `render_verbose` (control) still
+/// renders the value in full.
 #[test]
 fn body_diff_elides_an_over_cap_identifier_with_no_prefix_and_keeps_a_short_one() {
     // Arrange: the over-cap value's distinguishing lead is inside the
@@ -545,6 +548,9 @@ fn body_diff_elides_an_over_cap_identifier_with_no_prefix_and_keeps_a_short_one(
     // Act
     let elided = bounded_body_diff(&over, &other, &[]).expect("differing bodies report");
     let control = bounded_body_diff(&short, &other, &[]).expect("differing bodies report");
+    let divergence = diff_all(&over, &other, &[]).remove(0);
+    let debugged = format!("{divergence:?}");
+    let verbose = divergence.render_verbose();
 
     // Assert
     assert!(elided.contains("model"), "path preserved: {elided}");
@@ -563,6 +569,19 @@ fn body_diff_elides_an_over_cap_identifier_with_no_prefix_and_keeps_a_short_one(
     assert!(
         control.contains("\"sonnet\"") && control.contains("claude-sonnet-4-5"),
         "a short identifier must render in full: {control}"
+    );
+    assert!(
+        debugged.contains("elided") && !debugged.contains("LEADING-MARKER"),
+        "Debug must summarize an over-cap value, not print it: {debugged}"
+    );
+    assert!(
+        debugged.len() < 200,
+        "Debug must stay bounded on a large value ({} bytes): {debugged}",
+        debugged.len()
+    );
+    assert!(
+        verbose.contains(&over_cap),
+        "control: render_verbose is the full-value path and must print it"
     );
 }
 

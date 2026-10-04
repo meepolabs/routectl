@@ -22,8 +22,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-mod common;
-
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 use routectl_router::{
@@ -69,6 +67,20 @@ fn req_with_structured_output(alias: &str) -> ChatRequest {
     }
 }
 
+/// The real key in an owner-only (0600) temp file deleted when the returned
+/// guard drops. Never `routectl_testkit::secret_file_ref`: that writes into a
+/// per-process dir that deliberately outlives the test and is reaped only by
+/// a later run, which is fine for fake keys and wrong for a live credential.
+fn live_key_file(api_key: &str) -> tempfile::NamedTempFile {
+    use std::io::Write;
+
+    let mut file = tempfile::NamedTempFile::new().expect("create live key temp file");
+    file.write_all(api_key.as_bytes())
+        .and_then(|()| file.flush())
+        .expect("write live key temp file");
+    file
+}
+
 #[tokio::test]
 async fn live_openai_unsupported_parameter_is_learned() {
     let (Ok(base_url), Ok(api_key)) = (std::env::var(ENV_BASE_URL), std::env::var(ENV_API_KEY))
@@ -76,10 +88,13 @@ async fn live_openai_unsupported_parameter_is_learned() {
         panic!("set {ENV_BASE_URL} and {ENV_API_KEY} to run the live smoke");
     };
 
+    let key_file = live_key_file(&api_key);
+    let key_ref = format!("file://{}", key_file.path().display());
+
     let mut providers = BTreeMap::new();
     providers.insert(
         "live".to_string(),
-        ProviderEntry::openai_compat(&base_url, common::file_ref(&api_key)),
+        ProviderEntry::openai_compat(&base_url, key_ref),
     );
     let mut models = BTreeMap::new();
     models.insert("m_live".to_string(), ModelEntry::new("live", MODEL));

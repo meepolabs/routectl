@@ -1009,8 +1009,8 @@ fn canonical_mcp_rename(name: &str) -> Option<String> {
 /// tampering conservation exists to catch.
 fn is_canonical_mcp_rename(divergence: &Divergence) -> bool {
     let (Some(wire), Some(ingress)) = (
-        divergence.actual.as_ref().and_then(Value::as_str),
-        divergence.expected.as_ref().and_then(Value::as_str),
+        divergence.actual().and_then(Value::as_str),
+        divergence.expected().and_then(Value::as_str),
     ) else {
         return false;
     };
@@ -1213,7 +1213,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
         max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Added
-                && divergence.actual.as_ref().and_then(Value::as_f64) == Some(1.0)
+                && divergence.actual().and_then(Value::as_f64) == Some(1.0)
         }),
         matched: AtomicUsize::new(0),
     },
@@ -1246,8 +1246,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Changed
                 && match (
-                    divergence.actual.as_ref().and_then(Value::as_str),
-                    divergence.expected.as_ref().and_then(Value::as_str),
+                    divergence.actual().and_then(Value::as_str),
+                    divergence.expected().and_then(Value::as_str),
                 ) {
                     (Some(wire), Some(ingress)) => is_bracketed_alias_of(ingress, wire),
                     _ => false,
@@ -1278,7 +1278,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
         max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Removed
-                && divergence.expected.as_ref().and_then(|v| v.get("type"))
+                && divergence.expected().and_then(|v| v.get("type"))
                     == Some(&Value::String("disabled".to_string()))
         }),
         matched: AtomicUsize::new(0),
@@ -1359,7 +1359,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
         max_per_fixture: Some(MAX_AUTO_CACHE_MARKERS),
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Added
-                && divergence.actual.as_ref().is_some_and(is_auto_cache_marker)
+                && divergence.actual().is_some_and(is_auto_cache_marker)
         }),
         matched: AtomicUsize::new(0),
     },
@@ -2327,12 +2327,12 @@ mod tests {
         // length-changing transform must not answer the post-diff
         // question, or it becomes a per-index whitelist over `.messages`.
         let entry = exceptions_for_lane(&ANTHROPIC_FIDELITY_LANE)[0];
-        let divergence = Divergence {
-            path: "messages[1]".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!({"role": "system", "content": "lifted"})),
-        };
+        let divergence = Divergence::new(
+            "messages[1]",
+            DivergenceKind::Removed,
+            None,
+            Some(json!({"role": "system", "content": "lifted"})),
+        );
 
         assert!(
             (entry.path_predicate)(&divergence.path),
@@ -2509,37 +2509,32 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("thinking-temperature-clamp");
-        let clamped = Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(1.0)),
-            expected: None,
-        };
+        let clamped = Divergence::new("temperature", DivergenceKind::Added, Some(json!(1.0)), None);
 
         assert!(entry.matches(&clamped));
 
         // Same path, a value the clamp never produces.
-        assert!(!entry.matches(&Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(0.7)),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Added,
+            Some(json!(0.7)),
+            None,
+        )));
         // Same path and value, but the client sent it too -- that is a
         // rewrite of the caller's sampling, not the clamp adding a field.
-        assert!(!entry.matches(&Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!(1.0)),
-            expected: Some(json!(0.2)),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Changed,
+            Some(json!(1.0)),
+            Some(json!(0.2)),
+        )));
         // An unrelated path carrying the same shape.
-        assert!(!entry.matches(&Divergence {
-            path: "top_p".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(1.0)),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "top_p",
+            DivergenceKind::Added,
+            Some(json!(1.0)),
+            None,
+        )));
     }
 
     #[test]
@@ -2549,41 +2544,41 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("model-alias-suffix-resolved");
 
-        assert!(entry.matches(&Divergence {
-            path: "model".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("claude-opus-4-8")),
-            expected: Some(json!("claude-opus-4-8[1m]")),
-        }));
+        assert!(entry.matches(&Divergence::new(
+            "model",
+            DivergenceKind::Changed,
+            Some(json!("claude-opus-4-8")),
+            Some(json!("claude-opus-4-8[1m]")),
+        )));
 
         // A different model entirely: a real routing divergence.
-        assert!(!entry.matches(&Divergence {
-            path: "model".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("claude-haiku-4-5")),
-            expected: Some(json!("claude-opus-4-8[1m]")),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "model",
+            DivergenceKind::Changed,
+            Some(json!("claude-haiku-4-5")),
+            Some(json!("claude-opus-4-8[1m]")),
+        )));
         // Suffix on the wrong side: the wire gained the alias marker.
-        assert!(!entry.matches(&Divergence {
-            path: "model".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("claude-opus-4-8[1m]")),
-            expected: Some(json!("claude-opus-4-8")),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "model",
+            DivergenceKind::Changed,
+            Some(json!("claude-opus-4-8[1m]")),
+            Some(json!("claude-opus-4-8")),
+        )));
         // An empty bracket pair proves no alias relationship.
-        assert!(!entry.matches(&Divergence {
-            path: "model".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("claude-opus-4-8")),
-            expected: Some(json!("claude-opus-4-8[]")),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "model",
+            DivergenceKind::Changed,
+            Some(json!("claude-opus-4-8")),
+            Some(json!("claude-opus-4-8[]")),
+        )));
         // An unrelated path whose values happen to fit the shape.
-        assert!(!entry.matches(&Divergence {
-            path: "metadata.user_id".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("u")),
-            expected: Some(json!("u[1m]")),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "metadata.user_id",
+            DivergenceKind::Changed,
+            Some(json!("u")),
+            Some(json!("u[1m]")),
+        )));
     }
 
     #[test]
@@ -2593,35 +2588,35 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("disabled-thinking-dropped");
 
-        assert!(entry.matches(&Divergence {
-            path: "thinking".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!({"type": "disabled"})),
-        }));
+        assert!(entry.matches(&Divergence::new(
+            "thinking",
+            DivergenceKind::Removed,
+            None,
+            Some(json!({"type": "disabled"})),
+        )));
 
         // An ACTIVE thinking config vanishing from the wire is a real
         // fidelity loss and must keep surfacing.
-        assert!(!entry.matches(&Divergence {
-            path: "thinking".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!({"type": "enabled", "budget_tokens": 4096})),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "thinking",
+            DivergenceKind::Removed,
+            None,
+            Some(json!({"type": "enabled", "budget_tokens": 4096})),
+        )));
         // routectl ADDING a disabled config is the opposite transform.
-        assert!(!entry.matches(&Divergence {
-            path: "thinking".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!({"type": "disabled"})),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "thinking",
+            DivergenceKind::Added,
+            Some(json!({"type": "disabled"})),
+            None,
+        )));
         // An unrelated path carrying the same value shape.
-        assert!(!entry.matches(&Divergence {
-            path: "output_config".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!({"type": "disabled"})),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "output_config",
+            DivergenceKind::Removed,
+            None,
+            Some(json!({"type": "disabled"})),
+        )));
     }
 
     #[test]
@@ -2639,63 +2634,63 @@ mod tests {
             "tools[3].cache_control",
         ] {
             assert!(
-                entry.matches(&Divergence {
-                    path: path.to_string(),
-                    kind: DivergenceKind::Added,
-                    actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
-                    expected: None,
-                }),
+                entry.matches(&Divergence::new(
+                    path.to_string(),
+                    DivergenceKind::Added,
+                    Some(json!({"type": "ephemeral", "ttl": "5m"})),
+                    None,
+                )),
                 "`{path}` is a placement slot"
             );
         }
         // A premium TTL is a shape auto-placement never constructs: only
         // `ephemeral_5m()` is assigned, so `1h` is a caller marker or an
         // unreviewed placement change and must keep surfacing.
-        assert!(!entry.matches(&Divergence {
-            path: "cache_control".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!({"type": "ephemeral", "ttl": "1h"})),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "cache_control",
+            DivergenceKind::Added,
+            Some(json!({"type": "ephemeral", "ttl": "1h"})),
+            None,
+        )));
         // Nor is an omitted TTL: `ephemeral_5m()` carries `Some("5m")`, and
         // the field skips serialization only when it is `None`.
-        assert!(!entry.matches(&Divergence {
-            path: "cache_control".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!({"type": "ephemeral"})),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "cache_control",
+            DivergenceKind::Added,
+            Some(json!({"type": "ephemeral"})),
+            None,
+        )));
 
         // A cache-control kind routectl never injects: the type is what
         // carries the precision, so this must keep surfacing.
-        assert!(!entry.matches(&Divergence {
-            path: "cache_control".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!({"type": "permanent", "ttl": "5m"})),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "cache_control",
+            DivergenceKind::Added,
+            Some(json!({"type": "permanent", "ttl": "5m"})),
+            None,
+        )));
         // Same path, no type at all.
-        assert!(!entry.matches(&Divergence {
-            path: "cache_control".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!({"ttl": "5m"})),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "cache_control",
+            DivergenceKind::Added,
+            Some(json!({"ttl": "5m"})),
+            None,
+        )));
         // routectl REWRITING a caller's marker is a different transform:
         // injection is withheld entirely when the caller supplied one.
-        assert!(!entry.matches(&Divergence {
-            path: "cache_control".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
-            expected: Some(json!({"type": "ephemeral", "ttl": "1h"})),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "cache_control",
+            DivergenceKind::Changed,
+            Some(json!({"type": "ephemeral", "ttl": "5m"})),
+            Some(json!({"type": "ephemeral", "ttl": "1h"})),
+        )));
         // The wire DROPPING a caller's marker is wire loss, not injection.
-        assert!(!entry.matches(&Divergence {
-            path: "system[1].cache_control".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!({"type": "ephemeral", "ttl": "5m"})),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "system[1].cache_control",
+            DivergenceKind::Removed,
+            None,
+            Some(json!({"type": "ephemeral", "ttl": "5m"})),
+        )));
         // Paths auto-placement never writes, including the one
         // caller-controlled subtree that can carry the key name.
         for path in [
@@ -2707,12 +2702,12 @@ mod tests {
             "metadata.cache_control",
         ] {
             assert!(
-                !entry.matches(&Divergence {
-                    path: path.to_string(),
-                    kind: DivergenceKind::Added,
-                    actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
-                    expected: None,
-                }),
+                !entry.matches(&Divergence::new(
+                    path.to_string(),
+                    DivergenceKind::Added,
+                    Some(json!({"type": "ephemeral", "ttl": "5m"})),
+                    None,
+                )),
                 "`{path}` is not a placement slot"
             );
         }
@@ -2734,48 +2729,48 @@ mod tests {
             ("top_p", json!(0.9)),
         ] {
             assert!(
-                entry.matches(&Divergence {
-                    path: path.to_string(),
-                    kind: DivergenceKind::Removed,
-                    actual: None,
-                    expected: Some(sent.clone()),
-                }),
+                entry.matches(&Divergence::new(
+                    path.to_string(),
+                    DivergenceKind::Removed,
+                    None,
+                    Some(sent.clone()),
+                )),
                 "`{path}` carrying {sent} is what the strip removes"
             );
         }
 
         // A sampling key the strip leaves alone: the seat accepts it, so
         // its loss is real.
-        assert!(!entry.matches(&Divergence {
-            path: "top_k".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!(40)),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "top_k",
+            DivergenceKind::Removed,
+            None,
+            Some(json!(40)),
+        )));
         // A REWRITE of the caller's value is not this transform -- the
         // strip removes the key outright.
-        assert!(!entry.matches(&Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!(1.0)),
-            expected: Some(json!(0.2)),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Changed,
+            Some(json!(1.0)),
+            Some(json!(0.2)),
+        )));
         // An ADDED temperature stays `thinking-temperature-clamp`'s
         // territory: that entry is a value the wire GAINS, this one a
         // value the wire LOSES.
-        assert!(!entry.matches(&Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(1.0)),
-            expected: None,
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Added,
+            Some(json!(1.0)),
+            None,
+        )));
         // A nested key that merely ends in one of the two names.
-        assert!(!entry.matches(&Divergence {
-            path: "provider_extras.temperature".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!(0.5)),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "provider_extras.temperature",
+            DivergenceKind::Removed,
+            None,
+            Some(json!(0.5)),
+        )));
     }
 
     #[test]
@@ -2784,11 +2779,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher(MCP_TOOL_RENAME_ID);
-        let renamed = |path: &str| Divergence {
-            path: path.to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("mcp__Read")),
-            expected: Some(json!("Read")),
+        let renamed = |path: &str| {
+            Divergence::new(
+                path.to_string(),
+                DivergenceKind::Changed,
+                Some(json!("mcp__Read")),
+                Some(json!("Read")),
+            )
         };
 
         for path in [
@@ -2829,11 +2826,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher(MCP_TOOL_RENAME_ID);
-        let rename = |wire: &str, ingress: &str| Divergence {
-            path: "tools[0].name".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!(wire)),
-            expected: Some(json!(ingress)),
+        let rename = |wire: &str, ingress: &str| {
+            Divergence::new(
+                "tools[0].name",
+                DivergenceKind::Changed,
+                Some(json!(wire)),
+                Some(json!(ingress)),
+            )
         };
 
         // The three producer cases that DO produce a divergence: a bare
@@ -2866,25 +2865,25 @@ mod tests {
         // A name that merely gains the prefix as a SUFFIX or infix.
         assert!(!entry.matches(&rename("Readmcp__", "Read")));
         // The key appearing or vanishing wholesale is a different shape.
-        assert!(!entry.matches(&Divergence {
-            path: "tools[0].name".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!("mcp__Read")),
-            expected: None,
-        }));
-        assert!(!entry.matches(&Divergence {
-            path: "tools[0].name".to_string(),
-            kind: DivergenceKind::Removed,
-            actual: None,
-            expected: Some(json!("Read")),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "tools[0].name",
+            DivergenceKind::Added,
+            Some(json!("mcp__Read")),
+            None,
+        )));
+        assert!(!entry.matches(&Divergence::new(
+            "tools[0].name",
+            DivergenceKind::Removed,
+            None,
+            Some(json!("Read")),
+        )));
         // A non-string value on either side.
-        assert!(!entry.matches(&Divergence {
-            path: "tools[0].name".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("mcp__Read")),
-            expected: Some(json!(["Read"])),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "tools[0].name",
+            DivergenceKind::Changed,
+            Some(json!("mcp__Read")),
+            Some(json!(["Read"])),
+        )));
     }
 
     #[test]
@@ -3073,11 +3072,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("auto-cache-breakpoint-injected");
-        let marker = |path: &str| Divergence {
-            path: path.to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!({"type": "ephemeral", "ttl": "5m"})),
-            expected: None,
+        let marker = |path: &str| {
+            Divergence::new(
+                path.to_string(),
+                DivergenceKind::Added,
+                Some(json!({"type": "ephemeral", "ttl": "5m"})),
+                None,
+            )
         };
         assert_eq!(entry.max_per_fixture, Some(2));
 
@@ -3115,12 +3116,12 @@ mod tests {
         let entry = matcher("thinking-temperature-clamp");
         let before = entry.matched_count();
 
-        assert!(entry.matches(&Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(1.0)),
-            expected: None,
-        }));
+        assert!(entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Added,
+            Some(json!(1.0)),
+            None,
+        )));
 
         assert!(
             entry.matched_count() > before,
@@ -3136,12 +3137,12 @@ mod tests {
         let entry = matcher("disabled-thinking-dropped");
         let before = entry.matched_count();
 
-        assert!(!entry.matches(&Divergence {
-            path: "max_tokens".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!(1)),
-            expected: Some(json!(2)),
-        }));
+        assert!(!entry.matches(&Divergence::new(
+            "max_tokens",
+            DivergenceKind::Changed,
+            Some(json!(1)),
+            Some(json!(2)),
+        )));
 
         assert_eq!(entry.matched_count(), before);
     }
@@ -3156,12 +3157,12 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("model-alias-suffix-resolved");
-        let unrelated = vec![Divergence {
-            path: "max_tokens".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!(1024)),
-            expected: Some(json!(4096)),
-        }];
+        let unrelated = vec![Divergence::new(
+            "max_tokens",
+            DivergenceKind::Changed,
+            Some(json!(1024)),
+            Some(json!(4096)),
+        )];
 
         let before = entry.matched_count();
         let _ = unexplained(&ANTHROPIC_FIDELITY_LANE, &unrelated);
@@ -3175,12 +3176,12 @@ mod tests {
 
         // Positive control: a walk that DOES exercise the entry moves the
         // delta, so the zero above is a real signal and not a constant.
-        let matching = vec![Divergence {
-            path: "model".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!("claude-opus-4-8")),
-            expected: Some(json!("claude-opus-4-8[1m]")),
-        }];
+        let matching = vec![Divergence::new(
+            "model",
+            DivergenceKind::Changed,
+            Some(json!("claude-opus-4-8")),
+            Some(json!("claude-opus-4-8[1m]")),
+        )];
 
         let before = entry.matched_count();
         let residual = unexplained(&ANTHROPIC_FIDELITY_LANE, &matching);
@@ -3194,18 +3195,14 @@ mod tests {
         let _guard = super::COUNTER_DELTA_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let explained = Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(1.0)),
-            expected: None,
-        };
-        let real_loss = Divergence {
-            path: "max_tokens".to_string(),
-            kind: DivergenceKind::Changed,
-            actual: Some(json!(1024)),
-            expected: Some(json!(4096)),
-        };
+        let explained =
+            Divergence::new("temperature", DivergenceKind::Added, Some(json!(1.0)), None);
+        let real_loss = Divergence::new(
+            "max_tokens",
+            DivergenceKind::Changed,
+            Some(json!(1024)),
+            Some(json!(4096)),
+        );
         let divergences = vec![explained, real_loss.clone()];
 
         let residual = unexplained(&ANTHROPIC_FIDELITY_LANE, &divergences);
@@ -3225,12 +3222,12 @@ mod tests {
             ingress: "anthropic",
             egress: "gemini",
         };
-        let divergences = vec![Divergence {
-            path: "temperature".to_string(),
-            kind: DivergenceKind::Added,
-            actual: Some(json!(1.0)),
-            expected: None,
-        }];
+        let divergences = vec![Divergence::new(
+            "temperature",
+            DivergenceKind::Added,
+            Some(json!(1.0)),
+            None,
+        )];
 
         assert!(exceptions_for_lane(&gemini_lane).is_empty());
         assert_eq!(unexplained(&gemini_lane, &divergences).len(), 1);

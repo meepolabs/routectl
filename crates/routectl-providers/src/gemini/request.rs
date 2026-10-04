@@ -3929,7 +3929,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn file_id_only_file_part_drops_with_warn() {
         // Arrange: the previously-uploaded reference form carries no bytes.
@@ -3945,7 +3944,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn non_data_uri_file_data_drops_with_warn() {
         // Arrange: file_data that is not an RFC 2397 base64 URI. Emitting it
@@ -3998,7 +3996,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn url_document_source_drops_with_warn() {
         // Arrange: a legal Anthropic url-shape source, which the Anthropic
@@ -4019,7 +4016,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn base64_document_source_with_empty_data_drops_with_warn() {
         // Arrange: correct source type, truncated payload.
@@ -4050,7 +4046,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     #[serial_test::serial(gemini_redacted_thinking_unsupported)]
     fn redacted_thinking_part_drops_with_warn() {
         // Arrange: Gemini's Part has no redacted-thinking slot.
@@ -4069,7 +4064,6 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
     #[serial_test::serial(gemini_redacted_thinking_unsupported)]
     fn ordinary_thinking_part_survives_with_no_warn() {
         // Arrange: the positive control -- an un-redacted thinking part

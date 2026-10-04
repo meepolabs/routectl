@@ -90,10 +90,11 @@ pub fn create_mitm_dir(tag: &str, n: u64) -> PathBuf {
     })
 }
 
-/// Create `root/<name_for(nonce)>` with `create_dir` (which fails on an
+/// Create `root/<name_for(nonce)>` exclusively (creation fails on an
 /// existing path), drawing a new nonce from `next_nonce` on `AlreadyExists`.
-/// `root` must already exist. Panics after [`MAX_CREATE_ATTEMPTS`] collisions
-/// or on any other error.
+/// On unix the dir is created owner-only (`0o700`) at creation time, so no
+/// umask ever leaves it listable by other users. `root` must already exist.
+/// Panics after [`MAX_CREATE_ATTEMPTS`] collisions or on any other error.
 fn create_exclusive_dir(
     root: &Path,
     mut next_nonce: impl FnMut() -> String,
@@ -101,7 +102,7 @@ fn create_exclusive_dir(
 ) -> PathBuf {
     for _ in 0..MAX_CREATE_ATTEMPTS {
         let dir = root.join(name_for(&next_nonce()));
-        match std::fs::create_dir(&dir) {
+        match owner_only_dir_builder().create(&dir) {
             Ok(()) => return dir,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
             Err(err) => panic!("create test temp dir {}: {err}", dir.display()),
@@ -111,6 +112,20 @@ fn create_exclusive_dir(
         "could not create a unique test temp dir under {} after {MAX_CREATE_ATTEMPTS} attempts",
         root.display()
     );
+}
+
+#[cfg(unix)]
+fn owner_only_dir_builder() -> std::fs::DirBuilder {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+}
+
+#[cfg(not(unix))]
+fn owner_only_dir_builder() -> std::fs::DirBuilder {
+    std::fs::DirBuilder::new()
 }
 
 /// Reap stale dirs under the system temp dir, once per test process.
