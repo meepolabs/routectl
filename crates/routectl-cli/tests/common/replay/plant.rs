@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use super::lane::egress_lane_from_token;
 use super::loader::{
     FIXTURE_SCHEMA_VERSION, INGRESS_BODY, INGRESS_HEADERS, META_JSON, OUTGOING_BODY,
     OUTGOING_HEADERS,
@@ -80,13 +81,22 @@ pub fn plant_fixture(dir: &Path) {
 }
 
 /// Plant a loadable driver-corpus case at `<root>/<lane>/<case_id>` and
-/// return its path. `meta.lane` follows the planted lane component so
-/// the fixture is self-consistent the way a rig-written one is.
+/// return its path. `lane` is an egress lane token; both `meta.lane` and
+/// `meta.provider_kind` are stamped from it, the latter in the fixture
+/// spelling, so the case resolves through
+/// [`egress_lane_from_fixture_kind`](super::lane::egress_lane_from_fixture_kind)
+/// to the lane it was planted under.
+///
+/// Panics on a `lane` that names no egress lane: a case planted under a
+/// directory no capture could produce would resolve to nothing.
 pub fn plant_driver_case(root: &Path, lane: &str, case_id: &str) -> PathBuf {
+    let egress = egress_lane_from_token(lane)
+        .unwrap_or_else(|err| panic!("cannot plant a driver case under `{lane}`: {err}"));
     let dir = root.join(lane).join(case_id);
     fs::create_dir_all(&dir).unwrap();
     let mut meta = current_meta();
     meta["lane"] = json!(lane);
+    meta["provider_kind"] = json!(egress.fixture_kind());
     meta["case_id"] = json!(case_id);
     write_required_files(&dir, &meta);
     dir
@@ -143,4 +153,40 @@ pub fn plant_unloadable_driver_case(root: &Path, lane: &str, case_id: &str) -> P
 pub fn make_conserved(dir: &Path) {
     let ingress = fs::read(dir.join(INGRESS_BODY)).unwrap();
     fs::write(dir.join(OUTGOING_BODY), ingress).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::lane::{EgressLane, egress_lane_from_fixture_kind};
+    use super::super::loader::load_fixture;
+    use super::*;
+    use tempfile::tempdir;
+
+    fn resolved_lane(dir: &Path) -> EgressLane {
+        let fixture = load_fixture(dir).unwrap();
+        egress_lane_from_fixture_kind(&fixture.meta.provider_kind)
+            .expect("a planted case resolves to some lane")
+    }
+
+    #[test]
+    fn a_planted_driver_case_resolves_to_the_lane_it_was_planted_under() {
+        let tmp = tempdir().unwrap();
+        for lane in EgressLane::ALL {
+            let dir = plant_driver_case(tmp.path(), lane.token(), "case-01");
+
+            assert_eq!(
+                resolved_lane(&dir),
+                lane,
+                "a case planted under `{}` resolved elsewhere",
+                lane.token()
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot plant a driver case under `bedrock`")]
+    fn planting_under_a_name_that_is_no_egress_lane_panics() {
+        let tmp = tempdir().unwrap();
+        plant_driver_case(tmp.path(), "bedrock", "case-01");
+    }
 }

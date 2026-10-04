@@ -362,6 +362,16 @@ impl EgressLane {
         }
     }
 
+    /// The lane's spelling in a fixture's `meta.provider_kind`: the
+    /// inverse of [`egress_lane_from_fixture_kind`], so a writer of
+    /// synthetic fixtures never hand-rolls the one translated row.
+    pub const fn fixture_kind(self) -> &'static str {
+        match self {
+            Self::AnthropicApi => FIXTURE_KIND_ANTHROPIC,
+            other => other.token(),
+        }
+    }
+
     /// THE egress-kind -> dialect map. Exhaustive by construction: a new
     /// [`EgressLane`] variant fails to compile until it declares a
     /// dialect, so no kind can fall through to a default.
@@ -1961,6 +1971,19 @@ mod tests {
         let err = egress_lane_from_token("bedrock").expect_err("the bare kind is not a lane token");
 
         assert_eq!(err, LaneError::UnknownEgressKind("bedrock".to_string()));
+    }
+
+    #[test]
+    fn a_lane_round_trips_through_its_fixture_spelling() {
+        for lane in EgressLane::ALL {
+            assert_eq!(
+                egress_lane_from_fixture_kind(lane.fixture_kind())
+                    .expect("own fixture spelling resolves"),
+                lane
+            );
+        }
+
+        assert_eq!(EgressLane::AnthropicApi.fixture_kind(), "anthropic");
     }
 
     // ---------- table shape ----------

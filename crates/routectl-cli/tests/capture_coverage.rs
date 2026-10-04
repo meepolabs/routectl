@@ -564,33 +564,12 @@ mod unit_tests {
         );
     }
 
-    /// Plant a driver case whose `meta.provider_kind` actually matches the
-    /// requested lane token, the way a real capture rig would. Plain
-    /// [`plant_driver_case`] only stamps `meta.lane`, leaving
-    /// `provider_kind` at its `"anthropic"` default -- fine for lane
-    /// `anthropic-api`, wrong for any other lane, since
-    /// [`egress_lane_from_fixture_kind`] (what this view actually reads)
-    /// resolves through `provider_kind`, not `lane`.
-    fn plant_lane_case(root: &Path, lane_token: &str, case_id: &str) -> PathBuf {
-        let dir = plant_driver_case(root, lane_token, case_id);
-        let provider_kind = match lane_token {
-            "anthropic-api" => "anthropic",
-            other => other,
-        };
-        let meta_path = dir.join("meta.json");
-        let mut meta: Value =
-            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
-        meta["provider_kind"] = Value::String(provider_kind.to_string());
-        fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
-        dir
-    }
-
     fn init_git_repo_with_driver_corpus(root: &Path) {
         git(root, &["init", "-q"]);
         git(root, &["config", "user.email", "test@example.com"]);
         git(root, &["config", "user.name", "test"]);
         let driver = root.join(DRIVER_ROOT_REL);
-        plant_lane_case(&driver, "anthropic-api", "case-a");
+        plant_driver_case(&driver, "anthropic-api", "case-a");
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", "baseline corpus"]);
     }
@@ -635,7 +614,7 @@ mod unit_tests {
         // Add a lane, commit, and take THAT commit as the baseline "prior
         // run" -- the one that actually had openai-compat covered, so its
         // later removal below has something real to lose.
-        plant_lane_case(&driver, "openai-compat", "case-b");
+        plant_driver_case(&driver, "openai-compat", "case-b");
         git(repo.path(), &["add", "-A"]);
         git(
             repo.path(),
