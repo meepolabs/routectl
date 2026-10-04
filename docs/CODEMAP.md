@@ -4860,7 +4860,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `read_capability_events_after`/`latest_tombstone` + the row/summary types
   `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`NearLosslessAttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CalibrationSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
   `estimate_cost_tokens`/`CostBreakdown`/`Rates` (+ the `#[doc(hidden)]`
-  record-path `estimate_cost`), `CapabilityLearnEvent`, `CapabilityEvent` +
+  record-path `estimate_cost`), `CapabilityEvent` +
   `insert_capability_event` (the append-only capability-ledger writer,
   re-exported for the CLI capability probe's synchronous insert),
   `MigrateError`, and the `SCHEMA_VERSION` constant; carries
@@ -4872,13 +4872,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   enum (`ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled`,
   `gate_blocked`) with `as_str`/`FromStr` wire tokens that mirror the DB CHECK
   constraint
-- `src/learn_event.rs` -- the `capability_learn_events` row + its insert:
-  `CapabilityLearnEvent` (plain-type fields only, keeping the crate a leaf --
-  the producer pre-normalizes the feature key and stringifies the tier;
-  `remapped` is always false by construction but persisted for defensive
-  replay; `request_features` is the in-flight derived feature set) and
-  `insert_learn_event` (append-only bound-parameter `INSERT`, no dedup / no
-  `OR IGNORE`, one row per observation)
 - `src/capability_event.rs` -- the unified `capability_events` ledger write
   shape: `CapabilityEvent` (plain-type fields keeping the crate a leaf --
   `ts`, NORMALIZED `lane_key` / `capability`, open-set `verdict` / `phase` /
@@ -5085,15 +5078,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   is held (both measured to survive behavioural testing alone, which is why they
   are pinned where the ordering is written)
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never
-  blocks/awaits/panics -- safe from `Drop`), `try_send_learn_event` (the same
-  best-effort discipline for a `CapabilityLearnEvent`, dropping on a
-  full/closed channel under its own counter and honoring the shared `enabled`
-  gate), `try_send_capability_event` (same discipline for a unified-ledger
+  blocks/awaits/panics -- safe from `Drop`), `try_send_capability_event` (the
+  same best-effort discipline for a unified-ledger
   `CapabilityEvent`), runtime-flippable `enabled` gate, shared lock-free
   `UsageCounters` (enqueued / dropped_full / dropped_disabled / persisted /
-  write_errors / prune_errors plus the learn-event trio learn_events_enqueued
-  / learn_events_dropped_full / learn_events_persisted and the
-  capability-event trio capability_events_enqueued /
+  write_errors / prune_errors plus the capability-event trio capability_events_enqueued /
   capability_events_dropped_full / capability_events_persisted)
 - `src/query/mod.rs` -- read-query facade: owns the shared row/error types
   `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
@@ -5260,8 +5249,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   crate able to build a variant could forge any write the actor performs,
   including the reservation that authorizes money. The commands are
   (`Request(Box<UsageRecord>)` -> the
-  `requests` table, `LearnEvent(CapabilityLearnEvent)` -> the
-  `capability_learn_events` table, `CapabilityEvent(CapabilityEvent)` -> the
+  `requests` table, `CapabilityEvent(CapabilityEvent)` -> the
   unified `capability_events` ledger (carrying the producing registry
   GENERATION -- the writer drops an event older than the generation a boundary
   batch has committed, since such an event predates the boundary and would
@@ -6159,9 +6147,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   / `suspect` rows (phase `f3`, the pinned evidence-class token),
   `cleared_capabilities` -> `cleared` rows (`live` source). Empty on the
   common non-capability path, best-effort like every usage write. The legacy
-  `capability_learn_events` write path is RETIRED here (the request path no
-  longer calls `try_send_learn_event`; the table / variant /
-  `try_send_learn_event` remain, deprecation-doc-commented, no DROP). Also
+  `capability_learn_events` table takes no writes from any path (the table
+  remains as retained history, no DROP). Also
   owns the token-estimate calibration pair's capture side: `observe_meta`
   copies `DispatchMeta::calib_estimated_tokens` (the numerator the router
   stamps per dispatched attempt), `observe_response` / `observe_chunk` hold the

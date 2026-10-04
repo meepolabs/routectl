@@ -15,7 +15,6 @@ mod capability_event;
 mod cost;
 mod db;
 mod handle;
-mod learn_event;
 mod migrate;
 mod paid_probe;
 mod paid_probe_command;
@@ -54,7 +53,6 @@ pub use capability_event::{
 pub use cost::{CostBreakdown, Rates, estimate_cost, estimate_cost_tokens};
 pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, open_rw};
 pub use handle::{UsageCounters, UsageHandle};
-pub use learn_event::CapabilityLearnEvent;
 pub use migrate::MigrateError;
 pub use paid_probe_command::{PaidProbeAdmission, PaidProbeCommit, PaidProbeReceipt};
 pub use paid_probe_read::{PaidProbeUsage, committed_units};

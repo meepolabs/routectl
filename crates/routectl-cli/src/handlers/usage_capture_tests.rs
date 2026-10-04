@@ -694,11 +694,10 @@ async fn observe_meta_leaves_seat_null_when_no_seat_was_served() {
 // row per event, stamped with the `(catalog_version, overlay_revision)` the
 // ingress boundary reads off the router getters. Learned negatives map to
 // `broken` rows, response-evidence observations to `verified` / `suspect`
-// rows, probe-settled clears to `cleared` rows. The LEGACY
-// `capability_learn_events` table takes NO new writes on this path (pinned
-// below). These tests build a REAL router meta (`any_dispatch_meta`, the
-// `#[non_exhaustive]` construction pattern above) and push events onto its
-// public vecs, then assert the writer persists the mapped rows. The handle is
+// rows, probe-settled clears to `cleared` rows. These tests build a REAL
+// router meta (`any_dispatch_meta`, the `#[non_exhaustive]` construction
+// pattern above) and push events onto its public vecs, then assert the writer
+// persists the mapped rows. The handle is
 // dropped before the writer shutdown so the channel closes (repo learning:
 // shutdown otherwise blocks on a deadline waiting for a channel that never
 // closes).
@@ -981,13 +980,6 @@ async fn observe_meta_learned_negative_maps_to_broken_row() {
     assert!(ut.is_none(), "broken row carries no upstream token");
     assert_eq!(cat, 7);
     assert_eq!(ovr, 3);
-    // The legacy table takes NO new writes on this path.
-    let legacy: i64 = conn
-        .query_row("SELECT COUNT(*) FROM capability_learn_events", [], |r| {
-            r.get(0)
-        })
-        .expect("legacy count");
-    assert_eq!(legacy, 0, "legacy learn table must take no new writes");
 }
 
 #[tokio::test]

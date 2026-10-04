@@ -31,7 +31,6 @@ use tokio::sync::mpsc;
 use crate::capability_event::{CapabilityEvent, insert_capability_event};
 use crate::db::{self, UsageDb};
 use crate::handle::{UsageCounters, UsageHandle};
-use crate::learn_event::{CapabilityLearnEvent, insert_learn_event};
 use crate::paid_probe_lifecycle::LifecycleGate;
 use crate::record::UsageRecord;
 use crate::retention::{self, PruneOutcome};
@@ -63,17 +62,11 @@ impl WriterMessage {
 /// What a [`WriterMessage`] actually asks the writer to do. One channel, one
 /// actor, one SQLite connection serves every row kind -- the command selects the
 /// destination table. The `UsageRecord` is boxed so the variants stay close in
-/// size (the record dwarfs a learn event), keeping the channel's per-slot
+/// size (the record dwarfs a capability event), keeping the channel's per-slot
 /// footprint small.
 enum WriterCommand {
     /// A usage-accounting row bound for the `requests` table.
     Request(Box<UsageRecord>),
-    /// A capability learn event bound for the `capability_learn_events` table.
-    ///
-    /// DEPRECATED: the request path no longer produces this variant -- learned
-    /// negatives now ride out as `CapabilityEvent` `broken` rows. Retained so
-    /// the legacy write path stays compilable; removal is a later change.
-    LearnEvent(CapabilityLearnEvent),
     /// A capability event bound for the unified `capability_events` ledger,
     /// stamped with the registry generation that produced it.
     ///
@@ -120,11 +113,6 @@ impl WriterMessage {
     /// A usage-accounting row.
     pub(crate) const fn request(record: Box<UsageRecord>) -> Self {
         Self::new(WriterCommand::Request(record))
-    }
-
-    /// A legacy capability learn event.
-    pub(crate) const fn learn_event(event: CapabilityLearnEvent) -> Self {
-        Self::new(WriterCommand::LearnEvent(event))
     }
 
     /// A unified-ledger capability event, stamped with its producing generation.
@@ -446,7 +434,6 @@ fn run_writer(
     while let Some(msg) = rx.blocking_recv() {
         match msg.into_command() {
             WriterCommand::Request(record) => state.persist(&record, &counters),
-            WriterCommand::LearnEvent(event) => state.persist_learn_event(&event, &counters),
             WriterCommand::CapabilityEvent(event, stamp) => {
                 // Best effort: the outcome is discarded, because nothing waits on
                 // it. The ACKNOWLEDGED variant below is the one whose caller acts
@@ -714,29 +701,6 @@ impl WriterState {
                     rows = n,
                     "usage writer insert affected unexpected row count"
                 );
-            }
-            Err(err) => self.record_failure(Some(err), counters),
-        }
-    }
-
-    /// Persist one capability learn event to `capability_learn_events`.
-    /// Append-only (no duplicate collapsing), so any success bumps the
-    /// learn-event persisted counter. A missing connection or an insert
-    /// error drops the event and routes through the shared DB-health
-    /// failure path (write-error counter + degraded-transition log).
-    ///
-    /// DEPRECATED: the request path no longer enqueues `LearnEvent`, so this
-    /// consumer branch is dormant. Retained with the legacy table; removal is
-    /// a later change.
-    fn persist_learn_event(&mut self, event: &CapabilityLearnEvent, counters: &Arc<UsageCounters>) {
-        let Some(conn) = self.conn.as_ref() else {
-            self.record_failure(None, counters);
-            return;
-        };
-        match insert_learn_event(conn, event) {
-            Ok(_) => {
-                counters.incr_learn_events_persisted();
-                self.mark_healthy();
             }
             Err(err) => self.record_failure(Some(err), counters),
         }
@@ -1908,152 +1872,6 @@ mod tests {
 
         // Assert: retention=0 means no prune.
         assert_eq!(row_count(&path), 1);
-    }
-
-    /// Build a representative learn event.
-    fn learn_event(capability_key: &str) -> CapabilityLearnEvent {
-        CapabilityLearnEvent {
-            ts: 123,
-            state_key: "gpt-nick".to_string(),
-            capability_key: capability_key.to_string(),
-            provider_kind: "anthropic-api".to_string(),
-            signal_tier: "inferred".to_string(),
-            observations: 2,
-            upstream_status: 400,
-            remapped: false,
-            request_features: vec!["thinking".to_string(), capability_key.to_string()],
-        }
-    }
-
-    fn learn_event_row_count(path: &PathBuf) -> i64 {
-        let conn = Connection::open(path).expect("read open");
-        conn.query_row("SELECT COUNT(*) FROM capability_learn_events", [], |r| {
-            r.get(0)
-        })
-        .expect("count")
-    }
-
-    /// Spin until the learn-event persisted counter reaches `want` or a
-    /// deadline passes; returns whether it was reached.
-    fn wait_learn_events_persisted(counters: &Arc<UsageCounters>, want: u64) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while counters.learn_events_persisted() < want {
-            if std::time::Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        true
-    }
-
-    #[tokio::test]
-    async fn learn_event_round_trips_through_the_shared_writer() {
-        // Arrange
-        let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
-
-        // Act
-        handle.try_send_learn_event(learn_event("web_search"));
-        assert!(
-            wait_learn_events_persisted(handle.counters(), 1),
-            "learn event not persisted"
-        );
-        // Drop the handle's sender clone before draining, or shutdown blocks
-        // on the deadline waiting for a channel that never closes.
-        drop(handle);
-        writer.shutdown();
-
-        // Assert: the row round-trips through the one actor / one connection,
-        // and request rows are untouched.
-        assert_eq!(learn_event_row_count(&path), 1);
-        assert_eq!(row_count(&path), 0);
-        let conn = Connection::open(&path).expect("read");
-        let (state_key, capability_key, tier, observations, status, remapped, features): (
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            i64,
-            String,
-        ) = conn
-            .query_row(
-                "SELECT state_key, capability_key, signal_tier, observations, upstream_status, \
-                 remapped, request_features FROM capability_learn_events",
-                [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                },
-            )
-            .expect("row");
-        assert_eq!(state_key, "gpt-nick");
-        assert_eq!(capability_key, "web_search");
-        assert_eq!(tier, "inferred");
-        assert_eq!(observations, 2);
-        assert_eq!(status, 400);
-        assert_eq!(remapped, 0);
-        assert_eq!(features, "[\"thinking\",\"web_search\"]");
-    }
-
-    #[tokio::test]
-    async fn full_channel_drops_learn_events_without_blocking() {
-        // Arrange: a handle over a channel whose receiver is never polled.
-        let capacity = 2usize;
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(capacity);
-        let counters = Arc::new(UsageCounters::default());
-        let enabled = Arc::new(AtomicBool::new(true));
-        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters), LifecycleGate::running());
-
-        // Act: send well past capacity, timing the loop to prove the enqueue
-        // never blocks.
-        let sends = 50usize;
-        let start = std::time::Instant::now();
-        for i in 0..sends {
-            handle.try_send_learn_event(learn_event(&format!("cap-{i}")));
-        }
-        let elapsed = start.elapsed();
-
-        // Assert: no blocking; exact split of enqueued (capacity) vs overflow
-        // drops (the rest), tracked on the learn-event counters.
-        assert!(
-            elapsed < Duration::from_millis(100),
-            "learn-event send loop blocked: took {elapsed:?} for {sends} sends"
-        );
-        assert_eq!(counters.learn_events_enqueued(), capacity as u64);
-        assert_eq!(
-            counters.learn_events_dropped_full(),
-            (sends - capacity) as u64
-        );
-    }
-
-    #[tokio::test]
-    async fn disabled_gate_drops_learn_events() {
-        // Arrange
-        let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, false);
-
-        // Act: disabled -> dropped at the gate (counted as a disabled-drop,
-        // not a learn-event overflow).
-        handle.try_send_learn_event(learn_event("gated"));
-        // Snapshot the counters and drop the handle's sender clone before
-        // draining, or shutdown blocks on the deadline.
-        let counters = Arc::clone(handle.counters());
-        drop(handle);
-        writer.shutdown();
-
-        // Assert
-        assert_eq!(counters.dropped_disabled(), 1);
-        assert_eq!(counters.learn_events_dropped_full(), 0);
-        assert_eq!(counters.learn_events_persisted(), 0);
-        assert_eq!(learn_event_row_count(&path), 0);
     }
 
     /// Build a representative capability event.

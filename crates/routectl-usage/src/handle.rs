@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc::Sender;
 
 use crate::capability_event::CapabilityEvent;
-use crate::learn_event::CapabilityLearnEvent;
 use crate::record::UsageRecord;
 use crate::writer::WriterMessage;
 
@@ -31,9 +30,6 @@ pub struct UsageCounters {
     persisted: AtomicU64,
     write_errors: AtomicU64,
     prune_errors: AtomicU64,
-    learn_events_enqueued: AtomicU64,
-    learn_events_dropped_full: AtomicU64,
-    learn_events_persisted: AtomicU64,
     capability_events_enqueued: AtomicU64,
     /// Capability events the writer dropped because an operator purge of the same
     /// key had already superseded them.
@@ -110,21 +106,6 @@ impl UsageCounters {
         self.prune_errors.load(Ordering::Relaxed)
     }
 
-    /// Learn events accepted into the channel by `try_send_learn_event`.
-    pub fn learn_events_enqueued(&self) -> u64 {
-        self.learn_events_enqueued.load(Ordering::Relaxed)
-    }
-
-    /// Learn events dropped because the bounded channel was full or closed.
-    pub fn learn_events_dropped_full(&self) -> u64 {
-        self.learn_events_dropped_full.load(Ordering::Relaxed)
-    }
-
-    /// Learn-event rows successfully persisted by the consumer thread.
-    pub fn learn_events_persisted(&self) -> u64 {
-        self.learn_events_persisted.load(Ordering::Relaxed)
-    }
-
     /// Capability events accepted into the channel by
     /// `try_send_capability_event`.
     pub fn capability_events_enqueued(&self) -> u64 {
@@ -183,19 +164,6 @@ impl UsageCounters {
 
     pub(crate) fn incr_prune_errors(&self) {
         self.prune_errors.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn incr_learn_events_enqueued(&self) {
-        self.learn_events_enqueued.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn incr_learn_events_dropped_full(&self) -> u64 {
-        self.learn_events_dropped_full
-            .fetch_add(1, Ordering::Relaxed)
-    }
-
-    pub(crate) fn incr_learn_events_persisted(&self) {
-        self.learn_events_persisted.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn incr_capability_events_enqueued(&self) {
@@ -300,29 +268,6 @@ impl UsageHandle {
         }
     }
 
-    /// Hand a capability learn event to the writer without ever blocking,
-    /// awaiting, or panicking. Mirrors [`UsageHandle::try_send`]: the same
-    /// enabled gate applies (a learn event is a usage write), and a full or
-    /// closed channel drops the event with its own counter and rate-limited
-    /// WARN. Routing never depends on this landing -- it is best-effort.
-    ///
-    /// DEPRECATED: the request path no longer calls this -- learned negatives
-    /// now ride out as `broken` rows through `try_send_capability_event_in_generation`
-    /// into the unified `capability_events` ledger. Retained (with the
-    /// `LearnEvent` writer branch and the `capability_learn_events` DDL) so the
-    /// legacy write path stays compilable and existing rows are untouched;
-    /// removal is a later change.
-    pub fn try_send_learn_event(&self, event: CapabilityLearnEvent) {
-        if !self.is_enabled() {
-            self.counters.incr_dropped_disabled();
-            return;
-        }
-        match self.sender.try_send(WriterMessage::learn_event(event)) {
-            Ok(()) => self.counters.incr_learn_events_enqueued(),
-            Err(_) => self.note_learn_event_overflow_drop(),
-        }
-    }
-
     /// Hand a capability event to the writer without ever blocking,
     /// awaiting, or panicking. Mirrors [`UsageHandle::try_send`]: the same
     /// enabled gate applies (a capability event is a usage write), and a
@@ -410,17 +355,6 @@ impl UsageHandle {
                 target: "routectl_usage::handle",
                 dropped_total = prior + 1,
                 "usage channel full -- dropping record (capture lags writer)"
-            );
-        }
-    }
-
-    fn note_learn_event_overflow_drop(&self) {
-        let prior = self.counters.incr_learn_events_dropped_full();
-        if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {
-            tracing::warn!(
-                target: "routectl_usage::handle",
-                dropped_total = prior + 1,
-                "usage channel full -- dropping learn event (capture lags writer)"
             );
         }
     }

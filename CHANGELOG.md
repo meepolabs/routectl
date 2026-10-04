@@ -492,6 +492,11 @@ list with more narrative.
   upgrade: reduction runs before auto-cache, so any prefix previously
   cached in its unreduced form re-writes once against the new bytes,
   after which cache reads stabilize.
+- **Internal:** the unused write path into the legacy
+  `capability_learn_events` table is removed from `routectl-usage`
+  (`CapabilityLearnEvent`, `UsageHandle::try_send_learn_event`, and the
+  three learn-event counters). The table itself stays, with any rows it
+  already holds; the schema version is unchanged -- no behavior change.
 
 ### Fixed
 

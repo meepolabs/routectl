@@ -32,7 +32,6 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "cost.rs",
     "db.rs",
     "handle.rs",
-    "learn_event.rs",
     "lib.rs",
     "migrate.rs",
     "paid_probe.rs",
