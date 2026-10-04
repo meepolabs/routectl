@@ -52,12 +52,60 @@ fn ref_file_is_owner_only() {
     assert_eq!(mode & 0o077, 0, "mode {mode:o} must deny group and other");
 }
 
+/// Names the one test a child invocation of this binary was started to run.
+#[cfg(unix)]
+const UMASK_CHILD_ENV: &str = "ROUTECTL_TESTKIT_UMASK_CHILD";
+
+/// Printed by the child only after its assertion passed, so a child that
+/// exits 0 without asserting (or a filter that selects nothing) fails the
+/// parent.
+#[cfg(unix)]
+const UMASK_CHILD_VERIFIED: &str = "umask-child-verified: secret dir is 0700";
+
 /// The secret dir is created owner-only regardless of umask: under a
 /// permissive `0002` a plain `create_dir` would yield `0775`. The umask is
-/// process-global, so it is restored before any assertion can unwind.
+/// process-global and libtest runs tests on concurrent threads, so the umask
+/// is set only in a child invocation of this binary that runs this test
+/// alone; the parent never touches it.
 #[cfg(unix)]
 #[test]
 fn secret_dir_is_owner_only_under_a_permissive_umask() {
+    const TEST: &str = "secret_dir_is_owner_only_under_a_permissive_umask";
+    if std::env::var_os(UMASK_CHILD_ENV).is_some_and(|named| named == TEST) {
+        assert_secret_dir_is_owner_only_under_umask_0002();
+        // libtest has already printed `test <name> ... ` without a newline.
+        println!("\n{UMASK_CHILD_VERIFIED}");
+        return;
+    }
+
+    let module = module_path!()
+        .split_once("::")
+        .map_or("", |(_crate, rest)| rest);
+    let program = std::env::current_exe().expect("the running test binary");
+    let output = std::process::Command::new(&program)
+        .args([
+            &format!("{module}::{TEST}"),
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(UMASK_CHILD_ENV, TEST)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|err| panic!("run child {}: {err}", program.display()));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.lines().any(|line| line == UMASK_CHILD_VERIFIED),
+        "the umask child must exit 0 and print its verified marker; status {}\n\
+         --- child stdout ---\n{stdout}\n--- child stderr ---\n{stderr}",
+        output.status
+    );
+}
+
+#[cfg(unix)]
+fn assert_secret_dir_is_owner_only_under_umask_0002() {
     use nix::sys::stat::{Mode, umask};
     use std::os::unix::fs::PermissionsExt;
 

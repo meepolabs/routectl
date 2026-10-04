@@ -321,15 +321,6 @@ const GITLEAKS_CONFIG: &str = ".gitleaks.toml";
 /// patterns against repo-relative paths.
 const FIXTURES_ROOT: &str = "crates/routectl-cli/tests/fixtures";
 
-/// Every entry currently in `[allowlist] paths`, in file order. Pinned as
-/// a SET rather than a count so that widening the allowlist cannot pass
-/// review unnoticed.
-const EXPECTED_ALLOWLIST_PATHS: &[&str] = &[
-    r"(?:^|/)Cargo\.lock$",
-    "^target/",
-    "^crates/routectl-cli/tests/fixtures/captured/",
-];
-
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -445,17 +436,18 @@ fn allowlist_paths() -> Vec<String> {
         })
         .collect();
 
+    let expected = expected_allowlist_paths();
     assert_eq!(
         paths.len(),
-        EXPECTED_ALLOWLIST_PATHS.len(),
+        expected.len(),
         "{GITLEAKS_CONFIG} declares {} `[allowlist] paths` entries but this \
          test pins {}. Every entry is a place a real secret can hide \
          undetected, so a change here is deliberate: if the new entry is \
-         correct, update EXPECTED_ALLOWLIST_PATHS in this file to match and \
+         correct, update EXPECTED_GLOBAL_ALLOWLIST in this file to match and \
          say why in the commit body. A mismatch is also how a broken parse \
          surfaces instead of silently passing the absence check below.",
         paths.len(),
-        EXPECTED_ALLOWLIST_PATHS.len()
+        expected.len()
     );
 
     paths
@@ -559,20 +551,6 @@ fn the_allowlist_matcher_fires_on_the_allowlisted_capture_root() {
     );
 }
 
-/// The exact set, so the next allowlist edit is a review moment.
-#[test]
-fn the_path_allowlist_is_exactly_the_reviewed_set() {
-    let paths = allowlist_paths();
-
-    assert_eq!(
-        paths, EXPECTED_ALLOWLIST_PATHS,
-        "`[allowlist] paths` in {GITLEAKS_CONFIG} drifted from the reviewed \
-         set. Each entry disables secret scanning for everything under it; \
-         confirm the change is intended, then update EXPECTED_ALLOWLIST_PATHS \
-         here."
-    );
-}
-
 /// The whole reviewed allowlist surface, as gitleaks reads it. `paths` is
 /// only one way to switch scanning off: a global `regexes` entry such as
 /// `.*` (or a `stopwords` / `commits` entry, or a changed `regexTarget`)
@@ -591,6 +569,20 @@ paths = [
 ]
 "#;
 
+fn expected_global_allowlist() -> toml::Table {
+    toml::from_str(EXPECTED_GLOBAL_ALLOWLIST).expect("the expected allowlist literal is valid TOML")
+}
+
+/// The reviewed `paths` entries, in file order.
+fn expected_allowlist_paths() -> Vec<String> {
+    expected_global_allowlist()["paths"]
+        .as_array()
+        .expect("the expected allowlist declares `paths`")
+        .iter()
+        .map(|entry| entry.as_str().expect("string path entry").to_owned())
+        .collect()
+}
+
 fn read_gitleaks_config() -> String {
     let config = repo_root().join(GITLEAKS_CONFIG);
     std::fs::read_to_string(&config)
@@ -604,10 +596,7 @@ fn read_gitleaks_config() -> String {
 fn allowlist_surface_drift(source: &str) -> Vec<String> {
     let document: toml::Table = toml::from_str(source)
         .unwrap_or_else(|err| panic!("{GITLEAKS_CONFIG} must be valid TOML ({err})"));
-    let expected = toml::Value::Table(
-        toml::from_str(EXPECTED_GLOBAL_ALLOWLIST)
-            .expect("the expected allowlist literal is valid TOML"),
-    );
+    let expected = toml::Value::Table(expected_global_allowlist());
     let mut drift = Vec::new();
     match document.get("allowlist") {
         Some(actual) if *actual == expected => {}

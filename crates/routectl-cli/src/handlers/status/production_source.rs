@@ -23,9 +23,9 @@
 /// in this file's text at all.
 ///
 /// Openers that are not code -- inside a line or block comment (nested
-/// included), a string literal (raw strings included), or a char literal --
-/// are prose or data, not modules, and are ignored for both the count and the
-/// cut.
+/// included), a string literal (`b`, `c` and raw prefixes included), or a char
+/// literal -- are prose or data, not modules, and are ignored for both the
+/// count and the cut.
 ///
 /// # Panics
 ///
@@ -111,13 +111,15 @@ fn non_code_end(bytes: &[u8], i: usize) -> usize {
 }
 
 /// Whether an `r` at `i` begins a token (so `r"` is a raw-string prefix,
-/// not the tail of an identifier like `bar"`), allowing the `br` byte prefix.
+/// not the tail of an identifier like `bar"`), allowing the `br` byte and
+/// `cr` C-string prefixes. The plain `b"` / `c"` prefixes need no rule: the
+/// prefix byte stays code and the `"` after it opens an ordinary string.
 #[cfg(test)]
 fn starts_token(bytes: &[u8], i: usize) -> bool {
     let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     match i.checked_sub(1).map(|p| bytes[p]) {
         None => true,
-        Some(b'b') => i < 2 || !is_ident(bytes[i - 2]),
+        Some(b'b' | b'c') => i < 2 || !is_ident(bytes[i - 2]),
         Some(prev) => !is_ident(prev),
     }
 }
@@ -282,6 +284,43 @@ mod tests {
             "const A: &str = r\"mod tests {\";\n\
              const B: &str = r#\"has \" quote and mod tests {\"#;\n"
         );
+    }
+
+    #[test]
+    fn ignores_openers_inside_prefixed_string_literals() {
+        let cases = [
+            ("raw C string with a quote", "cr#\"quote \" mod tests {\"#"),
+            ("C string", "c\"mod tests {\""),
+            ("byte string", "b\"mod tests {\""),
+            ("raw byte string", "br#\"quote \" mod tests {\"#"),
+        ];
+        for (name, literal) in cases {
+            let production = format!("const S: &[u8] = {literal};\n");
+            let src = format!("{production}mod tests {{\n}}\n");
+
+            assert_eq!(production_source(&src), production, "{name}");
+        }
+    }
+
+    /// An `r` or `cr` ending an identifier is not a raw-string prefix. Only
+    /// the adjacent rows can tell: there a raw reading closes at the escaped
+    /// quote and exposes the opener, while the ordinary reading hides it. Those
+    /// rows are not legal Rust, which the scanner never relies on.
+    #[test]
+    fn an_identifier_ending_in_a_prefix_letter_is_not_a_string_prefix() {
+        let cases = [
+            ("r tail, spaced", "foo_r \"\\\" mod tests {\""),
+            ("c tail, spaced", "foo_c \"\\\" mod tests {\""),
+            ("r tail, adjacent", "foo_r\"\\\" mod tests {\""),
+            ("cr tail, adjacent", "foo_cr\"\\\" mod tests {\""),
+            ("br tail, adjacent", "foo_br\"\\\" mod tests {\""),
+        ];
+        for (name, tokens) in cases {
+            let production = format!("m!({tokens});\n");
+            let src = format!("{production}mod tests {{\n}}\n");
+
+            assert_eq!(production_source(&src), production, "{name}");
+        }
     }
 
     #[test]
