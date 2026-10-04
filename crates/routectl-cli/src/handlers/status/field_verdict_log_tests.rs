@@ -794,3 +794,83 @@ fn the_emitter_allocates_no_observer_event_outside_a_test_build() {
          than matching nothing at all",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The operator table in docs/LOGGING.md
+// ---------------------------------------------------------------------------
+
+/// Every backticked `rc_` token in the first cell of each table row under the
+/// snapshot heading, in document order.
+fn documented_snapshot_fields(doc: &str) -> Vec<String> {
+    const HEADING: &str = "### Field-verdict snapshot INFO";
+    let start = doc
+        .find(HEADING)
+        .expect("LOGGING.md must carry the field-verdict snapshot section");
+    let body = &doc[start + HEADING.len()..];
+    let end = body.find("\n#").map_or(body.len(), |idx| idx);
+    body[..end]
+        .lines()
+        .filter_map(|line| line.strip_prefix('|'))
+        .filter_map(|row| row.split('|').next())
+        .flat_map(|cell| cell.split('`').skip(1).step_by(2))
+        .filter(|token| token.starts_with("rc_"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The snapshot line's emitted field names and the LOGGING.md table rows are the
+/// same set, each name documented exactly once.
+///
+/// The emitted side is read off the CAPTURED EVENT of a real emission, and the
+/// documented side off the embedded doc, so neither side is a literal in this
+/// file: adding, removing, or renaming an emitted field, or editing a table
+/// row, fails here until the other side matches.
+///
+/// Mutation checks: rename one `rc_field_*` emit in `log_field_verdict_snapshot`
+/// -> red (missing and undocumented); drop or rename a table row -> red; repeat
+/// a row -> red on the duplicate.
+#[test]
+fn snapshot_fields_match_the_logging_doc_table_exactly_once() {
+    const LOGGING_DOC: &str = include_str!("../../../../../docs/LOGGING.md");
+
+    let view = fresh_view();
+    let info = captured_snapshot(|| {
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            healthy_globals(),
+            FidelityEmission::always(),
+        );
+    });
+    let mut emitted: Vec<String> = info.fields.iter().map(|(name, _)| name.clone()).collect();
+    let mut documented = documented_snapshot_fields(LOGGING_DOC);
+
+    // Controls: the fixture can represent the drift it guards against.
+    assert!(
+        emitted.iter().any(|name| name.starts_with("rc_field_")),
+        "control: the captured line must carry rc_field_* fields"
+    );
+    assert!(
+        documented.iter().any(|name| name.starts_with("rc_field_")),
+        "control: the parsed table must carry rc_field_* rows"
+    );
+
+    emitted.sort();
+    documented.sort();
+    let duplicates: Vec<&String> = documented
+        .windows(2)
+        .filter(|pair| pair[0] == pair[1])
+        .map(|pair| &pair[0])
+        .collect();
+    assert!(
+        duplicates.is_empty(),
+        "LOGGING.md documents these snapshot fields more than once: {duplicates:?}"
+    );
+    let undocumented: Vec<&String> = emitted.iter().filter(|n| !documented.contains(n)).collect();
+    let stale: Vec<&String> = documented.iter().filter(|n| !emitted.contains(n)).collect();
+    assert!(
+        undocumented.is_empty() && stale.is_empty(),
+        "snapshot line and LOGGING.md table disagree: emitted but undocumented \
+         {undocumented:?}; documented but not emitted {stale:?}"
+    );
+}
