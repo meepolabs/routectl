@@ -168,11 +168,12 @@ jobs:
     name: test
     runs-on: ubuntu-22.04
     # The workspace suite runs once, inside the network-isolation step, which
-    # is bounded at 90 by its own timeout and per-leg deadlines. Outside it are
-    # only setup and the conservation step, which reuses that step's build;
+    # is bounded by its own timeout and per-leg deadlines. Outside it are
+    # only setup and the conservation step, which reuses that step's build.
+    # 164 = the isolation step's 104 + 60 for everything else;
     # scripts/check-live-gate-isolation.test.sh keeps this at least 60
-    # minutes above that step and the script's deadlines inside it.
-    timeout-minutes: 170
+    # minutes above that step.
+    timeout-minutes: 164
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: AWS-LC build environment preflight
@@ -200,8 +201,11 @@ jobs:
       # variables, is a positive control that must attempt -- inside the
       # namespace, so nothing leaves the runner.
       # --require-netns: on CI a missing namespace is a failure, not a skip.
+      # 104 minutes = STEP_BUDGET / 60 in the script: its worst-case deadline
+      # sum plus BUDGET_HEADROOM, rounded up to a minute. The self-test
+      # derives that sum and fails when either value drifts.
       - name: standard test gate makes no network attempt
-        timeout-minutes: 90
+        timeout-minutes: 104
         run: bash scripts/check-live-gate-isolation.sh --require-netns
 
       # The wire-conservation leg, run for its VERDICT: the driver corpus is
@@ -229,8 +233,8 @@ jobs:
       # and pipefail with the tee, without which cargo's exit status is lost
       # to the pipe and the verdict stops gating anything.
       #
-      # The selection is the isolation step's (--workspace --all-features
-      # --profile test-release) narrowed by --test, so cargo reuses that
+      # `test-gate.sh conservation` is the isolation step's selection
+      # (workspace-all-features) narrowed by --test, so cargo reuses that
       # step's conservation binary instead of building another feature set.
       # The extra features change nothing the harness runs: they only add
       # test seams, the gen-catalog codegen, and the live and dhat targets.
@@ -239,8 +243,8 @@ jobs:
           set -e
           set -o pipefail
           log="$RUNNER_TEMP/conservation.log"
-          cargo test --workspace --all-features --profile test-release \
-            --test conservation -- --nocapture --test-threads=1 2>&1 | tee "$log"
+          bash scripts/test-gate.sh conservation \
+            --nocapture --test-threads=1 2>&1 | tee "$log"
 
           block="$RUNNER_TEMP/conservation-committed-corpus.log"
           awk '/^test conservation_over_both_fixture_roots \.\.\./ { inblock = 1 }
@@ -441,6 +445,27 @@ jobs:
 
       - name: internal-id scanner self-test
         run: bash scripts/check-internal-ids.test.sh
+
+      # The commit-gate leg again, so a commit made without the hooks is
+      # still held to it: no new source file without a navigation-doc row,
+      # no stale allowlist entry, and no allowlist line the base lacks. The
+      # base is the merge base with the PR target, or the pushed commit's
+      # parent on a push.
+      - name: navigation-doc index (enforced)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$(git merge-base HEAD "origin/$PR_BASE_REF")"
+          else
+            base="$(git rev-parse HEAD^)"
+          fi
+          NAV_INDEX_BASE="$base" bash scripts/check-nav-index.sh --enforce
+
+      - name: navigation-doc index self-test
+        run: bash scripts/check-nav-index.test.sh
 
       # The log-sink inventory reads targets and dependency kinds from
       # `cargo metadata --offline --no-deps`, which needs cargo but no

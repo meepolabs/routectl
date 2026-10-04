@@ -17,12 +17,14 @@ permissions:
   contents: read
   pull-requests: read
 
-# Cancel redundant pull_request runs on the same branch; push runs queue so
-# each merge commit is scanned. Keyed on event_name too, so a
-# push never cancels the weekly full-history scan (and vice versa) -- they
-# scan different things and the cron is the only one that sees history.
+# A newer pull_request run on the same ref cancels the older one. Each push
+# run gets its own group keyed on its commit SHA: a shared group holds at
+# most one pending run and replaces it with the next, and the action scans
+# only its own push's commit range, so a replaced push run would leave that
+# range unscanned. The event name is part of every key, so push, PR and
+# scheduled runs never share a group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

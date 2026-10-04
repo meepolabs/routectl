@@ -32,6 +32,8 @@ fails=0
 read -r -d '' -a git_local_env < <(git rev-parse --local-env-vars)
 unset "${git_local_env[@]}"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CEILING_DIRECTORIES="${TMPDIR:-/tmp}"
+# Only the rows that set it on purpose may pick a base revision.
+unset NAV_INDEX_BASE
 
 # Build a throwaway repo with docs/CODEMAP.md and docs/DEVELOPMENT.md
 # holding the given bodies, run the checker inside it, and return its
@@ -58,6 +60,7 @@ run_checker() {
     rc_ref=$?
     # shellcheck disable=SC2034  # nameref writes back to the caller's var
     err_ref="$(cat "$errfile")"
+    chmod -R u+rwx "$tmp"
     rm -rf "$tmp" "$errfile"
 }
 
@@ -166,6 +169,31 @@ assert_exit "script named only in a README one level up still fails" 1 \
      : >scripts/tool/helper.sh
      echo 'helper.sh -- the helper' >scripts/README.md"
 
+# --- a directory find cannot read fails the run instead of shrinking the
+# --- list it checks (paired control: the same tree, readable) ---
+
+UNREADABLE_SETUP="mkdir -p crates/demo-crate/src/locked
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/locked/hidden.rs"
+UNREADABLE_CODEMAP="## demo-crate
+
+- \`src/lib.rs\` -- crate root
+- \`src/locked/hidden.rs\` -- hidden"
+
+assert_exit "a readable subdirectory is listed and checked" 0 \
+    "$UNREADABLE_CODEMAP" "" "$UNREADABLE_SETUP"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "SKIP: unreadable-subdirectory rows (root reads any directory)"
+else
+    assert_exit "an unreadable crates subdirectory is an error, not a clean run" 2 \
+        "$UNREADABLE_CODEMAP" "" "$UNREADABLE_SETUP
+     chmod 000 crates/demo-crate/src/locked"
+    assert_exit "an unreadable scripts subdirectory is an error, not a clean run" 2 \
+        "$UNREADABLE_CODEMAP" "" "$UNREADABLE_SETUP
+     mkdir -p scripts/locked && chmod 000 scripts/locked"
+fi
+
 # Run the checker with --enforce and assert both its exit code and that
 # its stderr carries the given fixed string (empty: no message expected).
 assert_enforce() {
@@ -269,6 +297,50 @@ assert_enforce "--enforce fails on an unsorted allowlist" 1 \
      : >crates/demo-crate/src/old_gap.rs
      : >crates/demo-crate/src/a_gap.rs
      printf 'crates/demo-crate/src/old_gap.rs\\ncrates/demo-crate/src/a_gap.rs\\n' >scripts/check-nav-index.allowlist"
+
+# --- --enforce against a git base: the allowlist may shrink, never grow ---
+
+# A repo whose HEAD commit carries an allowlist of old_gap.rs and
+# second_gap.rs, both genuine gaps.
+GROWTH_BASE="mkdir -p crates/demo-crate/src
+     : >crates/demo-crate/src/lib.rs
+     : >crates/demo-crate/src/old_gap.rs
+     : >crates/demo-crate/src/second_gap.rs
+     printf 'crates/demo-crate/src/old_gap.rs\\ncrates/demo-crate/src/second_gap.rs\\n' >scripts/check-nav-index.allowlist
+     git init -q . && git add -A
+     git -c user.name=t -c user.email=t@example.invalid commit -q -m base"
+GROWN_ALLOWLIST="printf 'crates/demo-crate/src/new_gap.rs\\ncrates/demo-crate/src/old_gap.rs\\ncrates/demo-crate/src/second_gap.rs\\n' >scripts/check-nav-index.allowlist"
+
+assert_enforce "--enforce passes on the base revision's own allowlist" 0 "" \
+    "$ENFORCE_CODEMAP" "" "$GROWTH_BASE"
+
+assert_enforce "--enforce fails on an allowlist line the base revision lacks" 1 \
+    "not in the base revision's allowlist (HEAD)" \
+    "$ENFORCE_CODEMAP" "" \
+    "$GROWTH_BASE
+     : >crates/demo-crate/src/new_gap.rs
+     $GROWN_ALLOWLIST
+     git add -A"
+
+assert_enforce "--enforce passes when a closed gap leaves the allowlist" 0 "" \
+    "$ENFORCE_CODEMAP
+- \`src/second_gap.rs\` -- now documented" "" \
+    "$GROWTH_BASE
+     printf 'crates/demo-crate/src/old_gap.rs\\n' >scripts/check-nav-index.allowlist
+     git add -A"
+
+NAV_INDEX_BASE=HEAD^ assert_enforce "NAV_INDEX_BASE names the base the growth check compares against" 1 \
+    "not in the base revision's allowlist (HEAD^)" \
+    "$ENFORCE_CODEMAP" "" \
+    "$GROWTH_BASE
+     : >crates/demo-crate/src/new_gap.rs
+     $GROWN_ALLOWLIST
+     git add -A
+     git -c user.name=t -c user.email=t@example.invalid commit -q -m grow"
+
+NAV_INDEX_BASE=no-such-rev assert_enforce "an unresolvable NAV_INDEX_BASE is an error, not a skipped check" 2 \
+    "NAV_INDEX_BASE=no-such-rev is not a commit" \
+    "$ENFORCE_CODEMAP" "" "$GROWTH_BASE"
 
 assert_enforce "--enforce refuses a missing allowlist rather than passing" 2 \
     "allowlist not readable" \

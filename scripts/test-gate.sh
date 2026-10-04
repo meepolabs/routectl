@@ -24,12 +24,19 @@
 #       a network namespace. Both flags after the profile are load-bearing
 #       there: dependencies are fetched before the namespace exists, and
 #       one failing test binary must not stop later ones from running.
+#   test-gate.sh conservation [HARNESS_ARGS...]
+#       the workspace-all-features selection plus --test conservation
+#       The wire-conservation verdict CI runs after the standard gate. It
+#       reuses that selection so cargo builds no other feature set.
 #   test-gate.sh release-build
 #       cargo build --locked --release -p routectl-cli
 #       Accepts no extra arguments.
 #
 # HARNESS_ARGS are appended after `--`, i.e. passed to the test harness
 # (e.g. a test-name filter or --nocapture), never to cargo.
+#
+# TEST_GATE_DRY_RUN=1 prints the command on stdout, one line, and exits 0
+# without running it, so a self-test can compare the commands themselves.
 #
 # Exit codes: the gate command's own exit code; 2 = usage.
 
@@ -38,11 +45,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# The cargo selection of the workspace-all-features gate, which every
+# subcommand narrowing that gate extends rather than restates.
+WORKSPACE_ALL_FEATURES=(cargo test --workspace --all-features --profile test-release
+    --offline --no-fail-fast)
+
 usage() {
     sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 run() {
+    if [[ "${TEST_GATE_DRY_RUN:-0}" == "1" ]]; then
+        printf '%s\n' "$*"
+        exit 0
+    fi
     printf '+ %s\n' "$*" >&2
     cd "$REPO_ROOT"
     exec "$@"
@@ -62,8 +78,10 @@ case "$subcommand" in
             -- --skip egress_replay_all --skip ingress_replay_all "$@"
         ;;
     workspace-all-features)
-        run cargo test --workspace --all-features --profile test-release \
-            --offline --no-fail-fast -- "$@"
+        run "${WORKSPACE_ALL_FEATURES[@]}" -- "$@"
+        ;;
+    conservation)
+        run "${WORKSPACE_ALL_FEATURES[@]}" --test conservation -- "$@"
         ;;
     release-build)
         if [[ $# -gt 0 ]]; then

@@ -3,8 +3,9 @@
 # namespace and no cargo: it drives the checker's --self-check mode.
 #
 # Pins:
-#   - the deadline budget fits the CI step timeout, and the job timeout
-#     leaves room for the job's other steps;
+#   - the deadline budget fits the CI step timeout, STEP_BUDGET is exactly
+#     the worst case plus the headroom rounded up to a minute, and the job
+#     timeout leaves room for the job's other steps;
 #   - a deadline raised past the budget makes the checker refuse to run;
 #   - the fixed credential names are always planted, whatever the source
 #     scan finds, and dropping one is caught;
@@ -17,7 +18,9 @@
 #     subcommand, and that subcommand keeps the all-features selection and
 #     the --offline / --no-fail-fast flags the namespaced leg depends on;
 #   - each live leg's cargo selection is that subcommand's, narrowed only by
-#     --test, so the live legs reuse the standard gate's build.
+#     --test, so the live legs reuse the standard gate's build;
+#   - the registry's conservation subcommand is that same selection plus
+#     --test conservation, so CI's conservation step reuses it too.
 #
 # Every "passes" assertion has a control proving the same assertion fails
 # on a copy of the checker planted with the defect.
@@ -111,6 +114,19 @@ else
 fi
 
 step_budget="$(sed -n 's/^STEP_BUDGET=//p' "$CHECKER")"
+headroom="$(sed -n 's/^BUDGET_HEADROOM=//p' "$CHECKER")"
+worst_case="$(sed -n 's/^budget worst_case=\([0-9]*\) .*/\1/p' <<<"$budget_line")"
+if [[ -z "$worst_case" || -z "$headroom" ]]; then
+    fail "could not read worst_case ($worst_case) or BUDGET_HEADROOM ($headroom)"
+else
+    derived_budget=$(((worst_case + headroom + 59) / 60 * 60))
+    if ((step_budget == derived_budget)); then
+        pass "STEP_BUDGET=$step_budget is worst case ${worst_case}s + ${headroom}s headroom, rounded up to a minute"
+    else
+        fail "STEP_BUDGET=$step_budget, but worst case ${worst_case}s + ${headroom}s headroom rounds up to $derived_budget"
+    fi
+fi
+
 step_minutes="$(awk -v name="$STEP_NAME" '
     $0 ~ "- name: " name { found = 1; next }
     found && /timeout-minutes:/ { print $2; exit }
@@ -289,19 +305,31 @@ else
     fail "could not build the inline-gate mutant"
 fi
 
+# A registry copy's command for a subcommand, as its dry run prints it.
+registry_command() { TEST_GATE_DRY_RUN=1 bash "$1" "$2" 2>/dev/null; }
+
+# A copy of the registry edited by the given sed expression. Prints its path.
+registry_mutant() {
+    local name="$1" expr="$2" path="$TMP/test-gate-$1.sh"
+    sed -e "$expr" "$GATE_REGISTRY" >"$path"
+    if cmp -s "$GATE_REGISTRY" "$path"; then
+        echo "registry mutation '$name' changed nothing" >&2
+        return 1
+    fi
+    echo "$path"
+}
+
 # Prints each flag the namespaced leg needs that a registry copy's
 # workspace-all-features command lacks.
 missing_gate_flags() {
-    local body flag
-    body="$(awk '/^    workspace-all-features\)$/ { on = 1; next }
-        on && /^        ;;$/ { exit }
-        on { print }' "$1" | tr -d '\\\n')"
-    if [[ "$body" != *"run cargo test --workspace"* ]]; then
+    local cmd flag
+    cmd="$(registry_command "$1" workspace-all-features)"
+    if [[ "$cmd" != "cargo test --workspace "* ]]; then
         echo "<no cargo test --workspace command>"
         return
     fi
     for flag in --all-features "--profile test-release" --offline --no-fail-fast; do
-        [[ "$body" == *" $flag "* ]] || echo "$flag"
+        [[ " $cmd " == *" $flag "* ]] || echo "$flag"
     done
 }
 
@@ -312,25 +340,57 @@ else
     fail "test-gate.sh workspace-all-features lacks: $(tr '\n' ' ' <<<"$gone")"
 fi
 
-sed -e '/^    workspace-all-features)$/,/^        ;;$/s/ --offline//' "$GATE_REGISTRY" >"$TMP/test-gate-online.sh"
-if cmp -s "$GATE_REGISTRY" "$TMP/test-gate-online.sh"; then
-    fail "could not build the dropped --offline registry mutant"
-elif [[ "$(missing_gate_flags "$TMP/test-gate-online.sh")" == "--offline" ]]; then
-    pass "control: a registry command without --offline is caught"
+if m="$(registry_mutant online 's/^\(WORKSPACE_ALL_FEATURES=.*\) --offline/\1/;s/^    --offline --no-fail-fast)$/    --no-fail-fast)/')"; then
+    if [[ "$(missing_gate_flags "$m")" == "--offline" ]]; then
+        pass "control: a registry command without --offline is caught"
+    else
+        fail "control: dropped --offline not caught"
+    fi
 else
-    fail "control: dropped --offline not caught"
+    fail "could not build the dropped --offline registry mutant"
 fi
 
-# --- live leg selection ----------------------------------------------------
+# --- registry selections ----------------------------------------------------
 
 # The registry's workspace-all-features cargo arguments, up to the harness
 # separator.
 registry_selection() {
-    awk '/^    workspace-all-features\)$/ { on = 1; next }
-        on && /^        ;;$/ { exit }
-        on { print }' "$1" | tr -d '\\\n' | tr -s ' ' |
-        sed -n 's/^ *run \(cargo test .*\) -- .*$/\1/p'
+    registry_command "$1" "${2:-workspace-all-features}" | sed -n 's/^\(cargo test .*\) --\( .*\)\{0,1\}$/\1/p'
 }
+
+# Prints the mismatch, or nothing when a registry copy's conservation
+# command is its workspace-all-features selection plus --test conservation.
+conservation_mismatch() {
+    local want got
+    want="$(registry_selection "$1")"
+    got="$(registry_selection "$1" conservation)"
+    if [[ -z "$want" || -z "$got" ]]; then
+        echo "unreadable: workspace-all-features='$want' conservation='$got'"
+    elif [[ "$got" != "$want --test conservation" ]]; then
+        echo "conservation='$got' workspace-all-features='$want'"
+    fi
+}
+
+gone="$(conservation_mismatch "$GATE_REGISTRY")"
+if [[ -z "$gone" ]]; then
+    pass "test-gate.sh conservation is the workspace-all-features selection plus --test conservation"
+else
+    fail "test-gate.sh conservation diverges from workspace-all-features: $gone"
+fi
+
+# shellcheck disable=SC2016 # matches the literal array expansion in the registry
+if m="$(registry_mutant conservation-narrow 's|^        run "${WORKSPACE_ALL_FEATURES\[@\]}" --test conservation|        run cargo test -p routectl-cli --profile test-release --test conservation|')"; then
+    if [[ -n "$(conservation_mismatch "$m")" ]]; then
+        pass "control: a conservation command selecting another feature set is caught"
+    else
+        fail "control: a conservation command selecting another feature set passed"
+    fi
+else
+    fail "could not build the conservation-narrow mutant"
+fi
+
+# --- live leg selection ----------------------------------------------------
+
 # A checker's live_command cargo arguments, up to its --test.
 live_selection() {
     awk '/^live_command\(\) \{$/ { on = 1; next }

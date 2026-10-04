@@ -129,12 +129,14 @@ WELL_KNOWN_SOCKETS=(
     /run/systemd/journal/stdout
 )
 
-# Deadlines, in seconds. STEP_BUDGET is the CI step's timeout-minutes * 60.
-STEP_BUDGET=5400
+# Deadlines, in seconds. STEP_BUDGET is the CI step's timeout-minutes * 60:
+# worst_case_seconds plus BUDGET_HEADROOM, rounded up to a whole minute.
+# check-live-gate-isolation.test.sh derives that sum and asserts it.
+STEP_BUDGET=6240
 FETCH_DEADLINE=300
 CONTROL_DEADLINE=120
 STANDARD_DEADLINE=3000
-LIVE_DEADLINE=450
+LIVE_DEADLINE=750
 # `timeout --kill-after` grace for every bounded command.
 KILL_AFTER=10
 # Inside a leg: recorder start-up, residual-process kill, recorder stop.

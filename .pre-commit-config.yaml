@@ -115,7 +115,8 @@ repos:
         pass_filenames: false
 
       # Fails only on a source file with no navigation-doc row that is not
-      # in scripts/check-nav-index.allowlist, or on a stale allowlist entry.
+      # in scripts/check-nav-index.allowlist, on a stale allowlist entry, or
+      # on an allowlist entry HEAD's copy of the list lacks.
       # A doc edit alone can make an entry stale, so this cannot be filtered
       # to new files either. The full gap report stays advisory: run the
       # script without --enforce.

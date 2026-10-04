@@ -32,13 +32,21 @@
 # wired, so a doc lag that predates it does not block every commit while a
 # NEW unindexed file does. It only shrinks: an entry whose file gained a
 # row, or no longer exists, fails the gate until it is removed, so a gap
-# closed once cannot silently reopen behind a forgotten entry. The list
-# must stay sorted and duplicate-free (`LC_ALL=C sort -u`) so every change
-# to it is a one-line diff.
+# closed once cannot silently reopen behind a forgotten entry; and in
+# --enforce mode an entry absent from the base revision's allowlist fails
+# too, so the list cannot grow. The base is HEAD (the commit gate's case)
+# unless NAV_INDEX_BASE=<rev> names another; CI passes the merge base or
+# the pushed commit's parent. The growth check is skipped outside a git
+# work tree, when HEAD does not resolve yet, and when the base has no
+# allowlist (the commit that introduces it); an explicit NAV_INDEX_BASE
+# that does not resolve is an error. The list must stay sorted and
+# duplicate-free (`LC_ALL=C sort -u`) so every change to it is a one-line
+# diff.
 #
 # Exit codes: 0 = every file indexed (report) or no gap outside the
-# allowlist and no stale entry (--enforce), 1 = at least one such
-# failure, 2 = usage error or an unreadable allowlist.
+# allowlist and no stale or added entry (--enforce), 1 = at least one such
+# failure, 2 = usage error, an unreadable allowlist, a tree that could not
+# be listed, or a base revision that could not be read.
 
 set -euo pipefail
 
@@ -65,10 +73,23 @@ crate_section() {
     ' "$codemap"
 }
 
+# Write the NUL-delimited, sorted list of files named $2 under $1 to $3.
+# A find or sort failure (an unreadable directory) would otherwise read as
+# a shorter, clean list, so it exits 2.
+list_files() {
+    local root="$1" pattern="$2" out="$3"
+    if ! find "$root" -type f -name "$pattern" -print0 | sort -z >"$out"; then
+        echo "check-nav-index: could not list every $pattern file under ${root#"$REPO_ROOT"/}" >&2
+        exit 2
+    fi
+}
+
 check_rust_files() {
     local crates_root="$1" codemap="$2" development="$3"
     local -n out_ref="$4"
+    local listing="$5"
     local path relpath crate rest section
+    list_files "$crates_root" '*.rs' "$listing"
     while IFS= read -r -d '' path; do
         relpath="${path#"$crates_root"/}"
         case "$(basename "$relpath")" in
@@ -80,13 +101,15 @@ check_rust_files() {
         if ! grep -qF "$rest" <<<"$section" && ! grep -qF "$rest" "$development"; then
             out_ref+=("crates/$relpath")
         fi
-    done < <(find "$crates_root" -type f -name '*.rs' -print0 | sort -z)
+    done <"$listing"
 }
 
 check_scripts() {
     local scripts_root="$1" codemap="$2" development="$3" repo_root="$4"
     local -n scripts_out_ref="$5"
+    local listing="$6"
     local path base readme
+    list_files "$scripts_root" '*.sh' "$listing"
     while IFS= read -r -d '' path; do
         base="$(basename "$path")"
         if grep -qF "$base" "$codemap" || grep -qF "$base" "$development"; then
@@ -102,7 +125,7 @@ check_scripts() {
             continue
         fi
         scripts_out_ref+=("${path#"$repo_root"/}")
-    done < <(find "$scripts_root" -type f -name '*.sh' -print0 | sort -z)
+    done <"$listing"
 }
 
 # The allowlist's entries: every line that is neither blank nor a comment.
@@ -132,10 +155,43 @@ filter_to_index() {
     paths_ref=("${kept[@]}")
 }
 
+# Print the allowlist entries of $2 (newline-separated) that the base
+# revision's allowlist lacks, or nothing when there is no base to compare
+# against. Exits 2 when an explicit NAV_INDEX_BASE cannot be read.
+added_entries() {
+    local allowlist="$1" entries="$2" repo_root="$3" work="$4"
+    local base="${NAV_INDEX_BASE:-HEAD}" rel="${allowlist#"$repo_root"/}"
+    local explicit="${NAV_INDEX_BASE:+1}"
+    if ! git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+        ! git -C "$repo_root" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+        if [[ -n "$explicit" ]]; then
+            echo "check-nav-index: NAV_INDEX_BASE=$base is not a commit in this repository" >&2
+            exit 2
+        fi
+        return 0
+    fi
+    git -C "$repo_root" cat-file -e "$base:./$rel" 2>/dev/null || return 0
+    if ! git -C "$repo_root" show "$base:./$rel" >"$work/base-allowlist"; then
+        echo "check-nav-index: could not read $rel at $base" >&2
+        exit 2
+    fi
+    local -A in_base=()
+    local entry
+    while IFS= read -r entry; do
+        in_base["$entry"]=1
+    done < <(read_allowlist "$work/base-allowlist")
+    while IFS= read -r entry; do
+        if [[ -n "$entry" && -z "${in_base[$entry]:-}" ]]; then
+            echo "$entry"
+        fi
+    done <<<"$entries"
+}
+
 # Compare the gaps found against the allowlist and exit with the verdict.
 enforce_allowlist() {
     local allowlist="$1" repo_root="$2"
     local -n gaps_ref="$3"
+    local work="$4"
     if [[ ! -r "$allowlist" ]]; then
         echo "check-nav-index: allowlist not readable at ${allowlist#"$repo_root"/}" >&2
         exit 2
@@ -144,6 +200,16 @@ enforce_allowlist() {
     entries="$(read_allowlist "$allowlist")"
     if [[ "$entries" != "$(LC_ALL=C sort -u <<<"$entries")" ]]; then
         echo "check-nav-index: ${allowlist#"$repo_root"/} is not sorted and duplicate-free (LC_ALL=C sort -u)" >&2
+        failed=1
+    fi
+
+    local added_text added=()
+    added_text="$(added_entries "$allowlist" "$entries" "$repo_root" "$work")" || exit "$?"
+    [[ -z "$added_text" ]] || mapfile -t added <<<"$added_text"
+    if [[ "${#added[@]}" -gt 0 ]]; then
+        echo "check-nav-index: ${#added[@]} allowlist line(s) not in the base revision's allowlist (${NAV_INDEX_BASE:-HEAD}); it only shrinks:" >&2
+        printf '  %s\n' "${added[@]}" >&2
+        echo "  Add a row to docs/CODEMAP.md or docs/DEVELOPMENT.md instead." >&2
         failed=1
     fi
 
@@ -199,11 +265,14 @@ main() {
         1:--enforce) enforce=1 ;;
         *) usage ;;
     esac
-    local missing=()
-    check_rust_files "$REPO_ROOT/crates" "$CODEMAP" "$DEVELOPMENT" missing
-    check_scripts "$REPO_ROOT/scripts" "$CODEMAP" "$DEVELOPMENT" "$REPO_ROOT" missing
+    local missing=() work
+    work="$(mktemp -d)"
+    # shellcheck disable=SC2064 # expand now: work is local to main
+    trap "rm -rf '$work'" EXIT
+    check_rust_files "$REPO_ROOT/crates" "$CODEMAP" "$DEVELOPMENT" missing "$work/rust-files"
+    check_scripts "$REPO_ROOT/scripts" "$CODEMAP" "$DEVELOPMENT" "$REPO_ROOT" missing "$work/scripts"
     if [[ "$enforce" -eq 1 ]]; then
-        enforce_allowlist "$ALLOWLIST" "$REPO_ROOT" missing
+        enforce_allowlist "$ALLOWLIST" "$REPO_ROOT" missing "$work"
     fi
     if [[ "${#missing[@]}" -gt 0 ]]; then
         echo "check-nav-index: ${#missing[@]} file(s) with no navigation-doc row:" >&2

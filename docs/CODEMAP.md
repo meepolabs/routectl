@@ -8571,8 +8571,9 @@ new section or a second doc.
   `*_tests.rs` sidecars) and every `scripts/**/*.sh` appears by path in this
   file or `DEVELOPMENT.md`; existence only, never row wording or freshness.
   The bare run is the advisory full report; `--enforce` is the commit-stage
-  leg, failing only on a gap outside `check-nav-index.allowlist` or a stale
-  allowlist entry
+  leg, failing only on a gap outside `check-nav-index.allowlist`, a stale
+  allowlist entry, or an entry absent from the base revision's allowlist
+  (HEAD, or `NAV_INDEX_BASE`); CI runs it too
 - `check-nav-index.allowlist` -- the pre-existing gaps `--enforce` tolerates;
   sorted, one path per line, only ever shrinks
 - `check-nav-index.test.sh` -- self-test for the navigation-index check,
@@ -8583,7 +8584,8 @@ new section or a second doc.
   and mount namespaces; CI's only workspace test run
 - `check-live-gate-isolation.test.sh` -- self-test for that check's static
   contract: deadline budget vs the CI step timeout, the fixed planted
-  credential names, run-from-anywhere source resolution, and its live-target
-  list matching every live `test = false` target in the crate manifests
+  credential names, run-from-anywhere source resolution, its live-target
+  list matching every live `test = false` target in the crate manifests, and
+  the gate registry's conservation selection matching workspace-all-features
 - `net-oracle.py` -- the loopback packet-capture attempt recorder (plus DNS
   responder) that check runs inside the namespace
