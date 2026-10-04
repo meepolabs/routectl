@@ -417,6 +417,18 @@ fn reasoning_summary_stream_emits_summary_delta_with_format_and_id() {
     let delta = data_of(&events, "response.reasoning_summary_text.delta");
     assert_eq!(delta["delta"], "step");
     assert_eq!(delta["summary_index"], 0);
+    // The official wire carries item_id on reasoning deltas: a client
+    // building its transcript from stream events must be able to
+    // associate the item's eventual encrypted_content signature with
+    // the id the upstream bound it to. A missing/null item_id forces
+    // the client to mint its own, and a replay under a minted id fails
+    // the backend's verification ("Encrypted content item_id did not
+    // match the target item id").
+    assert_eq!(
+        delta["item_id"],
+        "rs_1",
+        "reasoning delta must carry the item id the signature was bound to"
+    );
 }
 
 #[test]
@@ -434,6 +446,7 @@ fn reasoning_text_stream_emits_reasoning_text_delta() {
     let delta = data_of(&events, "response.reasoning_text.delta");
     assert_eq!(delta["delta"], "chain");
     assert_eq!(delta["content_index"], 0);
+    assert_eq!(delta["item_id"], "rs_1");
 }
 
 #[test]
@@ -722,8 +735,88 @@ fn completed_body_output_matches_non_stream_render_for_text() {
     };
     let non_stream_output = render_responses_response(&Default::default(), resp).unwrap()["output"].clone();
 
-    // Assert: byte-for-byte identical output[].
-    assert_eq!(streamed_output, non_stream_output);
+    // Assert: identical output[] apart from the minted message-item id.
+    // The stream path (and the official API) names message items with an
+    // id end to end — `item.added` / every delta / `item.done` / the
+    // completed body all carry the same `msg_N` — while a bare non-stream
+    // render (no stream state) has no id to echo. Strip the id from both
+    // sides so the test pins CONTENT parity; id consistency across the
+    // stream events is pinned by completed_body_message_item_carries_minted_id.
+    let strip_ids = |arr: &Value| -> Value {
+        let mut items = arr
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for item in items.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("id");
+            }
+        }
+        Value::Array(items)
+    };
+    assert_eq!(strip_ids(&streamed_output), strip_ids(&non_stream_output));
+    // The streamed message item carries exactly the id the item.added /
+    // delta events emitted.
+    assert_eq!(
+        streamed_output[0]["id"],
+        json!("msg_1"),
+        "completed body's message item must carry the minted id the stream events used"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Message-item id consistency (client replay contract)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn completed_body_message_item_carries_minted_id() {
+    // A client (OpenAI SDK, codex) builds its transcript from the stream
+    // events and replays item ids on the next turn. Every event for the
+    // message item must carry the SAME minted id, and the completed
+    // body must name it too — an id that only exists on some events
+    // forces the client to mint its own, which is what broke
+    // encrypted-content replay verification for reasoning items
+    // (the same class of bug, on the item that has no signature).
+    let mut state = fresh();
+    let mut events: Vec<SseEvent> = Vec::new();
+    events.extend(render(&mut state, text_chunk("hello")));
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    let added = data_of(&events, "response.output_item.added");
+    assert_eq!(added["item"]["type"], "message");
+    assert_eq!(
+        added["item"]["id"], "msg_1",
+        "item.added must carry the minted message id"
+    );
+    let part = data_of(&events, "response.content_part.added");
+    assert_eq!(part["item_id"], "msg_1");
+
+    let delta = data_of(&events, "response.output_text.delta");
+    assert_eq!(delta["item_id"], "msg_1");
+
+    let text_done = data_of(&events, "response.output_text.done");
+    assert_eq!(text_done["item_id"], "msg_1");
+    let part_done = data_of(&events, "response.content_part.done");
+    assert_eq!(part_done["item_id"], "msg_1");
+
+    let item_done = data_of(&events, "response.output_item.done");
+    assert_eq!(item_done["item"]["id"], "msg_1");
+
+    let completed = data_of(&events, "response.completed");
+    let message_items: Vec<&Value> = completed["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "message")
+        .collect();
+    assert!(!message_items.is_empty());
+    for item in message_items {
+        assert_eq!(
+            item["id"], "msg_1",
+            "completed body must name the same id the stream events carried"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

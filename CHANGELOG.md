@@ -16,6 +16,23 @@ list with more narrative.
 
 ### Added
 
+- **Responses stream events now carry item ids end to end.** The
+  reasoning delta events (`response.reasoning_summary_text.delta` /
+  `response.reasoning_text.delta`) omitted `item_id`, and message
+  items (`response.output_item.added` / every delta / `output_item.done`
+  / the completed body) carried no id at all. A client building its
+  transcript from stream events -- the OpenAI SDK, codex -- could not
+  associate a reasoning item's eventual `encrypted_content` signature
+  with the id the upstream bound it to, so it minted its own id and
+  replayed the signature under it; the ChatGPT backend verifies the
+  pair and rejects with "Encrypted content item_id did not match the
+  target item id". Message items now mint a stable `msg_N` id at open
+  time carried on every event for the item AND patched into the
+  completed body (the official API names message items end to end);
+  reasoning deltas carry the upstream's own item id. Stream-vs-non-
+  stream output parity keeps holding (id-stripped comparison pinned in
+  tests, with the id consistency pinned separately).
+
 - **Responses `previous_response_id` chaining + `GET /v1/responses/{id}`
   retrieval.** The Responses ingress kept the stateless contract (a
   chained request 400'd, `store: true` warned it was ignored), so a

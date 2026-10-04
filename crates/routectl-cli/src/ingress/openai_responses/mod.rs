@@ -116,6 +116,17 @@ pub struct ResponsesStreamState {
     sequence_number: u64,
     /// Next `output_index` to allocate for a new output item.
     next_output_index: u64,
+    /// Counter for minted item ids (`msg_N`); official item ids are
+    /// per-response sequential. The egress forwards upstream item ids
+    /// when the upstream assigns them (reasoning items on the chatgpt
+    /// lane always carry one), so this mints only what the upstream
+    /// left id-less.
+    next_item_id: u64,
+    /// The minted id of the most recent open message item, patched
+    /// into the completed body's message item so a client replaying
+    /// the completed output sees the same id the stream events
+    /// carried.
+    last_message_id: Option<String>,
     /// The single currently-open text/reasoning output item, if any.
     /// Tool calls are buffered separately in `tool_buffers` and flushed
     /// together, so they do not occupy this slot.
@@ -174,6 +185,8 @@ impl Default for ResponsesStreamState {
             finished: false,
             sequence_number: 0,
             next_output_index: 0,
+            next_item_id: 0,
+            last_message_id: None,
             open: None,
             tool_buffers: Vec::new(),
             response_id: None,
@@ -198,7 +211,12 @@ enum OpenOutputItem {
     /// message-level `output_index` and the `content_index` of its
     /// single text part are tracked so deltas and the closing
     /// `output_text.done` / `content_part.done` carry the right indices.
-    Text { output_index: u64 },
+    Text {
+        output_index: u64,
+        /// Minted item id (`msg_N`), carried on every event for this
+        /// item and patched into the completed body.
+        message_id: String,
+    },
     /// A `reasoning` item streaming summary / text deltas. `detail_id`
     /// groups emitted details (matching the non-stream renderer's
     /// id-grouping); the
