@@ -888,6 +888,57 @@ fn a_class_bound_by_a_tally_table_the_call_sits_outside_of_is_an_error() {
     assert!(why.contains("tally table"), "unexpected reason: {why}");
 }
 
+/// A two-file population where `super::LANE` means different constants under
+/// the directory tree and the module tree: from inside `mod inner` in
+/// `gemini/outer.rs` it is `outer.rs`'s own `LANE`, while a directory-tree hop
+/// lands on `gemini/mod.rs`. `body` is spliced into `outer.rs` after its
+/// constant.
+fn inline_mod_population(body: &str) -> Vec<(String, String)> {
+    vec![
+        (
+            "gemini/mod.rs".to_string(),
+            "pub const LANE: &str = \"gemini\";\n".to_string(),
+        ),
+        (
+            "gemini/outer.rs".to_string(),
+            format!("const LANE: &str = \"outer-lane\";\n{body}"),
+        ),
+    ]
+}
+
+#[test]
+fn a_counter_call_inside_an_inline_mod_block_is_refused_rather_than_misresolved() {
+    let population = inline_mod_population(
+        "mod inner {\n    fn f() {\n        \
+         crate::translation_drop_metrics::record_translation_drop(super::LANE, \"cls\");\n    \
+         }\n}\n",
+    );
+    let why = harvest(&population).expect_err(
+        "a call inside an inline mod resolves `super::` against the wrong module, so it must be \
+         refused",
+    );
+    assert!(
+        why.contains("inline `mod inner` block"),
+        "unexpected reason: {why}"
+    );
+}
+
+#[test]
+fn a_counter_call_beside_an_inline_mod_or_a_mod_declaration_is_still_harvested() {
+    // The refusal is keyed to the call sitting INSIDE a block: a call outside
+    // one, in a file that also carries an inline mod and a `mod x;` declaration,
+    // resolves as before.
+    let population = inline_mod_population(
+        "mod declared;\nmod inner {\n    fn g() {}\n}\nfn f() {\n    \
+         crate::translation_drop_metrics::record_translation_drop(LANE, \"cls\");\n}\n",
+    );
+    let lanes: Vec<String> = expect(harvest(&population))
+        .into_iter()
+        .map(|c| c.lane)
+        .collect();
+    assert_eq!(lanes, vec!["outer-lane".to_string()]);
+}
+
 #[test]
 fn a_harvest_that_recovered_no_call_is_a_failed_harvest() {
     // An empty counter side satisfies the equality against an empty marker

@@ -758,6 +758,45 @@ fn parent_module(file: &str) -> Option<String> {
     Some(format!("{parent_dir}/mod.rs"))
 }
 
+/// Every inline `mod <name> { ... }` block in `source`, as its name and the
+/// byte span of its body. A `mod <name>;` declaration is not a block.
+///
+/// Read over code only, so a `mod` inside a comment or a string opens nothing.
+fn inline_mod_blocks(source: &str) -> Result<Vec<(String, std::ops::Range<usize>)>, String> {
+    let scan_owned = code_only(source);
+    let scan = scan_owned.as_str();
+    let mut blocks = Vec::new();
+    for (offset, _) in scan.match_indices("mod") {
+        let is_word_start = scan[..offset]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        let after_keyword = &scan[offset + "mod".len()..];
+        if !is_word_start || !after_keyword.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let rest = after_keyword.trim_start();
+        let name_len = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if name_len == 0 {
+            continue;
+        }
+        let after_name = &rest[name_len..];
+        if !after_name.trim_start().starts_with('{') {
+            continue;
+        }
+        let name_at = scan.len() - rest.len();
+        let brace_at = name_at + name_len + (after_name.len() - after_name.trim_start().len());
+        let body = delimited(scan, brace_at, '{', '}')?;
+        blocks.push((
+            rest[..name_len].to_string(),
+            brace_at + 1..brace_at + 1 + body.len(),
+        ));
+    }
+    Ok(blocks)
+}
+
 /// Resolve a lane expression to its literal by reading the constant's own
 /// definition, transitively. Only two of the four denominator sites pass a
 /// literal -- the others pass `LANE` or `super::LANE` -- so a
@@ -820,6 +859,7 @@ pub fn harvest(population: &[(String, String)]) -> Result<Vec<CounterCall>, Stri
     let mut calls = Vec::new();
     for (file, source) in population {
         let tables = class_tables(source)?;
+        let inline_mods = inline_mod_blocks(source)?;
         for (counter, after_token) in call_openings(file, source)? {
             let open_at = after_token
                 + source[after_token..].find('(').ok_or_else(|| {
@@ -827,6 +867,18 @@ pub fn harvest(population: &[(String, String)]) -> Result<Vec<CounterCall>, Stri
                 })?;
             let line = line_of(source, open_at);
             let where_ = format!("the {} call in {file} on line {line}", counter.token());
+            // Constants resolve against the DIRECTORY tree: `super::` hops to
+            // the parent directory's `mod.rs`, and a bare name reads the file's
+            // own table. Inside an inline `mod` block both are wrong, and wrong
+            // in a way that can still find a constant and look resolved.
+            if let Some((name, _)) = inline_mods.iter().find(|(_, body)| body.contains(&open_at)) {
+                return Err(format!(
+                    "{where_} sits inside the inline `mod {name}` block, a shape this resolver \
+                     does not read: it resolves constants against the directory tree, not the \
+                     module tree. Move the call out of the inline module rather than assuming \
+                     its lane"
+                ));
+            }
             let args = arguments(delimited(source, open_at, '(', ')')?);
             let expected = if counter == Counter::LaneSeen { 1 } else { 2 };
             if args.len() != expected {
