@@ -1,7 +1,6 @@
 //! OpenAI Responses API wire types.
 //!
-//! Serialize-only structs mirroring the request body that the codex
-//! reference implementation sends to either:
+//! Serialize-only structs for the request body sent to either:
 //!
 //!   - `https://chatgpt.com/backend-api/codex/responses`
 //!     (ChatGPT subscription / `auth_kind = "chatgpt-oauth"`)
@@ -12,9 +11,9 @@
 //! covers only the egress request shape; the response side completes the
 //! translation pipeline.
 //!
-//! Reference: `codex-rs/codex-api/src/common.rs::ResponsesApiRequest`
-//! and `codex-rs/app-server-protocol/schema/typescript/ResponseItem.ts`
-//! for the input-item union.
+//! The wire contract is the JSON these structs serialize for those two
+//! endpoints; the request and input-item tests in this module's siblings
+//! (`request_tests.rs`, `request_content_tests.rs`) pin the emitted shapes.
 
 use serde::Serialize;
 use serde_json::{Map, Value};

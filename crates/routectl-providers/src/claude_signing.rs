@@ -34,7 +34,10 @@ const SYSTEM_KEY: &[u8] = b"\"system\":";
 /// Width of the hex checksum (5 lowercase hex chars).
 const CCH_HEX_LEN: usize = 5;
 
-/// XXH64 seed (matches the reference implementation bit-for-bit).
+/// XXH64 seed for the billing checksum. A wrong value still produces a
+/// well-formed 5-hex `cch`, so the error is silent until the upstream
+/// recompute rejects it; `signs_billing_block_to_expected_checksum` pins
+/// the algorithm together with this seed.
 const SEED: u64 = 0x6E52_736A_C806_831E;
 
 /// Mask applied to the 64-bit hash before formatting (20 low bits).
