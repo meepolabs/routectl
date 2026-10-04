@@ -325,7 +325,7 @@ const FIXTURES_ROOT: &str = "crates/routectl-cli/tests/fixtures";
 /// a SET rather than a count so that widening the allowlist cannot pass
 /// review unnoticed.
 const EXPECTED_ALLOWLIST_PATHS: &[&str] = &[
-    r"Cargo\.lock",
+    r"(?:^|/)Cargo\.lock$",
     "^target/",
     "^crates/routectl-cli/tests/fixtures/captured/",
 ];
