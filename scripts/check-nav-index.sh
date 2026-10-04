@@ -258,6 +258,12 @@ enforce_allowlist() {
     exit 0
 }
 
+NAV_INDEX_WORK=""
+# shellcheck disable=SC2329 # invoked indirectly, by the EXIT trap in main
+cleanup_work() {
+    [[ -z "$NAV_INDEX_WORK" ]] || rm -rf -- "$NAV_INDEX_WORK"
+}
+
 main() {
     local enforce=0
     case "$#:${1:-}" in
@@ -265,10 +271,10 @@ main() {
         1:--enforce) enforce=1 ;;
         *) usage ;;
     esac
-    local missing=() work
-    work="$(mktemp -d)"
-    # shellcheck disable=SC2064 # expand now: work is local to main
-    trap "rm -rf '$work'" EXIT
+    local missing=()
+    NAV_INDEX_WORK="$(mktemp -d)"
+    trap cleanup_work EXIT
+    local work="$NAV_INDEX_WORK"
     check_rust_files "$REPO_ROOT/crates" "$CODEMAP" "$DEVELOPMENT" missing "$work/rust-files"
     check_scripts "$REPO_ROOT/scripts" "$CODEMAP" "$DEVELOPMENT" "$REPO_ROOT" missing "$work/scripts"
     if [[ "$enforce" -eq 1 ]]; then

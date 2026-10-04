@@ -350,6 +350,52 @@ assert_enforce "--enforce refuses a missing allowlist rather than passing" 2 \
 
 assert_exit "an unknown argument is a usage error" 2 "" "" "" --bogus
 
+# --- the checker's work dir is removed under a hostile TMPDIR ----------
+# A TMPDIR holding an apostrophe and a space must not break the cleanup.
+# The control runs the same checker with `rm` stubbed to a no-op, so the
+# work dir is left behind: that proves the checker does create its work
+# dir under the given TMPDIR, and the empty-TMPDIR verdict is not vacuous.
+# Prints the number of entries the checker left in its TMPDIR.
+leftover_work_dirs() {
+    local stub_rm="$1" tmp hostile rc
+    tmp="$(mktemp -d)"
+    hostile="$tmp/it's a tmp"
+    mkdir -p "$hostile" "$tmp/repo/scripts" "$tmp/repo/docs" \
+        "$tmp/repo/crates/demo-crate/src" "$tmp/stubbin"
+    cp "$CHECKER" "$tmp/repo/scripts/check-nav-index.sh"
+    # shellcheck disable=SC2016 # the backticks are literal markdown
+    printf '## demo-crate\n\n- `src/lib.rs` -- crate root\n\n- `check-nav-index.sh` -- self\n' \
+        >"$tmp/repo/docs/CODEMAP.md"
+    : >"$tmp/repo/docs/DEVELOPMENT.md"
+    : >"$tmp/repo/crates/demo-crate/src/lib.rs"
+    [[ "$stub_rm" -eq 0 ]] || printf '#!/bin/sh\nexit 0\n' >"$tmp/stubbin/rm"
+    chmod +x "$tmp/stubbin/rm" 2>/dev/null
+    rc=0
+    (cd "$tmp/repo" && TMPDIR="$hostile" PATH="$tmp/stubbin:$PATH" \
+        bash scripts/check-nav-index.sh) >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf 'checker-exit-%s\n' "$rc"
+    else
+        find "$hostile" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '
+    fi
+    rm -rf "$tmp"
+}
+
+left="$(leftover_work_dirs 0)"
+if [[ "$left" == "0" ]]; then
+    echo "PASS: the work dir is removed under a TMPDIR with an apostrophe and a space"
+else
+    echo "FAIL: work dir not removed under a hostile TMPDIR -- left: $left" >&2
+    fails=$((fails + 1))
+fi
+left="$(leftover_work_dirs 1)"
+if [[ "$left" == "1" ]]; then
+    echo "PASS: control: with rm stubbed out the work dir is left under that TMPDIR"
+else
+    echo "FAIL: control: expected one work dir left with rm stubbed, got: $left" >&2
+    fails=$((fails + 1))
+fi
+
 if [[ "$fails" -ne 0 ]]; then
     echo "check-nav-index self-test: $fails failure(s)" >&2
     exit 1

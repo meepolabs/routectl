@@ -1655,7 +1655,7 @@ assert_clean "a colon-separated MAC is accepted" \
     "$(body_with "link/ether fa:bc:de:f7:62:04 brd ff:ff:ff:ff:ff:ff")"
 assert_clean "dotted-quad IPs are accepted" \
     ingress_request.json \
-    "$(body_with "inet 10.0.15.201/24 brd 10.0.15.255 via 192.168.0.1 and 172.16.10.23")"
+    "$(body_with "inet 192.0.2.201/24 brd 192.0.2.255 via 198.51.100.1 and 203.0.113.23")"
 assert_clean "a pre-release semver is accepted" \
     ingress_request.json \
     "$(body_with "upgrade to 1.2.3-rc.4 then 2.0.0-beta.11+build.07")"
@@ -1712,6 +1712,131 @@ assert_non_regular_refused "a symlinked directory target with a trailing slash" 
     "refusing a symlinked target: linked/"
 assert_non_regular_refused "a symlinked file inside a directory target" file-in-dir real \
     "non-regular entry: real/leak.json"
+
+# --- symlinked parent component ---------------------------------------
+# A target whose LAST component is a real directory but whose parent is a
+# link out of the tree: `fixture/linked-parent/case`. `--write` on it would
+# rewrite the files behind the link, so both modes must refuse, and the
+# outside file -- which holds a live auth header `--write` WOULD redact --
+# must come out byte-identical. The control builds the same tree with a
+# real directory in place of the link: `--check` reaches the scan and
+# reports the live header (exit 1, not the exit-2 refusal), and `--write`
+# redacts it and leaves a tree `--check` then passes clean. That is what
+# proves the outside file is one `--write` rewrites when it can reach it.
+#
+# `$2` spells the target relative to the work dir or absolute.
+build_linked_parent_tree() {
+    local work="$1" layout="$2"
+    mkdir -p "$work/fixture" "$work/outside/case" "$work/home/$FAKE_HOME_NAME"
+    printf '%s' "$HEADERS_LIVE" >"$work/outside/case/ingress_request.headers.json"
+    case "$layout" in
+        link) ln -s ../outside "$work/fixture/linked-parent" ;;
+        real) cp -R "$work/outside" "$work/fixture/linked-parent" ;;
+    esac
+}
+
+run_linked_parent() {
+    local work="$1" mode="$2" spelling="$3" target="fixture/linked-parent/case"
+    [ "$spelling" = relative ] || target="$work/$target"
+    (cd "$work" && HOME="$work/home/$FAKE_HOME_NAME" bash "$SCRUB" "$mode" "$target") \
+        >"$work/scrub.log" 2>&1
+}
+
+assert_linked_parent_refused() {
+    local mode="$1" spelling="$2" work rc=0 before after
+    work="$(mktemp -d)"
+    build_linked_parent_tree "$work" link
+    before="$(sha256sum <"$work/outside/case/ingress_request.headers.json")"
+    run_linked_parent "$work" "$mode" "$spelling" || rc=$?
+    after="$(sha256sum <"$work/outside/case/ingress_request.headers.json")"
+    if [ "$rc" != "2" ] ||
+        ! grep -qF "symlink component at" "$work/scrub.log" ||
+        ! grep -qF "fixture/linked-parent" "$work/scrub.log"; then
+        echo "FAIL: expected exit 2 naming the linked parent but got $rc -- $mode $spelling linked-parent/case"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    elif [ "$before" != "$after" ]; then
+        echo "FAIL: $mode rewrote a file behind a linked parent -- $spelling linked-parent/case"
+        fails=$((fails + 1))
+    else
+        echo "PASS: a linked parent component is refused and the outside file is unchanged -- $mode $spelling"
+    fi
+    rm -rf "$work"
+}
+
+assert_linked_parent_control() {
+    local mode="$1" spelling="$2" expect_rc="$3" work rc=0 before after
+    work="$(mktemp -d)"
+    build_linked_parent_tree "$work" real
+    before="$(sha256sum <"$work/fixture/linked-parent/case/ingress_request.headers.json")"
+    run_linked_parent "$work" "$mode" "$spelling" || rc=$?
+    after="$(sha256sum <"$work/fixture/linked-parent/case/ingress_request.headers.json")"
+    if [ "$rc" != "$expect_rc" ]; then
+        echo "FAIL: control without the link exited $rc, expected $expect_rc -- $mode $spelling"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    elif [ "$mode" = --write ] && [ "$before" = "$after" ]; then
+        echo "FAIL: control --write left the live auth header unredacted -- $spelling"
+        fails=$((fails + 1))
+    elif [ "$mode" = --write ] && ! run_linked_parent "$work" --check "$spelling"; then
+        echo "FAIL: control tree is not clean after --write -- $spelling"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    else
+        echo "PASS: control without the link reaches the scan -- $mode $spelling (exit $rc)"
+    fi
+    rm -rf "$work"
+}
+
+for spelling in relative absolute; do
+    assert_linked_parent_refused --check "$spelling"
+    assert_linked_parent_refused --write "$spelling"
+    assert_linked_parent_control --check "$spelling" 1
+    assert_linked_parent_control --write "$spelling" 0
+done
+
+# --- symlinked TMPDIR ------------------------------------------------
+# A temp dir reached through a symlinked TMPDIR is the caller's
+# environment, not the tree being scrubbed: a `mktemp -d` fixture under it
+# must scan, from a working directory that is not its ancestor. A linked
+# parent BELOW that temp dir must still be refused -- the trusted anchor
+# covers the TMPDIR spelling only, never what lies under it.
+assert_symlinked_tmpdir() {
+    local work stage rc_clean=0 rc_linked=0
+    work="$(mktemp -d)"
+    mkdir -p "$work/real-tmp" "$work/home/$FAKE_HOME_NAME" "$work/elsewhere/case"
+    ln -s real-tmp "$work/tmp-link"
+    stage="$(TMPDIR="$work/tmp-link" mktemp -d)"
+    mkdir -p "$stage/fixture"
+    printf '%s' "$(body_with "an ordinary prose sentence")" >"$stage/fixture/ingress_request.json"
+    ln -s "$work/elsewhere" "$stage/linked-parent"
+    (cd / && TMPDIR="$work/tmp-link" HOME="$work/home/$FAKE_HOME_NAME" \
+        bash "$SCRUB" --check "$stage/fixture") >"$work/clean.log" 2>&1 || rc_clean=$?
+    (cd / && TMPDIR="$work/tmp-link" HOME="$work/home/$FAKE_HOME_NAME" \
+        bash "$SCRUB" --check "$stage/linked-parent/case") >"$work/linked.log" 2>&1 || rc_linked=$?
+    case "$stage" in
+        "$work/tmp-link"/*) ;;
+        *)
+            echo "FAIL: mktemp did not place the stage under the symlinked TMPDIR: $stage"
+            fails=$((fails + 1))
+            rm -rf "$work"
+            return
+            ;;
+    esac
+    if [ "$rc_clean" != "0" ]; then
+        echo "FAIL: a mktemp fixture under a symlinked TMPDIR was refused (exit $rc_clean)"
+        cat "$work/clean.log"
+        fails=$((fails + 1))
+    elif [ "$rc_linked" != "2" ] || ! grep -qF "symlink component at" "$work/linked.log"; then
+        echo "FAIL: a linked parent under a symlinked TMPDIR was not refused (exit $rc_linked)"
+        cat "$work/linked.log"
+        fails=$((fails + 1))
+    else
+        echo "PASS: a symlinked TMPDIR is accepted and a linked parent below it is refused"
+    fi
+    rm -rf "$work"
+}
+assert_symlinked_tmpdir
 
 
 # --- inherited git environment ------------------------------------------

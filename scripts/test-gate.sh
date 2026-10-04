@@ -12,6 +12,7 @@
 # subcommand uses the shipped release profile unchanged.
 #
 # Usage:
+#   test-gate.sh [--print] <subcommand> [ARGS...]
 #   test-gate.sh pre-push [HARNESS_ARGS...]
 #       cargo test --workspace --profile test-release
 #         -- --skip egress_replay_all --skip ingress_replay_all
@@ -35,8 +36,10 @@
 # HARNESS_ARGS are appended after `--`, i.e. passed to the test harness
 # (e.g. a test-name filter or --nocapture), never to cargo.
 #
-# TEST_GATE_DRY_RUN=1 prints the command on stdout, one line, and exits 0
-# without running it, so a self-test can compare the commands themselves.
+# --print, given before the subcommand, prints the command on stdout, one
+# line, and exits 0 without running it, so a self-test can compare the
+# commands themselves. It is a flag rather than an environment switch so an
+# inherited variable can never turn a real gate into a passing no-op.
 #
 # Exit codes: the gate command's own exit code; 2 = usage.
 
@@ -54,8 +57,10 @@ usage() {
     sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
+print_only=0
+
 run() {
-    if [[ "${TEST_GATE_DRY_RUN:-0}" == "1" ]]; then
+    if [[ "$print_only" -eq 1 ]]; then
         printf '%s\n' "$*"
         exit 0
     fi
@@ -63,6 +68,11 @@ run() {
     cd "$REPO_ROOT"
     exec "$@"
 }
+
+if [[ "${1:-}" == "--print" ]]; then
+    print_only=1
+    shift
+fi
 
 if [[ $# -eq 0 ]]; then
     usage >&2

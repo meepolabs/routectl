@@ -461,15 +461,71 @@ fi
 # validation runs HERE, in the current shell, and not inside the `find`
 # pipeline below: a `fatal` from a process substitution exits only the
 # subshell, and the gate would report a vacuous clean scan.
-validate_targets() {
-  local t u
-  for t in "${TARGETS[@]}"; do
-    # `-L` on `link/` tests the directory behind the link, not the link.
-    u="$t"
-    while [ "$u" != "/" ] && [ "$u" != "${u%/}" ]; do u="${u%/}"; done
-    if [ -L "$u" ]; then
-      fatal "refusing a symlinked target: $t"
+#
+# A symlink ANYWHERE in a target's path is refused, not only at its last
+# component: `fixture/link/case` with `fixture/link` aimed outside the tree
+# would otherwise let `--write` rewrite files the caller never named. Each
+# component is tested with `-L` as the kernel walks it, so a dangling link
+# and a link reached through `..` are both seen.
+#
+# The walk starts at a trusted ANCHOR, and the anchor's own ancestry is not
+# walked. Rejecting every symlink up to `/` would refuse a repo or a temp
+# dir that sits behind a system or user symlink (`/tmp` on some systems, a
+# symlinked TMPDIR or home), which is where every caller and self-test
+# lives; those links are the caller's environment, not content of the tree
+# being scrubbed. The anchor is:
+#   - the working directory, for a relative target;
+#   - for an absolute target, the longest of the logical working directory,
+#     the logical repo root holding this script, and `${TMPDIR:-/tmp}` that
+#     is a lexical prefix of it -- the spellings callers build targets
+#     from, `mktemp -d` included;
+#   - otherwise `/`, so every component is walked.
+GATE_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+
+target_anchor() {
+  local t="$1" a best=""
+  case "$t" in
+    /*) ;;
+    *) printf '.\n'; return 0 ;;
+  esac
+  for a in "$PWD" "$GATE_ROOT" "${TMPDIR:-/tmp}"; do
+    while [ "$a" != "/" ] && [ "$a" != "${a%/}" ]; do a="${a%/}"; done
+    case "$a" in
+      /?*) ;;
+      *) continue ;;
+    esac
+    case "$t" in
+      "$a" | "$a"/*) [ "${#a}" -le "${#best}" ] || best="$a" ;;
+    esac
+  done
+  printf '%s\n' "${best:-/}"
+}
+
+refuse_symlinked_components() {
+  local t="$1" anchor path rest seg
+  anchor="$(target_anchor "$t")"
+  case "$anchor" in
+    .) path="."; rest="$t" ;;
+    /) path=""; rest="${t#/}" ;;
+    *) path="$anchor"; rest="${t:${#anchor}}"; rest="${rest#/}" ;;
+  esac
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*) seg="${rest%%/*}"; rest="${rest#*/}" ;;
+      *) seg="$rest"; rest="" ;;
+    esac
+    [ -n "$seg" ] || continue
+    path="$path/$seg"
+    if [ -L "$path" ]; then
+      fatal "refusing a symlinked target: $t (symlink component at $path)"
     fi
+  done
+}
+
+validate_targets() {
+  local t
+  for t in "${TARGETS[@]}"; do
+    refuse_symlinked_components "$t"
     if [ ! -d "$t" ] && [ ! -f "$t" ]; then
       fatal "not a readable file or directory: $t"
     fi
