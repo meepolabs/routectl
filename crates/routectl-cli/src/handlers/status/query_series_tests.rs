@@ -362,6 +362,14 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
     // contention spike can only ever inflate a sample, so the minimum is the
     // sample least polluted by the machine -- and a real regression raises every
     // sample, the minimum included.
+    //
+    // Known exposure, accepted: the minimum is blind to noise that is asymmetric
+    // inside one rep. A scheduler delay landing on that rep's reference scan
+    // inflates the denominator, shrinks that rep's ratio, and the minimum selects
+    // it -- so one delayed reference can pass a regression the other reps would
+    // fail. The median would ignore a single such rep, but choosing it needs a
+    // fresh ratio remeasure under saturated load; the min statistic is kept
+    // because the bounds above were measured with it.
     const REPS: usize = 5;
 
     // Arrange: 100k rows over 400 days, read as an all-history day series. The
