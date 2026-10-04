@@ -1615,6 +1615,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   exception: an unset-`base_url` `cloud-code` gemini entry reports the daily
   Cloud Code host, because the api-key public default is a host that lane
   never talks to
+- `src/config_effective_tests.rs` -- `#[path]` sidecar unit coverage of the
+  effective-view derivation, including the guard that scans the whole of
+  `config_effective.rs` for a call into the router build path
 - `src/schema_gen.rs` -- `render_schema_json() -> String`: the single source
   of the committed `routectl.schema.json` at the repo root, rendered from
   `schemars::schema_for!(Config)` as pretty JSON with a trailing newline
@@ -6228,11 +6231,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   decorates test-only items ABOVE the real module, so the old needle silently
   shrank a guard's scanned region while it stayed green) and ASSERTS the opener
   is unique, so a second test module forces the author to revisit the guard
-  instead of halving its reach. Used by the `doctor.rs`, `config.rs`, and
-  `mod.rs` panel guards; `config_effective.rs` in routectl-router carries the
-  same logic inline (crossing the crate boundary for four lines would mean a
-  public-API change plus a baseline regeneration). Its `#[should_panic]` test is
-  the durable proof the ambiguity check fires
+  instead of halving its reach. Openers inside `//` comments are ignored. Used
+  by the `mod.rs` panel guard and `field_verdict_log_tests.rs`. Its
+  `#[should_panic]` test is the durable proof the ambiguity check fires
 - `src/handlers/status/test_hooks.rs` -- DAEMON-scoped observation and
   failure-injection seams for the `/status` family, carried on `StatusState` and
   handed in at spawn. Two properties of the fidelity surface are invisible from a
@@ -6501,6 +6502,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   it). An overlay load/parse failure is routed through the shared
   `redact_config_load_error`, logged, and collapsed to a `config_unavailable`
   code -- no path/value reaches the wire
+- `src/handlers/status/config_tests.rs` -- `#[path]` sidecar coverage of the
+  config panel, including the guard that scans the whole of `config.rs` for
+  `build`'s daemon-stamp-before-router-view read order
 - `src/handlers/status/doctor.rs` -- `/status/doctor`, strictly NO network.
   Runs only the no-network doctor sections via
   `commands::doctor::gather_context_no_network(config_path)` +
@@ -6520,6 +6524,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   re-dial. Config-load errors are already redacted inside the gather (no
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
+- `src/handlers/status/doctor_tests.rs` -- `#[path]` sidecar coverage of the
+  doctor panel, including the guard that scans the whole of `doctor.rs` for a
+  probe-dial call
 - `src/handlers/status/page.rs` -- the embedded dashboard page. ASSEMBLES the
   document at COMPILE time from its authoring sources (`include_str!` --
   `dashboard.html` markup + the `STYLE_PARTS` style sources + the
