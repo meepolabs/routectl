@@ -25,6 +25,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRUB="$HERE/scrub-fixture.sh"
 
+# Under the commit hook git exports GIT_DIR, GIT_INDEX_FILE and friends for
+# the repo being committed. Left set, the throwaway repos' `git init` and
+# `git config` below would write into THAT repo's config instead of their
+# own, so every repo-local git variable is cleared for the whole run, and
+# the global and system config are kept out of the identity the cases see.
+read -r -d '' -a git_local_env < <(git rev-parse --local-env-vars)
+unset "${git_local_env[@]}"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CEILING_DIRECTORIES="${TMPDIR:-/tmp}"
+
 # The seat store the script derives its `seat-session-id` deny values from
 # lives at `$XDG_CONFIG_HOME/routectl/credentials.json`. Every invocation
 # below therefore runs under a throwaway XDG: without this the suite would
@@ -1629,6 +1638,107 @@ assert_clean "prose naming the worktrees directory without a branch is accepted"
     ingress_request.json \
     "$(body_with "a worktree under \`.claude/worktrees/\` of the same repository")"
 
+# Dotted and colon-separated hex is the input class the task-id shape most
+# resembles: every pair is a valid slug, and `.` is a left boundary. The MAC
+# line is quoted from CPython's Lib/uuid.py, a file a captured tool result can
+# plausibly carry; the digest is the sha256 of `a`, which holds a dotted `f8`
+# pair followed by a two-digit pair. Both are joined at run time so this file
+# does not itself carry a literal the repo's internal-id scan would reject.
+hex_pairs() { local IFS="$1"; shift; printf '%s' "$*"; }
+UUID_PY_MAC_LINE="        # en0   1500  link#2      $(hex_pairs . fa bc de f7 62 04) 110854824     0 160133733     0     0"
+SHA256_OF_A_PAIRS=(ca 97 81 12 ca 1b bd ca fa c2 31 b3 9a 23 dc 4d a7 86 ef f8 14 7c 4e 72 b9 80 77 85 af ee 48 bb)
+assert_clean "a dotted MAC quoted from Python's uuid.py is accepted" \
+    ingress_request.json \
+    "$(body_with ">>> uuid.getnode()\\n$UUID_PY_MAC_LINE")"
+assert_clean "a colon-separated MAC is accepted" \
+    ingress_request.json \
+    "$(body_with "link/ether fa:bc:de:f7:62:04 brd ff:ff:ff:ff:ff:ff")"
+assert_clean "dotted-quad IPs are accepted" \
+    ingress_request.json \
+    "$(body_with "inet 10.0.15.201/24 brd 10.0.15.255 via 192.168.0.1 and 172.16.10.23")"
+assert_clean "a pre-release semver is accepted" \
+    ingress_request.json \
+    "$(body_with "upgrade to 1.2.3-rc.4 then 2.0.0-beta.11+build.07")"
+assert_clean "a hex digest printed in dotted pairs is accepted" \
+    ingress_request.json \
+    "$(body_with "fingerprint $(hex_pairs . "${SHA256_OF_A_PAIRS[@]}")")"
+assert_clean "a hex digest printed in colon pairs is accepted" \
+    ingress_request.json \
+    "$(body_with "SHA256 $(hex_pairs : "${SHA256_OF_A_PAIRS[@]}")")"
+assert_caught "a board-shaped task id whose slug mixes hex and other letters" \
+    ingress_request.json \
+    "$(body_with "picked up $(task_id deadbeef-x 1 02) today")" \
+    scratch-task-id
+
+# --- non-regular targets ----------------------------------------------
+# `find -type f` skips a symlink, so a symlinked target or a link inside a
+# fixture directory would be scanned as nothing. Each refusal is paired with
+# a control whose same tree, minus the link, passes clean; the refusal must
+# carry its own message naming the path -- the empty-scan refusal would
+# otherwise stand in for it -- and must not echo the leak behind the link.
+assert_non_regular_refused() {
+    local desc="$1" layout="$2" target="$3" needle="$4"
+    local work rc=0 control_rc=0
+    work="$(mktemp -d)"
+    mkdir -p "$work/real" "$work/outside"
+    printf '%s' "$(body_with "an ordinary prose sentence")" >"$work/real/ingress_request.json"
+    printf '%s' "$(body_with "ls /home/someoneelse/Desktop")" >"$work/outside/leak.json"
+    (cd "$work" && bash "$SCRUB" --check real) >"$work/control.log" 2>&1 || control_rc=$?
+    case "$layout" in
+        dir-link) ln -s real "$work/linked" ;;
+        file-in-dir) ln -s ../outside/leak.json "$work/real/leak.json" ;;
+    esac
+    (cd "$work" && bash "$SCRUB" --check "$target") >"$work/scrub.log" 2>&1 || rc=$?
+    if [ "$control_rc" != "0" ]; then
+        echo "FAIL: control tree without the link was not clean (exit $control_rc) -- $desc"
+        cat "$work/control.log"
+        fails=$((fails + 1))
+    elif [ "$rc" != "2" ] || ! grep -qF -- "$needle" "$work/scrub.log"; then
+        echo "FAIL: expected exit 2 with '$needle' but got $rc -- $desc"
+        cat "$work/scrub.log"
+        fails=$((fails + 1))
+    elif grep -q "someoneelse" "$work/scrub.log"; then
+        echo "FAIL: the refusal echoed the linked content -- $desc"
+        fails=$((fails + 1))
+    else
+        echo "PASS: non-regular entry refused -- $desc"
+    fi
+    rm -rf "$work"
+}
+
+assert_non_regular_refused "a symlinked directory target" dir-link linked \
+    "refusing a symlinked target: linked"
+assert_non_regular_refused "a symlinked directory target with a trailing slash" dir-link linked/ \
+    "refusing a symlinked target: linked/"
+assert_non_regular_refused "a symlinked file inside a directory target" file-in-dir real \
+    "non-regular entry: real/leak.json"
+
+
+# --- inherited git environment ------------------------------------------
+# The whole suite is re-run with GIT_DIR and GIT_INDEX_FILE aimed at a decoy
+# bare repo, the state a commit hook leaves. The decoy's bytes must come out
+# unchanged and the nested run must still pass on its own throwaway repos.
+assert_inherited_git_env_ignored() {
+    local decoy rc=0 before after
+    decoy="$(mktemp -d)"
+    git init -q --bare "$decoy/decoy.git"
+    before="$(cd "$decoy" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
+    GIT_DIR="$decoy/decoy.git" GIT_INDEX_FILE="$decoy/decoy.git/index" \
+        SCRUB_SELFTEST_NESTED=1 bash "$HERE/scrub-fixture.test.sh" >"$decoy/nested.log" 2>&1 || rc=$?
+    after="$(cd "$decoy" && find . -type f ! -name nested.log -exec sha256sum {} + | LC_ALL=C sort)"
+    if [ "$rc" != "0" ]; then
+        echo "FAIL: the suite failed under an inherited GIT_DIR (exit $rc)"
+        tail -n 20 "$decoy/nested.log"
+        fails=$((fails + 1))
+    elif [ "$before" != "$after" ]; then
+        echo "FAIL: the suite wrote into a repo named by an inherited GIT_DIR"
+        fails=$((fails + 1))
+    else
+        echo "PASS: an inherited GIT_DIR is ignored and its repo left untouched"
+    fi
+    rm -rf "$decoy"
+}
+[ -n "${SCRUB_SELFTEST_NESTED:-}" ] || assert_inherited_git_env_ignored
 
 if [ "$fails" -gt 0 ]; then
     echo "scrub-fixture self-test: $fails failure(s)" >&2

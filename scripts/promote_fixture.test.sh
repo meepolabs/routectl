@@ -46,6 +46,15 @@ mapfile -t KNOWN_INGRESS_KINDS < <(
 )
 CLIENT_VERSION="$HERE/drivers/lib/client_version.py"
 
+# Under the commit hook git exports GIT_DIR, GIT_INDEX_FILE and friends for
+# the repo being committed. Left set, the throwaway repos' `git init` and
+# `git config` below would write into THAT repo's config instead of their
+# own, so every repo-local git variable is cleared for the whole run, and
+# the global and system config are kept out of the identity the cases see.
+read -r -d '' -a git_local_env < <(git rev-parse --local-env-vars)
+unset "${git_local_env[@]}"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CEILING_DIRECTORIES="${TMPDIR:-/tmp}"
+
 fails=0
 
 # The identities the throwaway environment reports. Deliberately not the
@@ -965,6 +974,32 @@ check "positive control: the library DOES run the symlink test" "1" \
     "$(grep -q '\[ -L ' "$CONFINE" && echo 1 || echo 0)"
 check "promote_fixture.sh sources the shared library" "1" \
     "$(grep -c 'drivers/lib/confine.sh"$' "$PROMOTE")"
+
+# --- inherited git environment ------------------------------------------
+# The whole suite is re-run with GIT_DIR and GIT_INDEX_FILE aimed at a decoy
+# bare repo, the state a commit hook leaves. The decoy's bytes must come out
+# unchanged and the nested run must still pass on its own throwaway repos.
+assert_inherited_git_env_ignored() {
+    local decoy rc=0 before after
+    decoy="$(mktemp -d)"
+    git init -q --bare "$decoy/decoy.git"
+    before="$(cd "$decoy" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
+    GIT_DIR="$decoy/decoy.git" GIT_INDEX_FILE="$decoy/decoy.git/index" \
+        PROMOTE_SELFTEST_NESTED=1 bash "$HERE/promote_fixture.test.sh" >"$decoy/nested.log" 2>&1 || rc=$?
+    after="$(cd "$decoy" && find . -type f ! -name nested.log -exec sha256sum {} + | LC_ALL=C sort)"
+    if [ "$rc" != "0" ]; then
+        echo "FAIL: the suite failed under an inherited GIT_DIR (exit $rc)"
+        tail -n 20 "$decoy/nested.log"
+        fails=$((fails + 1))
+    elif [ "$before" != "$after" ]; then
+        echo "FAIL: the suite wrote into a repo named by an inherited GIT_DIR"
+        fails=$((fails + 1))
+    else
+        echo "PASS: an inherited GIT_DIR is ignored and its repo left untouched"
+    fi
+    rm -rf "$decoy"
+}
+[ -n "${PROMOTE_SELFTEST_NESTED:-}" ] || assert_inherited_git_env_ignored
 
 if [ "$fails" -gt 0 ]; then
     echo "promote_fixture self-test: $fails failure(s)"

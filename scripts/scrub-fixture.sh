@@ -462,12 +462,30 @@ fi
 # pipeline below: a `fatal` from a process substitution exits only the
 # subshell, and the gate would report a vacuous clean scan.
 validate_targets() {
-  local t
+  local t u
   for t in "${TARGETS[@]}"; do
+    # `-L` on `link/` tests the directory behind the link, not the link.
+    u="$t"
+    while [ "$u" != "/" ] && [ "$u" != "${u%/}" ]; do u="${u%/}"; done
+    if [ -L "$u" ]; then
+      fatal "refusing a symlinked target: $t"
+    fi
     if [ ! -d "$t" ] && [ ! -f "$t" ]; then
       fatal "not a readable file or directory: $t"
     fi
   done
+}
+
+# `find -type f` does not follow links, so a symlink, fifo or socket inside
+# a directory target would otherwise be skipped and the scan would pass on
+# the rest. Only the offending path is named, never what it points at.
+refuse_special_entries() {
+  local t="$1" odd find_rc
+  odd="$(find "$t" ! -type f ! -type d -print -quit)" || {
+    find_rc=$?
+    fatal "find failed (status $find_rc) enumerating: $t"
+  }
+  [ -z "$odd" ] || fatal "refusing a directory holding a non-regular entry: $odd"
 }
 
 # Fills FILES in the current shell. `find` runs in a process substitution so
@@ -480,6 +498,7 @@ collect_files() {
   local -a found
   for t in "${TARGETS[@]}"; do
     if [ -d "$t" ]; then
+      refuse_special_entries "$t"
       found=()
       mapfile -d '' -t found < <(find "$t" -type f -print0)
       find_rc=0
@@ -742,7 +761,13 @@ AWS_CRED_ASSIGN_RE='(AWS_SECRET_ACCESS_KEY|aws_secret_access_key|AWS_SESSION_TOK
 # per-branch worktree directory a capture ran from. Both name the operator's
 # planning or checkout layout rather than anything the fixture is about, so a
 # capture that echoes one is refused.
-SCRATCH_TASK_ID_RE="$ANCHOR_LEFT"'[a-z][a-z0-9-]*\.f[0-9]+\.[0-9]{2}([^0-9A-Za-z]|$)'
+#
+# The slug must carry a letter outside a-f or a hyphen. Dotted hex -- a
+# MAC printed as six dotted hex pairs, a digest printed in dotted pairs -- is
+# otherwise indistinguishable from `<slug>.f<n>.<nn>`, because ANCHOR_LEFT
+# accepts `.` as a boundary and every pair is a valid all-hex slug.
+SCRATCH_TASK_SLUG='([g-z][a-z0-9-]*|[a-f][a-f0-9]*[g-z-][a-z0-9-]*)'
+SCRATCH_TASK_ID_RE="$ANCHOR_LEFT$SCRATCH_TASK_SLUG"'\.f[0-9]+\.[0-9]{2}([^0-9A-Za-z]|$)'
 SCRATCH_WORKTREE_RE='\.claude/worktrees/[A-Za-z0-9_][A-Za-z0-9_.-]*'
 
 has_scratch_task_id() {
