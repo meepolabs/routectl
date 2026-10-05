@@ -69,6 +69,7 @@ pub mod runtime_state;
 pub mod schema_gen;
 pub mod seat_naming;
 pub(crate) mod seat_pool;
+pub(crate) mod state_key;
 #[cfg(test)]
 pub(crate) mod test_secret;
 
@@ -85,6 +86,7 @@ pub use capability_rebuild::{
     CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
     rebuild_capabilities_into,
 };
+pub use capability_vocab::CURRENT_VOCAB_VERSION;
 pub use catalog::{
     BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
     baked_table_rows, epoch_day_age, is_cataloged_provider_kind, is_stale_days,
@@ -207,3 +209,4 @@ pub use router::{
     FieldVerdictStatusSpec, field_verdict_event_stamps_for_tests, make_field_canary_due_for_tests,
     plant_acting_field_verdict_for_tests, seed_distinct_fidelity_counters_for_tests,
 };
+pub use state_key::StateKey;

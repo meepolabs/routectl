@@ -1718,6 +1718,7 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
             before.catalog_version,
             0,
         )
+        .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))
     };
     let summary = restarted.rebuild_learned_from_ledger(&MixedLedger {
         tombstone: ReplayTombstone::new(0, boundary_catalog, 0),
@@ -1824,6 +1825,7 @@ fn cold_rebuild_seeds_field_canary_state_from_the_replayed_entries() {
             0,
             0,
         )
+        .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))
     };
 
     let mut config = Config::default();

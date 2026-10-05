@@ -131,8 +131,10 @@ pub(crate) fn acknowledge_field_confirmations(
             upstream_token: None,
             catalog_version,
             overlay_revision,
-            provider_kind: None,
-            vocab_version: None,
+            provider_kind: crate::handlers::usage_capture::persisted_provider_kind(
+                &ev.provider_kind,
+            ),
+            vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
         };
         match usage.admit_acknowledged_capability_event(
             event,

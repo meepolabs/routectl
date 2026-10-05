@@ -76,6 +76,7 @@ fn registry_with_claimed_probe() -> (Arc<LearnedCapabilityRegistry>, Instant) {
 fn admission_at(generation: u64) -> ProbeAdmission {
     ProbeAdmission {
         state_key: "nick".to_string(),
+        learned_key: "nick".to_string(),
         feature: probe_key(),
         provider_kind: PROVIDER,
         generation,

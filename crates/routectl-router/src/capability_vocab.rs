@@ -7,10 +7,10 @@
 //! rename table, and only then decodes them.
 //!
 //! A row whose version this build does not know (older than v1, newer than
-//! current, or with no step to bridge a gap), or whose token a step retires
-//! with no current equivalent, is skipped WHOLE -- it never reaches an
-//! admission arm with some tokens mapped and others not. The caller counts the
-//! skip.
+//! current, or with no step to bridge a gap), whose token a step retires with
+//! no current equivalent, or whose version a step retires outright, is skipped
+//! WHOLE -- it never reaches an admission arm with some tokens mapped and
+//! others not. The caller counts the skip.
 
 use crate::capability_rebuild::CapabilityEventRow;
 
@@ -18,7 +18,7 @@ use crate::capability_rebuild::CapabilityEventRow;
 pub const LEGACY_VOCAB_VERSION: i64 = 1;
 
 /// The vocabulary this build decodes. Rows at an older version are mapped
-/// forward to it through [`VOCAB_STEPS`].
+/// forward to it through `VOCAB_STEPS`.
 pub const CURRENT_VOCAB_VERSION: i64 = 2;
 
 /// The token columns a rename may apply to.
@@ -42,16 +42,28 @@ pub struct Rename {
 }
 
 /// The renames that take a row from vocabulary `from` to `from + 1`.
+///
+/// `retire_all` marks a step whose change is not expressible as a token
+/// rename -- the lane-key grammar itself changed -- so no row of version
+/// `from` maps forward and every one is skipped; `renames` is then unread.
 #[derive(Debug, Clone, Copy)]
 pub struct VocabStep {
     pub from: i64,
     pub renames: &'static [Rename],
+    pub retire_all: bool,
 }
 
-/// The production ladder. v1 -> v2 renames no token.
+/// The production ladder.
+///
+/// v1 -> v2 retires every v1 row: v1 keyed a lane by the model nickname, v2
+/// by `provider_entry#upstream`. Mapping a nickname to a lane needs the
+/// config in force when the row was written, which the ledger does not
+/// record, so a v1 row is skipped, counted, and relearned rather than
+/// replayed under the wrong lane.
 pub const VOCAB_STEPS: &[VocabStep] = &[VocabStep {
     from: 1,
     renames: &[],
+    retire_all: true,
 }];
 
 /// Why a row was not decoded.
@@ -62,6 +74,8 @@ pub enum VocabSkip {
     UnknownVersion(i64),
     /// A step retires a token the row carries.
     RetiredToken { field: TokenField, version: i64 },
+    /// A step retires every row of the version the row passes through.
+    RetiredVersion(i64),
 }
 
 impl VocabSkip {
@@ -70,6 +84,7 @@ impl VocabSkip {
         match self {
             Self::UnknownVersion(_) => "unknown_vocab_version",
             Self::RetiredToken { .. } => "retired_vocab_token",
+            Self::RetiredVersion(_) => "retired_vocab_version",
         }
     }
 }
@@ -108,6 +123,9 @@ pub fn map_through(
 
 /// Apply one step's renames to every token column of `row`.
 fn apply_step(row: CapabilityEventRow, step: &VocabStep) -> Result<CapabilityEventRow, VocabSkip> {
+    if step.retire_all {
+        return Err(VocabSkip::RetiredVersion(step.from));
+    }
     let rename = |field: TokenField, token: String| -> Result<String, VocabSkip> {
         match step
             .renames

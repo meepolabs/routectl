@@ -106,7 +106,7 @@ fn field_event() -> CapabilityEvent {
         catalog_version: 8,
         overlay_revision: 1,
         provider_kind: None,
-        vocab_version: None,
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
 

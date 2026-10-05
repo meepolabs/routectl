@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use routectl_core::Error;
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
-use routectl_router::{DispatchMeta, ObservationDirection};
+use routectl_router::{CURRENT_VOCAB_VERSION, DispatchMeta, ObservationDirection};
 use routectl_usage::{CapabilityEvent, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
 
@@ -620,8 +620,8 @@ pub(crate) fn drain_capability_events(
                 upstream_token: None,
                 catalog_version,
                 overlay_revision,
-                provider_kind: None,
-                vocab_version: None,
+                provider_kind: persisted_provider_kind(&ev.provider_kind),
+                vocab_version: Some(CURRENT_VOCAB_VERSION),
             },
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
@@ -649,8 +649,8 @@ pub(crate) fn drain_capability_events(
                 upstream_token: None,
                 catalog_version,
                 overlay_revision,
-                provider_kind: None,
-                vocab_version: None,
+                provider_kind: persisted_provider_kind(&ev.provider_kind),
+                vocab_version: Some(CURRENT_VOCAB_VERSION),
             },
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
@@ -674,8 +674,8 @@ pub(crate) fn drain_capability_events(
                 upstream_token: None,
                 catalog_version,
                 overlay_revision,
-                provider_kind: None,
-                vocab_version: None,
+                provider_kind: persisted_provider_kind(&ev.provider_kind),
+                vocab_version: Some(CURRENT_VOCAB_VERSION),
             },
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
@@ -685,6 +685,13 @@ pub(crate) fn drain_capability_events(
             ev.incarnation,
         );
     }
+}
+
+/// The `provider_kind` column for a capability row: the producer's kind
+/// token, or `None` when the producer resolved none (an empty token names no
+/// provider kind and must not read back as one).
+pub(crate) fn persisted_provider_kind(kind: &str) -> Option<String> {
+    (!kind.is_empty()).then(|| kind.to_string())
 }
 
 impl UsageCapture {

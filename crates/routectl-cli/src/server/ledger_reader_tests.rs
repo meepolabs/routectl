@@ -41,8 +41,9 @@ fn seed_event(
 ) {
     conn.execute(
         "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
-         tier, evidence_class, upstream_token, catalog_version, overlay_revision) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9)",
+         tier, evidence_class, upstream_token, catalog_version, overlay_revision, \
+         vocab_version) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10)",
         params![
             ts,
             lane_key,
@@ -52,7 +53,8 @@ fn seed_event(
             source,
             tier,
             catalog_version,
-            overlay_revision
+            overlay_revision,
+            routectl_router::CURRENT_VOCAB_VERSION
         ],
     )
     .expect("seed capability event");

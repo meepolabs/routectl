@@ -138,7 +138,7 @@ fn target(router: &Router, nickname: &str, priors: &[(&str, bool)]) -> DispatchT
         row.capabilities.insert((*key).to_string(), *value);
     }
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model = ResolvedModel::new(nickname, "p1", provider, "upstream").with_effective_row(
+    let model = ResolvedModel::new(nickname, "p1", provider, nickname).with_effective_row(
         EffectiveRow::Present {
             row,
             source: Source::Baked,
@@ -274,7 +274,7 @@ async fn scenario_a_schema_conforming_success_admits_verified_and_routes_allow()
     assert_eq!(snap[0].verdict, Verdict::VerifiedWorking);
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            "p1#m1",
             STRUCTURED_OUTPUT,
             KIND,
             Instant::now()
@@ -322,7 +322,7 @@ fn scenario_b_forced_search_absent_acts_f3_yet_routing_stays_allow() {
     assert_eq!(
         router
             .learned_capabilities
-            .acting_negative_for("m1", WEB_SEARCH, KIND, Instant::now()),
+            .acting_negative_for("p1#m1", WEB_SEARCH, KIND, Instant::now()),
         RoutingDecision::Allow,
         "an F3+Live suspect routes nothing",
     );
@@ -367,7 +367,7 @@ fn scenario_c_self_identifying_negative_replaces_resident_verified() {
     // Act: a fresh self-identifying negative arrives for the same key -- the
     // signal the error-arm learn path mints.
     let outcome = router.learned_capabilities.observe(
-        "m1",
+        "p1#m1",
         STRUCTURED_OUTPUT,
         KIND,
         SignalTier::SelfIdentifying,

@@ -238,7 +238,7 @@ impl Router {
     /// FIRST so it hard-drops (and reports its preserved source label --
     /// `provider`, `model`, or `override`) ahead of any learned signal.
     /// When the kill switch is on, a non-expired acting learned negative
-    /// for this `(state_key, feature)` is consulted after.
+    /// for this `(learned lane, feature)` is consulted after.
     ///
     /// A `ForceSupported` override masks a feature: it short-circuits that
     /// feature to Allow BEFORE the learned consult, suppressing an acting
@@ -338,12 +338,11 @@ impl Router {
                 if self.override_forces_supported(target, feature, provider_kind) {
                     continue;
                 }
-                let (decision, read_generation) = self.acting_negative_with_generation(
-                    &target.state_key,
-                    feature,
-                    provider_kind,
-                    now,
-                );
+                let Some(learned_key) = target.learned_key(feature) else {
+                    continue;
+                };
+                let (decision, read_generation) =
+                    self.acting_negative_with_generation(learned_key, feature, provider_kind, now);
                 match decision {
                     crate::learned_capability::RoutingDecision::RouteAway { phase, .. } => {
                         learned_claimed.push(feature);
@@ -413,6 +412,7 @@ impl Router {
                         }
                         admissions.push(ProbeAdmission {
                             state_key: target.state_key.clone(),
+                            learned_key: learned_key.to_string(),
                             feature: normalized,
                             provider_kind,
                             // From the read that granted it, not a later sample.
@@ -453,12 +453,9 @@ impl Router {
             for feature in features {
                 if learned_claimed.contains(&feature.as_str())
                     || self.override_forces_supported(target, feature, provider_kind)
-                    || self.is_verified_working_or_false(
-                        &target.state_key,
-                        feature,
-                        provider_kind,
-                        now,
-                    )
+                    || target.learned_key(feature).is_some_and(|learned_key| {
+                        self.is_verified_working_or_false(learned_key, feature, provider_kind, now)
+                    })
                 {
                     continue;
                 }

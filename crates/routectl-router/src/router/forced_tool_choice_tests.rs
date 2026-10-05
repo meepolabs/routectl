@@ -207,7 +207,7 @@ async fn bedrock_rejection_learns_and_next_forced_request_skips_the_lane() {
         );
         let learned = &first.meta.learned_capabilities;
         assert_eq!(learned.len(), 1, "{body_key}");
-        assert_eq!(learned[0].state_key, "m1");
+        assert_eq!(learned[0].state_key, "p1#wire-model-1");
         assert_eq!(learned[0].capability_key, FORCED_TOOL_CHOICE);
         assert_eq!(learned[0].signal_tier, SignalTier::SelfIdentifying);
         assert_eq!(learned[0].phase, FailurePhase::F1);
@@ -262,7 +262,7 @@ async fn anthropic_rejection_learns_once_corroborated_and_then_skips_the_lane() 
     assert!(second.result.is_ok());
     let learned = &second.meta.learned_capabilities;
     assert_eq!(learned.len(), 1);
-    assert_eq!(learned[0].state_key, "m1");
+    assert_eq!(learned[0].state_key, "p1#wire-model-1");
     assert_eq!(learned[0].capability_key, FORCED_TOOL_CHOICE);
     assert_eq!(learned[0].signal_tier, SignalTier::Inferred);
 

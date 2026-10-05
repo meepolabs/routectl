@@ -65,20 +65,23 @@ impl PlantedLedger {
     fn negative(router: &Router, state_key: &str, capability: &str) -> Self {
         Self {
             tombstone: ReplayTombstone::new(1, router.catalog_version(), router.overlay_revision()),
-            rows: vec![ReplayRow::new(
-                2,
-                Instant::now(),
-                "broken".to_string(),
-                Some(FailurePhase::F1.as_str().to_string()),
-                EvidenceSource::Live.as_str().to_string(),
-                Some(SignalTier::SelfIdentifying.as_str().to_string()),
-                None,
-                capability.to_string(),
-                state_key.to_string(),
-                "anthropic-api".to_string(),
-                router.catalog_version(),
-                router.overlay_revision(),
-            )],
+            rows: vec![
+                ReplayRow::new(
+                    2,
+                    Instant::now(),
+                    "broken".to_string(),
+                    Some(FailurePhase::F1.as_str().to_string()),
+                    EvidenceSource::Live.as_str().to_string(),
+                    Some(SignalTier::SelfIdentifying.as_str().to_string()),
+                    None,
+                    capability.to_string(),
+                    state_key.to_string(),
+                    "anthropic-api".to_string(),
+                    router.catalog_version(),
+                    router.overlay_revision(),
+                )
+                .with_vocab_version(Some(routectl_router::CURRENT_VOCAB_VERSION)),
+            ],
         }
     }
 }
@@ -119,7 +122,7 @@ fn cleared_row(
         catalog_version: i64::from(router.catalog_version()),
         overlay_revision: i64::try_from(router.overlay_revision()).unwrap_or(i64::MAX),
         provider_kind: None,
-        vocab_version: None,
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
 

@@ -110,7 +110,8 @@ pub(crate) fn admit_capability_boundary(
     // concurrent commit landing between the read and the cut.
     let cut = registry.with_boundary_cut(
         |survivors, pending_generation| {
-            let batch = boundary_batch(survivors, now_ms, catalog_version, overlay_revision);
+            let batch =
+                boundary_batch(survivors, router, now_ms, catalog_version, overlay_revision);
             // Admission only -- non-blocking, so no lock is held across I/O. The
             // registry installs the pending generation itself, inside this same
             // ordered acquisition, when the admission below reports success.
@@ -179,6 +180,7 @@ pub(crate) fn admit_capability_boundary(
 /// entry's own age relative to it.
 pub(crate) fn boundary_batch(
     survivors: &[LearnedRegistryEntry],
+    router: &Router,
     now_ms: i64,
     catalog_version: u32,
     overlay_revision: u64,
@@ -192,6 +194,9 @@ pub(crate) fn boundary_batch(
         signed_overlay,
     ));
     for survivor in survivors {
+        let provider_kind = crate::handlers::usage_capture::persisted_provider_kind(
+            router.provider_kind_for_state_key(&survivor.state_key),
+        );
         // An INFERRED negative acts only once corroborated, and its
         // corroborating observation must arrive INSIDE the inferred
         // window -- a later one RESETS the entry to a fresh pending
@@ -247,8 +252,11 @@ pub(crate) fn boundary_batch(
                 // relevance per key class; no sentinel stamp is involved.
                 catalog_version: signed_catalog,
                 overlay_revision: signed_overlay,
-                provider_kind: None,
-                vocab_version: None,
+                provider_kind: provider_kind.clone(),
+                // A restatement is a fresh row in today's vocabulary: stamping
+                // it legacy would have the next boot skip the very verdict the
+                // boundary exists to preserve.
+                vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
             });
         }
     }

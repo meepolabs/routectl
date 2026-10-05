@@ -513,6 +513,7 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         // v0.6.0 dispatch keys the breaker by nickname so two models
         // on one provider quarantine independently.
         state_key: m.nickname.clone(),
+        learned_lane: crate::state_key::StateKey::new(&m.provider_name, &m.upstream),
         seat: crate::seat_pool::seat_identity(m.auth_secret_ref.as_ref()),
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
@@ -561,7 +562,8 @@ pub(super) fn sticky_pin_key(session: &str, pool: &str) -> String {
 /// every per-provider config lookup on the dispatch path (runtime policy,
 /// class overrides, header extras, beta floor, context reduction) silently
 /// miss. `nickname` still carries the model for tracing, while `state_key`
-/// joins the two so the breaker and RPM bucket are per (model, seat).
+/// joins the two so the breaker and RPM bucket are per (model, seat). The
+/// learned lane keys on the member entry and the model's upstream.
 pub(super) fn dispatch_target_for_seat(
     m: &Arc<ResolvedModel>,
     seat: &crate::seat_pool::SeatTarget,
@@ -573,6 +575,10 @@ pub(super) fn dispatch_target_for_seat(
         provider_kind,
         use_forwarded_credential: false,
         state_key: seat.state_key_for(&m.nickname),
+        // The member entry, not the OAuth account identity below: the lane is
+        // the provider entry that egresses, which at one seat per entry is
+        // already per seat.
+        learned_lane: crate::state_key::StateKey::new(&seat.provider_name, &m.upstream),
         seat: crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref()),
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),

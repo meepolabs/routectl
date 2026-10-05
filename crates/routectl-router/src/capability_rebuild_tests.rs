@@ -47,6 +47,7 @@ fn row(
         CV,
         OV,
     )
+    .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))
 }
 
 /// A `broken` (F1 self-identifying, live) row -- the common negative shape,
@@ -622,10 +623,11 @@ fn unknown_tokens_skip_without_panic() {
     assert_eq!(summary.replayed_verified, 0);
 }
 
-/// Rows are mapped to the current vocabulary before decoding: a legacy
-/// (NULL) row and a current-version row both replay, an unknown version is
-/// skipped whole and counted in `skipped_vocab` -- not `skipped_unknown` -- and
-/// a pre-boundary row in an unknown vocabulary stays uncounted bookkeeping.
+/// Rows are mapped to the current vocabulary before decoding: a current-version
+/// row replays, a legacy (NULL) row -- keyed by a model nickname under the old
+/// lane grammar -- and an unknown version are skipped whole and counted in
+/// `skipped_vocab` (not `skipped_unknown`), and a pre-boundary row in an
+/// unknown vocabulary stays uncounted bookkeeping.
 #[test]
 fn rebuild_maps_vocab_versions_and_counts_unmappable_rows() {
     let base = Instant::now();
@@ -634,7 +636,7 @@ fn rebuild_maps_vocab_versions_and_counts_unmappable_rows() {
         tombstone: Some(ReplayTombstone::new(1, CV, OV)),
         rows: vec![
             broken(1, base, "pre_boundary").with_vocab_version(Some(current + 7)),
-            broken(2, base, "legacy_cap"),
+            broken(2, base, "legacy_cap").with_vocab_version(None),
             broken(3, base, "current_cap").with_vocab_version(Some(current)),
             broken(4, base, "future_cap").with_vocab_version(Some(current + 1)),
             broken(5, base, "zero_cap").with_vocab_version(Some(0)),
@@ -644,12 +646,12 @@ fn rebuild_maps_vocab_versions_and_counts_unmappable_rows() {
 
     let summary = rebuild_capabilities_into(&reader, &reg);
 
-    assert_eq!(summary.replayed_negative, 2);
-    assert_eq!(summary.skipped_vocab, 2);
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.skipped_vocab, 3);
     assert_eq!(summary.skipped_unknown, 0);
     let at = base + Duration::from_secs(1);
     for (capability, acting) in [
-        ("legacy_cap", true),
+        ("legacy_cap", false),
         ("current_cap", true),
         ("future_cap", false),
         ("zero_cap", false),

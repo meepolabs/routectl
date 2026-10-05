@@ -120,7 +120,7 @@ fn cap_event(
         catalog_version,
         overlay_revision,
         provider_kind: None,
-        vocab_version: None,
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
 
@@ -391,6 +391,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
                     cat_u32,
                     overlay_u64,
                 )
+                .with_vocab_version(Some(routectl_router::CURRENT_VOCAB_VERSION))
             },
         )
         .collect();

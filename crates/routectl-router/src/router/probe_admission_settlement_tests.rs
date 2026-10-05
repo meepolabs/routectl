@@ -113,12 +113,12 @@ impl Provider for ScriptedProvider {
     }
 }
 
-/// A lapsed (already-expired) self-identifying negative: acting AND due
-/// for a re-probe, so the chain filter admits it and flips `in_flight`.
-fn lapsed_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
+/// A lapsed (already-expired) self-identifying negative on `lane`: acting AND
+/// due for a re-probe, so the chain filter admits it and flips `in_flight`.
+fn lapsed_negative(lane: &str, feature_key: &str) -> ExportedEntry {
     let base = Instant::now();
     ExportedEntry {
-        state_key: state_key.into(),
+        state_key: lane.into(),
         feature_key: feature_key.into(),
         verdict: crate::learned_capability::EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,
@@ -213,7 +213,7 @@ async fn success_on_earlier_target_releases_unreached_admission() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_b", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
     let d = router
         .complete_with_options(req_with_web_search(), RouterOptions::default())
@@ -221,7 +221,7 @@ async fn success_on_earlier_target_releases_unreached_admission() {
     assert!(d.result.is_ok(), "m_a should succeed: {:?}", d.result.err());
 
     assert!(
-        !probe_entry(&router, "m_b", &cap).in_flight,
+        !probe_entry(&router, "prov_b#upstream-model", &cap).in_flight,
         "an admission the loop never reached must release in_flight",
     );
 }
@@ -237,7 +237,7 @@ async fn terminal_error_on_earlier_target_releases_unreached_admission() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_b", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
     let d = router
         .complete_with_options(req_with_web_search(), RouterOptions::default())
@@ -248,7 +248,7 @@ async fn terminal_error_on_earlier_target_releases_unreached_admission() {
     );
 
     assert!(
-        !probe_entry(&router, "m_b", &cap).in_flight,
+        !probe_entry(&router, "prov_b#upstream-model", &cap).in_flight,
         "a terminal early return must release the unreached admission",
     );
 }
@@ -264,7 +264,7 @@ async fn break_under_disable_fallbacks_releases_unreached_admission() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_b", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
     let mut opts = RouterOptions::new();
     opts.disable_fallbacks = true;
@@ -277,7 +277,7 @@ async fn break_under_disable_fallbacks_releases_unreached_admission() {
     );
 
     assert!(
-        !probe_entry(&router, "m_b", &cap).in_flight,
+        !probe_entry(&router, "prov_b#upstream-model", &cap).in_flight,
         "a disable_fallbacks break must release the unreached admission",
     );
 }
@@ -294,7 +294,7 @@ async fn reached_admission_settled_by_guard_not_by_set() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_a", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_a#upstream-model", &cap)]);
 
     let (d, events) = routectl_testkit::with_capture(
         router.complete_with_options(req_with_web_search(), RouterOptions::default()),
@@ -307,7 +307,7 @@ async fn reached_admission_settled_by_guard_not_by_set() {
             .learned_capabilities
             .export_entries()
             .iter()
-            .all(|e| !(e.state_key == "m_a" && e.feature_key == cap)),
+            .all(|e| !(e.state_key == "prov_a#upstream-model" && e.feature_key == cap)),
         "a successful re-probe clears the negative via the target guard",
     );
     let settlements: Vec<_> = events
@@ -338,7 +338,7 @@ async fn reached_terminal_drop_emits_terminal_settlement() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_a", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_a#upstream-model", &cap)]);
 
     let (d, events) = routectl_testkit::with_capture(
         router.complete_with_options(req_with_web_search(), RouterOptions::default()),
@@ -347,7 +347,7 @@ async fn reached_terminal_drop_emits_terminal_settlement() {
     assert!(d.result.is_err(), "the terminal error returns terminally");
 
     assert!(
-        !probe_entry(&router, "m_a", &cap).in_flight,
+        !probe_entry(&router, "prov_a#upstream-model", &cap).in_flight,
         "a reached-then-dropped admission must release in_flight",
     );
     let ev = events
@@ -380,7 +380,7 @@ async fn future_drop_releases_unreached_admission() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_b", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
     let ((), events) = routectl_testkit::with_capture(async {
         let fut = router.complete_with_options(req_with_web_search(), RouterOptions::default());
@@ -393,7 +393,7 @@ async fn future_drop_releases_unreached_admission() {
     .await;
 
     assert!(
-        !probe_entry(&router, "m_b", &cap).in_flight,
+        !probe_entry(&router, "prov_b#upstream-model", &cap).in_flight,
         "dropping the dispatch future must release the unreached admission",
     );
     let ev = events
@@ -418,7 +418,7 @@ async fn unreached_admission_emits_probe_settlement_event() {
     let cap = normalize_capability_key("web_search", PROVIDER_KIND);
     router
         .learned_capabilities
-        .import_entries(vec![lapsed_negative("m_b", &cap)]);
+        .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
     let (d, events) = routectl_testkit::with_capture(
         router.complete_with_options(req_with_web_search(), RouterOptions::default()),

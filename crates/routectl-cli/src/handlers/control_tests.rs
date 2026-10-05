@@ -363,6 +363,7 @@ fn broken_row(rowid: i64, router: &Router, state_key: &str, capability: &str) ->
         router.catalog_version(),
         router.overlay_revision(),
     )
+    .with_vocab_version(Some(routectl_router::CURRENT_VOCAB_VERSION))
 }
 
 /// A well-formed purge body for `(state_key, capability_key)`.

@@ -3947,6 +3947,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget`, the seat state-key
   grammar (`seat_state_key` / `split_seat_state_key` / `check_state_key_name`),
   `seat_identity`, and the round-robin and sticky least-loaded seat selection
+- `src/state_key.rs` -- `StateKey`, the learned-store lane (provider entry,
+  upstream): one constructor and one first-`#` parser over the serialized
+  `provider_entry#upstream` ledger `lane_key`; no `Display`, only the
+  sanitized `for_log`. Distinct from the runtime breaker `state_key`
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
   pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date
   suffixes (e.g. `_20250305`) so `unsupported_features` on
@@ -4613,11 +4617,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   vocabulary: stored rows are never rewritten; replay maps each row's tokens
   forward from its `vocab_version` (NULL = `LEGACY_VOCAB_VERSION` 1) to
   `CURRENT_VOCAB_VERSION` through the pure per-step `VOCAB_STEPS` rename table
-  (`VocabStep { from, renames: [Rename { field, from, to }] }`, `to: None`
-  retires a token). `map_through(row, steps, current)` is the generic seam
-  (table-driven tests run a three-version ladder); `map_to_current` applies the
-  production ladder (v1 -> v2 is identity today). An unknown version (outside
-  `1..=current`, or a ladder gap) or a retired token is a `VocabSkip` and the
+  (`VocabStep { from, renames: [Rename { field, from, to }], retire_all }`,
+  `to: None` retires a token, `retire_all` every row of that version).
+  `map_through(row, steps, current)` is the generic seam (table-driven tests
+  run a three-version ladder); `map_to_current` applies the production ladder,
+  whose v1 -> v2 step retires every v1 row (v1 keyed lanes by nickname, v2 by
+  `StateKey`). An unknown version (outside `1..=current`, or a ladder gap), a
+  retired version, or a retired token is a `VocabSkip` and the
   row is skipped WHOLE, never partially decoded; `rebuild_capabilities_into`
   counts it in `skipped_vocab`
 - `src/capability_strip.rs` -- the strip-vs-route policy plus the single

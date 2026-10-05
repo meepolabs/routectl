@@ -69,7 +69,7 @@ pub struct CatalogIndependentSurvivor {
 }
 
 /// Per-request dedupe key for the learn path. The capability arm dedupes on
-/// `(state_key, feature_key)`; the drift signals dedupe on `state_key` alone;
+/// `(learned_key, feature_key)`; the drift signals dedupe on `state_key` alone;
 /// the F1-seen marker keys on `feature_key` alone (cross-lane -- it records
 /// that ANY lane in this attempt chain already minted an F1 negative for that
 /// capability). Distinct enum variants keep the namespaces disjoint by TYPE
@@ -77,10 +77,13 @@ pub struct CatalogIndependentSurvivor {
 /// with a token-shaped capability key regardless of what an upstream names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum LearnDedupeKey {
-    /// One capability observation per `(target, capability)` per request.
+    /// One capability observation per `(learned key, capability)` per
+    /// request: two targets sharing a lane share one registry entry, so a
+    /// second rejection on that lane in the same request must not corroborate
+    /// it.
     Capability {
-        /// Breaker state key of the rejecting target.
-        state_key: String,
+        /// Learned-registry key of the rejecting target.
+        learned_key: String,
         /// Normalized capability key the rejection named.
         feature_key: String,
     },
@@ -150,7 +153,9 @@ pub struct CapabilityLearnEvent {
     /// only the superseded one.
     pub incarnation: u64,
 
-    /// Breaker state key (nickname-or-provider) of the rejecting target.
+    /// Learned-registry key of the rejecting target, persisted verbatim as
+    /// the ledger `lane_key`: the serialized lane (`provider_entry#upstream`)
+    /// for a catalog capability, the runtime state key for a field verdict.
     pub state_key: String,
     /// Normalized capability key the rejection named.
     pub capability_key: String,
@@ -191,45 +196,126 @@ impl Router {
     pub(super) fn expire_learned_on_override_change(&self, previous: &Self) {
         let now = Instant::now();
         for entry in self.learned_capabilities.snapshot() {
-            let (provider_name, nickname) = self.override_identity_for(&entry.state_key);
-            let provider_kind = self
-                .config
-                .providers
-                .get(&provider_name)
-                .map_or("", |p| p.kind_str());
-            let before = previous
-                .override_registry
-                .resolve(&provider_name, &nickname, &entry.feature_key, provider_kind)
-                .map(|(verdict, _)| verdict);
-            let after = self
-                .override_registry
-                .resolve(&provider_name, &nickname, &entry.feature_key, provider_kind)
-                .map(|(verdict, _)| verdict);
-            if before != after {
-                // Through the barrier: this sweep runs on the REPLACEMENT Router
-                // during a carry-over, so its generation is the live one -- but
-                // routing it through the facade keeps the invariant that no
-                // catalog-scoped mutation bypasses a generation check, rather
-                // than relying on where this happens to be called from.
-                if matches!(
-                    self.learned_capabilities.expire_keyed_in_generation(
-                        self.registry_generation(),
-                        &entry.state_key,
-                        &entry.feature_key,
-                        provider_kind,
-                        now,
-                    ),
-                    crate::learned_capability::GenerationOutcome::Stale
-                ) {
-                    continue;
-                }
-                tracing::debug!(
-                    state_key = %routectl_core::sanitize_for_log(&entry.state_key),
-                    capability_key = %entry.feature_key,
-                    "override cell changed across reload; lapsed learned negative into a re-probe",
-                );
+            let identities =
+                self.override_identities_for_entry(&entry.state_key, &entry.feature_key);
+            let changed = identities.iter().any(|(provider_name, nickname)| {
+                let provider_kind = self
+                    .config
+                    .providers
+                    .get(provider_name)
+                    .map_or("", |p| p.kind_str());
+                let before = previous
+                    .override_registry
+                    .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
+                    .map(|(verdict, _)| verdict);
+                let after = self
+                    .override_registry
+                    .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
+                    .map(|(verdict, _)| verdict);
+                before != after
+            });
+            if !changed {
+                continue;
+            }
+            let provider_kind = identities.first().map_or("", |(provider_name, _)| {
+                self.config
+                    .providers
+                    .get(provider_name)
+                    .map_or("", |p| p.kind_str())
+            });
+            // Through the barrier: this sweep runs on the REPLACEMENT Router
+            // during a carry-over, so its generation is the live one -- but
+            // routing it through the facade keeps the invariant that no
+            // catalog-scoped mutation bypasses a generation check, rather
+            // than relying on where this happens to be called from.
+            if matches!(
+                self.learned_capabilities.expire_keyed_in_generation(
+                    self.registry_generation(),
+                    &entry.state_key,
+                    &entry.feature_key,
+                    provider_kind,
+                    now,
+                ),
+                crate::learned_capability::GenerationOutcome::Stale
+            ) {
+                continue;
+            }
+            tracing::debug!(
+                state_key = %routectl_core::sanitize_for_log(&entry.state_key),
+                capability_key = %entry.feature_key,
+                "override cell changed across reload; lapsed learned negative into a re-probe",
+            );
+        }
+    }
+
+    /// Every `(provider_name, nickname)` pair whose override resolution governs
+    /// the learned entry keyed `(registry_key, feature_key)`, in the shape a
+    /// live `DispatchTarget` hands the override registry.
+    ///
+    /// The capability namespace says which keyspace `registry_key` is in. A
+    /// catalog capability keys on a lane (`provider_entry#upstream`), which
+    /// several nicknames can share, so every one of them is returned: an
+    /// override cell changed for any of them changes the operator's intent for
+    /// the shared entry. A field verdict keys on the runtime state key its
+    /// owner mints and resolves through [`Self::override_identity_for`].
+    fn override_identities_for_entry(
+        &self,
+        registry_key: &str,
+        feature_key: &str,
+    ) -> Vec<(String, String)> {
+        let lane_keyed = crate::field_capability::capability_key_is_catalog_scoped(feature_key);
+        match crate::state_key::StateKey::parse(registry_key).filter(|_| lane_keyed) {
+            Some(lane) => self.override_identities_for_lane(&lane),
+            None => vec![self.override_identity_for(registry_key)],
+        }
+    }
+
+    /// The `(provider_name, nickname)` pair of every model that dispatches to
+    /// `lane`, read off the resolved models (seat targets carry the member
+    /// entry as their provider, exactly as `chain::dispatch_target_for_seat`
+    /// mints them), then any CONFIGURED model the resolved table lacks -- a
+    /// cold boot before installation, or a provider that failed to build.
+    /// With no model on the lane, the provider entry alone, so a provider-tier
+    /// override still resolves.
+    fn override_identities_for_lane(
+        &self,
+        lane: &crate::state_key::StateKey,
+    ) -> Vec<(String, String)> {
+        let entry = lane.provider_entry();
+        let upstream = lane.upstream();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for model in self.resolved_models.values() {
+            if model.upstream != upstream {
+                continue;
+            }
+            let on_lane = model
+                .seats
+                .as_ref()
+                .map_or(model.provider_name == entry, |seats| {
+                    seats.iter().any(|seat| seat.provider_name == entry)
+                });
+            if on_lane {
+                out.push((entry.to_string(), model.nickname.clone()));
             }
         }
+        for (nickname, model) in &self.config.models {
+            if model.upstream != upstream || self.resolved_models.contains_key(nickname) {
+                continue;
+            }
+            let on_lane = model.provider == entry
+                || self
+                    .config
+                    .pools
+                    .get(&model.provider)
+                    .is_some_and(|pool| pool.members.iter().any(|member| member == entry));
+            if on_lane {
+                out.push((entry.to_string(), nickname.clone()));
+            }
+        }
+        if out.is_empty() {
+            out.push((entry.to_string(), String::new()));
+        }
+        out
     }
 
     /// Map a learned-registry `state_key` to the `(provider_name, nickname)`
@@ -331,7 +417,14 @@ impl Router {
         }
         // A provider-scoped key (legacy or direct construction, no model scope).
         // Last, so a model shape never resolves through a same-named provider.
-        self.kind_of_provider(state_key).unwrap_or("")
+        // A learned lane (`provider_entry#upstream`) resolves through its
+        // provider entry once every runtime-key reading has missed.
+        self.kind_of_provider(state_key)
+            .or_else(|| {
+                crate::state_key::StateKey::parse(state_key)
+                    .and_then(|lane| self.kind_of_provider(lane.provider_entry()))
+            })
+            .unwrap_or("")
     }
 
     /// The kind of the provider a CONFIGURED model names, or `None` when the
@@ -768,6 +861,9 @@ impl Router {
             return;
         }
         let state_key = target.state_key.clone();
+        let Some(learned_key) = target.learned_key(&feature_key).map(str::to_string) else {
+            return;
+        };
         // MASK: an operator `force_supported` override for this (target,
         // feature) masks the learned negative. The act side already
         // short-circuited both the routing verdict AND the probe admission
@@ -780,7 +876,7 @@ impl Router {
         // state_key only -- never a request body.
         if self.override_forces_supported(target, &feature_key, provider_kind) {
             if dedupe.insert(LearnDedupeKey::Capability {
-                state_key: state_key.clone(),
+                learned_key,
                 feature_key: feature_key.clone(),
             }) {
                 self.metrics.incr_mask_suppressed();
@@ -798,7 +894,7 @@ impl Router {
         // observation bump and expiry) instead of feeding the observe path.
         // The dedupe key is inserted too, so a same-request retry that hits
         // this arm again does not re-observe the entry the probe refreshed.
-        match probe_guard.settle_same_capability(&state_key, &feature_key, provider_kind) {
+        match probe_guard.settle_same_capability(&learned_key, &feature_key, provider_kind) {
             // A STALE settlement released its admission but recorded nothing, so
             // none of the consequences below may follow: no probe-failure metric
             // (no probe failure was booked), no F1Seen marker (nothing was
@@ -816,13 +912,14 @@ impl Router {
                 // blind-minted past the reconfirmed F1. Phase-conditional -- a
                 // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
                 // be wrongly suppressed.
-                if self.settled_negative_phase(&state_key, &feature_key) == Some(FailurePhase::F1) {
+                if self.settled_negative_phase(&learned_key, &feature_key) == Some(FailurePhase::F1)
+                {
                     dedupe.insert(LearnDedupeKey::F1Seen {
                         feature_key: feature_key.clone(),
                     });
                 }
                 dedupe.insert(LearnDedupeKey::Capability {
-                    state_key,
+                    learned_key,
                     feature_key,
                 });
                 return;
@@ -858,10 +955,11 @@ impl Router {
                 return;
             }
         }
-        // One observation per request per (state_key, feature): a retry or
-        // per-target re-entry that hits this arm again is dropped here.
+        // One observation per request per (learned key, feature): a retry, a
+        // per-target re-entry, or a sibling target on the same lane that hits
+        // this arm again is dropped here.
         if !dedupe.insert(LearnDedupeKey::Capability {
-            state_key: state_key.clone(),
+            learned_key: learned_key.clone(),
             feature_key: feature_key.clone(),
         }) {
             return;
@@ -874,7 +972,7 @@ impl Router {
             .learned_capabilities
             .observe_in_generation_with_observations(
                 self.registry_generation(),
-                &state_key,
+                &learned_key,
                 &feature_key,
                 provider_kind,
                 tier,
@@ -903,7 +1001,7 @@ impl Router {
         } = outcome
         else {
             dedupe.remove(&LearnDedupeKey::Capability {
-                state_key,
+                learned_key,
                 feature_key,
             });
             return;
@@ -934,6 +1032,7 @@ impl Router {
             Some(param) => tracing::warn!(
                 event = "learn",
                 state_key = %routectl_core::sanitize_for_log(&state_key),
+                lane = %routectl_core::sanitize_for_log(&learned_key),
                 capability_key = %feature_key,
                 provider_kind,
                 upstream_status,
@@ -948,6 +1047,7 @@ impl Router {
             None => tracing::warn!(
                 event = "learn",
                 state_key = %routectl_core::sanitize_for_log(&state_key),
+                lane = %routectl_core::sanitize_for_log(&learned_key),
                 capability_key = %feature_key,
                 provider_kind,
                 upstream_status,
@@ -965,7 +1065,7 @@ impl Router {
             meta.learned_capabilities.push(CapabilityLearnEvent {
                 persistence_generation,
                 incarnation,
-                state_key,
+                state_key: learned_key,
                 capability_key: feature_key,
                 provider_kind: provider_kind.to_string(),
                 signal_tier: tier,
@@ -979,15 +1079,15 @@ impl Router {
         }
     }
 
-    /// The detection phase of the resident learned negative for `(state_key,
+    /// The detection phase of the resident learned negative for `(learned_key,
     /// feature_key)`, or `None` when no entry resides. Read at the probe-settle
     /// site to decide whether a reconfirmed negative is F1 evidence that must
     /// suppress a later cross-lane F2 candidate in the same attempt chain.
-    fn settled_negative_phase(&self, state_key: &str, feature_key: &str) -> Option<FailurePhase> {
+    fn settled_negative_phase(&self, learned_key: &str, feature_key: &str) -> Option<FailurePhase> {
         self.learned_capabilities
             .snapshot()
             .into_iter()
-            .find(|entry| entry.state_key == state_key && entry.feature_key == feature_key)
+            .find(|entry| entry.state_key == learned_key && entry.feature_key == feature_key)
             .map(|entry| entry.phase)
     }
 

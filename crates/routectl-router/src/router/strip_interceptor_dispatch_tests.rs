@@ -198,7 +198,7 @@ async fn complete_strips_advisor_before_dispatch() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     router.complete(advisor_request()).await.expect("ok");
 
@@ -220,7 +220,7 @@ async fn stream_strips_advisor_identically() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let _ = router
         .stream(advisor_request())
@@ -247,7 +247,7 @@ async fn count_tokens_strips_so_estimated_prefix_matches_shipped() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let count = router.count_tokens(advisor_request()).await.expect("ok");
     assert_eq!(count.input_tokens, 7);
@@ -273,7 +273,7 @@ async fn kill_switch_off_leaves_advisor_intact() {
     let router = build_router(provider, false);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     router.complete(advisor_request()).await.expect("ok");
 
@@ -296,7 +296,7 @@ async fn complete_strict_rejects_without_dispatching() {
     let router = build_router_strict(provider, true, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let err = router
         .complete(advisor_request())
@@ -324,7 +324,7 @@ async fn complete_rollback_routes_away_without_dispatching_mutated_request() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let result = router.complete(advisor_request_forcing_advisor()).await;
 
@@ -346,7 +346,7 @@ async fn stream_strict_rejects_without_dispatching() {
     let router = build_router_strict(provider, true, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let err = router
         .stream(advisor_request())
@@ -368,7 +368,7 @@ async fn count_tokens_strict_rejects_without_dispatching() {
     let router = build_router_strict(provider, true, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let err = router
         .count_tokens(advisor_request())
@@ -394,7 +394,7 @@ async fn count_tokens_rollback_advances_seat_without_dispatching() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let result = router.count_tokens(advisor_request_forcing_advisor()).await;
 
@@ -418,7 +418,7 @@ async fn complete_rollback_on_mandatory_choice_emptied_tools() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let result = router.complete(advisor_request_mandatory_choice()).await;
 
@@ -443,7 +443,7 @@ async fn stream_rollback_on_mandatory_choice_emptied_tools() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let result = router.stream(advisor_request_mandatory_choice()).await;
 
@@ -465,7 +465,7 @@ async fn count_tokens_rollback_on_mandatory_choice_emptied_tools() {
     let router = build_router(provider, true);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("haiku")]);
+        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
 
     let result = router
         .count_tokens(advisor_request_mandatory_choice())

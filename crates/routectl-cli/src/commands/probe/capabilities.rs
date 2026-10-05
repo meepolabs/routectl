@@ -163,7 +163,8 @@ fn single(canary: super::canary::Canary) -> CanaryDispatchPlan {
 /// The scoping + stamping inputs the core needs, resolved by the caller.
 #[derive(Debug, Clone)]
 pub struct CapabilityProbePlan {
-    /// Routing state key (the `[models]` nickname) -- the ledger lane key.
+    /// The serialized learned lane (`provider_entry#upstream`) -- the ledger
+    /// lane key a live request to the same endpoint learns under.
     pub state_key: String,
     /// Provider-kind token, for the rejection matcher and normalization.
     pub provider_kind: String,
@@ -528,8 +529,8 @@ fn event(
         upstream_token: None,
         catalog_version: plan.catalog_version,
         overlay_revision: plan.overlay_revision,
-        provider_kind: None,
-        vocab_version: None,
+        provider_kind: Some(plan.provider_kind.clone()),
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
 
@@ -661,8 +662,12 @@ async fn dispatch_and_persist(
         }
     };
 
+    let Some(lane) = routectl_router::StateKey::new(&target.provider, &target.model_id) else {
+        eprintln!("error: provider `{}` has no learned lane", target.provider);
+        return 1;
+    };
     let plan = CapabilityProbePlan {
-        state_key: target.state_key.clone(),
+        state_key: lane.as_lane_key().to_string(),
         provider_kind: entry.kind_str().to_string(),
         model: target.model_id.clone(),
         catalog_version: i64::from(CATALOG_VERSION),

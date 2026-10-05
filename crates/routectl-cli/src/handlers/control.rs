@@ -531,8 +531,8 @@ pub(crate) fn cleared_event(
         upstream_token: None,
         catalog_version: i64::from(router.catalog_version()),
         overlay_revision: i64::try_from(router.overlay_revision()).unwrap_or(i64::MAX),
-        provider_kind: None,
-        vocab_version: None,
+        provider_kind: super::usage_capture::persisted_provider_kind(&settlement.provider_kind),
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
 

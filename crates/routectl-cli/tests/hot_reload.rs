@@ -1729,6 +1729,9 @@ async fn learned_negative_keys(base_url: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The learned lane `m_a` keys on in [`kill_switch_config`].
+const M_A_LANE: &str = "prov_a#upstream-model";
+
 /// Poll until a learned negative for `state_key` becomes resident, re-issuing
 /// the web_search probe each iteration so a self-identifying negative
 /// is learned. Returns true once it surfaces, false on timeout.
@@ -1812,7 +1815,7 @@ async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
             &client,
             &base_url,
             "probe-chain",
-            "m_a",
+            M_A_LANE,
             RELOAD_WAIT_CEILING
         )
         .await,
@@ -1855,7 +1858,7 @@ async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
         learned_negative_keys(&base_url)
             .await
             .iter()
-            .any(|k| k == "m_a"),
+            .any(|k| k == M_A_LANE),
         "the learned negative must carry over the reload (imported live)",
     );
 

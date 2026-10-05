@@ -101,7 +101,7 @@ const fn secret_ref_scheme(secret_ref: &SecretRef) -> &'static str {
 /// The byte that joins a model nickname to a pool member in a seat's
 /// runtime-state key. Reserved in every model nickname and provider name
 /// (see [`check_state_key_name`]), which is what makes the join injective.
-const SEAT_KEY_SEPARATOR: char = '#';
+pub const SEAT_KEY_SEPARATOR: char = '#';
 
 /// Derive the runtime-state key for one seat of a pooled model.
 ///

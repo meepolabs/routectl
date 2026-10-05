@@ -693,7 +693,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
     let acting_key = normalize_capability_key("web_search", "openai-compat");
     router.learned_capabilities.import_entries(vec![
         ExportedEntry {
-            state_key: "nick".into(),
+            state_key: "prov#upstream".into(),
             feature_key: probe_due_key.clone(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
@@ -708,7 +708,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
             consecutive_failed_probes: 0,
         },
         ExportedEntry {
-            state_key: "nick".into(),
+            state_key: "prov#upstream".into(),
             feature_key: acting_key,
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
@@ -754,7 +754,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
     // repeat query routes away, proving the slot is genuinely occupied.
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "nick",
+            "prov#upstream",
             "structured_output",
             "openai-compat",
             Instant::now(),
@@ -776,7 +776,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
     // been dropped the slot would have latched forever.
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "nick",
+            "prov#upstream",
             "structured_output",
             "openai-compat",
             Instant::now(),
@@ -794,7 +794,8 @@ fn filter_source_as_str_tokens() {
 
 // --- strip-vs-route verdict (capability-strip wiring) ---
 
-/// An acting (non-expired) learned negative for `(state_key, feature)`,
+/// An acting (non-expired) learned negative for the [`strip_target`] named
+/// `state_key` and `feature`, keyed where that target's lookup reads it,
 /// normalized under the `openai-compat` kind these strip tests use
 /// (identity normalization for a clean key).
 fn acting_negative(
@@ -802,8 +803,13 @@ fn acting_negative(
     feature: &str,
     base: Instant,
 ) -> crate::learned_capability::ExportedEntry {
+    let registry_key = if crate::field_capability::capability_key_is_field_verdict(feature) {
+        state_key.to_string()
+    } else {
+        lane_of(state_key)
+    };
     crate::learned_capability::ExportedEntry {
-        state_key: state_key.into(),
+        state_key: registry_key,
         feature_key: normalize_capability_key(feature, "openai-compat"),
         verdict: crate::learned_capability::EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,
@@ -838,11 +844,18 @@ fn strip_target(nickname: &str) -> DispatchTarget {
         id: nickname.into(),
         captured: Arc::new(ParkingMutex::new(Vec::new())),
     });
-    let model = Arc::new(ResolvedModel::new(nickname, "prov", stub, "upstream"));
+    let model = Arc::new(ResolvedModel::new(nickname, "prov", stub, nickname));
     let mut target = into_one_dispatch_target(model);
     // The learned pass runs only for a target carrying a provider kind.
     target.provider_kind = Some("openai-compat");
     target
+}
+
+/// The learned lane a [`strip_target`] for `nickname` keys catalog facts on:
+/// each fixture nickname is its own upstream on the shared `prov` entry, so
+/// distinct fixtures stay distinct lanes.
+fn lane_of(nickname: &str) -> String {
+    format!("prov#{nickname}")
 }
 
 #[test]
@@ -990,7 +1003,7 @@ fn stripped_success_leaves_negative_while_admitted_probe_success_clears() {
     // A full-request 2xx settles exactly the recorded admissions.
     for adm in &admissions {
         router.learned_capabilities.record_probe_outcome(
-            &adm.state_key,
+            &adm.learned_key,
             &adm.feature,
             adm.provider_kind,
             crate::learned_capability::ProbeOutcome::Success,
@@ -1000,7 +1013,7 @@ fn stripped_success_leaves_negative_while_admitted_probe_success_clears() {
 
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "nick",
+            &lane_of("nick"),
             "context_management",
             "openai-compat",
             base,
@@ -1009,9 +1022,12 @@ fn stripped_success_leaves_negative_while_admitted_probe_success_clears() {
         "the admitted probe's 2xx cleared its negative",
     );
     assert_eq!(
-        router
-            .learned_capabilities
-            .acting_negative_for("nick", "advisor", "openai-compat", base,),
+        router.learned_capabilities.acting_negative_for(
+            &lane_of("nick"),
+            "advisor",
+            "openai-compat",
+            base,
+        ),
         crate::learned_capability::RoutingDecision::RouteAway {
             signal: SignalTier::SelfIdentifying,
             phase: FailurePhase::F1,
@@ -1093,7 +1109,7 @@ fn operator_pinned_beta_capability_routes_away_never_strips() {
         "context-management-2025-06-27".to_string(),
     );
     let model =
-        Arc::new(ResolvedModel::new("nick", "prov", stub, "upstream").with_header_extras(headers));
+        Arc::new(ResolvedModel::new("nick", "prov", stub, "nick").with_header_extras(headers));
     let mut target = into_one_dispatch_target(model);
     target.provider_kind = Some("openai-compat");
 

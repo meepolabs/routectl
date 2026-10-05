@@ -30,7 +30,11 @@ use crate::handlers::usage_capture::drain_capability_events;
 
 const DAYS: usize = 30;
 const VERIFIED_REQUESTS_PER_DAY: usize = 200;
-const LANE: &str = "m1";
+/// The model nickname every request below dispatches through.
+const NICKNAME: &str = "m1";
+
+/// The learned lane that model keys on (`provider_entry#upstream`).
+const LANE: &str = "p1#wire-model";
 
 /// A provider whose non-streaming arm returns a schema-conforming body, so
 /// every dispatch reaches the success-arm observer with verified evidence.
@@ -85,8 +89,8 @@ enabled = true
     let provider: Arc<dyn Provider> = Arc::new(SchemaConformingProvider);
     let mut models = std::collections::BTreeMap::new();
     models.insert(
-        LANE.to_string(),
-        Arc::new(ResolvedModel::new(LANE, "p1", provider, "wire-model")),
+        NICKNAME.to_string(),
+        Arc::new(ResolvedModel::new(NICKNAME, "p1", provider, "wire-model")),
     );
     router.install_resolved_models(models);
     router
@@ -95,7 +99,7 @@ enabled = true
 /// A strict structured-output request whose schema the canned body satisfies.
 fn structured_output_request() -> ChatRequest {
     ChatRequest {
-        model: LANE.into(),
+        model: NICKNAME.into(),
         messages: vec![].into(),
         provider_extras: Some(json!({
             "output_config": {
@@ -148,7 +152,7 @@ fn broken(
         catalog_version,
         overlay_revision,
         provider_kind: None,
-        vocab_version: None,
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
 

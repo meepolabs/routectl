@@ -233,7 +233,7 @@ impl Router {
                         // `dispatch_chain_for_request`, which a boundary can
                         // span.
                         admission.generation,
-                        &admission.state_key,
+                        &admission.learned_key,
                         &admission.feature,
                         admission.provider_kind,
                         crate::learned_capability::ProbeOutcome::OtherError,

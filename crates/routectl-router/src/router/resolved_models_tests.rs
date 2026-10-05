@@ -1242,11 +1242,16 @@ fn learned_target(router: &Router, nickname: &str) -> DispatchTarget {
         id: "test-prov".into(),
         calls: AtomicUsize::new(0),
     });
-    let model = ResolvedModel::new(nickname, "test-prov", p, "claude-x");
+    let model = ResolvedModel::new(nickname, "test-prov", p, nickname);
     router
         .expand_chain_to_targets(vec![Arc::new(model)], None)
         .pop()
         .expect("one target for a non-seat model")
+}
+
+/// The learned lane a [`learned_target`] for `nickname` keys on.
+fn learned_lane(nickname: &str) -> String {
+    format!("test-prov#{nickname}")
 }
 
 #[test]
@@ -1260,7 +1265,7 @@ fn learned_negative_deprioritizes_target_to_tail() {
     let front = learned_target(&router, "front");
     let back = learned_target(&router, "back");
     router.learned_capabilities.observe(
-        "front",
+        &learned_lane("front"),
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
@@ -1335,7 +1340,7 @@ fn sole_learned_tail_target_still_attempts_and_counts_d17() {
     let router = Router::new(learned_provider_config());
     let only = learned_target(&router, "only");
     router.learned_capabilities.observe(
-        "only",
+        &learned_lane("only"),
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
@@ -1376,7 +1381,7 @@ fn kill_switch_off_skips_the_learned_consult() {
     let front = learned_target(&router, "front");
     let back = learned_target(&router, "back");
     router.learned_capabilities.observe(
-        "front",
+        &learned_lane("front"),
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
@@ -1410,7 +1415,7 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
     let router = Router::new(Arc::new(config));
     let only = learned_target(&router, "only");
     router.learned_capabilities.observe(
-        "only",
+        &learned_lane("only"),
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,

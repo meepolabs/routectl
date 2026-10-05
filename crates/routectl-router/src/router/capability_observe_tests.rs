@@ -248,7 +248,7 @@ fn verified_structured_output_admits_and_rides_along() {
     // Assert: one acting positive rode out with the replay columns.
     assert_eq!(meta.capability_observations.len(), 1);
     let ev = &meta.capability_observations[0];
-    assert_eq!(ev.state_key, "m1");
+    assert_eq!(ev.state_key, "p1#wire-model");
     assert_eq!(ev.capability_key, STRUCTURED_OUTPUT);
     assert_eq!(ev.provider_kind, "openai-compat");
     assert_eq!(ev.evidence_class, SCHEMA_PARSE);
@@ -277,7 +277,7 @@ fn verified_positive_no_ops_when_a_negative_resides() {
     let router = router_with(OPENAI_P1, NoopProvider::new());
     let target = openai_target(&router);
     router.learned_capabilities.observe(
-        "m1",
+        "p1#wire-model",
         STRUCTURED_OUTPUT,
         "openai-compat",
         SignalTier::SelfIdentifying,
@@ -336,7 +336,7 @@ fn only_a_positive_verdict_transition_rides_out_for_the_ledger() {
             }
             Prior::NegativeClearedByReprobe => {
                 router.learned_capabilities.observe(
-                    "m1",
+                    "p1#wire-model",
                     STRUCTURED_OUTPUT,
                     "openai-compat",
                     SignalTier::SelfIdentifying,
@@ -348,13 +348,13 @@ fn only_a_positive_verdict_transition_rides_out_for_the_ledger() {
                 let expired = router.learned_capabilities.snapshot()[0].expires_at
                     + std::time::Duration::from_secs(1);
                 router.learned_capabilities.acting_negative_for(
-                    "m1",
+                    "p1#wire-model",
                     STRUCTURED_OUTPUT,
                     "openai-compat",
                     expired,
                 );
                 router.learned_capabilities.record_probe_outcome(
-                    "m1",
+                    "p1#wire-model",
                     STRUCTURED_OUTPUT,
                     "openai-compat",
                     crate::learned_capability::ProbeOutcome::Success,

@@ -294,7 +294,12 @@ impl Drop for ProbeSlotGuard {
 /// claimed. Carried out of the filter so the dispatch path can settle the
 /// probe.
 pub(super) struct ProbeAdmission {
+    /// Runtime `state_key` of the target that settles this admission; groups
+    /// the admission with its target, never addresses the registry.
     pub(super) state_key: String,
+    /// The learned-registry key the admission claimed its slot under
+    /// (`DispatchTarget::learned_key`). Every settlement addresses it.
+    pub(super) learned_key: String,
     pub(super) feature: String,
     pub(super) provider_kind: &'static str,
     /// The generation the guarded feature-filter read GRANTED this admission
@@ -324,7 +329,7 @@ pub(super) enum SameCapabilitySettlement {
     /// Refused as stale: the admission was released, nothing was recorded, and
     /// no event or metric may follow.
     Stale,
-    /// This guard held no admission for the `(state_key, feature, provider_kind)`
+    /// This guard held no admission for the `(learned_key, feature, provider_kind)`
     /// triple, so the rejection is not a probe settlement at all and falls
     /// through to the ordinary observe path.
     NoMatch,
@@ -396,7 +401,7 @@ impl LearnedProbeGuard {
             for probe in self.probes.drain(..) {
                 let settled = registry.record_probe_outcome_in_generation(
                     probe.generation,
-                    &probe.state_key,
+                    &probe.learned_key,
                     &probe.feature,
                     probe.provider_kind,
                     crate::learned_capability::ProbeOutcome::Success,
@@ -421,7 +426,7 @@ impl LearnedProbeGuard {
                 cleared.push(super::CapabilityClearedEvent {
                     persistence_generation,
                     incarnation,
-                    state_key: probe.state_key,
+                    state_key: probe.learned_key,
                     capability_key: probe.feature,
                     provider_kind: probe.provider_kind.to_string(),
                 });
@@ -435,7 +440,7 @@ impl LearnedProbeGuard {
     /// Returns `true` when a held probe matched.
     pub(super) fn settle_same_capability(
         &mut self,
-        state_key: &str,
+        learned_key: &str,
         feature: &str,
         provider_kind: &str,
     ) -> SameCapabilitySettlement {
@@ -443,7 +448,7 @@ impl LearnedProbeGuard {
             return SameCapabilitySettlement::NoMatch;
         }
         let Some(pos) = self.probes.iter().position(|probe| {
-            probe.state_key == state_key
+            probe.learned_key == learned_key
                 && probe.feature == feature
                 && probe.provider_kind == provider_kind
         }) else {
@@ -458,7 +463,7 @@ impl LearnedProbeGuard {
             if matches!(
                 registry.record_probe_outcome_in_generation(
                     probe.generation,
-                    &probe.state_key,
+                    &probe.learned_key,
                     &probe.feature,
                     probe.provider_kind,
                     crate::learned_capability::ProbeOutcome::SameCapabilityRejection,
@@ -495,7 +500,7 @@ impl Drop for LearnedProbeGuard {
                 if matches!(
                     registry.record_probe_outcome_in_generation(
                         probe.generation,
-                        &probe.state_key,
+                        &probe.learned_key,
                         &probe.feature,
                         probe.provider_kind,
                         crate::learned_capability::ProbeOutcome::OtherError,
@@ -579,7 +584,7 @@ impl Drop for ProbeAdmissionSet {
                 if matches!(
                     self.registry.record_probe_outcome_in_generation(
                         admission.generation,
-                        &admission.state_key,
+                        &admission.learned_key,
                         &admission.feature,
                         admission.provider_kind,
                         crate::learned_capability::ProbeOutcome::OtherError,

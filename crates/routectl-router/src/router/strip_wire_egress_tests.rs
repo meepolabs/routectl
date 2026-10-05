@@ -207,8 +207,9 @@ fn context_management_req(alias: &str) -> ChatRequest {
 }
 
 /// An acting (non-expired) self-identifying learned negative for
-/// `(state_key, feature_key)`. `feature_key` is stored verbatim -- the
-/// caller chooses a canonical or non-canonical token.
+/// `(lane, feature_key)`, where `lane` is the target's serialized learned
+/// lane. `feature_key` is stored verbatim -- the caller chooses a canonical or
+/// non-canonical token.
 fn acting_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
     let base = Instant::now();
     ExportedEntry {
@@ -265,7 +266,7 @@ async fn advisor_strip_removes_tool_from_real_wire_body_and_succeeds() {
     .await;
     router
         .learned_capabilities
-        .import_entries(vec![acting_negative("m_a", "advisor")]);
+        .import_entries(vec![acting_negative("prov_a#upstream-model", "advisor")]);
 
     let (d, events) = routectl_testkit::with_capture(
         router.complete_with_options(advisor_req("solo"), RouterOptions::default()),
@@ -315,7 +316,10 @@ async fn non_canonical_registry_token_does_not_strip_advisor_tool() {
     .await;
     router
         .learned_capabilities
-        .import_entries(vec![acting_negative("m_a", "advisor_helper")]);
+        .import_entries(vec![acting_negative(
+            "prov_a#upstream-model",
+            "advisor_helper",
+        )]);
 
     let (d, events) = routectl_testkit::with_capture(
         router.complete_with_options(advisor_req("solo"), RouterOptions::default()),
@@ -357,7 +361,10 @@ async fn pinned_beta_capability_routes_away_instead_of_stripping() {
     .await;
     router
         .learned_capabilities
-        .import_entries(vec![acting_negative("m_a", "context_management")]);
+        .import_entries(vec![acting_negative(
+            "prov_a#upstream-model",
+            "context_management",
+        )]);
 
     let (d, events) = routectl_testkit::with_capture(
         router.complete_with_options(context_management_req("chain"), RouterOptions::default()),

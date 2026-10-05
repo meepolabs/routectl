@@ -367,7 +367,7 @@ fn seed_durable_verdict(config: &Arc<Config>, usage: &UsageHandle) {
                             catalog_version: catalog,
                             overlay_revision: 0,
                             provider_kind: None,
-                            vocab_version: None,
+                            vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
                         },
                     ],
                     1,

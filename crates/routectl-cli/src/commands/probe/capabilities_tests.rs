@@ -468,6 +468,7 @@ fn rebuild_summary(
                 u32::try_from(r.catalog_version.expect("cv")).unwrap(),
                 u64::try_from(r.overlay_revision.expect("ov")).unwrap(),
             )
+            .with_vocab_version(r.vocab_version)
         })
         .collect();
     router.rebuild_learned_from_ledger(&TestReader { tombstone, rows })

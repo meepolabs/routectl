@@ -1852,6 +1852,14 @@ struct DispatchTarget {
     /// Key into `Router.state` for the per-attempt rate-limit + circuit-
     /// breaker check.
     state_key: String,
+    /// The learned-store lane: this target's egressing provider entry and its
+    /// upstream, minted once at chain expansion. Every learned acceptance read
+    /// and write for the target keys on it, never on `state_key`, so two
+    /// nicknames for one endpoint share their learned history. `None` only
+    /// when the provider entry carries the reserved separator, which config
+    /// validation refuses; such a target neither learns nor consults learned
+    /// state.
+    learned_lane: Option<crate::state_key::StateKey>,
     /// Persistable credential identity of this target's own credential
     /// (see [`crate::seat_pool::seat_identity`]): the `provider#label`
     /// seat key for an `oauth://` ref, `None` for every other scheme and
@@ -1976,6 +1984,24 @@ impl DispatchTarget {
     /// for a feature the learned pass left open soft-tails the target.
     fn capability_prior(&self, feature: &str) -> Option<bool> {
         self.capabilities.get(feature).copied()
+    }
+
+    /// The learned-registry key this target's fact about `feature` lives
+    /// under. The single choke point every learn, observe and lookup site on a
+    /// target goes through, so the three always meet on one key.
+    ///
+    /// A catalog capability keys on the target's lane. An envelope-field
+    /// verdict still keys on the runtime `state_key`: the field namespace
+    /// mints its own keys (`FieldVerdictKey`) and this lookup must find what
+    /// that owner wrote. `None` when the target has no lane, in which case
+    /// nothing is learned or consulted for a catalog capability.
+    fn learned_key(&self, feature: &str) -> Option<&str> {
+        if crate::field_capability::capability_key_is_field_verdict(feature) {
+            return Some(&self.state_key);
+        }
+        self.learned_lane
+            .as_ref()
+            .map(crate::state_key::StateKey::as_lane_key)
     }
 }
 
@@ -3156,6 +3182,10 @@ mod state_slot_install_tests;
 #[cfg(test)]
 #[path = "state_key_rpm_isolation_tests.rs"]
 mod state_key_rpm_isolation_tests;
+
+#[cfg(test)]
+#[path = "learned_lane_tests.rs"]
+mod learned_lane_tests;
 
 #[cfg(test)]
 #[path = "state_carry_over_owner_tests.rs"]

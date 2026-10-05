@@ -15160,6 +15160,69 @@ impl<T> typenum::type_operators::Same for routectl_router::SkippedSelector
 pub type routectl_router::SkippedSelector::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::SkippedSelector where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::SkippedSelector::into_shared(self) -> Shared
+pub struct routectl_router::StateKey
+impl routectl_router::StateKey
+pub fn routectl_router::StateKey::as_lane_key(&self) -> &str
+pub fn routectl_router::StateKey::for_log(&self) -> alloc::string::String
+pub fn routectl_router::StateKey::new(&str, &str) -> core::option::Option<Self>
+pub fn routectl_router::StateKey::parse(&str) -> core::option::Option<Self>
+pub fn routectl_router::StateKey::provider_entry(&self) -> &str
+pub fn routectl_router::StateKey::upstream(&self) -> &str
+impl core::clone::Clone for routectl_router::StateKey
+pub fn routectl_router::StateKey::clone(&self) -> routectl_router::StateKey
+impl core::cmp::Eq for routectl_router::StateKey
+impl core::cmp::PartialEq for routectl_router::StateKey
+pub fn routectl_router::StateKey::eq(&self, &routectl_router::StateKey) -> bool
+impl core::fmt::Debug for routectl_router::StateKey
+pub fn routectl_router::StateKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_router::StateKey
+pub fn routectl_router::StateKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for routectl_router::StateKey
+impl core::marker::Freeze for routectl_router::StateKey
+impl core::marker::Send for routectl_router::StateKey
+impl core::marker::Sync for routectl_router::StateKey
+impl core::marker::Unpin for routectl_router::StateKey
+impl core::marker::UnsafeUnpin for routectl_router::StateKey
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::StateKey
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::StateKey
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::StateKey where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::StateKey::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::StateKey where U: core::convert::From<T>
+pub fn routectl_router::StateKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::StateKey where U: core::convert::Into<T>
+pub type routectl_router::StateKey::Error = core::convert::Infallible
+pub fn routectl_router::StateKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::StateKey where U: core::convert::TryFrom<T>
+pub type routectl_router::StateKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::StateKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::StateKey where T: core::clone::Clone
+pub type routectl_router::StateKey::Owned = T
+pub fn routectl_router::StateKey::clone_into(&self, &mut T)
+pub fn routectl_router::StateKey::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::StateKey where T: core::clone::Clone
+pub fn routectl_router::StateKey::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::StateKey where T: 'static + ?core::marker::Sized
+pub fn routectl_router::StateKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::StateKey where T: ?core::marker::Sized
+pub fn routectl_router::StateKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::StateKey where T: ?core::marker::Sized
+pub fn routectl_router::StateKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::StateKey where T: core::clone::Clone
+pub unsafe fn routectl_router::StateKey::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::StateKey
+pub fn routectl_router::StateKey::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::StateKey where T: core::clone::Clone
+pub fn routectl_router::StateKey::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::StateKey
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::StateKey where T: ?core::marker::Sized
+pub fn routectl_router::StateKey::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::StateKey::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::StateKey
+impl<T> tracing::instrument::WithSubscriber for routectl_router::StateKey
+impl<T> typenum::type_operators::Same for routectl_router::StateKey
+pub type routectl_router::StateKey::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::StateKey where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::StateKey::into_shared(self) -> Shared
 pub struct routectl_router::SteadyStateTrimParams
 pub routectl_router::SteadyStateTrimParams::clear_at_least_tokens: u64
 pub routectl_router::SteadyStateTrimParams::head_keep_messages: usize
@@ -15685,6 +15748,7 @@ pub const routectl_router::CATALOG_SNAPSHOT_DATE: &str
 pub const routectl_router::CATALOG_VERSION: u32
 pub const routectl_router::CONFIG_PROVIDER_KINDS: &[&str]
 pub const routectl_router::CURRENT_CONFIG_VERSION: u32
+pub const routectl_router::CURRENT_VOCAB_VERSION: i64
 pub const routectl_router::K_SESSION_CAPACITY: usize
 pub const routectl_router::MAX_POOL_MEMBERS: usize
 pub trait routectl_router::CalibrationLedgerReader: core::marker::Send + core::marker::Sync

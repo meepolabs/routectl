@@ -233,6 +233,7 @@ fn rebuild_and_snapshot(db_path: &Path, router: &Router) -> Vec<LearnedRegistryE
                 u32::try_from(r.catalog_version.expect("cv")).unwrap(),
                 u64::try_from(r.overlay_revision.expect("ov")).unwrap(),
             )
+            .with_vocab_version(r.vocab_version)
         })
         .collect();
     router.rebuild_learned_from_ledger(&LedgerReader { tombstone, rows });
@@ -681,6 +682,6 @@ fn live_broken(ts: i64, lane: &str, cap: &str, revision: (i64, i64)) -> Capabili
         catalog_version: revision.0,
         overlay_revision: revision.1,
         provider_kind: None,
-        vocab_version: None,
+        vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }

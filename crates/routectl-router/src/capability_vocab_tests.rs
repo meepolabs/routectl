@@ -32,6 +32,7 @@ const TEST_STEPS: &[VocabStep] = &[
             from: "old_search",
             to: Some("web_search"),
         }],
+        retire_all: false,
     },
     VocabStep {
         from: 2,
@@ -47,6 +48,7 @@ const TEST_STEPS: &[VocabStep] = &[
                 to: None,
             },
         ],
+        retire_all: false,
     },
 ];
 const TEST_CURRENT: i64 = 3;
@@ -173,6 +175,7 @@ fn a_gap_in_the_ladder_is_an_unknown_version() {
     let gapped = &[VocabStep {
         from: 2,
         renames: &[],
+        retire_all: false,
     }];
 
     let result = map_through(row(None, "broken", "web_search"), gapped, 3);
@@ -181,10 +184,59 @@ fn a_gap_in_the_ladder_is_an_unknown_version() {
 }
 
 #[test]
-fn the_production_ladder_maps_legacy_and_current_rows_and_rejects_others() {
+fn a_retiring_step_skips_every_row_of_its_version_and_no_other() {
+    let steps = &[
+        VocabStep {
+            from: 1,
+            renames: &[],
+            retire_all: true,
+        },
+        VocabStep {
+            from: 2,
+            renames: &[],
+            retire_all: false,
+        },
+    ];
+    let cases: &[(&str, Option<i64>, Result<(), VocabSkip>)] = &[
+        ("null reads as v1", None, Err(VocabSkip::RetiredVersion(1))),
+        ("explicit v1", Some(1), Err(VocabSkip::RetiredVersion(1))),
+        ("v2 starts past the retiring step", Some(2), Ok(())),
+        ("current", Some(3), Ok(())),
+    ];
+
+    for (name, version, want) in cases {
+        let got = map_through(row(*version, "broken", "web_search"), steps, 3).map(|_| ());
+        assert_eq!(&got, want, "{name}");
+    }
+}
+
+/// Production: a v1 row keyed by a model nickname has no lane in the current
+/// grammar, so it is skipped whole and the caller counts it; a v2 row keyed
+/// `provider#upstream` maps through unchanged.
+#[test]
+fn the_production_ladder_skips_nickname_rows_and_replays_lane_rows() {
+    let mut nickname_row = row(None, "broken", "web_search");
+    nickname_row.state_key = "opus-nick".to_string();
+    let mut lane_row = row(Some(CURRENT_VOCAB_VERSION), "broken", "web_search");
+    lane_row.state_key = "anthropic#claude-opus-4".to_string();
+
+    let skipped = map_to_current(nickname_row);
+    let replayed = map_to_current(lane_row).expect("a current lane row maps");
+
+    assert_eq!(
+        skipped,
+        Err(VocabSkip::RetiredVersion(LEGACY_VOCAB_VERSION))
+    );
+    assert_eq!(replayed.state_key, "anthropic#claude-opus-4");
+    assert_eq!(replayed.capability, "web_search");
+    assert_eq!(replayed.vocab_version, Some(CURRENT_VOCAB_VERSION));
+}
+
+#[test]
+fn the_production_ladder_rejects_versions_outside_its_range() {
     let cases: &[(&str, Option<i64>, bool)] = &[
-        ("legacy null", None, true),
-        ("legacy v1", Some(LEGACY_VOCAB_VERSION), true),
+        ("legacy null", None, false),
+        ("legacy v1", Some(LEGACY_VOCAB_VERSION), false),
         ("current", Some(CURRENT_VOCAB_VERSION), true),
         ("future", Some(CURRENT_VOCAB_VERSION + 1), false),
         ("zero", Some(0), false),
@@ -193,9 +245,5 @@ fn the_production_ladder_maps_legacy_and_current_rows_and_rejects_others() {
     for (name, version, mapped) in cases {
         let result = map_to_current(row(*version, "broken", "web_search"));
         assert_eq!(result.is_ok(), *mapped, "{name}: {result:?}");
-        if let Ok(row) = result {
-            assert_eq!(row.capability, "web_search", "{name}");
-            assert_eq!(row.vocab_version, Some(CURRENT_VOCAB_VERSION), "{name}");
-        }
     }
 }

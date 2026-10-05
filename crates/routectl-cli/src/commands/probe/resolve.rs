@@ -10,23 +10,20 @@
 //! Two views over the same resolution:
 //!   - [`resolve_provider_and_model`] returns just `(provider, model_id)` --
 //!     what a bare dispatch needs.
-//!   - [`resolve_probe_target`] additionally carries the routing `state_key`
-//!     (the nickname the learned-capability ledger keys on), which a
-//!     capability probe must emit so its events land on the SAME lane a live
-//!     request through that model would.
+//!   - [`resolve_probe_target`] additionally carries the `[models]` nickname
+//!     the target was resolved through.
 
 use routectl_router::Config;
 
 /// A resolved probe target: the routing state key plus the provider and
 /// upstream model id the dispatch needs.
 ///
-/// `state_key` is the `[models]` nickname -- the exact key the router's
-/// learned-capability registry and the usage ledger record events under for
-/// a non-pooled model (see `into_one_dispatch_target`), so a probe emitting
-/// on this key settles the same lane live traffic would.
+/// `state_key` is the `[models]` nickname, the operator's handle for the
+/// target. The learned lane a probe records under is minted from `provider`
+/// and `model_id`, exactly as chain expansion mints it for live traffic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProbeTarget {
-    /// Routing state key (the `[models]` nickname) -- the ledger lane key.
+    /// The `[models]` nickname the target was resolved through.
     pub state_key: String,
     /// Provider name (a key in the `[providers]` table).
     pub provider: String,

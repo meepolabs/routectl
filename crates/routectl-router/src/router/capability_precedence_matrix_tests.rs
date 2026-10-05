@@ -83,7 +83,7 @@ fn target_with_priors(router: &Router, nickname: &str, priors: &[(&str, bool)]) 
         row.capabilities.insert((*key).to_string(), *value);
     }
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model = ResolvedModel::new(nickname, "p", provider, "upstream").with_effective_row(
+    let model = ResolvedModel::new(nickname, "p", provider, nickname).with_effective_row(
         EffectiveRow::Present {
             row,
             source: Source::Baked,
@@ -96,11 +96,17 @@ fn target_with_priors(router: &Router, nickname: &str, priors: &[(&str, bool)]) 
         .expect("one target for a non-seat model")
 }
 
+/// The learned lane the matrix target for `nickname` keys on: each fixture
+/// nickname is its own upstream on the shared `p` entry.
+fn lane_of(nickname: &str) -> String {
+    format!("p#{nickname}")
+}
+
 /// Seed an acting (self-identifying) learned negative for `(nickname, feature)`
 /// in the given detection phase.
 fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePhase) {
     router.learned_capabilities.observe(
-        nickname,
+        &lane_of(nickname),
         feature,
         KIND,
         SignalTier::SelfIdentifying,
@@ -114,7 +120,7 @@ fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePh
 /// Seed a resident VerifiedWorking positive for `(nickname, feature)`.
 fn seed_verified(router: &Router, nickname: &str, feature: &str) {
     router.learned_capabilities.observe_positive(
-        nickname,
+        &lane_of(nickname),
         feature,
         KIND,
         EvidenceSource::Live,

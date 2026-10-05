@@ -2689,9 +2689,18 @@ mod capability_matrix {
     fn seed_broken(conn: &rusqlite::Connection, ts: i64, lane: &str, cap: &str, cat: i64, ov: i64) {
         conn.execute(
             "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
-             tier, evidence_class, upstream_token, catalog_version, overlay_revision) \
-             VALUES (?1, ?2, ?3, 'broken', 'f1', 'live', 'self-identifying', NULL, NULL, ?4, ?5)",
-            params![ts, lane, cap, cat, ov],
+             tier, evidence_class, upstream_token, catalog_version, overlay_revision, \
+             vocab_version) \
+             VALUES (?1, ?2, ?3, 'broken', 'f1', 'live', 'self-identifying', NULL, NULL, ?4, ?5, \
+             ?6)",
+            params![
+                ts,
+                lane,
+                cap,
+                cat,
+                ov,
+                routectl_router::CURRENT_VOCAB_VERSION
+            ],
         )
         .expect("seed broken negative");
     }
@@ -3877,7 +3886,7 @@ mod seeded_matrix_surfaces {
             catalog_version: i64::from(CATALOG_VERSION),
             overlay_revision: 0,
             provider_kind: None,
-            vocab_version: None,
+            vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
         }
     }
 

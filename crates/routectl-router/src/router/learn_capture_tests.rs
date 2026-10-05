@@ -235,7 +235,7 @@ async fn eligible_self_identifying_records_warns_and_populates_meta() {
     assert!(dispatched.result.is_err());
     assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
     let ev = &dispatched.meta.learned_capabilities[0];
-    assert_eq!(ev.state_key, "m1");
+    assert_eq!(ev.state_key, WIRE_LANE);
     assert_eq!(ev.capability_key, "web_search");
     assert_eq!(ev.provider_kind, "openai-compat");
     assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
@@ -264,7 +264,7 @@ async fn eligible_self_identifying_records_warns_and_populates_meta() {
     // The registry now holds an acting negative for the target.
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            WIRE_LANE,
             "web_search",
             "openai-compat",
             Instant::now(),
@@ -456,7 +456,7 @@ async fn masked_cell_rejection_does_not_refresh_resident_entry() {
     // Plant a resident acting negative at a fixed instant.
     let t0 = Instant::now();
     router.learned_capabilities.observe(
-        "m1",
+        WIRE_LANE,
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
@@ -701,7 +701,7 @@ async fn probe_success_clears_the_learned_negative() {
     // Arrange: an expired negative for the very feature the request asks
     // for; the target's provider then succeeds on the admitted re-probe.
     let router = router_with(OPENAI_P1, Arc::new(SuccessProvider { id: "p1" }));
-    seed_expired_negative(&router, "m1", "web_search");
+    seed_expired_negative(&router, WIRE_LANE, "web_search");
 
     // Act
     let dispatched = router
@@ -715,7 +715,7 @@ async fn probe_success_clears_the_learned_negative() {
     assert!(router.learned_capabilities.is_empty());
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            WIRE_LANE,
             "web_search",
             "openai-compat",
             Instant::now(),
@@ -729,7 +729,7 @@ async fn probe_same_capability_rejection_refreshes_with_backoff() {
     // Arrange: an expired negative; the probe target re-rejects the SAME
     // capability (self-identifying 400).
     let router = router_with(OPENAI_P1, self_identifying_provider());
-    seed_expired_negative(&router, "m1", "web_search");
+    seed_expired_negative(&router, WIRE_LANE, "web_search");
     let before = router.learned_capabilities.snapshot()[0].expires_at;
 
     // Act
@@ -756,7 +756,7 @@ async fn probe_same_capability_rejection_refreshes_with_backoff() {
     );
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            WIRE_LANE,
             "web_search",
             "openai-compat",
             Instant::now(),
@@ -774,7 +774,7 @@ async fn probe_other_error_releases_slot_and_re_probes_next_request() {
     // Arrange: an expired negative; the probe target fails with an error
     // that is NOT the same-capability rejection.
     let router = router_with(OPENAI_P1, other_error_provider());
-    seed_expired_negative(&router, "m1", "web_search");
+    seed_expired_negative(&router, WIRE_LANE, "web_search");
 
     // Act
     let dispatched = router
@@ -796,7 +796,7 @@ async fn probe_other_error_releases_slot_and_re_probes_next_request() {
     );
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            WIRE_LANE,
             "web_search",
             "openai-compat",
             Instant::now(),
@@ -811,7 +811,7 @@ async fn stream_probe_same_capability_rejection_settles_on_the_stream_arm() {
     // The stream loop wires the settle guard identically to the complete
     // loop: a pre-first-chunk same-capability rejection settles the probe.
     let router = router_with(OPENAI_P1, self_identifying_provider());
-    seed_expired_negative(&router, "m1", "web_search");
+    seed_expired_negative(&router, WIRE_LANE, "web_search");
     let before = router.learned_capabilities.snapshot()[0].expires_at;
 
     let dispatched = router
@@ -830,7 +830,7 @@ async fn stream_probe_same_capability_rejection_settles_on_the_stream_arm() {
     );
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            WIRE_LANE,
             "web_search",
             "openai-compat",
             Instant::now(),
@@ -848,7 +848,7 @@ async fn count_tokens_releases_admitted_probe_without_latching() {
     // (OtherError): the token-count path is not a messages-capability test,
     // so the entry must not latch in_flight.
     let router = router_with(OPENAI_P1, self_identifying_provider());
-    seed_expired_negative(&router, "m1", "web_search");
+    seed_expired_negative(&router, WIRE_LANE, "web_search");
 
     // openai-compat cannot count_tokens, so the walk terminates without
     // touching the provider -- but the filter still admitted the probe.
@@ -859,7 +859,7 @@ async fn count_tokens_releases_admitted_probe_without_latching() {
     assert_eq!(router.metrics.probe_failures_total(), 0);
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            WIRE_LANE,
             "web_search",
             "openai-compat",
             Instant::now(),
@@ -1071,6 +1071,13 @@ fn anthropic_target(router: &Router) -> DispatchTarget {
         .expect("one target for a non-seat model")
 }
 
+/// The learned lane an [`anthropic_target`] keys its catalog facts on.
+const M1_LANE: &str = "p1#claude-x";
+
+/// The learned lane the `m1` model [`router_with`] installs keys on, which
+/// every test dispatching through the router learns under.
+const WIRE_LANE: &str = "p1#wire-model";
+
 /// A generic 400 upstream error for driving the mint pipeline (the resolution
 /// is supplied provisionally, so the body is never parsed for a capability).
 fn generic_400() -> Error {
@@ -1126,7 +1133,7 @@ fn f2_all_gates_pass_mints_a_phase_f2_negative() {
 
     assert_eq!(
         router.learned_capabilities.acting_negative_for(
-            "m1",
+            M1_LANE,
             "web_search",
             "anthropic-api",
             Instant::now(),
@@ -1203,7 +1210,10 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
     let mut meta = DispatchMeta::for_alias("m1");
     let mut guard = LearnedProbeGuard::inert();
     let sibling_registry = Arc::clone(&router.learned_capabilities);
-    let state_key = target.state_key.clone();
+    let state_key = target
+        .learned_key("web_search")
+        .expect("the target has a lane")
+        .to_string();
     let generation = router.registry_generation();
     router
         .learned_capabilities
@@ -1272,7 +1282,10 @@ fn a_reserved_refusal_removes_the_dedupe_key_so_a_released_retry_applies() {
     let target = anthropic_target(&router);
     let req = req_with_tool("web_search");
     let err = generic_400();
-    let state_key = target.state_key.clone();
+    let state_key = target
+        .learned_key("web_search")
+        .expect("the target has a lane")
+        .to_string();
 
     let mut seed_dedupe = HashSet::new();
     let mut seed_meta = DispatchMeta::for_alias("m1");
@@ -1343,7 +1356,7 @@ fn a_reserved_refusal_removes_the_dedupe_key_so_a_released_retry_applies() {
     );
     assert!(
         !dedupe.contains(&LearnDedupeKey::Capability {
-            state_key: state_key.clone(),
+            learned_key: state_key.clone(),
             feature_key: "web_search".to_string(),
         }),
         "a refused mutation must not leave the dedupe key installed"
@@ -1396,7 +1409,10 @@ fn an_exhausted_refusal_removes_the_dedupe_key_and_leaves_no_resident_row() {
     let target = anthropic_target(&router);
     let req = req_with_tool("web_search");
     let err = generic_400();
-    let state_key = target.state_key.clone();
+    let state_key = target
+        .learned_key("web_search")
+        .expect("the target has a lane")
+        .to_string();
     router
         .learned_capabilities
         .force_incarnation_ceiling_for_tests();
@@ -1432,7 +1448,7 @@ fn an_exhausted_refusal_removes_the_dedupe_key_and_leaves_no_resident_row() {
     );
     assert!(
         !dedupe.contains(&LearnDedupeKey::Capability {
-            state_key: state_key.clone(),
+            learned_key: state_key.clone(),
             feature_key: "web_search".to_string(),
         }),
         "an exhausted refusal must not leave the dedupe key installed"
@@ -1456,7 +1472,7 @@ fn f2_candidate_with_same_chain_f1_is_suppressed_not_minted() {
     let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
     let target_b = router
         .expand_chain_to_targets(
-            vec![Arc::new(ResolvedModel::new("m2", "p1", p, "claude-x"))],
+            vec![Arc::new(ResolvedModel::new("m2", "p1", p, "claude-y"))],
             None,
         )
         .pop()
@@ -1650,7 +1666,7 @@ fn seed_expired_phase_negative(router: &Router, feature: &str, phase: FailurePha
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: "m1".into(),
+            state_key: M1_LANE.into(),
             feature_key: feature.into(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
@@ -1672,6 +1688,7 @@ fn armed_guard_for(router: &Router, feature: &str) -> LearnedProbeGuard {
         router.learned_capabilities.clone(),
         vec![super::super::runtime_gate::ProbeAdmission {
             state_key: "m1".into(),
+            learned_key: M1_LANE.into(),
             feature: feature.into(),
             provider_kind: "anthropic-api",
             generation: 1,
@@ -1692,7 +1709,7 @@ fn settle_success_emits_one_cleared_event_per_held_probe() {
     let cleared = guard.settle_success();
 
     assert_eq!(cleared.len(), 1, "one cleared event per held probe");
-    assert_eq!(cleared[0].state_key, "m1");
+    assert_eq!(cleared[0].state_key, M1_LANE);
     assert_eq!(cleared[0].capability_key, "web_search");
     assert_eq!(cleared[0].provider_kind, "anthropic-api");
 }
@@ -1707,7 +1724,7 @@ fn same_capability_settle_emits_no_cleared_event() {
     seed_expired_phase_negative(&router, "web_search", FailurePhase::F1);
     let mut guard = armed_guard_for(&router, "web_search");
 
-    let matched = guard.settle_same_capability("m1", "web_search", "anthropic-api");
+    let matched = guard.settle_same_capability(M1_LANE, "web_search", "anthropic-api");
     assert_eq!(
         matched,
         super::super::runtime_gate::SameCapabilitySettlement::Applied,
@@ -1856,7 +1873,7 @@ fn reverse_order_f2_then_f1_both_mint_self_healing() {
 
     // Lane B (a distinct state_key) then mints an F1 for the same capability.
     let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
-    let model_b = ResolvedModel::new("m2", "p1", p, "claude-x");
+    let model_b = ResolvedModel::new("m2", "p1", p, "claude-y");
     let target_b = router
         .expand_chain_to_targets(vec![Arc::new(model_b)], None)
         .pop()
@@ -1941,7 +1958,7 @@ fn pending_inferred_f1_does_not_suppress_a_later_f2() {
     let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
     let target_b = router
         .expand_chain_to_targets(
-            vec![Arc::new(ResolvedModel::new("m2", "p1", p, "claude-x"))],
+            vec![Arc::new(ResolvedModel::new("m2", "p1", p, "claude-y"))],
             None,
         )
         .pop()
@@ -2292,7 +2309,7 @@ async fn bedrock_advisor_400_learns_one_self_identifying_negative() {
     assert!(dispatched.result.is_err());
     assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
     let ev = &dispatched.meta.learned_capabilities[0];
-    assert_eq!(ev.state_key, "m1");
+    assert_eq!(ev.state_key, WIRE_LANE);
     assert_eq!(ev.capability_key, "advisor");
     assert_eq!(ev.provider_kind, "bedrock");
     assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
@@ -2309,9 +2326,12 @@ async fn bedrock_advisor_400_learns_one_self_identifying_negative() {
 
     // The registry now holds an acting negative for the target.
     assert_eq!(
-        router
-            .learned_capabilities
-            .acting_negative_for("m1", "advisor", "bedrock", Instant::now(),),
+        router.learned_capabilities.acting_negative_for(
+            WIRE_LANE,
+            "advisor",
+            "bedrock",
+            Instant::now(),
+        ),
         crate::learned_capability::RoutingDecision::RouteAway {
             signal: SignalTier::SelfIdentifying,
             phase: FailurePhase::F1,
@@ -2580,7 +2600,7 @@ async fn bedrock_drift_body_bumps_only_the_unmatched_counter() {
 async fn a_stale_same_capability_probe_settlement_books_nothing() {
     // Arrange: an expired negative and a guard holding its re-probe admission.
     let router = router_with(OPENAI_P1, self_identifying_provider());
-    seed_expired_negative(&router, "m1", "web_search");
+    seed_expired_negative(&router, M1_LANE, "web_search");
     let before = router.learned_capabilities.snapshot()[0].expires_at;
     let observations_before = router.learned_capabilities.snapshot()[0].observations;
     let failures_before = router.metrics.probe_failures_total();
@@ -2590,7 +2610,7 @@ async fn a_stale_same_capability_probe_settlement_books_nothing() {
     router.learned_capabilities.advance_generation();
 
     // Act: the production settlement path.
-    let settled = guard.settle_same_capability("m1", "web_search", "anthropic-api");
+    let settled = guard.settle_same_capability(M1_LANE, "web_search", "anthropic-api");
 
     // Assert: reported as stale, which is what makes the caller skip its whole
     // consequence block.

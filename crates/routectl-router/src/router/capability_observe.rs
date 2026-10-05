@@ -42,7 +42,7 @@ use crate::learned_capability::{GenerationOutcome, ObserveOutcome, PositiveOutco
 ///
 /// Carries the columns a later warm-rebuild replays (stage two): the
 /// capability key, the pinned evidence class, the observation direction,
-/// tier, and source, plus the routing `state_key`, `provider_kind`, and the
+/// tier, and source, plus the learned-registry key, `provider_kind`, and the
 /// request's derived feature set. No request body, prompt, or response text
 /// ever enters this struct.
 #[derive(Debug, Clone)]
@@ -66,7 +66,9 @@ pub struct CapabilityObserveEvent {
     /// only the superseded one.
     pub incarnation: u64,
 
-    /// Routing state key (nickname-or-provider) of the served target.
+    /// Learned-registry key of the served target: its serialized lane
+    /// (`provider_entry#upstream`), persisted verbatim as the ledger
+    /// `lane_key`.
     pub state_key: String,
     /// Canonical capability key the observation attests to.
     pub capability_key: String,
@@ -117,17 +119,27 @@ impl Router {
         if observations.is_empty() {
             return;
         }
-        let state_key = target.state_key.as_str();
-        // One observation per `(state_key, capability)` per request. The
-        // success arm is terminal (it returns on first success), so this call
-        // fires once per request and `state_key` is constant across the loop;
-        // the set therefore dedupes on the capability key alone.
+        // One observation per `(target, capability)` per request. The success
+        // arm is terminal (it returns on first success), so this call fires
+        // once per request and the target is constant across the loop; the set
+        // therefore dedupes on the capability key alone.
         let mut dedupe: HashSet<&'static str> = HashSet::new();
         for obs in observations {
             if !dedupe.insert(obs.capability_key) {
                 continue;
             }
-            self.admit_observation(&obs, state_key, provider_kind, &request_features, meta, now);
+            let Some(learned_key) = target.learned_key(obs.capability_key) else {
+                continue;
+            };
+            self.admit_observation(
+                &obs,
+                learned_key,
+                &target.state_key,
+                provider_kind,
+                &request_features,
+                meta,
+                now,
+            );
         }
     }
 
@@ -139,9 +151,11 @@ impl Router {
     /// negative, or a still-pending single inferred observation, does neither).
     /// A same-verdict refresh of a resident positive bumps the counter only:
     /// no WARN and no ride-along, so it never reaches the ledger.
+    #[allow(clippy::too_many_arguments)]
     fn admit_observation(
         &self,
         obs: &CapabilityObservation,
+        learned_key: &str,
         state_key: &str,
         provider_kind: &'static str,
         request_features: &[String],
@@ -157,7 +171,7 @@ impl Router {
         let acting = match obs.direction {
             ObservationDirection::Verified => {
                 let outcome = self.observe_verified_capability(
-                    state_key,
+                    learned_key,
                     obs.capability_key,
                     provider_kind,
                     EvidenceSource::Live,
@@ -189,7 +203,7 @@ impl Router {
             }
             ObservationDirection::SuspectAbsence => {
                 let outcome = self.observe_learned_capability(
-                    state_key,
+                    learned_key,
                     obs.capability_key,
                     provider_kind,
                     obs.tier,
@@ -221,6 +235,7 @@ impl Router {
         tracing::warn!(
             event = "observe",
             state_key = %routectl_core::sanitize_for_log(state_key),
+            lane = %routectl_core::sanitize_for_log(learned_key),
             capability_key = obs.capability_key,
             provider_kind,
             evidence_class = obs.evidence_class,
@@ -232,7 +247,7 @@ impl Router {
         meta.capability_observations.push(CapabilityObserveEvent {
             persistence_generation,
             incarnation,
-            state_key: state_key.to_string(),
+            state_key: learned_key.to_string(),
             capability_key: obs.capability_key.to_string(),
             provider_kind: provider_kind.to_string(),
             evidence_class: obs.evidence_class.to_string(),
