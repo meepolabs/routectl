@@ -137,6 +137,8 @@ impl Router {
     /// observation; a suspected-absence F3 negative acts only once corroborated
     /// within the inferred window (a passive positive suppressed by a resident
     /// negative, or a still-pending single inferred observation, does neither).
+    /// A same-verdict refresh of a resident positive bumps the counter only:
+    /// no WARN and no ride-along, so it never reaches the ledger.
     fn admit_observation(
         &self,
         obs: &CapabilityObservation,
@@ -168,15 +170,20 @@ impl Router {
                 );
                 match outcome {
                     GenerationOutcome::Applied {
-                        value: PositiveOutcome::Recorded,
+                        value: value @ (PositiveOutcome::Recorded | PositiveOutcome::Refreshed),
                         generation,
                         incarnation,
                     } => {
                         self.metrics.incr_verified_working();
-                        Some((generation, incarnation))
+                        // Only a verdict transition produces an event. A
+                        // same-verdict refresh restates nothing a warm rebuild
+                        // needs, and persisting it would let steady positive
+                        // traffic crowd the bounded rebuild window, pushing
+                        // out the negatives a rebuild must restate.
+                        (value == PositiveOutcome::Recorded).then_some((generation, incarnation))
                     }
-                    // Not recorded, refused as stale, or refused by a purge
-                    // lease: no metric, no event.
+                    // Suppressed by a negative, refused as stale, or refused
+                    // by a purge lease: no metric, no event.
                     _ => None,
                 }
             }

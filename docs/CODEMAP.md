@@ -3760,7 +3760,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe` at `FailurePhase::F3`/`SignalTier::Inferred` for a suspected
   absence; on an acting outcome emits a structured WARN -- token + state_key
   only -- bumps `RouterMetrics::verified_working_total`/`f3_suspect_total`,
-  and rides the event out on `meta`). Pure `DetectorContext` derivation
+  and rides the event out on `meta`; a same-verdict positive refresh bumps
+  the counter only, so ledger rows scale with transitions, not traffic). Pure `DetectorContext` derivation
   helpers: strict-output via `derive_feature_keys` STRUCTURED_OUTPUT
   membership, `schema_required_keys` (top-level `required` from
   `output_config.format.schema` or a strict tool's `input_schema`),
@@ -4053,6 +4054,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   VerifiedWorking positive: acts on 1 observation, never decays (`is_expired`
   excludes it), never claims a re-probe slot, never backs off, and NO-OPs when
   any negative resides (a passive positive never clears a negative).
+  `PositiveOutcome` separates a verdict transition (`Recorded`, fresh insert)
+  from a same-verdict refresh (`Refreshed`); only `Recorded` is persisted.
   Write-path recency: a fresh negative observation REPLACES a resident
   VerifiedWorking. The dispatch gate `acting_negative_for` is keyed on
   (verdict, phase, source) via `acting_decision`: `Verified` and acting

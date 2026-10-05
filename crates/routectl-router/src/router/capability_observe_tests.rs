@@ -302,6 +302,109 @@ fn verified_positive_no_ops_when_a_negative_resides() {
     assert_eq!(snap[0].verdict, Verdict::LearnedBroken(FailurePhase::F1));
 }
 
+#[test]
+fn only_a_positive_verdict_transition_rides_out_for_the_ledger() {
+    enum Prior {
+        Empty,
+        ResidentPositive,
+        NegativeClearedByReprobe,
+    }
+    // (name, prior, ride-alongs expected from the observed positive)
+    let rows = [
+        ("fresh insert", Prior::Empty, 1),
+        ("same-verdict refresh", Prior::ResidentPositive, 0),
+        (
+            "positive replacing a re-probe-cleared negative",
+            Prior::NegativeClearedByReprobe,
+            1,
+        ),
+    ];
+    for (name, prior, want) in rows {
+        // Arrange
+        let router = router_with(OPENAI_P1, NoopProvider::new());
+        let target = openai_target(&router);
+        let req = structured_output_request(&["name"]);
+        let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+        let t0 = Instant::now();
+        let now = match prior {
+            Prior::Empty => t0,
+            Prior::ResidentPositive => {
+                let mut seed = DispatchMeta::for_alias("m1");
+                router.observe_capabilities(&req, &resp, &target, &mut seed, t0);
+                assert_eq!(seed.capability_observations.len(), 1, "{name}: seed");
+                t0
+            }
+            Prior::NegativeClearedByReprobe => {
+                router.learned_capabilities.observe(
+                    "m1",
+                    STRUCTURED_OUTPUT,
+                    "openai-compat",
+                    SignalTier::SelfIdentifying,
+                    FailurePhase::F1,
+                    EvidenceSource::Live,
+                    None,
+                    t0,
+                );
+                let expired = router.learned_capabilities.snapshot()[0].expires_at
+                    + std::time::Duration::from_secs(1);
+                router.learned_capabilities.acting_negative_for(
+                    "m1",
+                    STRUCTURED_OUTPUT,
+                    "openai-compat",
+                    expired,
+                );
+                router.learned_capabilities.record_probe_outcome(
+                    "m1",
+                    STRUCTURED_OUTPUT,
+                    "openai-compat",
+                    crate::learned_capability::ProbeOutcome::Success,
+                    expired,
+                );
+                assert!(router.learned_capabilities.snapshot().is_empty(), "{name}");
+                expired
+            }
+        };
+        let mut meta = DispatchMeta::for_alias("m1");
+
+        // Act
+        router.observe_capabilities(&req, &resp, &target, &mut meta, now);
+
+        // Assert: the positive acts either way, but only a transition rides out.
+        assert_eq!(meta.capability_observations.len(), want, "{name}");
+        let snap = router.learned_capabilities.snapshot();
+        assert_eq!(snap.len(), 1, "{name}");
+        assert_eq!(snap[0].verdict, Verdict::VerifiedWorking, "{name}");
+    }
+}
+
+#[test]
+fn a_same_verdict_refresh_still_counts_as_an_acting_positive() {
+    // Arrange: a resident positive from a first observation.
+    let router = router_with(OPENAI_P1, NoopProvider::new());
+    let target = openai_target(&router);
+    let req = structured_output_request(&["name"]);
+    let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+    let now = Instant::now();
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &mut DispatchMeta::for_alias("m1"),
+        now,
+    );
+
+    // Act
+    let mut meta = DispatchMeta::for_alias("m1");
+    let events =
+        capture_events(|| router.observe_capabilities(&req, &resp, &target, &mut meta, now));
+
+    // Assert: the counter tracks acting traffic; the WARN and the ledger
+    // ride-along stay with transitions.
+    assert!(meta.capability_observations.is_empty());
+    assert_eq!(router.metrics.verified_working_total(), 2);
+    assert!(observe_warns(&events).is_empty());
+}
+
 // --- F3 suspected absence ----------------------------------------------
 
 #[test]

@@ -209,9 +209,14 @@ pub enum ObserveOutcome {
 /// Outcome of [`LearnedCapabilityRegistry::observe_positive`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositiveOutcome {
-    /// The positive was recorded (a fresh VerifiedWorking entry, or a
-    /// refresh of a resident one): VerifiedWorking now acts for this key.
+    /// A verdict transition: a fresh VerifiedWorking entry now acts for a key
+    /// that held none. The ledger needs a row for this one -- a warm rebuild
+    /// restates the positive from it.
     Recorded,
+    /// A same-verdict refresh of a resident VerifiedWorking entry: its
+    /// observation count and `last_seen` advanced, and the verdict did not
+    /// change. Restates nothing a replay needs, so it is not persisted.
+    Refreshed,
     /// A learned negative owns the key; the passive positive is a no-op.
     /// The negative's decay / re-probe lifecycle owns clearing -- a passive
     /// positive never clears a resident negative.
@@ -1060,7 +1065,7 @@ impl LearnedCapabilityRegistry {
                 EntryVerdict::Verified => {
                     existing.observations = existing.observations.saturating_add(1);
                     existing.last_seen = now;
-                    PositiveOutcome::Recorded
+                    PositiveOutcome::Refreshed
                 }
             };
         }
@@ -3849,6 +3854,122 @@ mod tests {
             reg.acting_negative_for("nick", "web_search", "openai-compat", long_after),
             RoutingDecision::Allow
         );
+    }
+
+    #[test]
+    fn positive_outcome_separates_verdict_transitions_from_refreshes() {
+        enum Prior {
+            Empty,
+            ResidentPositive,
+            ResidentNegative,
+            NegativeClearedByReprobe,
+        }
+        let rows = [
+            ("fresh insert", Prior::Empty, PositiveOutcome::Recorded),
+            (
+                "same-verdict refresh",
+                Prior::ResidentPositive,
+                PositiveOutcome::Refreshed,
+            ),
+            (
+                "resident negative",
+                Prior::ResidentNegative,
+                PositiveOutcome::SuppressedByNegative,
+            ),
+            (
+                "positive replacing a re-probe-cleared negative",
+                Prior::NegativeClearedByReprobe,
+                PositiveOutcome::Recorded,
+            ),
+        ];
+        for (name, prior, want) in rows {
+            // Arrange
+            let reg = registry();
+            let t0 = Instant::now();
+            let positive = |at| {
+                reg.observe_positive(
+                    "nick",
+                    "web_search",
+                    "openai-compat",
+                    EvidenceSource::Live,
+                    None,
+                    at,
+                )
+            };
+            let negative = || {
+                reg.observe(
+                    "nick",
+                    "web_search",
+                    "openai-compat",
+                    SignalTier::SelfIdentifying,
+                    FailurePhase::F1,
+                    EvidenceSource::Live,
+                    None,
+                    t0,
+                )
+            };
+            let now = match prior {
+                Prior::Empty => t0,
+                Prior::ResidentPositive => {
+                    positive(t0);
+                    t0 + Duration::from_secs(1)
+                }
+                Prior::ResidentNegative => {
+                    negative();
+                    t0
+                }
+                Prior::NegativeClearedByReprobe => {
+                    negative();
+                    let expired = t0 + DECAY + Duration::from_secs(1);
+                    reg.acting_negative_for("nick", "web_search", "openai-compat", expired);
+                    reg.record_probe_outcome(
+                        "nick",
+                        "web_search",
+                        "openai-compat",
+                        ProbeOutcome::Success,
+                        expired,
+                    );
+                    expired
+                }
+            };
+
+            // Act
+            let outcome = positive(now);
+
+            // Assert
+            assert_eq!(outcome, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn same_verdict_refresh_advances_the_resident_positive() {
+        // Arrange -- a resident VerifiedWorking positive.
+        let reg = registry();
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_mins(1);
+        let positive = |at| {
+            reg.observe_positive(
+                "nick",
+                "web_search",
+                "openai-compat",
+                EvidenceSource::Live,
+                None,
+                at,
+            )
+        };
+        positive(t0);
+
+        // Act
+        positive(t1);
+
+        // Assert -- unpersisted, but the in-memory entry still records the
+        // traffic, so eviction keeps preferring genuinely idle keys.
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].verdict, Verdict::VerifiedWorking);
+        assert_eq!(snap[0].observations, 2);
+        assert_eq!(snap[0].first_seen, t0);
+        assert_eq!(snap[0].last_seen, t1);
     }
 
     #[test]

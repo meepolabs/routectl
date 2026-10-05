@@ -202,3 +202,7 @@ mod tests;
 #[cfg(test)]
 #[path = "capability_lifecycle_tests.rs"]
 mod capability_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "capability_positive_window_tests.rs"]
+mod capability_positive_window_tests;
