@@ -311,6 +311,36 @@ fn refuses_an_added_column_carrying_a_default_or_a_generated_column() {
 }
 
 #[test]
+fn a_shape_refusal_message_carries_no_schema_content() {
+    // Arrange
+    let (_dir, path) = temp_db_path();
+    drop(v17_file_with(
+        &path,
+        &[
+            "provider_kind TEXT DEFAULT 'sensitive-value'",
+            "vocab_version INTEGER",
+        ],
+    ));
+
+    // Act
+    let err = downgrade_to_v16(&path).expect_err("a defaulted column is refused");
+
+    // Assert
+    let DowngradeError::NotAdditive { found } = &err else {
+        panic!("expected a shape refusal, got {err:?}");
+    };
+    assert!(
+        found
+            .iter()
+            .any(|column| column.default.as_deref() == Some("'sensitive-value'")),
+        "the programmatic shape keeps the default: {found:?}"
+    );
+    let message = err.to_string();
+    assert!(!message.contains("sensitive-value"), "{message}");
+    assert!(message.contains("a column's shape differs"), "{message}");
+}
+
+#[test]
 fn refuses_a_column_whose_constraints_differ_from_the_frozen_shape() {
     // Each row rewrites column definitions of the real v17 DDL; names and
     // declared types are unchanged, so only the constraint comparison can

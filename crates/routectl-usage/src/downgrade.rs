@@ -140,8 +140,9 @@ pub enum DowngradeError {
     /// `capability_events` is not exactly the v16 columns plus the v17
     /// additive pair -- by name, type, nullability, default, key, or hidden
     /// flag -- so stamping it v16 could hand a v16 binary a layout it does not
-    /// understand.
-    #[error("capability_events columns are not the additive v17 shape: found {found:?}")]
+    /// understand. The message names only which check failed; the columns
+    /// carry file-supplied text (defaults) and stay out of the rendering.
+    #[error("capability_events is not the additive v17 shape: {}", not_additive_reason(.found))]
     NotAdditive {
         /// The columns actually present, in physical order.
         found: Vec<ColumnShape>,
@@ -247,6 +248,15 @@ fn is_additive_v17(columns: &[ColumnShape]) -> bool {
         && columns.iter().zip(expected).all(matches_frozen)
 }
 
+/// The fixed description of why `columns` failed the additive v17 check.
+const fn not_additive_reason(columns: &[ColumnShape]) -> &'static str {
+    if columns.len() == V16_CAPABILITY_EVENTS_COLUMNS.len() + V17_ADDITIVE_COLUMNS.len() {
+        "a column's shape differs from the additive v17 shape"
+    } else {
+        "the column count differs from the additive v17 shape"
+    }
+}
+
 /// Whether one live column matches its frozen record exactly.
 fn matches_frozen((column, frozen): (&ColumnShape, &FrozenColumn)) -> bool {
     let &(name, declared_type, not_null, primary_key) = frozen;
@@ -264,7 +274,7 @@ fn capability_events_columns(conn: &Connection) -> Result<Vec<ColumnShape>, Down
     let mut stmt = conn
         .prepare(
             "SELECT name, type, \"notnull\", dflt_value, pk, hidden \
-             FROM pragma_table_xinfo('capability_events')",
+             FROM pragma_table_xinfo('capability_events') ORDER BY cid",
         )
         .map_err(classify)?;
     let rows = stmt
