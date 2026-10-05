@@ -4083,12 +4083,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/learned_replay.rs` -- the reasoning-replay learned lifecycle layered
   over the registry. Crate-internal surface: nothing here is re-exported from
   the crate root, so the whole lifecycle is reachable only from the router's
-  own dispatch arm. `ReplayLearnKey::new(state_key, provider_kind, lane
-  scheme, artifact scheme)` builds the `(scheme_tag, target_lane)` identity:
-  the lane discriminant is the configured target state key plus the lane's
-  `ReplayScheme` token and the capability key is `reasoning_replay:<artifact
-  scheme>` -- the caller-supplied model string never enters a key, so sibling
-  models on one lane share ONE learned truth. `ReplayLearnRegistry::
+  own dispatch arm. `ReplayLearnKey::new(&StateKey, provider_kind, artifact
+  scheme)` builds the `(scheme_tag, target_lane)` identity: the lane half is
+  the target's `StateKey` (`provider_entry#upstream`, shared with every other
+  learned fact) and the capability key is `reasoning_replay:<artifact
+  scheme>` -- the caller-supplied model string never enters a key, so every
+  nickname on one endpoint shares ONE learned truth. `ReplayLearnRegistry::
   admit_provisional -> Option<ReplayProbeGuard>` is the per-pair single-flight
   claim: `Some` means carry the artifacts (unknown or lapsed pair, no other
   probe outstanding), `None` means strip. The guard is the two-phase learn --

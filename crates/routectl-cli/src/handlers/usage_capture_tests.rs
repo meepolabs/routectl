@@ -843,7 +843,7 @@ async fn observe_meta_empty_capability_events_enqueues_nothing() {
 }
 
 /// A reasoning-replay learn event shaped exactly as the router's replay
-/// lifecycle emits it on commit: lane-discriminated state key, scheme-tagged
+/// lifecycle emits it on commit: the target's lane as state key, scheme-tagged
 /// capability key, self-identifying tier on a single corroborated
 /// observation. The lifecycle that PRODUCES this shape is covered by the
 /// router's own unit tests; here it is a fixture so the CLI drain is tested
@@ -852,7 +852,7 @@ fn replay_learn_event() -> routectl_router::router::CapabilityLearnEvent {
     routectl_router::router::CapabilityLearnEvent {
         persistence_generation: 1,
         incarnation: 1,
-        state_key: "lane-target#mantle".to_string(),
+        state_key: "lane-target#wire-model".to_string(),
         capability_key: "reasoning_replay:codex".to_string(),
         provider_kind: "openai-responses".to_string(),
         signal_tier: routectl_core::SignalTier::SelfIdentifying,
@@ -902,7 +902,7 @@ async fn observe_meta_drains_a_replay_negative_without_a_schema_change() {
             },
         )
         .expect("one replay row");
-    assert_eq!(lane, "lane-target#mantle");
+    assert_eq!(lane, "lane-target#wire-model");
     assert_eq!(cap_key, "reasoning_replay:codex");
     assert_eq!(verdict, "broken");
     assert_eq!(phase, "f1");

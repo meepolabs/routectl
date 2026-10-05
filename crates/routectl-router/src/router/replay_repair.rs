@@ -208,11 +208,11 @@ impl Router {
     /// Claim the carry slot for every non-portable artifact scheme the
     /// request carries toward `target`'s lane. See the module docs for the
     /// admit / proactive-strip split. Returns `None` (leaving `attempt_req`
-    /// carried as-is) when the lane is unestablished or no non-portable
-    /// artifact is present, and `None` (after stripping `attempt_req` in
-    /// place, and re-stamping the calibration estimate to match the stripped
-    /// payload) when any pair is acting-negative or already under a peer
-    /// probe.
+    /// carried as-is) when the lane is unestablished, the target has no
+    /// learned lane, or no non-portable artifact is present, and `None`
+    /// (after stripping `attempt_req` in place, and re-stamping the
+    /// calibration estimate to match the stripped payload) when any pair is
+    /// acting-negative or already under a peer probe.
     pub(super) fn plan_replay_carry<'a>(
         &'a self,
         target: &DispatchTarget,
@@ -224,6 +224,7 @@ impl Router {
         if lane == ReplayScheme::Gray {
             return None;
         }
+        let learned_lane = target.learned_lane.as_ref()?;
         let schemes = nonportable_schemes(attempt_req, lane);
         if schemes.is_empty() {
             return None;
@@ -231,7 +232,7 @@ impl Router {
         let provider_kind = target.provider_kind.unwrap_or("");
         let mut guards: Vec<ReplayProbeGuard<'a>> = Vec::with_capacity(schemes.len());
         for &scheme in &schemes {
-            let key = ReplayLearnKey::new(&target.provider_name, provider_kind, lane, scheme);
+            let key = ReplayLearnKey::new(learned_lane, provider_kind, scheme);
             match self
                 .learned_replay()
                 .admit_provisional(&key, self.registry_generation(), now)
@@ -254,7 +255,7 @@ impl Router {
                     drop(guards);
                     tracing::debug!(
                         event = "replay_admission_stale",
-                        state_key = %routectl_core::sanitize_for_log(&target.provider_name),
+                        state_key = %learned_lane.for_log(),
                         "reasoning-replay admission refused: this router predates the \
                          live capability generation"
                     );

@@ -11,12 +11,12 @@
 //! replay, which the generic registry cannot express on its own:
 //!
 //! - **Keying.** A learned replay truth is per-`(scheme_tag, target_lane)`,
-//!   never per-model. The replay validator is a property of the LANE, so
-//!   sibling models on one lane share ONE learned entry; a model-level key
-//!   would cost one learned retry per sibling to converge on a single
-//!   lane-level fact. The lane discriminant is the lane's [`ReplayScheme`]
-//!   (derived from its auth kind) plus the configured provider-level target
-//!   key -- the caller-controlled model string never enters a key.
+//!   never per-nickname. The lane is the target's [`StateKey`] -- the
+//!   egressing provider entry plus its configured upstream -- the same
+//!   identity every other learned acceptance fact keys on, so two nicknames
+//!   for one endpoint share ONE learned entry and a different upstream on
+//!   the same provider entry starts fresh. The caller-controlled model
+//!   string never enters a key.
 //! - **Two-phase learn.** The upstream rejection alone does NOT persist a
 //!   negative. It opens PROVISIONAL, request-local state; the negative is
 //!   persisted only once the stripped repair actually succeeds
@@ -56,6 +56,7 @@ use routectl_core::capability::{
 
 use crate::learned_capability::{LearnedCapabilityRegistry, NegativeState};
 use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
+use crate::state_key::StateKey;
 
 /// The outcome of asking to carry reasoning artifacts for a pair.
 ///
@@ -101,10 +102,6 @@ impl<'a> ReplayAdmission<'a> {
     }
 }
 
-/// Separator between the provider-level target key and the lane token
-/// inside a lane discriminant.
-const LANE_SEPARATOR: char = '#';
-
 /// Separator between the replay capability key and the artifact scheme
 /// token inside a learned replay capability key.
 const SCHEME_SEPARATOR: char = ':';
@@ -126,39 +123,26 @@ const fn scheme_token(scheme: ReplayScheme) -> &'static str {
 /// Identity is `(scheme_tag, target_lane)`, split across the underlying
 /// registry's two key halves:
 ///
-/// - the lane half is `<lane_state_key>#<lane scheme token>`, where
-///   `lane_state_key` is the PROVIDER-level configured target key. It is
-///   deliberately not the per-model nickname the breaker keys on: sibling
-///   models on one provider are several nicknames but ONE replay validator,
-///   and lane keying exists precisely so they converge on a single learned
-///   fact. Pinning the lane's scheme into the key means a reconfigured auth
-///   kind mints a fresh identity rather than silently inheriting a truth
-///   proven about the old lane.
-/// - the capability half is `reasoning_replay:<artifact scheme token>`, so
-///   artifacts of different provenance replayed onto one lane settle
-///   independently.
+/// - the lane half is the target's [`StateKey`] (`provider_entry#upstream`),
+///   shared with every other learned fact on that endpoint.
+/// - the capability half is `reasoning_replay:<artifact scheme token>`, the
+///   namespace identity, so artifacts of different provenance replayed onto
+///   one lane settle independently.
 ///
 /// `provider_kind` rides along because every registry call normalizes the
-/// capability key with it; it is a property of the same provider the lane
-/// key names, so it never splits the identity.
+/// capability key with it; it is a property of the same provider entry the
+/// lane names, so it never splits the identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReplayLearnKey {
-    lane_key: String,
+    lane: StateKey,
     capability_key: String,
     provider_kind: String,
 }
 
 impl ReplayLearnKey {
-    /// Build the key for replaying `artifact`-scheme reasoning onto the
-    /// `lane`-scheme lane of the provider named by `lane_state_key`.
+    /// Build the key for replaying `artifact`-scheme reasoning onto `lane`.
     #[must_use]
-    pub fn new(
-        lane_state_key: &str,
-        provider_kind: &str,
-        lane: ReplayScheme,
-        artifact: ReplayScheme,
-    ) -> Self {
-        let lane_key = format!("{lane_state_key}{LANE_SEPARATOR}{}", scheme_token(lane));
+    pub fn new(lane: &StateKey, provider_kind: &str, artifact: ReplayScheme) -> Self {
         let capability_key = format!(
             "{REASONING_REPLAY}{SCHEME_SEPARATOR}{}",
             scheme_token(artifact)
@@ -167,21 +151,19 @@ impl ReplayLearnKey {
             // Normalize once at construction so every registry call and the
             // emitted row meet on one canonical string.
             capability_key: normalize_capability_key(&capability_key, provider_kind),
-            lane_key,
+            lane: lane.clone(),
             provider_kind: provider_kind.to_string(),
         }
     }
 
-    /// The lane discriminant this entry is keyed on. Only the tests that pin
-    /// key normalization read it back out; the lifecycle itself passes the
-    /// whole key around.
-    #[cfg(test)]
-    pub fn lane_key(&self) -> &str {
-        &self.lane_key
+    /// The serialized lane this entry is keyed on.
+    fn lane_key(&self) -> &str {
+        self.lane.as_lane_key()
     }
 
-    /// The normalized capability key this entry is keyed on. Test-only for the
-    /// same reason as [`Self::lane_key`].
+    /// The normalized capability key this entry is keyed on. Only the tests
+    /// that pin key normalization read it back out; the lifecycle itself
+    /// passes the whole key around.
     #[cfg(test)]
     pub fn capability_key(&self) -> &str {
         &self.capability_key
@@ -333,7 +315,7 @@ impl ReplayLearnRegistry {
     ) -> Option<(NegativeState, u64)> {
         self.learned.negative_state_in_generation(
             generation,
-            &key.lane_key,
+            key.lane_key(),
             &key.capability_key,
             &key.provider_kind,
             now,
@@ -422,7 +404,7 @@ impl ReplayProbeGuard<'_> {
             .learned
             .observe_in_generation_with_observations(
                 self.generation,
-                &key.lane_key,
+                key.lane_key(),
                 &key.capability_key,
                 &key.provider_kind,
                 SignalTier::SelfIdentifying,
@@ -445,7 +427,7 @@ impl ReplayProbeGuard<'_> {
                 self.registry.release_slot(&key);
                 tracing::debug!(
                     event = "replay_learn_stale",
-                    state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+                    state_key = %key.lane.for_log(),
                     capability_key = %key.capability_key,
                     "reasoning-replay settlement refused: its carry predates the live \
                      capability generation"
@@ -456,7 +438,7 @@ impl ReplayProbeGuard<'_> {
                 self.registry.release_slot(&key);
                 tracing::debug!(
                     event = "replay_learn_reserved",
-                    state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+                    state_key = %key.lane.for_log(),
                     capability_key = %key.capability_key,
                     "reasoning-replay settlement refused: an operator purge holds \
                      this pair's lease"
@@ -467,7 +449,7 @@ impl ReplayProbeGuard<'_> {
                 self.registry.release_slot(&key);
                 tracing::debug!(
                     event = "replay_learn_exhausted",
-                    state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+                    state_key = %key.lane.for_log(),
                     capability_key = %key.capability_key,
                     "reasoning-replay settlement refused: the incarnation sequence \
                      is exhausted"
@@ -478,7 +460,7 @@ impl ReplayProbeGuard<'_> {
         self.registry.release_slot(&key);
         tracing::info!(
             event = "replay_learn_commit",
-            state_key = %routectl_core::sanitize_for_log(&key.lane_key),
+            state_key = %key.lane.for_log(),
             capability_key = %key.capability_key,
             upstream_status,
             observations,
@@ -487,7 +469,7 @@ impl ReplayProbeGuard<'_> {
         Some(CapabilityLearnEvent {
             persistence_generation,
             incarnation,
-            state_key: key.lane_key,
+            state_key: key.lane_key().to_string(),
             capability_key: key.capability_key,
             provider_kind: key.provider_kind,
             signal_tier: SignalTier::SelfIdentifying,
@@ -517,7 +499,7 @@ impl ReplayProbeGuard<'_> {
         self.settled = true;
         let removed = self.registry.learned.remove_keyed_in_generation(
             self.generation,
-            &self.key.lane_key,
+            self.key.lane_key(),
             &self.key.capability_key,
             &self.key.provider_kind,
         );
@@ -534,7 +516,7 @@ impl ReplayProbeGuard<'_> {
                 self.registry.release_slot(&self.key);
                 tracing::debug!(
                     event = "replay_clear_stale",
-                    state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+                    state_key = %self.key.lane.for_log(),
                     capability_key = %self.key.capability_key,
                     "reasoning-replay clear refused: its carry predates the live \
                      capability generation"
@@ -545,7 +527,7 @@ impl ReplayProbeGuard<'_> {
                 self.registry.release_slot(&self.key);
                 tracing::debug!(
                     event = "replay_clear_reserved",
-                    state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+                    state_key = %self.key.lane.for_log(),
                     capability_key = %self.key.capability_key,
                     "reasoning-replay clear refused: an operator purge holds this \
                      pair's lease"
@@ -556,7 +538,7 @@ impl ReplayProbeGuard<'_> {
                 self.registry.release_slot(&self.key);
                 tracing::debug!(
                     event = "replay_clear_exhausted",
-                    state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+                    state_key = %self.key.lane.for_log(),
                     capability_key = %self.key.capability_key,
                     "reasoning-replay clear refused: the incarnation sequence is \
                      exhausted"
@@ -570,14 +552,14 @@ impl ReplayProbeGuard<'_> {
         }
         tracing::info!(
             event = "replay_learn_clear",
-            state_key = %routectl_core::sanitize_for_log(&self.key.lane_key),
+            state_key = %self.key.lane.for_log(),
             capability_key = %self.key.capability_key,
             "lapsed reasoning-replay negative cleared by a successful carry",
         );
         Some(CapabilityClearedEvent {
             persistence_generation,
             incarnation,
-            state_key: self.key.lane_key.clone(),
+            state_key: self.key.lane_key().to_string(),
             capability_key: self.key.capability_key.clone(),
             provider_kind: self.key.provider_kind.clone(),
         })

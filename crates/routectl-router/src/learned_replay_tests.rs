@@ -20,11 +20,16 @@ fn registry() -> Arc<ReplayLearnRegistry> {
     )))
 }
 
-fn key(state_key: &str) -> ReplayLearnKey {
+const UPSTREAM: &str = "wire-model";
+
+fn lane(provider_entry: &str, upstream: &str) -> StateKey {
+    StateKey::new(provider_entry, upstream).expect("a separator-free provider entry")
+}
+
+fn key(provider_entry: &str) -> ReplayLearnKey {
     ReplayLearnKey::new(
-        state_key,
+        &lane(provider_entry, UPSTREAM),
         PROVIDER,
-        ReplayScheme::Mantle,
         ReplayScheme::Codex,
     )
 }
@@ -67,23 +72,26 @@ fn distinct_lanes_and_artifact_schemes_are_distinct_entries() {
     // Arrange
     let reg = registry();
     let t0 = Instant::now();
-    let onto_mantle = ReplayLearnKey::new("t", PROVIDER, ReplayScheme::Mantle, ReplayScheme::Codex);
-    let onto_codex = ReplayLearnKey::new("t", PROVIDER, ReplayScheme::Codex, ReplayScheme::Codex);
-    let other_artifact =
-        ReplayLearnKey::new("t", PROVIDER, ReplayScheme::Mantle, ReplayScheme::Mantle);
+    let learned = ReplayLearnKey::new(&lane("t", UPSTREAM), PROVIDER, ReplayScheme::Codex);
+    let other_upstream =
+        ReplayLearnKey::new(&lane("t", "other-wire"), PROVIDER, ReplayScheme::Codex);
+    let other_entry = ReplayLearnKey::new(&lane("u", UPSTREAM), PROVIDER, ReplayScheme::Codex);
+    let other_artifact = ReplayLearnKey::new(&lane("t", UPSTREAM), PROVIDER, ReplayScheme::Mantle);
 
-    // Act -- learn the codex-onto-mantle pair only.
+    // Act -- learn the codex pair on one lane only.
     let _ = reg
-        .admit_provisional(&onto_mantle, 1, t0)
+        .admit_provisional(&learned, 1, t0)
         .admitted()
         .expect("unknown pair admits")
         .commit(400, vec![], t0)
         .expect("a live commit emits its row");
 
-    // Assert -- neither the other lane nor the other artifact scheme
+    // Assert -- neither another upstream on the same provider entry, another
+    // provider entry on the same upstream, nor another artifact scheme
     // inherits that truth.
-    assert!(reg.is_negative_acting(&onto_mantle, t0));
-    assert!(!reg.is_negative_acting(&onto_codex, t0));
+    assert!(reg.is_negative_acting(&learned, t0));
+    assert!(!reg.is_negative_acting(&other_upstream, t0));
+    assert!(!reg.is_negative_acting(&other_entry, t0));
     assert!(!reg.is_negative_acting(&other_artifact, t0));
 }
 
@@ -353,7 +361,7 @@ fn the_emission_row_carries_no_body_blob_or_artifact_id() {
 
     // Assert -- every string field is a normalized key or a closed-set
     // token; the row has no field that could hold an artifact at all.
-    assert_eq!(event.state_key, "prod-lane#mantle");
+    assert_eq!(event.state_key, "prod-lane#wire-model");
     assert_eq!(event.capability_key, "reasoning_replay:codex");
     assert_eq!(event.provider_kind, PROVIDER);
     assert_eq!(event.request_features, vec!["reasoning_replay".to_string()]);
@@ -362,18 +370,17 @@ fn the_emission_row_carries_no_body_blob_or_artifact_id() {
 }
 
 #[test]
-fn the_key_never_embeds_the_caller_supplied_model_string() {
-    // Arrange -- the same lane, reached while the caller asked for two
-    // different models. The lifecycle is never handed the model string, so
-    // the identity cannot vary with it.
-    let lane_scheme = ReplayScheme::Mantle;
-    let artifact = ReplayScheme::Codex;
+fn the_key_is_the_target_lane_and_the_artifact_scheme_only() {
+    // Arrange -- the lifecycle is handed the target's lane, never the
+    // caller's model string, so the identity cannot vary with it.
+    let target_lane = lane("configured-entry", "configured-upstream");
 
     // Act
-    let k = ReplayLearnKey::new("configured-target", PROVIDER, lane_scheme, artifact);
+    let k = ReplayLearnKey::new(&target_lane, PROVIDER, ReplayScheme::Codex);
 
-    // Assert
-    assert_eq!(k.lane_key(), "configured-target#mantle");
+    // Assert -- the lane half is the serialized StateKey verbatim: no lane
+    // scheme token is appended to it.
+    assert_eq!(k.lane_key(), "configured-entry#configured-upstream");
     assert_eq!(k.capability_key(), "reasoning_replay:codex");
 }
 

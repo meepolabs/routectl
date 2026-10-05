@@ -35,6 +35,9 @@ impl ReasoningDialect {
     /// continuation logic.
     pub const fn format_tag(self) -> &'static str {
         match self {
+            // Deliberately the Gray-mapped compatibility tag: no lane-faithful
+            // tag is proven for this dialect, so its artifacts ride the
+            // learned replay ladder instead of a hand-encoded carry/strip rule.
             Self::OpenAi => "openai-responses-v1",
             Self::DeepSeek => "deepseek-v1",
             Self::Vllm => "vllm-reasoning-v1",

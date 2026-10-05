@@ -421,6 +421,75 @@ async fn persisted_negative_strips_proactively_with_no_carried_attempt() {
     );
 }
 
+/// Three nicknames on one provider entry: `m1` and `m2` share the upstream
+/// `wire-model`, `m3` sends `wire-other`. Each has its own mock so per-lane
+/// call counts are independent.
+fn router_sharing_one_provider(
+    m1: Arc<dyn Provider>,
+    m2: Arc<dyn Provider>,
+    m3: Arc<dyn Provider>,
+) -> Router {
+    let config: Config = toml::from_str(SINGLE_TARGET_TOML).expect("valid test toml");
+    let mut router = Router::new(Arc::new(config));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for (nickname, provider, upstream) in [
+        ("m1", m1, "wire-model"),
+        ("m2", m2, "wire-model"),
+        ("m3", m3, "wire-other"),
+    ] {
+        models.insert(
+            nickname.to_string(),
+            Arc::new(ResolvedModel::new(nickname, "p1", provider, upstream)),
+        );
+    }
+    router.install_resolved_models(models);
+    router
+}
+
+fn req_for(model: &str, format: &str) -> ChatRequest {
+    ChatRequest {
+        model: model.into(),
+        messages: vec![assistant_with_artifact(format)].into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_replay_negative_is_shared_by_nicknames_on_one_upstream_and_no_other() {
+    // Arrange -- `m1` learns the negative through a stripped repair.
+    let m1 = Arc::new(ReplayMockProvider::new());
+    let m2 = Arc::new(ReplayMockProvider::new());
+    let m3 = Arc::new(ReplayMockProvider::new());
+    let router = router_sharing_one_provider(
+        m1.clone() as Arc<dyn Provider>,
+        m2.clone() as Arc<dyn Provider>,
+        m3.clone() as Arc<dyn Provider>,
+    );
+    let learned = router.complete(req_for("m1", CODEX_OAUTH)).await;
+    assert!(learned.is_ok(), "the stripped repair commits the negative");
+    assert_eq!(m1.calls.load(Ordering::SeqCst), 2);
+
+    // Act
+    let same_upstream = router.complete(req_for("m2", CODEX_OAUTH)).await;
+    let other_upstream = router.complete(req_for("m3", CODEX_OAUTH)).await;
+
+    // Assert -- `m2` reads the negative `m1` learned and strips proactively:
+    // one call, no carried attempt. `m3` is the same provider entry on a
+    // different upstream, so it is a different lane and carries again.
+    assert!(same_upstream.is_ok());
+    assert_eq!(
+        m2.calls.load(Ordering::SeqCst),
+        1,
+        "a second nickname on the learned lane strips without a carry",
+    );
+    assert!(other_upstream.is_ok());
+    assert_eq!(
+        m3.calls.load(Ordering::SeqCst),
+        2,
+        "another upstream on the same provider entry learns for itself",
+    );
+}
+
 #[tokio::test]
 async fn ambiguous_tag_toward_mantle_is_stripped_by_the_ladder() {
     // SECURITY: an artifact whose ambiguous compatibility tag claims nothing
