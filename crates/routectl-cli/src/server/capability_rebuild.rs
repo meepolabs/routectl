@@ -20,18 +20,28 @@
 //!
 //! A tombstone row marks the correctness boundary: only a tombstone whose
 //! stamped revision matches this boot's catalog / overlay revision replays
-//! the post-boundary slice. Every other outcome fails closed -- replay
-//! nothing AND enqueue exactly one fresh tombstone stamped this boot's
-//! revision so this session's later events sit after a valid boundary:
+//! the post-boundary slice. A tombstone stamped a DIFFERENT revision moves
+//! the boundary the same way a revision-changing reload does: the slice after
+//! the stale tombstone is replayed through `should_replay` against this
+//! boot's revision (catalog-scoped rows of another revision drop,
+//! catalog-independent rows survive), and the survivors are restated past a
+//! fresh tombstone in one atomic batch built by
+//! `capability_boundary::boundary_batch`, the same builder the reload
+//! uses. Every other outcome fails closed -- replay nothing AND commit exactly
+//! one fresh tombstone stamped this boot's revision so this session's later
+//! events sit after a valid boundary:
 //!   * no ledger yet (`Cold`), or an unreadable / version-too-new ledger;
-//!   * a ledger with no tombstone at all;
-//!   * a tombstone whose stamped revision differs from this boot's.
+//!   * a ledger with no tombstone at all.
 
 use std::path::Path;
 
-use routectl_router::{CapabilityRebuildSummary, Router};
+use routectl_router::{
+    CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary,
+    LearnedCapabilityRegistry, ReplayTombstone, Router, rebuild_capabilities_into,
+};
 use routectl_usage::{BatchCommit, CapabilityEvent, UsageHandle};
 
+use super::capability_boundary::boundary_batch;
 use super::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, REBUILD_ROW_LIMIT, classify_boundary, epoch_ms_now,
 };
@@ -43,8 +53,10 @@ use super::ledger_reader::{
 /// classifies the ledger's tombstone boundary
 /// ([`super::ledger_reader::classify_boundary`]), and either replays the
 /// post-boundary slice through [`Router::rebuild_learned_from_ledger`] (on a
-/// matching tombstone) or logs the case and enqueues one fresh tombstone
-/// through `usage` (every fail-closed case). Never fails bootstrap.
+/// matching tombstone), restates the surviving verdicts past a fresh boundary
+/// (on a stale-revision tombstone, see `restate_survivors_past_new_boundary`),
+/// or logs the case and commits one fresh tombstone through `usage` (every
+/// fail-closed case). Never fails bootstrap.
 ///
 /// Unlike its sibling warms this one does NOT run its own migrating open:
 /// doing so would open a second read-write connection against the SAME file
@@ -71,6 +83,15 @@ pub(crate) fn warm_capability_registry_from_ledger(
             let summary = router.rebuild_learned_from_ledger(&reader);
             emit_rebuild_log(&summary, reader.loaded_rows());
         }
+        BoundaryOutcome::RevisionMismatch { stale_rowid } => {
+            tracing::info!(
+                catalog_version,
+                overlay_revision,
+                "capability tombstone revision differs from this boot; \
+                 restating catalog-independent verdicts past a fresh tombstone"
+            );
+            restate_survivors_past_new_boundary(db_path, router, usage, stale_rowid);
+        }
         outcome => {
             log_fail_closed(&outcome, db_path, catalog_version, overlay_revision);
             commit_fresh_tombstone(usage, catalog_version, overlay_revision);
@@ -80,8 +101,7 @@ pub(crate) fn warm_capability_registry_from_ledger(
 
 /// Log the fail-closed classification at the level its case warrants and no
 /// higher: a cold ledger and an absent tombstone are the ordinary cold-start
-/// shapes (debug), a revision mismatch is an expected post-reload / upgrade
-/// transition (info), and only a genuinely unreadable ledger is a WARN.
+/// shapes (debug), and only a genuinely unreadable ledger is a WARN.
 fn log_fail_closed(
     outcome: &BoundaryOutcome,
     db_path: &Path,
@@ -89,9 +109,9 @@ fn log_fail_closed(
     overlay_revision: u64,
 ) {
     match outcome {
-        // Unreachable in practice (the caller replays this case), listed for
-        // exhaustiveness.
-        BoundaryOutcome::Replay(_) => {}
+        // Unreachable in practice (the caller replays or restates these
+        // cases), listed for exhaustiveness.
+        BoundaryOutcome::Replay(_) | BoundaryOutcome::RevisionMismatch { .. } => {}
         BoundaryOutcome::Cold => tracing::debug!(
             db_path = %db_path.display(),
             "no usage ledger yet; capability warm fails closed to a fresh tombstone (cold start)"
@@ -101,18 +121,96 @@ fn log_fail_closed(
             overlay_revision,
             "no capability tombstone in the ledger; failing closed and writing a fresh one"
         ),
-        BoundaryOutcome::RevisionMismatch => tracing::info!(
-            catalog_version,
-            overlay_revision,
-            "capability tombstone revision differs from this boot; \
-             failing closed and writing a fresh tombstone"
-        ),
         BoundaryOutcome::Unreadable(class) => tracing::warn!(
             db_path = %db_path.display(),
             reason = class,
             "usage ledger not readable during capability startup warm; \
              leaving registry empty and writing a fresh tombstone"
         ),
+    }
+}
+
+/// Move the replay boundary from a stale-revision tombstone to this boot's
+/// revision WITHOUT evicting the verdicts that survive a revision change.
+///
+/// The slice after the stale tombstone is read once and replayed into a
+/// scratch registry under a boundary descriptor stamped THIS boot's revision,
+/// so `should_replay` drops catalog-scoped rows of any other revision and
+/// keeps the catalog-independent ones. Every entry the scratch replay leaves
+/// resident is restated, after a fresh tombstone, in one acknowledged atomic
+/// batch.
+///
+/// The live registry is populated only once that batch commits, by replaying
+/// the same rows into it. On any failure nothing is committed and the live
+/// registry stays empty: installing verdicts whose restatement never became
+/// durable would let them act now and vanish at the next restart, and a bare
+/// tombstone would evict them outright. The stale tombstone stays the newest
+/// boundary, so the next boot retries this same restatement, and rows this
+/// session appends at its own revision still replay through `should_replay`.
+fn restate_survivors_past_new_boundary(
+    db_path: &Path,
+    router: &Router,
+    usage: &UsageHandle,
+    stale_rowid: i64,
+) {
+    let catalog_version = router.catalog_version();
+    let overlay_revision = router.overlay_revision();
+    let boundary = ReplayTombstone::new(stale_rowid, catalog_version, overlay_revision);
+    let reader = LedgerCapabilityReader::new(db_path.to_path_buf(), boundary);
+    let slice = SliceReader {
+        tombstone: boundary,
+        rows: reader.read_events(),
+    };
+
+    let live = router.learned_registry();
+    let scratch =
+        LearnedCapabilityRegistry::new(live.decay(), live.inferred_window(), live.max_entries());
+    let _ = rebuild_capabilities_into(&slice, &scratch);
+    let survivors = scratch.snapshot();
+    let batch = boundary_batch(
+        &survivors,
+        epoch_ms_now(),
+        catalog_version,
+        overlay_revision,
+    );
+
+    match usage.commit_capability_events_blocking(batch, live.generation()) {
+        BatchCommit::Committed { .. } => {
+            let summary = router.rebuild_learned_from_ledger(&slice);
+            tracing::info!(
+                catalog_version,
+                overlay_revision,
+                restated_survivors = survivors.len(),
+                "committed fresh capability tombstone at boot with survivor restatements"
+            );
+            emit_rebuild_log(&summary, reader.loaded_rows());
+        }
+        failure => tracing::error!(
+            catalog_version,
+            overlay_revision,
+            pending_survivors = survivors.len(),
+            reason = ?failure,
+            "capability boot boundary NOT committed; registry left empty and the stale \
+             tombstone kept so the next boot retries the restatement"
+        ),
+    }
+}
+
+/// The stale-boundary slice, read from the ledger once and served to both
+/// replays, so the scratch replay that decides the restatement and the live
+/// replay after it consume identical rows.
+struct SliceReader {
+    tombstone: ReplayTombstone,
+    rows: Vec<CapabilityEventRow>,
+}
+
+impl CapabilityLedgerReader for SliceReader {
+    fn tombstone(&self) -> Option<ReplayTombstone> {
+        Some(self.tombstone)
+    }
+
+    fn read_events(&self) -> Vec<CapabilityEventRow> {
+        self.rows.clone()
     }
 }
 

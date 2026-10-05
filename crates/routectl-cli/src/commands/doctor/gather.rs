@@ -300,7 +300,7 @@ pub(super) fn gather_capability_matrix(
         }
         BoundaryOutcome::Cold => CapabilityMatrixSource::Unavailable("no_data"),
         BoundaryOutcome::NoTombstone => CapabilityMatrixSource::Unavailable("no_tombstone"),
-        BoundaryOutcome::RevisionMismatch => {
+        BoundaryOutcome::RevisionMismatch { .. } => {
             CapabilityMatrixSource::Unavailable("revision_mismatch")
         }
         BoundaryOutcome::Unreadable(code) => CapabilityMatrixSource::Unavailable(code),

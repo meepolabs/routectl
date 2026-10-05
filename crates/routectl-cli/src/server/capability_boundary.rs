@@ -39,7 +39,7 @@
 
 use std::sync::Arc;
 
-use routectl_router::{LearnedCapabilityRegistry, Router};
+use routectl_router::{LearnedCapabilityRegistry, LearnedRegistryEntry, Router};
 use routectl_usage::{BatchCommit, BatchReceipt, CapabilityEvent, UsageHandle};
 
 /// The outcome of committing a reload's replay boundary.
@@ -104,79 +104,13 @@ pub(crate) fn admit_capability_boundary(
     let registry = Arc::clone(router.learned_registry());
 
     let now_ms = super::ledger_reader::epoch_ms_now();
-    let signed_catalog = i64::from(catalog_version);
-    let signed_overlay = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
 
     // The registry DERIVES the generation this batch establishes, under its own
     // guard, and hands it to the closure. Computing it out here would race a
     // concurrent commit landing between the read and the cut.
     let cut = registry.with_boundary_cut(
         |survivors, pending_generation| {
-            let mut batch = Vec::with_capacity(survivors.len() + 1);
-            batch.push(CapabilityEvent::tombstone(
-                now_ms,
-                signed_catalog,
-                signed_overlay,
-            ));
-            for survivor in survivors {
-                // An INFERRED negative acts only once corroborated, and its
-                // corroborating observation must arrive INSIDE the inferred
-                // window -- a later one RESETS the entry to a fresh pending
-                // observation instead. That makes the row timestamps
-                // load-bearing:
-                //
-                //  - 1 observation (pending): one row at `last_seen`.
-                //  - exactly 2 (corroborated): rows at `first_seen` and
-                //    `last_seen`, which are inside the window by construction,
-                //    since that is how the entry became corroborated.
-                //  - more than 2 (corroborated, then reconfirmed later):
-                //    `last_seen` may be far past the window, so a
-                //    first_seen/last_seen pair replays the second row as TOO LATE
-                //    and resets the entry to pending -- resident but silently not
-                //    acting. Corroborate at `first_seen` TWICE so that pair lands
-                //    inside the window, then reconfirm at `last_seen`, which an
-                //    already-acting entry accepts.
-                //
-                // Bounded at three either way: replay only needs to cross the
-                // acts-or-not threshold and land the current decay stamp, so no
-                // further history is emitted.
-                let inferred = matches!(
-                    survivor.signal_tier,
-                    routectl_core::capability::SignalTier::Inferred
-                );
-                let observed_at: &[std::time::Instant] = if !inferred || survivor.observations < 2 {
-                    &[survivor.last_seen]
-                } else if survivor.observations == 2 {
-                    &[survivor.first_seen, survivor.last_seen]
-                } else {
-                    &[survivor.first_seen, survivor.first_seen, survivor.last_seen]
-                };
-                for &observed in observed_at {
-                    batch.push(CapabilityEvent {
-                        // Stamped from the entry's own age, not from this reload: a
-                        // restatement must not reset the decay clock.
-                        ts: now_ms.saturating_sub(
-                            i64::try_from(observed.elapsed().as_millis()).unwrap_or(i64::MAX),
-                        ),
-                        lane_key: survivor.state_key.clone(),
-                        capability: survivor.feature_key.clone(),
-                        verdict: survivor.verdict.as_str().to_string(),
-                        phase: survivor.phase.as_str().to_string(),
-                        source: survivor.source.as_str().to_string(),
-                        tier: survivor.signal_tier.as_str().to_string(),
-                        // Carried verbatim: the rebuild fails closed on a `verified` /
-                        // `suspect` row without a recognized class, so omitting it
-                        // would make the next boot skip the row and evict the verdict.
-                        evidence_class: survivor.evidence_class.clone(),
-                        upstream_token: None,
-                        // Stamped truthfully with the POST-reload revision: the row is
-                        // appended now, under this revision. The read side decides
-                        // relevance per key class; no sentinel stamp is involved.
-                        catalog_version: signed_catalog,
-                        overlay_revision: signed_overlay,
-                    });
-                }
-            }
+            let batch = boundary_batch(survivors, now_ms, catalog_version, overlay_revision);
             // Admission only -- non-blocking, so no lock is held across I/O. The
             // registry installs the pending generation itself, inside this same
             // ordered acquisition, when the admission below reports success.
@@ -234,6 +168,89 @@ pub(crate) fn admit_capability_boundary(
             Err(failure)
         }
     }
+}
+
+/// The atomic boundary batch: one tombstone stamped `catalog_version` /
+/// `overlay_revision`, then a restatement of every entry in `survivors`.
+///
+/// The single owner of how a surviving verdict is re-appended past a new
+/// boundary, for every caller that moves one. `now_ms` is the wall-clock
+/// instant the batch is built at; each restated row is stamped from its
+/// entry's own age relative to it.
+pub(crate) fn boundary_batch(
+    survivors: &[LearnedRegistryEntry],
+    now_ms: i64,
+    catalog_version: u32,
+    overlay_revision: u64,
+) -> Vec<CapabilityEvent> {
+    let signed_catalog = i64::from(catalog_version);
+    let signed_overlay = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
+    let mut batch = Vec::with_capacity(survivors.len() + 1);
+    batch.push(CapabilityEvent::tombstone(
+        now_ms,
+        signed_catalog,
+        signed_overlay,
+    ));
+    for survivor in survivors {
+        // An INFERRED negative acts only once corroborated, and its
+        // corroborating observation must arrive INSIDE the inferred
+        // window -- a later one RESETS the entry to a fresh pending
+        // observation instead. That makes the row timestamps
+        // load-bearing:
+        //
+        //  - 1 observation (pending): one row at `last_seen`.
+        //  - exactly 2 (corroborated): rows at `first_seen` and
+        //    `last_seen`, which are inside the window by construction,
+        //    since that is how the entry became corroborated.
+        //  - more than 2 (corroborated, then reconfirmed later):
+        //    `last_seen` may be far past the window, so a
+        //    first_seen/last_seen pair replays the second row as TOO LATE
+        //    and resets the entry to pending -- resident but silently not
+        //    acting. Corroborate at `first_seen` TWICE so that pair lands
+        //    inside the window, then reconfirm at `last_seen`, which an
+        //    already-acting entry accepts.
+        //
+        // Bounded at three either way: replay only needs to cross the
+        // acts-or-not threshold and land the current decay stamp, so no
+        // further history is emitted.
+        let inferred = matches!(
+            survivor.signal_tier,
+            routectl_core::capability::SignalTier::Inferred
+        );
+        let observed_at: &[std::time::Instant] = if !inferred || survivor.observations < 2 {
+            &[survivor.last_seen]
+        } else if survivor.observations == 2 {
+            &[survivor.first_seen, survivor.last_seen]
+        } else {
+            &[survivor.first_seen, survivor.first_seen, survivor.last_seen]
+        };
+        for &observed in observed_at {
+            batch.push(CapabilityEvent {
+                // Stamped from the entry's own age, not from this reload: a
+                // restatement must not reset the decay clock.
+                ts: now_ms.saturating_sub(
+                    i64::try_from(observed.elapsed().as_millis()).unwrap_or(i64::MAX),
+                ),
+                lane_key: survivor.state_key.clone(),
+                capability: survivor.feature_key.clone(),
+                verdict: survivor.verdict.as_str().to_string(),
+                phase: survivor.phase.as_str().to_string(),
+                source: survivor.source.as_str().to_string(),
+                tier: survivor.signal_tier.as_str().to_string(),
+                // Carried verbatim: the rebuild fails closed on a `verified` /
+                // `suspect` row without a recognized class, so omitting it
+                // would make the next boot skip the row and evict the verdict.
+                evidence_class: survivor.evidence_class.clone(),
+                upstream_token: None,
+                // Stamped truthfully with the POST-reload revision: the row is
+                // appended now, under this revision. The read side decides
+                // relevance per key class; no sentinel stamp is involved.
+                catalog_version: signed_catalog,
+                overlay_revision: signed_overlay,
+            });
+        }
+    }
+    batch
 }
 
 impl AdmittedBoundary {

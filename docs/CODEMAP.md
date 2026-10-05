@@ -5636,7 +5636,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   NEWEST tombstone: moving the boundary without re-appending the survivors
   leaves them acting for this process's life and gone at the next restart. Each
   restatement is stamped from the entry's own `last_seen`, never the reload
-  instant, so a reload never extends a verdict's decay life. `Failed` or
+  instant, so a reload never extends a verdict's decay life. The tombstone-plus-
+  restatement rows are built by `boundary_batch`, shared with the boot
+  revision-mismatch path in `capability_rebuild.rs`. `Failed` or
   `Abandoned` makes `handle_config_reload` reject the reload and keep the
   previous router live, with generation, registry and published Router
   untouched. Tests in the `#[path]`-included `capability_boundary_tests.rs` drive the
@@ -5648,9 +5650,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   never on hot-reload) classifies the boundary via
   `ledger_reader::classify_boundary` and either replays the post-boundary
   slice through `Router::rebuild_learned_from_ledger` (matching-revision
-  tombstone) or fails closed: `log_fail_closed` logs the case at its warranted
-  level (debug for a cold ledger / absent tombstone, info for a revision
-  mismatch, WARN only for a genuinely unreadable ledger) and
+  tombstone), restates survivors on a stale-revision tombstone, or fails
+  closed. `restate_survivors_past_new_boundary` (revision mismatch) replays
+  the slice after the STALE tombstone into a scratch registry under this
+  boot's revision (`should_replay` drops catalog-scoped rows, keeps
+  catalog-independent ones), commits `capability_boundary::boundary_batch`
+  (fresh tombstone + restatements) atomically, and only on commit replays
+  the same rows into the live registry; on failure nothing is committed and
+  the registry stays empty. `log_fail_closed` logs the remaining cases at
+  their warranted level (debug for a cold ledger / absent tombstone, WARN
+  only for a genuinely unreadable ledger) and
   `commit_fresh_tombstone` commits exactly one fresh tombstone stamped this
   boot's revision through the ACKNOWLEDGED batch path -- not best-effort and
   not gated on `usage.enabled`, because a boot that left a stale-revision
@@ -5678,8 +5687,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   read cap, and `epoch_ms_now` (shared with the hot-reload tombstone seam).
   `classify_boundary(db_path, catalog_version, overlay_revision) ->
   BoundaryOutcome` resolves the tombstone boundary read-only and PURELY -- no
-  logging, no writes -- into `Replay | Cold | NoTombstone | RevisionMismatch |
-  Unreadable(class)` so each caller applies its own reaction.
+  logging, no writes -- into `Replay | Cold | NoTombstone |
+  RevisionMismatch{stale_rowid} | Unreadable(class)` so each caller applies
+  its own reaction.
   `open_error_class` maps a usage-DB `OpenError` to a fixed path-free class
   token (a new variant is a compile error; reused by `doctor_panels.rs`; see
   the function's own doc comment for the `version_too_old` / `expected` split).

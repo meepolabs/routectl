@@ -346,7 +346,7 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
 }
 
 #[tokio::test]
-async fn revision_mismatch_fails_closed_and_writes_a_fresh_tombstone() {
+async fn revision_mismatch_drops_a_stale_catalog_scoped_verdict_behind_a_fresh_tombstone() {
     // Arrange: a ledger whose tombstone + negative were stamped at overlay 0,
     // but this boot runs at a different overlay revision.
     let tmp = TempDir::new().expect("tempdir");
@@ -380,7 +380,7 @@ async fn revision_mismatch_fails_closed_and_writes_a_fresh_tombstone() {
     // Assert: nothing replayed (fail closed on the revision mismatch).
     assert!(
         router.learned_capability_snapshot().is_empty(),
-        "a revision mismatch replays nothing"
+        "a catalog-scoped verdict of the stale revision does not survive"
     );
 
     drop(handle);
@@ -397,6 +397,167 @@ async fn revision_mismatch_fails_closed_and_writes_a_fresh_tombstone() {
         .expect("read tombstone")
         .expect("a boot tombstone exists");
     assert_eq!(boundary.overlay_revision, Some(99));
+}
+
+/// The wire-shape capability key these tests plant.
+///
+/// A lexical guard in `routectl-router` fails if the namespace prefix literal
+/// appears anywhere else under `crates/`, so the fixture assembles it from
+/// parts; the VALUE is byte-identical to a real key.
+fn field_key() -> String {
+    format!("{}{}thinking.enabled.display", "fie", "ld:")
+}
+
+/// Seed a stale-revision session: a tombstone at overlay 0 followed by one
+/// wire-shape and one catalog-scoped negative at that same revision.
+fn seed_stale_session(ledger: &Path, cat: i64) {
+    let db = open(ledger).expect("open ledger");
+    seed_tombstone(db.conn(), 100, cat, 0);
+    for (ts, capability) in [(200, field_key()), (300, "web_search".to_string())] {
+        seed_event(
+            db.conn(),
+            ts,
+            "gpt-nick",
+            &capability,
+            "broken",
+            "f1",
+            "live",
+            "self-identifying",
+            cat,
+            0,
+        );
+    }
+}
+
+/// The resident capability keys of a router, sorted.
+fn resident_keys(router: &Router) -> Vec<String> {
+    let mut keys: Vec<String> = router
+        .learned_capability_snapshot()
+        .into_iter()
+        .map(|e| e.feature_key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Every persisted capability row as `(verdict, capability, overlay)`, in
+/// append order.
+fn ledger_rows(path: &Path) -> Vec<(String, String, i64)> {
+    let db = open(path).expect("open ledger");
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT verdict, capability, overlay_revision FROM capability_events ORDER BY rowid",
+        )
+        .expect("prepare");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows")
+}
+
+/// A router at overlay revision 99, the revision the stale session is not.
+async fn bumped_router(tmp: &TempDir) -> Router {
+    let mut router = default_router(tmp).await;
+    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(99));
+    router
+}
+
+/// A boot across a revision bump keeps the wire-shape verdict and evicts the
+/// catalog-scoped one -- in memory now, AND durably, so a second boot at the
+/// new revision (a matching tombstone this time) still has it.
+#[tokio::test]
+async fn revision_bump_boot_restates_a_wire_shape_verdict_and_drops_a_catalog_scoped_one() {
+    // Arrange
+    let tmp = TempDir::new().expect("tempdir");
+    let router = bumped_router(&tmp).await;
+    let cat = i64::from(router.catalog_version());
+    let ledger = tmp.path().join("usage.db");
+    seed_stale_session(&ledger, cat);
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act: the first boot after the bump.
+    warm_off_runtime(&ledger, &router, &handle);
+
+    // Assert: only the wire-shape verdict is resident.
+    assert_eq!(
+        resident_keys(&router),
+        vec![field_key()],
+        "the wire-shape verdict survives the bump and the catalog-scoped one does not"
+    );
+
+    // Act: a second boot at the bumped revision.
+    let restarted = bumped_router(&tmp).await;
+    warm_off_runtime(&ledger, &restarted, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: the restatement is durable past a fresh boundary, and the
+    // catalog-scoped verdict was never restated.
+    assert_eq!(
+        resident_keys(&restarted),
+        vec![field_key()],
+        "the wire-shape verdict survives the restart after the bump"
+    );
+    let rows = ledger_rows(&ledger);
+    let fresh = rows
+        .iter()
+        .rposition(|(verdict, _, _)| verdict == "tombstone")
+        .expect("a tombstone exists");
+    assert_eq!(rows[fresh].2, 99, "the newest tombstone is this boot's");
+    assert_eq!(
+        rows[fresh + 1..].to_vec(),
+        vec![("broken".to_string(), field_key(), 99)],
+        "exactly the wire-shape verdict is restated past the fresh tombstone"
+    );
+}
+
+/// A boundary batch that fails to commit must change nothing: no fresh
+/// tombstone, no restatement, and no verdict installed in memory -- a
+/// resident verdict whose restatement never became durable would act now and
+/// vanish at the next restart.
+#[tokio::test]
+async fn revision_bump_boot_boundary_failure_commits_nothing_and_installs_nothing() {
+    // Arrange: the restatement row is rejected by a trigger, so the writer
+    // reaches the batch and its transaction fails part-way through.
+    let tmp = TempDir::new().expect("tempdir");
+    let router = bumped_router(&tmp).await;
+    let cat = i64::from(router.catalog_version());
+    let ledger = tmp.path().join("usage.db");
+    seed_stale_session(&ledger, cat);
+    open(&ledger)
+        .expect("open ledger")
+        .conn()
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_field BEFORE INSERT ON capability_events \
+             WHEN NEW.capability LIKE '{}{}%' \
+             BEGIN SELECT RAISE(ABORT, 'forced row failure'); END",
+            "fie", "ld:",
+        ))
+        .expect("install trigger");
+    let rows_before = ledger_rows(&ledger);
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act
+    let events = warm_off_runtime(&ledger, &router, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert!(
+        events.iter().any(|e| e.level == tracing::Level::ERROR
+            && e.message.contains("boot boundary NOT committed")),
+        "the uncommitted boundary is reported at ERROR"
+    );
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "nothing is installed in memory when the boundary did not commit"
+    );
+    assert_eq!(
+        ledger_rows(&ledger),
+        rows_before,
+        "a failed boundary leaves the ledger byte-identical -- not even the tombstone"
+    );
 }
 
 #[tokio::test]

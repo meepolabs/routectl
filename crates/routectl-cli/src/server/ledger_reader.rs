@@ -69,8 +69,13 @@ pub(crate) enum BoundaryOutcome {
     Cold,
     /// An otherwise-readable ledger carrying no tombstone at all.
     NoTombstone,
-    /// A tombstone stamped a revision other than the target's.
-    RevisionMismatch,
+    /// A tombstone stamped a revision other than the target's. Carries that
+    /// stale tombstone's rowid: the rows after it are where the
+    /// catalog-independent verdicts a new boundary must restate are read from.
+    RevisionMismatch {
+        /// Ledger rowid of the stale-revision tombstone.
+        stale_rowid: i64,
+    },
     /// The ledger could not be opened, or its boundary could not be read; the
     /// token is a path-free failure class (see [`open_error_class`], plus the
     /// `tombstone_read` class for a boundary-query failure).
@@ -127,7 +132,9 @@ pub(crate) fn classify_boundary(
                 overlay_revision,
             ))
         }
-        Ok(Some(_)) => BoundaryOutcome::RevisionMismatch,
+        Ok(Some(t)) => BoundaryOutcome::RevisionMismatch {
+            stale_rowid: t.rowid,
+        },
         Ok(None) => BoundaryOutcome::NoTombstone,
         Err(_) => BoundaryOutcome::Unreadable("tombstone_read"),
     }

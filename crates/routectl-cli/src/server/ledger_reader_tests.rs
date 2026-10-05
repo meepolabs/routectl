@@ -178,14 +178,15 @@ fn classify_boundary_revision_mismatch_on_foreign_tombstone() {
     let db = open(&ledger).expect("open ledger");
     // A tombstone stamped a DIFFERENT overlay revision than the target.
     seed_tombstone(db.conn(), 100, i64::from(CAT), 99);
+    let stale = db.conn().last_insert_rowid();
     drop(db);
 
     assert!(
         matches!(
             classify_boundary(&ledger, CAT, OV),
-            BoundaryOutcome::RevisionMismatch
+            BoundaryOutcome::RevisionMismatch { stale_rowid } if stale_rowid == stale
         ),
-        "a tombstone at a foreign revision classifies as RevisionMismatch"
+        "a tombstone at a foreign revision classifies as RevisionMismatch, carrying its rowid"
     );
 }
 
