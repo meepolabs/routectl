@@ -228,7 +228,13 @@ fn target_for(router: &Router, nickname: &str, provider_name: &str) -> DispatchT
         Answer::ServeImmediately,
         Arc::new(Observed::default()),
     ));
-    let model = ResolvedModel::new(nickname, provider_name, provider, "upstream");
+    // The installed model's own upstream, so the target learns on the lane the
+    // fixture's planted verdicts key on.
+    let upstream = router
+        .resolved_models
+        .get(nickname)
+        .map_or_else(|| "upstream".to_string(), |m| m.upstream.clone());
+    let model = ResolvedModel::new(nickname, provider_name, provider, upstream);
     router
         .expand_chain_to_targets(vec![Arc::new(model)], None)
         .pop()
@@ -238,7 +244,12 @@ fn target_for(router: &Router, nickname: &str, provider_name: &str) -> DispatchT
 // --- eligibility planting ----------------------------------------------
 
 fn verdict_key(state_key: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new(state_key, GROUNDED_PATH, ANTHROPIC).expect("a qualified path mints a key")
+    FieldVerdictKey::new(
+        &crate::router::probe_test_support::seat_chain_lane(state_key),
+        GROUNDED_PATH,
+        ANTHROPIC,
+    )
+    .expect("a qualified path mints a key")
 }
 
 /// Plant a resident field negative for `state_key` through the registry's own
@@ -249,7 +260,9 @@ fn plant_verdict(router: &Router, state_key: &str, lapsed: bool) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: state_key.to_string(),
+            state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
+                .as_lane_key()
+                .to_string(),
             feature_key: grounded_key(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,
@@ -273,7 +286,7 @@ fn plant_verdict(router: &Router, state_key: &str, lapsed: bool) {
 /// seed must match to back the verdict.
 fn resident_incarnation(router: &Router, state_key: &str) -> u64 {
     router.learned_capabilities.resident_incarnation_for_tests(
-        state_key,
+        crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
         &grounded_key(),
         ANTHROPIC,
     )
@@ -672,9 +685,11 @@ fn a_stale_confirmation_from_a_since_relearned_incarnation_falls_open() {
     plant_verdict(&router, "m0", false);
     let seeded = resident_incarnation(&router, "m0");
     acknowledge(&router, "m0", seeded, 1);
-    router
-        .learned_capabilities
-        .bump_incarnation_for_tests("m0", &grounded_key(), ANTHROPIC);
+    router.learned_capabilities.bump_incarnation_for_tests(
+        crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+        &grounded_key(),
+        ANTHROPIC,
+    );
     assert_ne!(
         resident_incarnation(&router, "m0"),
         seeded,
@@ -1013,7 +1028,11 @@ fn a_verdict_that_moves_between_the_two_eligibility_reads_is_refused() {
     let landed_in_hook = Arc::clone(&landed);
     let _interposed = crate::field_verdict::eligibility_interpose::install(move || {
         landed_in_hook.fetch_add(1, Ordering::SeqCst);
-        learned.bump_incarnation_for_tests("m0", &grounded, ANTHROPIC);
+        learned.bump_incarnation_for_tests(
+            crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+            &grounded,
+            ANTHROPIC,
+        );
     });
 
     let eligible = router
@@ -1042,7 +1061,11 @@ async fn a_walk_whose_verdict_moves_mid_eligibility_read_dispatches_the_original
     let learned = Arc::clone(&router.learned_capabilities);
     let grounded = grounded_key();
     let _interposed = crate::field_verdict::eligibility_interpose::install(move || {
-        learned.bump_incarnation_for_tests("m0", &grounded, ANTHROPIC);
+        learned.bump_incarnation_for_tests(
+            crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+            &grounded,
+            ANTHROPIC,
+        );
     });
 
     let dispatched = router
@@ -1082,9 +1105,11 @@ fn the_eligibility_read_stays_consistent_under_hostile_concurrency() {
         let grounded = grounded_key();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                router
-                    .learned_capabilities
-                    .bump_incarnation_for_tests("m0", &grounded, ANTHROPIC);
+                router.learned_capabilities.bump_incarnation_for_tests(
+                    crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+                    &grounded,
+                    ANTHROPIC,
+                );
             }
         })
     };
@@ -1799,8 +1824,9 @@ fn the_state_key_is_sanitized_on_every_record() {
 
     // The ACTING site builds its record separately, so it needs its own
     // assertion -- a sanitizer on one site and not the other is exactly the
-    // drift this pins.
-    plant_eligible(&router, HOSTILE);
+    // drift this pins. The hostile nickname dispatches `p0`'s `wire-0`, which is
+    // `m0`'s lane, so the verdict planted for `m0` is the one it acts on.
+    plant_eligible(&router, "m0");
     let (_planned, acting_records, _acting_plan) =
         router.plan_field_preflight(&req_on(ALIAS), &target, DispatchSurface::Complete);
     let acting = only_decision(&acting_records, "one row, one decision");
@@ -2088,7 +2114,12 @@ fn prefix_key() -> String {
 }
 
 fn prefix_verdict_key(state_key: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new(state_key, PREFIX_PATH, ANTHROPIC).expect("a qualified path mints a key")
+    FieldVerdictKey::new(
+        &crate::router::probe_test_support::seat_chain_lane(state_key),
+        PREFIX_PATH,
+        ANTHROPIC,
+    )
+    .expect("a qualified path mints a key")
 }
 
 /// The EXACT system-prompt text the prefix-impacting surface recognizes.
@@ -2134,7 +2165,9 @@ fn plant_prefix_verdict(router: &Router, state_key: &str, confirmations: u32) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: state_key.to_string(),
+            state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
+                .as_lane_key()
+                .to_string(),
             feature_key: prefix_key(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,
@@ -2149,7 +2182,7 @@ fn plant_prefix_verdict(router: &Router, state_key: &str, confirmations: u32) {
             evidence_class: None,
         }]);
     let incarnation = router.learned_capabilities.resident_incarnation_for_tests(
-        state_key,
+        crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
         &prefix_key(),
         ANTHROPIC,
     );
@@ -2571,7 +2604,10 @@ fn a_purge_moves_learned_state_only_and_cannot_touch_the_compiled_strip_table() 
     );
 
     // The LEARNED half moves, through the landed two-phase purge protocol.
-    let reserved = match router.reserve_learned_capability_purge("m0", &capability_key) {
+    let reserved = match router.reserve_learned_capability_purge(
+        &crate::router::probe_test_support::seat_chain_lane("m0"),
+        &capability_key,
+    ) {
         super::super::PurgeOutcome::Reserved(reserved) => reserved,
         _ => panic!("premise: a resident entry under a live generation reserves"),
     };
@@ -2722,7 +2758,11 @@ fn a_verdict_that_moves_between_the_two_authorization_reads_is_refused() {
     let landed_in_hook = Arc::clone(&landed);
     let _interposed = crate::field_verdict::eligibility_interpose::install(move || {
         landed_in_hook.fetch_add(1, Ordering::SeqCst);
-        learned.bump_incarnation_for_tests("m0", &prefix, ANTHROPIC);
+        learned.bump_incarnation_for_tests(
+            crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+            &prefix,
+            ANTHROPIC,
+        );
     });
 
     let authorization =
@@ -2939,12 +2979,16 @@ fn churn_round(
     deadline: Instant,
 ) -> Result<u64, String> {
     let prefix = prefix_key();
-    router
-        .learned_capabilities
-        .bump_incarnation_for_tests("m0", &prefix, ANTHROPIC);
-    let incarnation = router
-        .learned_capabilities
-        .resident_incarnation_for_tests("m0", &prefix, ANTHROPIC);
+    router.learned_capabilities.bump_incarnation_for_tests(
+        crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+        &prefix,
+        ANTHROPIC,
+    );
+    let incarnation = router.learned_capabilities.resident_incarnation_for_tests(
+        crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+        &prefix,
+        ANTHROPIC,
+    );
     let ack = router.field_verdicts().canaries().acknowledge_confirmation(
         key,
         incarnation,
@@ -3463,7 +3507,9 @@ fn plant_lapsed(router: &Router, state_key: &str, path: &str) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: state_key.to_string(),
+            state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
+                .as_lane_key()
+                .to_string(),
             feature_key,
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,
@@ -3528,10 +3574,11 @@ fn a_confirmation_count_moving_mid_read_cannot_produce_a_false_quorum_shortfall(
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let key = prefix_verdict_key("m0");
     let generation = router.registry_generation();
-    let incarnation =
-        router
-            .learned_capabilities
-            .resident_incarnation_for_tests("m0", &prefix_key(), ANTHROPIC);
+    let incarnation = router.learned_capabilities.resident_incarnation_for_tests(
+        crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+        &prefix_key(),
+        ANTHROPIC,
+    );
     assert!(
         router
             .field_verdicts()

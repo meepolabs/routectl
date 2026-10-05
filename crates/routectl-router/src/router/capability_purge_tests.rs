@@ -138,8 +138,13 @@ struct PurgeReport {
     settlement: Option<CapabilityClearedEvent>,
 }
 
+/// The lane `router_with_models` dispatches every nickname on.
+const SONNET: &str = "anthropic#claude-sonnet-4-5";
+
 fn purge(router: &Router, state_key: &str, capability_key: &str) -> PurgeReport {
-    match router.reserve_learned_capability_purge(state_key, capability_key) {
+    let lane = crate::state_key::StateKey::parse(state_key)
+        .expect("these tests purge by a serialized lane, as the control route does");
+    match router.reserve_learned_capability_purge(&lane, capability_key) {
         PurgeOutcome::Reserved(reserved) => {
             let settlement = reserved.settlement();
             let state_key = reserved.state_key.clone();
@@ -180,20 +185,20 @@ fn purge(router: &Router, state_key: &str, capability_key: &str) -> PurgeReport 
 fn purging_a_resident_negative_removes_it_and_reports_the_removal() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
     assert!(
-        resident(&router, "sonnet", WEB_SEARCH),
+        resident(&router, SONNET, WEB_SEARCH),
         "premise: the negative must be resident before the purge, or the \
          assertion below passes for the wrong reason"
     );
 
     // Act
-    let report = purge(&router, "sonnet", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert
     assert!(report.removed, "a resident entry must report removed");
     assert!(
-        !resident(&router, "sonnet", WEB_SEARCH),
+        !resident(&router, SONNET, WEB_SEARCH),
         "the purged entry must no longer be resident"
     );
 }
@@ -202,10 +207,10 @@ fn purging_a_resident_negative_removes_it_and_reports_the_removal() {
 fn purging_a_resident_negative_yields_a_cleared_settlement_to_persist() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
 
     // Act
-    let report = purge(&router, "sonnet", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
     let settlement = report
         .settlement
         .clone()
@@ -213,7 +218,7 @@ fn purging_a_resident_negative_yields_a_cleared_settlement_to_persist() {
 
     // Assert: the settlement's keys are exactly what the warm rebuild needs to
     // remove the same entry on the next boot.
-    assert_eq!(settlement.state_key, "sonnet");
+    assert_eq!(settlement.state_key, SONNET);
     assert_eq!(settlement.capability_key, WEB_SEARCH);
     assert_eq!(settlement.provider_kind, ANTHROPIC_API);
 }
@@ -224,10 +229,10 @@ fn purging_an_absent_key_is_a_clean_no_op_with_no_settlement() {
     // is a statement about the requested key rather than about an empty
     // registry.
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
 
     // Act
-    let report = purge(&router, "sonnet", THINKING);
+    let report = purge(&router, SONNET, THINKING);
 
     // Assert
     assert!(!report.removed, "an absent key must report no removal");
@@ -236,7 +241,7 @@ fn purging_an_absent_key_is_a_clean_no_op_with_no_settlement() {
         "a clean no-op must not manufacture a cleared settlement to persist"
     );
     assert!(
-        resident(&router, "sonnet", WEB_SEARCH),
+        resident(&router, SONNET, WEB_SEARCH),
         "the no-op must leave the unrelated resident entry alone"
     );
 }
@@ -245,10 +250,10 @@ fn purging_an_absent_key_is_a_clean_no_op_with_no_settlement() {
 fn a_purge_report_carries_the_normalized_capability_key() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
 
     // Act
-    let report = purge(&router, "sonnet", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert: the report's key is the one the registry keys on, which is what
     // makes it safe to log and to persist.
@@ -256,25 +261,45 @@ fn a_purge_report_carries_the_normalized_capability_key() {
         report.capability_key,
         routectl_core::capability::normalize_capability_key(WEB_SEARCH, ANTHROPIC_API),
     );
-    assert_eq!(report.state_key, "sonnet");
+    assert_eq!(report.state_key, SONNET);
 }
 
 #[test]
 fn purging_one_lane_leaves_the_same_capability_on_another_lane_resident() {
-    // Arrange: the same capability learned on two lanes.
-    let router = router_with_models(&["front", "back"]);
-    plant_negative(&router, "front", WEB_SEARCH);
-    plant_negative(&router, "back", WEB_SEARCH);
+    // Arrange: the same capability learned on two lanes -- the same provider
+    // entry over two upstreams.
+    let router = router_with_models(&["sonnet"]);
+    let other = "anthropic#claude-opus-4-1";
+    plant_negative(&router, SONNET, WEB_SEARCH);
+    plant_negative(&router, other, WEB_SEARCH);
 
     // Act
-    let report = purge(&router, "front", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert
     assert!(report.removed);
-    assert!(!resident(&router, "front", WEB_SEARCH));
+    assert!(!resident(&router, SONNET, WEB_SEARCH));
     assert!(
-        resident(&router, "back", WEB_SEARCH),
+        resident(&router, other, WEB_SEARCH),
         "a keyed purge must not widen into a sibling lane"
+    );
+}
+
+#[test]
+fn one_purge_clears_the_lane_every_nickname_on_it_shares() {
+    // Arrange: two nicknames for one upstream on one provider entry learn ONE
+    // entry, so purging the lane clears it for both.
+    let router = router_with_models(&["sonnet", "sonnet-alias"]);
+    plant_negative(&router, SONNET, WEB_SEARCH);
+
+    // Act
+    let report = purge(&router, SONNET, WEB_SEARCH);
+
+    // Assert
+    assert!(report.removed);
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "no nickname-keyed copy survives: the lane was the only entry",
     );
 }
 
@@ -282,11 +307,11 @@ fn purging_one_lane_leaves_the_same_capability_on_another_lane_resident() {
 fn a_purged_negative_leaves_no_resident_verdict_of_any_kind() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
     let before = router.learned_capability_snapshot();
     let entry = before
         .iter()
-        .find(|e| e.state_key == "sonnet")
+        .find(|e| e.state_key == SONNET)
         .expect("premise: planted entry resident");
     assert!(
         matches!(entry.verdict, Verdict::LearnedBroken(_)),
@@ -295,14 +320,14 @@ fn a_purged_negative_leaves_no_resident_verdict_of_any_kind() {
     );
 
     // Act
-    let _ = purge(&router, "sonnet", WEB_SEARCH);
+    let _ = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert: nothing in the registry can steer routing for this key anymore.
     assert!(
         router
             .learned_capability_snapshot()
             .iter()
-            .all(|e| !(e.state_key == "sonnet" && e.feature_key == WEB_SEARCH)),
+            .all(|e| !(e.state_key == SONNET && e.feature_key == WEB_SEARCH)),
         "a purged key must leave no resident verdict of any kind"
     );
 }
@@ -316,10 +341,10 @@ fn a_purged_negative_leaves_no_resident_verdict_of_any_kind() {
 fn the_provider_kind_is_derived_from_the_configured_target() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
 
     // Act: the caller names only the target and the capability.
-    let report = purge(&router, "sonnet", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert
     assert_eq!(report.provider_kind, ANTHROPIC_API);
@@ -329,32 +354,17 @@ fn the_provider_kind_is_derived_from_the_configured_target() {
     );
 }
 
-/// A provider-scoped state key (a legacy or directly-constructed target with
-/// no model scope) resolves the provider's own kind.
+/// A lane no model currently dispatches still derives its provider entry's
+/// kind: the entry half names the provider outright.
 #[test]
-fn a_provider_scoped_state_key_derives_that_providers_kind() {
+fn a_lane_no_model_dispatches_derives_its_provider_entrys_kind() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "anthropic", WEB_SEARCH);
+    let lane = "anthropic#an-upstream-no-model-sends";
+    plant_negative(&router, lane, WEB_SEARCH);
 
     // Act
-    let report = purge(&router, "anthropic", WEB_SEARCH);
-
-    // Assert
-    assert_eq!(report.provider_kind, ANTHROPIC_API);
-    assert!(report.removed);
-}
-
-/// A pooled seat's state key is `nickname#label`; the derivation recovers the
-/// base model so a seat-keyed entry resolves the same kind its base model does.
-#[test]
-fn a_pooled_seat_state_key_derives_the_base_models_provider_kind() {
-    // Arrange
-    let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet#second", WEB_SEARCH);
-
-    // Act
-    let report = purge(&router, "sonnet#second", WEB_SEARCH);
+    let report = purge(&router, lane, WEB_SEARCH);
 
     // Assert
     assert_eq!(report.provider_kind, ANTHROPIC_API);
@@ -370,15 +380,15 @@ fn a_pooled_seat_state_key_derives_the_base_models_provider_kind() {
 fn an_unconfigured_target_still_purges_under_the_identity_normalization() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "orphan", WEB_SEARCH);
+    plant_negative(&router, "orphan#upstream", WEB_SEARCH);
 
     // Act
-    let report = purge(&router, "orphan", WEB_SEARCH);
+    let report = purge(&router, "orphan#upstream", WEB_SEARCH);
 
     // Assert
     assert!(report.provider_kind.is_empty());
     assert!(report.removed);
-    assert!(!resident(&router, "orphan", WEB_SEARCH));
+    assert!(!resident(&router, "orphan#upstream", WEB_SEARCH));
 }
 
 /// Scope boundary. The purge acts on LEARNED entries only: it never edits,
@@ -401,7 +411,7 @@ fn purging_a_learned_entry_does_not_touch_the_operator_override_registry() {
         },
     );
     let router = Router::new(Arc::new(config));
-    plant_negative(&router, "anthropic", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
     let before = router
         .override_registry
         .resolve("anthropic", "", WEB_SEARCH, ANTHROPIC_API)
@@ -413,7 +423,7 @@ fn purging_a_learned_entry_does_not_touch_the_operator_override_registry() {
     );
 
     // Act
-    let report = purge(&router, "anthropic", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert
     assert!(report.removed, "the learned entry itself must be purged");
@@ -495,6 +505,16 @@ fn an_unresolved_model_nickname_resolves_its_configured_provider_kind() {
         "a configured-but-unresolved model must resolve through \
          `[models].provider` rather than falling through to the provider-name \
          lookup"
+    );
+}
+
+/// The lane form resolves through its provider entry with nothing resolved.
+#[test]
+fn a_lane_resolves_its_provider_entrys_kind_on_an_unresolved_router() {
+    let router = router_with_unresolved_model("sonnet", "anthropic-api");
+    assert_eq!(
+        router.provider_kind_for_state_key("prov#upstream-id"),
+        ANTHROPIC_API
     );
 }
 
@@ -591,8 +611,9 @@ fn purging_a_field_negative_resets_its_canary_state() {
     let router = router_with_models(&["sonnet"]);
     let field_key = field_capability_key("thinking.enabled.display")
         .expect("a qualified dotted path mints a key");
-    plant_negative(&router, "sonnet", &field_key);
-    let canary_key = FieldVerdictKey::new("sonnet", "thinking.enabled.display", ANTHROPIC_API)
+    plant_negative(&router, SONNET, &field_key);
+    let lane = crate::state_key::StateKey::parse(SONNET).expect("lane");
+    let canary_key = FieldVerdictKey::new(&lane, "thinking.enabled.display", ANTHROPIC_API)
         .expect("a qualified path mints a canary key");
     router
         .field_verdicts
@@ -609,7 +630,7 @@ fn purging_a_field_negative_resets_its_canary_state() {
     );
 
     // Act
-    let report = purge(&router, "sonnet", &field_key);
+    let report = purge(&router, SONNET, &field_key);
 
     // Assert
     assert!(report.removed, "premise: the field negative must be purged");
@@ -637,9 +658,9 @@ fn purging_a_catalog_scoped_key_does_not_touch_canary_state() {
     // exactly the shape the scope guard in `finalize_learned_capability_purge`
     // must reject on the capability key alone.
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "sonnet", WEB_SEARCH);
+    plant_negative(&router, SONNET, WEB_SEARCH);
     let canary_key = FieldVerdictKey::from_capability_key(
-        "sonnet".to_string(),
+        crate::state_key::StateKey::parse(SONNET).expect("lane"),
         WEB_SEARCH.to_string(),
         ANTHROPIC_API.to_string(),
     );
@@ -649,7 +670,7 @@ fn purging_a_catalog_scoped_key_does_not_touch_canary_state() {
         .acknowledge_confirmation(&canary_key, 1, 3);
 
     // Act
-    let report = purge(&router, "sonnet", WEB_SEARCH);
+    let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert
     assert!(
@@ -700,7 +721,7 @@ fn a_bedrock_dotted_key_purges_on_an_unresolved_model() {
     // Plant the way the learn path does: under the bedrock kind, so the stored
     // key is the REDUCED one.
     router.learned_capabilities.observe(
-        "bedrock-nick",
+        "prov#upstream-id",
         raw,
         "bedrock",
         SignalTier::SelfIdentifying,
@@ -710,12 +731,12 @@ fn a_bedrock_dotted_key_purges_on_an_unresolved_model() {
         Instant::now(),
     );
     assert!(
-        resident(&router, "bedrock-nick", &normalized),
+        resident(&router, "prov#upstream-id", &normalized),
         "premise: the registry must hold the REDUCED key"
     );
 
     // Act: the operator purges by the RAW dotted key they saw in the log.
-    let report = purge(&router, "bedrock-nick", raw);
+    let report = purge(&router, "prov#upstream-id", raw);
 
     // Assert
     assert!(
@@ -724,5 +745,5 @@ fn a_bedrock_dotted_key_purges_on_an_unresolved_model() {
          remove the resident entry"
     );
     assert_eq!(report.capability_key, normalized);
-    assert!(!resident(&router, "bedrock-nick", &normalized));
+    assert!(!resident(&router, "prov#upstream-id", &normalized));
 }

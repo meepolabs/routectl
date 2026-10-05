@@ -28,7 +28,7 @@ pub(super) fn payload() -> ProbePayload {
 /// so no test can spell a permanent key the grammar would refuse.
 pub(super) fn key(n: usize) -> FieldVerdictKey {
     FieldVerdictKey::new(
-        &format!("anthropic:model-{n}"),
+        &crate::state_key::StateKey::fixture(&format!("anthropic:model-{n}")),
         "thinking.enabled.display",
         "anthropic-api",
     )
@@ -37,6 +37,10 @@ pub(super) fn key(n: usize) -> FieldVerdictKey {
 
 /// The one grounded path, on one lane, under two distinct capabilities.
 pub(super) fn key_with_path(path: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new("anthropic:model-0", path, "anthropic-api")
-        .expect("a well-formed dotted path mints an identity")
+    FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("anthropic:model-0"),
+        path,
+        "anthropic-api",
+    )
+    .expect("a well-formed dotted path mints an identity")
 }

@@ -260,8 +260,12 @@ fn the_paid_slots_debug_prints_no_lane_from_the_scheduler() {
     // `Arc<ProbeScheduler>` and therefore every one of them.
     let scheduler = Arc::new(crate::probe_scheduler::ProbeScheduler::new());
     for n in 0..3 {
-        let identity = FieldVerdictKey::new(&format!("lane-{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let identity = FieldVerdictKey::new(
+            &crate::state_key::StateKey::fixture(&format!("lane-{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         assert_eq!(
             scheduler.activate(
                 &identity,

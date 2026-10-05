@@ -136,7 +136,8 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     // values, since reporting either as the other is the inversion an operator
     // cannot detect.
     let key = FieldVerdictKey::from_capability_key(
-        "seeded".to_string(),
+        crate::state_key::StateKey::new("seeded", "seeded-upstream")
+            .expect("a separator-free provider entry mints a lane"),
         crate::field_capability::field_capability_key("thinking.enabled.display")
             .expect("the grounded path is well-formed"),
         String::new(),
@@ -166,6 +167,19 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     router.field_repair_counters()
 }
 
+/// Parse a fixture's serialized lane. Every seam below takes the lane as the
+/// registry stores it (`provider_entry#upstream`).
+///
+/// # Panics
+///
+/// If `state_key` is not a serialized lane: a fixture keyed any other way
+/// would plant an entry no field identity can address.
+#[cfg(any(test, feature = "test-utils"))]
+fn lane_of(state_key: &str) -> crate::state_key::StateKey {
+    crate::state_key::StateKey::parse(state_key)
+        .expect("the fixture's state key must be a serialized learned lane")
+}
+
 /// Force a resident verdict's canary DUE on the next eligible request.
 ///
 /// The production writer for exactly this state is the cold-rebuild seed's
@@ -193,7 +207,7 @@ pub fn make_field_canary_due_for_tests(router: &Router, state_key: &str, field_p
         .expect("the fixture's field path must be a well-formed qualified path");
     let provider_kind = router.provider_kind_for_state_key(state_key).to_string();
     let key =
-        FieldVerdictKey::from_capability_key(state_key.to_string(), capability_key, provider_kind);
+        FieldVerdictKey::from_capability_key(lane_of(state_key), capability_key, provider_kind);
     let resident = router
         .field_verdicts()
         .canaries()
@@ -313,7 +327,7 @@ pub fn plant_acting_field_verdict_for_tests(
         }]);
     let provider_kind = router.provider_kind_for_state_key(state_key).to_string();
     let key =
-        FieldVerdictKey::from_capability_key(state_key.to_string(), capability_key, provider_kind);
+        FieldVerdictKey::from_capability_key(lane_of(state_key), capability_key, provider_kind);
     // The confirmation count's only production writer is the cold-rebuild seed, so
     // that is what this uses -- a test-only mutator on the canary registry would be
     // a second way to raise a count that gates traffic.

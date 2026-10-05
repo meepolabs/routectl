@@ -93,7 +93,12 @@ const FIELD_REJECT_BODY: &str = r#"{"error":{"type":"invalid_request_error","mes
 const REMOTE_BASE: &str = "https://api.anthropic.com";
 
 const ALIAS: &str = "canary-span-alias";
-const STATE_KEY: &str = "sonnet";
+/// The `[models]` nickname the fixture configures.
+const NICKNAME: &str = "sonnet";
+
+/// The learned lane `NICKNAME` dispatches: every learned fact for it, and every
+/// ledger row, is keyed on this.
+const STATE_KEY: &str = "p0#claude-sonnet-4-5";
 
 /// The wire-shape capability key, assembled from parts.
 ///
@@ -236,12 +241,12 @@ fn spanning_config() -> (Arc<Config>, tempfile::TempDir) {
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("p0", "claude-sonnet-4-5"),
     );
     config
         .aliases
-        .insert(ALIAS.to_string(), AliasValue::Single(STATE_KEY.to_string()));
+        .insert(ALIAS.to_string(), AliasValue::Single(NICKNAME.to_string()));
     let dir = isolate_usage_db(&mut config);
     (Arc::new(config), dir)
 }
@@ -258,9 +263,9 @@ fn router_with(config: &Arc<Config>, seat: Arc<Seat>) -> Router {
     let mut router = Router::new(Arc::clone(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         Arc::new(ResolvedModel::new(
-            STATE_KEY.to_string(),
+            NICKNAME.to_string(),
             "p0".to_string(),
             seat as Arc<dyn Provider>,
             "claude-sonnet-4-5".to_string(),

@@ -411,7 +411,8 @@ impl Dial {
 
 /// The acting lane's identity.
 fn key() -> FieldVerdictKey {
-    FieldVerdictKey::new(LANE, GROUNDED_PATH, "anthropic-api").expect("identity")
+    let lane = crate::state_key::StateKey::new(PROVIDER, UPSTREAM).expect("lane");
+    FieldVerdictKey::new(&lane, GROUNDED_PATH, "anthropic-api").expect("identity")
 }
 
 /// A bounded payload carrying BOTH beta sources and the Claude Code bit, built

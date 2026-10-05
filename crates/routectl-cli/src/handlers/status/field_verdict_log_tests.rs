@@ -28,7 +28,12 @@ const GROUNDED_PATH: &str = "thinking.enabled.display";
 
 /// The state key the fixture router resolves, and the one a planted verdict is
 /// keyed on.
-const STATE_KEY: &str = "sonnet";
+/// The `[models]` nickname the fixture configures.
+const NICKNAME: &str = "sonnet";
+
+/// The learned lane `NICKNAME` dispatches: every learned fact for it, and every
+/// ledger row, is keyed on this.
+const STATE_KEY: &str = "anthropic#claude-sonnet-4-5";
 
 /// A router over a config whose one model resolves, so a planted verdict's state
 /// key has a provider kind to normalize against.
@@ -40,13 +45,13 @@ fn fixture_router() -> Router {
     );
     let mut models = std::collections::BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     let mut aliases = std::collections::BTreeMap::new();
     aliases.insert(
         "default".to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     // DURABLE PERSISTENCE IS ASSUMED, stated rather than defaulted: every verdict row
     // reports `capability_writer_unhealthy` while capability writes cannot be
@@ -633,7 +638,7 @@ fn the_emitter_sends_one_populated_event_through_the_per_call_observer() {
         models,
         ..Config::default()
     }));
-    plant_acting_field_verdict_for_tests(&router, "sonnet", "thinking.enabled.display", 1);
+    plant_acting_field_verdict_for_tests(&router, STATE_KEY, "thinking.enabled.display", 1);
     let view = StatusRouterHandle::new(std::sync::Arc::new(ArcSwap::from_pointee(router))).view();
     let globals = AccountingGlobals {
         writer_degraded: false,

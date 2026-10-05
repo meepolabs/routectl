@@ -26,6 +26,15 @@ const PURGE_PATH: &str = "/control/capability/purge";
 /// only, and its capability-key normalization is the identity.
 const ANTHROPIC_API: &str = "anthropic-api";
 
+/// The learned lane `config_with_model`'s `sonnet` dispatches: what doctor
+/// prints and what the route keys a purge on.
+const LANE: &str = "anthropic#claude-sonnet-4-5";
+
+/// [`LANE`] parsed.
+fn lane() -> routectl_router::StateKey {
+    routectl_router::StateKey::parse(LANE).expect("the fixture lane parses")
+}
+
 /// A loopback peer -- what every legitimate caller presents.
 fn loopback_peer() -> std::net::SocketAddr {
     "127.0.0.1:54321".parse().expect("loopback peer parses")
@@ -387,10 +396,10 @@ async fn an_unavailable_writer_keeps_the_entry_acting_and_refuses_the_purge() {
     // boot, and the next warm rebuild resurrects it. With no durable commit
     // possible, the ONLY correct answer is a refusal with the entry untouched.
     let fixture = Fixture::with_closed_writer();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_ne!(
@@ -404,7 +413,7 @@ async fn an_unavailable_writer_keeps_the_entry_acting_and_refuses_the_purge() {
         "and must name the durability failure, distinguishably from absent and busy",
     );
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "the entry must still be RESIDENT and acting: nothing was persisted, so removing it \
          from memory would leave the ledger and the registry disagreeing",
     );
@@ -421,12 +430,12 @@ async fn a_full_writer_channel_refuses_the_purge_and_leaves_the_entry_resident()
     // The entry must survive it exactly as it survives an unavailable writer --
     // the operator retries, and a retry is only safe because nothing moved.
     let (fixture, _rx) = Fixture::with_owned_channel(1);
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     // Fill the one slot so the purge's own admission finds none free.
     fixture.fill_channel(1);
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_ne!(
@@ -436,7 +445,7 @@ async fn a_full_writer_channel_refuses_the_purge_and_leaves_the_entry_resident()
     );
     assert_eq!(body["error"]["code"].as_str(), Some(DURABILITY_FAILED));
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "an unqueued batch must leave the entry acting",
     );
 }
@@ -447,10 +456,10 @@ async fn a_write_failure_refuses_the_purge_and_leaves_the_entry_resident() {
     // rather than an environment one. Same contract: no success, entry intact,
     // ledger unchanged.
     let fixture = Fixture::with_unwritable_ledger();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_ne!(
@@ -460,7 +469,7 @@ async fn a_write_failure_refuses_the_purge_and_leaves_the_entry_resident() {
     );
     assert_eq!(body["error"]["code"].as_str(), Some(DURABILITY_FAILED));
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "a failed write must leave the entry acting",
     );
 }
@@ -480,11 +489,11 @@ async fn a_cancelled_client_leaves_the_settlement_to_the_daemon() {
     // way, which is the property an operator depends on.
     let _guard = ();
     let (fixture, _rx) = Fixture::with_owned_channel(4);
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Drive the request and drop the future before it can be answered: nothing
     // consumes `_rx`, so the commit never resolves.
-    let pending = fixture.call(loopback_peer(), &body_for("sonnet", WEB_SEARCH));
+    let pending = fixture.call(loopback_peer(), &body_for(LANE, WEB_SEARCH));
     let cancelled = tokio::time::timeout(std::time::Duration::from_millis(150), pending).await;
     assert!(
         cancelled.is_err(),
@@ -493,7 +502,7 @@ async fn a_cancelled_client_leaves_the_settlement_to_the_daemon() {
     );
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "a cancelled client must leave the entry resident: nothing is removed until the clear \
          commits",
     );
@@ -502,7 +511,7 @@ async fn a_cancelled_client_leaves_the_settlement_to_the_daemon() {
     match fixture
         .router
         .load()
-        .reserve_learned_capability_purge("sonnet", WEB_SEARCH)
+        .reserve_learned_capability_purge(&lane(), WEB_SEARCH)
     {
         routectl_router::router::PurgeOutcome::Busy => {}
         other => panic!(
@@ -530,16 +539,16 @@ async fn a_successful_purge_commits_durably_before_it_reports_or_finalizes() {
     // is the property -- the durable row is what licenses both the removal and
     // the report.
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_eq!(status, StatusCode::OK, "a durable purge succeeds");
     assert_eq!(body["purged"].as_bool(), Some(true));
     assert!(
-        !fixture.resident("sonnet", WEB_SEARCH),
+        !fixture.resident(LANE, WEB_SEARCH),
         "the entry is removed from memory only after the clear committed",
     );
     assert_eq!(
@@ -555,16 +564,16 @@ async fn a_repeat_purge_after_a_successful_one_is_a_clean_absent_no_op() {
     // again. The second call must be a distinguishable ABSENT no-op -- not a
     // second clear, and not a failure.
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     let (first, first_body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
     assert_eq!(first, StatusCode::OK);
     assert_eq!(first_body["purged"].as_bool(), Some(true));
 
     let (second, second_body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
     assert_eq!(
         second,
@@ -595,7 +604,7 @@ async fn an_absent_purge_reports_no_generation() {
     let fixture = Fixture::new();
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_eq!(status, StatusCode::OK);
@@ -609,11 +618,11 @@ async fn an_absent_purge_reports_no_generation() {
 #[tokio::test]
 async fn a_successful_purge_reports_the_generation_the_removal_ran_under() {
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     let expected = fixture.router.load().registry_generation();
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_eq!(status, StatusCode::OK);
@@ -628,10 +637,10 @@ async fn a_successful_purge_reports_the_generation_the_removal_ran_under() {
 #[tokio::test]
 async fn a_failed_purge_reports_no_generation() {
     let fixture = Fixture::with_closed_writer();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     let (_status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert!(
@@ -650,15 +659,15 @@ async fn a_second_purge_of_the_same_key_is_refused_as_busy_and_clears_once() {
     // DISTINGUISHABLE busy answer (never "absent", which would tell it the entry
     // is gone), and at most one clear becomes durable.
     let (fixture, mut rx) = Fixture::with_owned_channel(8);
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // The first purge blocks awaiting its receipt (nothing consumes the channel
     // yet), so its lease is open while the second arrives.
-    let first = tokio::spawn(fixture.call(loopback_peer(), &body_for("sonnet", WEB_SEARCH)));
+    let first = tokio::spawn(fixture.call(loopback_peer(), &body_for(LANE, WEB_SEARCH)));
     await_admitted_batch(&mut rx).await;
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
     assert_eq!(
         status,
@@ -680,9 +689,9 @@ async fn a_same_key_learn_is_blocked_during_a_purge_and_proceeds_after_release()
     // the capture cannot go stale. Once released, legitimate learning resumes --
     // a lease that leaked would silently stop the daemon from ever relearning.
     let (fixture, _rx) = Fixture::with_owned_channel(4);
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
-    let pending = fixture.call(loopback_peer(), &body_for("sonnet", WEB_SEARCH));
+    let pending = fixture.call(loopback_peer(), &body_for(LANE, WEB_SEARCH));
     let cancelled = tokio::time::timeout(std::time::Duration::from_millis(150), pending).await;
     assert!(
         cancelled.is_err(),
@@ -692,7 +701,7 @@ async fn a_same_key_learn_is_blocked_during_a_purge_and_proceeds_after_release()
 
     // After the abandoned lease releases, the same key admits a fresh learn.
     assert!(
-        fixture.same_key_learn_admitted("sonnet", WEB_SEARCH),
+        fixture.same_key_learn_admitted(LANE, WEB_SEARCH),
         "once the lease is released the registry must admit a legitimate same-key observation \
          again, or a cancelled purge would permanently freeze the key",
     );
@@ -702,20 +711,20 @@ async fn a_same_key_learn_is_blocked_during_a_purge_and_proceeds_after_release()
 async fn a_purge_removes_the_resident_entry_and_reports_it_purged() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let (status, json) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     // Assert
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["purged"], serde_json::json!(true));
-    assert_eq!(json["state_key"], serde_json::json!("sonnet"));
+    assert_eq!(json["state_key"], serde_json::json!(LANE));
     assert_eq!(json["capability_key"], serde_json::json!(WEB_SEARCH));
     assert!(
-        !fixture.resident("sonnet", WEB_SEARCH),
+        !fixture.resident(LANE, WEB_SEARCH),
         "the purged entry must be gone from the LIVE registry, not merely \
          reported gone"
     );
@@ -725,11 +734,11 @@ async fn a_purge_removes_the_resident_entry_and_reports_it_purged() {
 async fn a_purge_persists_exactly_one_cleared_settlement_row() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let (status, _json) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     // Assert
@@ -747,11 +756,11 @@ async fn an_absent_key_is_a_clean_no_op_that_persists_nothing() {
     // Arrange: a DIFFERENT capability resident, so "not purged" is about the
     // requested key rather than about an empty registry.
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let (status, json) = fixture
-        .call(loopback_peer(), &body_for("sonnet", THINKING))
+        .call(loopback_peer(), &body_for(LANE, THINKING))
         .await;
 
     // Assert
@@ -766,7 +775,7 @@ async fn an_absent_key_is_a_clean_no_op_that_persists_nothing() {
         "the no-op must be distinguishable from a real purge on the wire"
     );
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "the no-op must leave the unrelated resident entry alone"
     );
     assert_eq!(
@@ -780,17 +789,17 @@ async fn an_absent_key_is_a_clean_no_op_that_persists_nothing() {
 async fn a_non_loopback_peer_is_refused_and_mutates_nothing() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     let remote: std::net::SocketAddr = "203.0.113.7:44444".parse().expect("remote peer parses");
 
     // Act
-    let (status, json) = fixture.call(remote, &body_for("sonnet", WEB_SEARCH)).await;
+    let (status, json) = fixture.call(remote, &body_for(LANE, WEB_SEARCH)).await;
 
     // Assert
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(json["error"]["code"], serde_json::json!(FORBIDDEN_PEER));
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "a refused caller must not have purged anything"
     );
     assert_eq!(
@@ -809,10 +818,10 @@ async fn a_non_loopback_peer_is_refused_and_mutates_nothing() {
 async fn every_out_of_vocabulary_body_is_refused_without_mutating() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     let oversize = "x".repeat(MAX_KEY_BYTES + 1);
     let cases: Vec<(&str, String)> = vec![
-        ("not JSON at all", "sonnet web_search".to_string()),
+        ("not JSON at all", "sonnet-lane web_search".to_string()),
         ("an empty body", String::new()),
         (
             "a wrong-typed key",
@@ -821,7 +830,7 @@ async fn every_out_of_vocabulary_body_is_refused_without_mutating() {
         (
             "an unknown field",
             serde_json::json!({
-                "state_key": "sonnet",
+                "state_key": LANE,
                 "capability_key": WEB_SEARCH,
                 "provider_kind": ANTHROPIC_API,
             })
@@ -829,12 +838,16 @@ async fn every_out_of_vocabulary_body_is_refused_without_mutating() {
         ),
         (
             "a missing capability key",
-            serde_json::json!({"state_key": "sonnet"}).to_string(),
+            serde_json::json!({"state_key": LANE}).to_string(),
         ),
         ("a blank state key", body_for("   ", WEB_SEARCH)),
-        ("a blank capability key", body_for("sonnet", "")),
-        ("a control byte in a key", body_for("sonnet", "web\nsearch")),
-        ("an oversize key", body_for("sonnet", &oversize)),
+        ("a blank capability key", body_for(LANE, "")),
+        ("a control byte in a key", body_for(LANE, "web\nsearch")),
+        ("an oversize key", body_for(LANE, &oversize)),
+        (
+            "a state key that is not a learned lane",
+            body_for("sonnet", WEB_SEARCH),
+        ),
     ];
 
     for (label, body) in cases {
@@ -856,7 +869,7 @@ async fn every_out_of_vocabulary_body_is_refused_without_mutating() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no refused request may have purged anything"
     );
     assert_eq!(
@@ -874,18 +887,18 @@ async fn every_out_of_vocabulary_body_is_refused_without_mutating() {
 async fn a_purge_on_one_lane_leaves_another_lanes_entry_resident() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     fixture.plant_negative("anthropic", WEB_SEARCH);
 
     // Act
     let (status, json) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     // Assert
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["purged"], serde_json::json!(true));
-    assert!(!fixture.resident("sonnet", WEB_SEARCH));
+    assert!(!fixture.resident(LANE, WEB_SEARCH));
     assert!(
         fixture.resident("anthropic", WEB_SEARCH),
         "a keyed purge must not widen into a sibling lane"
@@ -924,13 +937,12 @@ async fn a_get_is_not_served_by_the_purge_route() {
 async fn one_content_free_audit_record_is_emitted_per_purge() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
-    let (_result, events) = routectl_testkit::with_capture(
-        fixture.call(loopback_peer(), &body_for("sonnet", WEB_SEARCH)),
-    )
-    .await;
+    let (_result, events) =
+        routectl_testkit::with_capture(fixture.call(loopback_peer(), &body_for(LANE, WEB_SEARCH)))
+            .await;
 
     // Assert
     let audit: Vec<_> = events
@@ -938,7 +950,7 @@ async fn one_content_free_audit_record_is_emitted_per_purge() {
         .filter(|e| e.field("event") == Some("purge"))
         .collect();
     assert_eq!(audit.len(), 1, "exactly one audit record per purge");
-    assert_eq!(audit[0].field("state_key"), Some("sonnet"));
+    assert_eq!(audit[0].field("state_key"), Some(LANE));
     assert_eq!(audit[0].field("capability_key"), Some(WEB_SEARCH));
     assert_eq!(audit[0].field("removed"), Some("true"));
     let names: Vec<&str> = audit[0]
@@ -960,13 +972,12 @@ async fn one_content_free_audit_record_is_emitted_per_purge() {
 async fn the_audit_record_distinguishes_a_no_op_from_a_removal() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
-    let (_result, events) = routectl_testkit::with_capture(
-        fixture.call(loopback_peer(), &body_for("sonnet", THINKING)),
-    )
-    .await;
+    let (_result, events) =
+        routectl_testkit::with_capture(fixture.call(loopback_peer(), &body_for(LANE, THINKING)))
+            .await;
 
     // Assert
     let audit: Vec<_> = events
@@ -995,8 +1006,8 @@ async fn the_audit_record_distinguishes_a_no_op_from_a_removal() {
 async fn a_browser_simple_cross_origin_request_is_refused_before_mutating() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
-    let body = body_for("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
+    let body = body_for(LANE, WEB_SEARCH);
 
     for content_type in [
         "text/plain",
@@ -1035,7 +1046,7 @@ async fn a_browser_simple_cross_origin_request_is_refused_before_mutating() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no simple cross-origin request may have purged anything"
     );
     assert_eq!(
@@ -1052,14 +1063,14 @@ async fn a_browser_simple_cross_origin_request_is_refused_before_mutating() {
 async fn a_request_with_no_content_type_is_refused() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let request = HttpRequest::builder()
         .method("POST")
         .uri(PURGE_PATH)
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let response = fixture
         .app
@@ -1070,7 +1081,7 @@ async fn a_request_with_no_content_type_is_refused() {
 
     // Assert
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    assert!(fixture.resident("sonnet", WEB_SEARCH));
+    assert!(fixture.resident(LANE, WEB_SEARCH));
 }
 
 /// The positive control for the gate above, and the reason it is evidence: the
@@ -1081,7 +1092,7 @@ async fn a_request_with_no_content_type_is_refused() {
 async fn a_json_content_type_is_served_and_does_mutate() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let request = HttpRequest::builder()
@@ -1091,7 +1102,7 @@ async fn a_json_content_type_is_served_and_does_mutate() {
         .header("origin", "https://evil.example")
         .header("host", "127.0.0.1:8791")
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let response = fixture
         .app
@@ -1108,7 +1119,7 @@ async fn a_json_content_type_is_served_and_does_mutate() {
          above prove nothing about the content-type gate"
     );
     assert!(
-        !fixture.resident("sonnet", WEB_SEARCH),
+        !fixture.resident(LANE, WEB_SEARCH),
         "control: the served request must really mutate"
     );
 }
@@ -1125,7 +1136,7 @@ async fn every_json_content_type_spelling_the_ingress_accepts_is_accepted_here()
     ] {
         // Arrange
         let fixture = Fixture::new();
-        fixture.plant_negative("sonnet", WEB_SEARCH);
+        fixture.plant_negative(LANE, WEB_SEARCH);
 
         // Act
         let request = HttpRequest::builder()
@@ -1133,7 +1144,7 @@ async fn every_json_content_type_spelling_the_ingress_accepts_is_accepted_here()
             .uri(PURGE_PATH)
             .header("content-type", content_type)
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1169,7 +1180,7 @@ async fn every_loopback_peer_spelling_is_accepted() {
         let addr: std::net::SocketAddr = peer.parse().expect("peer parses");
 
         // Act
-        let (status, _body) = fixture.call(addr, &body_for("sonnet", WEB_SEARCH)).await;
+        let (status, _body) = fixture.call(addr, &body_for(LANE, WEB_SEARCH)).await;
 
         // Assert
         assert_eq!(
@@ -1195,11 +1206,11 @@ async fn every_non_loopback_peer_spelling_stays_refused() {
     ] {
         // Arrange
         let fixture = Fixture::new();
-        fixture.plant_negative("sonnet", WEB_SEARCH);
+        fixture.plant_negative(LANE, WEB_SEARCH);
         let addr: std::net::SocketAddr = peer.parse().expect("peer parses");
 
         // Act
-        let (status, body) = fixture.call(addr, &body_for("sonnet", WEB_SEARCH)).await;
+        let (status, body) = fixture.call(addr, &body_for(LANE, WEB_SEARCH)).await;
 
         // Assert
         assert_eq!(
@@ -1209,7 +1220,7 @@ async fn every_non_loopback_peer_spelling_stays_refused() {
         );
         assert_eq!(body["error"]["code"], serde_json::json!(FORBIDDEN_PEER));
         assert!(
-            fixture.resident("sonnet", WEB_SEARCH),
+            fixture.resident(LANE, WEB_SEARCH),
             "`{peer}` was refused, so it must not have purged anything"
         );
     }
@@ -1232,7 +1243,7 @@ async fn every_non_loopback_peer_spelling_stays_refused() {
 async fn a_present_foreign_host_is_rejected_before_mutating() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     for host in [
         "rebind.evil",
@@ -1251,7 +1262,7 @@ async fn a_present_foreign_host_is_rejected_before_mutating() {
             .header("content-type", "application/json")
             .header("host", host)
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1271,7 +1282,7 @@ async fn a_present_foreign_host_is_rejected_before_mutating() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no foreign-Host request may have purged anything"
     );
     assert_eq!(
@@ -1297,7 +1308,7 @@ async fn every_loopback_host_authority_is_served() {
     ] {
         // Arrange
         let fixture = Fixture::new();
-        fixture.plant_negative("sonnet", WEB_SEARCH);
+        fixture.plant_negative(LANE, WEB_SEARCH);
 
         // Act
         let request = HttpRequest::builder()
@@ -1306,7 +1317,7 @@ async fn every_loopback_host_authority_is_served() {
             .header("content-type", "application/json")
             .header("host", host)
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1323,7 +1334,7 @@ async fn every_loopback_host_authority_is_served() {
              daemon's own CLI cannot reach the route"
         );
         assert!(
-            !fixture.resident("sonnet", WEB_SEARCH),
+            !fixture.resident(LANE, WEB_SEARCH),
             "control: a served request must really mutate"
         );
     }
@@ -1336,7 +1347,7 @@ async fn every_loopback_host_authority_is_served() {
 async fn an_absent_host_is_permitted() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let request = HttpRequest::builder()
@@ -1344,7 +1355,7 @@ async fn an_absent_host_is_permitted() {
         .uri(PURGE_PATH)
         .header("content-type", "application/json")
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let response = fixture
         .app
@@ -1355,7 +1366,7 @@ async fn an_absent_host_is_permitted() {
 
     // Assert
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(!fixture.resident("sonnet", WEB_SEARCH));
+    assert!(!fixture.resident(LANE, WEB_SEARCH));
 }
 
 /// The Host guard runs BEFORE the content-type guard, so a rebound page learns
@@ -1373,7 +1384,7 @@ async fn a_foreign_host_is_rejected_ahead_of_the_content_type_check() {
         .header("content-type", "text/plain")
         .header("host", "rebind.evil")
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let response = fixture
         .app
@@ -1405,7 +1416,7 @@ async fn a_foreign_host_is_rejected_ahead_of_the_content_type_check() {
 async fn an_h2_shaped_request_with_a_foreign_authority_is_rejected() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     for authority in [
         "rebind.evil",
@@ -1420,7 +1431,7 @@ async fn an_h2_shaped_request_with_a_foreign_authority_is_rejected() {
             .uri(format!("http://{authority}{PURGE_PATH}"))
             .header("content-type", "application/json")
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1440,7 +1451,7 @@ async fn an_h2_shaped_request_with_a_foreign_authority_is_rejected() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no foreign-authority request may have purged anything"
     );
     assert_eq!(
@@ -1464,7 +1475,7 @@ async fn an_h2_shaped_request_with_a_loopback_authority_is_served() {
     ] {
         // Arrange
         let fixture = Fixture::new();
-        fixture.plant_negative("sonnet", WEB_SEARCH);
+        fixture.plant_negative(LANE, WEB_SEARCH);
 
         // Act
         let request = HttpRequest::builder()
@@ -1472,7 +1483,7 @@ async fn an_h2_shaped_request_with_a_loopback_authority_is_served() {
             .uri(format!("http://{authority}{PURGE_PATH}"))
             .header("content-type", "application/json")
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1488,7 +1499,7 @@ async fn an_h2_shaped_request_with_a_loopback_authority_is_served() {
             "URI authority `{authority}` names loopback and must be served"
         );
         assert!(
-            !fixture.resident("sonnet", WEB_SEARCH),
+            !fixture.resident(LANE, WEB_SEARCH),
             "control: a served request must really mutate"
         );
     }
@@ -1501,7 +1512,7 @@ async fn an_h2_shaped_request_with_a_loopback_authority_is_served() {
 async fn a_foreign_authority_is_rejected_even_beside_a_loopback_host_header() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act: a loopback Host header paired with a foreign URI authority.
     let request = HttpRequest::builder()
@@ -1510,7 +1521,7 @@ async fn a_foreign_authority_is_rejected_even_beside_a_loopback_host_header() {
         .header("content-type", "application/json")
         .header("host", "127.0.0.1:8791")
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let response = fixture
         .app
@@ -1527,7 +1538,7 @@ async fn a_foreign_authority_is_rejected_even_beside_a_loopback_host_header() {
          sits beside it -- otherwise the guard is satisfiable by the half an \
          attacker does not need"
     );
-    assert!(fixture.resident("sonnet", WEB_SEARCH));
+    assert!(fixture.resident(LANE, WEB_SEARCH));
 }
 
 /// The remaining permitted shape, stated exactly: ORIGIN-FORM with no `Host`
@@ -1538,7 +1549,7 @@ async fn a_foreign_authority_is_rejected_even_beside_a_loopback_host_header() {
 async fn a_genuinely_authority_less_origin_form_request_is_permitted() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act: origin-form path only, no Host, no authority.
     let request = HttpRequest::builder()
@@ -1546,7 +1557,7 @@ async fn a_genuinely_authority_less_origin_form_request_is_permitted() {
         .uri(PURGE_PATH)
         .header("content-type", "application/json")
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let request_authority = request.uri().authority().map(ToString::to_string);
     assert_eq!(
@@ -1563,7 +1574,7 @@ async fn a_genuinely_authority_less_origin_form_request_is_permitted() {
 
     // Assert
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(!fixture.resident("sonnet", WEB_SEARCH));
+    assert!(!fixture.resident(LANE, WEB_SEARCH));
 }
 
 // --- Final authority correction: every claimed value, fail-closed ---
@@ -1579,7 +1590,7 @@ async fn a_genuinely_authority_less_origin_form_request_is_permitted() {
 async fn a_present_non_utf8_host_fails_closed() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     for raw in [
         // Lone continuation byte, and a truncated multi-byte sequence.
@@ -1596,7 +1607,7 @@ async fn a_present_non_utf8_host_fails_closed() {
             .uri(PURGE_PATH)
             .header("content-type", "application/json")
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         request.headers_mut().insert(axum::http::header::HOST, host);
         let response = fixture
@@ -1616,7 +1627,7 @@ async fn a_present_non_utf8_host_fails_closed() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no unreadable-Host request may have purged anything"
     );
     assert_eq!(
@@ -1636,7 +1647,7 @@ async fn a_present_non_utf8_host_fails_closed() {
 async fn a_hostile_duplicate_host_is_rejected_whichever_position_it_holds() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Both orderings: hostile second (the `get`-only blind spot) and hostile
     // first (which the old code did catch -- kept so a future change that
@@ -1655,7 +1666,7 @@ async fn a_hostile_duplicate_host_is_rejected_whichever_position_it_holds() {
             .header("host", first)
             .header("host", second)
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1674,7 +1685,7 @@ async fn a_hostile_duplicate_host_is_rejected_whichever_position_it_holds() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no duplicate-Host request carrying a hostile value may have purged"
     );
     assert_eq!(
@@ -1691,7 +1702,7 @@ async fn a_hostile_duplicate_host_is_rejected_whichever_position_it_holds() {
 async fn benign_duplicate_loopback_hosts_are_served() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Act
     let request = HttpRequest::builder()
@@ -1701,7 +1712,7 @@ async fn benign_duplicate_loopback_hosts_are_served() {
         .header("host", "127.0.0.1:8791")
         .header("host", "127.0.0.1:8791")
         .extension(ConnectInfo(loopback_peer()))
-        .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+        .body(Body::from(body_for(LANE, WEB_SEARCH)))
         .expect("build request");
     let response = fixture
         .app
@@ -1718,7 +1729,7 @@ async fn benign_duplicate_loopback_hosts_are_served() {
          refusal above must be about the VALUE and not about the duplication"
     );
     assert!(
-        !fixture.resident("sonnet", WEB_SEARCH),
+        !fixture.resident(LANE, WEB_SEARCH),
         "control: the served request must really mutate"
     );
 }
@@ -1729,7 +1740,7 @@ async fn benign_duplicate_loopback_hosts_are_served() {
 async fn a_userinfo_bearing_host_is_rejected_at_the_route() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     for hostile in [
         "[::1]@evil.example",
@@ -1744,7 +1755,7 @@ async fn a_userinfo_bearing_host_is_rejected_at_the_route() {
             .header("content-type", "application/json")
             .header("host", hostile)
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1762,7 +1773,7 @@ async fn a_userinfo_bearing_host_is_rejected_at_the_route() {
         );
     }
 
-    assert!(fixture.resident("sonnet", WEB_SEARCH));
+    assert!(fixture.resident(LANE, WEB_SEARCH));
 }
 
 /// Malformed bracketed authorities are rejected at the MUTATING route, with no
@@ -1779,7 +1790,7 @@ async fn a_userinfo_bearing_host_is_rejected_at_the_route() {
 async fn bracket_trailing_junk_authorities_are_rejected_without_mutating() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     for hostile in [
         "[::1]evil",
@@ -1799,7 +1810,7 @@ async fn bracket_trailing_junk_authorities_are_rejected_without_mutating() {
             .header("content-type", "application/json")
             .header("host", hostile)
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1818,7 +1829,7 @@ async fn bracket_trailing_junk_authorities_are_rejected_without_mutating() {
     }
 
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "no malformed-authority request may have purged anything"
     );
     assert_eq!(
@@ -1835,7 +1846,7 @@ async fn bracket_trailing_junk_authorities_are_rejected_without_mutating() {
 async fn bracket_trailing_junk_uri_authorities_are_rejected_without_mutating() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     for hostile in ["[::1]evil.example", "[::1]:8791evil", "[127.0.0.1]evil"] {
         // Act: absolute-form URI carrying the malformed authority, no Host.
@@ -1844,7 +1855,7 @@ async fn bracket_trailing_junk_uri_authorities_are_rejected_without_mutating() {
             .uri(format!("http://{hostile}{PURGE_PATH}"))
             .header("content-type", "application/json")
             .extension(ConnectInfo(loopback_peer()))
-            .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+            .body(Body::from(body_for(LANE, WEB_SEARCH)))
             .expect("build request");
         let response = fixture
             .app
@@ -1861,7 +1872,7 @@ async fn bracket_trailing_junk_uri_authorities_are_rejected_without_mutating() {
         );
     }
 
-    assert!(fixture.resident("sonnet", WEB_SEARCH));
+    assert!(fixture.resident(LANE, WEB_SEARCH));
     assert_eq!(fixture.persisted_cleared_rows(), 0);
 }
 
@@ -1877,7 +1888,7 @@ async fn bracket_trailing_junk_uri_authorities_are_rejected_without_mutating() {
 async fn an_authority_refusal_names_the_claim_site_without_the_value() {
     // Arrange
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // A header claim and a URI claim, each driven separately so each line is
     // attributable to one site.
@@ -1891,7 +1902,7 @@ async fn an_authority_refusal_names_the_claim_site_without_the_value() {
                     .header("content-type", "application/json")
                     .header("host", "evil-LEAKED.example:8791")
                     .extension(ConnectInfo(loopback_peer()))
-                    .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+                    .body(Body::from(body_for(LANE, WEB_SEARCH)))
                     .expect("build request")
             } else {
                 HttpRequest::builder()
@@ -1899,7 +1910,7 @@ async fn an_authority_refusal_names_the_claim_site_without_the_value() {
                     .uri(format!("http://evil-LEAKED.example{PURGE_PATH}"))
                     .header("content-type", "application/json")
                     .extension(ConnectInfo(loopback_peer()))
-                    .body(Body::from(body_for("sonnet", WEB_SEARCH)))
+                    .body(Body::from(body_for(LANE, WEB_SEARCH)))
                     .expect("build request")
             };
             fixture
@@ -1934,7 +1945,7 @@ async fn an_authority_refusal_names_the_claim_site_without_the_value() {
         );
     }
 
-    assert!(fixture.resident("sonnet", WEB_SEARCH));
+    assert!(fixture.resident(LANE, WEB_SEARCH));
     assert_eq!(fixture.persisted_cleared_rows(), 0);
 }
 
@@ -1963,7 +1974,7 @@ async fn a_busy_first_attempt_retries_against_the_settled_boundary_and_succeeds(
     // catalog-scoped entry, so a `web_search` fixture would vanish for a reason
     // unrelated to the retry and the test would pass on the wrong evidence.
     let key = wire_shape_key();
-    fixture.plant_negative("sonnet", &key);
+    fixture.plant_negative(LANE, &key);
     // A pending boundary makes the FIRST reservation refuse (a purge yields to an
     // admitted-but-unsettled boundary), and it is cleared from a hook so the
     // retry finds a settled generation.
@@ -1983,7 +1994,7 @@ async fn a_busy_first_attempt_retries_against_the_settled_boundary_and_succeeds(
         fixture
             .router
             .load()
-            .reserve_learned_capability_purge("sonnet", &key),
+            .reserve_learned_capability_purge(&lane(), &key),
         routectl_router::router::PurgeOutcome::Busy
     );
     assert!(
@@ -1993,9 +2004,7 @@ async fn a_busy_first_attempt_retries_against_the_settled_boundary_and_succeeds(
     );
     admitted.commit_for_tests();
 
-    let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", &key))
-        .await;
+    let (status, body) = fixture.call(loopback_peer(), &body_for(LANE, &key)).await;
 
     assert_eq!(
         status,
@@ -2021,12 +2030,12 @@ async fn a_busy_first_attempt_retries_against_the_settled_boundary_and_succeeds(
 #[tokio::test]
 async fn repeated_busy_refusals_exhaust_the_bound_and_report_it_distinguishably() {
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     // Never settled, so EVERY reservation refuses and the bound exhausts.
     let _admitted = fixture.admit_unsettled_boundary();
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_eq!(
@@ -2048,7 +2057,7 @@ async fn repeated_busy_refusals_exhaust_the_bound_and_report_it_distinguishably(
         "a refusal carries no purge verdict at all",
     );
     assert!(
-        fixture.resident("sonnet", WEB_SEARCH),
+        fixture.resident(LANE, WEB_SEARCH),
         "and the entry is untouched, so retrying stays safe",
     );
 }
@@ -2092,7 +2101,7 @@ fn advance_shared_generation(fixture: &Fixture) -> Arc<Router> {
 #[tokio::test]
 async fn a_stale_first_attempt_retries_against_a_freshly_published_router_and_succeeds() {
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
 
     // Moves the shared registry's active generation away from the one the
     // fixture's still-published router is cached at, and -- as a real
@@ -2100,14 +2109,14 @@ async fn a_stale_first_attempt_retries_against_a_freshly_published_router_and_su
     // with it.
     let fresh_router = advance_shared_generation(&fixture);
     assert!(
-        !fixture.resident("sonnet", WEB_SEARCH),
+        !fixture.resident(LANE, WEB_SEARCH),
         "premise: a boundary commit prunes catalog-scoped entries, or the retry below \\
          would succeed for the wrong reason",
     );
 
     // Live traffic on the newly published router re-learns the same key under
     // the new generation, before the purge's retry runs.
-    let reader = PlantedLedger::negative(&fresh_router, "sonnet", WEB_SEARCH);
+    let reader = PlantedLedger::negative(&fresh_router, LANE, WEB_SEARCH);
     let summary = fresh_router.rebuild_learned_from_ledger(&reader);
     assert_eq!(
         summary.replayed_negative, 1,
@@ -2119,7 +2128,7 @@ async fn a_stale_first_attempt_retries_against_a_freshly_published_router_and_su
         fixture
             .router
             .load()
-            .reserve_learned_capability_purge("sonnet", WEB_SEARCH),
+            .reserve_learned_capability_purge(&lane(), WEB_SEARCH),
         routectl_router::router::PurgeOutcome::Stale
     );
     assert!(
@@ -2132,7 +2141,7 @@ async fn a_stale_first_attempt_retries_against_a_freshly_published_router_and_su
     // preempts a task on its own -- so the one `yield_now` below is what lets
     // the spawned task's own first-attempt yield (added for exactly this
     // reason) hand control back before the swap below runs.
-    let handle = tokio::spawn(fixture.call(loopback_peer(), &body_for("sonnet", WEB_SEARCH)));
+    let handle = tokio::spawn(fixture.call(loopback_peer(), &body_for(LANE, WEB_SEARCH)));
     tokio::task::yield_now().await;
 
     fixture.router.store(fresh_router);
@@ -2164,7 +2173,7 @@ async fn a_stale_first_attempt_retries_against_a_freshly_published_router_and_su
 #[tokio::test]
 async fn repeated_staleness_exhausts_the_bound_and_reports_it_distinguishably() {
     let fixture = Fixture::new();
-    fixture.plant_negative("sonnet", WEB_SEARCH);
+    fixture.plant_negative(LANE, WEB_SEARCH);
     // Advances the shared registry past the fixture's own published router,
     // which is never swapped for the fresh one -- so both attempts read the
     // same superseded generation.
@@ -2174,7 +2183,7 @@ async fn repeated_staleness_exhausts_the_bound_and_reports_it_distinguishably() 
         fixture
             .router
             .load()
-            .reserve_learned_capability_purge("sonnet", WEB_SEARCH),
+            .reserve_learned_capability_purge(&lane(), WEB_SEARCH),
         routectl_router::router::PurgeOutcome::Stale
     );
     assert!(
@@ -2184,7 +2193,7 @@ async fn repeated_staleness_exhausts_the_bound_and_reports_it_distinguishably() 
     );
 
     let (status, body) = fixture
-        .call(loopback_peer(), &body_for("sonnet", WEB_SEARCH))
+        .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
     assert_eq!(

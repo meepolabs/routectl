@@ -40,7 +40,8 @@ use tempfile::TempDir;
 use super::{UsagePaidProbeLedger, paid_probe_ledger};
 use crate::server::test_support::{added_control_rows, live_usage_writer, usage_control_rows};
 
-/// The lanes, their shared `[providers]` key, and the wire id both resolve to.
+/// The lanes, their shared `[providers]` key, and the wire id the first lane
+/// resolves to.
 ///
 /// TWO lanes on ONE provider, which is what makes the second pass a budget
 /// boundary rather than an empty list: the cap is per provider-day, so lane B's
@@ -50,6 +51,20 @@ const FIRST_LANE: &str = "m1";
 const SECOND_LANE: &str = "m2";
 const WIRE_PROVIDER: &str = "p1";
 const WIRE_UPSTREAM: &str = "claude-sonnet-4-5";
+
+/// The wire id the second lane resolves to. A learned lane is (provider entry,
+/// upstream), so two nicknames on one provider are two lanes only when their
+/// upstreams differ.
+const SECOND_UPSTREAM: &str = "claude-sonnet-4-5-second";
+
+/// The upstream nickname `lane` resolves to.
+fn upstream_of(lane: &str) -> &'static str {
+    if lane == SECOND_LANE {
+        SECOND_UPSTREAM
+    } else {
+        WIRE_UPSTREAM
+    }
+}
 
 /// The closed-table path and value an admitted request grounds, retained on the
 /// candidate and expected back on the paid body.
@@ -260,7 +275,7 @@ impl ComposedProbeRig {
         for lane in [FIRST_LANE, SECOND_LANE] {
             config.models.insert(
                 lane.to_string(),
-                routectl_router::config::ModelEntry::new(WIRE_PROVIDER, WIRE_UPSTREAM),
+                routectl_router::config::ModelEntry::new(WIRE_PROVIDER, upstream_of(lane)),
             );
         }
         config.aliases.insert(
@@ -281,7 +296,7 @@ impl ComposedProbeRig {
                         lane,
                         WIRE_PROVIDER,
                         Arc::clone(&provider) as Arc<dyn routectl_core::Provider>,
-                        WIRE_UPSTREAM,
+                        upstream_of(lane),
                     )
                     .with_effective_row(priced_row(output_ceiling)),
                 ),

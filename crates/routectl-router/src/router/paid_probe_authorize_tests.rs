@@ -208,17 +208,30 @@ impl Fixture {
 
 /// The identity for `m1` on the acting lane.
 fn key() -> FieldVerdictKey {
-    FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity")
+    lane_key("m1")
 }
 
-/// A distinct identity per `n`, for the multi-candidate and bound cases.
+/// A distinct identity per `n`, for the multi-candidate and bound cases. Only
+/// `m1` and `m2` resolve to a model; the rest name lanes nothing dispatches.
 fn key_n(n: usize) -> FieldVerdictKey {
-    FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api").expect("identity")
+    lane_key(&format!("m{n}"))
 }
 
-/// The identity for an explicitly-named model nickname.
+/// The identity of the lane an explicitly-named model nickname dispatches:
+/// `m2` sits on the second provider (see `TWO_LANES`), every other nickname on
+/// the first, and only `m1` sends the shared wire id.
 fn lane_key(nickname: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new(nickname, GROUNDED_PATH, "anthropic-api").expect("identity")
+    let provider = TWO_LANES
+        .iter()
+        .find(|(n, _)| *n == nickname)
+        .map_or(PROVIDER, |(_, p)| *p);
+    let upstream = if TWO_LANES.iter().any(|(n, _)| *n == nickname) {
+        "claude-sonnet-4-5".to_string()
+    } else {
+        format!("unresolved-{nickname}")
+    };
+    let lane = crate::state_key::StateKey::new(provider, &upstream).expect("lane");
+    FieldVerdictKey::new(&lane, GROUNDED_PATH, "anthropic-api").expect("identity")
 }
 
 /// A router with TWO fully-admissible lanes and `ledger` installed, for the
@@ -391,7 +404,7 @@ fn candidate_debug_renders_no_state_key_or_captured_context() {
     // Arrange
     let candidate = PaidProbeCandidate {
         key: FieldVerdictKey::new(
-            "state-sentinel#seat-sentinel",
+            &crate::state_key::StateKey::new("state-sentinel", "seat-sentinel").expect("lane"),
             GROUNDED_PATH,
             "anthropic-api",
         )

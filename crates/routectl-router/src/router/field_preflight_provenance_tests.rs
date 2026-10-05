@@ -45,7 +45,9 @@ fn plant_distinguishable_provenance(router: &Router, state_key: &str) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: state_key.to_string(),
+            state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
+                .as_lane_key()
+                .to_string(),
             feature_key: grounded_key(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,

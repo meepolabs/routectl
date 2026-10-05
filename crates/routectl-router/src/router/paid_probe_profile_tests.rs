@@ -117,7 +117,12 @@ fn router_built(
 
 /// The identity for `m1` on the acting lane.
 fn key() -> FieldVerdictKey {
-    FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity")
+    FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity")
 }
 
 /// The profile for a router built from `effective_row` and `adaptive`.
@@ -276,8 +281,12 @@ fn a_zero_output_ceiling_yields_no_profile() {
 #[test]
 fn an_identity_naming_no_resolved_model_yields_no_profile() {
     let router = router_with(fully_priced(), false);
-    let absent =
-        FieldVerdictKey::new("no-such-model", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let absent = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("no-such-model"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
 
     assert_eq!(router.paid_probe_profile(&absent), None);
 }

@@ -232,13 +232,13 @@ fn field_repair_counters_reports_both_nonzero_alarm_halves() {
     let router = bare_router();
     let canaries = router.field_verdicts().canaries();
     let disproved_key = crate::field_verdict::FieldVerdictKey::new(
-        "anthropic-api:claude-sonnet-4-5",
+        &crate::state_key::StateKey::new("anthropic-api", "claude-sonnet-4-5").expect("lane"),
         THINKING_DISPLAY_PATH,
         "anthropic-api",
     )
     .expect("a qualified path mints a key");
     let live_key = crate::field_verdict::FieldVerdictKey::new(
-        "anthropic-api:claude-opus-4-1",
+        &crate::state_key::StateKey::new("anthropic-api", "claude-opus-4-1").expect("lane"),
         COMPUTER_USE_DISPLAY_PATH,
         "anthropic-api",
     )

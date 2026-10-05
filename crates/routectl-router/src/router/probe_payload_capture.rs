@@ -29,8 +29,11 @@ impl Router {
         target: &super::DispatchTarget,
         attempt_req: &routectl_core::ChatRequest,
     ) {
+        let Some(lane) = target.learned_lane.as_ref() else {
+            return;
+        };
         self.activate_probe_lanes_for_admitted_request(
-            &target.state_key,
+            lane,
             &target.provider_name,
             target.provider_kind,
             target.use_forwarded_credential,
@@ -66,7 +69,7 @@ impl Router {
     /// permanent field key is assembled here.
     pub(crate) fn activate_probe_lanes_for_admitted_request(
         &self,
-        state_key: &str,
+        lane: &crate::state_key::StateKey,
         provider_name: &str,
         provider_kind: Option<&str>,
         use_forwarded_credential: bool,
@@ -107,7 +110,7 @@ impl Router {
         );
         for (path, field_value) in super::field_repair::grounded_closed_table_payloads(attempt_req)
         {
-            let Some(key) = FieldVerdictKey::new(state_key, path, kind) else {
+            let Some(key) = FieldVerdictKey::new(lane, path, kind) else {
                 continue;
             };
             // The two beta sources stay SEPARATE all the way through: the

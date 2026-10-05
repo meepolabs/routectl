@@ -1,10 +1,11 @@
-// POOLED-SEAT identity parity: every status row fact a pooled `nick#member` key
-// resolves must come from the SAME identity a live `DispatchTarget` for that seat
-// carries -- the member provider entry for kind, base URL, override mask, and
-// prefix-impact opt-in, and the base model nickname for the model-scoped tier.
+// POOLED-SEAT identity parity: every status row fact a pooled seat's lane
+// (`member#upstream`) resolves must come from the SAME identity a live
+// `DispatchTarget` for that seat carries -- the member provider entry for kind,
+// base URL, override mask, and prefix-impact opt-in, and the base model nickname
+// for the model-scoped tier.
 //
 // Why this needs its own section rather than one case beside the non-pooled rows:
-// a pooled key has THREE plausible resolutions (the member suffix, the base model
+// a pooled seat has THREE plausible resolutions (the member entry, the base model
 // nickname, the pool the base names) and two of them are wrong in ways no
 // non-pooled fixture can see. A pooled fixture that lets the pool name double as a
 // provider entry cannot see them either -- both resolutions then land on the same
@@ -32,9 +33,23 @@ const MEMBER: &str = "seat-a";
 /// opt the member above in.
 const OTHER_MEMBER: &str = "seat-b";
 
-/// `nick#member`, the state key a live pooled `DispatchTarget` carries.
-fn pooled_key() -> String {
+/// `nick#member`, the runtime state key a live pooled `DispatchTarget` carries.
+fn pooled_runtime_key() -> String {
     crate::seat_pool::seat_state_key(POOLED_NICK, Some(MEMBER))
+}
+
+/// The upstream the pooled model sends.
+const POOLED_UPSTREAM: &str = "claude-sonnet-4-5";
+
+/// `member#upstream`, the learned lane a live pooled `DispatchTarget` carries and
+/// every field verdict for the seat keys on.
+fn pooled_key() -> String {
+    format!("{MEMBER}#{POOLED_UPSTREAM}")
+}
+
+/// [`pooled_key`] parsed.
+fn pooled_lane() -> crate::state_key::StateKey {
+    crate::state_key::StateKey::parse(&pooled_key()).expect("the pooled lane parses")
 }
 
 /// The prefix-impacting closed-table path, whose class is the one that requires a
@@ -207,7 +222,7 @@ fn live_seat_target(router: &Router) -> crate::router::DispatchTarget {
     router
         .expand_chain_to_targets(vec![model], None)
         .into_iter()
-        .find(|target| target.state_key == pooled_key())
+        .find(|target| target.state_key == pooled_runtime_key())
         .expect("the pooled model expands to one target per seat")
 }
 
@@ -216,7 +231,7 @@ fn live_seat_target(router: &Router) -> crate::router::DispatchTarget {
 ///
 /// The kind is taken from the live `DispatchTarget` rather than from the status
 /// surface's own resolution, and that is the whole point: the confirmation half is
-/// keyed on `(state_key, capability_key, provider_kind)`, so a status read that
+/// keyed on `(lane, capability_key, provider_kind)`, so a status read that
 /// resolves a different kind looks up a key nothing seeded and reports an
 /// acknowledged verdict as unacknowledged.
 fn plant_pooled_verdict(router: &Router, capability_key: &str, confirmations: u32) {
@@ -225,7 +240,7 @@ fn plant_pooled_verdict(router: &Router, capability_key: &str, confirmations: u3
         .expect("a live pooled target carries its member entry's kind");
     plant_verdict_on(router, &pooled_key(), capability_key.to_string());
     let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        pooled_key(),
+        pooled_lane(),
         capability_key.to_string(),
         live_kind.to_string(),
     );
@@ -257,16 +272,16 @@ fn plant_pooled_verdict(router: &Router, capability_key: &str, confirmations: u3
 /// moment rewriting traffic with. Each of those readings is individually plausible,
 /// which is why none of them alone would be recognized as a resolution bug.
 ///
-/// Mutation check: drop the member-suffix arm from `provider_kind_for_state_key` ->
-/// the kind parity assertion reds, and the three downstream facts red with it.
+/// Mutation check: drop the lane arm from `provider_kind_for_state_key` -> the kind
+/// parity assertion reds, and the three downstream facts red with it.
 #[test]
 fn a_pooled_seats_row_resolves_the_member_identity_a_live_dispatch_target_carries() {
     let router = pooled_router(pooled_config());
     let target = live_seat_target(&router);
     // PREMISE, stated against the live target rather than assumed: the seat's own
-    // target is keyed by `nick#member`, names the MEMBER provider entry (not the
+    // target learns on `member#upstream`, names the MEMBER provider entry (not the
     // pool), and carries that entry's kind.
-    assert_eq!(target.state_key, pooled_key());
+    assert_eq!(target.learned_lane.as_ref(), Some(&pooled_lane()));
     assert_eq!(
         target.provider_name, MEMBER,
         "a pooled seat's target names the member entry it dispatches",
@@ -326,7 +341,7 @@ fn a_pooled_row_whose_confirmation_was_seeded_under_another_kind_is_not_eligible
     // belongs to an identity the row cannot reach.
     let foreign_kind = "openai-compat";
     let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        pooled_key(),
+        pooled_lane(),
         grounded_key(),
         foreign_kind.to_string(),
     );
@@ -396,7 +411,7 @@ fn pooled_prefix_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlockedReaso
 /// its traffic is being rewritten.
 ///
 /// Mutation check: resolve the opt-in's provider half through the pool base instead
-/// of the `#member` suffix -> red here with `no_target_opt_in`.
+/// of the lane's member entry -> red here with `no_target_opt_in`.
 #[test]
 fn a_member_scoped_model_scoped_opt_in_unblocks_a_pooled_seat() {
     let spec = format!("{MEMBER}:{POOLED_NICK}");
@@ -469,9 +484,9 @@ fn an_opt_in_naming_a_sibling_pool_member_does_not_opt_this_seat_in() {
 /// in.
 ///
 /// The discriminating case for the model half. A resolution that dropped the
-/// nickname comparison -- or compared the pooled `nick#member` key against the
-/// spec's bare nickname and fell through to the provider tier -- would match this
-/// spec and opt in a model the operator named nowhere.
+/// nickname comparison, or matched any model on the member rather than the ones
+/// on this lane, would match this spec and opt in a model the operator named
+/// nowhere.
 #[test]
 fn an_opt_in_naming_another_model_on_the_same_member_does_not_opt_this_seat_in() {
     let mut config = pooled_config();
@@ -497,16 +512,16 @@ fn an_opt_in_naming_another_model_on_the_same_member_does_not_opt_this_seat_in()
 }
 
 // ---------------------------------------------------------------------------
-// Pool fallback: a suffix that names no provider entry
+// The lane's provider entry decides the lane gate
 // ---------------------------------------------------------------------------
 
-/// A config with ONE openai-compat provider-backed model, for the fallback pair
-/// below: `nick#<member>` where the suffix names a real `anthropic-api` entry, and
-/// `nick#<unknown>` where it names nothing.
+/// A config with ONE openai-compat provider-backed model plus an `anthropic-api`
+/// entry no model uses, for the pair below.
 ///
 /// The two provider kinds are deliberately DIFFERENT, which is what makes the pair
-/// discriminate: the member resolution admits the lane and the base resolution
-/// refuses it, so a swap between them flips both rows at once.
+/// discriminate: a lane on the `anthropic-api` entry admits pre-flight and a lane
+/// on the openai-compat one refuses it, so a resolution through anything but the
+/// lane's own entry flips one of the two rows.
 fn fallback_config() -> Config {
     use crate::config::{AliasValue, ModelEntry};
     let toml_text = format!(
@@ -527,16 +542,12 @@ fn fallback_config() -> Config {
     config
 }
 
-/// A suffix naming a real provider entry resolves THAT entry, not the base model's.
-///
-/// Half of the fallback pair. The base model here is openai-compat, whose lane
-/// pre-flight refuses, and the suffix is an attributable `anthropic-api` entry whose
-/// lane it admits -- so this row reads as a supported lane only if the suffix won.
+/// A lane on an attributable `anthropic-api` entry reads as a supported lane, even
+/// though no model nickname happens to dispatch it.
 #[test]
-fn a_suffix_naming_a_provider_entry_resolves_that_entry_rather_than_the_base_model() {
+fn a_lane_on_an_anthropic_entry_resolves_that_entry_rather_than_any_model() {
     let router = router_assuming_durable_writes(fallback_config());
-    let state_key = crate::seat_pool::seat_state_key(POOLED_NICK, Some(MEMBER));
-    plant_verdict_on(&router, &state_key, grounded_key());
+    plant_verdict_on(&router, &format!("{MEMBER}#gpt-4o"), grounded_key());
 
     let rows = router.field_verdict_status();
 
@@ -544,22 +555,18 @@ fn a_suffix_naming_a_provider_entry_resolves_that_entry_rather_than_the_base_mod
     assert_ne!(
         row.blocked_reason,
         Some(PreflightBlockedReason::UnsupportedLane),
-        "the suffix names an attributable anthropic-api entry, so the lane is \
-         supported -- the base model's openai-compat entry is not what was resolved",
+        "the lane names an attributable anthropic-api entry, so the lane is \
+         supported -- the configured model's openai-compat entry is not what was \
+         resolved",
     );
 }
 
-/// A suffix naming NO provider entry falls back to the base model's own provider.
-///
-/// The other half of the pair, and the reason the fallback exists: a `#`-suffixed
-/// key whose suffix resolves nothing is not unattributable, it is a key whose model
-/// half still resolves. Here the base is openai-compat, so the lane is refused --
-/// which is the correct answer for that entry and the opposite of the row above.
+/// The other half of the pair: the configured model's own lane, on its
+/// openai-compat entry, is refused.
 #[test]
-fn a_suffix_naming_no_provider_entry_falls_back_to_the_base_models_provider() {
+fn a_lane_on_an_openai_compat_entry_is_an_unsupported_lane() {
     let router = router_assuming_durable_writes(fallback_config());
-    let state_key = crate::seat_pool::seat_state_key(POOLED_NICK, Some("no-such-entry"));
-    plant_verdict_on(&router, &state_key, grounded_key());
+    plant_verdict_on(&router, "base-oc#gpt-4o", grounded_key());
 
     let rows = router.field_verdict_status();
 
@@ -567,8 +574,7 @@ fn a_suffix_naming_no_provider_entry_falls_back_to_the_base_models_provider() {
     assert_eq!(
         row.blocked_reason,
         Some(PreflightBlockedReason::UnsupportedLane),
-        "with no provider entry for the suffix the base model's provider is what \
-         resolves, and its openai-compat lane is one pre-flight never acts on",
+        "the lane's own entry is openai-compat, a lane pre-flight never acts on",
     );
 }
 
@@ -606,7 +612,7 @@ fn config_only_pooled_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlocked
          the lane rather than by the opt-in, and every case would read the same",
     );
     let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        state_key.clone(),
+        pooled_lane(),
         capability_key.clone(),
         kind.clone(),
     );
@@ -639,8 +645,8 @@ fn config_only_pooled_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlocked
 /// table would report every such row blocked, telling an operator their opt-in was
 /// ignored on exactly the boot where the verdict was restored.
 ///
-/// Mutation check: delete the configured-model fallback arm from
-/// `override_identity_for` -> red here with `no_target_opt_in`.
+/// Mutation check: delete the configured-model arm from
+/// `override_identities_for_lane` -> red here with `no_target_opt_in`.
 #[test]
 fn a_config_only_pooled_seat_honours_a_member_scoped_model_scoped_opt_in() {
     let spec = format!("{MEMBER}:{POOLED_NICK}");
@@ -649,7 +655,7 @@ fn a_config_only_pooled_seat_honours_a_member_scoped_model_scoped_opt_in() {
 
     assert_eq!(
         blocked, None,
-        "with no resolved table the pooled key still resolves the MEMBER for the \
+        "with no resolved table the pooled lane still resolves the MEMBER for the \
          provider half and the BASE nickname for the model half, so the operator's \
          opt-in is honoured",
     );

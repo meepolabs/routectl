@@ -11,7 +11,12 @@ const ANTHROPIC: &str = "anthropic-api";
 const GROUNDED_PATH: &str = "thinking.enabled.display";
 
 fn key(state_key: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new(state_key, GROUNDED_PATH, ANTHROPIC).expect("a qualified path mints a key")
+    FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture(state_key),
+        GROUNDED_PATH,
+        ANTHROPIC,
+    )
+    .expect("a qualified path mints a key")
 }
 
 // Only exercised through `field_capability_key` to keep the const path live

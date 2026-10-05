@@ -88,7 +88,7 @@ fn field_key() -> String {
 fn broken(ts: i64, capability: &str, revision: i64, catalog: i64) -> CapabilityEvent {
     CapabilityEvent {
         ts,
-        lane_key: "nick".to_string(),
+        lane_key: "nick#upstream".to_string(),
         capability: capability.to_string(),
         verdict: "broken".to_string(),
         phase: "f1".to_string(),
@@ -1220,7 +1220,7 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
     // The old Router observes a wire-shape fact through the PRODUCTION path.
     let observed_key = field_key();
     let outcome = before.observe_learned_capability(
-        "nick",
+        "nick#upstream",
         &observed_key,
         "anthropic-api",
         SignalTier::SelfIdentifying,
@@ -1332,7 +1332,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
     let pending = admitted.pending_generation();
 
     // (3) The PRODUCTION clear path settles mid-boundary.
-    let removed = live.clear_learned_capability("nick", &field_key(), "anthropic-api");
+    let removed = live.clear_learned_capability("nick#upstream", &field_key(), "anthropic-api");
     let routectl_router::GenerationOutcome::Applied {
         value: was_resident,
         generation: clear_generation,
@@ -1363,7 +1363,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
         .push(routectl_router::router::CapabilityClearedEvent {
             persistence_generation: clear_generation,
             incarnation: clear_incarnation,
-            state_key: "nick".to_string(),
+            state_key: "nick#upstream".to_string(),
             capability_key: field_key(),
             provider_kind: "anthropic-api".to_string(),
         });
@@ -1483,7 +1483,7 @@ async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
     for (key, observations) in [(&pending_key, 1), (&acting_key, 2)] {
         for _ in 0..observations {
             live.observe_learned_capability(
-                "nick",
+                "nick#upstream",
                 key,
                 "anthropic-api",
                 SignalTier::Inferred,
@@ -1582,7 +1582,7 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
         .expect("test clock is well past boot");
     let observe_at = |at: std::time::Instant| {
         live.observe_learned_capability(
-            "nick",
+            "nick#upstream",
             &key,
             "anthropic-api",
             SignalTier::Inferred,
@@ -1772,7 +1772,10 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
 
     // Reserve the purge FIRST: the lease it opens must outlive the boundary
     // attempt below.
-    let reserved = match before.reserve_learned_capability_purge("nick", &field_key()) {
+    let reserved = match before.reserve_learned_capability_purge(
+        &routectl_router::StateKey::parse("nick#upstream").expect("lane"),
+        &field_key(),
+    ) {
         PurgeOutcome::Reserved(reserved) => reserved,
         _ => panic!("premise: the wire-shape entry must be resident to reserve a purge on it"),
     };
@@ -1892,7 +1895,10 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     // pending generation, which refuses every purge attempt while it stands.
     let admitted = admit_capability_boundary(&usage, &reloaded).expect("the boundary is admitted");
 
-    let refused = before.reserve_learned_capability_purge("nick", &field_key());
+    let refused = before.reserve_learned_capability_purge(
+        &routectl_router::StateKey::parse("nick#upstream").expect("lane"),
+        &field_key(),
+    );
     assert!(
         matches!(refused, PurgeOutcome::Busy),
         "a purge must be refused while a boundary is admitted and unsettled",
@@ -1916,7 +1922,10 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
 
     // The retried purge now succeeds, against the router the boundary
     // published.
-    let reserved = match reloaded.reserve_learned_capability_purge("nick", &field_key()) {
+    let reserved = match reloaded.reserve_learned_capability_purge(
+        &routectl_router::StateKey::parse("nick#upstream").expect("lane"),
+        &field_key(),
+    ) {
         PurgeOutcome::Reserved(reserved) => reserved,
         _ => panic!("premise: the restated entry must still be resident to reserve a purge on it"),
     };

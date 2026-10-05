@@ -270,8 +270,12 @@ async fn retained_payload_bytes_are_bounded_by_depth_times_the_largest_payload()
 
     let mut activated = 0usize;
     for n in 0..PROBE_QUEUE_DEPTH * 3 {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         let payload = ProbePayload::new(GROUNDED_PATH, max_value.clone(), &client, &operator, true)
             .expect("the maximum acceptable payload must construct");
         assert!(

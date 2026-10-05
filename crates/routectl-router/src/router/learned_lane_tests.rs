@@ -266,14 +266,72 @@ fn a_pooled_seat_lane_is_the_member_entry_not_the_pool_or_the_account() {
 }
 
 #[test]
-fn a_field_verdict_keeps_the_runtime_key_its_owner_mints() {
+fn every_capability_namespace_keys_on_the_lane() {
     let router = router();
     let t = target(&router, "opus", "alpha", "model-x");
     let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
         .expect("the grounded path is well-formed");
 
-    assert_eq!(t.learned_key(&field_key), Some("opus"));
+    assert_eq!(t.learned_key(&field_key), Some("alpha#model-x"));
     assert_eq!(t.learned_key("web_search"), Some("alpha#model-x"));
+}
+
+#[test]
+fn a_field_verdict_learned_under_one_nickname_applies_to_another_on_the_lane() {
+    // A field verdict minted through the production identity for one nickname's
+    // target, then read through the production lookup on a sibling nickname
+    // sharing the provider entry and upstream -- and on a target on another
+    // upstream, which must not see it.
+    let router = router();
+    let learner = target(&router, "opus", "alpha", "model-x");
+    let sibling = target(&router, "opus-alias", "alpha", "model-x");
+    let elsewhere = target(&router, "opus", "alpha", "model-y");
+    let path = "thinking.enabled.display";
+    let field_key =
+        crate::field_capability::field_capability_key(path).expect("the grounded path mints");
+    let identity = crate::field_verdict::FieldVerdictKey::new(
+        learner.learned_lane.as_ref().expect("a lane is minted"),
+        path,
+        KIND,
+    )
+    .expect("the grounded path mints an identity");
+    let now = Instant::now();
+    let guard = router
+        .field_verdicts()
+        .admit_provisional(
+            &identity,
+            "https://alpha.example.test/v1",
+            router.registry_generation(),
+            now,
+        )
+        .expect("an unknown identity admits one repair");
+    let learned = guard.commit(400, vec![field_key.clone()], now);
+    assert!(
+        learned.is_some(),
+        "premise: the repaired retry persisted a verdict"
+    );
+
+    let field_acts_on = |t: &DispatchTarget| {
+        let key = t.learned_key(&field_key).expect("the target has a lane");
+        matches!(
+            router
+                .acting_negative_with_generation(key, &field_key, KIND, Instant::now())
+                .0,
+            RoutingDecision::RouteAway { .. }
+        )
+    };
+    assert!(
+        field_acts_on(&learner),
+        "premise: the learner reads its own verdict"
+    );
+    assert!(
+        field_acts_on(&sibling),
+        "a sibling nickname on the same lane reads the same field verdict",
+    );
+    assert!(
+        !field_acts_on(&elsewhere),
+        "a different upstream is a different lane and starts fresh",
+    );
 }
 
 #[test]

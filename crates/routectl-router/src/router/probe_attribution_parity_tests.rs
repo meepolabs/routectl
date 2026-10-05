@@ -350,7 +350,10 @@ fn preflight_admits(shape: &Shape, req: &ChatRequest) -> bool {
 fn activation_admits(shape: &Shape, req: &ChatRequest) -> bool {
     let (router, target) = fixture(shape);
     router.activate_probe_lanes_for_admitted_request(
-        &target.state_key,
+        target
+            .learned_lane
+            .as_ref()
+            .expect("a fixture target mints a lane"),
         &target.provider_name,
         target.provider_kind,
         target.use_forwarded_credential,

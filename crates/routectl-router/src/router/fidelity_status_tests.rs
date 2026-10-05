@@ -26,10 +26,17 @@ use crate::field_canary::CanaryOutcome;
 /// The one grounded closed-table path.
 const GROUNDED_PATH: &str = "thinking.enabled.display";
 
-/// A state key no `[providers]` entry names, so its provider kind resolves to
-/// the empty token -- inert in capability-key normalization, which is what keeps
-/// these fixtures' keys byte-stable without a resolved-model rig.
-const STATE_KEY: &str = "sonnet";
+/// The `[models]` nickname the fixtures configure.
+const NICKNAME: &str = "sonnet";
+
+/// The learned lane `NICKNAME` dispatches in `bare_router`: the `anthropic`
+/// entry sending `claude-sonnet-4-5`. Every field verdict is keyed on it.
+const STATE_KEY: &str = "anthropic#claude-sonnet-4-5";
+
+/// [`STATE_KEY`] parsed.
+fn state_lane() -> crate::state_key::StateKey {
+    crate::state_key::StateKey::parse(STATE_KEY).expect("the fixture lane parses")
+}
 
 /// Long enough that nothing in a test lapses by wall-clock.
 const NOT_LAPSED: Duration = Duration::from_hours(1);
@@ -63,13 +70,13 @@ fn bare_router() -> Router {
     );
     let mut models = std::collections::BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     let mut aliases = std::collections::BTreeMap::new();
     aliases.insert(
         "default".to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     router_assuming_durable_writes(Config {
         providers,
@@ -87,11 +94,11 @@ fn grounded_key() -> String {
         .expect("the grounded path is well-formed")
 }
 
-/// The identity for `STATE_KEY`'s grounded row on a router whose provider kind
-/// resolves empty.
+/// The identity for `STATE_KEY`'s grounded row, at the kind the router resolves
+/// for the lane.
 fn grounded_identity(router: &Router) -> crate::field_verdict::FieldVerdictKey {
     crate::field_verdict::FieldVerdictKey::from_capability_key(
-        STATE_KEY.to_string(),
+        state_lane(),
         grounded_key(),
         router.provider_kind_for_state_key(STATE_KEY).to_string(),
     )
@@ -342,7 +349,7 @@ fn an_acknowledged_verdict_with_a_foreign_transform_class_is_blocked_not_unblock
     // path a real boot uses -- so this row is eligible in every respect but its class.
     let provider_kind = router.provider_kind_for_state_key(STATE_KEY).to_string();
     let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        STATE_KEY.to_string(),
+        state_lane(),
         foreign.clone(),
         provider_kind.clone(),
     );
@@ -404,7 +411,7 @@ fn a_force_supported_override_is_reported_as_the_mask_ahead_of_every_other_reaso
         ProviderEntry::anthropic_api("env://K"),
     );
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     // Keyed on the PROVIDER tier: the model resolves through `anthropic`, so the

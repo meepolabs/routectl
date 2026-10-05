@@ -196,8 +196,7 @@ impl Router {
     pub(super) fn expire_learned_on_override_change(&self, previous: &Self) {
         let now = Instant::now();
         for entry in self.learned_capabilities.snapshot() {
-            let identities =
-                self.override_identities_for_entry(&entry.state_key, &entry.feature_key);
+            let identities = self.override_identities_for_entry(&entry.state_key);
             let changed = identities.iter().any(|(provider_name, nickname)| {
                 let provider_kind = self
                     .config
@@ -252,19 +251,13 @@ impl Router {
     /// the learned entry keyed `(registry_key, feature_key)`, in the shape a
     /// live `DispatchTarget` hands the override registry.
     ///
-    /// The capability namespace says which keyspace `registry_key` is in. A
-    /// catalog capability keys on a lane (`provider_entry#upstream`), which
-    /// several nicknames can share, so every one of them is returned: an
+    /// Every capability namespace keys on a lane (`provider_entry#upstream`),
+    /// which several nicknames can share, so every one of them is returned: an
     /// override cell changed for any of them changes the operator's intent for
-    /// the shared entry. A field verdict keys on the runtime state key its
-    /// owner mints and resolves through [`Self::override_identity_for`].
-    fn override_identities_for_entry(
-        &self,
-        registry_key: &str,
-        feature_key: &str,
-    ) -> Vec<(String, String)> {
-        let lane_keyed = crate::field_capability::capability_key_is_catalog_scoped(feature_key);
-        match crate::state_key::StateKey::parse(registry_key).filter(|_| lane_keyed) {
+    /// the shared entry. A key that is not a lane resolves through
+    /// [`Self::override_identity_for`].
+    fn override_identities_for_entry(&self, registry_key: &str) -> Vec<(String, String)> {
+        match crate::state_key::StateKey::parse(registry_key) {
             Some(lane) => self.override_identities_for_lane(&lane),
             None => vec![self.override_identity_for(registry_key)],
         }
@@ -277,7 +270,7 @@ impl Router {
     /// cold boot before installation, or a provider that failed to build.
     /// With no model on the lane, the provider entry alone, so a provider-tier
     /// override still resolves.
-    fn override_identities_for_lane(
+    pub(super) fn override_identities_for_lane(
         &self,
         lane: &crate::state_key::StateKey,
     ) -> Vec<(String, String)> {
@@ -386,6 +379,15 @@ impl Router {
     /// (only the exact `bedrock` token reduces a key), so it reconstructs the
     /// identical key instead of corrupting it.
     pub fn provider_kind_for_state_key(&self, state_key: &str) -> &str {
+        // A learned lane names its egressing provider entry outright, and every
+        // learned key is one, so the entry's kind is the answer whenever the
+        // key parses to a configured entry. The runtime-key readings below
+        // remain for a key that is not a lane.
+        if let Some(kind) = crate::state_key::StateKey::parse(state_key)
+            .and_then(|lane| self.kind_of_provider(lane.provider_entry()))
+        {
+            return kind;
+        }
         // Resolved identity first: a live row is the truth a dispatch would use,
         // so a reload that repointed a nickname is honoured over the config
         // tables.
@@ -417,14 +419,7 @@ impl Router {
         }
         // A provider-scoped key (legacy or direct construction, no model scope).
         // Last, so a model shape never resolves through a same-named provider.
-        // A learned lane (`provider_entry#upstream`) resolves through its
-        // provider entry once every runtime-key reading has missed.
-        self.kind_of_provider(state_key)
-            .or_else(|| {
-                crate::state_key::StateKey::parse(state_key)
-                    .and_then(|lane| self.kind_of_provider(lane.provider_entry()))
-            })
-            .unwrap_or("")
+        self.kind_of_provider(state_key).unwrap_or("")
     }
 
     /// The kind of the provider a CONFIGURED model names, or `None` when the
@@ -703,8 +698,11 @@ impl Router {
         incarnation: u64,
         observations: u32,
     ) -> bool {
+        let Some(lane) = crate::state_key::StateKey::parse(state_key) else {
+            return false;
+        };
         let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-            state_key.to_string(),
+            lane,
             capability_key.to_string(),
             provider_kind.to_string(),
         );

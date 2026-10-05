@@ -202,12 +202,19 @@ fn pooled_router() -> (Router, Arc<parking_lot::Mutex<Vec<&'static str>>>) {
     pooled_router_named("m1", ["seat-a", "seat-b"])
 }
 
+/// The lane a pooled fixture's member `member` learns on.
+fn pooled_lane(member: &str) -> crate::state_key::StateKey {
+    crate::state_key::StateKey::new(member, "claude-sonnet-4-5")
+        .expect("a separator-free member mints a lane")
+}
+
 #[tokio::test]
-async fn a_pooled_identity_probes_the_seat_its_state_key_names_not_seat_zero() {
+async fn a_pooled_identity_probes_the_seat_its_lane_names_not_seat_zero() {
     let (router, calls) = pooled_router();
     // An identity minted against the SECOND member. Seat zero is `seat-a`,
-    // so a resolver ignoring the label would dial the wrong account.
-    let key = FieldVerdictKey::new("m1#seat-b", GROUNDED_PATH, "anthropic-api").expect("identity");
+    // so a resolver ignoring the lane's entry would dial the wrong account.
+    let key = FieldVerdictKey::new(&pooled_lane("seat-b"), GROUNDED_PATH, "anthropic-api")
+        .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     let ran = router.run_due_probes().await;
@@ -216,17 +223,17 @@ async fn a_pooled_identity_probes_the_seat_its_state_key_names_not_seat_zero() {
     assert_eq!(
         calls.lock().as_slice(),
         ["seat-b"],
-        "the probe must reach the seat its state key names"
+        "the probe must reach the seat its lane names"
     );
 }
 
 #[tokio::test]
 async fn a_pooled_identity_naming_no_live_member_probes_nothing() {
-    // Converse: a label that matches no current member must dial NOTHING
+    // Converse: a lane whose entry is no current member must dial NOTHING
     // rather than falling back to an arbitrary seat.
     let (router, calls) = pooled_router();
-    let key =
-        FieldVerdictKey::new("m1#seat-gone", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(&pooled_lane("seat-gone"), GROUNDED_PATH, "anthropic-api")
+        .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -238,6 +245,20 @@ async fn a_pooled_identity_naming_no_live_member_probes_nothing() {
 }
 
 #[tokio::test]
+async fn a_pooled_identity_on_another_upstream_probes_nothing() {
+    // The upstream half binds too: the member is live, but the lane names an
+    // upstream no model on it sends.
+    let (router, calls) = pooled_router();
+    let lane = crate::state_key::StateKey::new("seat-b", "some-other-upstream").expect("lane");
+    let key = FieldVerdictKey::new(&lane, GROUNDED_PATH, "anthropic-api").expect("identity");
+    router.activate_probe_lane(&key, ProbeValidator::CountTokens);
+
+    router.run_due_probes().await;
+
+    assert!(calls.lock().is_empty());
+}
+
+#[tokio::test]
 async fn the_actual_dial_target_is_re_guarded_for_loopback() {
     // Activation guarded the entry it resolved THEN. A reload can
     // replace that entry with a loopback one before the dial, and a probe
@@ -246,7 +267,12 @@ async fn the_actual_dial_target_is_re_guarded_for_loopback() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     // Swap the provider entry under the queued job, as a reload would.
@@ -284,7 +310,12 @@ async fn the_actual_dial_target_is_re_guarded_for_a_forwarded_entry() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     // Replace the entry with a forwarded-credential one on the SAME remote
@@ -322,7 +353,12 @@ async fn the_actual_dial_target_is_re_guarded_for_a_vanished_entry() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     let mut config = (*router.config).clone();
@@ -345,7 +381,12 @@ async fn an_open_breaker_blocks_the_probe_dial_without_spending_the_free_step() 
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     router.force_open_breaker("m1", Duration::from_hours(1));
 
@@ -376,7 +417,12 @@ async fn a_closed_breaker_lets_the_probe_dial() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -438,30 +484,28 @@ fn pooled_router_named(
     (router, calls)
 }
 
-/// Probe one composed key against a router built by `pooled_router_named` and
-/// return which seats were dialed.
-async fn probe_composed(
-    nickname: &str,
-    labels: [&'static str; 2],
-    label: &str,
-) -> Vec<&'static str> {
+/// Probe the lane of member `label` against a router built by
+/// `pooled_router_named` and return which seats were dialed.
+async fn probe_member(nickname: &str, labels: [&'static str; 2], label: &str) -> Vec<&'static str> {
     let (router, calls) = pooled_router_named(nickname, labels);
-    let composed = crate::seat_pool::seat_state_key(nickname, Some(label));
-    let key = FieldVerdictKey::new(&composed, GROUNDED_PATH, "anthropic-api").expect("identity");
+    let calls_before = calls.lock().len();
+    let Some(lane) = crate::state_key::StateKey::new(label, "claude-sonnet-4-5") else {
+        return Vec::new();
+    };
+    let key = FieldVerdictKey::new(&lane, GROUNDED_PATH, "anthropic-api").expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
 
-    calls.lock().clone()
+    calls.lock()[calls_before..].to_vec()
 }
 
 #[tokio::test]
 async fn a_pooled_nickname_containing_the_separator_is_never_probed() {
-    // `weird#name` on `seat-b` composes `weird#name#seat-b`, which splits as
-    // model `weird` + member `name#seat-b`. The install boundary refuses the
-    // nickname, so no probe can reach either reading.
+    // The install boundary refuses a nickname carrying the separator, so no
+    // model dispatches the member's lane and no probe can reach it.
     assert!(
-        probe_composed("weird#name", ["seat-a", "seat-b"], "seat-b")
+        probe_member("weird#name", ["seat-a", "seat-b"], "seat-b")
             .await
             .is_empty()
     );
@@ -469,10 +513,10 @@ async fn a_pooled_nickname_containing_the_separator_is_never_probed() {
 
 #[tokio::test]
 async fn a_pooled_label_containing_the_separator_is_never_probed() {
-    // The mirror case: member `seat#b` makes `m1#seat#b` readable as model
-    // `m1#seat` + member `b`. The install boundary refuses the pool member.
+    // The mirror case: a member named `seat#b` cannot mint a lane at all, and
+    // the install boundary refuses the pool member besides.
     assert!(
-        probe_composed("m1", ["seat-a", "seat#b"], "seat#b")
+        probe_member("m1", ["seat-a", "seat#b"], "seat#b")
             .await
             .is_empty()
     );
@@ -481,9 +525,9 @@ async fn a_pooled_label_containing_the_separator_is_never_probed() {
 #[tokio::test]
 async fn a_separator_free_pooled_identity_in_the_same_fixture_is_probed() {
     // Positive control for the two refusals above: same fixture builder,
-    // same composer, names that carry no separator.
+    // names that carry no separator.
     assert_eq!(
-        probe_composed("m1", ["seat-a", "seat-b"], "seat-b").await,
+        probe_member("m1", ["seat-a", "seat-b"], "seat-b").await,
         ["seat-b"]
     );
 }

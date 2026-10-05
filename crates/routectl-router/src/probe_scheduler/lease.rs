@@ -186,7 +186,8 @@ mod tests {
     use crate::field_verdict::FieldVerdictKey;
 
     fn sentinel_key(state_key: &str, field_path: &str, provider_kind: &str) -> FieldVerdictKey {
-        FieldVerdictKey::new(state_key, field_path, provider_kind)
+        let lane = crate::state_key::StateKey::parse(state_key).expect("a sentinel lane");
+        FieldVerdictKey::new(&lane, field_path, provider_kind)
             .expect("a well-formed dotted path mints an identity")
     }
 

@@ -304,7 +304,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
 
     let specs: &[EventSpec] = &[
         (
-            "gpt-nick",
+            "gpt-nick#upstream",
             WEB_SEARCH,
             "broken",
             "f1",
@@ -322,7 +322,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
             Some(SCHEMA_PARSE),
         ),
         (
-            "gpt-nick",
+            "gpt-nick#upstream",
             COMPUTER_USE,
             "broken",
             "f1",
@@ -331,7 +331,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
             None,
         ),
         (
-            "gpt-nick",
+            "gpt-nick#upstream",
             COMPUTER_USE,
             "broken",
             "f1",
@@ -340,7 +340,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
             None,
         ),
         (
-            "gpt-nick",
+            "gpt-nick#upstream",
             PROMPT_CACHING,
             "broken",
             "f1",
@@ -348,7 +348,15 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
             "self-identifying",
             None,
         ),
-        ("gpt-nick", PROMPT_CACHING, "cleared", "", "live", "", None),
+        (
+            "gpt-nick#upstream",
+            PROMPT_CACHING,
+            "cleared",
+            "",
+            "live",
+            "",
+            None,
+        ),
     ];
 
     // Persisted side: a matching tombstone then every event through the real
@@ -420,11 +428,11 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
     assert_eq!(live.len(), 3, "web_search, structured_output, computer_use");
     assert_eq!(rebuilt.len(), 3);
     assert!(
-        find(&rebuilt, "gpt-nick", PROMPT_CACHING).is_none(),
+        find(&rebuilt, "gpt-nick#upstream", PROMPT_CACHING).is_none(),
         "a probe-settled negative must not resurrect after rebuild",
     );
 
-    let ws = find(&rebuilt, "gpt-nick", WEB_SEARCH).expect("web_search resident");
+    let ws = find(&rebuilt, "gpt-nick#upstream", WEB_SEARCH).expect("web_search resident");
     assert_eq!(ws.verdict, Verdict::LearnedBroken(FailurePhase::F1));
     assert_eq!(acting_decision(ws, now), ActingDecision::RouteAway);
 
@@ -432,7 +440,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
     assert_eq!(so.verdict, Verdict::VerifiedWorking);
     assert_eq!(acting_decision(so, now), ActingDecision::Allow);
 
-    let cu = find(&rebuilt, "gpt-nick", COMPUTER_USE).expect("computer_use resident");
+    let cu = find(&rebuilt, "gpt-nick#upstream", COMPUTER_USE).expect("computer_use resident");
     assert_eq!(
         cu.observations, 2,
         "the corroborated inferred negative acts on two"
@@ -455,7 +463,14 @@ async fn learned_negative_survives_restart_and_acts_without_a_fresh_attempt() {
     let (handle, writer) = writer_at(&ledger);
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     handle.try_send_capability_event_in_generation(
-        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, overlay),
+        broken(
+            ts,
+            "gpt-nick#upstream",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
         1,
     );
     drop(handle);
@@ -468,7 +483,8 @@ async fn learned_negative_survives_restart_and_acts_without_a_fresh_attempt() {
     // Assert: the negative is resident and already acts -- a first dispatch
     // routes away without paying a fresh doomed attempt to re-learn it.
     assert_eq!(snap.len(), 1);
-    let entry = find(&snap, "gpt-nick", WEB_SEARCH).expect("negative resident after restart");
+    let entry =
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).expect("negative resident after restart");
     let now = Instant::now();
     assert!(
         entry.expires_at > now,
@@ -491,7 +507,14 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     let (handle, writer) = writer_at(&ledger);
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 0), 1);
     handle.try_send_capability_event_in_generation(
-        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, 0),
+        broken(
+            ts,
+            "gpt-nick#upstream",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            0,
+        ),
         1,
     );
     drop(handle);
@@ -542,7 +565,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
         "a negative learned under the new revision replays across restart",
     );
     assert!(
-        find(&snap, "gpt-nick", WEB_SEARCH).is_none(),
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).is_none(),
         "the pre-bump negative never crosses the new boundary",
     );
 }
@@ -568,7 +591,7 @@ async fn stale_event_lapses_to_a_single_reprobe_across_restart() {
     handle.try_send_capability_event_in_generation(
         broken(
             stale,
-            "gpt-nick",
+            "gpt-nick#upstream",
             WEB_SEARCH,
             "self-identifying",
             cat,
@@ -579,7 +602,7 @@ async fn stale_event_lapses_to_a_single_reprobe_across_restart() {
     handle.try_send_capability_event_in_generation(
         broken(
             recent,
-            "gpt-nick",
+            "gpt-nick#upstream",
             COMPUTER_USE,
             "self-identifying",
             cat,
@@ -598,14 +621,16 @@ async fn stale_event_lapses_to_a_single_reprobe_across_restart() {
     // so the next dispatch admits a single re-probe rather than routing away
     // forever; the recent negative still acts.
     let now = Instant::now();
-    let stale_entry = find(&snap, "gpt-nick", WEB_SEARCH).expect("stale negative resident");
+    let stale_entry =
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).expect("stale negative resident");
     assert!(
         stale_entry.expires_at <= now,
         "a stale negative maps to an expired window"
     );
     assert_eq!(acting_decision(stale_entry, now), ActingDecision::Reprobe);
 
-    let recent_entry = find(&snap, "gpt-nick", COMPUTER_USE).expect("recent negative resident");
+    let recent_entry =
+        find(&snap, "gpt-nick#upstream", COMPUTER_USE).expect("recent negative resident");
     assert_eq!(
         acting_decision(recent_entry, now),
         ActingDecision::RouteAway
@@ -672,7 +697,7 @@ async fn missing_tombstone_fails_closed_to_empty_registry() {
     handle.try_send_capability_event_in_generation(
         broken(
             now_ms(),
-            "gpt-nick",
+            "gpt-nick#upstream",
             WEB_SEARCH,
             "self-identifying",
             cat,
@@ -915,7 +940,7 @@ async fn future_dated_event_clamps_to_now_and_replays_fresh() {
     handle.try_send_capability_event_in_generation(
         broken(
             future,
-            "gpt-nick",
+            "gpt-nick#upstream",
             WEB_SEARCH,
             "self-identifying",
             cat,
@@ -933,7 +958,8 @@ async fn future_dated_event_clamps_to_now_and_replays_fresh() {
     // Assert: the clock map clamps the future timestamp to now, so the negative
     // replays as fresh -- resident, within its window, and acting.
     let clock = Instant::now();
-    let entry = find(&snap, "gpt-nick", WEB_SEARCH).expect("future-dated negative resident");
+    let entry =
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).expect("future-dated negative resident");
     assert!(
         entry.expires_at > clock,
         "a clamped future event maps to a fresh window"
@@ -965,7 +991,14 @@ async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
     let (handle, writer) = writer_at(&ledger);
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     handle.try_send_capability_event_in_generation(
-        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, overlay),
+        broken(
+            ts,
+            "gpt-nick#upstream",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
         1,
     );
 
@@ -976,7 +1009,7 @@ async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
     let scratch = tmp.path().join("scratch.db");
     let resident = warm_and_snapshot(&ledger, &live, &scratch);
     assert!(
-        find(&resident, "gpt-nick", WEB_SEARCH).is_some(),
+        find(&resident, "gpt-nick#upstream", WEB_SEARCH).is_some(),
         "premise: the negative must be resident before the purge, else the \
          durability assertion is vacuous"
     );
@@ -986,7 +1019,10 @@ async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
     // Through the real protocol: reserve, commit the clear DURABLY, then
     // finalize. The order is the contract -- the entry is removed only after the
     // row is committed, so a rebuild can never see the removal without the clear.
-    let reserved = match live.reserve_learned_capability_purge("gpt-nick", WEB_SEARCH) {
+    let reserved = match live.reserve_learned_capability_purge(
+        &routectl_router::StateKey::parse("gpt-nick#upstream").expect("lane"),
+        WEB_SEARCH,
+    ) {
         routectl_router::router::PurgeOutcome::Reserved(reserved) => reserved,
         _ => panic!("a resident entry on the live generation must reserve"),
     };
@@ -1033,7 +1069,7 @@ async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
 
     // Assert: the purge is durable -- the negative does not come back.
     assert!(
-        find(&snap, "gpt-nick", WEB_SEARCH).is_none(),
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).is_none(),
         "a purged negative must not be resurrected by the warm rebuild"
     );
 }
@@ -1054,7 +1090,14 @@ async fn without_a_persisted_settlement_the_warm_rebuild_does_resurrect_it() {
     let (handle, writer) = writer_at(&ledger);
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     handle.try_send_capability_event_in_generation(
-        broken(ts, "gpt-nick", WEB_SEARCH, "self-identifying", cat, overlay),
+        broken(
+            ts,
+            "gpt-nick#upstream",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            overlay,
+        ),
         1,
     );
     drop(handle);
@@ -1066,7 +1109,7 @@ async fn without_a_persisted_settlement_the_warm_rebuild_does_resurrect_it() {
     // Assert: the negative IS resident, so the sibling scenario's absence is
     // attributable to the settlement and to nothing else.
     assert!(
-        find(&snap, "gpt-nick", WEB_SEARCH).is_some(),
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).is_some(),
         "control: the same ledger without a settlement must replay the negative"
     );
 }

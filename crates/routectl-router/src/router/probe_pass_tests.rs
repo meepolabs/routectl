@@ -22,7 +22,12 @@ use crate::router::probe_test_support::{FailingProvider, GROUNDED_PATH, remote_r
 /// A due free job on a router with no paid candidate and no paid cap: the
 /// floor every other assertion in this file builds on.
 fn idle_free_lane(router: &Router) {
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 }
 

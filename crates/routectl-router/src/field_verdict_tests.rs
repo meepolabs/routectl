@@ -46,7 +46,12 @@ fn registry() -> Arc<FieldVerdictRegistry> {
 }
 
 fn key(state_key: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new(state_key, GROUNDED_PATH, ANTHROPIC).expect("a qualified path mints a key")
+    FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture(state_key),
+        GROUNDED_PATH,
+        ANTHROPIC,
+    )
+    .expect("a qualified path mints a key")
 }
 
 /// Plant a resident, acting field negative the way existing capability tests
@@ -77,8 +82,18 @@ fn two_distinct_field_paths_are_distinct_entries() {
     // Arrange -- one target, two envelope fields it rejected.
     let reg = registry();
     let t0 = Instant::now();
-    let display = FieldVerdictKey::new("t", GROUNDED_PATH, ANTHROPIC).expect("accepted");
-    let budget = FieldVerdictKey::new("t", "thinking.budget_tokens", ANTHROPIC).expect("accepted");
+    let display = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        GROUNDED_PATH,
+        ANTHROPIC,
+    )
+    .expect("accepted");
+    let budget = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        "thinking.budget_tokens",
+        ANTHROPIC,
+    )
+    .expect("accepted");
 
     // Act -- learn the display field only.
     let _ = reg
@@ -97,8 +112,18 @@ fn the_same_field_on_two_targets_is_two_distinct_entries() {
     // Arrange -- one field path, rejected by two configured targets.
     let reg = registry();
     let t0 = Instant::now();
-    let here = FieldVerdictKey::new("target-a", "thinking", ANTHROPIC).expect("accepted");
-    let other_target = FieldVerdictKey::new("target-b", "thinking", ANTHROPIC).expect("accepted");
+    let here = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("target-a"),
+        "thinking",
+        ANTHROPIC,
+    )
+    .expect("accepted");
+    let other_target = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("target-b"),
+        "thinking",
+        ANTHROPIC,
+    )
+    .expect("accepted");
 
     // Act
     let _ = reg
@@ -122,8 +147,18 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
     // lifecycle rides the existing storage contract rather than redefining it.
     let reg = registry();
     let t0 = Instant::now();
-    let anthropic = FieldVerdictKey::new("t", "thinking", ANTHROPIC).expect("accepted");
-    let compat = FieldVerdictKey::new("t", "thinking", "openai-compat").expect("accepted");
+    let anthropic = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        "thinking",
+        ANTHROPIC,
+    )
+    .expect("accepted");
+    let compat = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        "thinking",
+        "openai-compat",
+    )
+    .expect("accepted");
     assert_ne!(anthropic, compat, "the guard identity keeps the kind apart");
     assert_eq!(
         anthropic.capability_key(),
@@ -151,11 +186,19 @@ fn a_path_the_namespace_grammar_refuses_mints_no_key() {
     // this lifecycle cannot route around it.
     for path in ["", ".thinking", "thinking..display", "thinking display"] {
         assert!(
-            FieldVerdictKey::new("t", path, ANTHROPIC).is_none(),
+            FieldVerdictKey::new(&crate::state_key::StateKey::fixture("t"), path, ANTHROPIC)
+                .is_none(),
             "a malformed path must mint no key: {path:?}"
         );
     }
-    assert!(FieldVerdictKey::new("t", GROUNDED_PATH, ANTHROPIC).is_some());
+    assert!(
+        FieldVerdictKey::new(
+            &crate::state_key::StateKey::fixture("t"),
+            GROUNDED_PATH,
+            ANTHROPIC
+        )
+        .is_some()
+    );
 }
 
 #[test]
@@ -168,7 +211,7 @@ fn the_key_carries_the_normalized_field_capability_key() {
 
     // Assert -- normalized once at construction, so the registry row and the
     // emitted event meet on one canonical string.
-    assert_eq!(k.state_key(), "t");
+    assert_eq!(k.state_key(), "t#fixture-upstream");
     assert_eq!(
         k.capability_key(),
         normalize_capability_key(&minted, ANTHROPIC)
@@ -490,7 +533,7 @@ fn the_default_anthropic_target_can_mint_a_field_verdict() {
 
     // Assert
     assert!(reg.is_negative_acting(&k, t0));
-    assert_eq!(event.state_key, "cloud");
+    assert_eq!(event.state_key, "cloud#fixture-upstream");
 }
 
 #[test]
@@ -521,7 +564,8 @@ fn suppression_follows_the_base_url_and_not_the_configured_kind() {
     for kind in EVERY_KIND {
         let reg = registry();
         let t0 = Instant::now();
-        let k = FieldVerdictKey::new("t", "thinking", kind).expect("accepted");
+        let k = FieldVerdictKey::new(&crate::state_key::StateKey::fixture("t"), "thinking", kind)
+            .expect("accepted");
 
         assert!(
             reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0).is_none(),
@@ -934,7 +978,12 @@ fn the_anthropic_lane_preserves_the_minted_key_exactly() {
     let minted = field_capability_key(GROUNDED_PATH).expect("accepted");
 
     // Act
-    let k = FieldVerdictKey::new("t", GROUNDED_PATH, ANTHROPIC).expect("the Stage 1 lane admits");
+    let k = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        GROUNDED_PATH,
+        ANTHROPIC,
+    )
+    .expect("the Stage 1 lane admits");
 
     // Assert -- byte-for-byte, so the row and the ledger carry the upstream's
     // own qualified path.
@@ -964,7 +1013,8 @@ fn a_lane_whose_normalization_rewrites_the_key_acquires_no_field_identity() {
         "tools.0.input_schema",
     ] {
         assert!(
-            FieldVerdictKey::new("t", path, "bedrock").is_none(),
+            FieldVerdictKey::new(&crate::state_key::StateKey::fixture("t"), path, "bedrock")
+                .is_none(),
             "a rewritten key must acquire no identity: {path}"
         );
     }
@@ -979,7 +1029,11 @@ fn a_bedrock_target_cannot_acquire_a_field_guard_for_a_dotted_path() {
     let t0 = Instant::now();
 
     // Act
-    let identity = FieldVerdictKey::new("t", GROUNDED_PATH, "bedrock");
+    let identity = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        GROUNDED_PATH,
+        "bedrock",
+    );
 
     // Assert
     assert!(identity.is_none());
@@ -988,8 +1042,12 @@ fn a_bedrock_target_cannot_acquire_a_field_guard_for_a_dotted_path() {
     // The accept control on the SAME lane: a single-segment path is not
     // rewritten, so it still mints. This is what keeps the refusal specific to
     // the truncation rather than a blanket ban on the lane.
-    let single = FieldVerdictKey::new("t", "thinking", "bedrock")
-        .expect("an unrewritten key still mints on this lane");
+    let single = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("t"),
+        "thinking",
+        "bedrock",
+    )
+    .expect("an unrewritten key still mints on this lane");
     assert_eq!(
         single.capability_key(),
         field_capability_key("thinking").expect("accepted")
@@ -1080,7 +1138,7 @@ fn a_disproof_that_removed_nothing_keeps_the_identity_suspended() {
     // finds nothing resident: Applied, but with `value: false`.
     assert!(
         reg.learned()
-            .remove_keyed(&k.state_key, &k.capability_key, &k.provider_kind),
+            .remove_keyed(k.state_key(), &k.capability_key, &k.provider_kind),
         "fixture premise: the row was resident before this removal",
     );
 
@@ -1262,7 +1320,7 @@ fn a_retained_suspension_survives_a_relearn_until_the_state_is_dropped() {
         .expect("claim admitted");
     assert!(
         reg.learned()
-            .remove_keyed(&k.state_key, &k.capability_key, &k.provider_kind),
+            .remove_keyed(k.state_key(), &k.capability_key, &k.provider_kind),
         "fixture premise: the row was resident before this removal",
     );
     assert!(
@@ -1377,7 +1435,7 @@ fn the_committed_row_reuses_the_existing_event_shape() {
     // Assert -- every field is a normalized key or a closed-set token, on the
     // same row shape the existing learn path emits: no new column, no new
     // store, nothing that could carry a request body.
-    assert_eq!(event.state_key, "prod-target");
+    assert_eq!(event.state_key, "prod-target#fixture-upstream");
     assert_eq!(
         event.capability_key,
         field_capability_key(GROUNDED_PATH).expect("accepted"),
@@ -2509,7 +2567,7 @@ fn an_acknowledgment_the_canary_layer_refuses_reports_false_rather_than_a_succes
 fn key_debug_renders_capability_and_provider_but_never_the_state_key() {
     // Arrange
     let k = FieldVerdictKey::new(
-        "state-sentinel#seat-sentinel",
+        &crate::state_key::StateKey::new("state-sentinel", "seat-sentinel").expect("sentinel lane"),
         "pathsentinel.leaf",
         "provider-sentinel",
     )

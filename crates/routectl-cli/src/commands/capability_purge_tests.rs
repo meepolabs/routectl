@@ -9,6 +9,9 @@ use routectl_router::{ServerAuth, ServerConfig};
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// The lane every case purges, in the form doctor prints.
+const LANE: &str = "anthropic#claude-sonnet-4-5";
+
 /// A config whose server address points at `base_url`'s host and port, so the
 /// command dials the mock daemon instead of a real one.
 fn config_pointing_at(base_url: &str) -> Config {
@@ -33,7 +36,7 @@ fn purge_response(purged: bool) -> serde_json::Value {
     json!({
         "schema_version": 1,
         "purged": purged,
-        "state_key": "sonnet",
+        "state_key": LANE,
         "capability_key": "web_search",
     })
 }
@@ -50,7 +53,7 @@ async fn a_purge_reported_by_the_daemon_exits_zero() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 0);
@@ -68,7 +71,7 @@ async fn a_clean_no_op_reported_by_the_daemon_also_exits_zero() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert: "nothing was there" is not a failure -- an operator scripting a
     // cleanup must be able to run it twice.
@@ -83,7 +86,7 @@ async fn the_request_body_names_only_the_target_and_the_capability() {
     Mock::given(method("POST"))
         .and(path(PURGE_PATH))
         .and(wiremock::matchers::body_json(json!({
-            "state_key": "sonnet",
+            "state_key": LANE,
             "capability_key": "web_search",
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(purge_response(true)))
@@ -92,7 +95,7 @@ async fn the_request_body_names_only_the_target_and_the_capability() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert: a provider kind, a config path, or any other field would have
     // failed the body matcher.
@@ -114,7 +117,7 @@ async fn a_refusal_from_the_daemon_exits_non_zero() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 1);
@@ -144,7 +147,7 @@ async fn every_durability_class_refusal_exits_non_zero_without_claiming_a_purge(
             .mount(&daemon)
             .await;
 
-        let exit = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+        let exit = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
         assert_eq!(
             exit, 1,
@@ -173,7 +176,7 @@ async fn an_unknown_refusal_code_from_an_older_daemon_still_exits_non_zero() {
         .mount(&daemon)
         .await;
 
-    let exit = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let exit = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     assert_eq!(
         exit, 1,
@@ -221,7 +224,7 @@ async fn an_unrecognized_success_body_exits_non_zero() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 1);
@@ -240,7 +243,7 @@ async fn an_unreachable_daemon_exits_non_zero_and_writes_no_local_state() {
     config.usage.db_path = ledger.path().join("usage.db");
 
     // Act
-    let code = run(&config, "sonnet", "web_search").await;
+    let code = run(&config, LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 1, "an unreachable daemon must be a clear failure");
@@ -268,7 +271,7 @@ async fn a_successful_purge_never_opens_the_usage_ledger() {
     config.usage.db_path = dir.path().join("usage.db");
 
     // Act
-    let code = run(&config, "sonnet", "web_search").await;
+    let code = run(&config, LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 0);
@@ -335,7 +338,7 @@ async fn a_configured_listener_token_is_sent_with_the_request() {
     });
 
     // Act
-    let code = run(&config, "sonnet", "web_search").await;
+    let code = run(&config, LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 0);
@@ -355,7 +358,7 @@ async fn no_credential_header_is_sent_when_the_daemon_is_token_less() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert: read the header off the request the daemon actually received,
     // rather than off a matcher -- a matcher that fails to match reports as a
@@ -390,7 +393,7 @@ async fn an_underivable_bind_transmits_nothing_and_exits_non_zero() {
     });
 
     // Act
-    let code = run(&config, "sonnet", "web_search").await;
+    let code = run(&config, LANE, "web_search").await;
 
     // Assert
     assert_eq!(
@@ -434,7 +437,7 @@ async fn a_cross_host_redirect_receives_neither_body_nor_credential() {
     });
 
     // Act
-    let code = run(&config, "sonnet", "web_search").await;
+    let code = run(&config, LANE, "web_search").await;
 
     // Assert: the redirect target saw nothing at all.
     let hops = elsewhere.received_requests().await.expect("records");
@@ -473,7 +476,7 @@ async fn every_3xx_status_is_reported_as_a_failure() {
             .await;
 
         // Act
-        let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+        let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
         // Assert
         assert_eq!(
@@ -756,7 +759,7 @@ async fn a_daemon_sending_a_hostile_code_still_exits_non_zero() {
         .await;
 
     // Act
-    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
 
     // Assert
     assert_eq!(
@@ -861,7 +864,7 @@ async fn a_localhost_bind_refuses_locally_without_transmitting() {
     });
 
     // Act
-    let code = run(&config, "sonnet", "web_search").await;
+    let code = run(&config, LANE, "web_search").await;
 
     // Assert
     assert_eq!(code, 1, "a localhost bind must be a clear local failure");
@@ -914,4 +917,51 @@ fn the_destination_is_derived_before_any_credential_is_resolved() {
          for no reason, and a failed resolve is silent so no behavioral test can \
          catch the reversal"
     );
+}
+
+/// A target that is not a learned lane is refused before anything leaves the
+/// process: no request reaches the daemon, and the exit is non-zero rather than
+/// a "nothing to purge" that would read as already gone.
+#[tokio::test]
+async fn an_unparseable_lane_exits_non_zero_without_dialing_the_daemon() {
+    // Arrange: the mock answers a well-formed success, so a request that slipped
+    // through would exit zero.
+    let daemon = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(PURGE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(purge_response(false)))
+        .expect(0)
+        .mount(&daemon)
+        .await;
+
+    // Act
+    let code = run(&config_pointing_at(&daemon.uri()), "sonnet", "web_search").await;
+
+    // Assert
+    assert_ne!(code, 0, "a bare nickname is not a lane");
+    assert!(
+        daemon
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .is_empty(),
+        "nothing may reach the daemon for an unparseable lane",
+    );
+}
+
+/// Positive control for the refusal above: the same daemon and the same
+/// command, with a lane, does dial and exits zero.
+#[tokio::test]
+async fn a_parseable_lane_reaches_the_daemon() {
+    let daemon = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(PURGE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(purge_response(false)))
+        .expect(1)
+        .mount(&daemon)
+        .await;
+
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
+
+    assert_eq!(code, 0);
 }

@@ -142,7 +142,12 @@ impl PaidProbeLedger for CountingLedger {
 /// The acting lane's identity, matching `remote_router_with_paid_cap`'s
 /// single installed lane.
 fn counter_key() -> FieldVerdictKey {
-    FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity")
+    FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity")
 }
 
 /// A bounded, viable paid payload for the seeded candidate.

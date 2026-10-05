@@ -183,10 +183,16 @@ pub(crate) const fn purge_superseded_code() -> &'static str {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PurgeRequest {
-    /// Routing state key (a `[models]` nickname, a pooled seat's
-    /// `nickname#label`, or a `[providers]` name) to purge on.
+    /// Learned lane to purge on, in the serialized `provider_entry#upstream`
+    /// form doctor prints.
     state_key: String,
     /// Capability key to purge.
+    capability_key: String,
+}
+
+/// A purge request whose lane has been parsed through the lane's single parser.
+struct ValidPurge {
+    lane: routectl_router::StateKey,
     capability_key: String,
 }
 
@@ -299,13 +305,13 @@ pub async fn purge_capability(
 /// retry is safe precisely because a stale reservation changed nothing: it took
 /// no lease, removed nothing, and committed nothing, so there is no partial state
 /// for the second attempt to collide with and no way for it to clear twice.
-async fn purge_durably(state: &AppState, purge: &PurgeRequest) -> Response {
+async fn purge_durably(state: &AppState, purge: &ValidPurge) -> Response {
     for attempt in 0..=STALE_RETRIES {
         // Re-read the live Router each attempt: on the retry the point is to
         // reserve against the CURRENT generation, and holding the first snapshot
         // would just reproduce the same staleness.
         let router = state.router.load_full();
-        match router.reserve_learned_capability_purge(&purge.state_key, &purge.capability_key) {
+        match router.reserve_learned_capability_purge(&purge.lane, &purge.capability_key) {
             PurgeOutcome::Reserved(reserved) => {
                 return settle(state, &router, reserved).await;
             }
@@ -321,13 +327,13 @@ async fn purge_durably(state: &AppState, purge: &PurgeRequest) -> Response {
                 // indistinguishable. The SUCCESS record is emitted at finalize
                 // instead (see `settle`), so no record ever claims a removal the
                 // ledger did not receive.
-                router.audit_absent_purge(&purge.state_key, &purge.capability_key);
+                router.audit_absent_purge(&purge.lane, &purge.capability_key);
                 return (
                     StatusCode::OK,
                     Json(json!({
                         "schema_version": SCHEMA_VERSION,
                         "purged": false,
-                        "state_key": purge.state_key,
+                        "state_key": purge.lane.as_lane_key(),
                         "capability_key": purge.capability_key,
                     })),
                 )
@@ -495,14 +501,22 @@ const fn commit_token(outcome: BatchCommit) -> &'static str {
 /// A blank key is refused rather than answered. An empty `state_key` cannot
 /// name a target, so answering it would report `purged: false` for a request
 /// that never addressed anything -- a false clean-no-op, which is exactly the
-/// answer an operator would misread as "already gone".
-async fn parse_body(body: Body) -> Option<PurgeRequest> {
+/// answer an operator would misread as "already gone". A `state_key` that does
+/// not parse as a learned lane is refused for the same reason: no learned entry
+/// can be keyed on it, so `purged: false` would be the same false no-op.
+async fn parse_body(body: Body) -> Option<ValidPurge> {
     let bytes = to_bytes(body, MAX_BODY_BYTES).await.ok()?;
     let purge: PurgeRequest = serde_json::from_slice(&bytes).ok()?;
     let bounded = |key: &str| {
         !key.trim().is_empty() && key.len() <= MAX_KEY_BYTES && !key.contains(char::is_control)
     };
-    (bounded(&purge.state_key) && bounded(&purge.capability_key)).then_some(purge)
+    if !(bounded(&purge.state_key) && bounded(&purge.capability_key)) {
+        return None;
+    }
+    Some(ValidPurge {
+        lane: routectl_router::StateKey::parse(&purge.state_key)?,
+        capability_key: purge.capability_key,
+    })
 }
 
 /// The `cleared` capability event for a settlement, stamped with the live

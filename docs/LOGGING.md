@@ -315,7 +315,8 @@ upstream body, and the session key are never carried:
 Two verdict-lifecycle lines accompany it at INFO, both carrying
 normalized keys only: `"field_verdict_commit"` when a repaired retry
 confirms a verdict, and `"field_verdict_clear"` when an accepted request
-drops a resident one. `state_key` is sanitized at both sites;
+drops a resident one. `state_key` is the verdict's learned lane
+(`provider_entry#upstream`), sanitized at both sites;
 `capability_key` is the closed repair-table path literal, never upstream
 text, so it is logged as-is for consistency with the WARN line above.
 
@@ -544,7 +545,7 @@ count, a boolean, or a sanitized identifier.
 
 | Field | Meaning |
 |---|---|
-| `state_key` | Sanitized `[providers]` state key of the target the verdict applies to |
+| `state_key` | Sanitized learned lane (`provider_entry#upstream`) the verdict applies to -- the form `routectl capability purge` takes |
 | `capability_key` | The normalized `field:`-namespaced capability key, read off the resident row |
 | `transform_class` | `envelope` / `prefix_impacting`, or `unknown` for a resident verdict whose path THIS build's closed table does not carry (what a verdict persisted by a build with a wider table looks like) |
 | `prefix_impacting` | Whether this class's transform rewrites content the upstream hashes into its cache prefix. `false` for an unknown class -- it claims no prefix cost it cannot substantiate |
@@ -1591,6 +1592,7 @@ history from a fully evicted one:
 | `skipped_unknown` | integer | Rows skipped because a persisted TOKEN (verdict / phase / source / tier / evidence class) is not one this build recognizes. |
 | `skipped_revision` | integer | Catalog-scoped rows skipped because their stamped catalog / overlay revision is not the replay boundary's -- an eviction. Envelope-field rows are never counted here: their truth is catalog-independent, so they replay under a superseded revision. |
 | `skipped_vocab` | integer | Rows skipped whole before decoding because their stored vocabulary version is unknown to this build (for example a row a newer build wrote) or a vocabulary step retires one of their tokens. Stored rows are never rewritten; a known older vocabulary is mapped forward on read. Each skip also emits a `rebuild_skip` WARN with `reason` `unknown_vocab_version` or `retired_vocab_token`. |
+| `skipped_lane` | integer | Envelope-field rows skipped because their lane key does not parse as a learned lane (`provider_entry#upstream`), so no identity can be attributed to them. Each skip also emits a `rebuild_skip` WARN with `reason` `unparseable_lane`. |
 
 ### `strip` (WARN)
 

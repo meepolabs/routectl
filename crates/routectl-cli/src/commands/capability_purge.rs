@@ -1,5 +1,12 @@
-//! `routectl capability purge <target> <capability>` -- ask the running daemon
+//! `routectl capability purge <lane> <capability>` -- ask the running daemon
 //! to drop one learned-capability entry.
+//!
+//! The lane is the learned identity exactly as doctor and `routectl probe`
+//! print it: `provider_entry#upstream`, the `[providers]` entry that egresses
+//! the request and the upstream model id it sends. It is parsed through the
+//! router's single lane parser before anything leaves this process, so a
+//! target spelled any other way (a bare nickname, say) is refused here with a
+//! message rather than reported by the daemon as "nothing to purge".
 //!
 //! # Why this goes through the daemon
 //!
@@ -44,13 +51,25 @@ const OVERRIDE_TABLE: &str = "[capability.overrides]";
 const MAX_REFUSAL_CODE_CHARS: usize = 64;
 
 /// Run one purge against the configured daemon and return the process exit
-/// code: `0` on a purge or a clean no-op, non-zero on any failure to reach or
-/// be understood by the daemon.
+/// code: `0` on a purge or a clean no-op, non-zero for a `lane` that does not
+/// parse (refused before any network I/O) and on any failure to reach or be
+/// understood by the daemon.
 ///
 /// Every failure path writes to stderr and returns non-zero WITHOUT touching
 /// local state -- there is no local state to leave half-written, which is the
 /// point of routing through the daemon. A failure is never reported as a purge.
-pub async fn run(config: &Config, target: &str, capability: &str) -> i32 {
+pub async fn run(config: &Config, lane: &str, capability: &str) -> i32 {
+    let Some(parsed) = routectl_router::StateKey::parse(lane) else {
+        eprintln!(
+            "error: `{}` is not a learned lane",
+            routectl_core::sanitize_for_log(lane)
+        );
+        eprintln!(
+            "       a lane is `<provider>#<upstream>`: the `[providers]` entry and the \
+             upstream model id, exactly as `routectl doctor` prints it"
+        );
+        return 1;
+    };
     // Derive the destination BEFORE resolving any credential: an underivable
     // one must refuse locally rather than put a listener token on a socket
     // whose address nobody chose.
@@ -80,7 +99,7 @@ pub async fn run(config: &Config, target: &str, capability: &str) -> i32 {
     };
 
     let mut request = client.post(&url).json(&json!({
-        "state_key": target,
+        "state_key": parsed.as_lane_key(),
         "capability_key": capability,
     }));
     // The daemon's control route sits behind the SAME listener auth as
@@ -173,7 +192,10 @@ pub async fn run(config: &Config, target: &str, capability: &str) -> i32 {
 
     match body["purged"].as_bool() {
         Some(true) => {
-            println!("purged learned capability `{capability}` on `{target}`");
+            println!(
+                "purged learned capability `{capability}` on `{}`",
+                parsed.for_log()
+            );
             println!(
                 "note: live traffic can teach this again. To make the decision \
                  durable, set it under {OVERRIDE_TABLE} in your config."
@@ -181,7 +203,10 @@ pub async fn run(config: &Config, target: &str, capability: &str) -> i32 {
             0
         }
         Some(false) => {
-            println!("nothing to purge: no learned entry for `{capability}` on `{target}`");
+            println!(
+                "nothing to purge: no learned entry for `{capability}` on `{}`",
+                parsed.for_log()
+            );
             0
         }
         // A success status with no `purged` field means the daemon answered

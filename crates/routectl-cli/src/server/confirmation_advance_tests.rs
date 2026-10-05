@@ -23,7 +23,12 @@ use tempfile::TempDir;
 const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The lane and field this file plants on.
-const STATE_KEY: &str = "nick";
+/// The `[models]` nickname the fixture configures.
+const NICKNAME: &str = "nick";
+
+/// The learned lane `NICKNAME` dispatches: every learned fact for it, and every
+/// ledger row, is keyed on this.
+const STATE_KEY: &str = "anthropic#claude-sonnet-4-5";
 const FIELD_PATH: &str = "thinking.enabled.display";
 
 /// The wire-shape capability key, assembled from parts: the namespace prefix has
@@ -45,7 +50,7 @@ fn router_awaiting_confirmation() -> Arc<Router> {
         ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
     );
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     let router =

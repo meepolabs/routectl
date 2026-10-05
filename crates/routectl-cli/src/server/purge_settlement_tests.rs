@@ -21,11 +21,11 @@ fn router_with_negative(capability: &str) -> Arc<Router> {
         routectl_router::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
     );
     config.models.insert(
-        "nick".to_string(),
+        "nick#upstream".to_string(),
         routectl_router::ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     let router = Arc::new(Router::new(Arc::new(config)));
-    let reader = PlantedLedger::negative(&router, "nick", capability);
+    let reader = PlantedLedger::negative(&router, "nick#upstream", capability);
     let summary = router.rebuild_learned_from_ledger(&reader);
     assert_eq!(
         summary.replayed_negative, 1,
@@ -42,7 +42,7 @@ fn router_with_no_entries() -> Arc<Router> {
         routectl_router::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
     );
     config.models.insert(
-        "nick".to_string(),
+        "nick#upstream".to_string(),
         routectl_router::ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     Arc::new(Router::new(Arc::new(config)))
@@ -52,7 +52,7 @@ fn resident(router: &Router, capability: &str) -> bool {
     router
         .learned_capability_snapshot()
         .iter()
-        .any(|e| e.state_key == "nick" && e.feature_key == capability)
+        .any(|e| e.state_key == "nick#upstream" && e.feature_key == capability)
 }
 
 /// A one-row capability ledger for planting, through the real replay path.
@@ -143,7 +143,10 @@ fn cleared_rows(path: &std::path::Path) -> Vec<(i64, String, String)> {
 
 /// Reserve a purge on the router, for the tests that need a live reservation.
 fn reserve(router: &Router, capability: &str) -> Box<routectl_router::router::ReservedPurge> {
-    match router.reserve_learned_capability_purge("nick", capability) {
+    match router.reserve_learned_capability_purge(
+        &routectl_router::StateKey::parse("nick#upstream").expect("lane"),
+        capability,
+    ) {
         routectl_router::router::PurgeOutcome::Reserved(reserved) => reserved,
         _ => panic!("a resident entry on the live generation must reserve"),
     }
@@ -201,7 +204,7 @@ async fn a_dropped_caller_still_commits_the_clear_and_finalizes_memory() {
     );
     let (rowid, lane, cap) = &rows[0];
     assert!(*rowid > 0, "the clear must occupy a real ledger rowid");
-    assert_eq!(lane, "nick");
+    assert_eq!(lane, "nick#upstream");
     assert_eq!(cap, capability);
 
     // TWO consecutive rebuilds from that ledger: the negative must stay absent,

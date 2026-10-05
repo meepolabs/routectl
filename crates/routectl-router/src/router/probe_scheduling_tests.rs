@@ -32,9 +32,14 @@ fn router() -> Router {
     Router::new(Arc::new(config))
 }
 
+/// The lane `router()`'s `sonnet` dispatches.
+fn sonnet_lane() -> crate::state_key::StateKey {
+    crate::state_key::StateKey::new("anthropic", "claude-sonnet-4-5").expect("lane")
+}
+
 fn key(n: usize) -> FieldVerdictKey {
     FieldVerdictKey::new(
-        &format!("anthropic:model-{n}"),
+        &crate::state_key::StateKey::fixture(&format!("anthropic:model-{n}")),
         GROUNDED_PATH,
         "anthropic-api",
     )
@@ -296,7 +301,7 @@ fn an_admitted_request_grounding_the_closed_table_activates_its_lane() {
 
     // Act
     router.activate_probe_lanes_for_admitted_request(
-        "anthropic:sonnet",
+        &sonnet_lane(),
         "anthropic",
         Some("anthropic-api"),
         false,
@@ -318,7 +323,7 @@ fn a_burst_of_admitted_requests_on_one_lane_activates_exactly_once() {
     // Act: the shape real traffic takes -- many requests, one lane.
     for _ in 0..25 {
         router.activate_probe_lanes_for_admitted_request(
-            "anthropic:sonnet",
+            &sonnet_lane(),
             "anthropic",
             Some("anthropic-api"),
             false,
@@ -340,7 +345,7 @@ fn an_admitted_request_grounding_nothing_activates_no_lane() {
 
     // Act
     router.activate_probe_lanes_for_admitted_request(
-        "anthropic:sonnet",
+        &sonnet_lane(),
         "anthropic",
         Some("anthropic-api"),
         false,
@@ -360,7 +365,7 @@ fn a_forwarded_credential_target_activates_no_lane() {
 
     // Act
     router.activate_probe_lanes_for_admitted_request(
-        "anthropic:sonnet",
+        &sonnet_lane(),
         "anthropic",
         Some("anthropic-api"),
         true,
@@ -379,7 +384,7 @@ fn a_target_off_the_acting_lane_activates_no_lane() {
     // Act
     for kind in [None, Some("openai-compat"), Some("bedrock")] {
         router.activate_probe_lanes_for_admitted_request(
-            "other:model",
+            &crate::state_key::StateKey::fixture("other"),
             "anthropic",
             kind,
             false,
@@ -399,7 +404,7 @@ fn an_admitted_request_activates_a_free_validator_first() {
 
     // Act
     router.activate_probe_lanes_for_admitted_request(
-        "anthropic:sonnet",
+        &sonnet_lane(),
         "anthropic",
         Some("anthropic-api"),
         false,
@@ -452,7 +457,7 @@ fn a_body_an_acting_preflight_already_stripped_activates_no_lane() {
 
     // Act
     router.activate_probe_lanes_for_admitted_request(
-        "anthropic:sonnet",
+        &sonnet_lane(),
         "anthropic",
         Some("anthropic-api"),
         false,

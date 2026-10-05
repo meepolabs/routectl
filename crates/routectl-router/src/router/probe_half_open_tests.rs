@@ -81,7 +81,12 @@ async fn a_probe_completion_does_not_release_a_real_requests_half_open_claim() {
         dial_started: Arc::clone(&dial_started),
         may_finish: Arc::clone(&may_finish),
     })));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
 
     // The breaker is CLOSED here, so the probe's own gate_check claims no
     // half-open slot -- its guard is inert.
@@ -147,7 +152,12 @@ async fn a_probe_leaves_no_half_open_claim_after_completing() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -207,7 +217,12 @@ async fn cancelling_a_probe_mid_dial_strands_no_half_open_claim() {
     let router = Arc::new(remote_router(Arc::new(Blocking {
         dial_started: Arc::clone(&dial_started),
     })));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     let worker = tokio::spawn({
@@ -362,7 +377,12 @@ async fn a_deferred_probe_charges_no_rpm_token() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router_with_rpm(provider.clone(), 60, Some(1));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     // Breaker open with a lapsed cooldown: the lane is HalfOpenReady, which is
@@ -415,7 +435,12 @@ async fn a_probe_through_a_closed_breaker_does_charge_its_rpm_token() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router_with_rpm(provider.clone(), 60, Some(1));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     let before = router
         .gate_status_for_tests("m1")
@@ -451,7 +476,12 @@ async fn three_deferrals_neither_abandon_nor_tombstone_the_identity() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     // Hold the lane half-open-ready across the whole episode, and drive MORE
@@ -524,7 +554,12 @@ async fn a_lane_that_recovers_after_deferrals_still_dials() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     router.force_open_breaker("m1", Duration::from_millis(1));
     tokio::time::sleep(Duration::from_millis(5)).await;

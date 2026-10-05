@@ -42,7 +42,12 @@ async fn a_resolved_identity_is_tombstoned_until_the_incarnation_advances() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider);
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     router.run_due_probes().await;
     assert_eq!(router.probe_scheduler_snapshot().resolved_total, 1);
@@ -74,7 +79,12 @@ async fn an_exhausted_identity_is_tombstoned_for_its_incarnation() {
         calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider);
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     router.run_due_probes().await;
     assert_eq!(router.probe_scheduler_snapshot().free_exhausted_total, 1);
@@ -211,7 +221,12 @@ async fn a_lane_count_above_the_queue_depth_does_not_saturate_terminal_capacity(
     );
     assert_eq!(snap.tombstone_saturations_total, 0);
     // And an unrelated fresh lane still activates.
-    let fresh = FieldVerdictKey::new("m-fresh", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let fresh = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m-fresh"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     assert_eq!(
         router.activate_probe_lane(&fresh, ProbeValidator::CountTokens),
         ProbeActivation::Queued
@@ -247,7 +262,7 @@ async fn tombstone_saturation_at_the_new_bound_fails_closed_for_the_overflow_ide
     // THE overflow identity: its terminal marker could not be stored, so it
     // must NOT be re-activatable.
     let overflow_key = FieldVerdictKey::new(
-        &format!("m{overflow_index}"),
+        &crate::router::probe_test_support::lane(&format!("m{overflow_index}")),
         GROUNDED_PATH,
         "anthropic-api",
     )
@@ -257,7 +272,12 @@ async fn tombstone_saturation_at_the_new_bound_fails_closed_for_the_overflow_ide
         ProbeActivation::Tombstoned,
         "an identity whose terminal marker overflowed must not re-activate"
     );
-    let fresh = FieldVerdictKey::new("m-fresh", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let fresh = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m-fresh"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     assert_eq!(
         router.activate_probe_lane(&fresh, ProbeValidator::CountTokens),
         ProbeActivation::Tombstoned,
@@ -284,7 +304,12 @@ async fn retirement_clears_tombstone_saturation() {
         "retirement must clear saturation"
     );
     assert_eq!(snap.tombstoned, 0);
-    let fresh = FieldVerdictKey::new("m-fresh", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let fresh = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m-fresh"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     assert_eq!(
         router.activate_probe_lane(&fresh, ProbeValidator::CountTokens),
         ProbeActivation::Queued,
@@ -329,8 +354,12 @@ async fn saturation_warns_once_per_episode_and_keeps_counting() {
     let ((), events) = routectl_testkit::with_capture(async {
         let mut keys = Vec::new();
         for n in PROBE_TOMBSTONE_CAPACITY..PROBE_TOMBSTONE_CAPACITY + 4 {
-            let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-                .expect("identity");
+            let key = FieldVerdictKey::new(
+                &crate::router::probe_test_support::lane(&format!("m{n}")),
+                GROUNDED_PATH,
+                "anthropic-api",
+            )
+            .expect("identity");
             if router.activate_probe_lane(&key, ProbeValidator::CountTokens)
                 == ProbeActivation::Queued
             {
@@ -379,7 +408,12 @@ async fn below_capacity_no_saturation_is_raised() {
     let snap = router.probe_scheduler_snapshot();
     assert!(!snap.tombstone_saturated);
     assert_eq!(snap.tombstone_saturations_total, 0);
-    let fresh = FieldVerdictKey::new("m-fresh", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let fresh = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m-fresh"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     assert_eq!(
         router.activate_probe_lane(&fresh, ProbeValidator::CountTokens),
         ProbeActivation::Queued
@@ -398,7 +432,12 @@ async fn a_lease_retired_mid_flight_publishes_no_candidate() {
         calls: AtomicUsize::new(0),
     });
     let router = remote_router_with_paid_cap(provider, 3);
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     let lease = router
         .lease_due_probe(std::time::Instant::now())
@@ -436,7 +475,12 @@ async fn a_committed_settlement_reports_that_it_committed() {
         calls: AtomicUsize::new(0),
     });
     let router = remote_router_with_paid_cap(provider, 3);
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     let lease = router
         .lease_due_probe(std::time::Instant::now())
@@ -459,7 +503,12 @@ async fn shutdown_during_an_outstanding_lease_publishes_no_candidate() {
         calls: AtomicUsize::new(0),
     });
     let router = remote_router_with_paid_cap(provider, 3);
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     let lease = router
         .lease_due_probe(std::time::Instant::now())
@@ -527,7 +576,12 @@ async fn a_worker_run_retired_mid_flight_publishes_no_candidate() {
     });
     let router = Arc::new(remote_router_with_paid_cap(provider.clone(), 3));
     *provider.router.lock() = Some(Arc::downgrade(&router));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     let ran = router.run_due_probes().await;
@@ -564,7 +618,12 @@ async fn a_bad_request_probe_stamps_no_last_outcome_on_the_lane() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -590,7 +649,12 @@ async fn a_zero_count_probe_stamps_no_last_outcome_on_the_lane() {
         calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -627,8 +691,12 @@ async fn further_overflow_inside_one_episode_emits_no_second_warn() {
     );
     let mut queued = 0usize;
     for n in PROBE_TOMBSTONE_CAPACITY..PROBE_TOMBSTONE_CAPACITY + 6 {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         if router.activate_probe_lane(&key, ProbeValidator::CountTokens) == ProbeActivation::Queued
         {
             queued += 1;
@@ -689,8 +757,12 @@ async fn an_unavailable_lane_is_terminal_for_the_incarnation_and_dials_once() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone() as Arc<dyn routectl_core::Provider>);
-    let unresolvable =
-        FieldVerdictKey::new("m-no-such-seat", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let unresolvable = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m-no-such-seat"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
 
     router.activate_probe_lane(&unresolvable, ProbeValidator::CountTokens);
     router.run_due_probes().await;

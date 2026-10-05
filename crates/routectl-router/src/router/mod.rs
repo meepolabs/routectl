@@ -1990,15 +1990,11 @@ impl DispatchTarget {
     /// under. The single choke point every learn, observe and lookup site on a
     /// target goes through, so the three always meet on one key.
     ///
-    /// A catalog capability keys on the target's lane. An envelope-field
-    /// verdict still keys on the runtime `state_key`: the field namespace
-    /// mints its own keys (`FieldVerdictKey`) and this lookup must find what
-    /// that owner wrote. `None` when the target has no lane, in which case
-    /// nothing is learned or consulted for a catalog capability.
-    fn learned_key(&self, feature: &str) -> Option<&str> {
-        if crate::field_capability::capability_key_is_field_verdict(feature) {
-            return Some(&self.state_key);
-        }
+    /// Every capability namespace keys on the target's lane, an envelope-field
+    /// verdict included, so a fact learned through one nickname applies to
+    /// every nickname on the same provider entry and upstream. `None` when the
+    /// target has no lane, in which case nothing is learned or consulted.
+    fn learned_key(&self, _feature: &str) -> Option<&str> {
         self.learned_lane
             .as_ref()
             .map(crate::state_key::StateKey::as_lane_key)
@@ -2702,11 +2698,17 @@ impl Router {
     /// not wait a full cadence cycle before re-verifying it.
     fn seed_field_canaries_from_ledger(&self) {
         for entry in self.learned_capabilities.field_seed_snapshot() {
+            // Replay admits only lane-keyed field rows, so a resident field
+            // entry always names a lane; one that does not has no identity to
+            // seed.
+            let Some(lane) = crate::state_key::StateKey::parse(&entry.state_key) else {
+                continue;
+            };
             let provider_kind = self
                 .provider_kind_for_state_key(&entry.state_key)
                 .to_string();
             let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-                entry.state_key,
+                lane,
                 entry.capability_key,
                 provider_kind,
             );

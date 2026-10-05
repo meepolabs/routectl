@@ -15,7 +15,8 @@
 //! new string VALUE in an already open-set column, with no schema change and
 //! no second store.
 //!
-//! - **Keying.** `(state_key, field capability key, provider_kind)`. The
+//! - **Keying.** `(lane, field capability key, provider_kind)`, where the
+//!   lane is the shared [`StateKey`] every learned fact keys on. The
 //!   capability half is minted by the namespace owner
 //!   ([`field_capability_key`]) from the qualified dotted path the upstream
 //!   named, so this module cannot spell a key the grammar would refuse, and a
@@ -70,24 +71,27 @@ use crate::field_canary::FieldCanaryRegistry;
 use crate::field_capability::field_capability_key;
 use crate::learned_capability::{LearnedCapabilityRegistry, NegativeState};
 use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
+use crate::state_key::StateKey;
 
 /// The identity of one learned envelope-field truth: a qualified wire path
-/// rejected by one configured target.
+/// rejected on one learned lane.
 ///
-/// Identity is `(state_key, field capability key, provider_kind)`. The
-/// capability half is minted by the namespace owner from the path, so a
-/// malformed path yields no key rather than a permanent token nobody can
-/// attribute; `provider_kind` rides along because every registry call
-/// normalizes the capability key with it.
+/// Identity is `(lane, field capability key, provider_kind)`. The lane is the
+/// same [`StateKey`] every catalog capability keys on, so a field verdict
+/// learned through one nickname applies to every nickname that egresses the
+/// same provider entry with the same upstream. The capability half is minted
+/// by the namespace owner from the path, so a malformed path yields no key
+/// rather than a permanent token nobody can attribute; `provider_kind` rides
+/// along because every registry call normalizes the capability key with it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct FieldVerdictKey {
-    state_key: String,
+    lane: StateKey,
     capability_key: String,
     provider_kind: String,
 }
 
-/// Hand-written: the state key names the operator's provider, model, and seat,
-/// so it never prints.
+/// Hand-written: the lane names the operator's provider entry and upstream, so
+/// it never prints.
 impl std::fmt::Debug for FieldVerdictKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FieldVerdictKey")
@@ -99,8 +103,8 @@ impl std::fmt::Debug for FieldVerdictKey {
 
 impl FieldVerdictKey {
     /// Build the identity for the qualified dotted `field_path` an upstream
-    /// rejection named on the target `state_key`, or `None` when no identity
-    /// can be built for it.
+    /// rejection named on `lane`, or `None` when no identity can be built for
+    /// it.
     ///
     /// Two independent refusals, both upstream of every mint path:
     ///
@@ -114,7 +118,7 @@ impl FieldVerdictKey {
     ///   classes depend on. A lane whose normalization is a pass-through for
     ///   this key is unaffected.
     #[must_use]
-    pub fn new(state_key: &str, field_path: &str, provider_kind: &str) -> Option<Self> {
+    pub fn new(lane: &StateKey, field_path: &str, provider_kind: &str) -> Option<Self> {
         let minted = field_capability_key(field_path)?;
         // Normalized once at construction so every registry call and the
         // emitted row meet on one canonical string -- and compared against the
@@ -124,7 +128,7 @@ impl FieldVerdictKey {
             return None;
         }
         Some(Self {
-            state_key: state_key.to_string(),
+            lane: lane.clone(),
             capability_key: minted,
             provider_kind: provider_kind.to_string(),
         })
@@ -139,54 +143,39 @@ impl FieldVerdictKey {
     /// agree with the check that admitted it the first time.
     #[must_use]
     pub(crate) const fn from_capability_key(
-        state_key: String,
+        lane: StateKey,
         capability_key: String,
         provider_kind: String,
     ) -> Self {
         Self {
-            state_key,
+            lane,
             capability_key,
             provider_kind,
         }
     }
 
-    /// The routing state key this identity is keyed on, for the probe
-    /// worker's target resolution.
-    ///
-    /// A probe must reach the SAME lane the identity was minted against,
-    /// and the state key is what names it. Exposed as its own accessor
-    /// (rather than ungating the test-only `state_key` below) so this one
-    /// production reader is explicit about why it needs the half.
+    /// The learned lane this identity is keyed on: what a probe resolves to a
+    /// seat and what the status projection resolves to provider and nicknames.
     #[must_use]
-    pub(crate) fn probe_state_key(&self) -> &str {
-        &self.state_key
+    pub(crate) const fn lane(&self) -> &StateKey {
+        &self.lane
     }
 
-    /// The routing state key this identity is keyed on, for the read-only
-    /// status/doctor projection's target-spec resolution.
-    ///
-    /// Its own accessor rather than ungating the test-only `state_key` below, for
-    /// the same reason [`Self::probe_state_key`] is: each production reader is
-    /// explicit about why it needs the half. This one resolves the state key to a
-    /// `(provider, nickname)` pair to answer whether the operator opted the target
-    /// into prefix-impacting pre-flight -- a pure read, on a surface that must
-    /// mutate nothing.
-    #[must_use]
-    pub(crate) fn status_state_key(&self) -> &str {
-        &self.state_key
+    /// The serialized lane, which is the learned registry's key half.
+    fn registry_key(&self) -> &str {
+        self.lane.as_lane_key()
     }
 
-    /// The routing state key this identity is keyed on.
+    /// The serialized lane this identity is keyed on, as the registry and the
+    /// ledger store it.
     ///
-    /// Test-only, like its two siblings below: the dispatch path passes the
+    /// Test-only, like its sibling below: the dispatch path passes the
     /// identity whole and never reads a half out of it, so these accessors exist
-    /// for the tests that assert the key's composition. Gated rather than
-    /// blanket-allowed, so a future production reader has to ungate one
-    /// deliberately.
+    /// for the tests that assert the key's composition.
     #[cfg(test)]
     #[must_use]
     pub fn state_key(&self) -> &str {
-        &self.state_key
+        self.registry_key()
     }
 
     /// The normalized field capability key this identity is keyed on.
@@ -441,7 +430,7 @@ impl FieldVerdictRegistry {
         let acting_facts = |()| {
             self.learned.field_acting_facts_in_generation(
                 generation,
-                &key.state_key,
+                key.registry_key(),
                 &key.capability_key,
                 &key.provider_kind,
                 now,
@@ -562,7 +551,7 @@ impl FieldVerdictRegistry {
         if !claim.owns_current_incarnation() {
             tracing::debug!(
                 event = "field_canary_confirmation_stale",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 "canary confirmation abandoned: the identity moved to a new \
                  incarnation while this canary was in flight"
@@ -572,7 +561,7 @@ impl FieldVerdictRegistry {
         }
         let observed = self.learned.observe_in_generation_with_observations(
             generation,
-            &key.state_key,
+            key.registry_key(),
             &key.capability_key,
             &key.provider_kind,
             SignalTier::SelfIdentifying,
@@ -589,7 +578,7 @@ impl FieldVerdictRegistry {
         else {
             tracing::debug!(
                 event = "field_canary_confirmation_refused",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 "canary confirmation refused by the generation barrier: nothing recorded"
             );
@@ -600,7 +589,7 @@ impl FieldVerdictRegistry {
         };
         tracing::info!(
             event = "field_canary_confirmed",
-            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            state_key = %routectl_core::sanitize_for_log(key.registry_key()),
             capability_key = %key.capability_key,
             upstream_status,
             observations,
@@ -614,7 +603,7 @@ impl FieldVerdictRegistry {
         Some(CapabilityLearnEvent {
             persistence_generation,
             incarnation,
-            state_key: key.state_key.clone(),
+            state_key: key.registry_key().to_string(),
             capability_key: key.capability_key.clone(),
             provider_kind: key.provider_kind.clone(),
             signal_tier: SignalTier::SelfIdentifying,
@@ -694,7 +683,7 @@ impl FieldVerdictRegistry {
         if !claim.settle_disproved_if_current() {
             tracing::debug!(
                 event = "field_canary_disproof_stale",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 "canary disproof abandoned: the identity moved to a new \
                  incarnation while this canary was in flight"
@@ -703,7 +692,7 @@ impl FieldVerdictRegistry {
         }
         let removed = self.learned.remove_keyed_in_generation(
             generation,
-            &key.state_key,
+            key.registry_key(),
             &key.capability_key,
             &key.provider_kind,
         );
@@ -715,7 +704,7 @@ impl FieldVerdictRegistry {
         else {
             tracing::debug!(
                 event = "field_canary_clear_refused",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 "canary clear refused by the generation barrier: pre-flight stays \
                  suspended for this identity"
@@ -733,14 +722,14 @@ impl FieldVerdictRegistry {
         self.canaries.reset(key);
         tracing::info!(
             event = "field_canary_disproved",
-            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            state_key = %routectl_core::sanitize_for_log(key.registry_key()),
             capability_key = %key.capability_key,
             "envelope-field verdict cleared: a canary's unrepaired request was accepted",
         );
         Some(CapabilityClearedEvent {
             persistence_generation,
             incarnation,
-            state_key: key.state_key.clone(),
+            state_key: key.registry_key().to_string(),
             capability_key: key.capability_key.clone(),
             provider_kind: key.provider_kind.clone(),
         })
@@ -808,14 +797,14 @@ impl FieldVerdictRegistry {
         // acting, or a generation this event may not write against.
         let Some(facts) = self.learned.field_acting_facts_in_generation(
             generation,
-            &key.state_key,
+            key.registry_key(),
             &key.capability_key,
             &key.provider_kind,
             now,
         ) else {
             tracing::debug!(
                 event = "field_confirmation_ack_refused",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 reason = "not_acting_in_generation",
                 "durable confirmation acknowledgment refused: no acting verdict \
@@ -831,7 +820,7 @@ impl FieldVerdictRegistry {
         if facts.incarnation != incarnation {
             tracing::debug!(
                 event = "field_confirmation_ack_refused",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 reason = "incarnation_superseded",
                 "durable confirmation acknowledgment refused: the identity's \
@@ -858,7 +847,7 @@ impl FieldVerdictRegistry {
         if !ack.accepted {
             tracing::debug!(
                 event = "field_confirmation_ack_refused",
-                state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                 capability_key = %key.capability_key,
                 reason = "canary_state_superseded",
                 standing_observations = ack.confirmations,
@@ -869,7 +858,7 @@ impl FieldVerdictRegistry {
         }
         tracing::debug!(
             event = "field_confirmation_acknowledged",
-            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            state_key = %routectl_core::sanitize_for_log(key.registry_key()),
             capability_key = %key.capability_key,
             observations = ack.confirmations,
             "durable confirmation acknowledged: this verdict's acknowledged count \
@@ -912,7 +901,7 @@ impl FieldVerdictRegistry {
         // not decide to strip on state belonging to the replacement generation.
         let (state, admitted_generation) = self.learned.negative_state_in_generation(
             generation,
-            &key.state_key,
+            key.registry_key(),
             &key.capability_key,
             &key.provider_kind,
             now,
@@ -940,7 +929,7 @@ impl FieldVerdictRegistry {
         matches!(
             self.learned.negative_state_in_generation(
                 self.learned.generation(),
-                &key.state_key,
+                key.registry_key(),
                 &key.capability_key,
                 &key.provider_kind,
                 now,
@@ -1068,7 +1057,7 @@ impl FieldRepairGuard<'_> {
             .learned
             .observe_in_generation_with_observations(
                 self.generation,
-                &key.state_key,
+                key.registry_key(),
                 &key.capability_key,
                 &key.provider_kind,
                 SignalTier::SelfIdentifying,
@@ -1087,7 +1076,7 @@ impl FieldRepairGuard<'_> {
                 self.registry.release_slot(&key);
                 tracing::debug!(
                     event = "field_verdict_commit_stale",
-                    state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                    state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                     capability_key = %key.capability_key,
                     "field-verdict commit refused: its admission predates the live \
                      capability generation"
@@ -1098,7 +1087,7 @@ impl FieldRepairGuard<'_> {
                 self.registry.release_slot(&key);
                 tracing::debug!(
                     event = "field_verdict_commit_reserved",
-                    state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                    state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                     capability_key = %key.capability_key,
                     "field-verdict commit refused: an operator purge holds this \
                      key's lease"
@@ -1109,7 +1098,7 @@ impl FieldRepairGuard<'_> {
                 self.registry.release_slot(&key);
                 tracing::debug!(
                     event = "field_verdict_commit_exhausted",
-                    state_key = %routectl_core::sanitize_for_log(&key.state_key),
+                    state_key = %routectl_core::sanitize_for_log(key.registry_key()),
                     capability_key = %key.capability_key,
                     "field-verdict commit refused: the incarnation sequence is \
                      exhausted"
@@ -1127,7 +1116,7 @@ impl FieldRepairGuard<'_> {
         // this in-memory admission alone.
         tracing::info!(
             event = "field_verdict_commit",
-            state_key = %routectl_core::sanitize_for_log(&key.state_key),
+            state_key = %routectl_core::sanitize_for_log(key.registry_key()),
             capability_key = %key.capability_key,
             upstream_status,
             observations,
@@ -1136,7 +1125,7 @@ impl FieldRepairGuard<'_> {
         Some(CapabilityLearnEvent {
             persistence_generation,
             incarnation,
-            state_key: key.state_key,
+            state_key: key.registry_key().to_string(),
             capability_key: key.capability_key,
             provider_kind: key.provider_kind,
             signal_tier: SignalTier::SelfIdentifying,
@@ -1167,7 +1156,7 @@ impl FieldRepairGuard<'_> {
         self.settled = true;
         let removed = self.registry.learned.remove_keyed_in_generation(
             self.generation,
-            &self.key.state_key,
+            self.key.registry_key(),
             &self.key.capability_key,
             &self.key.provider_kind,
         );
@@ -1184,7 +1173,7 @@ impl FieldRepairGuard<'_> {
                 self.registry.release_slot(&self.key);
                 tracing::debug!(
                     event = "field_verdict_clear_stale",
-                    state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+                    state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
                     capability_key = %self.key.capability_key,
                     "field-verdict clear refused: its admission predates the live \
                      capability generation"
@@ -1195,7 +1184,7 @@ impl FieldRepairGuard<'_> {
                 self.registry.release_slot(&self.key);
                 tracing::debug!(
                     event = "field_verdict_clear_reserved",
-                    state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+                    state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
                     capability_key = %self.key.capability_key,
                     "field-verdict clear refused: an operator purge holds this \
                      key's lease"
@@ -1206,7 +1195,7 @@ impl FieldRepairGuard<'_> {
                 self.registry.release_slot(&self.key);
                 tracing::debug!(
                     event = "field_verdict_clear_exhausted",
-                    state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+                    state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
                     capability_key = %self.key.capability_key,
                     "field-verdict clear refused: the incarnation sequence is \
                      exhausted"
@@ -1224,14 +1213,14 @@ impl FieldRepairGuard<'_> {
         }
         tracing::info!(
             event = "field_verdict_clear",
-            state_key = %routectl_core::sanitize_for_log(&self.key.state_key),
+            state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
             capability_key = %self.key.capability_key,
             "envelope-field verdict cleared by an accepted request",
         );
         Some(CapabilityClearedEvent {
             persistence_generation,
             incarnation,
-            state_key: self.key.state_key.clone(),
+            state_key: self.key.registry_key().to_string(),
             capability_key: self.key.capability_key.clone(),
             provider_kind: self.key.provider_kind.clone(),
         })

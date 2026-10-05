@@ -795,21 +795,17 @@ fn filter_source_as_str_tokens() {
 // --- strip-vs-route verdict (capability-strip wiring) ---
 
 /// An acting (non-expired) learned negative for the [`strip_target`] named
-/// `state_key` and `feature`, keyed where that target's lookup reads it,
-/// normalized under the `openai-compat` kind these strip tests use
-/// (identity normalization for a clean key).
+/// `state_key` and `feature`, keyed on that target's lane (where every
+/// capability namespace's lookup reads it), normalized under the
+/// `openai-compat` kind these strip tests use (identity normalization for a
+/// clean key).
 fn acting_negative(
     state_key: &str,
     feature: &str,
     base: Instant,
 ) -> crate::learned_capability::ExportedEntry {
-    let registry_key = if crate::field_capability::capability_key_is_field_verdict(feature) {
-        state_key.to_string()
-    } else {
-        lane_of(state_key)
-    };
     crate::learned_capability::ExportedEntry {
-        state_key: registry_key,
+        state_key: lane_of(state_key),
         feature_key: normalize_capability_key(feature, "openai-compat"),
         verdict: crate::learned_capability::EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,

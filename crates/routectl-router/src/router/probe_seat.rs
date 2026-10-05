@@ -141,101 +141,57 @@ impl Router {
         .is_some()
     }
 
-    /// The resolved seat a probe identity's `state_key` names.
+    /// The resolved seat a probe identity's lane names.
     ///
-    /// A pooled identity keys as `nickname#label`, and the LABEL is the
-    /// member's `[providers]` key -- so the seat is selected by matching that
-    /// label, never by taking seat zero. Probing seat zero for an identity
-    /// minted against a different member would ask the wrong account and, on
-    /// a failure, attribute it to the wrong one.
+    /// The lane is `(provider entry, upstream)`, so the seat is the resolved
+    /// model (or pooled member) that egresses exactly that entry with exactly
+    /// that upstream. A pooled model contributes the member whose
+    /// `[providers]` key IS the lane's entry, never seat zero: probing another
+    /// member would ask the wrong account and, on a failure, attribute it to
+    /// the wrong one.
     ///
-    /// The pooled key is resolved by RE-COMPOSING each candidate through
-    /// `SeatTarget::state_key_for` and comparing, rather than by splitting the
-    /// key on the separator, so this resolution never depends on the grammar
-    /// holding.
-    ///
-    /// RECOMPOSITION IS NOT INJECTIVE over arbitrary names, so comparing is
-    /// only sound together with a UNIQUENESS requirement across TWO candidate
-    /// kinds:
-    ///
-    /// - a DIRECT hit, where the key is a `[models]` nickname outright;
-    /// - a POOLED match, where some (model, member) pair recomposes to the key.
-    ///
-    /// Two pooled pairs could collide with each other (model `a` with member
-    /// `b#c` and model `a#b` with member `c` both compose `a#b#c`), and a direct
-    /// nickname could collide with a pooled pair (a `[models]` entry literally
-    /// named `a#b` alongside model `a`'s member `b`). Each candidate names a
-    /// DIFFERENT account, so this counts candidates across both kinds and
-    /// answers `None` unless the COMBINED count is exactly one. The direct hit
-    /// deliberately does NOT short-circuit: returning it early would silently
-    /// prefer one account whenever both exist.
-    ///
-    /// Config validation and `Router::install_resolved_models` both reserve the
-    /// separator in nicknames and member names, so an installed table cannot
-    /// present either collision; this exact-one guard is defense in depth
-    /// behind them, keeping a probe decision from ever resting on a key that
-    /// names more than one seat.
+    /// Several nicknames may share one lane. They name the same account and
+    /// the same wire model, so any of them reaches the endpoint the identity
+    /// was learned on; the FIRST in nickname order is taken so the choice --
+    /// and with it the breaker the probe admits through -- is deterministic.
+    /// `None` when no resolved model dispatches the lane.
     pub(super) fn probe_seat_for(&self, key: &FieldVerdictKey) -> Option<ProbeSeat> {
-        let state_key = key.probe_state_key();
-        // Both candidate kinds are collected before anything is returned, so the
-        // combined count is what decides. Bounded by the configured model and
-        // seat counts, both small and operator-authored; this runs once per probe
-        // decision, not per request.
-        let mut matched: Option<ProbeSeat> = None;
-        let mut candidates: usize = 0;
-
-        // The DIRECT candidate: the key is a `[models]` nickname. A map key is
-        // unique within the map, so this contributes at most one candidate --
-        // but not necessarily the ONLY one.
-        if let Some(model) = self.resolved_models.get(state_key) {
-            candidates += 1;
-            matched = Some(ProbeSeat {
-                provider_name: model.provider_name.clone(),
-                state_key: state_key.to_string(),
-                upstream: model.upstream.clone(),
-                provider: std::sync::Arc::clone(&model.provider),
-                provider_kind: self.probe_provider_kind(&model.provider_name),
-                supports_adaptive_thinking: model.supports_adaptive_thinking,
-                configured_output_ceiling: model.max_output_tokens,
-                effective_row: model.effective_row.clone(),
-            });
-        }
-
-        // The POOLED candidates: every (model, member) pair whose composed key
-        // equals this one.
-        for (nickname, model) in &self.resolved_models {
-            let Some(seats) = model.seats.as_ref() else {
-                continue;
-            };
-            for seat in seats.iter() {
-                if seat.state_key_for(nickname) != state_key {
-                    continue;
-                }
-                candidates += 1;
-                if candidates > 1 {
-                    // A second candidate of either kind means the key names no
-                    // single account. Refuse rather than choose: the whole point
-                    // of this resolution is that the seat a probe reaches is the
-                    // seat its identity names.
-                    return None;
-                }
-                matched = Some(ProbeSeat {
-                    provider_name: seat.provider_name.clone(),
-                    state_key: seat.state_key_for(nickname),
+        let lane = key.lane();
+        let entry = lane.provider_entry();
+        let upstream = lane.upstream();
+        // Bounded by the configured model and seat counts, both small and
+        // operator-authored; this runs once per probe decision, not per request.
+        self.resolved_models
+            .iter()
+            .filter(|(_, model)| model.upstream == upstream)
+            .find_map(|(nickname, model)| match model.seats.as_ref() {
+                None => (model.provider_name == entry).then(|| ProbeSeat {
+                    provider_name: model.provider_name.clone(),
+                    state_key: nickname.clone(),
                     upstream: model.upstream.clone(),
-                    provider: std::sync::Arc::clone(&seat.provider),
-                    provider_kind: self.probe_provider_kind(&seat.provider_name),
-                    // These two facts belong to the MODEL, not to the seat: a
-                    // pool's members share one wire model id, so they share its
-                    // thinking shape and its catalog cell. Reading them off the
-                    // seat would require per-seat copies of one model's facts.
+                    provider: std::sync::Arc::clone(&model.provider),
+                    provider_kind: self.probe_provider_kind(&model.provider_name),
                     supports_adaptive_thinking: model.supports_adaptive_thinking,
                     configured_output_ceiling: model.max_output_tokens,
                     effective_row: model.effective_row.clone(),
-                });
-            }
-        }
-        matched
+                }),
+                Some(seats) => seats
+                    .iter()
+                    .find(|seat| seat.provider_name == entry)
+                    .map(|seat| ProbeSeat {
+                        provider_name: seat.provider_name.clone(),
+                        state_key: seat.state_key_for(nickname),
+                        upstream: model.upstream.clone(),
+                        provider: std::sync::Arc::clone(&seat.provider),
+                        provider_kind: self.probe_provider_kind(&seat.provider_name),
+                        // These two facts belong to the MODEL, not to the seat: a
+                        // pool's members share one wire model id, so they share its
+                        // thinking shape and its catalog cell.
+                        supports_adaptive_thinking: model.supports_adaptive_thinking,
+                        configured_output_ceiling: model.max_output_tokens,
+                        effective_row: model.effective_row.clone(),
+                    }),
+            })
     }
 
     /// The configured provider KIND behind `provider_name`, or `None` when no

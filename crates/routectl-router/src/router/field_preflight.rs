@@ -678,8 +678,11 @@ impl Router {
             target.use_forwarded_credential,
         )
         .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
-        FieldVerdictKey::new(&target.state_key, path, provider_kind)
-            .ok_or(FIELD_PREFLIGHT_NO_IDENTITY)
+        let lane = target
+            .learned_lane
+            .as_ref()
+            .ok_or(FIELD_PREFLIGHT_NO_IDENTITY)?;
+        FieldVerdictKey::new(lane, path, provider_kind).ok_or(FIELD_PREFLIGHT_NO_IDENTITY)
     }
 
     /// The VERDICT gates for one row's class: the operator mask, eligibility,

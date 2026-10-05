@@ -101,6 +101,16 @@ impl StateKey {
     }
 }
 
+#[cfg(test)]
+impl StateKey {
+    /// A lane for a fixture whose identity only needs to be distinct: the
+    /// named provider entry over one fixed upstream.
+    pub(crate) fn fixture(provider_entry: &str) -> Self {
+        Self::new(provider_entry, "fixture-upstream")
+            .expect("a fixture provider entry carries no separator")
+    }
+}
+
 impl std::fmt::Debug for StateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("StateKey").field(&self.for_log()).finish()

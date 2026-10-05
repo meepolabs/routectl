@@ -367,10 +367,15 @@ impl Router {
         let acting = self
             .learned_capabilities
             .field_acting_incarnations(Instant::now());
+        // A field entry is always lane-keyed (replay skips a field row that is
+        // not), so an entry whose key does not parse has no lane and no row.
         learned
             .into_iter()
             .filter(|entry| !capability_key_is_catalog_scoped(&entry.feature_key))
-            .map(|entry| self.status_row_for(entry, &acting))
+            .filter_map(|entry| {
+                let lane = crate::state_key::StateKey::parse(&entry.state_key)?;
+                Some(self.status_row_for(entry, lane, &acting))
+            })
             .collect()
     }
 
@@ -379,6 +384,7 @@ impl Router {
     fn status_row_for(
         &self,
         entry: LearnedRegistryEntry,
+        lane: crate::state_key::StateKey,
         acting: &std::collections::HashMap<(String, String), u64>,
     ) -> FieldVerdictStatus {
         let provider_kind = self
@@ -390,11 +396,8 @@ impl Router {
         // check that admitted it -- and would silently drop a row whose key a
         // stricter grammar no longer accepts, hiding exactly the verdict an
         // operator is looking for.
-        let key = FieldVerdictKey::from_capability_key(
-            entry.state_key.clone(),
-            entry.feature_key.clone(),
-            provider_kind,
-        );
+        let key =
+            FieldVerdictKey::from_capability_key(lane, entry.feature_key.clone(), provider_kind);
         let snapshot = self.field_verdicts().canaries().snapshot(&key);
         let class =
             crate::router::field_repair::transform_class_of_capability_key(&entry.feature_key);
@@ -480,7 +483,7 @@ impl Router {
         // one, which is exactly what the planner's own check prevents.
         let eligible = acting
             .get(&(
-                key.status_state_key().to_string(),
+                key.lane().as_lane_key().to_string(),
                 key.capability_key().to_string(),
             ))
             .is_some_and(|incarnation| {
@@ -521,114 +524,76 @@ impl Router {
     /// must be `anthropic-api`, and the entry must carry an attributable base URL
     /// (not a forwarded credential, a local hop, or none). A status read cannot
     /// check `use_forwarded_credential` because it has no `DispatchTarget` -- what
-    /// it has is the state key, which resolves to the provider entry's own base
-    /// URL and kind. A forwarded credential is a per-request property the status
-    /// surface does not carry, so it is not checked here; the verdict row's
-    /// blocked reason may therefore read `not_eligible` on a lane whose REQUESTS
-    /// are forwarded, which is the correct conservative reading rather than a
-    /// false claim about the lane itself.
+    /// it has is the lane, whose provider entry carries the base URL and kind. A
+    /// forwarded credential is a per-request property the status surface does not
+    /// carry, so it is not checked here; the verdict row's blocked reason may
+    /// therefore read `not_eligible` on a lane whose REQUESTS are forwarded, which
+    /// is the correct conservative reading rather than a false claim about the
+    /// lane itself.
     fn lane_supports_preflight(&self, key: &FieldVerdictKey) -> bool {
-        let pk = self.provider_kind_for_state_key(key.status_state_key());
+        let entry = key.lane().provider_entry();
+        let pk = self
+            .config
+            .providers
+            .get(entry)
+            .map_or("", |p| p.kind_str());
         if pk != super::field_repair::ANTHROPIC_API_KIND {
             return false;
         }
-        let pn = self.provider_name_for_state_key(key.status_state_key());
-        crate::router::field_repair::attributable_anthropic_base_url(&self.config, &pn, false)
+        crate::router::field_repair::attributable_anthropic_base_url(&self.config, entry, false)
             .is_some()
     }
 
-    /// The provider ENTRY name for a state key, for the lane predicate above and the
-    /// override mask below.
-    ///
-    /// MEMBER-FIRST, then the model tables, then a pool fallback. For a pooled seat
-    /// `nick#member` the MEMBER suffix is the provider entry a live `DispatchTarget`
-    /// carries as its `provider_name` (see `chain::dispatch_target_for_seat`), so it
-    /// is resolved first and the base is left to key the MODEL lookup rather than the
-    /// provider one. A key that names no member falls through to the resolved models
-    /// (a live Router), then the configured ones (cold boot, or a provider that failed
-    /// to build), then the base of a `#`-suffixed key whose suffix resolved nothing,
-    /// and finally the key itself -- a provider-scoped key with no model.
-    ///
-    /// The order is load-bearing: a pool-backed model's own `provider_name` is the
-    /// POOL, which is not a `[providers]` entry at all, so resolving through it first
-    /// would yield a name no provider lookup can answer and every decision keyed on it
-    /// would fall through to a default.
-    fn provider_name_for_state_key(&self, state_key: &str) -> String {
-        // Pooled seat: `nick#member` -> the SUFFIX is the provider entry name.
-        if let Some((_base, member)) = crate::seat_pool::split_seat_state_key(state_key)
-            && self.config.providers.contains_key(member)
-        {
-            return member.to_string();
-        }
-        // Resolved models (a live Router with installed providers).
-        if let Some(model) = self.resolved_models.get(state_key) {
-            return model.provider_name.clone();
-        }
-        // Configured model.
-        if let Some(model) = self.config.models.get(state_key) {
-            return model.provider.clone();
-        }
-        // Pool fallback: if the base part is a configured model.
-        if let Some((base, _)) = crate::seat_pool::split_seat_state_key(state_key)
-            && let Some(model) = self.config.models.get(base)
-        {
-            return model.provider.clone();
-        }
-        state_key.to_string()
-    }
-
     /// Whether an operator `[capability.overrides]` cell forces this capability
-    /// supported for the target `key` names.
+    /// supported for the lane `key` names.
     ///
-    /// Resolves the state key to its `(provider, nickname)` pair through
-    /// `override_identity_for` -- the same shared resolution every other
-    /// state-key-keyed decision uses -- and then asks the SAME override registry the
-    /// planner asks, with the same normalized capability token. The planner reads the
-    /// pair off a live `DispatchTarget`; a status read has only the state key, so the
-    /// pair is resolved rather than invented.
+    /// Resolves the lane to every `(provider, nickname)` pair dispatching it
+    /// through `override_identities_for_lane` -- the same resolution the reload
+    /// override sweep uses -- and asks the SAME override registry the planner
+    /// asks, with the same normalized capability token. The planner reads one
+    /// pair off a live `DispatchTarget`; a status read has only the lane, so a
+    /// mask on any nickname sharing it is reported, matching the shared verdict
+    /// it governs.
     fn override_masks_capability(&self, key: &FieldVerdictKey) -> bool {
-        let provider_name = self.provider_name_for_state_key(key.status_state_key());
-        // The nickname is the state key itself when the model is a direct config entry,
-        // and the base when it is a pooled seat. Both are what a live DispatchTarget
-        // carries, and the override resolver checks model-scoped first (matching them)
-        // then provider-tier (matching the provider alone).
-        let nickname = crate::seat_pool::split_seat_state_key(key.status_state_key()).map_or_else(
-            || key.status_state_key().to_string(),
-            |(base, _)| base.to_string(),
-        );
-        matches!(
-            self.override_registry.resolve(
-                &provider_name,
-                &nickname,
-                key.capability_key(),
-                self.provider_kind_for_state_key(key.status_state_key()),
-            ),
-            Some((crate::override_registry::OverrideVerdict::ForceSupported, _))
-        )
+        let provider_kind = self.provider_kind_for_state_key(key.lane().as_lane_key());
+        self.override_identities_for_lane(key.lane())
+            .iter()
+            .any(|(provider_name, nickname)| {
+                matches!(
+                    self.override_registry.resolve(
+                        provider_name,
+                        nickname,
+                        key.capability_key(),
+                        provider_kind,
+                    ),
+                    Some((crate::override_registry::OverrideVerdict::ForceSupported, _))
+                )
+            })
     }
 
-    /// Whether the operator opted the target `key` names into prefix-impacting
+    /// Whether the operator opted the lane `key` names into prefix-impacting
     /// pre-flight.
     ///
-    /// Resolves the state key to its `(provider, nickname)` pair through
-    /// `override_identity_for` -- the SAME shared resolution every other
-    /// state-key-keyed decision uses -- and then applies the same two-tier
-    /// target-spec membership the planner applies. The planner reads the pair off
-    /// a live `DispatchTarget` it already holds; a status read has only the state
-    /// key, so the pair is resolved rather than invented.
+    /// Resolves the lane to its `(provider, nickname)` pairs through
+    /// `override_identities_for_lane` and applies the same two-tier target-spec
+    /// membership the planner applies to any of them. The planner reads one pair
+    /// off a live `DispatchTarget` it already holds; a status read has only the
+    /// lane, so an opt-in naming any nickname on it is reported.
     fn prefix_impact_opted_in_for_state_key(&self, key: &FieldVerdictKey) -> bool {
-        let (provider_name, nickname) = self.override_identity_for(key.status_state_key());
+        let identities = self.override_identities_for_lane(key.lane());
         self.config
             .fidelity
             .prefix_impact_opt_in
             .iter()
             .any(|spec| {
                 let (spec_provider, spec_model) = crate::override_registry::split_target_spec(spec);
-                spec_provider == provider_name
-                    && match spec_model {
-                        Some(model) => model == nickname,
-                        None => true,
-                    }
+                identities.iter().any(|(provider_name, nickname)| {
+                    spec_provider == provider_name
+                        && match spec_model {
+                            Some(model) => model == nickname,
+                            None => true,
+                        }
+                })
             })
     }
 }

@@ -1124,7 +1124,8 @@ impl Router {
                         guard: None,
                     });
                 }
-                let key = FieldVerdictKey::new(&target.state_key, row.path, provider_kind)?;
+                let key =
+                    FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
                 let guard = self.field_verdicts().admit_provisional(
                     &key,
                     base_url,

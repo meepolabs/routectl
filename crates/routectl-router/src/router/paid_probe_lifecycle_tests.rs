@@ -118,7 +118,12 @@ fn a_publication_that_wins_first_stores_and_a_later_shutdown_is_still_terminal()
         count_calls: AtomicUsize::new(0),
     });
     let router = Arc::new(crate::router::probe_test_support::remote_router(provider));
-    let identity = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let identity = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&identity, ProbeValidator::CountTokens);
     assert_eq!(router.probe_scheduler_snapshot().queued, 1, "premise");
 
@@ -422,7 +427,12 @@ fn shutdown_refuses_activation_that_races_it_on_an_unchanged_generation() {
         count_calls: AtomicUsize::new(0),
     });
     let router = crate::router::probe_test_support::remote_router(provider);
-    let identity = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let identity = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
 
     // POSITIVE CONTROL, before the shutdown: this exact activation is admitted.
     assert_eq!(

@@ -247,8 +247,8 @@ fn write_config_file(dir: &std::path::Path) -> std::path::PathBuf {
         format!(
             "version = 3\n\n[providers.p0]\nkind = \"anthropic-api\"\n\
              api_key_ref = \"literal:k\"\nbase_url = \"{REMOTE_BASE}\"\n\n\
-             [models.{STATE_KEY}]\nprovider = \"p0\"\nupstream = \"claude-sonnet-4-5\"\n\n\
-             [aliases]\ndefault = \"{STATE_KEY}\"\n"
+             [models.{NICKNAME}]\nprovider = \"p0\"\nupstream = \"claude-sonnet-4-5\"\n\n\
+             [aliases]\ndefault = \"{NICKNAME}\"\n"
         ),
     )
     .expect("the config file writes");

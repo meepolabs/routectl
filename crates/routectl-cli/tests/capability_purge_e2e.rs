@@ -94,7 +94,7 @@ async fn the_purge_route_answers_a_clean_no_op_on_a_fresh_daemon() {
     // Act
     let (status, body) = purge(
         &base_url,
-        json!({"state_key": "sonnet", "capability_key": "web_search"}),
+        json!({"state_key": "anthropic#claude-sonnet-4-5", "capability_key": "web_search"}),
         None,
     )
     .await;
@@ -106,7 +106,7 @@ async fn the_purge_route_answers_a_clean_no_op_on_a_fresh_daemon() {
         json!(false),
         "a fresh daemon has learned nothing, so the answer is the clean no-op"
     );
-    assert_eq!(body["state_key"], json!("sonnet"));
+    assert_eq!(body["state_key"], json!("anthropic#claude-sonnet-4-5"));
     assert_eq!(body["capability_key"], json!("web_search"));
 }
 
@@ -119,7 +119,12 @@ async fn the_real_server_refuses_an_out_of_vocabulary_purge_body() {
     let base_url = spawn(servable_config(None)).await;
 
     // Act
-    let (status, body) = purge(&base_url, json!({"state_key": "sonnet"}), None).await;
+    let (status, body) = purge(
+        &base_url,
+        json!({"state_key": "anthropic#claude-sonnet-4-5"}),
+        None,
+    )
+    .await;
 
     // Assert
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
@@ -141,7 +146,7 @@ async fn a_token_configured_daemon_gates_the_purge_route_on_the_listener_token()
         tokens: vec![token_uri],
     })))
     .await;
-    let body = json!({"state_key": "sonnet", "capability_key": "web_search"});
+    let body = json!({"state_key": "anthropic#claude-sonnet-4-5", "capability_key": "web_search"});
 
     // Act + Assert: no credential is challenged.
     let (unauthenticated, _body) = purge(&base_url, body.clone(), None).await;
@@ -178,7 +183,7 @@ async fn the_real_server_refuses_a_browser_simple_cross_origin_request() {
         .post(format!("{base_url}{PURGE_PATH}"))
         .header("content-type", "text/plain;charset=UTF-8")
         .header("origin", "https://evil.example")
-        .body(r#"{"state_key":"sonnet","capability_key":"web_search"}"#)
+        .body(r#"{"state_key":"anthropic#claude-sonnet-4-5","capability_key":"web_search"}"#)
         .send()
         .await
         .expect("daemon answers");
@@ -199,7 +204,7 @@ async fn the_real_server_refuses_a_browser_simple_cross_origin_request() {
     let served = client
         .post(format!("{base_url}{PURGE_PATH}"))
         .header("origin", "https://evil.example")
-        .json(&json!({"state_key": "sonnet", "capability_key": "web_search"}))
+        .json(&json!({"state_key": "anthropic#claude-sonnet-4-5", "capability_key": "web_search"}))
         .send()
         .await
         .expect("daemon answers");
@@ -220,7 +225,7 @@ async fn the_real_server_rejects_a_rebound_host_before_mutating() {
     // Arrange
     let base_url = spawn(servable_config(None)).await;
     let client = reqwest::Client::new();
-    let body = json!({"state_key": "sonnet", "capability_key": "web_search"});
+    let body = json!({"state_key": "anthropic#claude-sonnet-4-5", "capability_key": "web_search"});
 
     // Act: a correct JSON request whose Host carries an attacker's name.
     let response = client

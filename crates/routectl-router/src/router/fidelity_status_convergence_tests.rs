@@ -162,6 +162,9 @@ fn convergence_prefix_req() -> routectl_core::ChatRequest {
 /// installed model.
 const CONVERGENCE_ALIAS: &str = "convergence-alias";
 
+/// The learned lane the convergence fixture's one model dispatches.
+const CONVERGENCE_LANE: &str = "p0#wire-model";
+
 /// The GROUNDED envelope path, from the table's own row.
 const CONVERGENCE_ENVELOPE_PATH: &str = GROUNDED_PATH;
 
@@ -184,19 +187,19 @@ fn convergence_router(base_url: &str, kind: &str) -> Router {
     let mut config: Config = toml::from_str(&toml_text).expect("valid convergence toml");
     config
         .models
-        .insert(STATE_KEY.to_string(), ModelEntry::new("p0", "wire-model"));
+        .insert(NICKNAME.to_string(), ModelEntry::new("p0", "wire-model"));
     config.aliases.insert(
         CONVERGENCE_ALIAS.to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     let mut router = router_assuming_durable_writes(config);
     let provider: std::sync::Arc<dyn routectl_core::Provider> = std::sync::Arc::new(InertProvider);
     let mut models: std::collections::BTreeMap<String, std::sync::Arc<ResolvedModel>> =
         std::collections::BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         std::sync::Arc::new(ResolvedModel::new(
-            STATE_KEY,
+            NICKNAME,
             "p0",
             provider,
             "wire-model".to_string(),
@@ -216,15 +219,17 @@ fn convergence_ok_router() -> Router {
 fn plant_convergence_verdict(router: &Router, path: &str, confirmations: u32) {
     let capability_key = crate::field_capability::field_capability_key(path)
         .expect("the fixture's path is well-formed");
-    plant_verdict_on(router, STATE_KEY, capability_key.clone());
-    let kind = router.provider_kind_for_state_key(STATE_KEY).to_string();
+    plant_verdict_on(router, CONVERGENCE_LANE, capability_key.clone());
+    let kind = router
+        .provider_kind_for_state_key(CONVERGENCE_LANE)
+        .to_string();
     let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        STATE_KEY.to_string(),
+        crate::state_key::StateKey::parse(CONVERGENCE_LANE).expect("lane"),
         capability_key.clone(),
         kind.clone(),
     );
     let incarnation = router.learned_capabilities.resident_incarnation_for_tests(
-        STATE_KEY,
+        CONVERGENCE_LANE,
         &capability_key,
         &kind,
     );
@@ -377,7 +382,7 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
     let unacked = convergence_ok_router();
     plant_verdict_on(
         &unacked,
-        STATE_KEY,
+        CONVERGENCE_LANE,
         crate::field_capability::field_capability_key(envelope).expect("well-formed"),
     );
     cases.push(ConvergenceCase {
@@ -478,10 +483,10 @@ fn convergence_router_without_health_read() -> Router {
     let mut config: Config = toml::from_str(toml_text).expect("valid convergence toml");
     config
         .models
-        .insert(STATE_KEY.to_string(), ModelEntry::new("p0", "wire-model"));
+        .insert(NICKNAME.to_string(), ModelEntry::new("p0", "wire-model"));
     config.aliases.insert(
         CONVERGENCE_ALIAS.to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     // Router::new and NOTHING else: no health read, which is production's default.
     let mut router = Router::new(Arc::new(config));
@@ -489,9 +494,9 @@ fn convergence_router_without_health_read() -> Router {
     let mut models: std::collections::BTreeMap<String, std::sync::Arc<ResolvedModel>> =
         std::collections::BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         std::sync::Arc::new(ResolvedModel::new(
-            STATE_KEY,
+            NICKNAME,
             "p0",
             provider,
             "wire-model".to_string(),
@@ -547,8 +552,8 @@ fn rebuild_convergence_router_inner(previous: &Router, config: Config) -> Router
     let mut models: std::collections::BTreeMap<String, std::sync::Arc<ResolvedModel>> =
         std::collections::BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
-        std::sync::Arc::new(ResolvedModel::new(STATE_KEY, "p0", provider, upstream)),
+        NICKNAME.to_string(),
+        std::sync::Arc::new(ResolvedModel::new(NICKNAME, "p0", provider, upstream)),
     );
     router.install_resolved_models(models);
     router

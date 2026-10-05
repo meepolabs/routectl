@@ -57,7 +57,12 @@ const GROUNDED_PATH: &str = "thinking.enabled.display";
 const REMOTE_BASE: &str = "https://api.anthropic.com";
 
 const ALIAS: &str = "preflight-behavior-alias";
-const STATE_KEY: &str = "sonnet";
+/// The `[models]` nickname the fixture configures.
+const NICKNAME: &str = "sonnet";
+
+/// The learned lane `NICKNAME` dispatches: every learned fact for it, and every
+/// ledger row, is keyed on this.
+const STATE_KEY: &str = "p0#claude-sonnet-4-5";
 
 /// Every request the seat received, plus how it answered.
 struct Seat {
@@ -171,12 +176,12 @@ fn config() -> Config {
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("p0", "claude-sonnet-4-5"),
     );
     config
         .aliases
-        .insert(ALIAS.to_string(), AliasValue::Single(STATE_KEY.to_string()));
+        .insert(ALIAS.to_string(), AliasValue::Single(NICKNAME.to_string()));
     config
 }
 
@@ -192,9 +197,9 @@ fn router_with(seat: Arc<Seat>) -> Router {
     let mut router = Router::new(Arc::new(config()));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         Arc::new(ResolvedModel::new(
-            STATE_KEY.to_string(),
+            NICKNAME.to_string(),
             "p0".to_string(),
             seat as Arc<dyn Provider>,
             "claude-sonnet-4-5".to_string(),

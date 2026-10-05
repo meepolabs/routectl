@@ -40,7 +40,12 @@ async fn a_probe_admitted_as_the_half_open_attempt_declines_and_returns_the_slot
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     // Trip the breaker with a cooldown short enough to lapse, so the probe's
@@ -97,7 +102,12 @@ async fn a_probe_on_a_closed_breaker_still_dials_and_holds_no_claim() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     let ran = router.run_due_probes().await;
@@ -122,7 +132,12 @@ async fn a_probe_success_does_not_credit_a_closed_breakers_failure_count() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -149,7 +164,12 @@ async fn a_probe_rate_limit_does_not_open_the_client_traffic_breaker() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -191,7 +211,12 @@ async fn a_probe_server_error_does_not_re_trip_a_recovering_breaker() {
         provider.clone(),
         Some(1),
     );
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;
@@ -230,7 +255,12 @@ async fn a_bad_request_probe_neither_debits_the_breaker_nor_claims_a_slot() {
         provider.clone(),
         Some(1),
     );
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;

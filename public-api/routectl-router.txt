@@ -4767,9 +4767,9 @@ pub routectl_router::router::Router::config: alloc::sync::Arc<routectl_router::c
 pub routectl_router::router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::abandon_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>)
-pub fn routectl_router::router::Router::audit_absent_purge(&self, &str, &str)
+pub fn routectl_router::router::Router::audit_absent_purge(&self, &routectl_router::StateKey, &str)
 pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
-pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &str, &str) -> routectl_router::router::PurgeOutcome
+pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &routectl_router::StateKey, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
 pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
@@ -10139,6 +10139,7 @@ pub routectl_router::CapabilityRebuildSummary::replayed_cleared: usize
 pub routectl_router::CapabilityRebuildSummary::replayed_negative: usize
 pub routectl_router::CapabilityRebuildSummary::replayed_probe: usize
 pub routectl_router::CapabilityRebuildSummary::replayed_verified: usize
+pub routectl_router::CapabilityRebuildSummary::skipped_lane: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_revision: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_unknown: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_vocab: usize
@@ -14294,9 +14295,9 @@ pub routectl_router::Router::config: alloc::sync::Arc<routectl_router::config::C
 pub routectl_router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::abandon_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>)
-pub fn routectl_router::router::Router::audit_absent_purge(&self, &str, &str)
+pub fn routectl_router::router::Router::audit_absent_purge(&self, &routectl_router::StateKey, &str)
 pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
-pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &str, &str) -> routectl_router::router::PurgeOutcome
+pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &routectl_router::StateKey, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
 pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>

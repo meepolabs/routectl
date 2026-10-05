@@ -80,7 +80,7 @@ fn purge_response() -> serde_json::Value {
     json!({
         "schema_version": 1,
         "purged": true,
-        "state_key": "sonnet",
+        "state_key": "anthropic#claude-sonnet-4-5",
         "capability_key": "web_search",
     })
 }
@@ -164,7 +164,12 @@ async fn a_configured_proxy_receives_nothing_from_the_control_call() {
     proxy.reset().await;
 
     // Act: the code under test.
-    let code = routectl_cli::commands::capability_purge::run(&config, "sonnet", "web_search").await;
+    let code = routectl_cli::commands::capability_purge::run(
+        &config,
+        "anthropic#claude-sonnet-4-5",
+        "web_search",
+    )
+    .await;
 
     // Assert
     assert_eq!(code, 0, "the call must succeed straight to the daemon");

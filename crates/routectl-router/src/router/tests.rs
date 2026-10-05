@@ -1713,7 +1713,7 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
             Some("self-identifying".to_string()),
             None,
             capability.to_string(),
-            "nick".to_string(),
+            "anthropic#nick-upstream".to_string(),
             "anthropic-api".to_string(),
             before.catalog_version,
             0,
@@ -1820,7 +1820,7 @@ fn cold_rebuild_seeds_field_canary_state_from_the_replayed_entries() {
             Some("self-identifying".to_string()),
             None,
             capability.to_string(),
-            "sonnet".to_string(),
+            "anthropic#claude-sonnet-4-5".to_string(),
             "anthropic-api".to_string(),
             0,
             0,
@@ -1861,9 +1861,10 @@ fn cold_rebuild_seeds_field_canary_state_from_the_replayed_entries() {
     });
     assert_eq!(summary.replayed_negative, 2);
 
-    let acting_canary_key = FieldVerdictKey::new("sonnet", acting_path, "anthropic-api")
+    let lane = crate::state_key::StateKey::new("anthropic", "claude-sonnet-4-5").expect("lane");
+    let acting_canary_key = FieldVerdictKey::new(&lane, acting_path, "anthropic-api")
         .expect("a qualified path mints a canary key");
-    let quiet_canary_key = FieldVerdictKey::new("sonnet", quiet_path, "anthropic-api")
+    let quiet_canary_key = FieldVerdictKey::new(&lane, quiet_path, "anthropic-api")
         .expect("a qualified path mints a canary key");
 
     let acting_snap = router
@@ -1872,7 +1873,7 @@ fn cold_rebuild_seeds_field_canary_state_from_the_replayed_entries() {
         .snapshot(&acting_canary_key)
         .expect("the acting entry must be seeded");
     let acting_resident_incarnation = router.learned_capabilities.resident_incarnation_for_tests(
-        "sonnet",
+        lane.as_lane_key(),
         &acting_key,
         "anthropic-api",
     );
@@ -1895,7 +1896,7 @@ fn cold_rebuild_seeds_field_canary_state_from_the_replayed_entries() {
         .snapshot(&quiet_canary_key)
         .expect("the non-acting entry must be seeded too");
     let quiet_resident_incarnation = router.learned_capabilities.resident_incarnation_for_tests(
-        "sonnet",
+        lane.as_lane_key(),
         &quiet_key,
         "anthropic-api",
     );
@@ -2583,8 +2584,12 @@ fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight()
     let before = Router::new(config.clone());
     let mut after = Router::new(config);
 
-    let key = FieldVerdictKey::new("prod-target", "thinking.enabled.display", "anthropic-api")
-        .expect("a qualified path mints a key");
+    let key = FieldVerdictKey::new(
+        &crate::state_key::StateKey::fixture("prod-target"),
+        "thinking.enabled.display",
+        "anthropic-api",
+    )
+    .expect("a qualified path mints a key");
     let t0 = Instant::now();
     let guard = before
         .field_verdicts()

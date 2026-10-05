@@ -154,7 +154,7 @@ fn the_prefix_impacting_class_reports_the_higher_quorum_and_its_prefix_cost() {
 /// `status_row_for` with `entry.state_key.clone()` -> red on the cap assertion.
 #[test]
 fn a_hostile_state_key_reaches_the_row_sanitized_and_capped() {
-    let hostile = format!("m0\n\u{1b}[31mforged\u{7}{}", "A".repeat(4096));
+    let hostile = format!("anthropic#m0\n\u{1b}[31mforged\u{7}{}", "A".repeat(4096));
     let router = bare_router();
     let stamped = Instant::now();
     router
@@ -212,12 +212,12 @@ fn a_disabled_capability_kill_switch_reports_capability_disabled() {
         ProviderEntry::anthropic_api("env://K"),
     );
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     config.aliases.insert(
         "default".to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     let router = router_assuming_durable_writes(config);
     plant_verdict(&router, grounded_key());
@@ -242,14 +242,15 @@ fn a_non_anthropic_lane_reports_unsupported_lane() {
     );
     config
         .models
-        .insert(STATE_KEY.to_string(), ModelEntry::new("oc", "gpt-4o"));
+        .insert(NICKNAME.to_string(), ModelEntry::new("oc", "gpt-4o"));
     config.aliases.insert(
         "default".to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     let router = router_assuming_durable_writes(config);
-    // Plant with the grounded key -- the verdict exists, the lane refuses it.
-    plant_verdict(&router, grounded_key());
+    // Plant with the grounded key on the model's own lane -- the verdict exists,
+    // the lane refuses it.
+    plant_verdict_on(&router, "oc#gpt-4o", grounded_key());
 
     let rows = router.field_verdict_status();
     let row = only_row(&rows);
@@ -272,12 +273,12 @@ fn a_loopback_anthropic_lane_reports_unsupported_lane() {
     let parsed: Config = toml::from_str(toml_text).expect("valid");
     config.providers = parsed.providers;
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic", "claude-sonnet-4-5"),
     );
     config.aliases.insert(
         "default".to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     let router = router_assuming_durable_writes(config);
     plant_verdict(&router, grounded_key());
@@ -313,12 +314,12 @@ fn a_pooled_seat_resolves_member_for_provider_and_base_for_model() {
     );
     // The MODEL targets the pool, whose member is seat-a.
     config.models.insert(
-        STATE_KEY.to_string(),
+        NICKNAME.to_string(),
         ModelEntry::new("anthropic-pool", "claude-sonnet-4-5"),
     );
     config.aliases.insert(
         "default".to_string(),
-        AliasValue::Single(STATE_KEY.to_string()),
+        AliasValue::Single(NICKNAME.to_string()),
     );
     // A member-scoped override: keyed on the MEMBER provider entry name.
     config.capability.overrides.insert(
@@ -329,12 +330,12 @@ fn a_pooled_seat_resolves_member_for_provider_and_base_for_model() {
         },
     );
     let router = router_assuming_durable_writes(config);
-    // Plant the verdict on the POOLED state key: `nick#member`.
-    let pooled_key = format!("{}#seat-a", STATE_KEY);
+    // Plant the verdict on the member's lane: `member#upstream`.
+    let pooled_key = "seat-a#claude-sonnet-4-5".to_string();
     let cap_key = grounded_key();
     let provider_kind = router.provider_kind_for_state_key(&pooled_key).to_string();
     let vk = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        pooled_key.clone(),
+        crate::state_key::StateKey::parse(&pooled_key).expect("lane"),
         cap_key.clone(),
         provider_kind,
     );

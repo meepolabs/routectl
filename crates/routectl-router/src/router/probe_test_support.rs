@@ -21,6 +21,45 @@ use crate::resolved::ResolvedModel;
 /// The one grounded closed-table path, on the acting lane.
 pub(super) const GROUNDED_PATH: &str = "thinking.enabled.display";
 
+/// The upstream every fixture router below gives the model `nickname`.
+///
+/// `m1` -- the only model of a single-lane fixture -- sends the real wire id;
+/// every other nickname gets its own, because a learned lane is
+/// `(provider entry, upstream)` and the fixtures share one provider entry, so
+/// identical upstreams would fold every nickname onto ONE identity.
+pub(super) fn fixture_upstream(nickname: &str) -> String {
+    if nickname == "m1" {
+        "claude-sonnet-4-5".to_string()
+    } else {
+        format!("claude-sonnet-4-5-{nickname}")
+    }
+}
+
+/// The learned lane a seat-chain fixture installs for `mN`: provider entry
+/// `pN` sending `wire-N`, the shape the field-repair, pre-flight and canary
+/// fixtures build. Any other nickname is its own entry over `wire-<nickname>`,
+/// which no fixture dispatches.
+pub(super) fn seat_chain_lane(nickname: &str) -> crate::state_key::StateKey {
+    let lane = nickname
+        .strip_prefix('m')
+        .filter(|n| n.parse::<usize>().is_ok())
+        .map_or_else(
+            || crate::state_key::StateKey::new(nickname, &format!("wire-{nickname}")),
+            |n| crate::state_key::StateKey::new(&format!("p{n}"), &format!("wire-{n}")),
+        );
+    lane.unwrap_or_else(|| {
+        crate::state_key::StateKey::new("separator-free", &format!("wire-{nickname}"))
+            .expect("a separator-free entry mints a lane")
+    })
+}
+
+/// The learned lane a fixture router dispatches the model `nickname` on. A
+/// nickname the fixture never installed names a lane no model resolves.
+pub(super) fn lane(nickname: &str) -> crate::state_key::StateKey {
+    crate::state_key::StateKey::new("p1", &fixture_upstream(nickname))
+        .expect("the fixture provider entry carries no separator")
+}
+
 /// A request grounding the closed-table surface. Without this the
 /// activation seam has no capability identity and every test below would
 /// pass vacuously, so `a_request_grounding_nothing_activates_no_lane`
@@ -207,7 +246,9 @@ impl Provider for BodyAssertingProvider {
 /// actually produce. Asserts its own premise: a fixture that silently failed to
 /// make the verdict eligible would make every "pre-flight stripped it" test
 /// pass for the wrong reason.
-pub(super) fn plant_eligible_verdict(router: &Router, state_key: &str) {
+pub(super) fn plant_eligible_verdict(router: &Router, nickname: &str) {
+    let lane = lane(nickname);
+    let state_key = lane.as_lane_key();
     let stamped = std::time::Instant::now();
     let feature_key = crate::field_capability::field_capability_key(GROUNDED_PATH)
         .expect("the grounded path is a well-formed qualified path");
@@ -228,7 +269,7 @@ pub(super) fn plant_eligible_verdict(router: &Router, state_key: &str) {
             consecutive_failed_probes: 0,
             evidence_class: None,
         }]);
-    let key = FieldVerdictKey::new(state_key, GROUNDED_PATH, "anthropic-api")
+    let key = FieldVerdictKey::new(&lane, GROUNDED_PATH, "anthropic-api")
         .expect("a qualified path mints a key");
     let incarnation = router.learned_capabilities.resident_incarnation_for_tests(
         state_key,
@@ -245,7 +286,7 @@ pub(super) fn plant_eligible_verdict(router: &Router, state_key: &str) {
             router.registry_generation(),
             std::time::Instant::now(),
         ),
-        "fixture premise: {state_key} must be pre-flight eligible",
+        "fixture premise: {nickname} must be pre-flight eligible",
     );
 }
 
@@ -266,7 +307,7 @@ pub(super) fn plant_eligible_verdict(router: &Router, state_key: &str) {
 /// zero. `remote_router_with_lanes` installs one resolved model per lane.
 pub(super) async fn settle_terminally(router: &Router, count: usize) {
     for n in 0..count {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
+        let key = FieldVerdictKey::new(&lane(&format!("m{n}")), GROUNDED_PATH, "anthropic-api")
             .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
         router.run_due_probes().await;
@@ -365,9 +406,10 @@ fn build_router(
         (0..lanes).map(|n| format!("m{n}")).collect()
     };
     for nickname in &nicknames {
-        config
-            .models
-            .insert(nickname.clone(), ModelEntry::new("p1", "claude-sonnet-4-5"));
+        config.models.insert(
+            nickname.clone(),
+            ModelEntry::new("p1", fixture_upstream(nickname)),
+        );
     }
     config.aliases.insert(
         "default".to_string(),
@@ -382,7 +424,7 @@ fn build_router(
                 nickname,
                 "p1",
                 Arc::clone(&provider),
-                "claude-sonnet-4-5",
+                fixture_upstream(nickname),
             )),
         );
     }

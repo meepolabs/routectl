@@ -3483,13 +3483,21 @@ To make the daemon forget one thing it learned -- without pinning
 anything -- ask the running daemon:
 
 ```bash
-routectl capability purge <target> <capability>
+routectl capability purge <lane> <capability>
 # e.g.
-routectl capability purge sonnet web_search
+routectl capability purge anthropic#claude-sonnet-4-5 web_search
 ```
 
-`<target>` is a `[models]` nickname, a pooled seat's `nickname#label`,
-or a `[providers]` name -- whichever the learned entry is keyed on.
+`<lane>` is the learned lane exactly as `routectl doctor` and
+`routectl probe` print it: `<provider>#<upstream>`, the `[providers]`
+entry that egresses the request and the upstream model id it sends.
+Learned facts key on that pair rather than on a `[models]` nickname, so
+every nickname for the same upstream on the same provider shares one
+entry, and one purge clears it for all of them. For a pooled model the
+provider half is the member entry of the seat that learned it. A value
+that is not of that form (a bare nickname, for instance) is refused
+locally with an error and a non-zero exit -- never reported as "nothing
+to purge".
 
 What it does and does not do:
 

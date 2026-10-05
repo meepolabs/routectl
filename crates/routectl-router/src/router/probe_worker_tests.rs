@@ -186,8 +186,12 @@ async fn a_wedged_validator_is_cancelled_at_the_timeout_and_frees_real_concurren
         live: Arc::clone(&live),
     }));
     for n in 0..PROBE_MAX_CONCURRENCY + 2 {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     }
 
@@ -256,8 +260,12 @@ async fn the_worker_leases_no_more_than_the_concurrency_bound_at_once() {
         live: Arc::clone(&live),
     }));
     for n in 0..PROBE_QUEUE_DEPTH {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     }
 
@@ -272,7 +280,12 @@ async fn the_worker_leases_no_more_than_the_concurrency_bound_at_once() {
 #[tokio::test]
 async fn the_worker_runs_nothing_for_a_retired_incarnation() {
     let previous = Router::new(Arc::new(Config::default()));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     previous.activate_probe_lane(&key, ProbeValidator::CountTokens);
     let mut next = Router::new(Arc::new(Config::default()));
     next.carry_over_learned_from(&previous);
@@ -301,8 +314,12 @@ async fn a_paid_candidate_refused_for_capacity_is_counted_rather_than_dropped_si
 
     // NEGATIVE control first: inside the bound nothing is refused.
     for n in 0..PROBE_QUEUE_DEPTH {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
         router.run_due_probes().await;
     }
@@ -321,8 +338,12 @@ async fn a_paid_candidate_refused_for_capacity_is_counted_rather_than_dropped_si
 
     // POSITIVE: past the bound, each exhausted lane is refused and counted.
     for n in PROBE_QUEUE_DEPTH..PROBE_QUEUE_DEPTH + 4 {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
         router.run_due_probes().await;
     }
@@ -388,16 +409,23 @@ fn a_settled_free_outcome_makes_no_paid_candidate() {
 fn repeated_queue_full_refusals_warn_once_but_keep_counting() {
     let router = Router::new(Arc::new(Config::default()));
     for n in 0..PROBE_QUEUE_DEPTH {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     }
 
     let events = routectl_testkit::capture_events(|| {
         for n in 0..40 {
-            let key =
-                FieldVerdictKey::new(&format!("overflow-{n}"), GROUNDED_PATH, "anthropic-api")
-                    .expect("identity");
+            let key = FieldVerdictKey::new(
+                &crate::router::probe_test_support::lane(&format!("overflow-{n}")),
+                GROUNDED_PATH,
+                "anthropic-api",
+            )
+            .expect("identity");
             router.activate_probe_lane(&key, ProbeValidator::CountTokens);
         }
     });
@@ -423,14 +451,22 @@ fn the_bounded_queue_full_warn_still_fires_for_the_first_refusal() {
     // the FIRST line, or the diagnostic would never appear at all.
     let router = Router::new(Arc::new(Config::default()));
     for n in 0..PROBE_QUEUE_DEPTH {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     }
 
     let events = routectl_testkit::capture_events(|| {
-        let key =
-            FieldVerdictKey::new("overflow", GROUNDED_PATH, "anthropic-api").expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane("overflow"),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     });
 
@@ -499,8 +535,12 @@ async fn a_lane_with_no_resolved_seat_makes_no_paid_candidate() {
     let router = remote_router_with_paid_cap(provider.clone(), 3);
     // An identity naming a state key no resolved model answers for, so seat
     // resolution finds nothing.
-    let key =
-        FieldVerdictKey::new("no-such-model", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("no-such-model"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     router.run_due_probes().await;

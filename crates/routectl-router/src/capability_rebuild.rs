@@ -244,6 +244,11 @@ pub struct CapabilityRebuildSummary {
     /// tokens -- distinct from `skipped_unknown`, which counts a token the
     /// CURRENT vocabulary does not recognize.
     pub skipped_vocab: usize,
+    /// Envelope-field events skipped because their lane key does not parse as
+    /// a learned lane (`provider_entry#upstream`): a field verdict keys on the
+    /// lane, so a row keyed any other way names no identity this build can
+    /// attribute it to.
+    pub skipped_lane: usize,
 }
 
 /// Replay a ledger slice into `registry` through the live stage-2 admission
@@ -286,6 +291,15 @@ pub fn rebuild_capabilities_into(
                 continue;
             }
         };
+        if !field_row_names_a_lane(&row) {
+            tracing::warn!(
+                event = "rebuild_skip",
+                reason = "unparseable_lane",
+                "capability rebuild skipped a field row whose lane key is not a learned lane",
+            );
+            summary.skipped_lane += 1;
+            continue;
+        }
         match should_replay(&row, &tombstone) {
             ReplayDecision::Replay => rows.push(row),
             ReplayDecision::SkipRevision => summary.skipped_revision += 1,
@@ -298,6 +312,13 @@ pub fn rebuild_capabilities_into(
         replay_row(row, registry, &mut summary);
     }
     summary
+}
+
+/// Whether `row` is keyed the way its namespace requires. A catalog-scoped
+/// row is left to the existing checks; a field row must carry a lane key.
+fn field_row_names_a_lane(row: &CapabilityEventRow) -> bool {
+    crate::field_capability::capability_key_is_catalog_scoped(&row.capability)
+        || crate::state_key::StateKey::parse(&row.state_key).is_some()
 }
 
 /// Replay one surviving row through the matching admission call. The parsed

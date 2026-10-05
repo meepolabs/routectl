@@ -65,7 +65,12 @@ fn grounded_key() -> String {
 }
 
 fn verdict_key(state_key: &str) -> FieldVerdictKey {
-    FieldVerdictKey::new(state_key, GROUNDED_PATH, ANTHROPIC).expect("a qualified path mints a key")
+    FieldVerdictKey::new(
+        &crate::router::probe_test_support::seat_chain_lane(state_key),
+        GROUNDED_PATH,
+        ANTHROPIC,
+    )
+    .expect("a qualified path mints a key")
 }
 
 /// Whether a request still emits the grounded wire field through EITHER
@@ -164,7 +169,9 @@ fn plant_verdict(router: &Router, state_key: &str) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: state_key.to_string(),
+            state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
+                .as_lane_key()
+                .to_string(),
             feature_key: grounded_key(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,
@@ -182,7 +189,7 @@ fn plant_verdict(router: &Router, state_key: &str) {
 
 fn resident_incarnation(router: &Router, state_key: &str) -> u64 {
     router.learned_capabilities.resident_incarnation_for_tests(
-        state_key,
+        crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
         &grounded_key(),
         ANTHROPIC,
     )
@@ -1059,7 +1066,11 @@ async fn a_canary_abandoned_while_the_verdict_moves_disproves_nothing() {
         let grounded = grounded_key();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            learned.bump_incarnation_for_tests("m0", &grounded, ANTHROPIC);
+            learned.bump_incarnation_for_tests(
+                crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+                &grounded,
+                ANTHROPIC,
+            );
         })
     };
     let outcome = flight.await;

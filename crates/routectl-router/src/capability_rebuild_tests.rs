@@ -3,6 +3,9 @@ use crate::learned_capability::{DEFAULT_MAX_ENTRIES, RoutingDecision};
 use std::time::Duration;
 
 const CV: u32 = 7;
+
+/// The serialized learned lane every fixture row is keyed on.
+const LANE: &str = "nn#upstream";
 const OV: u64 = 42;
 
 /// A reader that hands back a fixed tombstone and row set, ignoring nothing
@@ -42,7 +45,7 @@ fn row(
         tier.map(str::to_string),
         evidence_class.map(str::to_string),
         capability.to_string(),
-        "nn".to_string(),
+        LANE.to_string(),
         "openai-compat".to_string(),
         CV,
         OV,
@@ -244,7 +247,7 @@ fn rebuild_counts_revision_skips_apart_from_boundary_and_unknown_skips() {
     );
     assert!(matches!(
         reg.acting_negative_for(
-            "nn",
+            LANE,
             &field_key,
             "openai-compat",
             base + Duration::from_secs(1)
@@ -272,7 +275,7 @@ fn negative_then_cleared_ts_ordered_clears_the_negative() {
     assert_eq!(summary.replayed_cleared, 1);
     assert_eq!(
         reg.acting_negative_for(
-            "nn",
+            LANE,
             "web_search",
             "openai-compat",
             base + Duration::from_secs(3)
@@ -301,7 +304,7 @@ fn cleared_then_negative_ts_ordered_leaves_the_negative_acting() {
     assert_eq!(summary.replayed_negative, 1);
     assert!(matches!(
         reg.acting_negative_for(
-            "nn",
+            LANE,
             "web_search",
             "openai-compat",
             base + Duration::from_secs(3)
@@ -328,7 +331,7 @@ fn same_instant_rows_tie_break_by_rowid() {
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_cleared, 1);
     assert_eq!(
-        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
         RoutingDecision::Allow,
     );
 
@@ -343,7 +346,7 @@ fn same_instant_rows_tie_break_by_rowid() {
     assert_eq!(summary.cleared_noop, 1);
     assert_eq!(summary.replayed_negative, 1);
     assert!(matches!(
-        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
         RoutingDecision::RouteAway { .. },
     ));
 }
@@ -370,7 +373,7 @@ fn verified_row_replays_as_a_positive() {
 
     assert_eq!(summary.replayed_verified, 1);
     assert!(reg.is_verified_working(
-        "nn",
+        LANE,
         "web_search",
         "openai-compat",
         base + Duration::from_secs(1)
@@ -454,7 +457,7 @@ fn probe_source_rows_replay_through_the_shared_arms() {
     assert_eq!(summary.replayed_probe, 1);
     assert!(matches!(
         reg.acting_negative_for(
-            "nn",
+            LANE,
             "web_search",
             "openai-compat",
             base + Duration::from_secs(1)
@@ -487,7 +490,7 @@ fn probe_cleared_row_removes_a_resident_negative() {
     assert_eq!(summary.replayed_probe, 2);
     assert_eq!(
         reg.acting_negative_for(
-            "nn",
+            LANE,
             "web_search",
             "openai-compat",
             base + Duration::from_secs(3)
@@ -518,7 +521,7 @@ fn equal_ts_live_and_probe_rows_tie_break_by_rowid() {
     assert_eq!(summary.replayed_cleared, 1);
     assert_eq!(summary.replayed_probe, 1);
     assert_eq!(
-        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
         RoutingDecision::Allow,
     );
 
@@ -538,7 +541,7 @@ fn equal_ts_live_and_probe_rows_tie_break_by_rowid() {
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_probe, 1);
     assert!(matches!(
-        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
         RoutingDecision::RouteAway { .. },
     ));
 }
@@ -657,7 +660,7 @@ fn rebuild_maps_vocab_versions_and_counts_unmappable_rows() {
         ("zero_cap", false),
         ("pre_boundary", false),
     ] {
-        let decision = reg.acting_negative_for("nn", capability, "openai-compat", at);
+        let decision = reg.acting_negative_for(LANE, capability, "openai-compat", at);
         assert_eq!(
             matches!(decision, RoutingDecision::RouteAway { .. }),
             acting,
@@ -680,7 +683,7 @@ fn no_tombstone_replays_nothing() {
     assert_eq!(summary, CapabilityRebuildSummary::default());
     assert_eq!(
         reg.acting_negative_for(
-            "nn",
+            LANE,
             "web_search",
             "openai-compat",
             base + Duration::from_secs(1)
@@ -724,7 +727,7 @@ fn replay_precedence_follows_rowid_when_mapped_instants_disagree() {
     );
     assert_eq!(summary.cleared_noop, 0);
     assert_eq!(
-        reg.acting_negative_for("nn", "web_search", "openai-compat", late),
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", late),
         RoutingDecision::Allow,
         "a settled clear must not be inverted by a clock rollback",
     );
@@ -771,7 +774,7 @@ fn one_replayed_inferred_row_stays_pending_while_two_act() {
     let summary = rebuild_capabilities_into(&one, &reg);
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(
-        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
         RoutingDecision::Allow,
         "one inferred observation must replay as PENDING and not route away",
     );
@@ -789,9 +792,46 @@ fn one_replayed_inferred_row_stays_pending_while_two_act() {
     assert_eq!(summary.replayed_negative, 2);
     assert!(
         matches!(
-            reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+            reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
             RoutingDecision::RouteAway { .. }
         ),
         "two inferred observations must replay as CORROBORATED and route away",
     );
+}
+
+/// A field row keyed by something that is not a learned lane -- the shape an
+/// earlier build wrote with a model nickname under the current vocabulary --
+/// is skipped whole and counted, never replayed onto whatever lane the string
+/// might be read as. A catalog-scoped row with the same key is left to the
+/// existing checks, and a lane-keyed field row in the same slice still replays.
+#[test]
+fn a_field_row_whose_lane_does_not_parse_is_skipped_and_counted() {
+    let base = Instant::now();
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+    let mut nickname_field = broken(2, base, &field_key);
+    nickname_field.state_key = "opus".to_string();
+    let mut nickname_catalog = broken(3, base, "web_search");
+    nickname_catalog.state_key = "opus".to_string();
+    let lane_field = broken(4, base, &field_key);
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(1, CV, OV)),
+        rows: vec![nickname_field, nickname_catalog, lane_field],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg);
+
+    assert_eq!(summary.skipped_lane, 1, "only the nickname-keyed field row");
+    assert_eq!(summary.replayed_negative, 2);
+    let resident: Vec<(String, String)> = reg
+        .snapshot()
+        .into_iter()
+        .map(|e| (e.state_key, e.feature_key))
+        .collect();
+    assert!(
+        !resident.contains(&("opus".to_string(), field_key.clone())),
+        "the unparseable field row must not become resident: {resident:?}",
+    );
+    assert!(resident.contains(&(LANE.to_string(), field_key)));
 }

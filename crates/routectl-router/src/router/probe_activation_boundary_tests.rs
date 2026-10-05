@@ -327,7 +327,7 @@ fn a_target_whose_base_url_is_not_attributable_activates_no_lane() {
 
     // No `[providers.p1]` block exists, so the accessor answers None.
     router.activate_probe_lanes_for_admitted_request(
-        "m1",
+        &crate::router::probe_test_support::lane("m1"),
         "p1",
         Some("anthropic-api"),
         false,
@@ -348,7 +348,7 @@ fn a_request_grounding_nothing_activates_no_lane() {
     let router = remote_router(provider);
 
     router.activate_probe_lanes_for_admitted_request(
-        "m1",
+        &crate::router::probe_test_support::lane("m1"),
         "p1",
         Some("anthropic-api"),
         false,
@@ -385,7 +385,12 @@ fn the_scheduler_incarnation_advances_on_every_publication() {
 #[test]
 fn a_reload_publication_retires_the_previous_incarnation_work() {
     let previous = Router::new(Arc::new(Config::default()));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     previous.activate_probe_lane(&key, ProbeValidator::CountTokens);
     assert_eq!(previous.probe_scheduler_snapshot().queued, 1);
 
@@ -402,7 +407,12 @@ fn a_reload_publication_retires_the_previous_incarnation_work() {
 #[test]
 fn work_from_a_retired_incarnation_can_neither_lease_nor_retry() {
     let previous = Router::new(Arc::new(Config::default()));
-    let key = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     previous.activate_probe_lane(&key, ProbeValidator::CountTokens);
 
     let mut next = Router::new(Arc::new(Config::default()));
@@ -425,8 +435,12 @@ fn work_from_a_retired_incarnation_can_neither_lease_nor_retry() {
 fn shutdown_cancels_all_probe_work() {
     let router = Router::new(Arc::new(Config::default()));
     for n in 0..3 {
-        let key = FieldVerdictKey::new(&format!("m{n}"), GROUNDED_PATH, "anthropic-api")
-            .expect("identity");
+        let key = FieldVerdictKey::new(
+            &crate::router::probe_test_support::lane(&format!("m{n}")),
+            GROUNDED_PATH,
+            "anthropic-api",
+        )
+        .expect("identity");
         router.activate_probe_lane(&key, ProbeValidator::CountTokens);
     }
 

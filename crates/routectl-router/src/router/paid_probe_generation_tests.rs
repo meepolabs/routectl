@@ -661,7 +661,12 @@ async fn the_publication_callback_retires_the_outgoing_incarnations_work() {
         count_calls: AtomicUsize::new(0),
     });
     let router = crate::router::probe_test_support::remote_router(provider);
-    let identity = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let identity = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&identity, ProbeValidator::CountTokens);
     assert_eq!(
         router.probe_scheduler_snapshot().queued,
@@ -701,7 +706,12 @@ fn the_legacy_publication_surface_is_callable_synchronously() {
         count_calls: AtomicUsize::new(0),
     });
     let router = crate::router::probe_test_support::remote_router(provider);
-    let identity = FieldVerdictKey::new("m1", GROUNDED_PATH, "anthropic-api").expect("identity");
+    let identity = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
     router.activate_probe_lane(&identity, ProbeValidator::CountTokens);
     assert_eq!(router.probe_scheduler_snapshot().queued, 1, "premise");
 

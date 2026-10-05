@@ -257,7 +257,7 @@ async fn matching_tombstone_replays_post_boundary_negative() {
     seed_event(
         db.conn(),
         200,
-        "gpt-nick",
+        "gpt-nick#upstream",
         "web_search",
         "broken",
         "f1",
@@ -278,7 +278,7 @@ async fn matching_tombstone_replays_post_boundary_negative() {
     // Assert: the negative is resident after warm, under its lane / capability.
     let snapshot = router.learned_capability_snapshot();
     assert!(
-        snapshot.iter().any(|e| e.state_key == "gpt-nick"
+        snapshot.iter().any(|e| e.state_key == "gpt-nick#upstream"
             && e.feature_key == "web_search"
             && e.verdict.as_str() == "broken"),
         "a post-boundary negative must be replayed and resident after warm"
@@ -362,7 +362,7 @@ async fn revision_mismatch_drops_a_stale_catalog_scoped_verdict_behind_a_fresh_t
     seed_event(
         db.conn(),
         200,
-        "gpt-nick",
+        "gpt-nick#upstream",
         "web_search",
         "broken",
         "f1",
@@ -419,7 +419,7 @@ fn seed_stale_session(ledger: &Path, cat: i64) {
         seed_event(
             db.conn(),
             ts,
-            "gpt-nick",
+            "gpt-nick#upstream",
             &capability,
             "broken",
             "f1",

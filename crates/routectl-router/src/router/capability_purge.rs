@@ -35,6 +35,7 @@
 
 use super::{CapabilityClearedEvent, Router};
 use crate::learned_capability::{PurgeLease, PurgePreparation};
+use crate::state_key::StateKey;
 
 /// A reserved purge: the key is leased, the entry is still resident, and the
 /// caller owes exactly one settlement.
@@ -45,12 +46,14 @@ use crate::learned_capability::{PurgeLease, PurgePreparation};
 /// upstream text ever enters it.
 #[must_use = "a reserved purge must be finalized or abandoned"]
 pub struct ReservedPurge {
-    /// Routing state key the purge is keyed on.
+    /// Serialized learned lane (`provider_entry#upstream`) the purge is keyed
+    /// on.
     pub state_key: String,
     /// Normalized capability key the purge is keyed on.
     pub capability_key: String,
     /// Stable provider-kind token that normalized the capability key.
     pub provider_kind: String,
+    lane: StateKey,
     lease: PurgeLease,
 }
 
@@ -113,7 +116,11 @@ pub enum PurgeOutcome {
 }
 
 impl Router {
-    /// Reserve `(state_key, capability_key)` for an operator purge.
+    /// Reserve `(lane, capability_key)` for an operator purge.
+    ///
+    /// Typed on [`StateKey`] so an operator string reaches the registry only
+    /// through the lane's single parser: a target spelled any other way cannot
+    /// be addressed, rather than being answered as a clean no-op.
     ///
     /// The provider kind that normalizes the capability key is DERIVED here from
     /// the router's own config, never accepted from the caller: it is one half of
@@ -128,9 +135,10 @@ impl Router {
     /// SQLite next.
     pub fn reserve_learned_capability_purge(
         &self,
-        state_key: &str,
+        lane: &StateKey,
         capability_key: &str,
     ) -> PurgeOutcome {
+        let state_key = lane.as_lane_key();
         let provider_kind = self.provider_kind_for_state_key(state_key).to_string();
         let prepared = self.learned_capabilities.prepare_purge(
             self.registry_generation(),
@@ -146,6 +154,7 @@ impl Router {
                     &provider_kind,
                 ),
                 provider_kind,
+                lane: lane.clone(),
                 lease,
             })),
             PurgePreparation::Absent => PurgeOutcome::Absent,
@@ -174,7 +183,7 @@ impl Router {
             && !crate::field_capability::capability_key_is_catalog_scoped(&reserved.capability_key)
         {
             let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-                reserved.state_key.clone(),
+                reserved.lane.clone(),
                 reserved.capability_key.clone(),
                 reserved.provider_kind.clone(),
             );
@@ -198,7 +207,8 @@ impl Router {
     /// record present in both cases makes that readable. The capability key is
     /// normalized here exactly as the reservation would have normalized it, so
     /// the two cases key identically in the log.
-    pub fn audit_absent_purge(&self, state_key: &str, capability_key: &str) {
+    pub fn audit_absent_purge(&self, lane: &StateKey, capability_key: &str) {
+        let state_key = lane.as_lane_key();
         let provider_kind = self.provider_kind_for_state_key(state_key);
         let normalized =
             routectl_core::capability::normalize_capability_key(capability_key, provider_kind);

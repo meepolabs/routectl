@@ -393,7 +393,9 @@ fn plant_lapsed_verdict(router: &Router, state_key: &str) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
-            state_key: state_key.to_string(),
+            state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
+                .as_lane_key()
+                .to_string(),
             feature_key: rejected_key(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,
@@ -417,7 +419,11 @@ fn verdict_resident(router: &Router, state_key: &str) -> bool {
     router
         .learned_capability_snapshot()
         .into_iter()
-        .any(|entry| entry.state_key == state_key && entry.feature_key == rejected_key())
+        .any(|entry| {
+            entry.state_key
+                == crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key()
+                && entry.feature_key == rejected_key()
+        })
 }
 
 /// A one-seat `anthropic-api` chain whose provider entry authenticates with a
@@ -787,7 +793,11 @@ async fn a_successful_repaired_retry_commits_one_learned_verdict() {
         rejected_key(),
         "the learned row is keyed on the qualified dotted path, byte for byte",
     );
-    assert_eq!(event.state_key, "m0", "keyed on the repaired target");
+    assert_eq!(
+        event.state_key,
+        crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),
+        "keyed on the repaired target's lane"
+    );
     assert!(
         dispatched.meta.cleared_capabilities.is_empty(),
         "a repaired retry commits; it does not also clear",
@@ -1925,7 +1935,10 @@ async fn a_durably_purged_field_verdict_stops_tailing_its_target() {
     // protocol forbids in production, but the commit's own durability is
     // covered where the capability key can be spelled on the wire.
     let capability_key = rejected_key();
-    let reserved = match router.reserve_learned_capability_purge("m0", &capability_key) {
+    let reserved = match router.reserve_learned_capability_purge(
+        &crate::router::probe_test_support::seat_chain_lane("m0"),
+        &capability_key,
+    ) {
         PurgeOutcome::Reserved(reserved) => reserved,
         other => panic!(
             "premise: a resident entry under a live generation must reserve; got {}",

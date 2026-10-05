@@ -3343,7 +3343,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   delays the admitted request
 - `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
   `probe_entry_is_attributable`, `paid_probe_daily_cap`: which seat a probe
-  identity names and whether a rejection from it is attributable
+  identity's lane names (the first resolved model or pooled member egressing
+  that provider entry with that upstream) and whether a rejection from it is
+  attributable
 - `src/router/probe_failure_class.rs` -- two closed mappings off the SHARED
   `routectl_core` classifier: what a failure means for free validation, and for
   paid settlement (one arm per variant). Both fail closed; reasoning in module docs
@@ -3768,8 +3770,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format.schema` or a strict tool's `input_schema`),
   `forces_web_search` (bounded `tool_choice` directive read),
   `reasoning_requested`, `cache_requested`
-- `src/router/capability_purge.rs` -- operator-initiated purge of ONE keyed
-  learned entry, as a TWO-PHASE protocol whose ORDER is the contract (a purge is
+- `src/router/capability_purge.rs` -- operator-initiated purge of ONE
+  `(StateKey, capability)` learned entry, as a TWO-PHASE protocol whose ORDER is the contract (a purge is
   a memory mutation plus a SQLite transaction, and the transaction must not be
   awaited under a registry lock, so it cannot be one step):
   `Router::reserve_learned_capability_purge` validates the generation, captures
@@ -3788,9 +3790,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   generation out of the reservation, so the settlement is stamped with the
   generation the removal runs under rather than a value sampled across a possible
   reload boundary. The provider kind that normalizes the registry key is derived
-  HERE from the config tables (per-model nickname, then a pooled seat's
-  `nickname#label` base, then a provider-scoped key; empty = identity
-  normalization for a target the operator has since removed) rather than accepted
+  HERE from the config tables (the lane's own provider entry first, then the
+  runtime-key readings for a key that is not a lane; empty = identity
+  normalization for a provider entry the operator has since removed) rather than accepted
   from the caller, so no caller can address a key the learn path never minted.
   Learned entries only: never the override registry, never a baked prior.
   `finalize_learned_capability_purge` also drops the purged key's resident
@@ -4110,8 +4112,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the learned registry, the concrete sibling of `learned_replay` rather than a
   generic over both (the two identities share no field, and only this one
   carries a mint-suppression predicate). Crate-internal.
-  `FieldVerdictKey::new(state_key, field path, provider_kind) -> Option` builds
-  the identity, minting its capability half through `field_capability` so a
+  `FieldVerdictKey::new(lane: &StateKey, field path, provider_kind) -> Option`
+  builds the identity on the same learned lane catalog capabilities key on, minting its capability half through `field_capability` so a
   path that namespace refuses yields no identity at all, and refusing a lane
   whose capability-key normalization would REWRITE the minted key (the Stage 1
   exclusion, enforced without changing the shared normalizer).
@@ -4498,7 +4500,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   skip + WARN, never panic. Each post-boundary row is first mapped to the
   current vocabulary (`capability_vocab::map_to_current`, the row carrying
   `vocab_version` via `with_vocab_version`); an unmappable row bumps
-  `skipped_vocab` and never reaches an arm. A missing tombstone replays nothing
+  `skipped_vocab` and never reaches an arm; a field row whose lane key does
+  not parse as a `StateKey` bumps `skipped_lane`. A missing tombstone replays nothing
   (fail-closed; the caller writes the fresh boot tombstone)
 - `src/capability_matcher.rs` -- the single shared closed-set resolver mapping
   a use-time upstream rejection to the CANONICAL capability it names, in the
@@ -5944,7 +5947,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/handlers/mod.rs` -- groups per-route HTTP handlers
 - `src/handlers/control.rs` -- `POST /control/capability/purge`, the server's
-  one MUTATING route: removes a single resident learned-capability entry through
+  one MUTATING route (its `state_key` must parse as a `StateKey` lane or the
+  body is refused `invalid_request`): removes a single resident learned-capability entry through
   the two-phase reserve / durably-commit / finalize protocol in
   `src/router/capability_purge.rs`. Success is reported ONLY after an
   acknowledged durable commit of the `cleared` row (without that row the next
@@ -8096,10 +8100,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   non-empty. Consumed by BOTH `server`'s deprecation WARN
   (`warn_deprecated_capability_lists`) and `doctor`'s capability migrate
   nudge, so the two surfaces never diverge on which keys count
-- `src/commands/capability_purge.rs` -- `routectl capability purge <target>
-  <capability>`: POSTs the two keys to the daemon's loopback purge route and
-  maps the answer to an exit code (0 on a purge or a clean no-op, non-zero on
-  an unreachable daemon, a refusal, a 3xx, or an unrecognized body). `control_url`
+- `src/commands/capability_purge.rs` -- `routectl capability purge <lane>
+  <capability>`: parses `<lane>` through `StateKey::parse` (refusing an
+  unparseable lane locally, non-zero), POSTs the two keys to the daemon's
+  loopback purge route and maps the answer to an exit code (0 on a purge or a
+  clean no-op, non-zero on an unreachable daemon, a refusal, a 3xx, or an
+  unrecognized body). `control_url`
   derives the destination from `[server] host`: a loopback bind verbatim, a
   wildcard or public bind translated to the matching loopback address, anything
   underivable refused LOCALLY before a credential is resolved or a socket is

@@ -39,7 +39,8 @@ mod tests {
         // Arrange: a queued job carrying sentinel identity and beta context.
         let scheduler = ProbeScheduler::new();
         let key = FieldVerdictKey::new(
-            "state-sentinel#seat-sentinel",
+            &crate::state_key::StateKey::new("state-sentinel", "seat-sentinel")
+                .expect("sentinel lane"),
             "pathsentinel.leaf",
             "provider-sentinel",
         )
