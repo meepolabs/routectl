@@ -31,6 +31,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "capability_event.rs",
     "cost.rs",
     "db.rs",
+    "downgrade.rs",
     "handle.rs",
     "lib.rs",
     "migrate.rs",

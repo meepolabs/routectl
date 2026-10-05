@@ -25,6 +25,8 @@ fn event(lane_key: &str, capability: &str) -> CapabilityEvent {
         upstream_token: Some("thinking".to_string()),
         catalog_version: 7,
         overlay_revision: 3,
+        provider_kind: None,
+        vocab_version: None,
     }
 }
 

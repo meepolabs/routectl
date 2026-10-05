@@ -620,6 +620,8 @@ pub(crate) fn drain_capability_events(
                 upstream_token: None,
                 catalog_version,
                 overlay_revision,
+                provider_kind: None,
+                vocab_version: None,
             },
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
@@ -647,6 +649,8 @@ pub(crate) fn drain_capability_events(
                 upstream_token: None,
                 catalog_version,
                 overlay_revision,
+                provider_kind: None,
+                vocab_version: None,
             },
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
@@ -670,6 +674,8 @@ pub(crate) fn drain_capability_events(
                 upstream_token: None,
                 catalog_version,
                 overlay_revision,
+                provider_kind: None,
+                vocab_version: None,
             },
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that

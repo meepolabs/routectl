@@ -680,5 +680,7 @@ fn live_broken(ts: i64, lane: &str, cap: &str, revision: (i64, i64)) -> Capabili
         upstream_token: None,
         catalog_version: revision.0,
         overlay_revision: revision.1,
+        provider_kind: None,
+        vocab_version: None,
     }
 }

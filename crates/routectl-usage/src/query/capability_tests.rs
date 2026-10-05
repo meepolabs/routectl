@@ -25,6 +25,8 @@ fn event(ts: i64, capability: &str) -> CapabilityEvent {
         upstream_token: None,
         catalog_version: 1,
         overlay_revision: 1,
+        provider_kind: None,
+        vocab_version: None,
     }
 }
 
@@ -249,4 +251,33 @@ fn latest_tombstone_returns_highest_rowid() {
     assert_eq!(stone.rowid, 3);
     assert_eq!(stone.catalog_version, Some(9));
     assert_eq!(stone.overlay_revision, Some(2));
+}
+
+/// `provider_kind` and `vocab_version` round-trip through the writer and the
+/// replay read in both their stamped and NULL forms; a NULL vocabulary is how
+/// a legacy row reaches the replayer.
+#[test]
+fn read_after_carries_provider_kind_and_vocab_version() {
+    // Arrange: one stamped row, one legacy (NULL) row, through the same
+    // batched writer production uses.
+    let (_dir, db) = open_db();
+    let mut stamped = event(1, "stamped");
+    stamped.provider_kind = Some("anthropic-api".to_string());
+    stamped.vocab_version = Some(2);
+    let legacy = event(2, "legacy");
+    crate::capability_event::insert_capability_events_atomic(db.conn(), &[stamped, legacy])
+        .expect("insert");
+
+    // Act
+    let rows = read_capability_events_after(db.conn(), 0, 10).expect("read");
+
+    // Assert
+    let got: Vec<(Option<String>, Option<i64>)> = rows
+        .iter()
+        .map(|r| (r.provider_kind.clone(), r.vocab_version))
+        .collect();
+    assert_eq!(
+        got,
+        vec![(Some("anthropic-api".to_string()), Some(2)), (None, None)]
+    );
 }

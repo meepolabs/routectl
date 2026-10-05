@@ -131,6 +131,8 @@ pub(crate) fn acknowledge_field_confirmations(
             upstream_token: None,
             catalog_version,
             overlay_revision,
+            provider_kind: None,
+            vocab_version: None,
         };
         match usage.admit_acknowledged_capability_event(
             event,

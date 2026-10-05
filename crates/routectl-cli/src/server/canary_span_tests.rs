@@ -366,6 +366,8 @@ fn seed_durable_verdict(config: &Arc<Config>, usage: &UsageHandle) {
                             upstream_token: None,
                             catalog_version: catalog,
                             overlay_revision: 0,
+                            provider_kind: None,
+                            vocab_version: None,
                         },
                     ],
                     1,

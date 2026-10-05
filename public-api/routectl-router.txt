@@ -9958,8 +9958,10 @@ pub routectl_router::CapabilityEventRow::source: alloc::string::String
 pub routectl_router::CapabilityEventRow::state_key: alloc::string::String
 pub routectl_router::CapabilityEventRow::tier: core::option::Option<alloc::string::String>
 pub routectl_router::CapabilityEventRow::verdict: alloc::string::String
+pub routectl_router::CapabilityEventRow::vocab_version: core::option::Option<i64>
 impl routectl_router::CapabilityEventRow
 pub const fn routectl_router::CapabilityEventRow::new(i64, std::time::Instant, alloc::string::String, core::option::Option<alloc::string::String>, alloc::string::String, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::string::String, alloc::string::String, alloc::string::String, u32, u64) -> Self
+pub const fn routectl_router::CapabilityEventRow::with_vocab_version(self, core::option::Option<i64>) -> Self
 impl core::clone::Clone for routectl_router::CapabilityEventRow
 pub fn routectl_router::CapabilityEventRow::clone(&self) -> routectl_router::CapabilityEventRow
 impl core::cmp::Eq for routectl_router::CapabilityEventRow
@@ -10139,6 +10141,7 @@ pub routectl_router::CapabilityRebuildSummary::replayed_probe: usize
 pub routectl_router::CapabilityRebuildSummary::replayed_verified: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_revision: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_unknown: usize
+pub routectl_router::CapabilityRebuildSummary::skipped_vocab: usize
 impl core::clone::Clone for routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::CapabilityRebuildSummary::clone(&self) -> routectl_router::CapabilityRebuildSummary
 impl core::cmp::Eq for routectl_router::CapabilityRebuildSummary

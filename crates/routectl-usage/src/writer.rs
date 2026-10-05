@@ -1888,6 +1888,8 @@ mod tests {
             upstream_token: None,
             catalog_version: 8,
             overlay_revision: 2,
+            provider_kind: None,
+            vocab_version: None,
         }
     }
 

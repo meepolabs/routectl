@@ -289,7 +289,10 @@ enum Cmd {
     /// With no window flag and no `--since`, prints a multi-window
     /// summary (today / this week / this month / all time). Calendar
     /// windows use LOCAL time; the week starts Monday.
+    #[command(args_conflicts_with_subcommands = true)]
     Usage {
+        #[command(subcommand)]
+        action: Option<UsageCmd>,
         /// Usage since local midnight today.
         #[arg(long, group = "window")]
         today: bool,
@@ -353,6 +356,30 @@ enum Cmd {
     Capability {
         #[command(subcommand)]
         action: CapabilityCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum UsageCmd {
+    /// Re-stamp the usage DB at an older schema version so the previous
+    /// routectl binary can open it (rollback). OFFLINE: refuses while the
+    /// daemon, or anything else, has the DB open -- stop `routectl serve`
+    /// first. Only an exactly-additive v17 file is accepted; no column or row
+    /// is changed, and opening the file with this binary migrates it forward
+    /// again.
+    Downgrade {
+        /// The schema version to stamp. Only 16 is supported.
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(i64).range(
+                commands::usage_downgrade::SUPPORTED_TARGET
+                    ..=commands::usage_downgrade::SUPPORTED_TARGET
+            )
+        )]
+        to: i64,
+        /// Override the usage DB path. Defaults to `[usage] db_path`.
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 }
 
@@ -972,6 +999,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Usage {
+            action: Some(UsageCmd::Downgrade { to: _, db }),
+            ..
+        } => {
+            let db_path = match db {
+                Some(path) => path,
+                None => load_config_unvalidated_with_overlay(cli.config.as_deref())?
+                    .config
+                    .usage
+                    .db_path
+                    .clone(),
+            };
+            match commands::usage_downgrade::run(&db_path) {
+                Ok(message) => println!("{message}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Cmd::Usage {
+            action: None,
             today,
             this_week,
             this_month,
@@ -1785,5 +1833,30 @@ mod tests {
             argv.extend_from_slice(other);
             assert!(Cli::try_parse_from(argv).is_err(), "{other:?}");
         }
+    }
+
+    /// `usage downgrade` takes exactly `--to 16`, and the report flags do not
+    /// mix with it.
+    #[test]
+    fn usage_downgrade_parses_only_the_supported_target() {
+        let parsed =
+            Cli::try_parse_from(["routectl", "usage", "downgrade", "--to", "16"]).expect("parses");
+        assert!(matches!(
+            parsed.cmd,
+            Cmd::Usage {
+                action: Some(UsageCmd::Downgrade { to: 16, db: None }),
+                ..
+            }
+        ));
+        for argv in [
+            ["routectl", "usage", "downgrade", "--to", "15"].as_slice(),
+            ["routectl", "usage", "downgrade", "--to", "17"].as_slice(),
+            ["routectl", "usage", "downgrade"].as_slice(),
+            ["routectl", "usage", "--today", "downgrade", "--to", "16"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
+        }
+        let plain = Cli::try_parse_from(["routectl", "usage", "--today"]).expect("parses");
+        assert!(matches!(plain.cmd, Cmd::Usage { action: None, .. }));
     }
 }

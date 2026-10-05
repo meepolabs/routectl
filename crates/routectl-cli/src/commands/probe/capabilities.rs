@@ -528,6 +528,8 @@ fn event(
         upstream_token: None,
         catalog_version: plan.catalog_version,
         overlay_revision: plan.overlay_revision,
+        provider_kind: None,
+        vocab_version: None,
     }
 }
 

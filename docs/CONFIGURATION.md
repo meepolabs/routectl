@@ -4076,6 +4076,30 @@ same buckets for cold-start rows (anchor reason `cold`), and per lane the
 row categories, anchored/pass counts, unverified reports, defect rows and
 source, reason and `terminal_source` counts.
 
+
+### Rolling the usage database back (`routectl usage downgrade`)
+
+A binary refuses a usage database stamped with a newer schema version than
+it understands, so rolling a host back to the previous release needs the
+database re-stamped first. Schema v17 only appends two nullable columns to
+the capability ledger, which a v16 binary never reads, so the rollback is a
+re-stamp, not a rewrite:
+
+```bash
+systemctl --user stop routectl        # or however the daemon runs
+./routectl usage downgrade --to 16    # [--db /path/to/usage.db]
+# install and start the previous binary
+```
+
+The command is **offline only**: it refuses while the daemon or any other
+process (a `routectl usage` viewer, a status poll) has the database open,
+and it refuses a file that is not exactly the additive v17 shape. On a
+refusal nothing changes. It never drops the two v17 columns, so starting
+the newer binary again migrates the file straight back to v17; rows the
+older binary wrote in between replay as the legacy vocabulary. Use this
+command rather than editing the version with a hand-run `sqlite3`, which
+can disturb the database's WAL sidecar files.
+
 ## Diagnostics (`routectl doctor` and `routectl provider probe`)
 
 `routectl doctor` and `routectl provider probe` are the two read-only

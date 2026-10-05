@@ -16,6 +16,8 @@ list with more narrative.
 
 ### Added
 
+- **The usage database can be handed back to the previous release.** Schema v17 appends two nullable columns to the capability ledger (the provider kind and the vocabulary version a row was written under), and `routectl usage downgrade --to 16` re-stamps such a file as v16 so the previous binary starts against it. The command is offline only: it refuses while the daemon or any other reader has the database open, and refuses any file that is not exactly the additive v17 shape. Warm rebuild now maps each ledger row to the current token vocabulary before decoding it; a row in a vocabulary this build does not know is skipped whole and counted in the new `skipped_vocab` field of the rebuild log line.
+
 - **A Bedrock rejection that names its beta flags is repaired once per lane.** When AWS answers a client beta with a `ValidationException` naming the flags it rejects, routectl retries the request once without exactly those flags, on both carriers and for streaming, non-streaming, and token-count calls. A successful inference retry is remembered in memory (bounded per provider, cleared on restart), so later requests on the lane withhold those flags without another 400; a token-count retry is never remembered. Operator-pinned flags are never stripped or remembered, and no retry is made when the request's own features would re-add a named flag.
 
 - **The envelope-field pre-flight surface is now readable at INFO** -- a

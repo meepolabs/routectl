@@ -4491,8 +4491,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `skipped_revision` (distinct from `skipped_unknown`, which counts an
   unrecognized TOKEN, so an absent verdict history is distinguishable from a
   fully evicted one), unrecognized verdict/source/tier/phase ->
-  skip + WARN, never panic. A missing tombstone replays nothing (fail-closed;
-  the caller writes the fresh boot tombstone)
+  skip + WARN, never panic. Each post-boundary row is first mapped to the
+  current vocabulary (`capability_vocab::map_to_current`, the row carrying
+  `vocab_version` via `with_vocab_version`); an unmappable row bumps
+  `skipped_vocab` and never reaches an arm. A missing tombstone replays nothing
+  (fail-closed; the caller writes the fresh boot tombstone)
 - `src/capability_matcher.rs` -- the single shared closed-set resolver mapping
   a use-time upstream rejection to the CANONICAL capability it names, in the
   request-capability namespace (`derive_feature_keys` vocabulary) so learn
@@ -4606,6 +4609,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   support polarity (`None` only for `unknown`), and a source tag (`override` /
   `live` / `probe` / `prior`, `None` for `unknown`). A sibling drift test
   asserts the order agrees with `router::capability_precedence_matrix_tests`
+- `src/capability_vocab.rs` -- map-on-read for the persisted capability-event
+  vocabulary: stored rows are never rewritten; replay maps each row's tokens
+  forward from its `vocab_version` (NULL = `LEGACY_VOCAB_VERSION` 1) to
+  `CURRENT_VOCAB_VERSION` through the pure per-step `VOCAB_STEPS` rename table
+  (`VocabStep { from, renames: [Rename { field, from, to }] }`, `to: None`
+  retires a token). `map_through(row, steps, current)` is the generic seam
+  (table-driven tests run a three-version ladder); `map_to_current` applies the
+  production ladder (v1 -> v2 is identity today). An unknown version (outside
+  `1..=current`, or a ladder gap) or a retired token is a `VocabSkip` and the
+  row is skipped WHOLE, never partially decoded; `rebuild_capabilities_into`
+  counts it in `skipped_vocab`
 - `src/capability_strip.rs` -- the strip-vs-route policy plus the single
   request interceptor. `action_for(feature_key) -> CapabilityAction` is the
   const-style policy table: essentials
@@ -4894,7 +4908,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `CapabilityEvent::tombstone(ts, catalog_version, overlay_revision)`
   boundary-marker constructor (tombstone verdict, empty lane / capability, no
   phase/source/tier/evidence), and `insert_capability_event` (append-only
-  bound-parameter `INSERT`, all 11 columns bound, no dedup) plus
+  bound-parameter `INSERT`, all 13 columns bound -- including the nullable
+  `provider_kind` / `vocab_version` -- no dedup) plus
   `insert_capability_events_atomic(conn, &[CapabilityEvent])` (the whole slice
   in ONE `unchecked_transaction`, appended in slice order so the caller
   controls rowid ordering -- either every row commits or none does, because a
@@ -5488,9 +5503,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   evidence, never a measured `stable`. Deliberately NO per-marker OUTCOME
   column: providers report cache-write tokens only in aggregate, so
   per-breakpoint economic attribution would be fabricated; the economic
-  outcome stays with `cache_write_5m` / `cache_read`
+  outcome stays with `cache_write_5m` / `cache_read`. v17 (`SCHEMA_VERSION =
+  17`) appends the nullable `capability_events` pair `provider_kind TEXT` /
+  `vocab_version INTEGER` (NULL vocabulary = legacy v1) via
+  `migrate_v16_to_v17` (guarded `ALTER TABLE capability_events ADD COLUMN`
+  x2, one transaction with the version bump, no backfill); strictly additive,
+  so `downgrade.rs` can hand the file back to a v16 binary
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table
+- `src/downgrade.rs` -- the ONE backward step: `downgrade_to_v16(path)`
+  re-stamps an exactly-additive v17 file (`PRAGMA user_version` and
+  `meta.schema_version` to 16, one transaction, no column or row touched) so a
+  v16 binary opens it. Refuses with a `DowngradeError` and leaves the file
+  untouched on a missing file (never created), a version other than 17, a meta
+  mirror that disagrees, a `capability_events` column list other than the
+  frozen v16 set followed by `provider_kind TEXT`, `vocab_version INTEGER`, or
+  `InUse` when any other connection has the file open: it sets
+  `locking_mode = EXCLUSIVE` before its first read, and in WAL mode the first
+  transaction then fails busy while any other connection (the daemon's writer,
+  a viewer) is attached
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
   `requests` rows older than the configured retention window, and
   `prune_capability_events` (same shape for the `capability_events` ledger)
@@ -5669,8 +5700,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the boundary a later boot reads from, and the gate cannot be consulted since
   a later same-revision reload can enable capture while moving no boundary of
   its own. A failure logs at ERROR; boot never fails on the usage subsystem. `emit_rebuild_log` reports
-  the per-verdict tally plus both skip tallies (`skipped_unknown` for an
-  unrecognized token, `skipped_revision` for a revision eviction) with
+  the per-verdict tally plus the skip tallies (`skipped_unknown` for an
+  unrecognized token, `skipped_revision` for a revision eviction,
+  `skipped_vocab` for an unmappable vocabulary version) with
   WARN-on-`REBUILD_ROW_LIMIT`-truncate. Boot never
   fails. Tests in the `#[path]`-included `capability_rebuild_tests.rs`
 - `src/server/cc_pin_drift.rs` -- `CcPinDriftGuard`: warns once per distinct
@@ -7612,6 +7644,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
   the cap, so the grid always covers the window and never exceeds it
+- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 16 [--db
+  P]`: the offline rollback step over `routectl_usage::downgrade_to_v16`
+  (refuses while the daemon or any reader has the DB open, or on a file that
+  is not exactly additive v17); prints the re-stamped path, exits 1 on refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage
   --opening-accuracy`, the read-only context meter release-gate report over an
   explicit window: builds `OpeningAccuracyReport` from

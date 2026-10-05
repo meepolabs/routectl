@@ -98,6 +98,10 @@ pub struct CapabilityEventRow {
     pub catalog_version: u32,
     /// Catalog-overlay revision in force when the event was written.
     pub overlay_revision: u64,
+    /// Persisted-token vocabulary version the row was written under; `None`
+    /// is the legacy v1 vocabulary. Replay maps the tokens forward to the
+    /// current vocabulary before decoding them.
+    pub vocab_version: Option<i64>,
 }
 
 impl CapabilityEventRow {
@@ -135,7 +139,17 @@ impl CapabilityEventRow {
             provider_kind,
             catalog_version,
             overlay_revision,
+            vocab_version: None,
         }
+    }
+
+    /// Stamp the persisted vocabulary version (`None` = legacy v1). Separate
+    /// from [`Self::new`] so a reader that predates the column keeps building
+    /// legacy rows unchanged.
+    #[must_use]
+    pub const fn with_vocab_version(mut self, vocab_version: Option<i64>) -> Self {
+        self.vocab_version = vocab_version;
+        self
     }
 }
 
@@ -225,6 +239,11 @@ pub struct CapabilityRebuildSummary {
     /// `skipped_unknown` (an unrecognized TOKEN). Without it an operator
     /// cannot tell an empty history from a fully evicted one.
     pub skipped_revision: usize,
+    /// Events skipped whole before decoding because their vocabulary version
+    /// is unknown to this build or a vocabulary step retires one of their
+    /// tokens -- distinct from `skipped_unknown`, which counts a token the
+    /// CURRENT vocabulary does not recognize.
+    pub skipped_vocab: usize,
 }
 
 /// Replay a ledger slice into `registry` through the live stage-2 admission
@@ -249,6 +268,24 @@ pub fn rebuild_capabilities_into(
 
     let mut rows: Vec<CapabilityEventRow> = Vec::new();
     for row in reader.read_events() {
+        // The rowid boundary is checked on the raw row so a pre-boundary row in
+        // an unknown vocabulary stays uncounted bookkeeping; the revision check
+        // runs on the MAPPED row because it classifies the capability key.
+        if should_replay(&row, &tombstone) == ReplayDecision::SkipBoundary {
+            continue;
+        }
+        let row = match crate::capability_vocab::map_to_current(row) {
+            Ok(row) => row,
+            Err(skip) => {
+                tracing::warn!(
+                    event = "rebuild_skip",
+                    reason = skip.reason(),
+                    "capability rebuild skipped a row it cannot map to the current vocabulary",
+                );
+                summary.skipped_vocab += 1;
+                continue;
+            }
+        };
         match should_replay(&row, &tombstone) {
             ReplayDecision::Replay => rows.push(row),
             ReplayDecision::SkipRevision => summary.skipped_revision += 1,

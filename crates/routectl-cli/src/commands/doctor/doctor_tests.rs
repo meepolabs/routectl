@@ -3876,6 +3876,8 @@ mod seeded_matrix_surfaces {
             upstream_token: None,
             catalog_version: i64::from(CATALOG_VERSION),
             overlay_revision: 0,
+            provider_kind: None,
+            vocab_version: None,
         }
     }
 

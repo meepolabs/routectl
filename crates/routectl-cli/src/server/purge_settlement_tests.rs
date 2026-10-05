@@ -118,6 +118,8 @@ fn cleared_row(
         upstream_token: None,
         catalog_version: i64::from(router.catalog_version()),
         overlay_revision: i64::try_from(router.overlay_revision()).unwrap_or(i64::MAX),
+        provider_kind: None,
+        vocab_version: None,
     }
 }
 

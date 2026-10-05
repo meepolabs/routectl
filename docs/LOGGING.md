@@ -1582,7 +1582,7 @@ per-verdict fields (`replayed_verified`, `replayed_negative`,
 `replayed_cleared`, `cleared_noop`, `replayed_probe`) tally what replayed;
 `loaded_rows` and `row_cap` report the read.
 
-Two skip tallies are deliberately separate, because they answer different
+The skip tallies are deliberately separate, because they answer different
 questions and only their combination distinguishes an empty verdict
 history from a fully evicted one:
 
@@ -1590,6 +1590,7 @@ history from a fully evicted one:
 |---|---|---|
 | `skipped_unknown` | integer | Rows skipped because a persisted TOKEN (verdict / phase / source / tier / evidence class) is not one this build recognizes. |
 | `skipped_revision` | integer | Catalog-scoped rows skipped because their stamped catalog / overlay revision is not the replay boundary's -- an eviction. Envelope-field rows are never counted here: their truth is catalog-independent, so they replay under a superseded revision. |
+| `skipped_vocab` | integer | Rows skipped whole before decoding because their stored vocabulary version is unknown to this build (for example a row a newer build wrote) or a vocabulary step retires one of their tokens. Stored rows are never rewritten; a known older vocabulary is mapped forward on read. Each skip also emits a `rebuild_skip` WARN with `reason` `unknown_vocab_version` or `retired_vocab_token`. |
 
 ### `strip` (WARN)
 

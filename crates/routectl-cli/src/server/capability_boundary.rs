@@ -247,6 +247,8 @@ pub(crate) fn boundary_batch(
                 // relevance per key class; no sentinel stamp is involved.
                 catalog_version: signed_catalog,
                 overlay_revision: signed_overlay,
+                provider_kind: None,
+                vocab_version: None,
             });
         }
     }

@@ -119,6 +119,8 @@ fn cap_event(
         upstream_token: None,
         catalog_version,
         overlay_revision,
+        provider_kind: None,
+        vocab_version: None,
     }
 }
 

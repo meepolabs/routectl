@@ -27,6 +27,7 @@ pub(crate) mod capability_display;
 pub(crate) mod capability_matcher;
 pub(crate) mod capability_rebuild;
 pub(crate) mod capability_strip;
+pub(crate) mod capability_vocab;
 pub mod catalog;
 pub(crate) mod catalog_baked;
 #[doc(hidden)]

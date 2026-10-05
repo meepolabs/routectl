@@ -13,7 +13,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -343,6 +343,10 @@ CREATE TABLE IF NOT EXISTS capability_learn_events (
 /// normalized capability, not the raw wire token). `catalog_version` /
 /// `overlay_revision` stamp the boundary revision a row was written under,
 /// so replay can filter defensively and a tombstone can mark the boundary.
+/// v17 appends the nullable `provider_kind` (the provider kind the lane
+/// egressed through) and `vocab_version` (the persisted-token vocabulary the
+/// row was written under; NULL = legacy v1) LAST, so a v17 file differs from a
+/// v16 one only by those two trailing columns.
 /// NEVER a body / message / prompt column (log hygiene).
 ///
 /// `id` is an explicit `INTEGER PRIMARY KEY` -- an alias for the rowid that
@@ -365,7 +369,9 @@ CREATE TABLE IF NOT EXISTS capability_events (
     evidence_class   TEXT,
     upstream_token   TEXT,
     catalog_version  INTEGER,
-    overlay_revision INTEGER
+    overlay_revision INTEGER,
+    provider_kind    TEXT,
+    vocab_version    INTEGER
 )";
 
 /// Index over `capability_events.ts` for time-range scans (the dominant

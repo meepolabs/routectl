@@ -39,6 +39,12 @@ pub struct CapabilityEventRow {
     pub catalog_version: Option<i64>,
     /// Overlay revision the row was stamped under.
     pub overlay_revision: Option<i64>,
+    /// Provider-kind token of the lane's egress provider, or `None`.
+    pub provider_kind: Option<String>,
+    /// Persisted-token vocabulary version; `None` is the legacy v1
+    /// vocabulary. The replayer maps the row's tokens to its current
+    /// vocabulary by this version before decoding them.
+    pub vocab_version: Option<i64>,
 }
 
 /// The latest tombstone's boundary key and the revision it was stamped
@@ -96,6 +102,8 @@ pub fn read_capability_events_after(
                 upstream_token: row.get(9)?,
                 catalog_version: row.get(10)?,
                 overlay_revision: row.get(11)?,
+                provider_kind: row.get(12)?,
+                vocab_version: row.get(13)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -140,10 +148,12 @@ ORDER BY rowid DESC LIMIT 1";
 /// order is authoritative (see the function docs).
 const READ_AFTER_SQL: &str = "\
 SELECT rowid, ts, lane_key, capability, verdict, phase, source, tier,
-       evidence_class, upstream_token, catalog_version, overlay_revision
+       evidence_class, upstream_token, catalog_version, overlay_revision,
+       provider_kind, vocab_version
 FROM (
     SELECT rowid, ts, lane_key, capability, verdict, phase, source, tier,
-           evidence_class, upstream_token, catalog_version, overlay_revision
+           evidence_class, upstream_token, catalog_version, overlay_revision,
+           provider_kind, vocab_version
     FROM capability_events
     WHERE rowid > ?1
     ORDER BY rowid DESC

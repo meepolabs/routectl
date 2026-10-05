@@ -98,6 +98,8 @@ fn broken(ts: i64, capability: &str, revision: i64, catalog: i64) -> CapabilityE
         upstream_token: None,
         catalog_version: catalog,
         overlay_revision: revision,
+        provider_kind: None,
+        vocab_version: None,
     }
 }
 

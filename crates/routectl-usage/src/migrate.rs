@@ -506,6 +506,45 @@ fn migrate_v15_to_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v16 -> v17 step atomically: append the two nullable
+/// `capability_events` columns `provider_kind TEXT` (the provider kind the
+/// lane egressed through) and `vocab_version INTEGER` (the persisted-token
+/// vocabulary the row was written under; NULL reads as the legacy v1
+/// vocabulary), bump `PRAGMA user_version` to 17, and update the
+/// human-readable `meta.schema_version` row. All in one transaction so a crash
+/// mid-step rolls back rather than landing a column-without-version state.
+/// Existing rows survive with both new columns NULL -- no backfill, no rewrite.
+///
+/// The step is strictly additive so a v16 binary can be handed the file back:
+/// `usage downgrade --to 16` re-stamps the version without touching the
+/// columns, and a v16 reader names its columns explicitly, so the two trailing
+/// columns are invisible to it.
+///
+/// A FRESH DB reaches this arm too (the loop runs every step up to
+/// `SCHEMA_VERSION`), and its `capability_events` was created from the current
+/// DDL, which already carries both columns; so is a downgraded-then-reupgraded
+/// file. Each `ADD COLUMN` is therefore guarded by `column_exists`. The table
+/// itself is ensured first (`IF NOT EXISTS`, a no-op on any file the v12 -> v13
+/// step created it in) so the step never depends on an earlier step's table.
+fn migrate_v16_to_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(CREATE_CAPABILITY_EVENTS_TABLE)?;
+    tx.execute_batch(CREATE_CAPABILITY_EVENTS_TS_INDEX)?;
+    if !column_exists(&tx, "capability_events", "provider_kind")? {
+        tx.execute_batch("ALTER TABLE capability_events ADD COLUMN provider_kind TEXT")?;
+    }
+    if !column_exists(&tx, "capability_events", "vocab_version")? {
+        tx.execute_batch("ALTER TABLE capability_events ADD COLUMN vocab_version INTEGER")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 17")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "17"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -566,6 +605,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             13 => migrate_v13_to_v14(conn)?,
             14 => migrate_v14_to_v15(conn)?,
             15 => migrate_v15_to_v16(conn)?,
+            16 => migrate_v16_to_v17(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

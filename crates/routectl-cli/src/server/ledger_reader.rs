@@ -205,23 +205,26 @@ impl LedgerCapabilityReader {
         let overlay_revision = row.overlay_revision.and_then(|v| u64::try_from(v).ok())?;
         let observed_at = map_instant(self.now, self.now_ms, row.ts);
 
-        Some(ReplayRow::new(
-            row.rowid,
-            observed_at,
-            verdict,
-            row.phase,
-            source,
-            row.tier,
-            row.evidence_class,
-            capability,
-            state_key,
-            // Inert on replay: the persisted capability is already normalized
-            // and the registry key carries no provider dimension (see the
-            // lane-key contract in the module docs).
-            String::new(),
-            catalog_version,
-            overlay_revision,
-        ))
+        Some(
+            ReplayRow::new(
+                row.rowid,
+                observed_at,
+                verdict,
+                row.phase,
+                source,
+                row.tier,
+                row.evidence_class,
+                capability,
+                state_key,
+                // Inert on replay: the persisted capability is already normalized
+                // and the registry key carries no provider dimension (see the
+                // lane-key contract in the module docs).
+                String::new(),
+                catalog_version,
+                overlay_revision,
+            )
+            .with_vocab_version(row.vocab_version),
+        )
     }
 }
 

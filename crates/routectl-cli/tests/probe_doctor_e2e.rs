@@ -288,6 +288,8 @@ fn seed_capability_ledger(xdg: &Path) -> PathBuf {
             upstream_token: None,
             catalog_version: cat,
             overlay_revision: 0,
+            provider_kind: None,
+            vocab_version: None,
         }
     };
     let insert = |e: &routectl_usage::CapabilityEvent| {

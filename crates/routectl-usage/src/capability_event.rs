@@ -30,8 +30,11 @@ const TOMBSTONE_VERDICT: &str = "tombstone";
 /// pinned observation tokens and is `None` for rows that have none.
 /// `upstream_token` is forensic / display only -- never consulted by
 /// admission or replay. `catalog_version` / `overlay_revision` stamp the
-/// boundary revision the row was written under. NEVER carries a body /
-/// message / prompt.
+/// boundary revision the row was written under. `provider_kind` names the
+/// provider kind the lane egressed through and `vocab_version` the
+/// persisted-token vocabulary the row's tokens belong to; both are `None` on
+/// rows from producers that do not stamp them, and a `None` vocabulary reads
+/// back as the legacy v1 vocabulary. NEVER carries a body / message / prompt.
 #[derive(Debug, Clone)]
 pub struct CapabilityEvent {
     /// Capture time (epoch milliseconds).
@@ -58,6 +61,10 @@ pub struct CapabilityEvent {
     pub catalog_version: i64,
     /// Overlay revision the row was stamped under.
     pub overlay_revision: i64,
+    /// Provider-kind token of the lane's egress provider, or `None`.
+    pub provider_kind: Option<String>,
+    /// Persisted-token vocabulary version, or `None` (legacy v1).
+    pub vocab_version: Option<i64>,
 }
 
 impl CapabilityEvent {
@@ -80,6 +87,8 @@ impl CapabilityEvent {
             upstream_token: None,
             catalog_version,
             overlay_revision,
+            provider_kind: None,
+            vocab_version: None,
         }
     }
 }
@@ -106,6 +115,8 @@ pub fn insert_capability_event(
             e.upstream_token,
             e.catalog_version,
             e.overlay_revision,
+            e.provider_kind,
+            e.vocab_version,
         ],
     )
 }
@@ -150,6 +161,8 @@ pub fn insert_capability_events_atomic(
                 e.upstream_token,
                 e.catalog_version,
                 e.overlay_revision,
+                e.provider_kind,
+                e.vocab_version,
             ])?;
         }
     }
@@ -159,14 +172,15 @@ pub fn insert_capability_events_atomic(
 
 /// The bound `INSERT`. Names every writable column of
 /// `schema::CREATE_CAPABILITY_EVENTS_TABLE` (the `id` primary key is
-/// auto-assigned, so it is omitted); `?1..?11` positions match the params
-/// list above.
+/// auto-assigned, so it is omitted); `?1..?13` positions match the params
+/// lists above.
 const INSERT_SQL: &str = "\
 INSERT INTO capability_events (
     ts, lane_key, capability, verdict, phase, source, tier,
-    evidence_class, upstream_token, catalog_version, overlay_revision
+    evidence_class, upstream_token, catalog_version, overlay_revision,
+    provider_kind, vocab_version
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
 )";
 
 #[cfg(test)]

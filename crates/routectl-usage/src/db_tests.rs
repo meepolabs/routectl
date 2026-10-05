@@ -1377,8 +1377,8 @@ fn capability_events_column_set_is_pinned() {
         .execute(
             "INSERT INTO capability_events (ts, lane_key, capability, verdict, \
              phase, source, tier, evidence_class, upstream_token, \
-             catalog_version, overlay_revision) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             catalog_version, overlay_revision, provider_kind, vocab_version) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 1_i64,
                 "lane",
@@ -1391,6 +1391,8 @@ fn capability_events_column_set_is_pinned() {
                 Option::<String>::None,
                 7_i64,
                 3_i64,
+                Option::<String>::None,
+                Option::<i64>::None,
             ],
         )
         .expect("full-bind insert pins the column set");
@@ -1412,6 +1414,8 @@ fn capability_events_column_set_is_pinned() {
         ("upstream_token", false),
         ("catalog_version", false),
         ("overlay_revision", false),
+        ("provider_kind", false),
+        ("vocab_version", false),
     ];
     let mut stmt = db
         .conn()
@@ -1842,6 +1846,130 @@ fn migrating_a_pre_v16_db_applies_every_intermediate_step() {
     };
     assert!(has_column("reduction_bytes_saved"), "the v15 step ran");
     assert!(has_column("prefix_epoch_event"), "the v16 step ran");
+}
+
+/// The `capability_events` DDL as it stood before v17: the current DDL cut
+/// right after the last v16 column. Derived from the live constant so it
+/// cannot drift from the real prior shape.
+fn capability_events_ddl_without_v17_columns() -> String {
+    const LAST_V16_COLUMN: &str = "    overlay_revision INTEGER,";
+    let (head, tail) = crate::schema::CREATE_CAPABILITY_EVENTS_TABLE
+        .split_once(LAST_V16_COLUMN)
+        .expect("current DDL still ends its v16 set with overlay_revision");
+    assert!(
+        tail.contains("provider_kind") && tail.contains("vocab_version"),
+        "the v17 pair must be the trailing appended columns"
+    );
+    format!("{head}    overlay_revision INTEGER\n)")
+}
+
+/// A v16 DB migrates to v17 with a `capability_events` shape PHYSICALLY
+/// IDENTICAL to a fresh v17 DB, its existing rows unchanged (both new columns
+/// NULL, every prior value intact), both version stamps at 17, and a second
+/// pass a no-op.
+#[test]
+fn v16_to_v17_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
+    // Arrange: a genuine v16 file -- current `requests`, v16 `capability_events`
+    // -- carrying a capability row.
+    let (_migrated_dir, migrated_path) = temp_db_path();
+    let migrated = Connection::open(&migrated_path).expect("raw open");
+    migrated
+        .execute_batch(CREATE_REQUESTS_TABLE)
+        .expect("requests table");
+    migrated
+        .execute_batch(&capability_events_ddl_without_v17_columns())
+        .expect("v16 capability_events");
+    migrated
+        .execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '16');
+             INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, \
+                 source, tier, evidence_class, upstream_token, catalog_version, \
+                 overlay_revision) \
+                 VALUES (5, 'lane', 'web_search', 'verified', 'f3', 'probe', 'inferred', \
+                 'param_echoed', 'tok', 7, 3);
+             PRAGMA user_version = 16;",
+        )
+        .expect("seed v16 db");
+    let before: Vec<(String, String, i64)> = table_shape(&migrated, "capability_events");
+    assert_eq!(before.len(), 12, "sanity: the v16 table has twelve columns");
+    let snapshot = |c: &Connection| -> String {
+        c.query_row(
+            "SELECT json_array(id, ts, lane_key, capability, verdict, phase, source, tier, \
+             evidence_class, upstream_token, catalog_version, overlay_revision) \
+             FROM capability_events",
+            [],
+            |r| r.get(0),
+        )
+        .expect("row snapshot")
+    };
+    let row_before = snapshot(&migrated);
+
+    // Act
+    let version = migrate_to_current(&migrated, 0).expect("migrate v16->v17");
+
+    // Assert: stamped, the row unchanged, and both new columns NULL.
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&migrated), 17);
+    let meta_version: String = migrated
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("meta schema_version");
+    assert_eq!(meta_version, "17");
+    assert_eq!(snapshot(&migrated), row_before, "no prior value changed");
+    let added: (Option<String>, Option<i64>) = migrated
+        .query_row(
+            "SELECT provider_kind, vocab_version FROM capability_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("new columns");
+    assert_eq!(added, (None, None), "no backfill");
+
+    // Assert: indistinguishable from a fresh v17 DB.
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh = open(&fresh_path).expect("open fresh db");
+    assert_eq!(
+        table_shape(&migrated, "capability_events"),
+        table_shape(fresh.conn(), "capability_events"),
+        "a migrated v16 DB must be indistinguishable from a fresh v17 DB"
+    );
+
+    // Idempotent: a second pass is a no-op that leaves shape and row alone.
+    let again = migrate_to_current(&migrated, 0).expect("re-run migrate");
+    assert_eq!(again, SCHEMA_VERSION);
+    assert_eq!(snapshot(&migrated), row_before);
+    assert_eq!(
+        table_shape(&migrated, "capability_events"),
+        table_shape(fresh.conn(), "capability_events"),
+    );
+}
+
+/// The v17 step's `ADD COLUMN`s are guarded: re-entering it on a file that
+/// already carries both columns (a downgraded-then-reopened file) only
+/// re-stamps the version.
+#[test]
+fn v16_to_v17_is_a_no_op_on_a_file_that_already_has_the_columns() {
+    // Arrange: a fresh v17 DB re-stamped v16, as a downgrade leaves it.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open fresh");
+    db.conn()
+        .execute_batch(
+            "UPDATE meta SET value = '16' WHERE key = 'schema_version';
+             PRAGMA user_version = 16;",
+        )
+        .expect("restamp v16");
+    let shape_before = table_shape(db.conn(), "capability_events");
+
+    // Act
+    let version = migrate_to_current(db.conn(), 0).expect("re-migrate");
+
+    // Assert
+    assert_eq!(version, 17);
+    assert_eq!(table_shape(db.conn(), "capability_events"), shape_before);
 }
 
 /// Pins the physical `requests` DDL shape: 67 columns, in this exact

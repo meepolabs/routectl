@@ -164,6 +164,8 @@ mod tests {
                 upstream_token: None,
                 catalog_version: 1,
                 overlay_revision: 1,
+                provider_kind: None,
+                vocab_version: None,
             },
         )
         .expect("insert event");
