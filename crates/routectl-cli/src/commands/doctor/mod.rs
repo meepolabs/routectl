@@ -440,7 +440,7 @@ struct ImportResult {
     at_unix: u64,
     /// The catalog version the attempt targeted.
     catalog_version: u32,
-    /// The forever-token outcome vocabulary
+    /// The versioned, internal outcome token vocabulary
     /// (`ok`/`signature_invalid`/`schema_mismatch`/`io_error`).
     outcome: &'static str,
     /// Operator-facing error detail on a failed attempt.

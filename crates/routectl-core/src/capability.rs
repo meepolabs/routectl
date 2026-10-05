@@ -34,6 +34,9 @@ pub const THINKING: &str = "thinking";
 /// rejects a foreign lane's blob.
 pub const REASONING_REPLAY: &str = "reasoning_replay";
 
+/// Feature key for a `tool_choice` that forces the model to call a tool.
+pub const FORCED_TOOL_CHOICE: &str = "forced_tool_choice";
+
 /// All well-known capability keys. Not exhaustive: both `derive_feature_keys`
 /// and the catalog's capability map accept arbitrary tool-type strings
 /// beyond this list, which documents the ones routectl itself knows
@@ -45,43 +48,44 @@ pub const WELL_KNOWN_CAPABILITY_KEYS: &[&str] = &[
     PROMPT_CACHING,
     THINKING,
     REASONING_REPLAY,
+    FORCED_TOOL_CHOICE,
 ];
 
 /// Evidence class for a verified structured-output observation: the
 /// response body parsed and every top-level required schema property was
 /// present.
 ///
-/// Evidence-class tokens are a persisted contract: each is written
-/// verbatim to a capability ledger and read back on replay, so the
-/// mapping is fixed forever -- changing a token silently re-classifies
-/// every historical row. Replay is open-set-tolerant: an unrecognized
-/// class is skipped, never panicked on.
+/// Evidence-class tokens are a versioned, internal ledger contract: each
+/// is written verbatim to a capability ledger and read back on replay, so
+/// changing a token silently re-classifies every historical row. Replay
+/// is open-set-tolerant: an unrecognized class is skipped, never panicked
+/// on.
 pub const SCHEMA_PARSE: &str = "schema_parse";
 
 /// Evidence class for a suspected-absent structured-output observation: a
 /// strict or forced request returned prose or an unparseable body on a
-/// clean stop. Forever contract -- see [`SCHEMA_PARSE`].
+/// clean stop. Versioned, internal contract -- see [`SCHEMA_PARSE`].
 pub const SCHEMA_MISMATCH: &str = "schema_mismatch";
 
 /// Evidence class for a verified web-search observation: canonical
 /// search-result content blocks or usage server-tool evidence were
-/// present. Forever contract -- see [`SCHEMA_PARSE`].
+/// present. Versioned, internal contract -- see [`SCHEMA_PARSE`].
 pub const SEARCH_BLOCKS: &str = "search_blocks";
 
 /// Evidence class for a suspected-absent web-search observation: a
-/// forced-search request produced no search evidence. Forever contract --
-/// see [`SCHEMA_PARSE`].
+/// forced-search request produced no search evidence. Versioned, internal
+/// contract -- see [`SCHEMA_PARSE`].
 pub const SEARCH_ABSENT_FORCED: &str = "search_absent_forced";
 
 /// Evidence class for a verified prompt-caching observation: a cache read
 /// or creation was observed. Positive-only -- the negative side stays
-/// with the existing backstop vocabulary. Forever contract -- see
-/// [`SCHEMA_PARSE`].
+/// with the existing backstop vocabulary. Versioned, internal contract --
+/// see [`SCHEMA_PARSE`].
 pub const CACHE_HIT: &str = "cache_hit";
 
 /// Evidence class for a verified thinking observation: reasoning or
 /// redacted-reasoning blocks were present when reasoning was requested.
-/// Positive-only. Forever contract -- see [`SCHEMA_PARSE`].
+/// Positive-only. Versioned, internal contract -- see [`SCHEMA_PARSE`].
 pub const THINKING_BLOCKS: &str = "thinking_blocks";
 
 /// Every recognized evidence-class token. A warm-rebuild replayer checks
@@ -106,10 +110,10 @@ pub fn is_known_evidence_class(token: &str) -> bool {
 /// Whether a learned negative came from a provider that names the
 /// unsupported capability outright, or from an inferred free-text match.
 ///
-/// The `as_str` tokens are a persisted contract: they land in the usage
-/// ledger's `signal_tier` column and any future warm-rebuild replayer
-/// reads them back. Changing a token silently re-tiers historical rows,
-/// so the mapping is fixed forever.
+/// The `as_str` tokens are a versioned, internal ledger contract: they
+/// land in the usage ledger's `signal_tier` column and any future
+/// warm-rebuild replayer reads them back. Changing a token silently
+/// re-tiers historical rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalTier {
     /// The provider's error identifies the unsupported capability
@@ -122,8 +126,8 @@ pub enum SignalTier {
 }
 
 impl SignalTier {
-    /// Stable ledger token for this tier. Forever contract -- see the
-    /// type docs.
+    /// Stable ledger token for this tier. Versioned, internal contract --
+    /// see the type docs.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SelfIdentifying => "self-identifying",
@@ -146,12 +150,12 @@ impl SignalTier {
 
 /// Which detection phase attributed a learned negative.
 ///
-/// The `as_str` tokens are a persisted contract: they land in the
-/// learned-capability ledger and any future warm-rebuild replayer reads
-/// them back. Changing a token silently re-attributes historical rows,
-/// so the mapping is fixed forever. `parse` is open-set-tolerant: an
-/// unknown token yields `None` rather than panicking, so a ledger row
-/// written by a newer phase vocabulary never crashes an older replayer.
+/// The `as_str` tokens are a versioned, internal ledger contract: they
+/// land in the learned-capability ledger and any future warm-rebuild
+/// replayer reads them back. Changing a token silently re-attributes
+/// historical rows. `parse` is open-set-tolerant: an unknown token yields
+/// `None` rather than panicking, so a ledger row written by a newer phase
+/// vocabulary never crashes an older replayer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailurePhase {
     /// Wire-token strip phase: a droppable capability named directly by
@@ -165,8 +169,8 @@ pub enum FailurePhase {
 }
 
 impl FailurePhase {
-    /// Stable ledger token for this phase. Forever contract -- see the
-    /// type docs.
+    /// Stable ledger token for this phase. Versioned, internal contract --
+    /// see the type docs.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::F1 => "f1",
@@ -190,10 +194,9 @@ impl FailurePhase {
 /// Whether the evidence behind a learned negative came from live traffic
 /// or from an out-of-band probe.
 ///
-/// The `as_str` tokens are a persisted contract read back by any future
-/// warm-rebuild replayer, so the mapping is fixed forever. `parse` is
-/// open-set-tolerant: an unknown token yields `None` rather than
-/// panicking.
+/// The `as_str` tokens are a versioned, internal ledger contract read
+/// back by any future warm-rebuild replayer. `parse` is open-set-tolerant:
+/// an unknown token yields `None` rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceSource {
     /// Observed on a real client request in flight.
@@ -203,8 +206,8 @@ pub enum EvidenceSource {
 }
 
 impl EvidenceSource {
-    /// Stable ledger token for this source. Forever contract -- see the
-    /// type docs.
+    /// Stable ledger token for this source. Versioned, internal contract --
+    /// see the type docs.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Live => "live",
@@ -227,13 +230,13 @@ impl EvidenceSource {
 ///
 /// This is a DERIVED view: only the negative verdicts persist in the
 /// ledger; `Assumed` and `Unknown` are computed at read time. The
-/// `as_str` tokens are a forever contract shared with any warm-rebuild
-/// replayer. `Assumed(bool)` maps to `"assumed"` regardless of the bool
-/// -- the bool is the prior's truthiness, not part of the token; the
-/// phase inside `LearnedBroken` is likewise carried in a sibling ledger
-/// field, not encoded in the verdict token. Reconstruct a persisted
-/// verdict through `from_parts`, which reads those sibling columns; it is
-/// open-set-tolerant so an unrecognized token never panics.
+/// `as_str` tokens are a versioned, internal ledger contract shared with
+/// any warm-rebuild replayer. `Assumed(bool)` maps to `"assumed"`
+/// regardless of the bool -- the bool is the prior's truthiness, not part
+/// of the token; the phase inside `LearnedBroken` is likewise carried in a
+/// sibling ledger field, not encoded in the verdict token. Reconstruct a
+/// persisted verdict through `from_parts`, which reads those sibling
+/// columns; it is open-set-tolerant so an unrecognized token never panics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// No learned evidence yet; the bool carries the catalog prior's
@@ -243,7 +246,10 @@ pub enum Verdict {
     VerifiedWorking,
     /// Learned unsupported, attributed to the carried phase.
     LearnedBroken(FailurePhase),
-    /// A learned negative the operator chose to ignore.
+    /// A suspect-absence negative from positive detection (phase F3): the
+    /// capability was requested or forced but its expected evidence was
+    /// absent on an otherwise clean response. Always persisted with phase
+    /// `f3` and a recognized evidence class.
     SuspectIgnored,
     /// A previously learned negative that a successful re-probe settled.
     /// A ledger-event token in the shared verdict vocabulary rather than a
@@ -256,9 +262,10 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// Stable ledger token for this verdict. Forever contract -- see the
-    /// type docs. The bool in `Assumed` and the phase in `LearnedBroken`
-    /// are not encoded here; they live in sibling ledger fields.
+    /// Stable ledger token for this verdict. Versioned, internal contract --
+    /// see the type docs. The bool in `Assumed` and the phase in
+    /// `LearnedBroken` are not encoded here; they live in sibling ledger
+    /// fields.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Assumed(_) => "assumed",
@@ -376,6 +383,7 @@ mod tests {
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&PROMPT_CACHING));
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&THINKING));
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&REASONING_REPLAY));
+        assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&FORCED_TOOL_CHOICE));
     }
 
     #[test]
@@ -394,6 +402,7 @@ mod tests {
         assert_eq!(PROMPT_CACHING, "prompt_caching");
         assert_eq!(THINKING, "thinking");
         assert_eq!(REASONING_REPLAY, "reasoning_replay");
+        assert_eq!(FORCED_TOOL_CHOICE, "forced_tool_choice");
     }
 
     #[test]
@@ -407,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn is_known_evidence_class_recognizes_exactly_the_six_forever_tokens() {
+    fn is_known_evidence_class_recognizes_exactly_the_six_pinned_tokens() {
         for token in EVIDENCE_CLASSES {
             assert!(is_known_evidence_class(token), "{token} must be recognized");
         }

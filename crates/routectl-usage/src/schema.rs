@@ -326,8 +326,8 @@ CREATE TABLE IF NOT EXISTS capability_learn_events (
 
 /// DDL for the `capability_events` table (v13).
 ///
-/// One append-only row per capability admission event -- the forever
-/// contract the warm-rebuild replayer reads on boot. Distinct from the
+/// One append-only row per capability admission event -- the versioned,
+/// internal contract the warm-rebuild replayer reads on boot. Distinct from the
 /// legacy `capability_learn_events` landing pad: this table is the
 /// unified ledger across learned negatives, verified/suspect observations,
 /// probe-settled clears, and reload/boot tombstones.

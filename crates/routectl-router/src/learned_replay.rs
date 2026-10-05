@@ -110,8 +110,8 @@ const LANE_SEPARATOR: char = '#';
 const SCHEME_SEPARATOR: char = ':';
 
 /// Stable token for a validator family. It lands inside registry keys and
-/// the emitted ledger row, so the mapping is fixed forever: a changed token
-/// re-partitions historical rows.
+/// the emitted ledger row, so it is a versioned, internal ledger contract:
+/// a changed token re-partitions historical rows.
 const fn scheme_token(scheme: ReplayScheme) -> &'static str {
     match scheme {
         ReplayScheme::Codex => "codex",

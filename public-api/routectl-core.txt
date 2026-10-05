@@ -464,6 +464,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::Verdi
 pub const routectl_core::capability::CACHE_HIT: &str
 pub const routectl_core::capability::COMPUTER_USE: &str
 pub const routectl_core::capability::EVIDENCE_CLASSES: &[&str]
+pub const routectl_core::capability::FORCED_TOOL_CHOICE: &str
 pub const routectl_core::capability::PROMPT_CACHING: &str
 pub const routectl_core::capability::REASONING_REPLAY: &str
 pub const routectl_core::capability::SCHEMA_MISMATCH: &str
@@ -5851,6 +5852,7 @@ pub const routectl_core::CACHE_HIT: &str
 pub const routectl_core::CODEX_OAUTH: &str
 pub const routectl_core::COMPUTER_USE: &str
 pub const routectl_core::EVIDENCE_CLASSES: &[&str]
+pub const routectl_core::FORCED_TOOL_CHOICE: &str
 pub const routectl_core::HDR_MSG_EGRESS: &str
 pub const routectl_core::HDR_MSG_INGRESS: &str
 pub const routectl_core::HDR_MSG_OUTGOING: &str

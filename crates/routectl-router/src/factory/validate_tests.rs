@@ -1993,6 +1993,19 @@ mod collect_config_validation_tests {
         );
     }
 
+    /// `forced_tool_choice` is neither strippable nor a typed tool, so only its
+    /// well-known membership admits it to the list.
+    #[test]
+    fn accepts_forced_tool_choice_as_an_essential_capability() {
+        let validation = collect_config_validation(&essential_config("\"forced_tool_choice\""));
+
+        assert!(
+            validation.errors.is_empty(),
+            "a well-known capability key must be accepted: {:?}",
+            validation.errors
+        );
+    }
+
     #[test]
     fn a_clean_config_produces_no_errors() {
         let validation = collect_config_validation(&Config::default());

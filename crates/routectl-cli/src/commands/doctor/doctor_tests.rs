@@ -3643,6 +3643,7 @@ mod matrix_panel {
             .map(String::as_str)
             .collect();
         assert_eq!(leading, WELL_KNOWN_CAPABILITY_KEYS);
+        assert!(leading.contains(&"forced_tool_choice"));
         assert!(panel.columns.iter().any(|c| c == "custom_tool"));
 
         // Verified live cell.
@@ -3701,8 +3702,8 @@ mod matrix_panel {
         );
 
         let panel = build_capability_matrix_panel(&ctx);
-        // 6 well-known + 10 rendered other columns.
-        assert_eq!(panel.columns.len(), 16);
+        // 7 well-known + 10 rendered other columns.
+        assert_eq!(panel.columns.len(), 17);
         assert_eq!(panel.other_overflow, 2);
     }
 

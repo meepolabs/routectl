@@ -1362,7 +1362,8 @@ fn old_v12_db_migrates_to_v13_creating_capability_events_table() {
 /// column is added, removed, or renamed, and `pragma_table_info` pins the
 /// order, names, and null-ability (only `ts` is NOT NULL; the `id` primary
 /// key is auto-assigned and reads back as nullable). This is the
-/// forever-contract guard the warm-rebuild replayer relies on.
+/// versioned, internal ledger-contract guard the warm-rebuild replayer
+/// relies on.
 #[test]
 fn capability_events_column_set_is_pinned() {
     // Arrange

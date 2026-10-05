@@ -18,8 +18,8 @@ use crate::override_registry::{OverrideProvenance, OverrideVerdict};
 /// Display verdict token for an operator route-away override cell. A
 /// PANEL-ONLY token, distinct from the core [`Verdict`] vocabulary: an
 /// override is an operator assertion, not a learned or catalog signal,
-/// and the core verdict enum is a forever ledger contract that must not
-/// grow display-only states.
+/// and the core verdict enum is a versioned, internal ledger contract that
+/// must not grow display-only states.
 pub const FORCED_UNSUPPORTED: &str = "forced_unsupported";
 
 /// Display verdict token for an operator force-supported override cell.

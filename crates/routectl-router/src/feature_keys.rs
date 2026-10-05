@@ -31,6 +31,7 @@
 //! steers these requests to a leg that DOES enforce it.
 
 use routectl_core::ToolDef;
+pub use routectl_core::capability::FORCED_TOOL_CHOICE;
 use routectl_core::capability::STRUCTURED_OUTPUT as STRUCTURED_OUTPUT_KEY;
 use serde_json::Value;
 
@@ -117,9 +118,6 @@ fn response_format_requests_json(response_format: Option<&Value>) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|t| matches!(t, "json_schema" | "json_object"))
 }
-
-/// Feature key for a `tool_choice` that forces the model to call a tool.
-pub const FORCED_TOOL_CHOICE: &str = "forced_tool_choice";
 
 /// How a `tool_choice` directive forces tool use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

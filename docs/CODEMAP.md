@@ -146,9 +146,10 @@ license.
   extras-merge from clobbering `ChatRequest` fields
 - `src/capability.rs` -- shared capability-key vocabulary (`WEB_SEARCH`,
   `COMPUTER_USE`, `STRUCTURED_OUTPUT`, `PROMPT_CACHING`, `THINKING`,
-  `WELL_KNOWN_CAPABILITY_KEYS`) so the router's `feature_keys.rs` pre-filter
+  `REASONING_REPLAY`, `FORCED_TOOL_CHOICE`, `WELL_KNOWN_CAPABILITY_KEYS`) so the router's `feature_keys.rs` pre-filter
   and the catalog's capability priors key off identical strings; open-ended,
-  documents only the well-known subset. Also the forever evidence-class tokens
+  documents only the well-known subset. Also the versioned, internal
+  evidence-class tokens
   written verbatim to the capability ledger and read back open-set-tolerant on
   replay (`SCHEMA_PARSE`/`SCHEMA_MISMATCH`,
   `SEARCH_BLOCKS`/`SEARCH_ABSENT_FORCED`, `CACHE_HIT`, `THINKING_BLOCKS`),
@@ -160,8 +161,8 @@ license.
   `SignalTier` (`as_str` -> `"self-identifying"` / `"inferred"`, `parse` ->
   `Option`, the persisted signal-tier contract mirrored by the usage
   learn-event row's CHECK set and read back open-set-tolerant on warm
-  rebuild). Also the durable read-model contract enums, each with a forever
-  `as_str` token and an open-set-tolerant parse that never panics on an
+  rebuild). Also the durable read-model contract enums, each with a
+  versioned, internal `as_str` token and an open-set-tolerant parse that never panics on an
   unknown token: `FailurePhase` (`"f1"`/`"f2"`/`"f3"`, `parse` -> `Option`),
   `EvidenceSource` (`"live"`/`"probe"`, `parse` -> `Option`), and `Verdict`
   (`Assumed(bool)`->`"assumed"`, `VerifiedWorking`->`"verified"`,
@@ -3960,7 +3961,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `derive_feature_keys(tools, provider_extras, response_format)` is pure.
   Also `tool_choice_force` (the one syntactic forced-`tool_choice` predicate,
   `ToolChoiceForce::{AnyTool, Named}` across the Anthropic / OpenAI / Converse
-  shapes) and the `FORCED_TOOL_CHOICE` key it grounds, which
+  shapes) and the `FORCED_TOOL_CHOICE` key it grounds (re-exported from
+  routectl-core's well-known list), which
   `router::field_repair::request_feature_keys` appends; `forces_web_search`
   reads the same predicate
 - `src/log_hash.rs` -- `salted_log_hash`: per-process salted hash
@@ -5401,7 +5403,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `signal_tier` (CHECK-constrained to `self-identifying` / `inferred`),
   `observations`, `upstream_status`, `remapped`, `request_features` JSON-array
   TEXT) -- deliberately NOT a `requests` row (every reporting query treats
-  `requests` rows as requests), the forever-contract landing pad for the
+  `requests` rows as requests), the versioned, internal landing pad for the
   warm-rebuild replayer; carries no body / message / prompt column (log
   hygiene). v10 (`SCHEMA_VERSION = 10`) is a forward-only, idempotent keyspace
   invalidation: the v9 -> v10 step truncates `capability_learn_events`
@@ -5433,7 +5435,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `overlay_revision` boundary-revision stamps) via `migrate_v12_to_v13`
   (mirrors the v8 -> v9 whole-new-table step: `CREATE TABLE / INDEX IF NOT
   EXISTS` in one transaction with the version bump, fresh-create and
-  migrated-open both covered) -- the unified forever-contract ledger the
+  migrated-open both covered) -- the unified versioned, internal ledger the
   warm-rebuild replayer reads on boot; carries no body / message / prompt
   column (log hygiene). v14 (`SCHEMA_VERSION = 14`) appends the nullable
   token-estimate calibration pair `calib_estimated_tokens` (routectl's own
