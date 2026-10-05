@@ -141,10 +141,11 @@ fn log_fail_closed(
 /// batch.
 ///
 /// The live registry is populated only once that batch commits, by replaying
-/// the same rows into it. On any failure nothing is committed and the live
-/// registry stays empty: installing verdicts whose restatement never became
-/// durable would let them act now and vanish at the next restart, and a bare
-/// tombstone would evict them outright. The stale tombstone stays the newest
+/// the same rows into it. On any failure -- the slice read or the batch
+/// commit -- nothing is committed and the live registry stays empty:
+/// installing verdicts whose restatement never became durable would let them
+/// act now and vanish at the next restart, and a bare tombstone (or one
+/// restating an unread, empty slice) would evict them outright. The stale tombstone stays the newest
 /// boundary, so the next boot retries this same restatement, and rows this
 /// session appends at its own revision still replay through `should_replay`.
 fn restate_survivors_past_new_boundary(
@@ -157,9 +158,23 @@ fn restate_survivors_past_new_boundary(
     let overlay_revision = router.overlay_revision();
     let boundary = ReplayTombstone::new(stale_rowid, catalog_version, overlay_revision);
     let reader = LedgerCapabilityReader::new(db_path.to_path_buf(), boundary);
+    let rows = match reader.try_read_events() {
+        Ok(rows) => rows,
+        Err(failure) => {
+            tracing::error!(
+                catalog_version,
+                overlay_revision,
+                reason = failure.as_str(),
+                "capability event slice unreadable after the boundary read; boot boundary NOT \
+                 committed, registry left empty and the stale tombstone kept so the next boot \
+                 retries the restatement"
+            );
+            return;
+        }
+    };
     let slice = SliceReader {
         tombstone: boundary,
-        rows: reader.read_events(),
+        rows,
     };
 
     let live = router.learned_registry();

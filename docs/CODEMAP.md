@@ -5516,8 +5516,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `meta.schema_version` to 16, one transaction, no column or row touched) so a
   v16 binary opens it. Refuses with a `DowngradeError` and leaves the file
   untouched on a missing file (never created), a version other than 17, a meta
-  mirror that disagrees, a `capability_events` column list other than the
-  frozen v16 set followed by `provider_kind TEXT`, `vocab_version INTEGER`, or
+  mirror that disagrees, a `capability_events` column list (read through
+  `PRAGMA table_xinfo` as `ColumnShape`s: name, declared type, `NOT NULL`,
+  default, primary-key position, hidden flag) other than the frozen v16 set
+  followed by plain nullable `provider_kind TEXT`, `vocab_version INTEGER`, or
   `InUse` when any other connection has the file open: it sets
   `locking_mode = EXCLUSIVE` before its first read, and in WAL mode the first
   transaction then fails busy while any other connection (the daemon's writer,
@@ -5689,8 +5691,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   boot's revision (`should_replay` drops catalog-scoped rows, keeps
   catalog-independent ones), commits `capability_boundary::boundary_batch`
   (fresh tombstone + restatements) atomically, and only on commit replays
-  the same rows into the live registry; on failure nothing is committed and
-  the registry stays empty. `log_fail_closed` logs the remaining cases at
+  the same rows into the live registry; on failure (the slice read via
+  `try_read_events` OR the batch commit) nothing is committed, an ERROR logs
+  the path-free class, and the registry stays empty. `log_fail_closed` logs the remaining cases at
   their warranted level (debug for a cold ledger / absent tombstone, WARN
   only for a genuinely unreadable ledger) and
   `commit_fresh_tombstone` commits exactly one fresh tombstone stamped this
@@ -5724,6 +5727,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   logging, no writes -- into `Replay | Cold | NoTombstone |
   RevisionMismatch{stale_rowid} | Unreadable(class)` so each caller applies
   its own reaction.
+  `try_read_events` is the fallible slice read (`ReadFailure::{OpenFailed,
+  QueryFailed}`, path-free `as_str` tokens); the infallible `read_events`
+  trait method degrades a failure to no rows for the matching-boundary replay.
   `open_error_class` maps a usage-DB `OpenError` to a fixed path-free class
   token (a new variant is a compile error; reused by `doctor_panels.rs`; see
   the function's own doc comment for the `version_too_old` / `expected` split).

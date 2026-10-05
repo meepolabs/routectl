@@ -154,7 +154,7 @@ fn broken(
 
 /// Block until every capability event the handle accepted has been persisted
 /// or superseded, so the bounded channel never drops a burst of rows.
-fn wait_drained(handle: &UsageHandle) {
+async fn wait_drained(handle: &UsageHandle) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let counters = handle.counters();
@@ -164,7 +164,7 @@ fn wait_drained(handle: &UsageHandle) {
             return;
         }
         assert!(Instant::now() < deadline, "capability events never drained");
-        std::thread::sleep(Duration::from_millis(2));
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
 
@@ -183,7 +183,7 @@ async fn one_day_of_verified_traffic(router: &Router, handle: &UsageHandle) {
             router.overlay_revision(),
         );
     }
-    wait_drained(handle);
+    wait_drained(handle).await;
 }
 
 /// Run the blocking startup warm off the runtime thread against `ledger`.
@@ -218,7 +218,7 @@ async fn a_month_of_positive_traffic_writes_one_row_and_keeps_older_negatives() 
     let ts = now_ms();
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     handle.try_send_capability_event_in_generation(broken(ts, WEB_SEARCH, cat, overlay), 1);
-    wait_drained(&handle);
+    wait_drained(&handle).await;
 
     // Act: the traffic, then a restart that warms a fresh router.
     for _ in 0..DAYS {

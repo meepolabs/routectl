@@ -45,13 +45,18 @@ fn v16_capability_events_ddl() -> String {
 /// A WAL file stamped v17 whose `capability_events` is the v16 DDL followed
 /// by `added_columns`, each appended with `ALTER TABLE ... ADD COLUMN`.
 fn v17_file_with(path: &std::path::Path, added_columns: &[&str]) -> Connection {
+    v17_file_from_ddl(path, &v16_capability_events_ddl(), added_columns)
+}
+
+/// A WAL file stamped v17 whose `capability_events` is created by `ddl` and
+/// then extended by `added_columns`.
+fn v17_file_from_ddl(path: &std::path::Path, ddl: &str, added_columns: &[&str]) -> Connection {
     let conn = Connection::open(path).expect("raw open");
     conn.pragma_update(None, "journal_mode", "WAL")
         .expect("wal");
     conn.execute_batch(CREATE_REQUESTS_TABLE).expect("requests");
     conn.execute_batch(CREATE_META_TABLE).expect("meta");
-    conn.execute_batch(&v16_capability_events_ddl())
-        .expect("v16 capability_events");
+    conn.execute_batch(ddl).expect("capability_events");
     for column in added_columns {
         conn.execute_batch(&format!(
             "ALTER TABLE capability_events ADD COLUMN {column}"
@@ -64,6 +69,30 @@ fn v17_file_with(path: &std::path::Path, added_columns: &[&str]) -> Connection {
     )
     .expect("stamp v17");
     conn
+}
+
+/// `ddl` with one column definition rewritten. Panics unless `from` occurs
+/// exactly once, so a DDL edit cannot silently turn a refusal row into a copy
+/// of the real shape.
+fn rewrite_once(ddl: &str, from: &str, to: &str) -> String {
+    assert_eq!(
+        ddl.matches(from).count(),
+        1,
+        "{from:?} must occur exactly once in the DDL"
+    );
+    ddl.replacen(from, to, 1)
+}
+
+/// Assert `path` is refused on shape and is still stamped v17.
+fn assert_refused_on_shape(path: &std::path::Path, name: &str) {
+    let result = downgrade_to_v16(path);
+    assert!(
+        matches!(result, Err(DowngradeError::NotAdditive { .. })),
+        "{name}: {result:?}"
+    );
+    let conn = Connection::open(path).expect("reopen");
+    assert_eq!(user_version(&conn), 17, "{name}");
+    assert_eq!(meta_version(&conn), "17", "{name}");
 }
 
 /// One legacy-shaped negative, as a v16 binary would write it.
@@ -240,17 +269,101 @@ fn refuses_a_file_that_is_not_exactly_the_additive_v17_shape() {
         let (_dir, path) = temp_db_path();
         drop(v17_file_with(&path, added));
 
-        // Act
-        let result = downgrade_to_v16(&path);
+        // Act + Assert
+        assert_refused_on_shape(&path, name);
+    }
+}
 
-        // Assert: refused on shape, and still stamped v17.
-        assert!(
-            matches!(result, Err(DowngradeError::NotAdditive { .. })),
-            "{name}: {result:?}"
+#[test]
+fn refuses_an_added_column_carrying_a_default_or_a_generated_column() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "provider_kind with a DEFAULT",
+            &[
+                "provider_kind TEXT DEFAULT 'openai-compat'",
+                "vocab_version INTEGER",
+            ],
+        ),
+        (
+            "vocab_version as a generated column",
+            &[
+                "provider_kind TEXT",
+                "vocab_version INTEGER GENERATED ALWAYS AS (1) VIRTUAL",
+            ],
+        ),
+        (
+            "an extra trailing generated column",
+            &[
+                "provider_kind TEXT",
+                "vocab_version INTEGER",
+                "shadow INTEGER GENERATED ALWAYS AS (1) VIRTUAL",
+            ],
+        ),
+    ];
+    for (name, added) in cases {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        drop(v17_file_with(&path, added));
+
+        // Act + Assert
+        assert_refused_on_shape(&path, name);
+    }
+}
+
+#[test]
+fn refuses_a_column_whose_constraints_differ_from_the_frozen_shape() {
+    // Each row rewrites column definitions of the real v17 DDL; names and
+    // declared types are unchanged, so only the constraint comparison can
+    // refuse them.
+    type Rewrite = (&'static str, &'static str);
+    let cases: &[(&str, &[Rewrite])] = &[
+        (
+            "provider_kind TEXT NOT NULL",
+            &[("provider_kind    TEXT,", "provider_kind    TEXT NOT NULL,")],
+        ),
+        (
+            "v16 ts without NOT NULL",
+            &[(
+                "ts               INTEGER NOT NULL,",
+                "ts               INTEGER,",
+            )],
+        ),
+        (
+            "v16 lane_key NOT NULL",
+            &[("lane_key         TEXT,", "lane_key         TEXT NOT NULL,")],
+        ),
+        (
+            "v16 id not the primary key",
+            &[(
+                "id               INTEGER PRIMARY KEY,",
+                "id               INTEGER,",
+            )],
+        ),
+        (
+            "v16 primary key moved from id to ts",
+            &[
+                (
+                    "id               INTEGER PRIMARY KEY,",
+                    "id               INTEGER,",
+                ),
+                (
+                    "ts               INTEGER NOT NULL,",
+                    "ts               INTEGER NOT NULL PRIMARY KEY,",
+                ),
+            ],
+        ),
+    ];
+    for (name, rewrites) in cases {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        let ddl = rewrites.iter().fold(
+            CREATE_CAPABILITY_EVENTS_TABLE.to_string(),
+            |ddl, (from, to)| rewrite_once(&ddl, from, to),
         );
-        let conn = Connection::open(&path).expect("reopen");
-        assert_eq!(user_version(&conn), 17, "{name}");
-        assert_eq!(meta_version(&conn), "17", "{name}");
+        drop(v17_file_from_ddl(&path, &ddl, &[]));
+
+        // Act + Assert
+        assert_refused_on_shape(&path, name);
     }
 }
 
@@ -266,6 +379,20 @@ fn the_exact_additive_shape_is_accepted_by_the_shape_fixture() {
     ));
 
     downgrade_to_v16(&path).expect("exact additive shape downgrades");
+}
+
+#[test]
+fn the_current_ddl_is_accepted_by_the_constraint_fixture() {
+    // Positive control for the constraint table: the unmodified v17 DDL built
+    // through the same fixture downgrades.
+    let (_dir, path) = temp_db_path();
+    drop(v17_file_from_ddl(
+        &path,
+        CREATE_CAPABILITY_EVENTS_TABLE,
+        &[],
+    ));
+
+    downgrade_to_v16(&path).expect("the real v17 DDL downgrades");
 }
 
 #[test]

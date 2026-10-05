@@ -560,6 +560,82 @@ async fn revision_bump_boot_boundary_failure_commits_nothing_and_installs_nothin
     );
 }
 
+/// Plant a post-boundary row whose `ts` is not an integer. The tombstone query
+/// never decodes it, so the boundary still classifies; the event query fails
+/// decoding it -- a slice read that fails after a successful classify.
+fn poison_slice(ledger: &Path) {
+    open(ledger)
+        .expect("open ledger")
+        .conn()
+        .execute(
+            "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
+             tier, catalog_version, overlay_revision) \
+             VALUES ('not-a-timestamp', 'gpt-nick', 'web_search', 'broken', 'f1', 'live', \
+             'self-identifying', 1, 0)",
+            [],
+        )
+        .expect("plant undecodable row");
+}
+
+/// A stale-boundary slice that cannot be read must not be mistaken for an
+/// empty one: committing a fresh tombstone over it would drop every verdict
+/// behind the stale boundary for good.
+#[tokio::test]
+async fn revision_bump_boot_with_an_unreadable_slice_commits_nothing_and_installs_nothing() {
+    // Arrange: a stale session carrying a wire-shape survivor, then a row the
+    // slice read cannot decode.
+    let tmp = TempDir::new().expect("tempdir");
+    let router = bumped_router(&tmp).await;
+    let cat = i64::from(router.catalog_version());
+    let ledger = tmp.path().join("usage.db");
+    seed_stale_session(&ledger, cat);
+    poison_slice(&ledger);
+    assert!(
+        matches!(
+            classify_boundary(&ledger, router.catalog_version(), router.overlay_revision()),
+            BoundaryOutcome::RevisionMismatch { .. }
+        ),
+        "positive control: the poisoned ledger still classifies as a stale boundary"
+    );
+    let rows_before = ledger_rows(&ledger);
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act
+    let events = warm_off_runtime(&ledger, &router, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: a path-free ERROR names the failure class, nothing is resident,
+    // and the stale tombstone is still the newest row of its kind.
+    let error = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("the unreadable slice is reported at ERROR");
+    assert!(
+        error
+            .fields
+            .iter()
+            .any(|(name, value)| name == "reason" && value == "query_failed"),
+        "the ERROR carries the failure class: {error:?}"
+    );
+    assert!(
+        !error
+            .fields
+            .iter()
+            .any(|(_, value)| value.contains(&*tmp.path().to_string_lossy())),
+        "the ERROR is path-free: {error:?}"
+    );
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "nothing is installed in memory when the slice could not be read"
+    );
+    assert_eq!(
+        ledger_rows(&ledger),
+        rows_before,
+        "no fresh tombstone and no restatement land over an unread slice"
+    );
+}
+
 #[tokio::test]
 async fn unreadable_ledger_leaves_registry_empty_and_warns() {
     // Arrange: a non-DB file at the ledger path -- it exists, so the

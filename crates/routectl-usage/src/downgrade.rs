@@ -43,27 +43,52 @@ const TO_VERSION: i64 = 16;
 /// long wait only delays the refusal.
 const LOCK_TIMEOUT_MS: u64 = 250;
 
-/// The `capability_events` columns as v16 created them, in physical order,
-/// with their declared types. A frozen record of the historical shape -- it
-/// must not follow later DDL edits.
-const V16_CAPABILITY_EVENTS_COLUMNS: &[(&str, &str)] = &[
-    ("id", "INTEGER"),
-    ("ts", "INTEGER"),
-    ("lane_key", "TEXT"),
-    ("capability", "TEXT"),
-    ("verdict", "TEXT"),
-    ("phase", "TEXT"),
-    ("source", "TEXT"),
-    ("tier", "TEXT"),
-    ("evidence_class", "TEXT"),
-    ("upstream_token", "TEXT"),
-    ("catalog_version", "INTEGER"),
-    ("overlay_revision", "INTEGER"),
+/// One `capability_events` column as `PRAGMA table_xinfo` describes it: name,
+/// declared type, `NOT NULL`, default expression, primary-key position, and
+/// the hidden flag (non-zero for a generated column).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnShape {
+    /// Column name.
+    pub name: String,
+    /// Declared type, as written in the DDL.
+    pub declared_type: String,
+    /// Whether the column is declared `NOT NULL`.
+    pub not_null: bool,
+    /// The default expression's text, or `None` when there is no default.
+    pub default: Option<String>,
+    /// 1-based position in the primary key, or 0 when not part of it.
+    pub primary_key: i64,
+    /// `table_xinfo`'s hidden flag: 0 for an ordinary column.
+    pub hidden: i64,
+}
+
+/// A frozen column record: `(name, declared type, not null, primary-key
+/// position)`. Every frozen column has no default and is not hidden.
+type FrozenColumn = (&'static str, &'static str, bool, i64);
+
+/// The `capability_events` columns as v16 created them, in physical order. A
+/// frozen record of the historical shape -- it must not follow later DDL
+/// edits.
+const V16_CAPABILITY_EVENTS_COLUMNS: &[FrozenColumn] = &[
+    ("id", "INTEGER", false, 1),
+    ("ts", "INTEGER", true, 0),
+    ("lane_key", "TEXT", false, 0),
+    ("capability", "TEXT", false, 0),
+    ("verdict", "TEXT", false, 0),
+    ("phase", "TEXT", false, 0),
+    ("source", "TEXT", false, 0),
+    ("tier", "TEXT", false, 0),
+    ("evidence_class", "TEXT", false, 0),
+    ("upstream_token", "TEXT", false, 0),
+    ("catalog_version", "INTEGER", false, 0),
+    ("overlay_revision", "INTEGER", false, 0),
 ];
 
 /// The columns v17 appended after the v16 set, in order.
-const V17_ADDITIVE_COLUMNS: &[(&str, &str)] =
-    &[("provider_kind", "TEXT"), ("vocab_version", "INTEGER")];
+const V17_ADDITIVE_COLUMNS: &[FrozenColumn] = &[
+    ("provider_kind", "TEXT", false, 0),
+    ("vocab_version", "INTEGER", false, 0),
+];
 
 /// Why a downgrade was refused or failed. Every variant leaves the file
 /// unmodified.
@@ -113,12 +138,13 @@ pub enum DowngradeError {
     },
 
     /// `capability_events` is not exactly the v16 columns plus the v17
-    /// additive pair, so stamping it v16 could hand a v16 binary a layout it
-    /// does not understand.
+    /// additive pair -- by name, type, nullability, default, key, or hidden
+    /// flag -- so stamping it v16 could hand a v16 binary a layout it does not
+    /// understand.
     #[error("capability_events columns are not the additive v17 shape: found {found:?}")]
     NotAdditive {
-        /// The `(name, declared type)` columns actually present, in order.
-        found: Vec<(String, String)>,
+        /// The columns actually present, in physical order.
+        found: Vec<ColumnShape>,
     },
 
     /// Any other SQLite failure.
@@ -210,27 +236,48 @@ fn verify_additive_v17(conn: &Connection) -> Result<(), DowngradeError> {
 }
 
 /// Whether `columns` is exactly the v16 set followed by the v17 additive pair:
-/// same names, same declared types, same order, nothing missing or extra.
-fn is_additive_v17(columns: &[(String, String)]) -> bool {
+/// every column matching its frozen record in name, declared type, `NOT NULL`,
+/// default, primary-key position and hidden flag, in order, nothing missing or
+/// extra.
+fn is_additive_v17(columns: &[ColumnShape]) -> bool {
     let expected = V16_CAPABILITY_EVENTS_COLUMNS
         .iter()
         .chain(V17_ADDITIVE_COLUMNS);
     columns.len() == V16_CAPABILITY_EVENTS_COLUMNS.len() + V17_ADDITIVE_COLUMNS.len()
-        && columns
-            .iter()
-            .zip(expected)
-            .all(|((name, ty), (want_name, want_ty))| name == want_name && ty == want_ty)
+        && columns.iter().zip(expected).all(matches_frozen)
 }
 
-/// The `(name, declared type)` of every `capability_events` column, in
-/// physical order. An absent table yields an empty list, which the shape
-/// check rejects.
-fn capability_events_columns(conn: &Connection) -> Result<Vec<(String, String)>, DowngradeError> {
+/// Whether one live column matches its frozen record exactly.
+fn matches_frozen((column, frozen): (&ColumnShape, &FrozenColumn)) -> bool {
+    let &(name, declared_type, not_null, primary_key) = frozen;
+    column.name == name
+        && column.declared_type == declared_type
+        && column.not_null == not_null
+        && column.default.is_none()
+        && column.primary_key == primary_key
+        && column.hidden == 0
+}
+
+/// Every `capability_events` column, hidden ones included, in physical order.
+/// An absent table yields an empty list, which the shape check rejects.
+fn capability_events_columns(conn: &Connection) -> Result<Vec<ColumnShape>, DowngradeError> {
     let mut stmt = conn
-        .prepare("SELECT name, type FROM pragma_table_info('capability_events')")
+        .prepare(
+            "SELECT name, type, \"notnull\", dflt_value, pk, hidden \
+             FROM pragma_table_xinfo('capability_events')",
+        )
         .map_err(classify)?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([], |row| {
+            Ok(ColumnShape {
+                name: row.get(0)?,
+                declared_type: row.get(1)?,
+                not_null: row.get(2)?,
+                default: row.get(3)?,
+                primary_key: row.get(4)?,
+                hidden: row.get(5)?,
+            })
+        })
         .map_err(classify)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(classify)?;

@@ -233,6 +233,59 @@ fn classify_boundary_replays_and_reader_maps_a_matching_slice() {
 }
 
 #[test]
+fn try_read_events_reports_an_unopenable_ledger_as_open_failed() {
+    // Arrange: a boundary resolved against a ledger that is gone by the read.
+    let tmp = TempDir::new().expect("tempdir");
+    let reader = LedgerCapabilityReader::new(
+        tmp.path().join("missing.db"),
+        ReplayTombstone::new(1, CAT, OV),
+    );
+
+    // Act + Assert
+    assert!(matches!(
+        reader.try_read_events(),
+        Err(ReadFailure::OpenFailed)
+    ));
+    assert!(
+        reader.read_events().is_empty(),
+        "the infallible view degrades to no rows"
+    );
+}
+
+#[test]
+fn try_read_events_reports_an_undecodable_row_as_query_failed() {
+    // Arrange: a matching boundary followed by a row whose `ts` is not an
+    // integer, so the event query fails while decoding it.
+    let tmp = TempDir::new().expect("tempdir");
+    let ledger = tmp.path().join("usage.db");
+    let db = open(&ledger).expect("open ledger");
+    seed_tombstone(db.conn(), 100, i64::from(CAT), i64::try_from(OV).unwrap());
+    db.conn()
+        .execute(
+            "INSERT INTO capability_events (ts, verdict) VALUES ('not-a-timestamp', 'broken')",
+            [],
+        )
+        .expect("plant undecodable row");
+    drop(db);
+    let BoundaryOutcome::Replay(tombstone) = classify_boundary(&ledger, CAT, OV) else {
+        panic!("positive control: the boundary still classifies");
+    };
+    let reader = LedgerCapabilityReader::new(ledger, tombstone);
+
+    // Act + Assert
+    assert!(matches!(
+        reader.try_read_events(),
+        Err(ReadFailure::QueryFailed)
+    ));
+}
+
+#[test]
+fn read_failure_classes_are_stable_path_free_tokens() {
+    assert_eq!(ReadFailure::OpenFailed.as_str(), "open_failed");
+    assert_eq!(ReadFailure::QueryFailed.as_str(), "query_failed");
+}
+
+#[test]
 fn open_error_class_is_path_free_for_every_variant() {
     // Every class token is a fixed discriminant, never a path. The
     // path-bearing variants (Display embeds the DB path) must still map to a

@@ -233,37 +233,58 @@ impl CapabilityLedgerReader for LedgerCapabilityReader {
         Some(self.tombstone)
     }
 
+    /// Infallible view for the matching-boundary replay: a failed read yields
+    /// no rows and the rebuild degrades to an empty registry. Callers that
+    /// must not act on an empty slice use [`Self::try_read_events`].
     fn read_events(&self) -> Vec<ReplayRow> {
-        // A fresh open here can race the classify-time open (the daemon is the
-        // sole writer and may be live); a failure now yields no rows rather
-        // than a panic, and the rebuild degrades to an empty registry.
-        let db = match open_readonly(&self.db_path) {
-            Ok(db) => db,
-            Err(e) => {
-                tracing::warn!(
-                    db_path = %self.db_path.display(),
-                    error = %e,
-                    "usage ledger became unreadable between boundary read and event read; \
-                     leaving registry empty"
-                );
-                return Vec::new();
-            }
-        };
+        self.try_read_events().unwrap_or_else(|failure| {
+            tracing::warn!(
+                reason = failure.as_str(),
+                "capability event read failed after the boundary read; leaving registry empty"
+            );
+            Vec::new()
+        })
+    }
+}
 
-        match read_capability_events_after(db.conn(), self.tombstone.rowid, REBUILD_ROW_LIMIT) {
-            Ok(rows) => {
-                let loaded = rows.len();
-                self.loaded_rows.store(loaded, Ordering::Relaxed);
-                rows.into_iter().filter_map(|r| self.map_row(r)).collect()
-            }
-            Err(e) => {
-                tracing::warn!(
-                    db_path = %self.db_path.display(),
-                    error = %e,
-                    "capability event read failed; leaving registry empty"
-                );
-                Vec::new()
-            }
+impl LedgerCapabilityReader {
+    /// Read and map the post-boundary slice, distinguishing a failed read
+    /// from a genuinely empty slice.
+    ///
+    /// The fresh open here can race the classify-time open (the daemon is the
+    /// sole writer and may be live), so the ledger may have become unreadable
+    /// since the boundary was classified.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadFailure::OpenFailed`] when the read-only open fails, and
+    /// [`ReadFailure::QueryFailed`] when the event query or a row decode fails.
+    pub(crate) fn try_read_events(&self) -> Result<Vec<ReplayRow>, ReadFailure> {
+        let db = open_readonly(&self.db_path).map_err(|_| ReadFailure::OpenFailed)?;
+        let rows = read_capability_events_after(db.conn(), self.tombstone.rowid, REBUILD_ROW_LIMIT)
+            .map_err(|_| ReadFailure::QueryFailed)?;
+        self.loaded_rows.store(rows.len(), Ordering::Relaxed);
+        Ok(rows.into_iter().filter_map(|r| self.map_row(r)).collect())
+    }
+}
+
+/// Why a post-boundary event read failed. A path-free class: the underlying
+/// errors embed the DB path in their Display, so every logging or diagnostic
+/// site renders [`Self::as_str`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    /// The read-only open of the ledger failed.
+    OpenFailed,
+    /// The event query, or decoding one of its rows, failed.
+    QueryFailed,
+}
+
+impl ReadFailure {
+    /// The stable class token for this failure.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenFailed => "open_failed",
+            Self::QueryFailed => "query_failed",
         }
     }
 }
