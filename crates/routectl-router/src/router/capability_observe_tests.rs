@@ -23,7 +23,7 @@ use routectl_core::{
 use routectl_testkit::{CapturedEvent, capture_events};
 use serde_json::json;
 
-use crate::config::Config;
+use crate::config::{Config, CredentialSource, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::RouterOptions;
 
@@ -227,6 +227,97 @@ fn kill_switch_fully_disables_observation() {
     assert!(router.learned_capabilities.snapshot().is_empty());
     assert_eq!(router.metrics.verified_working_total(), 0);
     assert!(observe_warns(&events).is_empty());
+}
+
+// --- forwarded-credential gate -----------------------------------------
+
+/// A router with one `anthropic-api` provider entry `a1` whose credential
+/// source is `source`, and the dispatch target chain expansion builds for it.
+fn anthropic_router_and_target(source: CredentialSource) -> (Router, DispatchTarget) {
+    let mut config = Config::default();
+    config.providers.insert(
+        "a1".to_string(),
+        ProviderEntry::anthropic_api("literal:k").with_credential_source(source),
+    );
+    let router = Router::new(Arc::new(config));
+    let p: Arc<dyn Provider> = NoopProvider::new();
+    let target = router
+        .expand_chain_to_targets(
+            vec![Arc::new(ResolvedModel::new("m1", "a1", p, "wire-model"))],
+            None,
+        )
+        .pop()
+        .expect("one target for a non-seat model");
+    (router, target)
+}
+
+#[test]
+fn a_forwarded_credential_target_never_learns_a_positive() {
+    struct Case {
+        name: &'static str,
+        source: CredentialSource,
+        expect_learns: bool,
+    }
+    let cases = [
+        Case {
+            name: "forwarded credential",
+            source: CredentialSource::Forwarded,
+            expect_learns: false,
+        },
+        Case {
+            name: "own credential (positive control)",
+            source: CredentialSource::Own,
+            expect_learns: true,
+        },
+    ];
+    for case in cases {
+        // Arrange: the same verified structured-output evidence on each.
+        let (router, target) = anthropic_router_and_target(case.source);
+        assert_eq!(
+            target.use_forwarded_credential,
+            case.source == CredentialSource::Forwarded,
+            "{}: fixture must carry the credential source under test",
+            case.name,
+        );
+        let req = structured_output_request(&["name"]);
+        let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+        let mut meta = DispatchMeta::for_alias("m1");
+
+        // Act
+        let events = capture_events(|| {
+            router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+        });
+
+        // Assert: registry entry, ledger ride-along, counter, and WARN move
+        // together.
+        let expected = usize::from(case.expect_learns);
+        assert_eq!(
+            router.learned_capabilities.snapshot().len(),
+            expected,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            meta.capability_observations.len(),
+            expected,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            router.metrics.verified_working_total(),
+            expected as u64,
+            "{}",
+            case.name
+        );
+        assert_eq!(observe_warns(&events).len(), expected, "{}", case.name);
+        if case.expect_learns {
+            assert_eq!(meta.capability_observations[0].state_key, "a1#wire-model");
+            assert_eq!(
+                meta.capability_observations[0].provider_kind,
+                "anthropic-api"
+            );
+        }
+    }
 }
 
 // --- verified admission + ride-along -----------------------------------

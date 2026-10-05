@@ -96,9 +96,12 @@ impl Router {
     /// rides an acting observation out on `meta`.
     ///
     /// Short-circuits with ZERO detector runs / writes / ride-alongs when the
-    /// kill switch is off (`!config.capability.enabled`) or the served target
-    /// carries no provider-kind (a legacy / direct-construction target -- fail
-    /// closed, exactly as the learn path does).
+    /// kill switch is off (`!config.capability.enabled`), the served target
+    /// dispatches on a forwarded credential (the wire model is the client's,
+    /// so the target's lane does not describe what served -- the learn path
+    /// gates its negatives the same way), or the target carries no
+    /// provider-kind (a legacy / direct-construction target -- fail closed,
+    /// exactly as the learn path does).
     pub(super) fn observe_capabilities(
         &self,
         req: &ChatRequest,
@@ -107,7 +110,7 @@ impl Router {
         meta: &mut DispatchMeta,
         now: Instant,
     ) {
-        if !self.config.capability.enabled {
+        if !self.config.capability.enabled || target.use_forwarded_credential {
             return;
         }
         let Some(provider_kind) = target.provider_kind else {
