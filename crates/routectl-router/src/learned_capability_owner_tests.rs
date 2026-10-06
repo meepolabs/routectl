@@ -186,3 +186,65 @@ fn a_carried_entry_keeps_its_recorded_kind() {
     assert!(!acting_negative_acts(&next, "web_search", NEW));
     assert!(next.snapshot().is_empty());
 }
+
+/// The capability key a Bedrock writer reduces to its leaf and an
+/// identity-normalizing reader keeps whole: one raw key, two map keys.
+const BAG_PATH: &str = "additionalModelRequestFields.web_search";
+
+#[test]
+fn an_acting_read_drops_an_old_kind_entry_its_own_normalization_never_names() {
+    let reg = registry();
+    plant_negative(&reg, BAG_PATH, "bedrock");
+    plant_negative(&reg, "computer_use", OLD);
+    let other_lane = reg.observe_in_generation(
+        reg.generation(),
+        "beta#model-x",
+        BAG_PATH,
+        "bedrock",
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+        EvidenceSource::Live,
+        None,
+        Instant::now(),
+    );
+    assert!(other_lane.applied().is_some(), "the fixture must plant");
+    let resident = |reg: &LearnedCapabilityRegistry| -> Vec<(String, String)> {
+        let mut keys: Vec<(String, String)> = reg
+            .snapshot()
+            .into_iter()
+            .map(|e| (e.state_key, e.feature_key))
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert!(
+        resident(&reg).contains(&(LANE.to_string(), "web_search".to_string())),
+        "premise: the Bedrock writer stored the reduced leaf",
+    );
+
+    assert!(!acting_negative_acts(&reg, BAG_PATH, OLD));
+
+    assert_eq!(
+        resident(&reg),
+        vec![
+            ("alpha#model-x".to_string(), "computer_use".to_string()),
+            ("beta#model-x".to_string(), "web_search".to_string()),
+        ],
+        "the old-kind entry on the reader's lane is gone; the reader's own entry \
+         and another lane's entry are untouched",
+    );
+}
+
+#[test]
+fn a_write_under_a_new_kind_leaves_the_lanes_other_entries_alone() {
+    let reg = registry();
+    plant_negative(&reg, "computer_use", NEW);
+
+    plant_negative(&reg, "web_search", OLD);
+
+    assert_eq!(
+        reg.snapshot().len(),
+        2,
+        "a write replaces only its own key, never another owner's facts on the lane",
+    );
+}

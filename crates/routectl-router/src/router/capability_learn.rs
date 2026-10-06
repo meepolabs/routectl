@@ -185,34 +185,43 @@ pub struct CapabilityLearnEvent {
 impl Router {
     /// After a config-only carry-over, lapse into a single re-probe every
     /// learned negative whose EFFECTIVE operator override verdict changed
-    /// across the reload -- a `force_supported` mask (or any override cell)
-    /// added, removed, or flipped for that `(target, capability)`. The
-    /// operator's intent for the cell moved, so the resident learned verdict
-    /// is re-verified against live upstream behavior rather than trusted; the
-    /// entry is expired (decay clock reset), NOT dropped, so its observation
-    /// history and backoff survive. Entries whose override resolution is
-    /// unchanged ride across intact -- this never clears the whole registry
-    /// (that stays keyed to catalog / overlay changes).
+    /// across the reload for EVERY nickname on its lane -- a `force_supported`
+    /// mask (or any override cell) added, removed, or flipped at the provider
+    /// tier, or for each of the lane's models. The operator's intent for the
+    /// whole lane moved, so the resident learned verdict is re-verified against
+    /// live upstream behavior rather than trusted; the entry is expired (decay
+    /// clock reset), NOT dropped, so its observation history and backoff
+    /// survive.
+    ///
+    /// A change for only some of the lane's nicknames leaves the entry alone.
+    /// The lane is shared, and the override already applies per dispatch target
+    /// at the filter, so the changed nickname gets the operator's verdict while
+    /// a sibling whose intent did not move keeps acting on the learned one.
+    /// Lapsing the lane would instead hand every sibling a re-probe of a fact
+    /// nothing about its own configuration questioned. Entries whose override
+    /// resolution is unchanged ride across intact -- this never clears the
+    /// whole registry (that stays keyed to catalog / overlay changes).
     pub(super) fn expire_learned_on_override_change(&self, previous: &Self) {
         let now = Instant::now();
         for entry in self.learned_capabilities.snapshot() {
             let identities = self.override_identities_for_entry(&entry.state_key);
-            let changed = identities.iter().any(|(provider_name, nickname)| {
-                let provider_kind = self
-                    .config
-                    .providers
-                    .get(provider_name)
-                    .map_or("", |p| p.kind_str());
-                let before = previous
-                    .override_registry
-                    .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
-                    .map(|(verdict, _)| verdict);
-                let after = self
-                    .override_registry
-                    .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
-                    .map(|(verdict, _)| verdict);
-                before != after
-            });
+            let changed = !identities.is_empty()
+                && identities.iter().all(|(provider_name, nickname)| {
+                    let provider_kind = self
+                        .config
+                        .providers
+                        .get(provider_name)
+                        .map_or("", |p| p.kind_str());
+                    let before = previous
+                        .override_registry
+                        .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
+                        .map(|(verdict, _)| verdict);
+                    let after = self
+                        .override_registry
+                        .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
+                        .map(|(verdict, _)| verdict);
+                    before != after
+                });
             if !changed {
                 continue;
             }
@@ -252,9 +261,9 @@ impl Router {
     /// live `DispatchTarget` hands the override registry.
     ///
     /// Every capability namespace keys on a lane (`provider_entry#upstream`),
-    /// which several nicknames can share, so every one of them is returned: an
-    /// override cell changed for any of them changes the operator's intent for
-    /// the shared entry. A key that is not a lane resolves through
+    /// which several nicknames can share, so every one of them is returned: the
+    /// operator's intent for the shared entry moved only when it moved for all
+    /// of them. A key that is not a lane resolves through
     /// [`Self::override_identity_for`].
     fn override_identities_for_entry(&self, registry_key: &str) -> Vec<(String, String)> {
         match crate::state_key::StateKey::parse(registry_key) {

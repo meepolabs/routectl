@@ -4833,6 +4833,9 @@ pub fn routectl_router::router::Router::field_verdict_status(&self) -> alloc::ve
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
+pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
+impl routectl_router::router::Router
 pub fn routectl_router::router::Router::probe_scheduler_snapshot(&self) -> routectl_router::ProbeSchedulerSnapshot
 pub async fn routectl_router::router::Router::run_due_probes(&self) -> usize
 impl routectl_router::router::Router
@@ -12241,13 +12244,14 @@ pub fn routectl_router::LearnedCapabilityRegistry::observe_positive_in_generatio
 pub fn routectl_router::LearnedCapabilityRegistry::prepare_purge(&self, u64, &str, &str, &str) -> routectl_router::learned_capability::PurgePreparation
 pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome(&self, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant)
 pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome_in_generation(&self, u64, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant) -> routectl_router::GenerationOutcome<()>
+pub fn routectl_router::LearnedCapabilityRegistry::recorded_snapshot(&self) -> alloc::vec::Vec<routectl_router::RecordedLearnedEntry>
 pub fn routectl_router::LearnedCapabilityRegistry::remove_keyed(&self, &str, &str, &str) -> bool
 pub fn routectl_router::LearnedCapabilityRegistry::remove_keyed_in_generation(&self, u64, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::LearnedCapabilityRegistry::restore_purge(&self, routectl_router::learned_capability::PurgeLease)
 pub fn routectl_router::LearnedCapabilityRegistry::retune(&self, core::time::Duration, core::time::Duration, usize)
 pub fn routectl_router::LearnedCapabilityRegistry::rollback_pending_generation(&self, &routectl_router::BoundaryReceipt) -> routectl_router::BoundarySettlement
 pub fn routectl_router::LearnedCapabilityRegistry::snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
-pub fn routectl_router::LearnedCapabilityRegistry::with_boundary_cut<T>(&self, impl core::ops::function::FnOnce(&[routectl_router::LearnedRegistryEntry], u64) -> T, impl core::ops::function::FnOnce(&T) -> bool) -> routectl_router::BoundaryCut<T>
+pub fn routectl_router::LearnedCapabilityRegistry::with_boundary_cut<T>(&self, impl core::ops::function::FnOnce(&[routectl_router::RecordedLearnedEntry], u64) -> T, impl core::ops::function::FnOnce(&T) -> bool) -> routectl_router::BoundaryCut<T>
 impl core::fmt::Debug for routectl_router::LearnedCapabilityRegistry
 pub fn routectl_router::LearnedCapabilityRegistry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl !core::marker::Freeze for routectl_router::LearnedCapabilityRegistry
@@ -14042,6 +14046,62 @@ impl<T> typenum::type_operators::Same for routectl_router::ProviderRuntimePolicy
 pub type routectl_router::ProviderRuntimePolicy::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ProviderRuntimePolicy where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ProviderRuntimePolicy::into_shared(self) -> Shared
+pub struct routectl_router::RecordedLearnedEntry
+pub routectl_router::RecordedLearnedEntry::entry: routectl_router::LearnedRegistryEntry
+pub routectl_router::RecordedLearnedEntry::provider_kind: alloc::string::String
+impl core::clone::Clone for routectl_router::RecordedLearnedEntry
+pub fn routectl_router::RecordedLearnedEntry::clone(&self) -> routectl_router::RecordedLearnedEntry
+impl core::cmp::Eq for routectl_router::RecordedLearnedEntry
+impl core::cmp::PartialEq for routectl_router::RecordedLearnedEntry
+pub fn routectl_router::RecordedLearnedEntry::eq(&self, &routectl_router::RecordedLearnedEntry) -> bool
+impl core::fmt::Debug for routectl_router::RecordedLearnedEntry
+pub fn routectl_router::RecordedLearnedEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::RecordedLearnedEntry
+impl core::marker::Freeze for routectl_router::RecordedLearnedEntry
+impl core::marker::Send for routectl_router::RecordedLearnedEntry
+impl core::marker::Sync for routectl_router::RecordedLearnedEntry
+impl core::marker::Unpin for routectl_router::RecordedLearnedEntry
+impl core::marker::UnsafeUnpin for routectl_router::RecordedLearnedEntry
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::RecordedLearnedEntry
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::RecordedLearnedEntry
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::RecordedLearnedEntry where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::RecordedLearnedEntry::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::RecordedLearnedEntry where U: core::convert::From<T>
+pub fn routectl_router::RecordedLearnedEntry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::RecordedLearnedEntry where U: core::convert::Into<T>
+pub type routectl_router::RecordedLearnedEntry::Error = core::convert::Infallible
+pub fn routectl_router::RecordedLearnedEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::RecordedLearnedEntry where U: core::convert::TryFrom<T>
+pub type routectl_router::RecordedLearnedEntry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::RecordedLearnedEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::RecordedLearnedEntry where T: core::clone::Clone
+pub type routectl_router::RecordedLearnedEntry::Owned = T
+pub fn routectl_router::RecordedLearnedEntry::clone_into(&self, &mut T)
+pub fn routectl_router::RecordedLearnedEntry::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::RecordedLearnedEntry where T: core::clone::Clone
+pub fn routectl_router::RecordedLearnedEntry::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::RecordedLearnedEntry where T: 'static + ?core::marker::Sized
+pub fn routectl_router::RecordedLearnedEntry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::RecordedLearnedEntry where T: ?core::marker::Sized
+pub fn routectl_router::RecordedLearnedEntry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::RecordedLearnedEntry where T: ?core::marker::Sized
+pub fn routectl_router::RecordedLearnedEntry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::RecordedLearnedEntry where T: core::clone::Clone
+pub unsafe fn routectl_router::RecordedLearnedEntry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::RecordedLearnedEntry
+pub fn routectl_router::RecordedLearnedEntry::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::RecordedLearnedEntry where T: core::clone::Clone
+pub fn routectl_router::RecordedLearnedEntry::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::RecordedLearnedEntry
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::RecordedLearnedEntry where T: ?core::marker::Sized
+pub fn routectl_router::RecordedLearnedEntry::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::RecordedLearnedEntry::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::RecordedLearnedEntry
+impl<T> tracing::instrument::WithSubscriber for routectl_router::RecordedLearnedEntry
+impl<T> typenum::type_operators::Same for routectl_router::RecordedLearnedEntry
+pub type routectl_router::RecordedLearnedEntry::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RecordedLearnedEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::RecordedLearnedEntry::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::ReductionConfig
 pub routectl_router::ReductionConfig::enabled: bool
 impl core::clone::Clone for routectl_router::ReductionConfig
@@ -14563,6 +14623,9 @@ pub fn routectl_router::router::Router::fidelity_snapshot(&self) -> routectl_rou
 pub fn routectl_router::router::Router::field_verdict_status(&self) -> alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
+pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::probe_scheduler_snapshot(&self) -> routectl_router::ProbeSchedulerSnapshot
 pub async fn routectl_router::router::Router::run_due_probes(&self) -> usize

@@ -2458,7 +2458,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   must keep the settings it was serving under. Evicts no catalog-scoped entry
   either way: that eviction is the boundary transition's job, so a failed
   boundary leaves the store untouched. The one removal is the owner sweep
-  (`capability_owner_sweep.rs`), which runs before any boundary cut. The
+  (`capability_owner_sweep.rs`), which runs here only on a config-only
+  reload; a revision-changing reload defers it to the boundary commit. The
   invalidation WARN + counter still fire),
   `registry_generation` / `set_pending_registry_generation` (the generation token
   submitted with every registry operation; the reload coordinator stamps the
@@ -3749,7 +3750,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capability_matcher::has_feature_naming_table` so it never fires on
   tableless providers),
   `expire_learned_on_override_change`/`override_identity_for` (targeted expiry
-  on override-cell change), `learned_capability_snapshot` (the status
+  on override-cell change, only when the change applies to every nickname on
+  the entry's lane; a one-nickname change is left to the per-target filter), `learned_capability_snapshot` (the status
   read-model), and `learned_replay` (the crate-internal `&self` delegate handing
   the dispatch arm the `ReplayLearnRegistry` for its carry-slot claim)
 - `src/router/capability_observe.rs` -- response-evidence observer: the
@@ -3775,12 +3777,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format.schema` or a strict tool's `input_schema`),
   `forces_web_search` (bounded `tool_choice` directive read),
   `reasoning_requested`, `cache_requested`
-- `src/router/capability_owner_sweep.rs` -- `drop_unowned_learned_entries`,
-  run by `carry_over_learned_from` after the attach: removes (through the
-  generation barrier) every lane-keyed entry whose provider entry the new
-  config dropped or now configures under a different kind than the outgoing
-  config had, resetting a dropped field verdict's canary state; same rule as
-  boot replay via `capability_owner::owner_decision`
+- `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
+  Router's config own a `RecordedLearnedEntry`) and
+  `sweep_unowned_learned_entries`, which removes (through the generation
+  barrier, only while the entry still records the kind it was snapshotted
+  with) every lane-keyed entry whose provider entry this config dropped or
+  configures under a kind other than the one the ENTRY recorded, resetting a
+  dropped field verdict's canary state; same rule as boot replay via
+  `capability_owner::owner_decision`. Run by `carry_over_learned_from` on a
+  config-only reload, and by the boundary commit arm on a revision-changing
+  one
 - `src/router/capability_purge.rs` -- operator-initiated purge of ONE
   `(StateKey, capability)` learned entry, as a TWO-PHASE protocol whose ORDER is the contract (a purge is
   a memory mutation plus a SQLite transaction, and the transaction must not be
@@ -3994,9 +4000,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/learned_capability.rs` -- ONE instance is shared across Router
   generations (a reload attaches, never copies), which the generation barrier and
   the retunable tuning both follow from. Each entry records the provider kind
-  of the write that created it; the guarded acting reads and every write drop
-  an entry whose kind is not the caller's (`drop_other_owner`), so an
-  outgoing Router's in-flight write never acts after a kind-flip reload: `generation` / `advance_generation` /
+  of the write that created it; every write replaces an entry at its own key
+  whose kind is not the caller's (`drop_other_owner`), and the guarded acting
+  reads drop every such entry on the caller's lane
+  (`drop_other_owners_on_lane`, a range over the lane-first ordered map), so
+  an outgoing Router's in-flight write never acts after a kind-flip reload.
+  `recorded_snapshot` / `RecordedLearnedEntry` carry that kind for the owner
+  sweep and the boundary restatement: `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
   plus the catalog-scoped prune under one acquisition), the `*_in_generation`
   entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
@@ -4494,8 +4504,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   an envelope-field verdict is catalog-independent and replays under a
   superseded revision, matching the same predicate's use at
   `Router::carry_over_learned_from` so a verdict surviving a reload also
-  survives the next restart). `rebuild_capabilities_into(reader, registry)`
-  replays
+  survives the next restart). `rebuild_capabilities_into(reader, registry,
+  providers)` -- `providers` is the current `[providers]` table the owner
+  check holds each lane-keyed row to -- replays
   survivors oldest-first (same-instant rows tie-break by rowid, so
   negative-then-cleared is deterministic): the source token is parsed once and
   threaded into the shared admission so probe and live rows run the SAME arms
@@ -4514,8 +4525,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   skip + WARN, never panic. Each post-boundary row is first mapped to the
   current vocabulary (`capability_vocab::map_to_current`, the row carrying
   `vocab_version` via `with_vocab_version`); an unmappable row bumps
-  `skipped_vocab` and never reaches an arm; a field row whose lane key does
-  not parse as a `StateKey` bumps `skipped_lane`; a lane-keyed row that fails
+  `skipped_vocab` and never reaches an arm; a row in any namespace whose lane
+  key does not parse as a `StateKey` bumps `skipped_lane` (before the owner
+  and revision checks); a lane-keyed row that fails
   `capability_owner::owner_decision` against the `providers` table the caller
   passes bumps `skipped_owner`. A missing tombstone replays nothing
   (fail-closed; the caller writes the fresh boot tombstone)
@@ -5703,13 +5715,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   router, in two phases. `admit_capability_boundary(usage, router) ->
   Result<AdmittedBoundary, BatchCommit>` takes the CUT: under
   `LearnedCapabilityRegistry::with_boundary_cut` (registry guard held) it
-  snapshots the catalog-independent survivors and ADMITS one atomic batch of the
-  new tombstone plus a restatement of each -- indivisible, so no observation can
+  snapshots the catalog-independent survivors the replacement config owns and
+  ADMITS one atomic batch of the new tombstone plus a restatement of each,
+  stamped with the kind the entry recorded -- indivisible, so no observation can
   land between snapshot and submit and be lost by both. `AdmittedBoundary::settle`
   then runs with the guard RELEASED (a lock is never held across SQLite),
   selecting the receipt against the shutdown signal, and only on commit runs
   `commit_boundary_transition` (generation advance + catalog-scoped prune) as one
-  transition. `BoundaryOutcomeReport::{Committed{survivors,generation,pruned},
+  transition, then the deferred retune and owner sweep. `BoundaryOutcomeReport::{Committed{survivors,generation,pruned},
   Failed(BatchCommit), Abandoned}`; `Abandoned` is shutdown winning, which
   publishes nothing and must not resume serving. Load-bearing because the cold-boot read starts at the
   NEWEST tombstone: moving the boundary without re-appending the survivors

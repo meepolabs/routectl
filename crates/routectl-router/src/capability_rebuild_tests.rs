@@ -807,13 +807,13 @@ fn one_replayed_inferred_row_stays_pending_while_two_act() {
     );
 }
 
-/// A field row keyed by something that is not a learned lane -- the shape an
-/// earlier build wrote with a model nickname under the current vocabulary --
-/// is skipped whole and counted, never replayed onto whatever lane the string
-/// might be read as. A catalog-scoped row with the same key is left to the
-/// existing checks, and a lane-keyed field row in the same slice still replays.
+/// A current-vocabulary row keyed by something that is not a learned lane --
+/// the shape an earlier build wrote with a model nickname -- is skipped whole
+/// and counted, in BOTH namespaces: a non-lane key names no provider entry the
+/// owner check could hold it to. Skipped before the owner and revision checks,
+/// so it never counts there. A lane-keyed row in the same slice still replays.
 #[test]
-fn a_field_row_whose_lane_does_not_parse_is_skipped_and_counted() {
+fn a_row_whose_lane_does_not_parse_is_skipped_and_counted() {
     let base = Instant::now();
     let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
         .expect("a qualified dotted path mints a key");
@@ -821,27 +821,29 @@ fn a_field_row_whose_lane_does_not_parse_is_skipped_and_counted() {
     nickname_field.state_key = "opus".to_string();
     let mut nickname_catalog = broken(3, base, "web_search");
     nickname_catalog.state_key = "opus".to_string();
-    let lane_field = broken(4, base, &field_key);
+    let mut nickname_stale = broken(4, base, "computer_use");
+    nickname_stale.state_key = "opus".to_string();
+    nickname_stale.catalog_version = CV + 1;
+    nickname_stale.provider_kind = "anthropic-api".to_string();
+    let lane_field = broken(5, base, &field_key);
     let reader = FakeReader {
         tombstone: Some(ReplayTombstone::new(1, CV, OV)),
-        rows: vec![nickname_field, nickname_catalog, lane_field],
+        rows: vec![nickname_field, nickname_catalog, nickname_stale, lane_field],
     };
     let reg = registry();
 
     let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
-    assert_eq!(summary.skipped_lane, 1, "only the nickname-keyed field row");
-    assert_eq!(summary.replayed_negative, 2);
+    assert_eq!(summary.skipped_lane, 3, "every nickname-keyed row");
+    assert_eq!(summary.skipped_owner, 0);
+    assert_eq!(summary.skipped_revision, 0);
+    assert_eq!(summary.replayed_negative, 1);
     let resident: Vec<(String, String)> = reg
         .snapshot()
         .into_iter()
         .map(|e| (e.state_key, e.feature_key))
         .collect();
-    assert!(
-        !resident.contains(&("opus".to_string(), field_key.clone())),
-        "the unparseable field row must not become resident: {resident:?}",
-    );
-    assert!(resident.contains(&(LANE.to_string(), field_key)));
+    assert_eq!(resident, vec![(LANE.to_string(), field_key)]);
 }
 
 /// A lane-keyed row is replayed only while the provider entry its lane names

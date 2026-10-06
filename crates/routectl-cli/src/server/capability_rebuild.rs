@@ -181,10 +181,9 @@ fn restate_survivors_past_new_boundary(
     let scratch =
         LearnedCapabilityRegistry::new(live.decay(), live.inferred_window(), live.max_entries());
     let _ = rebuild_capabilities_into(&slice, &scratch, &router.config.providers);
-    let survivors = scratch.snapshot();
+    let survivors = scratch.recorded_snapshot();
     let batch = boundary_batch(
         &survivors,
-        router,
         epoch_ms_now(),
         catalog_version,
         overlay_revision,

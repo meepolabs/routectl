@@ -35,11 +35,22 @@
 //! entry's own `last_seen`, never from the reload instant: stamping "now"
 //! would silently extend every wire-shape verdict's life on every config
 //! reload, and a verdict could never lapse on a daemon that reloads
-//! regularly.
+//! regularly. For the same reason its provider kind is the kind the entry was
+//! WRITTEN under, never the replacement router's: a request still holding the
+//! outgoing router can write a lane after the carry-over, and stamping that
+//! entry with the new kind would have the next boot replay it as owned by an
+//! entry it never described.
+//!
+//! # Ownership at the boundary
+//!
+//! The owner sweep is deferred to the commit, because a refused or failed
+//! boundary leaves the previous router live and its entries must still be
+//! there. So the cut can see entries the replacement config does not own; it
+//! restates only the owned ones, and the commit arm sweeps the rest.
 
 use std::sync::Arc;
 
-use routectl_router::{LearnedCapabilityRegistry, LearnedRegistryEntry, Router};
+use routectl_router::{LearnedCapabilityRegistry, RecordedLearnedEntry, Router};
 use routectl_usage::{BatchCommit, BatchReceipt, CapabilityEvent, UsageHandle};
 
 /// The outcome of committing a reload's replay boundary.
@@ -51,7 +62,8 @@ use routectl_usage::{BatchCommit, BatchReceipt, CapabilityEvent, UsageHandle};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BoundaryOutcomeReport {
     /// The tombstone and every survivor restatement are durable, the
-    /// generation advanced, and the catalog-scoped entries were evicted.
+    /// generation advanced, the catalog-scoped entries were evicted, and the
+    /// entries the replacement config does not own were swept.
     Committed {
         /// Number of catalog-independent entries restated past the boundary.
         survivors: usize,
@@ -110,13 +122,17 @@ pub(crate) fn admit_capability_boundary(
     // concurrent commit landing between the read and the cut.
     let cut = registry.with_boundary_cut(
         |survivors, pending_generation| {
-            let batch =
-                boundary_batch(survivors, router, now_ms, catalog_version, overlay_revision);
+            let owned: Vec<RecordedLearnedEntry> = survivors
+                .iter()
+                .filter(|survivor| router.owns_learned_entry(survivor))
+                .cloned()
+                .collect();
+            let batch = boundary_batch(&owned, now_ms, catalog_version, overlay_revision);
             // Admission only -- non-blocking, so no lock is held across I/O. The
             // registry installs the pending generation itself, inside this same
             // ordered acquisition, when the admission below reports success.
             let admitted = usage.admit_capability_batch(batch, pending_generation);
-            (admitted, survivors.len())
+            (admitted, owned.len())
         },
         |(admitted, _survivors)| admitted.is_ok(),
     );
@@ -177,10 +193,10 @@ pub(crate) fn admit_capability_boundary(
 /// The single owner of how a surviving verdict is re-appended past a new
 /// boundary, for every caller that moves one. `now_ms` is the wall-clock
 /// instant the batch is built at; each restated row is stamped from its
-/// entry's own age relative to it.
+/// entry's own age relative to it, and with the provider kind the entry
+/// recorded.
 pub(crate) fn boundary_batch(
-    survivors: &[LearnedRegistryEntry],
-    router: &Router,
+    survivors: &[RecordedLearnedEntry],
     now_ms: i64,
     catalog_version: u32,
     overlay_revision: u64,
@@ -193,10 +209,10 @@ pub(crate) fn boundary_batch(
         signed_catalog,
         signed_overlay,
     ));
-    for survivor in survivors {
-        let provider_kind = crate::handlers::usage_capture::persisted_provider_kind(
-            router.provider_kind_for_state_key(&survivor.state_key),
-        );
+    for recorded in survivors {
+        let survivor = &recorded.entry;
+        let provider_kind =
+            crate::handlers::usage_capture::persisted_provider_kind(&recorded.provider_kind);
         // An INFERRED negative acts only once corroborated, and its
         // corroborating observation must arrive INSIDE the inferred
         // window -- a later one RESETS the entry to a fresh pending
@@ -324,10 +340,12 @@ impl AdmittedBoundary {
                     return BoundaryOutcomeReport::Failed(BatchCommit::Unavailable);
                 };
                 // Publication: only now does the reload's capability tuning
-                // apply. A failed or abandoned boundary leaves the previous
-                // Router live, and it must keep the settings it was serving
-                // under.
+                // apply, and only now are the entries the replacement config
+                // does not own removed. A failed or abandoned boundary leaves the
+                // previous Router live, and it must keep the settings it was
+                // serving under and the entries it still owns.
                 router.apply_capability_tuning();
+                router.sweep_unowned_learned_entries();
                 tracing::info!(
                     generation,
                     pruned_catalog_scoped = pruned,

@@ -318,7 +318,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
             None,
         ),
         (
-            "claude-nick",
+            "gpt-nick#claude-nick",
             STRUCTURED_OUTPUT,
             "verified",
             "f3",
@@ -441,7 +441,8 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
     assert_eq!(ws.verdict, Verdict::LearnedBroken(FailurePhase::F1));
     assert_eq!(acting_decision(ws, now), ActingDecision::RouteAway);
 
-    let so = find(&rebuilt, "claude-nick", STRUCTURED_OUTPUT).expect("structured_output resident");
+    let so = find(&rebuilt, "gpt-nick#claude-nick", STRUCTURED_OUTPUT)
+        .expect("structured_output resident");
     assert_eq!(so.verdict, Verdict::VerifiedWorking);
     assert_eq!(acting_decision(so, now), ActingDecision::Allow);
 
@@ -548,7 +549,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     h3.try_send_capability_event_in_generation(
         broken(
             now_ms(),
-            "claude-nick",
+            "gpt-nick#claude-nick",
             COMPUTER_USE,
             "self-identifying",
             cat,
@@ -566,7 +567,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
 
     // Assert 2: the new-revision negative replays; the pre-bump one stays gone.
     assert!(
-        find(&snap, "claude-nick", COMPUTER_USE).is_some(),
+        find(&snap, "gpt-nick#claude-nick", COMPUTER_USE).is_some(),
         "a negative learned under the new revision replays across restart",
     );
     assert!(
@@ -658,12 +659,26 @@ async fn reload_then_restart_replays_only_post_reload_negatives() {
     let (handle, writer) = writer_at(&ledger);
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 0), 1);
     handle.try_send_capability_event_in_generation(
-        broken(ts, "pre-lane", WEB_SEARCH, "self-identifying", cat, 0),
+        broken(
+            ts,
+            "gpt-nick#pre-lane",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            0,
+        ),
         1,
     );
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 1), 1);
     handle.try_send_capability_event_in_generation(
-        broken(ts, "post-lane", WEB_SEARCH, "self-identifying", cat, 1),
+        broken(
+            ts,
+            "gpt-nick#post-lane",
+            WEB_SEARCH,
+            "self-identifying",
+            cat,
+            1,
+        ),
         1,
     );
     drop(handle);
@@ -679,11 +694,11 @@ async fn reload_then_restart_replays_only_post_reload_negatives() {
     // matching revision) replays; the pre-reload one sits before the boundary.
     assert_eq!(snap.len(), 1);
     assert!(
-        find(&snap, "post-lane", WEB_SEARCH).is_some(),
+        find(&snap, "gpt-nick#post-lane", WEB_SEARCH).is_some(),
         "post-reload negative replays"
     );
     assert!(
-        find(&snap, "pre-lane", WEB_SEARCH).is_none(),
+        find(&snap, "gpt-nick#pre-lane", WEB_SEARCH).is_none(),
         "pre-reload negative is behind the boundary"
     );
 }
@@ -751,7 +766,7 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
     handle.try_send_capability_event_in_generation(
         cap_event(
             ts,
-            "probe-lane",
+            "gpt-nick#probe-lane",
             WEB_SEARCH,
             "broken",
             "f1",
@@ -766,7 +781,7 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
     handle.try_send_capability_event_in_generation(
         cap_event(
             ts,
-            "wobble-lane",
+            "gpt-nick#wobble-lane",
             WEB_SEARCH,
             "wobbled",
             "f1",
@@ -781,7 +796,7 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
     handle.try_send_capability_event_in_generation(
         cap_event(
             ts,
-            "telepathy-lane",
+            "gpt-nick#telepathy-lane",
             WEB_SEARCH,
             "broken",
             "f1",
@@ -796,7 +811,7 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
     handle.try_send_capability_event_in_generation(
         broken(
             ts,
-            "valid-lane",
+            "gpt-nick#valid-lane",
             WEB_SEARCH,
             "self-identifying",
             cat,
@@ -820,11 +835,11 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
     let snap = router.learned_capability_snapshot();
     assert_eq!(snap.len(), 2);
     assert!(
-        find(&snap, "valid-lane", WEB_SEARCH).is_some(),
+        find(&snap, "gpt-nick#valid-lane", WEB_SEARCH).is_some(),
         "the valid negative replays"
     );
     assert!(
-        find(&snap, "probe-lane", WEB_SEARCH).is_some(),
+        find(&snap, "gpt-nick#probe-lane", WEB_SEARCH).is_some(),
         "the probe negative replays through the shared arms"
     );
 
@@ -867,7 +882,7 @@ async fn retention_prune_never_crosses_the_tombstone() {
     handle.try_send_capability_event_in_generation(
         broken(
             old,
-            "ancient-pre",
+            "gpt-nick#ancient-pre",
             WEB_SEARCH,
             "self-identifying",
             cat,
@@ -880,7 +895,7 @@ async fn retention_prune_never_crosses_the_tombstone() {
     handle.try_send_capability_event_in_generation(
         broken(
             old,
-            "protected-post",
+            "gpt-nick#protected-post",
             COMPUTER_USE,
             "self-identifying",
             cat,
@@ -902,11 +917,11 @@ async fn retention_prune_never_crosses_the_tombstone() {
     let rows = read_capability_events_after(db.conn(), 0, 100).expect("read ledger");
     let lanes: Vec<String> = rows.iter().filter_map(|r| r.lane_key.clone()).collect();
     assert!(
-        !lanes.iter().any(|l| l == "ancient-pre"),
+        !lanes.iter().any(|l| l == "gpt-nick#ancient-pre"),
         "the old pre-tombstone row is pruned"
     );
     assert!(
-        lanes.iter().any(|l| l == "protected-post"),
+        lanes.iter().any(|l| l == "gpt-nick#protected-post"),
         "the post-tombstone row survives the prune"
     );
     drop(db);
@@ -918,11 +933,11 @@ async fn retention_prune_never_crosses_the_tombstone() {
     // Assert 2: the survivor is resident (old, so lapsed to re-probe); the
     // pruned pre-tombstone row is absent.
     assert!(
-        find(&snap, "protected-post", COMPUTER_USE).is_some(),
+        find(&snap, "gpt-nick#protected-post", COMPUTER_USE).is_some(),
         "the survivor replays after prune"
     );
     assert!(
-        find(&snap, "ancient-pre", WEB_SEARCH).is_none(),
+        find(&snap, "gpt-nick#ancient-pre", WEB_SEARCH).is_none(),
         "the pruned row cannot replay"
     );
 }

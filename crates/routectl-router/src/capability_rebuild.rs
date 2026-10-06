@@ -31,7 +31,7 @@ use routectl_core::capability::{
     EvidenceSource, FailurePhase, SignalTier, is_known_evidence_class,
 };
 
-use crate::capability_owner::{OwnerDecision, owner_decision};
+use crate::capability_owner::owner_decision;
 use crate::config::ProviderEntry;
 use crate::learned_capability::LearnedCapabilityRegistry;
 
@@ -249,9 +249,10 @@ pub struct CapabilityRebuildSummary {
     /// tokens -- distinct from `skipped_unknown`, which counts a token the
     /// CURRENT vocabulary does not recognize.
     pub skipped_vocab: usize,
-    /// Envelope-field events skipped because their lane key does not parse as
-    /// a learned lane (`provider_entry#upstream`): a field verdict keys on the
-    /// lane, so a row keyed any other way names no identity this build can
+    /// Events in the current vocabulary skipped because their lane key does
+    /// not parse as a learned lane (`provider_entry#upstream`): every current
+    /// fact keys on the lane, so a row keyed any other way names no provider
+    /// entry the owner check could hold it to, and no identity this build can
     /// attribute it to.
     pub skipped_lane: usize,
     /// Lane-keyed events skipped because the provider entry their lane names
@@ -306,16 +307,16 @@ pub fn rebuild_capabilities_into(
                 continue;
             }
         };
-        if !field_row_names_a_lane(&row) {
+        let Some(lane) = crate::state_key::StateKey::parse(&row.state_key) else {
             tracing::warn!(
                 event = "rebuild_skip",
                 reason = "unparseable_lane",
-                "capability rebuild skipped a field row whose lane key is not a learned lane",
+                "capability rebuild skipped a row whose lane key is not a learned lane",
             );
             summary.skipped_lane += 1;
             continue;
-        }
-        if let Some(reason) = row_owner(&row, providers).skip_reason() {
+        };
+        if let Some(reason) = owner_decision(&lane, &row.provider_kind, providers).skip_reason() {
             tracing::warn!(
                 event = "rebuild_skip",
                 reason,
@@ -336,24 +337,6 @@ pub fn rebuild_capabilities_into(
         replay_row(row, registry, &mut summary);
     }
     summary
-}
-
-/// Whether `row` is keyed the way its namespace requires. A catalog-scoped
-/// row is left to the existing checks; a field row must carry a lane key.
-fn field_row_names_a_lane(row: &CapabilityEventRow) -> bool {
-    crate::field_capability::capability_key_is_catalog_scoped(&row.capability)
-        || crate::state_key::StateKey::parse(&row.state_key).is_some()
-}
-
-/// The owner check for one row. A row whose key is not a lane names no
-/// provider entry to check; the namespace check above already decided it.
-fn row_owner(
-    row: &CapabilityEventRow,
-    providers: &BTreeMap<String, ProviderEntry>,
-) -> OwnerDecision {
-    crate::state_key::StateKey::parse(&row.state_key).map_or(OwnerDecision::Owned, |lane| {
-        owner_decision(&lane, &row.provider_kind, providers)
-    })
 }
 
 /// Replay one surviving row through the matching admission call. The parsed

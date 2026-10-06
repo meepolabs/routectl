@@ -192,7 +192,7 @@ pub use k_estimator::{
 };
 pub use learned_capability::{
     BoundaryCut, BoundaryReceipt, BoundarySettlement, GenerationOutcome, LearnedCapabilityRegistry,
-    LearnedRegistryEntry,
+    LearnedRegistryEntry, RecordedLearnedEntry,
 };
 pub use override_registry::{
     OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,

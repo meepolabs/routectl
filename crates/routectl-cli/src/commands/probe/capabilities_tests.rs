@@ -402,6 +402,14 @@ async fn router_and_fresh_db(tmp: &Path, db_path: &Path) -> (routectl_router::Ro
 
     let mut config = Config::default();
     config.usage.db_path = tmp.join("router-usage.db");
+    // Owns the lane the replayed probe plan writes under, at the plan's kind.
+    config.providers.insert(
+        "probed".to_string(),
+        routectl_router::ProviderEntry::openai_compat(
+            "https://probed.example.test/v1",
+            "literal:k",
+        ),
+    );
     let config = Arc::new(config);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     let router = crate::server::build_router_from_config(config, secrets)
@@ -464,7 +472,7 @@ fn rebuild_summary(
                 r.evidence_class,
                 r.capability.expect("capability"),
                 r.lane_key.expect("lane_key"),
-                String::new(),
+                r.provider_kind.unwrap_or_default(),
                 u32::try_from(r.catalog_version.expect("cv")).unwrap(),
                 u64::try_from(r.overlay_revision.expect("ov")).unwrap(),
             )
@@ -513,7 +521,7 @@ async fn probe_broken_into_ledger(
     );
     let dispatcher = ScriptedDispatch::new(vec![Err(err)]);
     let plan = CapabilityProbePlan {
-        state_key: "opus".to_string(),
+        state_key: "probed#test-model".to_string(),
         provider_kind: "openai-compat".to_string(),
         model: "test-model".to_string(),
         catalog_version: event_rev.0,

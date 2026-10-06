@@ -1214,6 +1214,7 @@ Summary (grep the `event` field to isolate a kind):
 | `event` | Level | Module target | Message |
 |---|---|---|---|
 | `learn` | WARN | `routectl_router::router` | `learned-capability negative observed` |
+| `observe` | WARN | `routectl_router::router` | `response-evidence capability observation acted` |
 | `clear` | INFO | `routectl_router::learned_capability` | `learned-capability negative cleared by successful re-probe` |
 | `purge` | INFO | `routectl_router::router::capability_purge` | `operator purged a learned-capability entry` |
 | `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
@@ -1279,7 +1280,8 @@ resolver attributed the fault to (e.g. `web_search`, `structured_output`)
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `learn`. |
-| `state_key` | string | The dispatch target's session/target key. |
+| `state_key` | string | The dispatch target's runtime key (`nickname[#member]`), the breaker / RPM identity. |
+| `lane` | string | The learned lane the negative was recorded on (`provider_entry#upstream`): the key the registry, the ledger `lane_key`, and `capability purge` use. Shared by every nickname on that provider entry and upstream. |
 | `capability_key` | string | The normalized canonical capability token learned unsupported. |
 | `provider_kind` | string | The target provider's egress kind (`anthropic-api`, `openai-compat`, ...). |
 | `upstream_status` | integer | The upstream HTTP status that carried the rejection (`400` or `422`). |
@@ -1291,10 +1293,36 @@ resolver attributed the fault to (e.g. `web_search`, `structured_output`)
 
 ```
 WARN routectl_router::router event=learn state_key=m1
-  capability_key=structured_output provider_kind=openai-compat
+  lane=openai#gpt-4.1 capability_key=structured_output provider_kind=openai-compat
   upstream_status=400 upstream_code=unsupported_parameter
   upstream_param=response_format signal_tier=self-identifying
   observations=1 acting=true "learned-capability negative observed"
+```
+
+### `observe` (WARN)
+
+Emitted when response evidence (a structural positive, or a suspected absence
+on a request that asked for the capability) changes what a lane's learned
+entry acts on. A refresh of an already-recorded positive emits nothing.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `observe`. |
+| `state_key` | string | The served target's runtime key (`nickname[#member]`). |
+| `lane` | string | The learned lane the observation was recorded on (`provider_entry#upstream`). |
+| `capability_key` | string | The normalized capability token observed. |
+| `provider_kind` | string | The served provider's egress kind. |
+| `evidence_class` | string | The pinned observation-evidence token the detector matched. |
+| `direction` | string | `verified` or `suspect_absence`. |
+| `signal_tier` | string | `self-identifying` or `inferred`. |
+| `source` | string | Always `live`. |
+
+```
+WARN routectl_router::router event=observe state_key=sonnet
+  lane=anthropic#claude-sonnet-4-5 capability_key=web_search
+  provider_kind=anthropic-api evidence_class=search_blocks direction=verified
+  signal_tier=self-identifying source=live
+  "response-evidence capability observation acted"
 ```
 
 ### `clear` (INFO)
@@ -1304,13 +1332,13 @@ Emitted when a successful re-probe clears a resident learned negative.
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `clear`. |
-| `state_key` | string | The target's session/target key. |
+| `state_key` | string | The learned lane (`provider_entry#upstream`) of the cleared entry. |
 | `capability_key` | string | The normalized capability token cleared. |
 | `signal_tier` | string | `self-identifying` or `inferred` (from the cleared entry). |
 
 ```
-INFO routectl_router::learned_capability event=clear state_key=nick
-  capability_key=web_search signal_tier=self-identifying
+INFO routectl_router::learned_capability event=clear
+  state_key=anthropic#claude-sonnet-4-5 capability_key=web_search signal_tier=self-identifying
   "learned-capability negative cleared by successful re-probe"
 ```
 
@@ -1332,13 +1360,13 @@ request body, prompt, upstream text, or caller address ever appears.
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `purge`. |
-| `state_key` | string | The target's session/target key, as requested. |
+| `state_key` | string | The learned lane (`provider_entry#upstream`), as requested. |
 | `capability_key` | string | The NORMALIZED capability token the purge was keyed on. |
 | `removed` | bool | `true` when a resident entry was removed; `false` for a clean no-op on a key that held nothing. |
 
 ```
-INFO routectl_router::router::capability_purge event=purge state_key=sonnet
-  capability_key=web_search removed=true
+INFO routectl_router::router::capability_purge event=purge
+  state_key=anthropic#claude-sonnet-4-5 capability_key=web_search removed=true
   "operator purged a learned-capability entry"
 ```
 
@@ -1363,7 +1391,7 @@ or `write_failed`).
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `purge_abandoned`. |
-| `state_key` | string | The target's session/target key, as requested. |
+| `state_key` | string | The learned lane (`provider_entry#upstream`), as requested. |
 | `capability_key` | string | The NORMALIZED capability token the purge was keyed on. |
 
 A `purge_abandoned` line is never accompanied by a `cleared` row, which is
@@ -1417,13 +1445,13 @@ re-probe.
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `expire_probe`. |
-| `state_key` | string | The target's session/target key. |
+| `state_key` | string | The learned lane (`provider_entry#upstream`) being re-probed. |
 | `capability_key` | string | The normalized capability token being re-probed. |
 | `signal_tier` | string | `self-identifying` or `inferred`. |
 
 ```
-INFO routectl_router::learned_capability event=expire_probe state_key=nick
-  capability_key=web_search signal_tier=self-identifying
+INFO routectl_router::learned_capability event=expire_probe
+  state_key=anthropic#claude-sonnet-4-5 capability_key=web_search signal_tier=self-identifying
   "lapsed learned negative admitted for its single re-probe"
 ```
 
@@ -1435,13 +1463,13 @@ safety valve, not a routine cache policy.
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `evict`. |
-| `state_key` | string | The evicted entry's session/target key. |
+| `state_key` | string | The evicted entry's learned lane (`provider_entry#upstream`). |
 | `capability_key` | string | The evicted entry's capability token. |
 | `max_entries` | integer | The registry capacity that triggered eviction. |
 
 ```
-WARN routectl_router::learned_capability event=evict state_key=n
-  capability_key=cap_a max_entries=2
+WARN routectl_router::learned_capability event=evict
+  state_key=anthropic#claude-sonnet-4-5 capability_key=cap_a max_entries=2
   "learned-capability registry at capacity; evicted oldest entry"
 ```
 
@@ -1577,8 +1605,11 @@ WARN routectl_router::router event=invalidation catalog_changed=true
 ### `owner_sweep` (INFO)
 
 Emitted on a hot reload when learned capabilities were dropped because the
-provider entry their lane names was removed from `[providers]` or changed
-`kind`. A same-kind `base_url` change drops nothing. Each dropped entry also
+provider entry their lane names was removed from `[providers]`, or now has a
+`kind` other than the one the entry was written under. A same-kind `base_url`
+change drops nothing. A config-only reload sweeps at the reload; a reload that
+moves the catalog or overlay revision sweeps only once its replay boundary has
+committed, so a failed boundary leaves the previous router's entries in place. Each dropped entry also
 emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
 `owner_kind_changed`), the sanitized `state_key`, and `capability_key`.
 
@@ -1589,7 +1620,8 @@ emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
 
 A request still holding the pre-reload router can write a lane after the sweep.
 Such an entry records the old `kind`, never acts for the current one, and is
-removed on the next lookup with a DEBUG `owner_lookup_drop` line carrying
+removed on the next lookup of its lane (every old-kind entry on the lane, not
+only the looked-up capability) with a DEBUG `owner_lookup_drop` line carrying
 `reason` (`owner_kind_changed` or `owner_kind_unrecorded`), the sanitized
 `state_key`, and `capability_key`.
 
@@ -1611,7 +1643,7 @@ history from a fully evicted one:
 | `skipped_unknown` | integer | Rows skipped because a persisted TOKEN (verdict / phase / source / tier / evidence class) is not one this build recognizes. |
 | `skipped_revision` | integer | Catalog-scoped rows skipped because their stamped catalog / overlay revision is not the replay boundary's -- an eviction. Envelope-field rows are never counted here: their truth is catalog-independent, so they replay under a superseded revision. |
 | `skipped_vocab` | integer | Rows skipped whole before decoding because their stored vocabulary version is unknown to this build (for example a row a newer build wrote) or a vocabulary step retires one of their tokens. Stored rows are never rewritten; a known older vocabulary is mapped forward on read. Each skip also emits a `rebuild_skip` WARN with `reason` `unknown_vocab_version` or `retired_vocab_token`. |
-| `skipped_lane` | integer | Envelope-field rows skipped because their lane key does not parse as a learned lane (`provider_entry#upstream`), so no identity can be attributed to them. Each skip also emits a `rebuild_skip` WARN with `reason` `unparseable_lane`. |
+| `skipped_lane` | integer | Rows skipped because their lane key does not parse as a learned lane (`provider_entry#upstream`), in any capability namespace: such a row names no provider entry to check ownership against. Checked before ownership and revision, so these rows count nowhere else. Each skip also emits a `rebuild_skip` WARN with `reason` `unparseable_lane`. |
 | `skipped_owner` | integer | Lane-keyed rows skipped because the provider entry their lane names no longer owns them: the entry is absent from the current config, it now has a different `kind` than the row recorded, or the row recorded no kind. Each skip also emits a `rebuild_skip` WARN with `reason` `owner_entry_removed`, `owner_kind_changed`, or `owner_kind_unrecorded`. A same-kind `base_url` change keeps ownership. |
 
 ### `strip` (WARN)

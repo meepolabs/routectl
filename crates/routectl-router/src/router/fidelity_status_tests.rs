@@ -218,6 +218,43 @@ fn an_eligible_envelope_verdict_reports_its_whole_row_unblocked() {
     assert_eq!(row.unconfirmed_requests, 0);
 }
 
+/// A verdict written under a kind the lane's provider entry no longer has is
+/// not reported acting, exactly as the dispatch read refuses it -- with the
+/// same seeded confirmations under which the current kind's verdict reports
+/// unblocked above. Status is read-only, so the entry stays resident.
+#[test]
+fn an_old_kind_verdict_after_a_kind_flip_is_not_reported_eligible() {
+    let router = bare_router();
+    let stamped = Instant::now();
+    router
+        .learned_capabilities
+        .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: "openai-compat".to_string(),
+            state_key: STATE_KEY.to_string(),
+            feature_key: grounded_key(),
+            verdict: crate::learned_capability::EntryVerdict::Negative,
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: stamped,
+            last_seen: stamped,
+            expires_at: stamped + NOT_LAPSED,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+            evidence_class: None,
+        }]);
+    seed_confirmations(&router, ENVELOPE_QUORUM);
+
+    let rows = router.field_verdict_status();
+
+    assert_eq!(
+        only_row(&rows).blocked_reason,
+        Some(PreflightBlockedReason::NotEligible),
+    );
+    assert_eq!(router.learned_capability_snapshot().len(), 1);
+}
+
 /// A resident verdict with NO acknowledged confirmation reports `not_eligible`.
 ///
 /// The base case an operator hits most: a verdict minted by one reactive repair

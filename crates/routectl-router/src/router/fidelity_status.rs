@@ -366,7 +366,9 @@ impl Router {
         // per-row walk.
         let acting = self
             .learned_capabilities
-            .field_acting_incarnations(Instant::now());
+            .field_acting_incarnations(Instant::now(), |state_key| {
+                self.provider_kind_for_state_key(state_key)
+            });
         // A field entry is always lane-keyed (replay skips a field row that is
         // not), so an entry whose key does not parse has no lane and no row.
         learned

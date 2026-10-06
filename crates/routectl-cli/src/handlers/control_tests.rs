@@ -888,7 +888,7 @@ async fn a_purge_on_one_lane_leaves_another_lanes_entry_resident() {
     // Arrange
     let fixture = Fixture::new();
     fixture.plant_negative(LANE, WEB_SEARCH);
-    fixture.plant_negative("anthropic", WEB_SEARCH);
+    fixture.plant_negative("anthropic#claude-opus-4-1", WEB_SEARCH);
 
     // Act
     let (status, json) = fixture
@@ -900,7 +900,7 @@ async fn a_purge_on_one_lane_leaves_another_lanes_entry_resident() {
     assert_eq!(json["purged"], serde_json::json!(true));
     assert!(!fixture.resident(LANE, WEB_SEARCH));
     assert!(
-        fixture.resident("anthropic", WEB_SEARCH),
+        fixture.resident("anthropic#claude-opus-4-1", WEB_SEARCH),
         "a keyed purge must not widen into a sibling lane"
     );
 }

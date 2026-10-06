@@ -2779,8 +2779,8 @@ impl Router {
         // reads. An import into a fresh registry would satisfy every
         // value-equality check and silently drop those writes.
         //
-        // Nothing is copied here, and the only removal is the owner sweep
-        // below. On a revision change the catalog-scoped eviction belongs to
+        // Nothing is copied here, and the only removal is the owner sweep,
+        // which runs here only on a config-only reload. On a revision change the catalog-scoped eviction belongs to
         // the boundary transition (`advance_generation` +
         // `prune_catalog_scoped`), which runs only after the boundary batch is
         // durable -- pruning now would discard entries that a failed boundary
@@ -2824,27 +2824,15 @@ impl Router {
         self.capability_health = previous.capability_persistence_health().cloned();
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
-        // Ahead of any boundary cut, which restates surviving entries stamped
-        // with this Router's provider kind: an entry left resident under a
-        // kind-flipped name would be restated as owned by the new kind. A
-        // boundary that then fails leaves the previous Router without these
-        // entries; they relearn from traffic.
-        let dropped_owner = self.drop_unowned_learned_entries(previous);
-        if dropped_owner > 0 {
-            tracing::info!(
-                event = "owner_sweep",
-                dropped_owner,
-                "dropped learned capabilities whose provider entry was removed or changed kind",
-            );
-        }
-
         if catalog_changed || overlay_changed {
-            // Retuning is DEFERRED to the boundary commit. A revision-changing
-            // reload may still fail or be abandoned, and the previous router
-            // stays live in that case -- applying the new tempo now would leave
-            // it running under settings from a reload that never took effect.
-            // `Router::apply_capability_tuning` performs it at publication,
-            // called by the boundary's commit arm.
+            // Retuning AND the owner sweep are DEFERRED to the boundary commit.
+            // A revision-changing reload may still fail or be abandoned, and the
+            // previous router stays live in that case -- applying the new tempo
+            // now would leave it running under settings from a reload that never
+            // took effect, and sweeping now would remove entries it still owns.
+            // The boundary's commit arm calls `apply_capability_tuning` and
+            // `sweep_unowned_learned_entries`; the cut leaves unowned entries out
+            // of the restatement.
             self.metrics.incr_invalidations();
             tracing::warn!(
                 event = "invalidation",
@@ -2860,8 +2848,10 @@ impl Router {
             return;
         }
         // No boundary is involved on a config-only reload (the revision did not
-        // move), so the reload IS the publication and the tuning applies now.
+        // move), so the reload IS the publication: the tuning applies and the
+        // owner sweep runs now.
         self.apply_capability_tuning();
+        self.sweep_unowned_learned_entries();
         self.expire_learned_on_override_change(previous);
     }
 

@@ -309,7 +309,7 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
             (
                 survivors
                     .iter()
-                    .map(|e| e.feature_key.clone())
+                    .map(|e| e.entry.feature_key.clone())
                     .collect::<Vec<_>>(),
                 reg.try_entry_count(),
             )
@@ -356,7 +356,7 @@ fn the_boundary_cut_snapshots_only_catalog_independent_entries() {
         |survivors, _pending| {
             survivors
                 .iter()
-                .map(|e| e.feature_key.clone())
+                .map(|e| e.entry.feature_key.clone())
                 .collect::<Vec<_>>()
         },
         |_| false,

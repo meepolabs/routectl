@@ -125,11 +125,34 @@ fn openai_response_format_rejection() -> CoreError {
 /// ledger tombstone carry, so a same-revision rebuild admits them.
 async fn router_over_fresh_ledger(db_path: &Path) -> Router {
     drop(open(db_path).expect("create migrated ledger"));
-    let config = Arc::new(Config::default());
+    let config = Arc::new(probed_config());
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     crate::server::build_router_from_config(config, secrets)
         .await
         .expect("build router")
+}
+
+/// The provider entry every fixture lane egresses through, under the kind the
+/// probe plans record. Replay holds a lane-keyed row to the entry its lane
+/// names, so the router must configure it.
+const PROBED: &str = "probed";
+
+/// A default config that configures the [`PROBED`] entry.
+fn probed_config() -> Config {
+    let mut config = Config::default();
+    config.providers.insert(
+        PROBED.to_string(),
+        routectl_router::ProviderEntry::openai_compat(
+            "https://probed.example.test/v1",
+            "literal:k",
+        ),
+    );
+    config
+}
+
+/// The learned lane `name` on the [`PROBED`] entry.
+fn lane(name: &str) -> String {
+    format!("{PROBED}#{name}")
 }
 
 /// This boot's revision as the ledger's `i64` columns carry it.
@@ -229,7 +252,7 @@ fn rebuild_and_snapshot(db_path: &Path, router: &Router) -> Vec<LearnedRegistryE
                 r.evidence_class,
                 r.capability.expect("capability"),
                 r.lane_key.expect("lane_key"),
-                String::new(),
+                r.provider_kind.unwrap_or_default(),
                 u32::try_from(r.catalog_version.expect("cv")).unwrap(),
                 u64::try_from(r.overlay_revision.expect("ov")).unwrap(),
             )
@@ -300,7 +323,7 @@ async fn fresh_lane_probe_populates_source_probe_cells_after_rebuild() {
         Ok(verified_structured_output()),
         Ok(suspect_web_search()),
     ]);
-    let plan = plan_for("opus", rev);
+    let plan = plan_for(&lane("opus"), rev);
     let report = run_capability_probe(
         &dispatcher,
         &plan,
@@ -314,11 +337,12 @@ async fn fresh_lane_probe_populates_source_probe_cells_after_rebuild() {
     let snap = rebuild_and_snapshot(&db, &router);
 
     // Assert: both cells landed as truth-matrix rows stamped source=probe.
-    let so = find(&snap, "opus", STRUCTURED_OUTPUT).expect("structured_output cell resident");
+    let so =
+        find(&snap, &lane("opus"), STRUCTURED_OUTPUT).expect("structured_output cell resident");
     assert_eq!(so.source, EvidenceSource::Probe);
     assert_eq!(so.verdict, Verdict::VerifiedWorking);
 
-    let ws = find(&snap, "opus", WEB_SEARCH).expect("web_search cell resident");
+    let ws = find(&snap, &lane("opus"), WEB_SEARCH).expect("web_search cell resident");
     assert_eq!(ws.source, EvidenceSource::Probe);
     assert_eq!(ws.verdict, Verdict::LearnedBroken(FailurePhase::F3));
     assert!(
@@ -338,12 +362,15 @@ async fn probe_success_clears_a_resident_negative_and_the_clear_survives_restart
     let seed_router = router_over_fresh_ledger(&db).await;
     let rev = boot_revision(&seed_router);
     write_tombstone(&db, rev);
-    persist_one(&db, &live_broken(now_ms(), "opus", STRUCTURED_OUTPUT, rev));
+    persist_one(
+        &db,
+        &live_broken(now_ms(), &lane("opus"), STRUCTURED_OUTPUT, rev),
+    );
 
     // A fresh restart before the probe: the negative is resident and routes away.
     let before_router = router_over_fresh_ledger(&db).await;
     let before = rebuild_and_snapshot(&db, &before_router);
-    let neg = find(&before, "opus", STRUCTURED_OUTPUT).expect("live negative resident");
+    let neg = find(&before, &lane("opus"), STRUCTURED_OUTPUT).expect("live negative resident");
     assert_eq!(
         acting_decision(neg, Instant::now()),
         ActingDecision::RouteAway,
@@ -355,7 +382,7 @@ async fn probe_success_clears_a_resident_negative_and_the_clear_survives_restart
     let dispatcher = ScriptedDispatch::new(vec![Ok(verified_structured_output())]);
     let report = run_capability_probe(
         &dispatcher,
-        &plan_for("opus", rev),
+        &plan_for(&lane("opus"), rev),
         &[ProbeCapability::StructuredOutput],
     )
     .await;
@@ -374,7 +401,8 @@ async fn probe_success_clears_a_resident_negative_and_the_clear_survives_restart
     // lane is no longer routed away -- the settlement survived the boundary.
     let after_router = router_over_fresh_ledger(&db).await;
     let after = rebuild_and_snapshot(&db, &after_router);
-    let settled = find(&after, "opus", STRUCTURED_OUTPUT).expect("the probe positive is resident");
+    let settled =
+        find(&after, &lane("opus"), STRUCTURED_OUTPUT).expect("the probe positive is resident");
     assert_eq!(settled.verdict, Verdict::VerifiedWorking);
     assert_eq!(settled.source, EvidenceSource::Probe);
     assert_eq!(
@@ -403,7 +431,7 @@ async fn forced_search_absent_routes_away_under_probe_authority_but_not_under_li
     let dispatcher = ScriptedDispatch::new(vec![Ok(suspect_web_search())]);
     let report = run_capability_probe(
         &dispatcher,
-        &plan_for("probe-lane", rev),
+        &plan_for(&lane("probe-lane"), rev),
         &[ProbeCapability::WebSearch],
     )
     .await;
@@ -423,11 +451,11 @@ async fn forced_search_absent_routes_away_under_probe_authority_but_not_under_li
 
     persist(
         &db,
-        &corroborating(&probe_suspect, "probe-lane", EvidenceSource::Probe),
+        &corroborating(&probe_suspect, &lane("probe-lane"), EvidenceSource::Probe),
     );
     persist(
         &db,
-        &corroborating(&probe_suspect, "live-lane", EvidenceSource::Live),
+        &corroborating(&probe_suspect, &lane("live-lane"), EvidenceSource::Live),
     );
     let snap = rebuild_and_snapshot(&db, &router);
     let now = Instant::now();
@@ -435,12 +463,12 @@ async fn forced_search_absent_routes_away_under_probe_authority_but_not_under_li
     // Assert: the corroborated probe-sourced F3 negative carries route-away
     // authority; the identical corroborated live-sourced F3 negative stays
     // advisory (allows) -- the only difference is the evidence source.
-    let probe_neg = find(&snap, "probe-lane", WEB_SEARCH).expect("probe negative resident");
+    let probe_neg = find(&snap, &lane("probe-lane"), WEB_SEARCH).expect("probe negative resident");
     assert_eq!(probe_neg.phase, FailurePhase::F3);
     assert_eq!(probe_neg.source, EvidenceSource::Probe);
     assert_eq!(acting_decision(probe_neg, now), ActingDecision::RouteAway);
 
-    let live_neg = find(&snap, "live-lane", WEB_SEARCH).expect("live negative resident");
+    let live_neg = find(&snap, &lane("live-lane"), WEB_SEARCH).expect("live negative resident");
     assert_eq!(live_neg.phase, FailurePhase::F3);
     assert_eq!(live_neg.source, EvidenceSource::Live);
     assert_eq!(
@@ -466,7 +494,7 @@ async fn deterministic_naming_400_learns_broken_at_f1_while_f2_is_withheld() {
     let f1_dispatcher = ScriptedDispatch::new(vec![Err(openai_response_format_rejection())]);
     let f1 = run_capability_probe(
         &f1_dispatcher,
-        &plan_for("opus", rev),
+        &plan_for(&lane("opus"), rev),
         &[ProbeCapability::StructuredOutput],
     )
     .await;
@@ -507,7 +535,8 @@ async fn deterministic_naming_400_learns_broken_at_f1_while_f2_is_withheld() {
 
     // Assert: after rebuild only the F1 negative is resident and routes away.
     let snap = rebuild_and_snapshot(&db, &router);
-    let broken = find(&snap, "opus", STRUCTURED_OUTPUT).expect("F1 broken negative resident");
+    let broken =
+        find(&snap, &lane("opus"), STRUCTURED_OUTPUT).expect("F1 broken negative resident");
     assert_eq!(broken.verdict, Verdict::LearnedBroken(FailurePhase::F1));
     assert_eq!(broken.source, EvidenceSource::Probe);
     assert_eq!(
@@ -538,7 +567,7 @@ async fn unhealthy_lane_renders_the_estimate_and_skipped_cells_and_mints_nothing
     ]);
     let report = run_capability_probe(
         &dispatcher,
-        &plan_for("opus", rev),
+        &plan_for(&lane("opus"), rev),
         &[
             ProbeCapability::StructuredOutput,
             ProbeCapability::WebSearch,
@@ -681,7 +710,7 @@ fn live_broken(ts: i64, lane: &str, cap: &str, revision: (i64, i64)) -> Capabili
         upstream_token: None,
         catalog_version: revision.0,
         overlay_revision: revision.1,
-        provider_kind: None,
+        provider_kind: Some("openai-compat".to_string()),
         vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }

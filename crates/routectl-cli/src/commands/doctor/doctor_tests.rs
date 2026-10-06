@@ -2673,6 +2673,14 @@ mod capability_matrix {
     fn config_at(db_path: &std::path::Path) -> Config {
         let mut config = Config::default();
         config.usage.db_path = db_path.to_path_buf();
+        // Owns the fixture lane under the kind `seed_broken` records.
+        config.providers.insert(
+            "gpt-nick".to_string(),
+            routectl_router::ProviderEntry::openai_compat(
+                "https://gpt.example.test/v1",
+                "literal:k",
+            ),
+        );
         config
     }
 
@@ -2690,9 +2698,9 @@ mod capability_matrix {
         conn.execute(
             "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
              tier, evidence_class, upstream_token, catalog_version, overlay_revision, \
-             vocab_version) \
+             provider_kind, vocab_version) \
              VALUES (?1, ?2, ?3, 'broken', 'f1', 'live', 'self-identifying', NULL, NULL, ?4, ?5, \
-             ?6)",
+             'openai-compat', ?6)",
             params![
                 ts,
                 lane,
@@ -2836,7 +2844,7 @@ mod capability_matrix {
         seed_broken(
             db.conn(),
             far_future,
-            "gpt-nick",
+            "gpt-nick#upstream",
             "web_search",
             i64::from(CATALOG_VERSION),
             0,
@@ -2859,7 +2867,7 @@ mod capability_matrix {
         );
         let entry = entries
             .iter()
-            .find(|e| e.state_key == "gpt-nick" && e.feature_key == "web_search")
+            .find(|e| e.state_key == "gpt-nick#upstream" && e.feature_key == "web_search")
             .expect("the replayed negative is resident");
         assert!(
             entry.last_seen <= now,
@@ -2881,7 +2889,7 @@ mod capability_matrix {
         seed_broken(
             db.conn(),
             200,
-            "gpt-nick",
+            "gpt-nick#upstream",
             "web_search",
             i64::from(CATALOG_VERSION),
             0,

@@ -395,3 +395,31 @@ fn a_write_under_the_new_kind_replaces_an_entry_recorded_under_the_old_kind() {
         "the new owner's own observation acts",
     );
 }
+
+#[test]
+fn a_delayed_write_from_the_original_owner_survives_a_flip_and_flip_back() {
+    let original = router(ALPHA_COMPAT);
+    let original_target = target(&original, "opus", "alpha");
+
+    let mut flipped = router(ALPHA_ANTHROPIC);
+    flipped.carry_over_learned_from(&original);
+    learn_on(&original, &original_target, COMPAT);
+    assert_eq!(
+        resident_lanes(&flipped),
+        vec![LANE.to_string()],
+        "premise: the original router's in-flight write lands after the first sweep",
+    );
+
+    let mut restored = router(ALPHA_COMPAT);
+    restored.carry_over_learned_from(&flipped);
+
+    assert_eq!(
+        resident_lanes(&restored),
+        vec![LANE.to_string()],
+        "the entry was written under the kind the restored config has again",
+    );
+    assert!(
+        routes_away(&restored, &target(&restored, "opus", "alpha"), COMPAT),
+        "the original owner's fact acts once its kind is back",
+    );
+}

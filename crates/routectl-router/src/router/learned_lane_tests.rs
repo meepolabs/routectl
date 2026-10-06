@@ -334,38 +334,73 @@ fn a_field_verdict_learned_under_one_nickname_applies_to_another_on_the_lane() {
     );
 }
 
-#[test]
-fn an_override_on_any_nickname_of_a_lane_lapses_the_shared_negative_on_reload() {
-    // The override sweep resolves the lane to every model on it through the
-    // resolved table, so a cell added for the SECOND nickname still lapses the
-    // entry the first one learned.
-    let models = |router: &mut Router| {
-        let mut table: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-        for nick in ["opus", "opus-alias"] {
-            let p: Arc<dyn Provider> = Arc::new(StubProvider);
-            table.insert(
-                nick.to_string(),
-                Arc::new(ResolvedModel::new(nick, "alpha", p, "model-x")),
-            );
-        }
-        router.install_resolved_models(table);
-    };
+/// Two nicknames on the `alpha#model-x` lane, installed in the resolved table
+/// so the override sweep sees both.
+fn install_two_nicknames(router: &mut Router) {
+    let mut table: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for nick in ["opus", "opus-alias"] {
+        let p: Arc<dyn Provider> = Arc::new(StubProvider);
+        table.insert(
+            nick.to_string(),
+            Arc::new(ResolvedModel::new(nick, "alpha", p, "model-x")),
+        );
+    }
+    router.install_resolved_models(table);
+}
+
+/// Learn a web_search negative on `opus`, then reload under `overrides`
+/// appended to the provider table. Returns the reloaded router and the
+/// entry's expiry before the reload.
+fn reload_with_overrides(overrides: &str) -> (Router, Instant) {
     let mut before = router();
-    models(&mut before);
-    let learner = target(&before, "opus", "alpha", "model-x");
-    learn_on(&before, &learner);
+    install_two_nicknames(&mut before);
+    learn_on(&before, &target(&before, "opus", "alpha", "model-x"));
     let expires_before = before.learned_capabilities.snapshot()[0].expires_at;
 
-    let overridden = format!(
-        "{PROVIDERS}\n[capability.overrides.\"alpha:opus-alias\"]\nforce_supported = [\"web_search\"]\n"
-    );
-    let mut after = Router::new(Arc::new(toml::from_str(&overridden).expect("valid toml")));
-    models(&mut after);
+    let config = format!("{PROVIDERS}\n{overrides}");
+    let mut after = Router::new(Arc::new(toml::from_str(&config).expect("valid toml")));
+    install_two_nicknames(&mut after);
     after.carry_over_learned_from(&before);
+    (after, expires_before)
+}
 
-    let entry = &after.learned_capabilities.snapshot()[0];
+#[test]
+fn an_override_on_one_nickname_of_a_lane_leaves_the_shared_negative_acting_for_its_sibling() {
+    let (after, expires_before) = reload_with_overrides(
+        "[capability.overrides.\"alpha:opus-alias\"]\nforce_supported = [\"web_search\"]\n",
+    );
+
+    assert_eq!(
+        after.learned_capabilities.snapshot()[0].expires_at,
+        expires_before,
+        "a change scoped to one nickname does not lapse the lane-wide fact",
+    );
     assert!(
-        entry.expires_at < expires_before,
-        "the override change on the sibling nickname lapsed the shared entry",
+        routes_away(&after, &target(&after, "opus", "alpha", "model-x")),
+        "the sibling whose override did not change still routes away",
+    );
+}
+
+#[test]
+fn an_override_for_the_whole_provider_lapses_the_shared_negative_on_reload() {
+    let (after, expires_before) =
+        reload_with_overrides("[capability.overrides.alpha]\nforce_supported = [\"web_search\"]\n");
+
+    assert!(
+        after.learned_capabilities.snapshot()[0].expires_at < expires_before,
+        "a provider-tier change moves the intent for every nickname on the lane",
+    );
+}
+
+#[test]
+fn an_override_on_every_nickname_of_a_lane_lapses_the_shared_negative_on_reload() {
+    let (after, expires_before) = reload_with_overrides(
+        "[capability.overrides.\"alpha:opus\"]\nforce_supported = [\"web_search\"]\n\
+         [capability.overrides.\"alpha:opus-alias\"]\nforce_supported = [\"web_search\"]\n",
+    );
+
+    assert!(
+        after.learned_capabilities.snapshot()[0].expires_at < expires_before,
+        "a change for every nickname on the lane lapses the shared entry",
     );
 }

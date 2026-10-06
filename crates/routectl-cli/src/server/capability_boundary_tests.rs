@@ -2003,3 +2003,225 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     drop(usage);
     writer.shutdown();
 }
+
+/// `owning_config` with the `nick` entry flipped to another kind, plus a `keep`
+/// entry under the same kind in both, sharing `base`'s ledger path.
+fn kind_flipped_config(base: &Config) -> Config {
+    let mut config = base.clone();
+    config.providers.insert(
+        "nick".to_string(),
+        routectl_router::ProviderEntry::openai_compat("https://nick.example.test/v1", "literal:k"),
+    );
+    config
+}
+
+/// Add the `keep` entry, configured identically before and after the flip.
+fn with_keep(mut config: Config) -> Config {
+    config.providers.insert(
+        "keep".to_string(),
+        routectl_router::ProviderEntry::anthropic_api("literal:k"),
+    );
+    config
+}
+
+/// The resident `(lane, capability)` pairs of a router, sorted.
+fn resident_lanes(router: &Router) -> Vec<(String, String)> {
+    let mut keys: Vec<(String, String)> = router
+        .learned_capability_snapshot()
+        .into_iter()
+        .map(|e| (e.state_key, e.feature_key))
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// A self-identifying field negative observed through `router` on `lane`,
+/// under `kind`, without a ledger row: only a boundary restatement can make
+/// it durable.
+fn observe_field(router: &Router, lane: &str, path: &str, kind: &str) -> String {
+    let key = format!("{}{path}", key_prefix());
+    let outcome = router.observe_learned_capability(
+        lane,
+        &key,
+        kind,
+        routectl_core::capability::SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
+        routectl_core::capability::EvidenceSource::Live,
+        None,
+        std::time::Instant::now(),
+    );
+    assert!(
+        !matches!(outcome, routectl_router::GenerationOutcome::Stale),
+        "a wire-shape observation is admitted in any generation",
+    );
+    key
+}
+
+/// A kind flip that also moves the revision. A request still holding the
+/// outgoing router writes a field verdict between the carry-over and the cut.
+/// That entry belongs to the OLD kind, so the boundary must not restate it as
+/// owned by the new one -- and after a restart under the flipped config it must
+/// not act. An entry on a lane whose owner did not change is restated, which is
+/// what makes the absence meaningful.
+#[tokio::test]
+async fn an_old_kind_write_between_carry_over_and_cut_is_not_restated_as_the_new_kind() {
+    let mut base = with_keep(owning_config());
+    let _dir = isolate_usage_db(&mut base);
+    let config = Arc::new(base);
+    let flipped = Arc::new(kind_flipped_config(&config));
+    let (usage, writer) = UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        0,
+        config.usage.enabled,
+    );
+    let before = seeded_router_with_both_classes(&config, 1, &usage);
+
+    let mut reloaded = Router::new(flipped.clone());
+    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    reloaded.carry_over_learned_from(&before);
+    let delayed = observe_field(&before, "nick#upstream", "output.format", NICK_KIND);
+    let kept = observe_field(&before, "keep#upstream", "output.format", NICK_KIND);
+    let reloaded = Arc::new(reloaded);
+
+    let outcome = commit_capability_boundary(&usage, &reloaded).await;
+
+    assert!(
+        matches!(
+            outcome,
+            BoundaryOutcomeReport::Committed { survivors: 1, .. }
+        ),
+        "only the owned entry is restated, got {outcome:?}",
+    );
+    let rows = ledger_capability_rows(&config.usage.db_path);
+    let last_tombstone = rows
+        .iter()
+        .rposition(|(_, verdict, _)| verdict == "tombstone")
+        .expect("the reload appended a tombstone");
+    let restated: Vec<&str> = rows[last_tombstone + 1..]
+        .iter()
+        .map(|(_, _, capability)| capability.as_str())
+        .collect();
+    assert_eq!(restated, vec![kept.as_str()]);
+    let restarted = restart_from_ledger(&flipped, 2, &usage);
+    assert_eq!(
+        resident_lanes(&restarted),
+        vec![("keep#upstream".to_string(), kept)],
+        "the old kind's write must not replay as owned by the new kind: {delayed}",
+    );
+
+    drop(usage);
+    writer.shutdown();
+}
+
+/// The owner sweep waits for the boundary. A kind flip with a revision move
+/// whose boundary fails leaves the previous router live, and every entry it
+/// owns must still be resident.
+#[tokio::test]
+async fn a_failed_kind_flip_boundary_leaves_the_previous_routers_entries_intact() {
+    let mut base = owning_config();
+    let _dir = isolate_usage_db(&mut base);
+    let config = Arc::new(base);
+    let flipped = Arc::new(kind_flipped_config(&config));
+    let (usage, writer) = UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        0,
+        config.usage.enabled,
+    );
+    let before = seeded_router_with_both_classes(&config, 1, &usage);
+    let resident_before = resident_lanes(&before);
+
+    let mut reloaded = Router::new(flipped);
+    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    reloaded.carry_over_learned_from(&before);
+    let reloaded = Arc::new(reloaded);
+    let outcome =
+        commit_capability_boundary(&routectl_usage::handle_with_closed_channel(), &reloaded).await;
+
+    assert!(
+        matches!(outcome, BoundaryOutcomeReport::Failed(_)),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        resident_lanes(&before),
+        resident_before,
+        "a failed boundary removes nothing the previous router owns",
+    );
+
+    drop(usage);
+    writer.shutdown();
+}
+
+/// The other half of deferring the sweep: once the boundary commits, the
+/// entries the replacement config does not own are gone.
+#[tokio::test]
+async fn a_committed_kind_flip_boundary_sweeps_the_unowned_entries() {
+    let mut base = owning_config();
+    let _dir = isolate_usage_db(&mut base);
+    let config = Arc::new(base);
+    let flipped = Arc::new(kind_flipped_config(&config));
+    let (usage, writer) = UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        0,
+        config.usage.enabled,
+    );
+    let before = seeded_router_with_both_classes(&config, 1, &usage);
+
+    let mut reloaded = Router::new(flipped);
+    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    reloaded.carry_over_learned_from(&before);
+    assert_eq!(
+        resident_lanes(&reloaded).len(),
+        2,
+        "premise: nothing is swept before the boundary settles",
+    );
+    let reloaded = Arc::new(reloaded);
+    let outcome = commit_capability_boundary(&usage, &reloaded).await;
+
+    assert!(
+        matches!(
+            outcome,
+            BoundaryOutcomeReport::Committed { survivors: 0, .. }
+        ),
+        "got {outcome:?}",
+    );
+    assert_eq!(resident_lanes(&reloaded), Vec::new());
+
+    drop(usage);
+    writer.shutdown();
+}
+
+/// Each restated row carries the provider kind its entry recorded, never one
+/// resolved from a config at restatement time.
+#[test]
+fn a_restatement_is_stamped_with_the_entrys_recorded_kind() {
+    let now = std::time::Instant::now();
+    let survivor = RecordedLearnedEntry {
+        entry: routectl_router::LearnedRegistryEntry {
+            state_key: "nick#upstream".to_string(),
+            feature_key: field_key(),
+            verdict: routectl_core::capability::Verdict::LearnedBroken(
+                routectl_core::capability::FailurePhase::F1,
+            ),
+            signal_tier: routectl_core::capability::SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: now,
+            last_seen: now,
+            expires_at: now,
+            evidence_class: None,
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: routectl_core::capability::EvidenceSource::Live,
+        },
+        provider_kind: "openai-compat".to_string(),
+    };
+
+    let batch = boundary_batch(&[survivor], 1_000, 7, 2);
+
+    let kinds: Vec<Option<&str>> = batch[1..]
+        .iter()
+        .map(|row| row.provider_kind.as_deref())
+        .collect();
+    assert_eq!(kinds, vec![Some("openai-compat")]);
+}

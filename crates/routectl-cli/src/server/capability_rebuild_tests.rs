@@ -308,7 +308,7 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     seed_event(
         db.conn(),
         200,
-        "lane-current",
+        "gpt-nick#lane-current",
         "cap-current",
         "broken",
         "f1",
@@ -320,7 +320,7 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     seed_event(
         db.conn(),
         300,
-        "lane-stale",
+        "gpt-nick#lane-stale",
         "cap-stale",
         "broken",
         "f1",
@@ -340,11 +340,15 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     // Assert: the current-revision negative replays; the stale straggler does not.
     let snapshot = router.learned_capability_snapshot();
     assert!(
-        snapshot.iter().any(|e| e.state_key == "lane-current"),
+        snapshot
+            .iter()
+            .any(|e| e.state_key == "gpt-nick#lane-current"),
         "the current-revision negative replays"
     );
     assert!(
-        !snapshot.iter().any(|e| e.state_key == "lane-stale"),
+        !snapshot
+            .iter()
+            .any(|e| e.state_key == "gpt-nick#lane-stale"),
         "a stale-revision straggler is skipped by the per-row filter"
     );
 
