@@ -131,6 +131,14 @@ impl Router {
     /// whose normalization is the identity -- the right answer for a registry
     /// entry whose config entry the operator has since removed.
     ///
+    /// The derived kind is also the third part of the registry identity, so the
+    /// purge clears the version the current config owns and only that one. The
+    /// durable clear it commits names that one kind, and removing another
+    /// kind's version from memory without a clear of its own would let a later
+    /// flip back to that kind plus a restart replay a version memory had
+    /// dropped. A version another kind wrote acts for no one, is skipped at
+    /// boot replay, and is removed by the next owner sweep.
+    ///
     /// Returns holding NO registry lock, which is what lets the caller await
     /// SQLite next.
     pub fn reserve_learned_capability_purge(

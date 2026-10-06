@@ -1186,9 +1186,14 @@ as it learns, re-probes, clears, and strips per-target capability
 negatives, plus two config-layer events for operator override hygiene.
 Every event carries a stable `event` discriminator so alerts pin on that
 field, never on the human message string. The events share one unified
-field vocabulary: `event` names the kind, `state_key` names the dispatch
-target's session/target key, and `capability_key` carries the normalized
-capability token. All fields are display-safe discriminants -- capability
+field vocabulary: `event` names the kind, `state_key` names a target, and
+`capability_key` carries the normalized capability token. Which target
+`state_key` names depends on the event: on `clear`, `purge`,
+`purge_abandoned`, `expire_probe` and `evict` it is the learned lane
+(`provider_entry#upstream`) the registry keys on; on `learn`, `observe`,
+`route_away`, `count_tokens`, `strip` and `suppression` it is the dispatch
+target's runtime key (`nickname[#member]`), and `learn` and `observe` carry
+the learned lane separately as `lane`. All fields are display-safe discriminants -- capability
 TOKENS, session/target keys, and counts only. Never a request body,
 prompt content, or secret.
 
@@ -1618,12 +1623,12 @@ emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
 | `event` | string | Always `owner_sweep`. |
 | `dropped_owner` | integer | Learned entries removed because their provider entry no longer owns their lane. |
 
-A request still holding the pre-reload router can write a lane after the sweep.
-Such an entry records the old `kind`, never acts for the current one, and is
-removed on the next lookup of its lane (every old-kind entry on the lane, not
-only the looked-up capability) with a DEBUG `owner_lookup_drop` line carrying
-`reason` (`owner_kind_changed` or `owner_kind_unrecorded`), the sanitized
-`state_key`, and `capability_key`.
+A request still holding the pre-reload router can read or write a lane after
+the sweep. The registry keys each entry by the `kind` that wrote it, so such a
+write lands as its own version beside the current kind's, never acts for the
+current kind, and never removes or refreshes the current kind's entry; no read
+or write removes anything. The stray version occupies registry capacity until
+the next reload's sweep removes it, it is evicted, or a restart skips its row.
 
 ### Capability warm rebuild (INFO)
 

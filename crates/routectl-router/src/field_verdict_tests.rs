@@ -175,12 +175,13 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
         .expect("a live commit emits its row");
 
     // Assert -- one row, acting for the kind that wrote it. A reader under the
-    // other kind does not act on it and drops it, because it was learned about
-    // a different upstream protocol.
+    // other kind does not act on it, because it was learned about a different
+    // upstream protocol, and the read removes nothing.
     assert_eq!(reg.snapshot_len(), 1);
     assert!(reg.is_negative_acting(&anthropic, t0));
     assert!(!reg.is_negative_acting(&compat, t0));
-    assert_eq!(reg.snapshot_len(), 0);
+    assert_eq!(reg.snapshot_len(), 1);
+    assert!(reg.is_negative_acting(&anthropic, t0));
 }
 
 #[test]

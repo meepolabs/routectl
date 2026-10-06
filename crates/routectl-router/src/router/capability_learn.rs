@@ -57,8 +57,7 @@ pub struct CatalogIndependentSurvivor {
     /// verdict would be evicted -- the exact outcome the restatement exists to
     /// prevent. `None` for a `broken` verdict, which carries none.
     pub evidence_class: Option<String>,
-    /// Provider-kind token, resolved through the one shared resolver
-    /// (`Router::provider_kind_for_state_key`).
+    /// The provider kind the entry was written under.
     pub provider_kind: String,
     /// When the entry was first observed. Carried so a restatement preserves
     /// the original observation time.
@@ -203,7 +202,7 @@ impl Router {
     /// whole registry (that stays keyed to catalog / overlay changes).
     pub(super) fn expire_learned_on_override_change(&self, previous: &Self) {
         let now = Instant::now();
-        for entry in self.learned_capabilities.snapshot() {
+        for entry in self.learned_capability_snapshot() {
             let identities = self.override_identities_for_entry(&entry.state_key);
             let changed = !identities.is_empty()
                 && identities.iter().all(|(provider_name, nickname)| {
@@ -616,15 +615,16 @@ impl Router {
     /// evidence, so its decay age must not be refreshed.
     pub fn catalog_independent_survivors(&self) -> Vec<CatalogIndependentSurvivor> {
         self.learned_capabilities
-            .snapshot()
+            .recorded_snapshot()
             .into_iter()
-            .filter(|entry| {
-                !crate::field_capability::capability_key_is_catalog_scoped(&entry.feature_key)
+            .filter(|recorded| {
+                !crate::field_capability::capability_key_is_catalog_scoped(
+                    &recorded.entry.feature_key,
+                )
             })
-            .map(|entry| CatalogIndependentSurvivor {
-                provider_kind: self
-                    .provider_kind_for_state_key(&entry.state_key)
-                    .to_string(),
+            .map(|recorded| (recorded.entry, recorded.provider_kind))
+            .map(|(entry, provider_kind)| CatalogIndependentSurvivor {
+                provider_kind,
                 state_key: entry.state_key,
                 capability: entry.feature_key,
                 verdict: entry.verdict.as_str().to_string(),
@@ -639,15 +639,20 @@ impl Router {
             .collect()
     }
 
-    /// Read-only snapshot of the learned-capability registry: every resident
-    /// per-(target, feature) negative in the fixed contract shape. `&self`
-    /// delegate over the private `learned_capabilities` registry so the
-    /// status surface can surface learned negatives without reaching into
-    /// the field.
+    /// Read-only snapshot of the learned-capability registry in the fixed
+    /// contract shape: every resident entry recorded under the kind this
+    /// Router's config gives its lane. `&self` delegate over the private
+    /// `learned_capabilities` registry so the status surface can surface
+    /// learned entries without reaching into the field.
+    ///
+    /// A version another kind wrote (an outgoing Router's late write after a
+    /// kind-flip reload) is left out: it never acts for this Router, and the
+    /// next owner sweep removes it.
     pub fn learned_capability_snapshot(
         &self,
     ) -> Vec<crate::learned_capability::LearnedRegistryEntry> {
-        self.learned_capabilities.snapshot()
+        self.learned_capabilities
+            .owned_snapshot(|state_key| self.provider_kind_for_state_key(state_key))
     }
 
     /// The reasoning-replay lifecycle riding on the learned-capability
@@ -919,7 +924,8 @@ impl Router {
                 // blind-minted past the reconfirmed F1. Phase-conditional -- a
                 // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
                 // be wrongly suppressed.
-                if self.settled_negative_phase(&learned_key, &feature_key) == Some(FailurePhase::F1)
+                if self.settled_negative_phase(&learned_key, &feature_key, provider_kind)
+                    == Some(FailurePhase::F1)
                 {
                     dedupe.insert(LearnDedupeKey::F1Seen {
                         feature_key: feature_key.clone(),
@@ -1090,12 +1096,23 @@ impl Router {
     /// feature_key)`, or `None` when no entry resides. Read at the probe-settle
     /// site to decide whether a reconfirmed negative is F1 evidence that must
     /// suppress a later cross-lane F2 candidate in the same attempt chain.
-    fn settled_negative_phase(&self, learned_key: &str, feature_key: &str) -> Option<FailurePhase> {
+    fn settled_negative_phase(
+        &self,
+        learned_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+    ) -> Option<FailurePhase> {
+        let normalized =
+            routectl_core::capability::normalize_capability_key(feature_key, provider_kind);
         self.learned_capabilities
-            .snapshot()
+            .recorded_snapshot()
             .into_iter()
-            .find(|entry| entry.state_key == learned_key && entry.feature_key == feature_key)
-            .map(|entry| entry.phase)
+            .find(|recorded| {
+                recorded.provider_kind == provider_kind
+                    && recorded.entry.state_key == learned_key
+                    && recorded.entry.feature_key == normalized
+            })
+            .map(|recorded| recorded.entry.phase)
     }
 
     /// Drift observability for the Bedrock validation matcher. When the

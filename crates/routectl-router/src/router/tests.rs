@@ -1699,7 +1699,7 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
     reloaded.learned_capabilities.advance_generation();
     reloaded.learned_capabilities.prune_catalog_scoped();
     assert_eq!(
-        reloaded.learned_capability_snapshot().len(),
+        reloaded.learned_capabilities.snapshot().len(),
         1,
         "after the boundary, exactly the wire-shape entry is resident",
     );

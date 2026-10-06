@@ -327,12 +327,12 @@
       num0(r.skipped_lane) + ', unknown ' + num0(r.skipped_unknown);
   }
 
-  // A `mixed` cell is one whose nicknames resolve to different routing
-  // actions; it names no single verdict, and its tooltip lists each
-  // nickname's action.
+  // A `mixed` cell is one whose nicknames resolve to different verdicts or
+  // routing actions; it names no single verdict, and its tooltip lists each
+  // nickname's verdict, layer and action.
   function matrixCell(cell, nowMs) {
     if (!cell) { return '-'; }
-    var mixed = cell.action === 'mixed';
+    var mixed = cell.action === 'mixed' || cell.verdict === 'mixed';
     if (!mixed && !cell.source) { return '-'; }
     var span = document.createElement('span');
     span.textContent = mixed ? 'mixed'
@@ -344,9 +344,9 @@
   function matrixCellTitle(cell, nowMs) {
     var parts = [];
     if (cell.source) { parts.push('source ' + cell.source); }
-    if (cell.action === 'mixed') {
-      parts.push('action mixed: ' + (cell.nickname_actions || []).map(function (n) {
-        return n.nickname + ' ' + n.action;
+    if (cell.action === 'mixed' || cell.verdict === 'mixed') {
+      parts.push('mixed: ' + (cell.nickname_actions || []).map(function (n) {
+        return n.nickname + ' ' + n.verdict + ' (' + (n.layer || 'none') + ') ' + n.action;
       }).join(', '));
     } else {
       parts.push('action ' + cell.action);

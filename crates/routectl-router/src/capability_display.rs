@@ -30,6 +30,12 @@ pub const FORCED_UNSUPPORTED: &str = "forced_unsupported";
 /// PANEL-ONLY -- see [`FORCED_UNSUPPORTED`].
 pub const FORCED_SUPPORTED: &str = "forced_supported";
 
+/// Display verdict token for a matrix cell whose nicknames resolve to
+/// different verdicts (one carries a nickname-scoped override the other does
+/// not), so no lane-wide verdict, source or layer describes it. PANEL-ONLY,
+/// like the override tokens: never part of the core verdict vocabulary.
+pub const VERDICT_MIXED: &str = "mixed";
+
 /// Source tag: an operator override decided the cell.
 pub const SOURCE_OVERRIDE: &str = "override";
 /// Source tag: a learned observation from live traffic.

@@ -88,15 +88,17 @@ pub enum MatrixAvailability {
 /// One resolved cell of the capability matrix: the display verdict for a
 /// `(lane, capability)` pair. `verdict` is a stable token (the core
 /// `Verdict::as_str` vocabulary plus the panel-only `forced_supported` /
-/// `forced_unsupported` override tokens); `supported` carries the polarity
-/// the token alone omits for a prior `assumed` cell (`None` only for an
-/// `unknown` cell); `source` is the winning layer's evidence tag
+/// `forced_unsupported` override tokens, or `mixed` when the nicknames on the
+/// lane resolve different verdicts); `supported` carries the polarity
+/// the token alone omits for a prior `assumed` cell (`None` for an
+/// `unknown` or `mixed` cell); `source` is the winning layer's evidence tag
 /// (`override` / `live` / `probe` / `prior`) and `layer` the layer itself
-/// (`override` / `learned` / `prior`), both `None` for `unknown`. `action` is
-/// what the dispatch filter does with the cell (`drop` / `route_away` /
-/// `strip` / `reprobe` / `allow` / `none`), or `mixed` when the nicknames on
-/// the lane resolve it to different actions -- `nickname_actions` then
-/// carries each nickname's own, and is empty otherwise.
+/// (`override` / `learned` / `prior`), both `None` for `unknown` or `mixed`.
+/// `action` is what the dispatch filter does with the cell (`drop` /
+/// `route_away` / `strip` / `reprobe` / `allow` / `none`), or `mixed` when
+/// the nicknames on the lane resolve it to different actions.
+/// `nickname_actions` carries each nickname's own verdict, layer and action
+/// whenever the verdict or the action is `mixed`, and is empty otherwise.
 ///
 /// The timestamps are epoch milliseconds and describe the resident learned
 /// entry, so they are present only when one exists -- including when an
@@ -127,16 +129,20 @@ pub struct MatrixCell {
     pub last_seen_ms: Option<i64>,
     /// When a resident learned negative's decay window lapses (epoch ms).
     pub expires_at_ms: Option<i64>,
-    /// Each nickname's own action, sorted by nickname, when `action` is
-    /// `mixed`; empty when every nickname on the lane agrees.
+    /// Each nickname's own resolution, sorted by nickname, when `verdict` or
+    /// `action` is `mixed`; empty when every nickname on the lane agrees.
     pub nickname_actions: Vec<MatrixNicknameAction>,
 }
 
-/// One nickname's resolved action on a `mixed` matrix cell.
+/// One nickname's resolution of a `mixed` matrix cell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixNicknameAction {
     /// The model nickname.
     pub nickname: String,
+    /// The display verdict token for this nickname's target.
+    pub verdict: &'static str,
+    /// The layer that decided this nickname's verdict; `None` for `unknown`.
+    pub layer: Option<&'static str>,
     /// The action the dispatch filter takes for this nickname's target.
     pub action: &'static str,
 }

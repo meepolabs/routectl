@@ -219,9 +219,10 @@ fn an_eligible_envelope_verdict_reports_its_whole_row_unblocked() {
 }
 
 /// A verdict written under a kind the lane's provider entry no longer has is
-/// not reported acting, exactly as the dispatch read refuses it -- with the
-/// same seeded confirmations under which the current kind's verdict reports
-/// unblocked above. Status is read-only, so the entry stays resident.
+/// not reported at all, exactly as the dispatch read never selects it -- with
+/// the same seeded confirmations under which the current kind's verdict
+/// reports unblocked above. Status is read-only, so the version stays resident
+/// for the owner sweep.
 #[test]
 fn an_old_kind_verdict_after_a_kind_flip_is_not_reported_eligible() {
     let router = bare_router();
@@ -248,11 +249,9 @@ fn an_old_kind_verdict_after_a_kind_flip_is_not_reported_eligible() {
 
     let rows = router.field_verdict_status();
 
-    assert_eq!(
-        only_row(&rows).blocked_reason,
-        Some(PreflightBlockedReason::NotEligible),
-    );
-    assert_eq!(router.learned_capability_snapshot().len(), 1);
+    assert!(rows.is_empty(), "{rows:?}");
+    assert!(router.learned_capability_snapshot().is_empty());
+    assert_eq!(router.learned_capabilities.recorded_snapshot().len(), 1);
 }
 
 /// A resident verdict with NO acknowledged confirmation reports `not_eligible`.

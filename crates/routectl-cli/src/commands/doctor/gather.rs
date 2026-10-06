@@ -11,9 +11,9 @@ use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay, Config,
-    EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource, ReplayTombstone,
-    Source, catalog_import_state_default_path, derive_effective_view, effective_pricing,
-    load_last_import, rebuild_capabilities_into, today_epoch_day,
+    EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource, ProviderEntry,
+    ReplayTombstone, Source, StateKey, catalog_import_state_default_path, derive_effective_view,
+    effective_pricing, load_last_import, rebuild_capabilities_into, today_epoch_day,
 };
 
 use crate::commands::capability_legacy::present_legacy_capability_keys;
@@ -317,7 +317,7 @@ fn replay_matrix_slice(
     let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
     let summary = rebuild_capabilities_into(&slice, &registry, &config.providers);
     let replay = replay_summary(&summary, reader.loaded_rows());
-    let entries = registry.snapshot();
+    let entries = registry.owned_snapshot(|lane| lane_provider_kind(config, lane));
     if entries.is_empty() {
         CapabilityMatrixSource::Empty { replay }
     } else {
@@ -328,6 +328,15 @@ fn replay_matrix_slice(
             replay,
         }
     }
+}
+
+/// The kind `config` gives the provider entry `lane` names, or `""` when the
+/// key is not a lane or names no configured entry: the version of a learned
+/// fact a router under this config would read.
+fn lane_provider_kind<'c>(config: &'c Config, lane: &str) -> &'c str {
+    StateKey::parse(lane)
+        .and_then(|lane| config.providers.get(lane.provider_entry()))
+        .map_or("", ProviderEntry::kind_str)
 }
 
 /// Fold the router's rebuild tally into the panel's replay summary.

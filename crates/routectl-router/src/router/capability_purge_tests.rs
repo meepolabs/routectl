@@ -99,10 +99,15 @@ impl routectl_core::Provider for PurgeNoopProvider {
 /// Plant one acting self-identifying negative for `(state_key, capability)`,
 /// keyed exactly the way the learn path keys it.
 fn plant_negative(router: &Router, state_key: &str, capability: &str) {
+    plant_negative_under(router, state_key, capability, ANTHROPIC_API);
+}
+
+/// [`plant_negative`] recorded under `provider_kind`.
+fn plant_negative_under(router: &Router, state_key: &str, capability: &str, provider_kind: &str) {
     router.learned_capabilities.observe(
         state_key,
         capability,
-        ANTHROPIC_API,
+        provider_kind,
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
@@ -371,16 +376,15 @@ fn a_lane_no_model_dispatches_derives_its_provider_entrys_kind() {
     assert!(report.removed);
 }
 
-/// An unrecognized target is not an error: the registry can hold an entry for a
-/// lane whose config entry the operator has since removed, and purging that
-/// stale entry is exactly what an operator wants. The derivation falls back to
-/// the empty kind, which normalizes as the identity -- the same fallback the
-/// ledger replay bridge relies on for an already-normalized key.
+/// An unrecognized target is not an error. The derivation falls back to the
+/// empty kind, which normalizes as the identity -- the same fallback the
+/// ledger replay bridge relies on for an already-normalized key -- and an entry
+/// recorded under that kind is purged.
 #[test]
 fn an_unconfigured_target_still_purges_under_the_identity_normalization() {
     // Arrange
     let router = router_with_models(&["sonnet"]);
-    plant_negative(&router, "orphan#upstream", WEB_SEARCH);
+    plant_negative_under(&router, "orphan#upstream", WEB_SEARCH, "");
 
     // Act
     let report = purge(&router, "orphan#upstream", WEB_SEARCH);
@@ -388,7 +392,34 @@ fn an_unconfigured_target_still_purges_under_the_identity_normalization() {
     // Assert
     assert!(report.provider_kind.is_empty());
     assert!(report.removed);
-    assert!(!resident(&router, "orphan#upstream", WEB_SEARCH));
+    assert!(router.learned_capabilities.recorded_snapshot().is_empty());
+}
+
+/// A purge clears the version the current config owns and only that one: a
+/// version another kind wrote is left for the owner sweep, never acts for the
+/// current kind, and is not reported by the Router.
+#[test]
+fn a_purge_leaves_a_version_another_kind_wrote_for_the_owner_sweep() {
+    // Arrange
+    let router = router_with_models(&["sonnet"]);
+    plant_negative(&router, SONNET, WEB_SEARCH);
+    plant_negative_under(&router, SONNET, WEB_SEARCH, "openai-compat");
+
+    // Act
+    let report = purge(&router, SONNET, WEB_SEARCH);
+
+    // Assert
+    assert!(report.removed);
+    assert!(!resident(&router, SONNET, WEB_SEARCH));
+    let kinds: Vec<String> = router
+        .learned_capabilities
+        .recorded_snapshot()
+        .into_iter()
+        .map(|recorded| recorded.provider_kind)
+        .collect();
+    assert_eq!(kinds, ["openai-compat"]);
+    assert_eq!(router.sweep_unowned_learned_entries(), 1);
+    assert!(router.learned_capabilities.recorded_snapshot().is_empty());
 }
 
 /// Scope boundary. The purge acts on LEARNED entries only: it never edits,

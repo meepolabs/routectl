@@ -140,4 +140,7 @@ banner, no retry signal -- silently mislabeled data.
   nickname on a lane the ledger holds a negative for means the client joined
   learned rows on the runtime `state_key` instead of the target's
   `learned_lane`.
-- A `verified` row on the same lane must not render as a chip.
+- A `verified` row on the same lane must not render as a chip. Seed it with a
+  recognized `evidence_class` (for example `schema_parse`): replay skips a
+  `verified` row whose class is missing or unrecognized, so a row seeded
+  without one never reaches the registry and the check passes vacuously.

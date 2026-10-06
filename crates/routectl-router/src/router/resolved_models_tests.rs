@@ -779,10 +779,13 @@ async fn learned_capability_snapshot_surfaces_negatives() {
         router.learned_capability_snapshot().is_empty(),
         "fresh registry surfaces no negatives",
     );
+    // The kind this Router resolves for the key: the snapshot reports the
+    // version a dispatch through this Router would read.
+    let provider_kind = router.provider_kind_for_state_key("alpha").to_string();
     router.learned_capabilities.observe(
         "alpha",
         "web_search",
-        "openai-compat",
+        &provider_kind,
         SignalTier::SelfIdentifying,
         routectl_core::capability::FailurePhase::F1,
         EvidenceSource::Live,

@@ -1424,7 +1424,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `MatrixReplaySummary` (rows = learned lanes `provider_entry#upstream` with
   their mapped nicknames and provider kind; cells = verdict + source + layer +
   routing action + age + the resident learned entry's epoch-ms first-seen /
-  last-seen / expiry, resolved through `capability_display`; availability
+  last-seen / expiry, resolved through `capability_display`, with
+  `MatrixNicknameAction` (nickname, verdict, layer, action) listed whenever the
+  lane's nicknames disagree on the verdict or the action; availability
   tri-state available/empty/unavailable so a read failure can never render as
   an empty registry; the replay tally of rows read / replayed / skipped by
   reason), and `DoctorReport { schema_version, findings, panels }`.
@@ -3788,8 +3790,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
   Router's config own a `RecordedLearnedEntry`) and
   `sweep_unowned_learned_entries`, which removes (through the generation
-  barrier, only while the entry still records the kind it was snapshotted
-  with) every lane-keyed entry whose provider entry this config dropped or
+  barrier, addressing only the version recorded under the snapshotted kind)
+  every lane-keyed entry whose provider entry this config dropped or
   configures under a kind other than the one the ENTRY recorded, resetting a
   dropped field verdict's canary state; same rule as boot replay via
   `capability_owner::owner_decision`. Run by `carry_over_learned_from` on a
@@ -3819,6 +3821,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   runtime-key readings for a key that is not a lane; empty = identity
   normalization for a provider entry the operator has since removed) rather than accepted
   from the caller, so no caller can address a key the learn path never minted.
+  That kind is also the registry key's kind half, so a purge clears the current
+  owner's version only; another kind's stray version is left to the owner sweep.
   Learned entries only: never the override registry, never a baked prior.
   `finalize_learned_capability_purge` also drops the purged key's resident
   canary/quorum state (`FieldCanaryRegistry::reset`, see `src/field_canary.rs`)
@@ -4007,13 +4011,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a value from here
 - `src/learned_capability.rs` -- ONE instance is shared across Router
   generations (a reload attaches, never copies), which the generation barrier and
-  the retunable tuning both follow from. Each entry records the provider kind
-  of the write that created it; every write replaces an entry at its own key
-  whose kind is not the caller's (`drop_other_owner`), and the guarded acting
-  reads drop every such entry on the caller's lane
-  (`drop_other_owners_on_lane`, a range over the lane-first ordered map), so
-  an outgoing Router's in-flight write never acts after a kind-flip reload.
-  `recorded_snapshot` / `RecordedLearnedEntry` carry that kind for the owner
+  the retunable tuning both follow from. The resident identity is
+  `RegistryKey { state_key, provider_kind, feature_key }` (lane-first
+  ordering): the kind of the write that created an entry is part of its key,
+  so every read and write selects its own kind's version, versions under
+  different kinds coexist, and an outgoing Router's in-flight read or write
+  after a kind-flip reload neither acts for nor removes the current kind's
+  facts. Nothing on the read or write path removes another kind's version;
+  that happens only in the reload owner sweep and at boot replay, and a stray
+  version counts toward the cap until then. `owned_snapshot(current_kind)` is
+  the display read (only each lane's current-kind version);
+  `recorded_snapshot` / `RecordedLearnedEntry` carry the kind for the owner
   sweep and the boundary restatement: `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
   plus the catalog-scoped prune under one acquisition), the `*_in_generation`
@@ -4656,7 +4664,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   side-effecting -- probe admission, `in_flight`, metrics -- so it cannot run
   from a read-only diagnostic). `DisplayVerdict { verdict, supported, source
   }` carries a stable token (the core `Verdict::as_str` vocabulary plus the
-  PANEL-ONLY override tokens `FORCED_SUPPORTED` / `FORCED_UNSUPPORTED`), a
+  PANEL-ONLY override tokens `FORCED_SUPPORTED` / `FORCED_UNSUPPORTED`, and
+  `VERDICT_MIXED` for a matrix cell whose nicknames resolve different verdicts), a
   support polarity (`None` only for `unknown`), and a source tag (`override` /
   `live` / `probe` / `prior`, `None` for `unknown`). A sibling drift test
   asserts the order agrees with `router::capability_precedence_matrix_tests`.
@@ -5581,9 +5590,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   v16 binary opens it. Refuses with a `DowngradeError` and leaves the file
   untouched on a missing file (never created), a version other than 17, a meta
   mirror that disagrees, a `capability_events` column list (read through
-  `PRAGMA table_xinfo` as `ColumnShape`s: name, declared type, `NOT NULL`,
-  default, primary-key position, hidden flag) other than the frozen v16 set
-  followed by plain nullable `provider_kind TEXT`, `vocab_version INTEGER`, or
+  `PRAGMA table_xinfo`: name, declared type, `NOT NULL`, default, primary-key
+  position, hidden flag) other than the frozen v16 set followed by plain
+  nullable `provider_kind TEXT`, `vocab_version INTEGER` (`NotAdditive`
+  carrying a `NotAdditiveReason`: `ColumnCount` or `ColumnShape`, never the
+  file-supplied column text), or
   `InUse` when any other connection has the file open: it sets
   `locking_mode = EXCLUSIVE` before its first read, and in WAL mode the first
   transaction then fails busy while any other connection (the daemon's writer,
@@ -8011,8 +8022,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   resolve through the lane's nicknames (`provider:nickname` before bare
   `provider`, via `OverrideRegistry::resolve`). Columns are the well-known
   keys then observed others capped at 10 (`(+N more)` overflow). Each cell
-  runs the shared `resolve_display_verdict` + `resolve_display_action`, then
-  layers on the winning layer, the display-only age and stale flag, and the
+  runs the shared `resolve_display_verdict` + `resolve_display_action` once
+  per nickname on the lane; when the nicknames disagree on the verdict the
+  cell's verdict is `mixed` with no lane-wide source, layer or age, when they
+  disagree on the action it is `mixed`, and either way the cell lists each
+  nickname's verdict, layer and action. It then layers on the winning layer,
+  the display-only age and stale flag, and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
   `now`/`now_ms` anchor pair. Lane-keyed coverage lives in the
   `#[path]`-included `lane_matrix_tests.rs`

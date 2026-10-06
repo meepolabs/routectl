@@ -2709,13 +2709,10 @@ impl Router {
             let Some(lane) = crate::state_key::StateKey::parse(&entry.state_key) else {
                 continue;
             };
-            let provider_kind = self
-                .provider_kind_for_state_key(&entry.state_key)
-                .to_string();
             let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
                 lane,
                 entry.capability_key,
-                provider_kind,
+                entry.provider_kind,
             );
             self.field_verdicts.canaries().seed_from_rebuild(
                 &key,

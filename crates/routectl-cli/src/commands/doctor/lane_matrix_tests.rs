@@ -307,19 +307,75 @@ fn a_model_scoped_override_resolves_through_the_lane_nicknames() {
         build_capability_matrix_panel(&context(config, available(Vec::new(), Instant::now(), 0)));
 
     let overridden = cell(&panel, "p#up", "web_search");
-    assert_eq!(overridden.verdict, "forced_unsupported");
-    assert_eq!(overridden.layer, Some("override"));
     assert_eq!(
-        overridden.action, "mixed",
-        "only beta carries the override, so alpha and beta disagree"
+        overridden.verdict, "mixed",
+        "only beta carries the override, so no lane-wide verdict describes the cell"
     );
-    let actions: Vec<(&str, &str)> = overridden
-        .nickname_actions
-        .iter()
-        .map(|n| (n.nickname.as_str(), n.action))
-        .collect();
-    assert_eq!(actions, [("alpha", "none"), ("beta", "drop")]);
+    assert_eq!(overridden.supported, None);
+    assert_eq!(overridden.source, None);
+    assert_eq!(overridden.layer, None);
+    assert_eq!(overridden.action, "mixed");
+    assert_eq!(
+        nickname_resolutions(overridden),
+        [
+            ("alpha", "unknown", None, "none"),
+            ("beta", "forced_unsupported", Some("override"), "drop"),
+        ]
+    );
     assert_eq!(cell(&panel, "p#other", "web_search").verdict, "unknown");
+}
+
+/// A partial override whose nicknames still agree on the ACTION: beta
+/// force-supports a capability alpha already has verified, so both allow,
+/// but alpha's evidence is learned and beta's is the override. The cell must
+/// not report the override as the lane's verdict.
+#[test]
+fn a_partial_override_with_an_agreeing_action_still_reports_a_mixed_verdict() {
+    let mut config = lane_config();
+    config.capability.overrides.insert(
+        "p:beta".to_string(),
+        toml::from_str("force_supported = [\"web_search\"]").expect("override entry parses"),
+    );
+    let now = Instant::now();
+    let verified = LearnedRegistryEntry {
+        verdict: Verdict::VerifiedWorking,
+        phase: FailurePhase::F3,
+        evidence_class: Some("search_blocks".to_string()),
+        ..negative("p#up", "web_search", FailurePhase::F3, now, now)
+    };
+    let panel = build_capability_matrix_panel(&context(config, available(vec![verified], now, 0)));
+
+    let partial = cell(&panel, "p#up", "web_search");
+    assert_eq!(partial.action, "allow", "premise: both nicknames allow");
+    assert_eq!(partial.verdict, "mixed");
+    assert_eq!(partial.layer, None);
+    assert_eq!(partial.source, None);
+    assert_eq!(partial.age_ms, None, "no lane-wide learned layer to age");
+    assert!(
+        partial.first_seen_ms.is_some(),
+        "the learned entry still exists underneath"
+    );
+    assert_eq!(
+        nickname_resolutions(partial),
+        [
+            ("alpha", "verified", Some("learned"), "allow"),
+            ("beta", "forced_supported", Some("override"), "allow"),
+        ]
+    );
+    let human = render_capability_matrix_panel(&panel);
+    assert!(
+        human.contains("mixed(alpha=allow[verified],beta=allow[forced_supported])"),
+        "the human grid names each nickname's verdict: {human}"
+    );
+}
+
+fn nickname_resolutions(
+    cell: &MatrixCell,
+) -> Vec<(&str, &'static str, Option<&'static str>, &'static str)> {
+    cell.nickname_actions
+        .iter()
+        .map(|n| (n.nickname.as_str(), n.verdict, n.layer, n.action))
+        .collect()
 }
 
 #[test]
@@ -340,12 +396,18 @@ fn nicknames_on_one_lane_with_different_overrides_render_a_mixed_cell() {
 
     let mixed = cell(&panel, "p#up", "web_search");
     assert_eq!(mixed.action, "mixed");
-    let actions: Vec<(&str, &str)> = mixed
-        .nickname_actions
-        .iter()
-        .map(|n| (n.nickname.as_str(), n.action))
-        .collect();
-    assert_eq!(actions, [("alpha", "allow"), ("beta", "drop")]);
+    assert_eq!(mixed.verdict, "mixed");
+    assert_eq!(
+        mixed.layer, None,
+        "both are overrides, but of opposite verdicts"
+    );
+    assert_eq!(
+        nickname_resolutions(mixed),
+        [
+            ("alpha", "forced_supported", Some("override"), "allow"),
+            ("beta", "forced_unsupported", Some("override"), "drop"),
+        ]
+    );
 
     let json = serde_json::to_value(&panel).expect("panel serializes");
     let lane = json["lanes"]
@@ -360,12 +422,17 @@ fn nicknames_on_one_lane_with_different_overrides_render_a_mixed_cell() {
     assert_eq!(lane["cells"][column]["action"], "mixed");
     assert_eq!(
         lane["cells"][column]["nickname_actions"][1],
-        serde_json::json!({ "nickname": "beta", "action": "drop" })
+        serde_json::json!({
+            "nickname": "beta",
+            "verdict": "forced_unsupported",
+            "layer": "override",
+            "action": "drop",
+        })
     );
     let human = render_capability_matrix_panel(&panel);
     assert!(
-        human.contains("mixed(alpha=allow,beta=drop)"),
-        "the human grid names each nickname's action: {human}"
+        human.contains("mixed(alpha=allow[forced_supported],beta=drop[forced_unsupported])"),
+        "the human grid names each nickname's verdict and action: {human}"
     );
 }
 
@@ -383,6 +450,8 @@ fn nicknames_that_agree_on_a_lane_carry_no_per_nickname_actions() {
 
     let agreed = cell(&panel, "p#up", "web_search");
     assert_eq!(agreed.action, "drop");
+    assert_eq!(agreed.verdict, "forced_unsupported");
+    assert_eq!(agreed.layer, Some("override"));
     assert!(agreed.nickname_actions.is_empty());
 }
 

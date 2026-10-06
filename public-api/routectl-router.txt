@@ -12364,6 +12364,7 @@ pub fn routectl_router::LearnedCapabilityRegistry::observe(&self, &str, &str, &s
 pub fn routectl_router::LearnedCapabilityRegistry::observe_in_generation(&self, u64, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
 pub fn routectl_router::LearnedCapabilityRegistry::observe_positive(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::learned_capability::PositiveOutcome
 pub fn routectl_router::LearnedCapabilityRegistry::observe_positive_in_generation(&self, u64, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
+pub fn routectl_router::LearnedCapabilityRegistry::owned_snapshot<'k>(&self, impl core::ops::function::Fn(&str) -> &'k str) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
 pub fn routectl_router::LearnedCapabilityRegistry::prepare_purge(&self, u64, &str, &str, &str) -> routectl_router::learned_capability::PurgePreparation
 pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome(&self, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant)
 pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome_in_generation(&self, u64, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant) -> routectl_router::GenerationOutcome<()>
@@ -12889,7 +12890,9 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::MatrixLane::into_shared(self) -> Shared
 pub struct routectl_router::MatrixNicknameAction
 pub routectl_router::MatrixNicknameAction::action: &'static str
+pub routectl_router::MatrixNicknameAction::layer: core::option::Option<&'static str>
 pub routectl_router::MatrixNicknameAction::nickname: alloc::string::String
+pub routectl_router::MatrixNicknameAction::verdict: &'static str
 impl core::clone::Clone for routectl_router::MatrixNicknameAction
 pub fn routectl_router::MatrixNicknameAction::clone(&self) -> routectl_router::MatrixNicknameAction
 impl core::cmp::Eq for routectl_router::MatrixNicknameAction
@@ -16328,6 +16331,7 @@ pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::CURRENT_VOCAB_VERSION: i64
 pub const routectl_router::K_SESSION_CAPACITY: usize
 pub const routectl_router::MAX_POOL_MEMBERS: usize
+pub const routectl_router::VERDICT_MIXED: &str
 pub trait routectl_router::CalibrationLedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::CalibrationLedgerReader::read_calibration_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::CalibrationLedgerRow>
 pub trait routectl_router::CapabilityLedgerReader: core::marker::Send + core::marker::Sync

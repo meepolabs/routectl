@@ -129,12 +129,27 @@ fn routes_away(router: &Router, target: &DispatchTarget, kind: &str) -> bool {
     )
 }
 
+/// Every resident version's lane, whichever kind wrote it: the registry the
+/// next sweep judges, not only the versions this Router reads.
 fn resident_lanes(router: &Router) -> Vec<String> {
     router
-        .learned_capability_snapshot()
+        .learned_capabilities
+        .recorded_snapshot()
         .into_iter()
-        .map(|entry| entry.state_key)
+        .map(|recorded| recorded.entry.state_key)
         .collect()
+}
+
+/// Every resident version's recorded kind, sorted.
+fn resident_kinds(router: &Router) -> Vec<String> {
+    let mut kinds: Vec<String> = router
+        .learned_capabilities
+        .recorded_snapshot()
+        .into_iter()
+        .map(|recorded| recorded.provider_kind)
+        .collect();
+    kinds.sort();
+    kinds
 }
 
 /// A restart's view of the ledger: one boundary and the rows after it.
@@ -351,9 +366,80 @@ fn an_old_router_write_after_a_kind_flip_does_not_act_on_the_new_router() {
         "an entry recorded under the old kind must not act for the new kind",
     );
     assert!(
-        resident_lanes(&reloaded).is_empty(),
-        "the acting lookup removes the entry its owner no longer matches",
+        reloaded.learned_capability_snapshot().is_empty(),
+        "the new router's display surfaces do not report the old kind's version",
     );
+    assert_eq!(
+        resident_lanes(&reloaded),
+        vec![LANE.to_string()],
+        "a read removes nothing; removal belongs to the owner sweep",
+    );
+    assert_eq!(reloaded.sweep_unowned_learned_entries(), 1);
+    assert!(resident_lanes(&reloaded).is_empty());
+}
+
+/// The reload race: after an A->B kind flip, B learns a fact, then requests
+/// still holding the A router look up and write the same lane. B keeps acting
+/// on its own entry, untouched; A's version is resident but never acts for B;
+/// and the next sweep under B's config removes only A's version.
+#[test]
+fn a_late_old_router_lookup_and_write_leave_the_new_kinds_fact_acting() {
+    let before = router(ALPHA_COMPAT);
+    let old_target = target(&before, "opus", "alpha");
+    let mut reloaded = router(ALPHA_ANTHROPIC);
+    reloaded.carry_over_learned_from(&before);
+    let new_target = target(&reloaded, "opus", "alpha");
+    learn_on(&reloaded, &new_target, ANTHROPIC);
+    let learned = reloaded.learned_capability_snapshot();
+
+    assert!(
+        !routes_away(&before, &old_target, COMPAT),
+        "premise: the old router finds nothing of its own kind",
+    );
+    learn_on(&before, &old_target, COMPAT);
+    assert!(
+        routes_away(&before, &old_target, COMPAT),
+        "the old router acts on its own late write",
+    );
+
+    assert!(routes_away(&reloaded, &new_target, ANTHROPIC));
+    assert_eq!(
+        reloaded.learned_capability_snapshot(),
+        learned,
+        "the new kind's entry is intact and is the only one the new router reports",
+    );
+    assert_eq!(
+        resident_kinds(&reloaded),
+        vec![ANTHROPIC.to_string(), COMPAT.to_string()],
+    );
+
+    assert_eq!(reloaded.sweep_unowned_learned_entries(), 1);
+    assert_eq!(resident_kinds(&reloaded), vec![ANTHROPIC.to_string()]);
+    assert!(routes_away(&reloaded, &new_target, ANTHROPIC));
+}
+
+/// The same race resolved by the next reload rather than a direct sweep: the
+/// carry-over onto a config that still configures the new kind removes the
+/// stray old-kind version.
+#[test]
+fn the_next_reload_removes_a_late_old_kind_version() {
+    let before = router(ALPHA_COMPAT);
+    let old_target = target(&before, "opus", "alpha");
+    let mut reloaded = router(ALPHA_ANTHROPIC);
+    reloaded.carry_over_learned_from(&before);
+    learn_on(&reloaded, &target(&reloaded, "opus", "alpha"), ANTHROPIC);
+    learn_on(&before, &old_target, COMPAT);
+    assert_eq!(resident_kinds(&reloaded).len(), 2, "premise: both versions");
+
+    let mut next = router(ALPHA_ANTHROPIC);
+    next.carry_over_learned_from(&reloaded);
+
+    assert_eq!(resident_kinds(&next), vec![ANTHROPIC.to_string()]);
+    assert!(routes_away(
+        &next,
+        &target(&next, "opus", "alpha"),
+        ANTHROPIC
+    ));
 }
 
 #[test]
@@ -374,7 +460,7 @@ fn an_old_router_write_after_a_same_kind_reload_still_acts_on_the_new_router() {
 }
 
 #[test]
-fn a_write_under_the_new_kind_replaces_an_entry_recorded_under_the_old_kind() {
+fn a_write_under_the_new_kind_does_not_refresh_an_entry_recorded_under_the_old_kind() {
     let before = router(ALPHA_COMPAT);
     let old_target = target(&before, "opus", "alpha");
     let mut reloaded = router(ALPHA_ANTHROPIC);
@@ -388,7 +474,7 @@ fn a_write_under_the_new_kind_replaces_an_entry_recorded_under_the_old_kind() {
     assert_eq!(snapshot.len(), 1);
     assert_eq!(
         snapshot[0].observations, 1,
-        "the old owner's entry was replaced, not refreshed",
+        "the new owner's first observation, not a refresh of the old owner's",
     );
     assert!(
         routes_away(&reloaded, &new_target, ANTHROPIC),

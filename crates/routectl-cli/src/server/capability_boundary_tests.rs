@@ -2024,12 +2024,14 @@ fn with_keep(mut config: Config) -> Config {
     config
 }
 
-/// The resident `(lane, capability)` pairs of a router, sorted.
+/// The resident `(lane, capability)` pairs of a router's registry, sorted:
+/// every version, whichever kind wrote it, since that is what a sweep judges.
 fn resident_lanes(router: &Router) -> Vec<(String, String)> {
     let mut keys: Vec<(String, String)> = router
-        .learned_capability_snapshot()
+        .learned_registry()
+        .recorded_snapshot()
         .into_iter()
-        .map(|e| (e.state_key, e.feature_key))
+        .map(|recorded| (recorded.entry.state_key, recorded.entry.feature_key))
         .collect();
     keys.sort();
     keys

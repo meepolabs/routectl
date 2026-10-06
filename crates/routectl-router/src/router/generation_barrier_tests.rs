@@ -78,7 +78,8 @@ fn an_old_router_field_observation_reaches_the_live_registry() {
         "a wire-shape observation from a superseded Router must be accepted",
     );
     let resident: Vec<String> = live
-        .learned_capability_snapshot()
+        .learned_capabilities
+        .snapshot()
         .into_iter()
         .map(|e| e.feature_key)
         .collect();
@@ -178,7 +179,7 @@ fn an_old_router_probe_settlement_on_a_scoped_key_is_inert() {
         "a stale settlement must report Stale so nothing is emitted",
     );
     assert_eq!(
-        live.learned_capability_snapshot().len(),
+        live.learned_capabilities.snapshot().len(),
         1,
         "and must not clear the live entry",
     );

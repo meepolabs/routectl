@@ -10,9 +10,9 @@
 //! and this module is the one place that compares a fact's recorded owner
 //! against the current config. Boot replay and hot-reload carry-over both
 //! call it, so a fact a reload drops is also a fact the next restart skips.
-//! The registry's acting lookups apply the same rule to the kind each resident
-//! entry was written under, because a request still holding the outgoing
-//! Router can write into the shared registry after the carry-over swept it.
+//! The resident registry keys each fact by the kind that wrote it, so a
+//! request still holding the outgoing Router reads and writes only its own
+//! kind's version and never acts on, or removes, the current kind's facts.
 //!
 //! A same-kind repoint (a changed `base_url` under one name) keeps its
 //! history: the predicate cannot see an endpoint, only a name and a kind.
@@ -63,13 +63,10 @@ pub fn owner_decision(
 }
 
 /// [`owner_decision`] once the lane's provider entry is known to configure
-/// `current_kind`.
-///
-/// The registry's acting lookups call this directly: the reader's provider
-/// kind is the kind its Router's config gives the target's entry, so only the
-/// kind comparison remains. A configured entry's kind is never empty, so for
-/// [`owner_decision`] an empty recorded kind is always unowned; a reader with
-/// no kind of its own matches only an entry written with none.
+/// `current_kind`: only the kind comparison remains. A configured entry's kind
+/// is never empty, so for [`owner_decision`] an empty recorded kind is always
+/// unowned; a `current_kind` that is itself empty matches only an entry written
+/// with none.
 pub fn recorded_kind_decision(recorded_kind: &str, current_kind: &str) -> OwnerDecision {
     if recorded_kind == current_kind {
         return OwnerDecision::Owned;

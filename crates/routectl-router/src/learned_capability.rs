@@ -71,14 +71,24 @@ const MAX_BACKOFF_MULTIPLE: u32 = 30;
 const JITTER_DIVISOR: u32 = 8;
 
 /// Internal map key. `state_key` is used verbatim; `feature_key` is
-/// always the normalized capability key.
+/// always the capability key normalized under `provider_kind`.
+///
+/// `provider_kind` is the kind of the write that created the entry, and it is
+/// part of the identity: one registry spans Router generations, so a request
+/// still holding an outgoing Router can read or write a lane after a reload
+/// changed its provider entry's kind. Keyed by kind, each Router reads and
+/// writes only its own kind's version, and nothing on the hot path has to
+/// remove another kind's version to keep it from acting. Versions the
+/// published config no longer owns are removed by the reload owner sweep and
+/// skipped by boot replay; until then a stray version occupies capacity and
+/// acts for no one.
 ///
 /// Ordered with `state_key` first so every entry on one lane is a contiguous
-/// range of the map, which is what lets the owner check visit a lane's
-/// entries without scanning the whole registry.
+/// range of the map.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct RegistryKey {
     state_key: String,
+    provider_kind: String,
     feature_key: String,
 }
 
@@ -148,14 +158,6 @@ struct LearnedEntry {
     /// here would silently evict the verdict rather than merely lose forensic
     /// detail.
     evidence_class: Option<String>,
-    /// The provider kind of the write that created this entry.
-    ///
-    /// One registry spans Router generations, and a config-only reload does not
-    /// move the generation, so a request still holding the outgoing Router can
-    /// write a lane after the carry-over swept it. The recorded kind is what lets
-    /// an acting lookup through the current Router tell such an entry from its
-    /// own: an entry whose kind is not the reader's never acts.
-    provider_kind: String,
 }
 
 /// Whether an entry with this signal tier and observation count acts: a
@@ -376,6 +378,9 @@ pub(crate) struct FieldActingFacts {
 pub struct FieldSeedEntry {
     pub state_key: String,
     pub capability_key: String,
+    /// The provider kind the entry was written under: the third component
+    /// of its identity.
+    pub provider_kind: String,
     pub incarnation: u64,
     pub observations: u32,
     /// Whether this entry currently routes traffic away from its target
@@ -411,8 +416,9 @@ pub struct ExportedEntry {
     /// `verified` / `suspect` row without a recognized class, so losing it
     /// across a carry-over would evict the entry at the next boot.
     pub evidence_class: Option<String>,
-    /// The provider kind the entry was written under. An entry imported under
-    /// a kind other than its reader's never acts for that reader.
+    /// The provider kind the entry was written under: the third component of
+    /// its identity, so an entry imported under one kind is never read or
+    /// written by a reader of another.
     pub provider_kind: String,
 }
 
@@ -995,7 +1001,6 @@ impl LearnedCapabilityRegistry {
             &mut entries,
             &leased,
             &key,
-            provider_kind,
             tier,
             phase,
             source,
@@ -1015,14 +1020,12 @@ impl LearnedCapabilityRegistry {
         entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
         leased: &std::collections::HashSet<RegistryKey>,
         key: &RegistryKey,
-        provider_kind: &str,
         tier: SignalTier,
         phase: FailurePhase,
         source: EvidenceSource,
         evidence_class: Option<&str>,
         now: Instant,
     ) -> ObserveOutcome {
-        Self::drop_other_owner(entries, key, provider_kind);
         if let Some(existing) = entries.get_mut(key) {
             return match existing.verdict {
                 // A resident negative runs the normal observe path.
@@ -1039,14 +1042,8 @@ impl LearnedCapabilityRegistry {
                 // negative, hence `Pending`.
                 EntryVerdict::Verified => match tier {
                     SignalTier::SelfIdentifying => {
-                        let (entry, outcome) = self.fresh_entry(
-                            provider_kind,
-                            tier,
-                            phase,
-                            source,
-                            evidence_class,
-                            now,
-                        );
+                        let (entry, outcome) =
+                            self.fresh_entry(tier, phase, source, evidence_class, now);
                         *existing = entry;
                         outcome
                     }
@@ -1055,8 +1052,7 @@ impl LearnedCapabilityRegistry {
             };
         }
         self.evict_if_full(entries, leased);
-        let (entry, outcome) =
-            self.fresh_entry(provider_kind, tier, phase, source, evidence_class, now);
+        let (entry, outcome) = self.fresh_entry(tier, phase, source, evidence_class, now);
         entries.insert(key.clone(), entry);
         outcome
     }
@@ -1085,15 +1081,7 @@ impl LearnedCapabilityRegistry {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let mut entries = self.entries.write();
         let leased = self.purge_leases.read();
-        self.observe_positive_in(
-            &mut entries,
-            &leased,
-            &key,
-            provider_kind,
-            source,
-            evidence_class,
-            now,
-        )
+        self.observe_positive_in(&mut entries, &leased, &key, source, evidence_class, now)
     }
 
     /// [`Self::observe_positive`]'s body, operating on already-held guards;
@@ -1106,12 +1094,10 @@ impl LearnedCapabilityRegistry {
         entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
         leased: &std::collections::HashSet<RegistryKey>,
         key: &RegistryKey,
-        provider_kind: &str,
         source: EvidenceSource,
         evidence_class: Option<&str>,
         now: Instant,
     ) -> PositiveOutcome {
-        Self::drop_other_owner(entries, key, provider_kind);
         if let Some(existing) = entries.get_mut(key) {
             return match existing.verdict {
                 EntryVerdict::Negative => PositiveOutcome::SuppressedByNegative,
@@ -1125,7 +1111,7 @@ impl LearnedCapabilityRegistry {
         self.evict_if_full(entries, leased);
         entries.insert(
             key.clone(),
-            Self::fresh_positive(provider_kind, source, evidence_class, now),
+            Self::fresh_positive(source, evidence_class, now),
         );
         PositiveOutcome::Recorded
     }
@@ -1350,6 +1336,27 @@ impl LearnedCapabilityRegistry {
             .collect()
     }
 
+    /// Snapshot, in the fixed contract shape, only the versions a reader would
+    /// act on: each entry recorded under the kind `current_kind` resolves for
+    /// its lane.
+    ///
+    /// The read for every display surface. The registry can hold one version
+    /// per kind for a `(lane, capability)`, and only the current kind's acts,
+    /// so a surface reading [`Self::snapshot`] would report a verdict no
+    /// dispatch acts on and could list the same cell twice.
+    pub fn owned_snapshot<'k>(
+        &self,
+        current_kind: impl Fn(&str) -> &'k str,
+    ) -> Vec<LearnedRegistryEntry> {
+        self.note_snapshot_read();
+        self.entries
+            .read()
+            .iter()
+            .filter(|(key, _)| key.provider_kind == current_kind(&key.state_key))
+            .map(|(key, entry)| Self::snapshot_row(key, entry))
+            .collect()
+    }
+
     /// Snapshot every resident entry together with the provider kind it was
     /// written under.
     pub fn recorded_snapshot(&self) -> Vec<RecordedLearnedEntry> {
@@ -1379,7 +1386,7 @@ impl LearnedCapabilityRegistry {
     fn recorded_row(key: &RegistryKey, entry: &LearnedEntry) -> RecordedLearnedEntry {
         RecordedLearnedEntry {
             entry: Self::snapshot_row(key, entry),
-            provider_kind: entry.provider_kind.clone(),
+            provider_kind: key.provider_kind.clone(),
         }
     }
 
@@ -1403,6 +1410,7 @@ impl LearnedCapabilityRegistry {
             .map(|(key, entry)| FieldSeedEntry {
                 state_key: key.state_key.clone(),
                 capability_key: key.feature_key.clone(),
+                provider_kind: key.provider_kind.clone(),
                 incarnation: entry.incarnation,
                 observations: entry.observations,
                 acting: matches!(entry.acting_decision(), RoutingDecision::RouteAway { .. }),
@@ -1429,7 +1437,7 @@ impl LearnedCapabilityRegistry {
                 in_flight: entry.in_flight,
                 consecutive_failed_probes: entry.consecutive_failed_probes,
                 evidence_class: entry.evidence_class.clone(),
-                provider_kind: entry.provider_kind.clone(),
+                provider_kind: key.provider_kind.clone(),
             })
             .collect()
     }
@@ -1444,6 +1452,7 @@ impl LearnedCapabilityRegistry {
             // so the round-trip preserves the canonical key.
             let key = RegistryKey {
                 state_key: exported.state_key,
+                provider_kind: exported.provider_kind,
                 feature_key: exported.feature_key,
             };
             if !map.contains_key(&key) {
@@ -1470,7 +1479,6 @@ impl LearnedCapabilityRegistry {
                     in_flight: false,
                     consecutive_failed_probes: exported.consecutive_failed_probes,
                     evidence_class: exported.evidence_class,
-                    provider_kind: exported.provider_kind,
                 },
             );
         }
@@ -1997,7 +2005,6 @@ impl LearnedCapabilityRegistry {
                     entries,
                     leased,
                     &key,
-                    provider_kind,
                     tier,
                     phase,
                     source,
@@ -2042,7 +2049,6 @@ impl LearnedCapabilityRegistry {
                     entries,
                     leased,
                     &key,
-                    provider_kind,
                     tier,
                     phase,
                     source,
@@ -2083,15 +2089,7 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                self.observe_positive_in(
-                    entries,
-                    leased,
-                    &key,
-                    provider_kind,
-                    source,
-                    evidence_class,
-                    now,
-                )
+                self.observe_positive_in(entries, leased, &key, source, evidence_class, now)
             },
         )
     }
@@ -2117,7 +2115,6 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                Self::drop_other_owners_on_lane(entries, &key, provider_kind);
                 self.acting_negative_for_in(entries, &key, now)
             },
         ) {
@@ -2346,14 +2343,14 @@ impl LearnedCapabilityRegistry {
         )
     }
 
-    /// Remove `(state_key, feature_key)` on behalf of `generation` only while
-    /// the resident entry still records `recorded_kind`. Returns whether it
-    /// was removed.
+    /// Remove the version of `(state_key, feature_key)` recorded under
+    /// `recorded_kind` on behalf of `generation`. Returns whether it was
+    /// removed.
     ///
-    /// For the owner sweep, which decides from a snapshot: a write under the
-    /// current kind can replace the entry between that snapshot and this
-    /// removal, and the replacement is owned. `feature_key` is the snapshot's
-    /// already-normalized key, so it is matched verbatim.
+    /// For the owner sweep, which decides from a snapshot. Only that kind's
+    /// version is addressed, so a version another kind wrote is never touched.
+    /// `feature_key` is the snapshot's already-normalized key; normalization is
+    /// idempotent, so re-normalizing it under its own kind yields the same key.
     pub(crate) fn remove_recorded_in_generation(
         &self,
         generation: u64,
@@ -2365,13 +2362,10 @@ impl LearnedCapabilityRegistry {
             generation,
             state_key,
             feature_key,
-            "",
+            recorded_kind,
             |entries, _leased| {
-                let key = Self::make_key(state_key, feature_key, "");
-                let still_recorded = entries
-                    .get(&key)
-                    .is_some_and(|entry| entry.provider_kind == recorded_kind);
-                still_recorded && entries.remove(&key).is_some()
+                let key = Self::make_key(state_key, feature_key, recorded_kind);
+                Self::remove_keyed_in(entries, &key)
             },
         )
     }
@@ -2681,7 +2675,6 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                Self::drop_other_owners_on_lane(entries, &key, provider_kind);
                 Self::negative_state_in(entries, &key, now)
             },
         ) {
@@ -2718,10 +2711,10 @@ impl LearnedCapabilityRegistry {
     /// exclusive one.
     ///
     /// `current_kind` resolves the kind a lane's reader has today (the Router's
-    /// resolver). An entry written under another kind is left out, exactly as
-    /// the per-key acting reads refuse it, so status never reports acting a
-    /// verdict no dispatch would act on. Unlike those reads, this one removes
-    /// nothing.
+    /// resolver). Only the version recorded under that kind is reported, the
+    /// same version a per-key acting read under that kind selects, so status
+    /// never reports acting a verdict no dispatch would act on and each
+    /// `(lane, capability)` maps to at most one incarnation.
     pub(crate) fn field_acting_incarnations<'k>(
         &self,
         now: Instant,
@@ -2752,12 +2745,7 @@ impl LearnedCapabilityRegistry {
             // primitive refuses it: acting on one would act on state the purge
             // already owns.
             .filter(|(key, _)| !leases.contains(*key))
-            .filter(|(key, entry)| {
-                crate::capability_owner::recorded_kind_decision(
-                    &entry.provider_kind,
-                    current_kind(&key.state_key),
-                ) == crate::capability_owner::OwnerDecision::Owned
-            })
+            .filter(|(key, _)| key.provider_kind == current_kind(&key.state_key))
             // The SAME acting predicate the per-key read applies, over the same
             // map -- not a second spelling of it. A copy here could disagree
             // about a lapsed or non-negative entry, and the status surface would
@@ -2810,7 +2798,6 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                Self::drop_other_owners_on_lane(entries, &key, provider_kind);
                 let state = Self::negative_state_in(entries, &key, now);
                 (
                     state,
@@ -2898,7 +2885,6 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                Self::drop_other_owners_on_lane(entries, &key, provider_kind);
                 Self::is_verified_working_in(entries, &key)
             },
         ) {
@@ -2933,81 +2919,9 @@ impl LearnedCapabilityRegistry {
     fn make_key(state_key: &str, feature_key_raw: &str, provider_kind: &str) -> RegistryKey {
         RegistryKey {
             state_key: state_key.to_string(),
+            provider_kind: provider_kind.to_string(),
             feature_key: normalize_capability_key(feature_key_raw, provider_kind),
         }
-    }
-
-    /// Remove the entry at `key` when it was written under a provider kind
-    /// other than `provider_kind`, so a writer never refreshes another owner's
-    /// fact and replaces it instead.
-    ///
-    /// Key-scoped on purpose: a request still holding an outgoing Router can
-    /// write after a kind-flip reload, and a lane-wide removal there would
-    /// delete the current owner's unrelated facts on that lane.
-    fn drop_other_owner(
-        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
-        key: &RegistryKey,
-        provider_kind: &str,
-    ) {
-        if let Some(reason) = entries.get(key).and_then(|entry| {
-            crate::capability_owner::recorded_kind_decision(&entry.provider_kind, provider_kind)
-                .skip_reason()
-        }) {
-            Self::remove_other_owner(entries, key, reason);
-        }
-    }
-
-    /// Remove every entry on `key`'s lane that was written under a provider
-    /// kind other than `provider_kind`, so an acting reader sees none of them.
-    ///
-    /// The whole lane, not only `key`: the map key's capability half is
-    /// normalized with the WRITER's kind, so an old-kind entry can sit under a
-    /// spelling the reader's normalization never produces (a Bedrock writer
-    /// reduces a dotted request-bag path to its leaf; an identity-normalizing
-    /// reader keeps the full path). A check on the reader's key alone would
-    /// leave that entry resident and attributed to the lane. The lane's
-    /// entries are one contiguous range of the ordered map, so the cost is the
-    /// lane's own entry count.
-    ///
-    /// Runs on every generation-validated acting read. No durable clear is
-    /// emitted, and none is needed: the ledger row behind each entry carries
-    /// its kind, and boot replay applies the same owner rule to it.
-    fn drop_other_owners_on_lane(
-        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
-        key: &RegistryKey,
-        provider_kind: &str,
-    ) {
-        let lane_start = RegistryKey {
-            state_key: key.state_key.clone(),
-            feature_key: String::new(),
-        };
-        let foreign: Vec<(RegistryKey, &'static str)> = entries
-            .range(lane_start..)
-            .take_while(|(resident, _)| resident.state_key == key.state_key)
-            .filter_map(|(resident, entry)| {
-                crate::capability_owner::recorded_kind_decision(&entry.provider_kind, provider_kind)
-                    .skip_reason()
-                    .map(|reason| (resident.clone(), reason))
-            })
-            .collect();
-        for (resident, reason) in foreign {
-            Self::remove_other_owner(entries, &resident, reason);
-        }
-    }
-
-    fn remove_other_owner(
-        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
-        key: &RegistryKey,
-        reason: &'static str,
-    ) {
-        entries.remove(key);
-        tracing::debug!(
-            event = "owner_lookup_drop",
-            reason,
-            state_key = %routectl_core::sanitize_for_log(&key.state_key),
-            capability_key = %routectl_core::sanitize_for_log(&key.feature_key),
-            "dropped a learned entry written under a provider kind its reader does not have",
-        );
     }
 
     /// Apply a fresh observation to an entry that already exists.
@@ -3070,7 +2984,6 @@ impl LearnedCapabilityRegistry {
     /// `phase` is the caller's attribution.
     fn fresh_entry(
         &self,
-        provider_kind: &str,
         tier: SignalTier,
         phase: FailurePhase,
         source: EvidenceSource,
@@ -3099,7 +3012,6 @@ impl LearnedCapabilityRegistry {
             phase,
             source,
             evidence_class: evidence_class.map(str::to_string),
-            provider_kind: provider_kind.to_string(),
         };
         (entry, outcome)
     }
@@ -3110,7 +3022,6 @@ impl LearnedCapabilityRegistry {
     /// `expires_at` is set to `now` but carries no decay meaning --
     /// `is_expired` excludes a positive, so it never lapses into a re-probe.
     fn fresh_positive(
-        provider_kind: &str,
         source: EvidenceSource,
         evidence_class: Option<&str>,
         now: Instant,
@@ -3129,7 +3040,6 @@ impl LearnedCapabilityRegistry {
             phase: FailurePhase::F3,
             source,
             evidence_class: evidence_class.map(str::to_string),
-            provider_kind: provider_kind.to_string(),
         }
     }
 

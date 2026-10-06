@@ -14,9 +14,12 @@
 //! overrides, the learned ledger-replay registry, and catalog priors --
 //! through the shared pure resolvers (`resolve_display_verdict`,
 //! `resolve_display_action`), so the panel cannot drift from the router's
-//! precedence order. The action is resolved per nickname, because an
-//! override or a pinned beta can be nickname-scoped; when the nicknames on a
-//! lane disagree the cell reads `mixed` and carries each nickname's action.
+//! precedence order. Both the verdict and the action are resolved per
+//! nickname, because an override or a pinned beta can be nickname-scoped.
+//! When the nicknames on a lane disagree on the verdict, the cell's verdict
+//! reads `mixed` with no lane-wide source or layer; when they disagree on the
+//! action, the action reads `mixed`; either way the cell carries each
+//! nickname's own verdict, layer and action.
 //! Ages, timestamps, and stale flags are layered on top here (a display
 //! concern the pure resolvers deliberately omit).
 
@@ -27,9 +30,8 @@ use routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS;
 use routectl_router::{
     ACTION_MIXED, ActionInputs, CapabilityMatrixPanel, DisplayVerdict, LearnedActing,
     LearnedLaneProjection, LearnedRegistryEntry, MatrixAvailability, MatrixCell, MatrixLane,
-    MatrixNicknameAction, ModelEntry, OverrideProvenance, OverrideRegistry, OverrideVerdict,
-    ProviderEntry, StateKey, is_stale_days, lane_strips_capability, resolve_display_action,
-    resolve_display_verdict,
+    MatrixNicknameAction, ModelEntry, OverrideRegistry, ProviderEntry, StateKey, VERDICT_MIXED,
+    is_stale_days, lane_strips_capability, resolve_display_action, resolve_display_verdict,
 };
 
 use super::sections::staleness_threshold_days;
@@ -239,48 +241,43 @@ fn insert_other(set: &mut BTreeSet<String>, key: &str) {
     }
 }
 
-/// Resolve one `(lane, capability)` cell: consult the three layers, run the
-/// shared display resolvers, then layer on the display-only age, timestamps,
-/// and stale flag.
+/// Resolve one `(lane, capability)` cell: consult the three layers per
+/// nickname, run the shared display resolvers, then layer on the display-only
+/// age, timestamps, and stale flag.
 fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixCell {
-    let override_cell = lane_override(meta, capability, inputs.overrides);
     let learned_entry = inputs
         .learned
         .entries
         .iter()
         .find(|e| e.state_key == meta.lane && e.feature_key == capability);
     let prior_stamp = lane_prior(meta, capability, inputs.priors);
-    let prior = prior_stamp.map(|(supported, _)| supported);
+    let signals = CellSignals {
+        learned: learned_entry.map(|e| (e.verdict, e.source)),
+        learned_acting: learned_entry
+            .zip(inputs.learned.now)
+            .map(|(entry, (now, _))| LearnedActing::from_entry(entry, now)),
+        prior: prior_stamp.map(|(supported, _)| supported),
+    };
+    let resolved = resolve_per_nickname(meta, capability, inputs, signals);
+    let shared_display = agreed(&resolved, |r| r.display);
+    let shared_action = agreed(&resolved, |r| r.action);
+    let nickname_actions = if shared_display.is_some() && shared_action.is_some() {
+        Vec::new()
+    } else {
+        resolved
+            .iter()
+            .filter_map(Resolved::nickname_action)
+            .collect()
+    };
 
-    let display = resolve_display_verdict(
-        override_cell,
-        learned_entry.map(|e| (e.verdict, e.source)),
-        prior,
-    );
-    let learned_acting = learned_entry
-        .zip(inputs.learned.now)
-        .map(|(entry, (now, _))| LearnedActing::from_entry(entry, now));
-    let (action, nickname_actions) = cell_action(
-        meta,
-        capability,
-        inputs,
-        CellSignals {
-            display,
-            learned: learned_entry.map(|e| (e.verdict, e.source)),
-            learned_acting,
-            prior,
-        },
-    );
-
-    let layer = display.source.map(|source| match source {
-        "override" => LAYER_OVERRIDE,
-        "prior" => LAYER_PRIOR,
-        _ => LAYER_LEARNED,
-    });
+    let layer = shared_display.and_then(layer_of);
     let (age_ms, stale) = match layer {
-        Some(LAYER_LEARNED) => {
-            learned_age(learned_entry, &inputs.learned, display.supported, inputs)
-        }
+        Some(LAYER_LEARNED) => learned_age(
+            learned_entry,
+            &inputs.learned,
+            shared_display.and_then(|d| d.supported),
+            inputs,
+        ),
         Some(LAYER_PRIOR) => (
             None,
             prior_stamp.is_some_and(|(_, verified_at)| {
@@ -294,11 +291,11 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
         .map(|(entry, anchor)| entry_stamps(entry, anchor));
 
     MatrixCell {
-        verdict: display.verdict,
-        supported: display.supported,
-        source: display.source,
+        verdict: shared_display.map_or(VERDICT_MIXED, |d| d.verdict),
+        supported: shared_display.and_then(|d| d.supported),
+        source: shared_display.and_then(|d| d.source),
         layer,
-        action,
+        action: shared_action.unwrap_or(ACTION_MIXED),
         age_ms,
         stale,
         first_seen_ms: stamps.map(|s| s.first_seen),
@@ -312,7 +309,6 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
 /// nickname on the lane.
 #[derive(Clone, Copy)]
 struct CellSignals {
-    display: DisplayVerdict,
     learned: Option<(
         routectl_core::capability::Verdict,
         routectl_core::capability::EvidenceSource,
@@ -321,28 +317,55 @@ struct CellSignals {
     prior: Option<bool>,
 }
 
-/// The cell's action, resolved for each nickname on the lane through its own
-/// override and its own beta pins. Agreement yields that action and no
-/// per-nickname list; disagreement yields [`ACTION_MIXED`] and every
-/// nickname's action. A lane no model maps resolves once, against the bare
-/// provider-entry override.
-fn cell_action(
+/// One nickname's resolution of a cell, or the lane's own for a lane no model
+/// maps (`nickname` is then `None`).
+struct Resolved {
+    nickname: Option<String>,
+    display: DisplayVerdict,
+    action: &'static str,
+}
+
+impl Resolved {
+    fn nickname_action(&self) -> Option<MatrixNicknameAction> {
+        self.nickname.as_ref().map(|nickname| MatrixNicknameAction {
+            nickname: nickname.clone(),
+            verdict: self.display.verdict,
+            layer: layer_of(self.display),
+            action: self.action,
+        })
+    }
+}
+
+/// The value every resolution agrees on, or `None` when any two differ.
+fn agreed<T: PartialEq + Copy>(resolved: &[Resolved], field: impl Fn(&Resolved) -> T) -> Option<T> {
+    let first = field(resolved.first()?);
+    resolved.iter().all(|r| field(r) == first).then_some(first)
+}
+
+/// Resolve the cell for each nickname on the lane through its own override
+/// and its own beta pins. A lane no model maps resolves once, against the
+/// bare provider-entry override (none when the entry is not configured).
+fn resolve_per_nickname(
     meta: &LaneMeta,
     capability: &str,
     inputs: &CellInputs,
     signals: CellSignals,
-) -> (&'static str, Vec<MatrixNicknameAction>) {
+) -> Vec<Resolved> {
     let (Some(provider), false) = (meta.provider_entry.as_deref(), meta.models.is_empty()) else {
-        let action = action_for(
-            signals.display,
-            signals,
-            lane_strips(meta, capability, inputs),
-            inputs,
-        );
-        return (action, Vec::new());
+        let override_cell = meta.provider_entry.as_deref().and_then(|provider| {
+            inputs
+                .overrides
+                .resolve(provider, "", capability, meta.provider_kind)
+        });
+        let display = resolve_display_verdict(override_cell, signals.learned, signals.prior);
+        let strips = lane_strips(meta, capability, inputs);
+        return vec![Resolved {
+            nickname: None,
+            display,
+            action: action_for(display, signals, strips, inputs),
+        }];
     };
-    let per_nickname: Vec<MatrixNicknameAction> = meta
-        .models
+    meta.models
         .iter()
         .map(|model| {
             let override_cell =
@@ -352,18 +375,22 @@ fn cell_action(
             let display = resolve_display_verdict(override_cell, signals.learned, signals.prior);
             let strips =
                 lane_strips_capability(&inputs.ctx.config, provider, &[model.entry], capability);
-            MatrixNicknameAction {
-                nickname: model.nickname.to_string(),
+            Resolved {
+                nickname: Some(model.nickname.to_string()),
+                display,
                 action: action_for(display, signals, strips, inputs),
             }
         })
-        .collect();
-    let first = per_nickname[0].action;
-    if per_nickname.iter().all(|n| n.action == first) {
-        (first, Vec::new())
-    } else {
-        (ACTION_MIXED, per_nickname)
-    }
+        .collect()
+}
+
+/// The layer tag for a resolved display, or `None` for an unknown cell.
+fn layer_of(display: DisplayVerdict) -> Option<&'static str> {
+    display.source.map(|source| match source {
+        "override" => LAYER_OVERRIDE,
+        "prior" => LAYER_PRIOR,
+        _ => LAYER_LEARNED,
+    })
 }
 
 fn action_for(
@@ -379,23 +406,6 @@ fn action_for(
         strip_applies,
         capability_enabled: inputs.ctx.config.capability.enabled,
     })
-}
-
-/// The override resolution for a lane: the first model on it whose
-/// `provider:nickname` or bare `provider` cell carries one, or the bare
-/// provider-entry cell for an unrouted lane.
-fn lane_override(
-    meta: &LaneMeta,
-    capability: &str,
-    overrides: &OverrideRegistry,
-) -> Option<(OverrideVerdict, OverrideProvenance)> {
-    let provider = meta.provider_entry.as_deref()?;
-    if meta.models.is_empty() {
-        return overrides.resolve(provider, "", capability, meta.provider_kind);
-    }
-    meta.models
-        .iter()
-        .find_map(|m| overrides.resolve(provider, m.nickname, capability, meta.provider_kind))
 }
 
 /// The catalog prior for a lane: the first mapped nickname whose prior cell

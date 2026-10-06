@@ -1,6 +1,7 @@
-//! A resident entry acts only for a reader whose provider kind is the kind it
-//! was written under, on every generation-validated acting read and on every
-//! write.
+//! The resident identity includes the provider kind of the write that
+//! created an entry: each read and write selects its own kind's version,
+//! versions under different kinds coexist, and nothing on the read or write
+//! path removes another kind's version.
 
 use super::*;
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
@@ -120,16 +121,45 @@ fn an_acting_read_under_the_recorded_kind_acts() {
 }
 
 #[test]
-fn an_acting_read_under_another_kind_does_not_act_and_drops_the_entry() {
+fn an_acting_read_under_another_kind_neither_acts_nor_removes_the_entry() {
     for (name, plant, capability, acts) in acting_reads() {
         let reg = registry();
         plant(&reg, &capability, OLD);
 
         assert!(!acts(&reg, &capability, NEW), "{name}");
-        assert!(reg.snapshot().is_empty(), "{name}: the lookup removes it");
+        assert_eq!(reg.snapshot().len(), 1, "{name}: a read removes nothing");
         assert!(
-            !acts(&reg, &capability, OLD),
-            "{name}: removed, not merely hidden"
+            acts(&reg, &capability, OLD),
+            "{name}: the recorded kind's version still acts for its own kind",
+        );
+    }
+}
+
+/// The reload race: after the lane's kind moves from OLD to NEW, the new
+/// Router learns a fact, then a request still holding the outgoing Router
+/// reads and writes the same lane and capability. The new kind's fact must
+/// keep acting, untouched, and the old kind's version must never act for it.
+#[test]
+fn a_late_old_kind_read_and_write_leave_the_new_kinds_fact_intact() {
+    for (name, plant, capability, acts) in acting_reads() {
+        let reg = registry();
+        plant(&reg, &capability, NEW);
+        let before = new_kind_row(&reg, &capability);
+
+        assert!(!acts(&reg, &capability, OLD), "{name}: premise");
+        plant(&reg, &capability, OLD);
+        let _ = acts(&reg, &capability, OLD);
+
+        assert!(acts(&reg, &capability, NEW), "{name}: the new fact acts");
+        assert_eq!(
+            new_kind_row(&reg, &capability),
+            before,
+            "{name}: the new kind's entry is byte-identical",
+        );
+        assert_eq!(
+            recorded_kinds(&reg),
+            vec![NEW.to_string(), OLD.to_string()],
+            "{name}: the late write lands as its own version",
         );
     }
 }
@@ -140,20 +170,24 @@ fn an_entry_written_with_no_kind_does_not_act_for_a_reader_with_one() {
     plant_negative(&reg, "web_search", "");
 
     assert!(!acting_negative_acts(&reg, "web_search", NEW));
-    assert!(reg.snapshot().is_empty());
+    assert_eq!(reg.snapshot().len(), 1);
 }
 
 #[test]
-fn a_negative_under_a_new_kind_replaces_one_recorded_under_the_old_kind() {
+fn a_negative_under_a_new_kind_coexists_with_one_recorded_under_the_old_kind() {
     let reg = registry();
     plant_negative(&reg, "web_search", OLD);
 
     plant_negative(&reg, "web_search", NEW);
 
-    let snapshot = reg.snapshot();
-    assert_eq!(snapshot.len(), 1);
-    assert_eq!(snapshot[0].observations, 1, "replaced, not refreshed");
+    let rows = reg.recorded_snapshot();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().all(|row| row.entry.observations == 1),
+        "each kind's first observation, neither refreshed by the other",
+    );
     assert!(acting_negative_acts(&reg, "web_search", NEW));
+    assert!(acting_negative_acts(&reg, "web_search", OLD));
 }
 
 #[test]
@@ -173,6 +207,7 @@ fn a_positive_under_a_new_kind_is_not_suppressed_by_an_old_kind_negative() {
 
     assert!(matches!(outcome.value(), Some(PositiveOutcome::Recorded)));
     assert!(verified_acts(&reg, "web_search", NEW));
+    assert!(acting_negative_acts(&reg, "web_search", OLD));
 }
 
 #[test]
@@ -184,7 +219,8 @@ fn a_carried_entry_keeps_its_recorded_kind() {
     next.import_entries(reg.export_entries());
 
     assert!(!acting_negative_acts(&next, "web_search", NEW));
-    assert!(next.snapshot().is_empty());
+    assert!(acting_negative_acts(&next, "web_search", OLD));
+    assert_eq!(recorded_kinds(&next), vec![OLD.to_string()]);
 }
 
 /// The capability key a Bedrock writer reduces to its leaf and an
@@ -192,59 +228,81 @@ fn a_carried_entry_keeps_its_recorded_kind() {
 const BAG_PATH: &str = "additionalModelRequestFields.web_search";
 
 #[test]
-fn an_acting_read_drops_an_old_kind_entry_its_own_normalization_never_names() {
+fn a_reader_of_another_kind_never_sees_a_version_spelled_like_its_own() {
     let reg = registry();
     plant_negative(&reg, BAG_PATH, "bedrock");
-    plant_negative(&reg, "computer_use", OLD);
-    let other_lane = reg.observe_in_generation(
-        reg.generation(),
-        "beta#model-x",
-        BAG_PATH,
-        "bedrock",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
-        Instant::now(),
-    );
-    assert!(other_lane.applied().is_some(), "the fixture must plant");
-    let resident = |reg: &LearnedCapabilityRegistry| -> Vec<(String, String)> {
-        let mut keys: Vec<(String, String)> = reg
-            .snapshot()
-            .into_iter()
-            .map(|e| (e.state_key, e.feature_key))
-            .collect();
-        keys.sort();
-        keys
-    };
-    assert!(
-        resident(&reg).contains(&(LANE.to_string(), "web_search".to_string())),
-        "premise: the Bedrock writer stored the reduced leaf",
+    assert_eq!(
+        reg.snapshot()[0].feature_key,
+        "web_search",
+        "premise: the Bedrock writer stored the reduced leaf, the spelling an \
+         identity-normalizing kind uses for its own fact",
     );
 
     assert!(!acting_negative_acts(&reg, BAG_PATH, OLD));
+    assert!(!acting_negative_acts(&reg, "web_search", OLD));
+
+    assert!(acting_negative_acts(&reg, BAG_PATH, "bedrock"));
+    assert_eq!(reg.snapshot().len(), 1, "no read removed the version");
+}
+
+#[test]
+fn the_owned_snapshot_selects_the_current_kinds_version() {
+    let reg = registry();
+    plant_negative(&reg, "web_search", OLD);
+    plant_positive(&reg, "web_search", NEW);
+
+    let owned = reg.owned_snapshot(|_| NEW);
+
+    assert_eq!(owned.len(), 1);
+    assert_eq!(owned[0].verdict, Verdict::VerifiedWorking);
+    assert!(reg.owned_snapshot(|_| "bedrock").is_empty());
+}
+
+#[test]
+fn the_status_projection_reports_only_the_current_kinds_incarnation() {
+    let reg = registry();
+    let capability = field_key();
+    plant_negative(&reg, &capability, NEW);
+    let new_incarnation = reg.resident_incarnation_for_tests(LANE, &capability, NEW);
+    plant_negative(&reg, &capability, OLD);
+
+    let acting = reg.field_acting_incarnations(Instant::now(), |_| NEW);
 
     assert_eq!(
-        resident(&reg),
-        vec![
-            ("alpha#model-x".to_string(), "computer_use".to_string()),
-            ("beta#model-x".to_string(), "web_search".to_string()),
-        ],
-        "the old-kind entry on the reader's lane is gone; the reader's own entry \
-         and another lane's entry are untouched",
+        acting.get(&(LANE.to_string(), capability)),
+        Some(&new_incarnation),
+        "the old kind's later incarnation never stands in for the current one",
     );
 }
 
 #[test]
-fn a_write_under_a_new_kind_leaves_the_lanes_other_entries_alone() {
+fn the_sweep_removal_takes_only_the_named_kinds_version() {
     let reg = registry();
-    plant_negative(&reg, "computer_use", NEW);
-
     plant_negative(&reg, "web_search", OLD);
+    plant_negative(&reg, "web_search", NEW);
 
-    assert_eq!(
-        reg.snapshot().len(),
-        2,
-        "a write replaces only its own key, never another owner's facts on the lane",
-    );
+    let removed = reg.remove_recorded_in_generation(reg.generation(), LANE, "web_search", OLD);
+
+    assert!(matches!(removed.value(), Some(true)));
+    assert_eq!(recorded_kinds(&reg), vec![NEW.to_string()]);
+    assert!(acting_negative_acts(&reg, "web_search", NEW));
+}
+
+fn recorded_kinds(reg: &LearnedCapabilityRegistry) -> Vec<String> {
+    let mut kinds: Vec<String> = reg
+        .recorded_snapshot()
+        .into_iter()
+        .map(|row| row.provider_kind)
+        .collect();
+    kinds.sort();
+    kinds
+}
+
+fn new_kind_row(reg: &LearnedCapabilityRegistry, capability: &str) -> LearnedRegistryEntry {
+    let normalized = normalize_capability_key(capability, NEW);
+    reg.recorded_snapshot()
+        .into_iter()
+        .find(|row| row.provider_kind == NEW && row.entry.feature_key == normalized)
+        .expect("the new kind's entry is resident")
+        .entry
 }
